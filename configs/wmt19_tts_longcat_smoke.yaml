@@ -1,0 +1,56 @@
+data:
+  datasets:
+    - store:///mnt/pami202/zhuyin/datasets/wmt19-tts-longcat/longcat-delta:train
+  cache_root: storage/anydataset
+  batch_size: 1
+  num_workers: 0
+  pin_memory: false
+  drop_last: false
+
+bpe:
+  cache_dir_env: BPE_CACHE_DIR
+  codec_name: longcat
+  vocab_size: 100000
+  max_piece_frames: 32
+
+tasks:
+  enabled:
+    - autoregression
+
+model:
+  model_name_or_path: Qwen/Qwen3-0.6B
+  trust_remote_code: false
+  load_in_4bit: true
+  train_text_embedding: false
+  train_audio_embedding: true
+  train_audio_special_tokens: true
+  train_backbone: false
+  train_dit: true
+  lora:
+    enabled: true
+    rank: 16
+    alpha: 32
+    dropout: 0.05
+    targets:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+
+train:
+  max_steps: 100
+  learning_rate: 0.0001
+  optimizer_preset: pretrain
+  optimizer: muon
+  weight_decay:
+  schedule: constant
+  warmup_steps: 0
+  stable_steps:
+  decay_steps:
+  min_lr_ratio: 0.1
+  seed: 0
+  device: cuda
+  precision: bf16-mixed

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "s2s"
+version = "0.1.0"
+description = "Semantic-to-semantic speech modeling scaffolding."
+requires-python = ">=3.12"
+dependencies = [
+  "anydataset",
+  "anytrain",
+  "torch>=2.12",
+  "lightning>=2.0",
+  "transformers>=4.51,<5",
+  "PyYAML>=6.0",
+]
+
+[project.scripts]
+s2s-smoke = "speech_to_speech.smoke:main"
+
+[project.optional-dependencies]
+model = ["bitsandbytes", "peft"]
+longcat = ["anytrain[longcat]"]
+flow = ["anytrain[flow]"]
+lba = ["lba"]
+logger = ["tensorboard>=2.0"]
+test = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
