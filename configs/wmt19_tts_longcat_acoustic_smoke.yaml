@@ -2,7 +2,7 @@ data:
   datasets:
     - store:///mnt/pami202/zhuyin/datasets/wmt19-tts-longcat/longcat-delta:train
   cache_root: storage/anydataset
-  batch_size: 4
+  batch_size: 1
   num_workers: 0
   pin_memory: false
   drop_last: false
@@ -15,7 +15,6 @@ bpe:
 
 tasks:
   enabled:
-    - autoregression
     - translation
 
 model:
@@ -45,7 +44,7 @@ model:
 train:
   max_steps: 100
   learning_rate: 0.0001
-  acoustic_loss_weight: 0.0
+  acoustic_loss_weight: 1.0
   optimizer_preset: pretrain
   optimizer: muon
   weight_decay:

@@ -7,6 +7,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import torch
 from anytrain.codec import LongCatAudioCodec
 from anytrain.tokenizer import IntBPE
 from .config import BPEConfig, DatasetInput, ModelConfig
@@ -108,6 +109,7 @@ def longcat_acoustic_features(
     codec: LongCatAudioCodec | None = None,
     decoder: LongCatDecoderName = "16k_4codebooks",
 ) -> Tensor:
+    acoustic_codes = _batched_acoustic_codes(acoustic_codes)
     return (codec or longcat_codec()).acoustic_codes_to_features(
         acoustic_codes,
         decoder=decoder,
@@ -123,6 +125,20 @@ def _cache_dir(config: BPEConfig, cache_dir: str | Path | None) -> Path:
             f"{config.cache_dir_env} is required to locate LongCat BPE artifacts."
         )
     return Path(value)
+
+
+def _batched_acoustic_codes(acoustic_codes: Tensor) -> Tensor:
+    if acoustic_codes.dim() == 2:
+        acoustic_codes = acoustic_codes.unsqueeze(0)
+    if acoustic_codes.dim() != 3:
+        raise ValueError("LongCat acoustic_codes must have shape [nq, time] or [batch, nq, time].")
+    if (
+        acoustic_codes.dtype == torch.bool
+        or torch.is_floating_point(acoustic_codes)
+        or torch.is_complex(acoustic_codes)
+    ):
+        raise TypeError("LongCat acoustic_codes must contain integer ids.")
+    return acoustic_codes
 
 
 def _chunked_pair_corpus(

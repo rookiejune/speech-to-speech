@@ -22,6 +22,8 @@ class DiT(nn.Module):
     def __init__(self, config: Qwen3Config) -> None:
         super().__init__()
 
+        if getattr(config, "_attn_implementation", None) is None:
+            config._attn_implementation = "eager"
         self.null_acoustic_condition = nn.Parameter(torch.zeros(1, config.hidden_size))
 
         self.config = config
@@ -69,18 +71,19 @@ class DiT(nn.Module):
             past_seen_tokens = (
                 past_key_values.get_seq_length() if past_key_values is not None else 0
             )
-            position_ids = (
-                torch.arange(x_t.shape[1], device=x_t.device) + past_seen_tokens
-            )  # type: ignore
-            position_ids = position_ids.unsqueeze(0)  # type: ignore
+            cache_position = torch.arange(x_t.shape[1], device=x_t.device) + past_seen_tokens
+            position_ids = cache_position.unsqueeze(0)  # type: ignore
+        else:
+            cache_position = position_ids.reshape(-1)
 
         # It may already have been prepared by e.g. `generate`
         if not isinstance(causal_mask_mapping := attention_mask, dict):
             # Prepare mask arguments
             mask_kwargs = {
                 "config": self.config,
-                "inputs_embeds": x_t,
+                "input_embeds": x_t,
                 "attention_mask": attention_mask,
+                "cache_position": cache_position,
                 "past_key_values": past_key_values,
                 "position_ids": position_ids,
             }

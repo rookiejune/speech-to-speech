@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import StrEnum, auto
 from typing import cast
 
 import torch
@@ -21,6 +23,7 @@ from ..types import (
     GenerationBatch,
     IGNORE_INDEX,
     SemanticBPE,
+    SemanticGeneration,
     WaveformCodec,
     WaveformGeneration,
 )
@@ -28,9 +31,10 @@ from .acoustic import (
     acoustic_condition,
     continuous_flow_loss,
     null_acoustic_condition,
+    pooled_acoustic_condition_from_batch_side,
     validate_acoustic_features,
 )
-from .diagonal import DiagonalSample, diagonal_flow_sample
+from .diagonal import DiagonalSample, diagonal_flow_sample, serial_flow_sample
 from .generation import Generator
 from .qwen3 import Qwen3Config, Qwen3Model
 from .token_space import (
@@ -51,7 +55,7 @@ def _qwen3_config():
     return config
 
 
-def _dit_config():
+def dit_config():
     config = Qwen3Config()
     config.num_hidden_layers = 8
     config.hidden_size = 1024  # LongCat Acoustic dim
@@ -85,6 +89,19 @@ def _lora_config(config: LoRAConfig | None = None):
     return LoraConfig(**kwargs)
 
 
+def _module_dtype(module: nn.Module, fallback: torch.dtype) -> torch.dtype:
+    for parameter in module.parameters():
+        return parameter.dtype
+    for buffer in module.buffers():
+        return buffer.dtype
+    return fallback
+
+
+class AcousticSampler(StrEnum):
+    SERIAL = auto()
+    DIAGONAL = auto()
+
+
 class Orchestrator(nn.Module):
     """Holds decoder-only semantic and optional acoustic models for task-side training."""
 
@@ -105,6 +122,7 @@ class Orchestrator(nn.Module):
         super().__init__()
 
         model_config = model_config or ModelConfig()
+        self.acoustic_condition_dropout = model_config.acoustic_condition_dropout
 
         peft_applied = False
         if qwen3 is not None:
@@ -256,14 +274,16 @@ class Orchestrator(nn.Module):
         noise: Tensor | None = None,
         timesteps: Tensor | None = None,
         acoustic_condition: Tensor | None = None,
+        source_feature_extractor: object | None = None,
     ) -> Tensor:
         if self.dit is None:
             raise RuntimeError("acoustic_flow_loss requires a DiT acoustic decoder.")
 
         condition = self.acoustic_condition(batch, bpe, hidden_states=hidden_states)
+        flow_dtype = _module_dtype(self.dit, condition.hidden_states.dtype)
         target_features = target_features.to(
             device=condition.hidden_states.device,
-            dtype=condition.hidden_states.dtype,
+            dtype=flow_dtype,
         )
         validate_acoustic_features(
             target_features,
@@ -271,10 +291,12 @@ class Orchestrator(nn.Module):
             target_mask=target_mask,
         )
 
-        last_hidden_state = self.acoustic_condition_proj(condition.hidden_states)
+        condition_hidden = condition.hidden_states
+        proj_dtype = _module_dtype(self.acoustic_condition_proj, condition_hidden.dtype)
+        condition_hidden = condition_hidden.to(dtype=proj_dtype)
+        last_hidden_state = self.acoustic_condition_proj(condition_hidden).to(dtype=flow_dtype)
         if target_features.size(-1) != last_hidden_state.size(-1):
             raise ValueError("target_features last dimension must match DiT hidden size.")
-        target_features = target_features.to(dtype=last_hidden_state.dtype)
         if noise is None:
             noise = torch.randn_like(target_features)
         else:
@@ -282,12 +304,32 @@ class Orchestrator(nn.Module):
         if noise.shape != target_features.shape:
             raise ValueError("noise and target_features must have the same shape.")
 
-        if acoustic_condition is None:
-            acoustic_condition = null_acoustic_condition(self.dit, target_features)
-        else:
-            acoustic_condition = acoustic_condition.to(
-                device=target_features.device,
-                dtype=target_features.dtype,
+        null_condition = null_acoustic_condition(self.dit, target_features)
+        source_condition = False
+        if acoustic_condition is None and source_feature_extractor is not None:
+            if batch.source_audio is None:
+                acoustic_condition = null_condition
+            else:
+                acoustic_condition = pooled_acoustic_condition_from_batch_side(
+                    batch.source_audio,
+                    feature_extractor=source_feature_extractor,
+                    empty_condition=null_condition,
+                )
+                source_condition = True
+        elif acoustic_condition is None:
+            acoustic_condition = null_condition
+        acoustic_condition = acoustic_condition.to(
+            device=target_features.device,
+            dtype=target_features.dtype,
+        )
+        if source_condition:
+            acoustic_condition = self._maybe_drop_acoustic_condition(
+                acoustic_condition,
+                null_condition,
+            )
+        if acoustic_condition.shape != (target_features.size(0), target_features.size(-1)):
+            raise ValueError(
+                "acoustic_condition must have shape [batch, target_features dim]."
             )
 
         return continuous_flow_loss(
@@ -299,6 +341,27 @@ class Orchestrator(nn.Module):
             acoustic_condition=acoustic_condition,
             mask=condition.mask,
         )
+
+    def _maybe_drop_acoustic_condition(
+        self,
+        condition: Tensor,
+        null_condition: Tensor,
+    ) -> Tensor:
+        probability = self.acoustic_condition_dropout
+        if not self.training or probability <= 0.0:
+            return condition
+        if probability >= 1.0:
+            drop_mask = torch.ones(
+                (condition.size(0), 1),
+                device=condition.device,
+                dtype=torch.bool,
+            )
+        else:
+            drop_mask = torch.rand(
+                (condition.size(0), 1),
+                device=condition.device,
+            ) < probability
+        return torch.where(drop_mask, null_condition, condition)
 
     @torch.no_grad()
     def generate_acoustic_condition(
@@ -320,6 +383,28 @@ class Orchestrator(nn.Module):
             temperature=temperature,
             top_p=top_p,
             return_token_ids=return_token_ids,
+        )
+
+    @torch.no_grad()
+    def generate_semantic(
+        self,
+        batch: GenerationBatch,
+        *,
+        bpe: SemanticBPE,
+        max_new_tokens: int,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+    ) -> SemanticGeneration:
+        return Generator(
+            qwen3=self.qwen3,
+            embed_tokens=self.embed_tokens,
+            lm_head=self.lm_head,
+        ).semantic(
+            batch,
+            bpe=bpe,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
         )
 
     @torch.no_grad()
@@ -359,6 +444,7 @@ class Orchestrator(nn.Module):
         num_steps: int,
         chunk_size: int,
         wave_stride: int = 1,
+        guidance_scale: float = 1.0,
     ) -> DiagonalSample:
         if self.dit is None:
             raise RuntimeError("diagonal_acoustic_sample requires a DiT acoustic decoder.")
@@ -371,7 +457,64 @@ class Orchestrator(nn.Module):
             num_steps=num_steps,
             chunk_size=chunk_size,
             wave_stride=wave_stride,
+            guidance_scale=guidance_scale,
         )
+
+    def acoustic_feature_generator(
+        self,
+        *,
+        num_steps: int,
+        chunk_size: int | None = None,
+        guidance_scale: float = 1.0,
+        sampler: AcousticSampler = AcousticSampler.DIAGONAL,
+    ) -> AcousticFeatureGenerator:
+        if self.dit is None:
+            raise RuntimeError("acoustic_feature_generator requires a DiT acoustic decoder.")
+        return DiTAcousticFeatureGenerator(
+            model=self,
+            num_steps=num_steps,
+            chunk_size=chunk_size,
+            guidance_scale=guidance_scale,
+            sampler=sampler,
+        )
+
+
+@dataclass(frozen=True)
+class DiTAcousticFeatureGenerator:
+    model: Orchestrator
+    num_steps: int
+    chunk_size: int | None = None
+    guidance_scale: float = 1.0
+    sampler: AcousticSampler = AcousticSampler.DIAGONAL
+
+    @torch.no_grad()
+    def __call__(self, condition: AcousticCondition) -> Tensor:
+        if self.model.dit is None:
+            raise RuntimeError("DiT acoustic feature generation requires a DiT decoder.")
+        hidden = condition.hidden_states
+        flow_dtype = _module_dtype(self.model.dit, hidden.dtype)
+        projection = self.model.acoustic_condition_proj
+        projection_dtype = _module_dtype(projection, hidden.dtype)
+        hidden = projection(hidden.to(dtype=projection_dtype)).to(dtype=flow_dtype)
+        initial = hidden.new_zeros(hidden.shape)
+        acoustic_condition = null_acoustic_condition(self.model.dit, initial)
+        chunk_size = self.chunk_size or hidden.size(1)
+        sample_kwargs = {
+            "last_hidden_state": hidden,
+            "acoustic_condition": acoustic_condition,
+            "mask": condition.mask.to(device=hidden.device, dtype=torch.bool),
+            "num_steps": self.num_steps,
+            "chunk_size": chunk_size,
+            "guidance_scale": self.guidance_scale,
+        }
+        match self.sampler:
+            case AcousticSampler.SERIAL:
+                sample = serial_flow_sample(self.model.dit, initial, **sample_kwargs)
+            case AcousticSampler.DIAGONAL:
+                sample = diagonal_flow_sample(self.model.dit, initial, **sample_kwargs)
+            case _:
+                raise ValueError(f"unsupported acoustic sampler: {self.sampler}")
+        return sample.final
 
 
 def _loss_positions(batch: CausalLMBatch) -> Tensor:

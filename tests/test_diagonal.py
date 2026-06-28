@@ -11,6 +11,7 @@ from speech_to_speech.model.diagonal import (
     diagonal_flow_sample,
     diagonal_schedule,
     serial_forward_count,
+    serial_flow_sample,
 )
 from speech_to_speech.model.orchestrator import Orchestrator
 from helpers import MockQwen, MockTokenizer
@@ -48,7 +49,7 @@ class DiagonalScheduleTest(unittest.TestCase):
             num_steps=4,
             chunk_size=2,
         )
-        serial = _serial_sample(
+        serial = serial_flow_sample(
             TrackingVelocityDiT(hidden_size=2),
             x_0,
             last_hidden_state=hidden,
@@ -58,7 +59,8 @@ class DiagonalScheduleTest(unittest.TestCase):
             chunk_size=2,
         )
 
-        self.assertTrue(torch.equal(diagonal.final, serial))
+        self.assertTrue(torch.equal(diagonal.final, serial.final))
+        self.assertEqual(serial.forward_count, 12)
         self.assertEqual(diagonal.forward_count, 6)
         self.assertLess(
             diagonal.forward_count,
@@ -90,6 +92,23 @@ class DiagonalScheduleTest(unittest.TestCase):
         self.assertEqual(tuple(sample.final.shape), (1, 4, 4))
         self.assertEqual(sample.forward_count, 3)
 
+    def test_diagonal_sample_uses_cfg_velocity(self) -> None:
+        dit = ConditionVelocityDiT(hidden_size=2)
+
+        sample = diagonal_flow_sample(
+            dit,
+            torch.zeros((1, 2, 2)),
+            last_hidden_state=torch.zeros((1, 2, 2)),
+            acoustic_condition=torch.tensor([[3.0, 5.0]]),
+            mask=torch.ones((1, 2), dtype=torch.bool),
+            num_steps=1,
+            chunk_size=2,
+            guidance_scale=2.0,
+        )
+
+        self.assertTrue(torch.equal(sample.final, torch.full((1, 2, 2), 16.0)))
+        self.assertEqual(dit.conditions, [[3.0, 5.0], [0.0, 0.0]])
+
 
 class TrackingVelocityDiT(nn.Module):
     def __init__(self, *, hidden_size: int) -> None:
@@ -114,33 +133,28 @@ class TrackingVelocityDiT(nn.Module):
         return BaseModelOutputWithPast(last_hidden_state=velocity)
 
 
-def _serial_sample(
-    dit: TrackingVelocityDiT,
-    x_0: torch.Tensor,
-    *,
-    last_hidden_state: torch.Tensor,
-    acoustic_condition: torch.Tensor,
-    mask: torch.Tensor,
-    num_steps: int,
-    chunk_size: int,
-) -> torch.Tensor:
-    state = x_0.clone()
-    time_grid = torch.linspace(0, 1, num_steps + 1)
-    for start in range(0, x_0.size(1), chunk_size):
-        end = min(start + chunk_size, x_0.size(1))
-        for step in range(num_steps):
-            outputs = dit(
-                x_t=state[:, start:end],
-                last_hidden_state=last_hidden_state[:, start:end],
-                timesteps=time_grid.new_full((x_0.size(0),), time_grid[step]),
-                acoustic_condition=acoustic_condition,
-                attention_mask=mask[:, start:end].long(),
-            )
-            delta = time_grid[step + 1] - time_grid[step]
-            updated = state[:, start:end] + delta * outputs.last_hidden_state
-            active = mask[:, start:end].unsqueeze(-1)
-            state[:, start:end] = torch.where(active, updated, state[:, start:end])
-    return state
+class ConditionVelocityDiT(nn.Module):
+    def __init__(self, *, hidden_size: int) -> None:
+        super().__init__()
+        self.config = SimpleNamespace(hidden_size=hidden_size)
+        self.null_acoustic_condition = nn.Parameter(torch.zeros(1, hidden_size))
+        self.conditions: list[list[float]] = []
+
+    def forward(
+        self,
+        *,
+        x_t: torch.Tensor,
+        last_hidden_state: torch.Tensor,
+        timesteps: torch.Tensor,
+        acoustic_condition: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> BaseModelOutputWithPast:
+        del last_hidden_state, timesteps, attention_mask
+        self.conditions.append(
+            [float(value) for value in acoustic_condition.detach().reshape(-1)]
+        )
+        value = acoustic_condition.sum(dim=-1).reshape(-1, 1, 1)
+        return BaseModelOutputWithPast(last_hidden_state=x_t + value)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,11 @@ import torch
 from torch import Tensor, nn
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
-from speech_to_speech.model.diagonal import diagonal_flow_sample, serial_forward_count
+from speech_to_speech.model.diagonal import (
+    diagonal_flow_sample,
+    serial_flow_sample,
+    serial_forward_count,
+)
 
 
 @dataclass(frozen=True)
@@ -59,36 +63,6 @@ class SyntheticDiT(nn.Module):
         velocity = self.proj(condition)
         velocity = velocity * attention_mask.to(dtype=velocity.dtype).unsqueeze(-1)
         return BaseModelOutputWithPast(last_hidden_state=velocity)
-
-
-@torch.no_grad()
-def serial_flow_sample(
-    dit: SyntheticDiT,
-    x_0: Tensor,
-    *,
-    last_hidden_state: Tensor,
-    acoustic_condition: Tensor,
-    mask: Tensor,
-    num_steps: int,
-    chunk_size: int,
-) -> Tensor:
-    state = x_0.clone()
-    time_grid = torch.linspace(0, 1, num_steps + 1, device=x_0.device, dtype=x_0.dtype)
-    for start in range(0, x_0.size(1), chunk_size):
-        end = min(start + chunk_size, x_0.size(1))
-        for step in range(num_steps):
-            outputs = dit(
-                x_t=state[:, start:end],
-                last_hidden_state=last_hidden_state[:, start:end],
-                timesteps=time_grid.new_full((x_0.size(0),), time_grid[step]),
-                acoustic_condition=acoustic_condition,
-                attention_mask=mask[:, start:end].long(),
-            )
-            delta = time_grid[step + 1] - time_grid[step]
-            updated = state[:, start:end] + delta * outputs.last_hidden_state
-            active = mask[:, start:end].unsqueeze(-1)
-            state[:, start:end] = torch.where(active, updated, state[:, start:end])
-    return state
 
 
 def benchmark(args: argparse.Namespace) -> BenchmarkResult:

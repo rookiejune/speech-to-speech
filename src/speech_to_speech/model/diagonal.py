@@ -12,6 +12,8 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor, nn
 
+from .acoustic import acoustic_velocity
+
 
 @dataclass(frozen=True)
 class DiagonalCell:
@@ -38,6 +40,13 @@ class DiagonalSample:
     schedule: tuple[DiagonalBatch, ...]
     forward_count: int
     packed_row_count: int
+
+
+@dataclass(frozen=True)
+class SerialSample:
+    final: Tensor
+    time_grid: Tensor
+    forward_count: int
 
 
 def diagonal_schedule(
@@ -89,6 +98,67 @@ def serial_forward_count(
 
 
 @torch.no_grad()
+def serial_flow_sample(
+    dit: nn.Module,
+    x_0: Tensor,
+    *,
+    last_hidden_state: Tensor,
+    acoustic_condition: Tensor,
+    mask: Tensor,
+    num_steps: int,
+    chunk_size: int,
+    time_grid: Tensor | None = None,
+    guidance_scale: float = 1.0,
+) -> SerialSample:
+    _validate_sample_inputs(
+        x_0=x_0,
+        last_hidden_state=last_hidden_state,
+        acoustic_condition=acoustic_condition,
+        mask=mask,
+    )
+    _validate_schedule_args(
+        frame_count=x_0.size(1),
+        chunk_size=chunk_size,
+        num_steps=num_steps,
+        wave_stride=1,
+    )
+    time_grid = _time_grid(
+        num_steps,
+        device=x_0.device,
+        dtype=x_0.dtype,
+        value=time_grid,
+    )
+    state = x_0.clone()
+    forward_count = 0
+
+    for start in range(0, x_0.size(1), chunk_size):
+        end = min(start + chunk_size, x_0.size(1))
+        chunk_mask = mask[:, start:end]
+        for step_index in range(num_steps):
+            velocity = acoustic_velocity(
+                dit,
+                x_t=state[:, start:end],
+                last_hidden_state=last_hidden_state[:, start:end],
+                timesteps=time_grid[step_index].expand(x_0.size(0)),
+                acoustic_condition=acoustic_condition,
+                mask=chunk_mask,
+                guidance_scale=guidance_scale,
+            )
+            forward_count += 1
+            delta = time_grid[step_index + 1] - time_grid[step_index]
+            current = state[:, start:end]
+            updated = current + delta * velocity
+            active = chunk_mask.unsqueeze(-1)
+            state[:, start:end] = torch.where(active, updated, current)
+
+    return SerialSample(
+        final=state,
+        time_grid=time_grid,
+        forward_count=forward_count,
+    )
+
+
+@torch.no_grad()
 def diagonal_flow_sample(
     dit: nn.Module,
     x_0: Tensor,
@@ -100,6 +170,7 @@ def diagonal_flow_sample(
     chunk_size: int,
     wave_stride: int = 1,
     time_grid: Tensor | None = None,
+    guidance_scale: float = 1.0,
 ) -> DiagonalSample:
     _validate_sample_inputs(
         x_0=x_0,
@@ -132,16 +203,15 @@ def diagonal_flow_sample(
             time_grid=time_grid,
         )
         packed_row_count += packed.x_t.size(0)
-        outputs = dit(
+        velocity = acoustic_velocity(
+            dit,
             x_t=packed.x_t,
             last_hidden_state=packed.last_hidden_state,
             timesteps=packed.timesteps,
             acoustic_condition=packed.acoustic_condition,
-            attention_mask=packed.attention_mask.to(dtype=torch.long),
+            mask=packed.attention_mask,
+            guidance_scale=guidance_scale,
         )
-        velocity = outputs.last_hidden_state
-        if velocity.shape != packed.x_t.shape:
-            raise ValueError("DiT output and packed acoustic state must have the same shape.")
         _scatter_cells(
             batch.cells,
             state=state,
@@ -304,7 +374,9 @@ __all__ = [
     "DiagonalBatch",
     "DiagonalCell",
     "DiagonalSample",
+    "SerialSample",
     "diagonal_flow_sample",
     "diagonal_schedule",
     "serial_forward_count",
+    "serial_flow_sample",
 ]

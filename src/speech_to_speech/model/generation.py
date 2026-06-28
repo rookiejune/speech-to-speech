@@ -14,6 +14,7 @@ from ..types import (
     AudioBoundary,
     GenerationBatch,
     SemanticBPE,
+    SemanticGeneration,
     SpecialToken,
     WaveformCodec,
     WaveformGeneration,
@@ -116,6 +117,38 @@ class Generator:
             hidden_states=hidden_states,
             mask=mask,
             token_ids=token_ids,
+        )
+
+    @torch.no_grad()
+    def semantic(
+        self,
+        batch: GenerationBatch,
+        *,
+        bpe: SemanticBPE,
+        max_new_tokens: int,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+    ) -> SemanticGeneration:
+        generation = self.acoustic_condition(
+            batch,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            return_token_ids=True,
+        )
+        if generation.token_ids is None:
+            raise RuntimeError("semantic generation must return token ids.")
+        semantic_ids, semantic_mask, _ = _semantic_frames_from_generation(
+            generation.token_ids,
+            generation.hidden_states,
+            generation.mask,
+            bpe=bpe,
+            block=self.embed_tokens.space.modality_block(Modality.AUDIO),
+        )
+        return SemanticGeneration(
+            semantic_ids=semantic_ids,
+            semantic_mask=semantic_mask,
+            token_ids=generation.token_ids,
         )
 
     def waveform(

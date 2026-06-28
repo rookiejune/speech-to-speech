@@ -51,6 +51,14 @@ class LongCatPair:
 
 
 @dataclass(frozen=True)
+class LongCatBatchSide:
+    semantic_ids: LongTensor
+    semantic_mask: Tensor
+    acoustic_ids: LongTensor
+    acoustic_mask: Tensor
+
+
+@dataclass(frozen=True)
 class AutoregressionExample:
     audio_ids: Tensor
 
@@ -75,6 +83,8 @@ class CausalLMBatch:
     attention_mask: LongTensor
     labels: LongTensor
     logits_to_keep: int | LongTensor
+    source_audio: LongCatBatchSide | None = None
+    target_audio: LongCatBatchSide | None = None
 
 
 @dataclass
@@ -107,6 +117,13 @@ class AcousticConditionGeneration:
     hidden_states: FloatTensor
     mask: Tensor
     token_ids: LongTensor | None = None
+
+
+@dataclass
+class SemanticGeneration:
+    semantic_ids: LongTensor
+    semantic_mask: Tensor
+    token_ids: LongTensor
 
 
 @dataclass

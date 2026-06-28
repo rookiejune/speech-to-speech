@@ -13,8 +13,9 @@ from speech_to_speech.config import ModelConfig, TrainConfig
 from speech_to_speech.datamodule.batch_builder import CausalLMBatchBuilder
 from speech_to_speech.model.orchestrator import Orchestrator
 from speech_to_speech.pl_module import SpeechToSpeechModule
-from speech_to_speech.types import AutoregressionExample, CausalLMBatch
+from speech_to_speech.types import AutoregressionExample, CausalLMBatch, LongCatBatchSide
 from helpers import MockQwen, MockTokenizer
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 
 class SpeechToSpeechModuleTest(unittest.TestCase):
@@ -63,6 +64,50 @@ class SpeechToSpeechModuleTest(unittest.TestCase):
 
         self.assertEqual(trainer.global_step, 1)
 
+    def test_transfer_batch_to_device_preserves_longcat_sides(self) -> None:
+        module, batch = _module_and_batch()
+        batch.target_audio = LongCatBatchSide(
+            semantic_ids=torch.tensor([[1, 2]]),
+            semantic_mask=torch.tensor([[True, True]]),
+            acoustic_ids=torch.zeros((1, 4, 2), dtype=torch.long),
+            acoustic_mask=torch.tensor([[True, True]]),
+        )
+
+        moved = module.transfer_batch_to_device(batch, torch.device("cpu"), 0)
+
+        self.assertIsNotNone(moved.target_audio)
+        assert moved.target_audio is not None
+        self.assertTrue(torch.equal(moved.target_audio.semantic_ids, torch.tensor([[1, 2]])))
+        self.assertTrue(torch.equal(moved.target_audio.acoustic_mask, torch.tensor([[True, True]])))
+
+    def test_loss_combines_semantic_and_acoustic_when_configured(self) -> None:
+        model = JointLossModel()
+        extractor = FakeFeatureExtractor(torch.full((1, 2, 4), 3.0))
+        module = SpeechToSpeechModule(
+            model,
+            TrainConfig(acoustic_loss_weight=0.5),
+            bpe=object(),
+            acoustic_feature_extractor=extractor,
+        )
+        batch = CausalLMBatch(
+            input_ids=torch.tensor([[1, 2]]),
+            attention_mask=torch.tensor([[1, 1]]),
+            labels=torch.tensor([[1, 2]]),
+            logits_to_keep=1,
+            target_audio=LongCatBatchSide(
+                semantic_ids=torch.tensor([[1, 2]]),
+                semantic_mask=torch.tensor([[True, True]]),
+                acoustic_ids=torch.zeros((1, 4, 2), dtype=torch.long),
+                acoustic_mask=torch.tensor([[True, True]]),
+            ),
+        )
+
+        loss = module._loss(batch)
+
+        self.assertTrue(torch.equal(loss, torch.tensor(3.5)))
+        self.assertTrue(torch.equal(model.target_features, torch.full((1, 2, 4), 3.0)))
+        self.assertTrue(torch.equal(model.target_mask, torch.tensor([[True, True]])))
+
 
 def _module_and_batch(
     *,
@@ -90,6 +135,40 @@ def _module_and_batch(
             warmup_steps=1,
         ),
     ), batch
+
+
+class JointLossModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.target_features: torch.Tensor | None = None
+        self.target_mask: torch.Tensor | None = None
+
+    def forward(self, batch: CausalLMBatch) -> CausalLMOutputWithPast:
+        del batch
+        return CausalLMOutputWithPast(loss=torch.tensor(2.0), logits=torch.empty(0))
+
+    def acoustic_flow_loss(
+        self,
+        batch: CausalLMBatch,
+        bpe: object,
+        target_features: torch.Tensor,
+        *,
+        target_mask: torch.Tensor,
+        source_feature_extractor: object,
+    ) -> torch.Tensor:
+        del batch, bpe, source_feature_extractor
+        self.target_features = target_features
+        self.target_mask = target_mask
+        return torch.tensor(3.0)
+
+
+class FakeFeatureExtractor:
+    def __init__(self, features: torch.Tensor) -> None:
+        self.features = features
+
+    def acoustic_codes_to_features(self, acoustic_ids: torch.Tensor) -> torch.Tensor:
+        del acoustic_ids
+        return self.features
 
 
 if __name__ == "__main__":

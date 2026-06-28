@@ -11,8 +11,9 @@ from torch.optim.lr_scheduler import LRScheduler
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from ..config import TrainConfig
+from ..model.acoustic import acoustic_features_from_batch_side
 from ..model.orchestrator import Orchestrator
-from ..types import CausalLMBatch, IGNORE_INDEX
+from ..types import CausalLMBatch, IGNORE_INDEX, LongCatBatchSide
 
 
 class _LRSchedulerConfig(TypedDict):
@@ -32,10 +33,15 @@ class SpeechToSpeechModule(LightningModule):
         self,
         model: Orchestrator,
         train: TrainConfig | None = None,
+        *,
+        bpe: object | None = None,
+        acoustic_feature_extractor: object | None = None,
     ) -> None:
         super().__init__()
         self.model = model
         self.train_config = train or TrainConfig()
+        self.bpe = bpe
+        self.acoustic_feature_extractor = acoustic_feature_extractor
         self.save_hyperparameters({"train": asdict(self.train_config)})
 
     def forward(self, batch: CausalLMBatch) -> CausalLMOutputWithPast:
@@ -92,6 +98,8 @@ class SpeechToSpeechModule(LightningModule):
             attention_mask=batch.attention_mask.to(device=device),
             labels=batch.labels.to(device=device),
             logits_to_keep=logits_to_keep,
+            source_audio=_move_longcat_side(batch.source_audio, device),
+            target_audio=_move_longcat_side(batch.target_audio, device),
         )
 
     def configure_optimizers(self) -> _LightningOptimizerConfig:
@@ -114,10 +122,46 @@ class SpeechToSpeechModule(LightningModule):
         loss = self.model(batch).loss
         if loss is None:
             raise RuntimeError("model output must include loss.")
-        return loss
+        acoustic_weight = self.train_config.acoustic_loss_weight
+        if acoustic_weight <= 0.0:
+            return loss
+        return loss + acoustic_weight * self._acoustic_loss(batch)
+
+    def _acoustic_loss(self, batch: CausalLMBatch) -> Tensor:
+        if self.bpe is None:
+            raise RuntimeError("acoustic loss requires a LongCat BPE tokenizer.")
+        if self.acoustic_feature_extractor is None:
+            raise RuntimeError("acoustic loss requires an acoustic feature extractor.")
+        if batch.target_audio is None:
+            raise RuntimeError("acoustic loss requires target_audio in the batch.")
+        target_features, target_mask = acoustic_features_from_batch_side(
+            batch.target_audio,
+            feature_extractor=self.acoustic_feature_extractor,
+        )
+        return self.model.acoustic_flow_loss(
+            batch,
+            self.bpe,
+            target_features,
+            target_mask=target_mask,
+            source_feature_extractor=self.acoustic_feature_extractor,
+        )
 
 
 def _scheduler_total_steps(train: TrainConfig) -> int | None:
     if train.schedule == "constant":
         return None
     return train.max_steps
+
+
+def _move_longcat_side(
+    side: LongCatBatchSide | None,
+    device: TorchDevice,
+) -> LongCatBatchSide | None:
+    if side is None:
+        return None
+    return LongCatBatchSide(
+        semantic_ids=side.semantic_ids.to(device=device),
+        semantic_mask=side.semantic_mask.to(device=device),
+        acoustic_ids=side.acoustic_ids.to(device=device),
+        acoustic_mask=side.acoustic_mask.to(device=device),
+    )

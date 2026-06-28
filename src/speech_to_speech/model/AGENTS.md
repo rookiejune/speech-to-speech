@@ -11,10 +11,11 @@
 - 将 `BOA`/`EOA` 注册为 idspace special token，并提供覆盖 audio token 和 BOA/EOA 的 LM head。
 - 接收 data module 构造的 batch，执行 semantic token 训练。
 - 从 semantic labels 推导目标侧 BPE token，使用 Qwen3 shifted hidden states 和 LongCat BPE 展开得到 frame-level acoustic condition。
-- 提供基于 DiT 的连续 acoustic flow loss 入口；LongCat discrete acoustic code 到连续 target feature 的转换由调用方或后续数据层显式提供。
+- 提供基于 DiT 的连续 acoustic flow loss 入口；LongCat discrete acoustic code 到连续 target feature 的转换由调用方或后续数据层显式提供，source acoustic condition 只在调用方显式传入 feature extractor 时从 batch source side 池化得到。
+- 提供 semantic-only 生成入口，将生成的 LongCat BPE token 显式展开回原始 semantic ids，用于最小生成 sanity check 和后续评估。
 - 提供基于 Qwen3 hidden states 的 DiT acoustic condition 生成接口；离散 BPE token 只用于自回归反馈、停止条件和可选 debug。
 - 提供 full-sequence waveform 生成编排入口：semantic BPE 生成、frame-level acoustic condition 展开、外部 acoustic feature generator 调用和 LongCat codec `decode_features()`。
-- 提供 diagonal acoustic flow 调度边界，用 synthetic condition/feature 先验证 wavefront 并行逻辑；真实 waveform 加速结论必须等 full-sequence baseline 和真实 sampler 接入后再判断。
+- 提供 serial/diagonal acoustic flow 调度边界，用 synthetic condition/feature 先验证 wavefront 并行逻辑；真实 waveform 加速结论必须等 full-sequence baseline 和真实 sampler 接入后再判断。
 
 ## 模块边界
 
@@ -22,7 +23,7 @@
 - `token_space.py` 负责 idspace、embedding 替换、special token embedding 和 trainable policy。
 - `generation.py` 负责语义 token 增量生成、EOA 停止和 acoustic condition hidden 收集。
 - `acoustic.py` 负责训练侧 acoustic condition 展开、连续 acoustic flow loss 和相关校验。
-- `diagonal.py` 负责 acoustic flow 的 chunk/wavefront 调度和 synthetic Euler 采样验证。
+- `diagonal.py` 负责 acoustic flow 的 serial chunk baseline、diagonal wavefront 调度和 synthetic Euler 采样验证。
 - `qwen3.py` 是 Hugging Face Qwen3 相关类的本地导入层，避免其他文件到处依赖 transformers 的深层路径。
 - `DiT/` 是 acoustic decoder 子模块，外部优先通过 `Orchestrator` 调用。
 
@@ -42,15 +43,21 @@ acoustic 侧输入输出契约：
 - BPE token 对应的 condition hidden 使用其下一位 input token 的 Qwen3 hidden state。
 - BPE hidden 通过 `IntBPE.repeat_interleave(..., mask=...)` 展开到原始 semantic frame 粒度。
 - `acoustic_flow_loss` 接收连续 `target_features`，形状为 `[batch, time, acoustic_dim]`，并要求 time 维与展开后的 condition mask 对齐。
+- `acoustic_flow_loss` 可选接收 `source_feature_extractor`，将 `batch.source_audio` 的 LongCat acoustic codes 转为连续 features 后按 mask mean 池化成 DiT 的 batch-level `acoustic_condition`；缺失 source 的行使用 DiT null acoustic condition。
+- `ModelConfig.acoustic_condition_dropout` 只作用于训练态、由 source features 池化得到的 acoustic condition；显式传入的 `acoustic_condition` 不被隐式替换。
+- Lightning 联合训练由 `TrainConfig.acoustic_loss_weight` 开启；权重为 0 时保持 semantic-only，权重大于 0 时必须显式传入 BPE 和 LongCat acoustic feature extractor。
 - LongCat discrete acoustic codes 到连续 features 的转换由 `anytrain.codec.longcat` 显式提供，模型层只消费连续 `target_features`。
 
 生成侧输入来自 `types.GenerationBatch`：
 
 - `input_ids` 和 `attention_mask` 表达已经构造好的 Qwen3 prompt。
 - `generate_acoustic_condition` 内部采样目标 audio BPE token 维持自回归，但对外主输出是 `AcousticConditionGeneration.hidden_states` 和 `mask`。
+- `generate_semantic` 返回生成的全局 token ids、展开后的 LongCat semantic ids 和 semantic mask，作为 semantic-only 评估入口。
 - 生成侧的 hidden condition 使用每个 sampled BPE token 的下一步 Qwen hidden state，与训练侧 acoustic condition 的 shifted hidden 契约对齐。
 - 离散 token ids 只在 `return_token_ids=True` 时返回，用于 debug、EOA 停止检查或简单 sanity check；不要把它当作 DiT 的主要条件输入。
 - `generate_waveform` 先走 full-sequence 路线，必须显式接收 acoustic feature generator；当前模型层不隐式把 condition 变成 LongCat acoustic features。
+- `acoustic_velocity(..., guidance_scale=...)` 是 CFG 速度预测边界；`guidance_scale=1` 只跑 conditional DiT，其他值会再跑 null acoustic condition 并做 `uncond + scale * (cond - uncond)`。
+- `Orchestrator.acoustic_feature_generator(...)` 返回可传给 `generate_waveform` 的 DiT acoustic feature generator，先用 diagonal sampler 生成连续 LongCat acoustic features，再交给 codec decode。
 
 模型层不负责：
 

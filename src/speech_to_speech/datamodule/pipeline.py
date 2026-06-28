@@ -6,6 +6,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import torch
 from anydataset import AnyDataset, MultipleAnyDataset, WeightedRandomStrategy
 from torch import Tensor, device as TorchDevice
 from torch.utils.data import IterableDataset
@@ -14,6 +15,7 @@ from ..config import DatasetInput, TaskConfig
 from ..types import (
     AutoregressionExample,
     CausalLMBatch,
+    LongCatBatchSide,
     LongCatSide,
     Task,
     TranslationExample,
@@ -169,7 +171,7 @@ class TaskBatchBuilder:
     def __call__(self, samples: Sequence[TaskSample]) -> CausalLMBatch:
         if not samples:
             raise ValueError("task sample batch must not be empty.")
-        return self.builder.mixed(
+        batch = self.builder.mixed(
             [
                 _encode_task_sample(
                     sample,
@@ -178,6 +180,20 @@ class TaskBatchBuilder:
                 )
                 for sample in samples
             ]
+        )
+        return CausalLMBatch(
+            input_ids=batch.input_ids,
+            attention_mask=batch.attention_mask,
+            labels=batch.labels,
+            logits_to_keep=batch.logits_to_keep,
+            source_audio=_collate_sides(
+                [_source_side(sample) for sample in samples],
+                device=self.device,
+            ),
+            target_audio=_collate_sides(
+                [_target_side(sample) for sample in samples],
+                device=self.device,
+            ),
         )
 
 
@@ -203,6 +219,98 @@ def _sequence_length(ids: Tensor) -> int:
     if ids.dim() == 0:
         raise ValueError("task sample ids must have a sequence dimension.")
     return int(ids.numel())
+
+
+def _source_side(sample: TaskSample) -> LongCatSide | None:
+    if isinstance(sample, SourceAutoregressionSample | TargetAutoregressionSample):
+        return None
+    if isinstance(sample, SourceToTargetSample | TargetToSourceSample):
+        return sample.source
+    raise TypeError("unknown task sample type.")
+
+
+def _target_side(sample: TaskSample) -> LongCatSide:
+    if isinstance(sample, SourceAutoregressionSample | TargetAutoregressionSample):
+        return sample.target
+    if isinstance(sample, SourceToTargetSample | TargetToSourceSample):
+        return sample.target
+    raise TypeError("unknown task sample type.")
+
+
+def _collate_sides(
+    sides: Sequence[LongCatSide | None],
+    *,
+    device: TorchDevice,
+) -> LongCatBatchSide | None:
+    present = [side for side in sides if side is not None]
+    if not present:
+        return None
+
+    semantic_rows = [_semantic_row(side.semantic_ids) for side in present]
+    acoustic_rows = [_acoustic_row(side.acoustic_ids) for side in present]
+    for semantic, acoustic in zip(semantic_rows, acoustic_rows, strict=True):
+        if semantic.numel() != acoustic.size(-1):
+            raise ValueError("LongCat semantic and acoustic lengths must match.")
+
+    max_semantic_length = max(row.numel() for row in semantic_rows)
+    max_acoustic_length = max(row.size(-1) for row in acoustic_rows)
+    codebook_count = acoustic_rows[0].size(0)
+    if any(row.size(0) != codebook_count for row in acoustic_rows):
+        raise ValueError("LongCat acoustic codebook count must be consistent within a batch.")
+
+    semantic_ids = torch.zeros(
+        (len(sides), max_semantic_length),
+        dtype=torch.long,
+        device=device,
+    )
+    semantic_mask = torch.zeros(
+        (len(sides), max_semantic_length),
+        dtype=torch.bool,
+        device=device,
+    )
+    acoustic_ids = torch.zeros(
+        (len(sides), codebook_count, max_acoustic_length),
+        dtype=torch.long,
+        device=device,
+    )
+    acoustic_mask = torch.zeros(
+        (len(sides), max_acoustic_length),
+        dtype=torch.bool,
+        device=device,
+    )
+
+    present_index = 0
+    for row_index, side in enumerate(sides):
+        if side is None:
+            continue
+        semantic = semantic_rows[present_index].to(device=device)
+        acoustic = acoustic_rows[present_index].to(device=device)
+        present_index += 1
+        semantic_ids[row_index, : semantic.numel()] = semantic
+        semantic_mask[row_index, : semantic.numel()] = True
+        acoustic_ids[row_index, :, : acoustic.size(-1)] = acoustic
+        acoustic_mask[row_index, : acoustic.size(-1)] = True
+
+    return LongCatBatchSide(
+        semantic_ids=semantic_ids,
+        semantic_mask=semantic_mask,
+        acoustic_ids=acoustic_ids,
+        acoustic_mask=acoustic_mask,
+    )
+
+
+def _semantic_row(ids: Tensor) -> Tensor:
+    if ids.dim() == 0:
+        raise ValueError("LongCat semantic ids must have a time dimension.")
+    return ids.reshape(-1).detach().to(dtype=torch.long)
+
+
+def _acoustic_row(ids: Tensor) -> Tensor:
+    if ids.dim() == 3 and ids.size(0) == 1:
+        ids = ids.squeeze(0)
+    if ids.dim() != 2:
+        raise ValueError("LongCat acoustic ids must have shape [nq, time].")
+    return ids.detach().to(dtype=torch.long)
 
 
 def _enabled_tasks(tasks: TaskConfig) -> frozenset[Task]:

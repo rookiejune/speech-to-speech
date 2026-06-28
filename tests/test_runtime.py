@@ -50,7 +50,7 @@ class RuntimeTest(unittest.TestCase):
 
     def test_longcat_acoustic_features_uses_codec_feature_boundary(self) -> None:
         codec = FakeLongCatCodec()
-        acoustic_codes = torch.tensor([[[1, 2], [3, 4]]])
+        acoustic_codes = torch.tensor([[1, 2], [3, 4]])
 
         features = runtime.longcat_acoustic_features(
             acoustic_codes,
@@ -59,7 +59,7 @@ class RuntimeTest(unittest.TestCase):
         )
 
         self.assertTrue(torch.equal(features, codec.features))
-        self.assertTrue(torch.equal(codec.acoustic_codes, acoustic_codes))
+        self.assertTrue(torch.equal(codec.acoustic_codes, acoustic_codes.unsqueeze(0)))
         self.assertEqual(codec.decoder, "24k_4codebooks")
 
 

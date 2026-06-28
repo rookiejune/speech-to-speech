@@ -77,6 +77,7 @@ class ModelConfig:
     train_audio_special_tokens: bool = True
     train_backbone: bool = False
     train_dit: bool = True
+    acoustic_condition_dropout: float = 0.0
     lora: LoRAConfig = field(default_factory=LoRAConfig)
 
 
@@ -84,6 +85,7 @@ class ModelConfig:
 class TrainConfig:
     max_steps: int = 100
     learning_rate: float = 1e-4
+    acoustic_loss_weight: float = 0.0
     optimizer_preset: str = "pretrain"
     optimizer: str = "muon"
     weight_decay: float | None = None

@@ -43,6 +43,7 @@ prompt/label 构造留在主进程完成，`inputs_embeds` 由模型 forward 内
 - `attention_mask` 标记 padding 位置。
 - audio segment 使用 idspace special token `BOA` 和 `EOA` 表达边界；LongCat BPE audio block 只包含真实 BPE token。
 - `labels` 只覆盖需要计算 loss 的目标 token，包括目标 audio segment 的 `BOA` 和 `EOA`。
+- `source_audio` / `target_audio` 可选携带 batch 对齐后的原始 LongCat semantic/acoustic codes 和 mask；semantic loss 不依赖它们，acoustic loss 和 feature 转换从这里读取。
 - prompt 和 user/assistant 结构 token 默认不计算 loss。
 - dataloader 对外只返回统一的 `CausalLMBatch`，不暴露 task/schema tag；任务来源由 prompt 和 label 结构表达。
 - Qwen3 文本模板必须通过 tokenizer 的 `apply_chat_template` 生成；不要手写 `<|im_start|>` / `assistant` / thinking token 序列。

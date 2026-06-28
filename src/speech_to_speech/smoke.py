@@ -29,9 +29,10 @@ from .config import (
 )
 from .datamodule import SpeechToSpeechDataModule
 from .datamodule.example import speech_pair_from_sample
-from .model.orchestrator import Orchestrator
+from .model.DiT.model import DiT
+from .model.orchestrator import Orchestrator, dit_config
 from .pl_module import SpeechToSpeechModule
-from .runtime import prepare_longcat_tokenizer, qwen3_tokenizer
+from .runtime import longcat_codec, prepare_longcat_tokenizer, qwen3_tokenizer
 from .types import SpeechPair
 
 
@@ -67,13 +68,20 @@ def run_smoke(
         datasets=config.data.datasets,
         config=config.bpe,
     )
+    acoustic_training = config.train.acoustic_loss_weight > 0.0
     model = Orchestrator(
+        dit=DiT(dit_config()) if acoustic_training else None,
         model_config=config.model,
         bpe_config=config.bpe,
         tokenizer=tokenizer,
         bpe_vocab_size=bpe.vocab_size,
     )
-    module = SpeechToSpeechModule(model, config.train)
+    module = SpeechToSpeechModule(
+        model,
+        config.train,
+        bpe=bpe if acoustic_training else None,
+        acoustic_feature_extractor=longcat_codec() if acoustic_training else None,
+    )
     datamodule = SpeechToSpeechDataModule(
         config.data,
         config.tasks,
@@ -216,6 +224,11 @@ def _model_config(data: Mapping[str, object] | None) -> ModelConfig:
         ),
         train_backbone=_bool(data, "train_backbone", defaults.train_backbone),
         train_dit=_bool(data, "train_dit", defaults.train_dit),
+        acoustic_condition_dropout=_probability(
+            data,
+            "acoustic_condition_dropout",
+            defaults.acoustic_condition_dropout,
+        ),
         lora=_lora_config(_optional_mapping(data, "lora")),
     )
 
@@ -238,6 +251,11 @@ def _train_config(data: Mapping[str, object] | None) -> TrainConfig:
     return TrainConfig(
         max_steps=_int(data, "max_steps", defaults.max_steps),
         learning_rate=_float(data, "learning_rate", defaults.learning_rate),
+        acoustic_loss_weight=_non_negative_float(
+            data,
+            "acoustic_loss_weight",
+            defaults.acoustic_loss_weight,
+        ),
         optimizer_preset=_str(data, "optimizer_preset", defaults.optimizer_preset),
         optimizer=_str(data, "optimizer", defaults.optimizer),
         weight_decay=_optional_float(data, "weight_decay", defaults.weight_decay),
@@ -347,6 +365,20 @@ def _optional_float(
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise TypeError(f"{key} must be a number or null.")
     return float(value)
+
+
+def _probability(data: Mapping[str, object], key: str, default: float) -> float:
+    value = _float(data, key, default)
+    if value < 0.0 or value > 1.0:
+        raise ValueError(f"{key} must be between 0 and 1.")
+    return value
+
+
+def _non_negative_float(data: Mapping[str, object], key: str, default: float) -> float:
+    value = _float(data, key, default)
+    if value < 0.0:
+        raise ValueError(f"{key} must be non-negative.")
+    return value
 
 
 def _devices(value: str) -> int | str:

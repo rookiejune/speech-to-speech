@@ -85,6 +85,37 @@ class SpeechToSpeechDataModuleTest(unittest.TestCase):
         )
         self.assertFalse(hasattr(batch, "schema"))
 
+    def test_translation_loader_carries_raw_longcat_audio_sides(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            store = _write_store(Path(tmpdir) / "store")
+            module = SpeechToSpeechDataModule(
+                DataConfig(
+                    datasets=(f"store://{store}:train",),
+                    cache_root=Path(tmpdir) / "cache",
+                    batch_size=2,
+                    num_workers=0,
+                ),
+                TaskConfig(enabled=(Task.TRANSLATION.value,)),
+                _embedding(),
+                tokenizer=MockTokenizer(),
+                bpe_tokenizer=MockBPE(),
+            )
+
+            batch = next(iter(module.train_dataloader()))
+
+        self.assertIsNotNone(batch.source_audio)
+        self.assertIsNotNone(batch.target_audio)
+        assert batch.source_audio is not None
+        assert batch.target_audio is not None
+        self.assertEqual(batch.source_audio.semantic_ids.tolist(), [[0, 1, 2], [2, 3, 0]])
+        self.assertEqual(batch.source_audio.semantic_mask.tolist(), [[True, True, True], [True, True, False]])
+        self.assertEqual(batch.target_audio.semantic_ids.tolist(), [[2, 3, 0], [0, 1, 2]])
+        self.assertEqual(batch.target_audio.semantic_mask.tolist(), [[True, True, False], [True, True, True]])
+        self.assertEqual(tuple(batch.source_audio.acoustic_ids.shape), (2, 4, 3))
+        self.assertEqual(batch.source_audio.acoustic_mask.tolist(), [[True, True, True], [True, True, False]])
+        self.assertEqual(tuple(batch.target_audio.acoustic_ids.shape), (2, 4, 3))
+        self.assertEqual(batch.target_audio.acoustic_mask.tolist(), [[True, True, False], [True, True, True]])
+
     def test_loader_supports_worker_task_stream(self) -> None:
         with TemporaryDirectory() as tmpdir:
             store = _write_store(Path(tmpdir) / "store")

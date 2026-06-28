@@ -13,9 +13,14 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 
 from speech_to_speech.config import LoRAConfig, ModelConfig
 from speech_to_speech.datamodule.batch_builder import CausalLMBatchBuilder
-from speech_to_speech.model.orchestrator import Orchestrator
+from speech_to_speech.model.orchestrator import AcousticSampler, Orchestrator
 from speech_to_speech.model import orchestrator
-from speech_to_speech.types import AutoregressionExample, TranslationExample
+from speech_to_speech.types import (
+    AcousticCondition,
+    AutoregressionExample,
+    LongCatBatchSide,
+    TranslationExample,
+)
 from helpers import MockQwen, MockTokenizer
 
 
@@ -105,6 +110,145 @@ class OrchestratorTest(unittest.TestCase):
         self.assertEqual(tuple(dit.last_hidden_state.shape), (1, 2, 4))
         self.assertEqual(dit.timesteps.tolist(), [0.25])
 
+    def test_acoustic_flow_loss_aligns_condition_dtype_to_dit(self) -> None:
+        tokenizer = MockTokenizer()
+        bpe = _bpe()
+        dit = MockDiT(hidden_size=4).to(dtype=torch.float32)
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            dit=dit,
+            tokenizer=tokenizer,
+            bpe_vocab_size=bpe.vocab_size,
+            pretrained=False,
+        )
+        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        batch = builder.translation(
+            TranslationExample(
+                source_ids=torch.tensor([3]),
+                target_ids=torch.tensor([4]),
+            )
+        )
+        hidden_states = torch.zeros(
+            batch.input_ids.size(0),
+            batch.input_ids.size(1),
+            4,
+            dtype=torch.bfloat16,
+        )
+        target_features = torch.ones((1, 2, 4), dtype=torch.float32)
+
+        model.acoustic_flow_loss(
+            batch,
+            bpe,
+            target_features,
+            hidden_states=hidden_states,
+            noise=torch.zeros_like(target_features),
+            timesteps=torch.tensor([0.5]),
+        )
+
+        self.assertIsNotNone(dit.last_hidden_state)
+        self.assertEqual(dit.last_hidden_state.dtype, torch.float32)
+
+    def test_acoustic_flow_loss_uses_pooled_source_acoustic_condition(self) -> None:
+        tokenizer = MockTokenizer()
+        bpe = _bpe()
+        dit = MockDiT(hidden_size=4)
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            dit=dit,
+            tokenizer=tokenizer,
+            bpe_vocab_size=bpe.vocab_size,
+            pretrained=False,
+        )
+        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        batch = builder.translation(
+            TranslationExample(
+                source_ids=torch.tensor([3]),
+                target_ids=torch.tensor([4]),
+            )
+        )
+        batch.source_audio = LongCatBatchSide(
+            semantic_ids=torch.tensor([[1, 2, 0]]),
+            semantic_mask=torch.tensor([[True, True, False]]),
+            acoustic_ids=torch.zeros((1, 2, 3), dtype=torch.long),
+            acoustic_mask=torch.tensor([[True, True, False]]),
+        )
+        hidden_states = torch.zeros(batch.input_ids.size(0), batch.input_ids.size(1), 4)
+
+        model.acoustic_flow_loss(
+            batch,
+            bpe,
+            torch.ones((1, 2, 4)),
+            hidden_states=hidden_states,
+            noise=torch.zeros((1, 2, 4)),
+            timesteps=torch.tensor([0.5]),
+            source_feature_extractor=FakeFeatureExtractor(
+                torch.tensor([[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 9.0, 9.0, 9.0]]])
+            ),
+        )
+
+        self.assertIsNotNone(dit.acoustic_condition)
+        self.assertTrue(
+            torch.equal(
+                dit.acoustic_condition,
+                torch.tensor([[3.0, 4.0, 5.0, 6.0]]),
+            )
+        )
+
+    def test_acoustic_condition_dropout_only_runs_in_training(self) -> None:
+        tokenizer = MockTokenizer()
+        bpe = _bpe()
+        dit = MockDiT(hidden_size=4)
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            dit=dit,
+            tokenizer=tokenizer,
+            bpe_vocab_size=bpe.vocab_size,
+            model_config=ModelConfig(acoustic_condition_dropout=1.0),
+            pretrained=False,
+        )
+        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        batch = builder.translation(
+            TranslationExample(
+                source_ids=torch.tensor([3]),
+                target_ids=torch.tensor([4]),
+            )
+        )
+        batch.source_audio = LongCatBatchSide(
+            semantic_ids=torch.tensor([[1, 2]]),
+            semantic_mask=torch.tensor([[True, True]]),
+            acoustic_ids=torch.zeros((1, 2, 2), dtype=torch.long),
+            acoustic_mask=torch.tensor([[True, True]]),
+        )
+        hidden_states = torch.zeros(batch.input_ids.size(0), batch.input_ids.size(1), 4)
+        feature_extractor = FakeFeatureExtractor(
+            torch.tensor([[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]])
+        )
+
+        model.eval()
+        model.acoustic_flow_loss(
+            batch,
+            bpe,
+            torch.ones((1, 2, 4)),
+            hidden_states=hidden_states,
+            noise=torch.zeros((1, 2, 4)),
+            timesteps=torch.tensor([0.5]),
+            source_feature_extractor=feature_extractor,
+        )
+        self.assertIsNotNone(dit.acoustic_condition)
+        self.assertTrue(torch.equal(dit.acoustic_condition, torch.tensor([[3.0, 4.0, 5.0, 6.0]])))
+
+        model.train()
+        model.acoustic_flow_loss(
+            batch,
+            bpe,
+            torch.ones((1, 2, 4)),
+            hidden_states=hidden_states,
+            noise=torch.zeros((1, 2, 4)),
+            timesteps=torch.tensor([0.5]),
+            source_feature_extractor=feature_extractor,
+        )
+        self.assertTrue(torch.equal(dit.acoustic_condition, torch.zeros((1, 4))))
+
     def test_forward_keeps_tail_supervised_logits(self) -> None:
         tokenizer = MockTokenizer()
         model = Orchestrator(
@@ -163,6 +307,42 @@ class OrchestratorTest(unittest.TestCase):
         self.assertTrue(
             torch.equal(condition.hidden_states[0, 0], torch.tensor([0.0, 1.0, 0.0, 0.0]))
         )
+
+    def test_generate_semantic_expands_bpe_tokens(self) -> None:
+        tokenizer = MockTokenizer()
+        qwen = ScriptedQwen(
+            next_hidden_values=(
+                torch.tensor([1.0, 0.0, 0.0, 0.0]),
+                torch.tensor([0.0, 1.0, 0.0, 0.0]),
+                torch.tensor([0.0, 0.0, 1.0, 0.0]),
+            )
+        )
+        model = Orchestrator(
+            qwen3=qwen,
+            tokenizer=tokenizer,
+            bpe_vocab_size=5,
+            pretrained=False,
+        )
+        _set_lm_head_weights(
+            model,
+            {
+                19: torch.tensor([1.0, 0.0, 0.0, 0.0]),
+                20: torch.tensor([0.0, 1.0, 0.0, 0.0]),
+                17: torch.tensor([0.0, 0.0, 1.0, 0.0]),
+            },
+        )
+        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        batch = builder.translation_generation(torch.tensor([0]))
+
+        generation = model.generate_semantic(
+            batch,
+            bpe=FakeBPE({1: [7, 8], 2: [9]}),
+            max_new_tokens=3,
+        )
+
+        self.assertEqual(generation.token_ids.tolist(), [[19, 20, 17]])
+        self.assertEqual(generation.semantic_ids.tolist(), [[7, 8, 9]])
+        self.assertEqual(generation.semantic_mask.tolist(), [[True, True, True]])
 
     def test_generate_waveform_runs_full_sequence_decode_contract(self) -> None:
         tokenizer = MockTokenizer()
@@ -227,6 +407,56 @@ class OrchestratorTest(unittest.TestCase):
                 acoustic_generator=None,
                 max_new_tokens=1,
             )
+
+    def test_acoustic_feature_generator_runs_default_diagonal_sampler(self) -> None:
+        tokenizer = MockTokenizer()
+        dit = ConstantDiT(hidden_size=4)
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            dit=dit,
+            tokenizer=tokenizer,
+            bpe_vocab_size=5,
+            pretrained=False,
+        )
+        condition = AcousticCondition(
+            hidden_states=torch.ones((1, 3, 4)),
+            semantic_ids=torch.tensor([[1, 2, 3]]),
+            mask=torch.tensor([[True, True, False]]),
+        )
+
+        features = model.acoustic_feature_generator(num_steps=2, chunk_size=2)(condition)
+
+        self.assertEqual(tuple(features.shape), (1, 3, 4))
+        self.assertTrue(torch.equal(features[:, :2], torch.ones((1, 2, 4))))
+        self.assertTrue(torch.equal(features[:, 2:], torch.zeros((1, 1, 4))))
+        self.assertEqual(dit.forward_count, 3)
+
+    def test_acoustic_feature_generator_can_use_serial_sampler(self) -> None:
+        tokenizer = MockTokenizer()
+        dit = ConstantDiT(hidden_size=4)
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            dit=dit,
+            tokenizer=tokenizer,
+            bpe_vocab_size=5,
+            pretrained=False,
+        )
+        condition = AcousticCondition(
+            hidden_states=torch.ones((1, 3, 4)),
+            semantic_ids=torch.tensor([[1, 2, 3]]),
+            mask=torch.tensor([[True, True, False]]),
+        )
+
+        features = model.acoustic_feature_generator(
+            num_steps=2,
+            chunk_size=2,
+            sampler=AcousticSampler.SERIAL,
+        )(condition)
+
+        self.assertEqual(tuple(features.shape), (1, 3, 4))
+        self.assertTrue(torch.equal(features[:, :2], torch.ones((1, 2, 4))))
+        self.assertTrue(torch.equal(features[:, 2:], torch.zeros((1, 1, 4))))
+        self.assertEqual(dit.forward_count, 4)
 
     def test_default_trainable_policy_freezes_text_and_trains_audio(self) -> None:
         tokenizer = MockTokenizer()
@@ -304,6 +534,7 @@ class MockDiT(nn.Module):
         self.attention_mask: torch.Tensor | None = None
         self.last_hidden_state: torch.Tensor | None = None
         self.timesteps: torch.Tensor | None = None
+        self.acoustic_condition: torch.Tensor | None = None
 
     def forward(
         self,
@@ -314,11 +545,33 @@ class MockDiT(nn.Module):
         acoustic_condition: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> BaseModelOutputWithPast:
-        del acoustic_condition
         self.attention_mask = attention_mask
         self.last_hidden_state = last_hidden_state
         self.timesteps = timesteps
+        self.acoustic_condition = acoustic_condition
         return BaseModelOutputWithPast(last_hidden_state=torch.zeros_like(x_t))
+
+
+class ConstantDiT(nn.Module):
+    def __init__(self, *, hidden_size: int) -> None:
+        super().__init__()
+        self.config = SimpleNamespace(hidden_size=hidden_size)
+        self.null_acoustic_condition = nn.Parameter(torch.zeros(1, hidden_size))
+        self.forward_count = 0
+
+    def forward(
+        self,
+        *,
+        x_t: torch.Tensor,
+        last_hidden_state: torch.Tensor,
+        timesteps: torch.Tensor,
+        acoustic_condition: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> BaseModelOutputWithPast:
+        del last_hidden_state, timesteps, acoustic_condition
+        self.forward_count += 1
+        velocity = attention_mask.to(dtype=x_t.dtype).unsqueeze(-1).expand_as(x_t)
+        return BaseModelOutputWithPast(last_hidden_state=velocity)
 
 
 class ScriptedQwen(nn.Module):
@@ -390,6 +643,15 @@ class FakeAcousticGenerator:
             time,
             self.dim,
         )
+
+
+class FakeFeatureExtractor:
+    def __init__(self, features: torch.Tensor) -> None:
+        self.features = features
+
+    def acoustic_codes_to_features(self, acoustic_ids: torch.Tensor) -> torch.Tensor:
+        del acoustic_ids
+        return self.features
 
 
 class FakeCodec:

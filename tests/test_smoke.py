@@ -37,6 +37,16 @@ class SmokeRunnerTest(unittest.TestCase):
         self.assertEqual(config.tasks.enabled, ("autoregression", "translation"))
         self.assertTrue(config.model.load_in_4bit)
         self.assertTrue(config.model.lora.enabled)
+        self.assertEqual(config.model.acoustic_condition_dropout, 0.1)
+        self.assertEqual(config.train.acoustic_loss_weight, 0.0)
+
+    def test_load_config_reads_wmt19_acoustic_smoke_yaml(self) -> None:
+        config = smoke.load_config("configs/wmt19_tts_longcat_acoustic_smoke.yaml")
+
+        self.assertEqual(config.tasks.enabled, ("translation",))
+        self.assertEqual(config.data.batch_size, 1)
+        self.assertEqual(config.train.acoustic_loss_weight, 1.0)
+        self.assertEqual(config.model.acoustic_condition_dropout, 0.1)
 
     def test_run_smoke_wires_real_dataset_to_trainer(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -69,6 +79,7 @@ model:
   train_audio_special_tokens: true
   train_backbone: false
   train_dit: false
+  acoustic_condition_dropout: 0.25
   lora:
     enabled: false
     rank: 16
@@ -79,6 +90,7 @@ model:
 train:
   max_steps: 4
   learning_rate: 0.0001
+  acoustic_loss_weight: 0.0
   optimizer_preset: pretrain
   optimizer: adamw
   weight_decay:
@@ -114,6 +126,10 @@ train:
             self.assertEqual(FakeTrainer.last_kwargs["accelerator"], "cpu")
             self.assertFalse(FakeTrainer.last_kwargs["enable_progress_bar"])
             self.assertEqual(FakeTrainer.last_fit_module.train.max_steps, 1)
+            self.assertEqual(
+                FakeTrainer.last_fit_module.model.model_config.acoustic_condition_dropout,
+                0.25,
+            )
             batch = next(iter(FakeTrainer.last_fit_datamodule.train_dataloader()))
             self.assertEqual(batch.input_ids.size(0), 1)
 
@@ -122,18 +138,27 @@ class FakeOrchestrator:
     def __init__(
         self,
         *,
+        dit: object | None = None,
         model_config: ModelConfig,
         bpe_config: object,
         tokenizer: object,
         bpe_vocab_size: int,
     ) -> None:
-        del bpe_config, tokenizer
+        del dit, bpe_config, tokenizer
         self.model_config = model_config
         self.embed_tokens = _embedding(bpe_vocab_size)
 
 
 class FakeModule:
-    def __init__(self, model: FakeOrchestrator, train: object) -> None:
+    def __init__(
+        self,
+        model: FakeOrchestrator,
+        train: object,
+        *,
+        bpe: object | None = None,
+        acoustic_feature_extractor: object | None = None,
+    ) -> None:
+        del bpe, acoustic_feature_extractor
         self.model = model
         self.train = train
 

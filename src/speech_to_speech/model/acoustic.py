@@ -7,7 +7,13 @@ from anytrain.idspace import IdSpaceEmbedding, Modality
 from anytrain.tokenizer import IntBPE
 from torch import Tensor, nn
 
-from ..types import AcousticCondition, AudioBoundary, CausalLMBatch, IGNORE_INDEX
+from ..types import (
+    AcousticCondition,
+    AudioBoundary,
+    CausalLMBatch,
+    IGNORE_INDEX,
+    LongCatBatchSide,
+)
 
 
 class _FixedTimeSampler:
@@ -45,6 +51,38 @@ class _FlowModel(nn.Module):
         if prediction.shape != x_t.shape:
             raise ValueError("DiT output and acoustic velocity target must have the same shape.")
         return prediction
+
+
+def acoustic_velocity(
+    dit: nn.Module,
+    *,
+    x_t: Tensor,
+    timesteps: Tensor,
+    last_hidden_state: Tensor,
+    acoustic_condition: Tensor,
+    mask: Tensor,
+    guidance_scale: float = 1.0,
+) -> Tensor:
+    _validate_guidance_scale(guidance_scale)
+    conditional = _dit_velocity(
+        dit,
+        x_t=x_t,
+        timesteps=timesteps,
+        last_hidden_state=last_hidden_state,
+        acoustic_condition=acoustic_condition,
+        mask=mask,
+    )
+    if guidance_scale == 1.0:
+        return conditional
+    unconditional = _dit_velocity(
+        dit,
+        x_t=x_t,
+        timesteps=timesteps,
+        last_hidden_state=last_hidden_state,
+        acoustic_condition=null_acoustic_condition(dit, x_t),
+        mask=mask,
+    )
+    return unconditional + guidance_scale * (conditional - unconditional)
 
 
 def acoustic_condition(
@@ -129,6 +167,57 @@ def validate_acoustic_features(
         raise ValueError("target_mask must match acoustic condition mask.")
 
 
+def acoustic_features_from_batch_side(
+    side: LongCatBatchSide,
+    *,
+    feature_extractor: object,
+) -> tuple[Tensor, Tensor]:
+    convert = getattr(feature_extractor, "acoustic_codes_to_features", None)
+    if not callable(convert):
+        raise TypeError("feature_extractor must provide acoustic_codes_to_features().")
+    acoustic_ids = side.acoustic_ids
+    if acoustic_ids.dim() != 3:
+        raise ValueError("LongCat batch acoustic_ids must have shape [batch, nq, time].")
+    features = convert(acoustic_ids)
+    if not isinstance(features, Tensor):
+        raise TypeError("acoustic_codes_to_features() must return a Tensor.")
+    if features.dim() != 3:
+        raise ValueError("LongCat acoustic features must have shape [batch, time, dim].")
+    if features.shape[:2] != side.acoustic_mask.shape:
+        raise ValueError("LongCat acoustic features must align with acoustic_mask.")
+    if not torch.is_floating_point(features) or torch.is_complex(features):
+        raise TypeError("LongCat acoustic features must be floating point tensors.")
+    return features, side.acoustic_mask.to(device=features.device, dtype=torch.bool)
+
+
+def pooled_acoustic_condition_from_batch_side(
+    side: LongCatBatchSide,
+    *,
+    feature_extractor: object,
+    empty_condition: Tensor | None = None,
+) -> Tensor:
+    features, mask = acoustic_features_from_batch_side(
+        side,
+        feature_extractor=feature_extractor,
+    )
+    weights = mask.to(device=features.device, dtype=features.dtype).unsqueeze(-1)
+    frame_counts = weights.sum(dim=1)
+    pooled = (features * weights).sum(dim=1) / frame_counts.clamp_min(1.0)
+    empty_rows = frame_counts.eq(0)
+    if bool(empty_rows.any()):
+        if empty_condition is None:
+            raise ValueError("source acoustic condition rows must contain at least one frame.")
+        fallback = _expand_acoustic_condition(
+            empty_condition,
+            batch_size=features.size(0),
+            hidden_size=features.size(-1),
+            device=features.device,
+            dtype=features.dtype,
+        )
+        pooled = torch.where(empty_rows, fallback, pooled)
+    return pooled
+
+
 def null_acoustic_condition(dit: nn.Module, like: Tensor) -> Tensor:
     value = getattr(dit, "null_acoustic_condition", None)
     if isinstance(value, Tensor):
@@ -184,3 +273,50 @@ def _masked_mse(prediction: Tensor, target: Tensor, extras: object) -> Tensor:
     if denominator <= 0:
         raise ValueError("acoustic mask must contain at least one valid frame.")
     return (loss * weights).sum() / denominator
+
+
+def _expand_acoustic_condition(
+    condition: Tensor,
+    *,
+    batch_size: int,
+    hidden_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tensor:
+    condition = condition.to(device=device, dtype=dtype)
+    if condition.dim() == 1:
+        condition = condition.unsqueeze(0)
+    if condition.shape == (1, hidden_size):
+        condition = condition.expand(batch_size, -1)
+    if condition.shape != (batch_size, hidden_size):
+        raise ValueError("empty_condition must have shape [hidden] or [batch, hidden].")
+    return condition
+
+
+def _dit_velocity(
+    dit: nn.Module,
+    *,
+    x_t: Tensor,
+    timesteps: Tensor,
+    last_hidden_state: Tensor,
+    acoustic_condition: Tensor,
+    mask: Tensor,
+) -> Tensor:
+    outputs = dit(
+        x_t=x_t,
+        last_hidden_state=last_hidden_state,
+        timesteps=timesteps,
+        acoustic_condition=acoustic_condition,
+        attention_mask=mask.to(device=x_t.device, dtype=torch.long),
+    )
+    prediction = outputs.last_hidden_state
+    if prediction.shape != x_t.shape:
+        raise ValueError("DiT output and acoustic velocity target must have the same shape.")
+    return prediction
+
+
+def _validate_guidance_scale(guidance_scale: float) -> None:
+    if isinstance(guidance_scale, bool) or not isinstance(guidance_scale, int | float):
+        raise TypeError("guidance_scale must be a number.")
+    if guidance_scale < 0.0:
+        raise ValueError("guidance_scale must be non-negative.")
