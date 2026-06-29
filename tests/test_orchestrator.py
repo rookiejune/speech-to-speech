@@ -10,6 +10,7 @@ from anytrain.tokenizer import CodecBPE
 from anytrain.idspace import Modality
 from torch import nn
 from transformers.modeling_outputs import BaseModelOutputWithPast
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from speech_to_speech.config import LoRAConfig, ModelConfig
 from speech_to_speech.datamodule.batch_builder import CausalLMBatchBuilder
@@ -18,6 +19,8 @@ from speech_to_speech.model import orchestrator
 from speech_to_speech.types import (
     AcousticCondition,
     AutoregressionExample,
+    CausalLMBatch,
+    IGNORE_INDEX,
     LongCatBatchSide,
     TranslationExample,
 )
@@ -44,6 +47,40 @@ class OrchestratorTest(unittest.TestCase):
         self.assertEqual(tuple(output.loss.shape), (1,))
         self.assertEqual(tuple(output.logits.shape), (5, 7))
         output.loss.mean().backward()
+
+    def test_semantic_accuracy_uses_supervised_positions(self) -> None:
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            tokenizer=MockTokenizer(),
+            bpe_vocab_size=5,
+            pretrained=False,
+        )
+        batch = CausalLMBatch(
+            input_ids=torch.zeros((2, 3), dtype=torch.long),
+            attention_mask=torch.ones((2, 3), dtype=torch.long),
+            labels=torch.tensor(
+                [
+                    [IGNORE_INDEX, 18, 19],
+                    [20, IGNORE_INDEX, 21],
+                ]
+            ),
+            logits_to_keep=torch.tensor(
+                [
+                    [0, 1],
+                    [0, 2],
+                    [1, 0],
+                ]
+            ),
+        )
+        logits = torch.full((3, model.lm_head.vocab_size), -1.0)
+        logits[0, model.lm_head.to_head_ids(torch.tensor(18))] = 1.0
+        logits[1, model.lm_head.to_head_ids(torch.tensor(16))] = 1.0
+        logits[2, model.lm_head.to_head_ids(torch.tensor(20))] = 1.0
+        output = CausalLMOutputWithPast(loss=torch.ones(2), logits=logits)
+
+        accuracy = model.semantic_accuracy(batch, output)
+
+        self.assertTrue(torch.equal(accuracy, torch.tensor(2.0 / 3.0)))
 
     def test_acoustic_condition_uses_target_label_shift(self) -> None:
         tokenizer = MockTokenizer()

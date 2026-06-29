@@ -54,7 +54,8 @@ class SpeechToSpeechModule(LightningModule):
 
     def training_step(self, batch: CausalLMBatch, batch_idx: int) -> Tensor:
         del batch_idx
-        row_loss = self._semantic_row_loss(batch)
+        output = self.model(batch)
+        row_loss = self._semantic_row_loss(batch, output)
         token_counts = _loss_token_counts(batch, dtype=row_loss.dtype)
         loss = self._loss(batch, row_loss, token_counts, stage=None)
         self.log(
@@ -66,6 +67,7 @@ class SpeechToSpeechModule(LightningModule):
             prog_bar=True,
             sync_dist=True,
         )
+        self._log_semantic_accuracy(batch, output, token_counts, stage=None)
         self._log_task_losses(batch, row_loss, token_counts, stage=None)
         self._log_family_group_losses(batch, row_loss, token_counts, stage=None)
         self.log(
@@ -81,7 +83,8 @@ class SpeechToSpeechModule(LightningModule):
 
     def validation_step(self, batch: CausalLMBatch, batch_idx: int) -> Tensor:
         del batch_idx
-        row_loss = self._semantic_row_loss(batch)
+        output = self.model(batch)
+        row_loss = self._semantic_row_loss(batch, output)
         token_counts = _loss_token_counts(batch, dtype=row_loss.dtype)
         loss = self._loss(batch, row_loss, token_counts, stage="val")
         self.log(
@@ -93,6 +96,7 @@ class SpeechToSpeechModule(LightningModule):
             prog_bar=True,
             sync_dist=True,
         )
+        self._log_semantic_accuracy(batch, output, token_counts, stage="val")
         self._log_task_losses(batch, row_loss, token_counts, stage="val")
         self._log_family_group_losses(batch, row_loss, token_counts, stage="val")
         self._log_acoustic_frame_count(batch, stage="val")
@@ -165,8 +169,14 @@ class SpeechToSpeechModule(LightningModule):
         )
         return loss + acoustic_weight * acoustic_loss
 
-    def _semantic_row_loss(self, batch: CausalLMBatch) -> Tensor:
-        loss = self.model(batch).loss
+    def _semantic_row_loss(
+        self,
+        batch: CausalLMBatch,
+        output: CausalLMOutputWithPast | None = None,
+    ) -> Tensor:
+        if output is None:
+            output = self.model(batch)
+        loss = output.loss
         if loss is None:
             raise RuntimeError("model output must include loss.")
         if loss.dim() == 0:
@@ -174,6 +184,37 @@ class SpeechToSpeechModule(LightningModule):
         if loss.dim() != 1 or loss.size(0) != batch.input_ids.size(0):
             raise RuntimeError("model loss must be scalar or one value per batch row.")
         return loss
+
+    def _log_semantic_accuracy(
+        self,
+        batch: CausalLMBatch,
+        output: CausalLMOutputWithPast,
+        token_counts: Tensor,
+        *,
+        stage: str | None,
+    ) -> None:
+        self.log(
+            _log_name("accuracy", stage=stage),
+            self._semantic_accuracy(batch, output),
+            batch_size=int(token_counts.sum().detach().item()),
+            on_step=stage is None,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
+
+    def _semantic_accuracy(
+        self,
+        batch: CausalLMBatch,
+        output: CausalLMOutputWithPast,
+    ) -> Tensor:
+        semantic_accuracy = getattr(self.model, "semantic_accuracy", None)
+        if not callable(semantic_accuracy):
+            raise TypeError("model must provide semantic_accuracy().")
+        accuracy = semantic_accuracy(batch, output)
+        if not isinstance(accuracy, Tensor):
+            raise TypeError("model semantic_accuracy() must return a Tensor.")
+        return accuracy
 
     def _log_task_losses(
         self,
@@ -300,23 +341,31 @@ def _muon_learning_rate(train: TrainConfig) -> float | None:
 
 
 def _loss_token_counts(batch: CausalLMBatch, *, dtype: torch.dtype) -> Tensor:
+    positions = _loss_positions(batch)
+    counts = torch.zeros(batch.input_ids.size(0), device=batch.labels.device)
+    counts.scatter_add_(
+        0,
+        positions[:, 0],
+        torch.ones_like(positions[:, 0], dtype=counts.dtype),
+    )
+    return counts.to(dtype=dtype)
+
+
+def _loss_positions(batch: CausalLMBatch) -> Tensor:
     if isinstance(batch.logits_to_keep, Tensor):
         positions = batch.logits_to_keep.to(device=batch.labels.device, dtype=torch.long)
         if positions.dim() != 2 or positions.size(-1) != 2:
             raise ValueError("logits_to_keep tensor must have shape (n, 2).")
-        counts = torch.zeros(batch.input_ids.size(0), device=batch.labels.device)
-        counts.scatter_add_(
-            0,
-            positions[:, 0],
-            torch.ones_like(positions[:, 0], dtype=counts.dtype),
-        )
-        return counts.to(dtype=dtype)
-
+        return positions
+    if batch.logits_to_keep <= 0:
+        raise ValueError("logits_to_keep must be positive.")
     mask = batch.labels.ne(IGNORE_INDEX)
+    if not bool(mask.any()):
+        raise ValueError("labels must contain at least one supervised token.")
     if batch.logits_to_keep >= mask.size(1):
-        return mask.sum(dim=1).to(dtype=dtype)
+        return mask.nonzero(as_tuple=False)
     keep = mask.cumsum(dim=1) > (mask.sum(dim=1, keepdim=True) - batch.logits_to_keep).clamp_min(0)
-    return (mask & keep).sum(dim=1).to(dtype=dtype)
+    return (mask & keep).nonzero(as_tuple=False)
 
 
 def _weighted_mean(values: Tensor, weights: Tensor) -> Tensor:

@@ -13,6 +13,7 @@
 - 从 semantic labels 推导目标侧 BPE token，使用 Qwen3 shifted hidden states 和 LongCat BPE 展开得到 frame-level acoustic condition。
 - 提供基于 DiT 的连续 acoustic flow loss 入口；LongCat discrete acoustic code 到连续 target feature 的转换由调用方或后续数据层显式提供，source acoustic condition 只在调用方显式传入 feature extractor 时从 batch source side 池化得到。
 - 提供 semantic-only 生成入口，将生成的 LongCat BPE token 显式展开回原始 semantic ids，用于最小生成 sanity check 和后续评估。
+- 提供 supervised semantic token accuracy 计算入口，统计范围与 semantic loss 使用的 supervised positions 对齐。
 - 提供基于 Qwen3 hidden states 的 DiT acoustic condition 生成接口；离散 BPE token 只用于自回归反馈、停止条件和可选 debug。
 - 提供 full-sequence waveform 生成编排入口：semantic BPE 生成、frame-level acoustic condition 展开、外部 acoustic feature generator 调用和 LongCat codec `decode_features()`。
 - 提供 serial/diagonal acoustic flow 调度边界，用 synthetic condition/feature 先验证 wavefront 并行逻辑；真实 waveform 加速结论必须等 full-sequence baseline 和真实 sampler 接入后再判断。

@@ -243,6 +243,24 @@ class Orchestrator(nn.Module):
             attentions=getattr(outputs, "attentions", None),
         )
 
+    def semantic_accuracy(
+        self,
+        batch: CausalLMBatch,
+        output: CausalLMOutputWithPast | None = None,
+    ) -> Tensor:
+        """Returns token accuracy over the same supervised positions as semantic loss."""
+        if output is None:
+            output = self(batch)
+        logits = output.logits
+        if logits is None:
+            raise RuntimeError("model output must include logits.")
+        positions = _loss_positions(batch)
+        if logits.dim() != 2 or logits.size(0) != positions.size(0):
+            raise RuntimeError("model logits must have one row per supervised token.")
+        labels = batch.labels[positions[:, 0], positions[:, 1]]
+        target = self.lm_head.to_head_ids(labels)
+        return logits.detach().argmax(dim=-1).eq(target).float().mean()
+
     def acoustic_condition(
         self,
         batch: CausalLMBatch,
