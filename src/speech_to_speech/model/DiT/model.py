@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import inspect
+from collections.abc import Callable
+from functools import lru_cache
 from typing import Unpack, cast
 
 import torch
@@ -78,23 +81,34 @@ class DiT(nn.Module):
 
         # It may already have been prepared by e.g. `generate`
         if not isinstance(causal_mask_mapping := attention_mask, dict):
-            # Prepare mask arguments
-            mask_kwargs = {
-                "config": self.config,
-                "input_embeds": x_t,
-                "attention_mask": attention_mask,
-                "cache_position": cache_position,
-                "past_key_values": past_key_values,
-                "position_ids": position_ids,
-            }
             # Create the masks
             causal_mask_mapping = {
-                "full_attention": create_causal_mask(**mask_kwargs),
+                "full_attention": create_causal_mask(
+                    **_mask_kwargs(
+                        create_causal_mask,
+                        config=self.config,
+                        inputs=x_t,
+                        attention_mask=attention_mask,
+                        cache_position=cache_position,
+                        past_key_values=past_key_values,
+                        position_ids=position_ids,
+                    )
+                ),
             }
             # The sliding window alternating layers are not always activated depending on the config
             if self.has_sliding_layers:
                 causal_mask_mapping["sliding_attention"] = (
-                    create_sliding_window_causal_mask(**mask_kwargs)
+                    create_sliding_window_causal_mask(
+                        **_mask_kwargs(
+                            create_sliding_window_causal_mask,
+                            config=self.config,
+                            inputs=x_t,
+                            attention_mask=attention_mask,
+                            cache_position=cache_position,
+                            past_key_values=past_key_values,
+                            position_ids=position_ids,
+                        )
+                    )
                 )
 
         position_embeddings = self.rotary_emb(x_t, position_ids)
@@ -121,6 +135,41 @@ class DiT(nn.Module):
             last_hidden_state=x_t,  # type: ignore
             past_key_values=past_key_values if use_cache else None,
         )
+
+
+def _mask_kwargs(
+    mask_fn: Callable[..., object],
+    *,
+    config: Qwen3Config,
+    inputs: Tensor,
+    attention_mask: Tensor | None,
+    cache_position: Tensor,
+    past_key_values: Cache | None,
+    position_ids: Tensor,
+) -> dict[str, object]:
+    embeds_name, accepts_cache_position = _mask_signature(mask_fn)
+    kwargs: dict[str, object] = {
+        "config": config,
+        embeds_name: inputs,
+        "attention_mask": attention_mask,
+        "past_key_values": past_key_values,
+        "position_ids": position_ids,
+    }
+    if accepts_cache_position:
+        kwargs["cache_position"] = cache_position
+    return kwargs
+
+
+@lru_cache(maxsize=None)
+def _mask_signature(mask_fn: Callable[..., object]) -> tuple[str, bool]:
+    parameters = inspect.signature(mask_fn).parameters
+    if "input_embeds" in parameters:
+        embeds_name = "input_embeds"
+    elif "inputs_embeds" in parameters:
+        embeds_name = "inputs_embeds"
+    else:
+        raise TypeError("Transformers mask function must accept input embeddings.")
+    return embeds_name, "cache_position" in parameters
 
 
 def _timestep_embedding(
