@@ -13,11 +13,12 @@ Common variables:
 | `REPOS_ROOT` | Parent directory containing `workspace/`, `third_party/`, and this repo. |
 | `PYTHONPATH` | Prepends this repo's `src` to the workspace-level Python path. |
 | `S2S_PYTHON` | Python executable. Defaults to `$WORKSPACE_PYTHON` when set, otherwise `python`. |
-| `S2S_TRAIN_ROOT` | Optional training output root override. If unset, Python resolves `zhuyin.env.train_dir("speech-to-speech")`. |
 
 Workspace variables such as `LOCATION`, `STATIC_HOME`, `DYNAMIC_HOME`,
 `HF_HOME`, `ANYDATASET_HOME`, and `BPE_CACHE_DIR` are documented in
 `workspace/jobs/README.md`.
 
 Local runs may set `LOCATION`, `STATIC_HOME`, or `DYNAMIC_HOME` before invoking
-a wrapper. The shell env does not initialize those homes.
+a wrapper. The shell env does not initialize those homes, and the default
+training root is resolved inside Python as
+`zhuyin.env.train_dir("speech-to-speech")`.

@@ -9,5 +9,4 @@ cd "$S2S_ROOT"
   experiment=wmt19_quality_full_adamw \
   tasks=s2_translation_weighted \
   trainer.name=wmt19-quality-001-s2-full-adamw \
-  ${S2S_TRAIN_OVERRIDES[@]+"${S2S_TRAIN_OVERRIDES[@]}"} \
   "$@"
