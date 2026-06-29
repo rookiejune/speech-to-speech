@@ -68,7 +68,7 @@ def main(cfg: DictConfig) -> None:
         bpe=config.bpe,
     )
 
-    root = Path(config.trainer.default_root_dir)
+    root = _trainer_root(config.trainer.default_root_dir)
     logger = TensorBoardLogger(
         save_dir=str(root / "tensorboard"),
         name=config.trainer.name,
@@ -135,6 +135,16 @@ def _bind_local_cuda_device() -> None:
     if rank is None or not torch.cuda.is_available():
         return
     torch.cuda.set_device(int(rank))
+
+
+def _trainer_root(default_root_dir: str | Path | None) -> Path:
+    if default_root_dir is None:
+        from zhuyin.env import train_dir
+
+        return train_dir("speech-to-speech")
+    if isinstance(default_root_dir, str) and not default_root_dir:
+        raise ValueError("trainer.default_root_dir must not be empty.")
+    return Path(default_root_dir)
 
 
 def _speech_pairs(dataset_factory: DatasetFactoryConfig) -> Iterable[SpeechPair]:

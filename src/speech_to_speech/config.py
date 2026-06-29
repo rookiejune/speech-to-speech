@@ -138,7 +138,7 @@ class TrainConfig:
 @dataclass(frozen=True)
 class TrainerConfig:
     name: str = "default"
-    default_root_dir: str | Path = "outputs/train"
+    default_root_dir: str | Path | None = None
     accelerator: str | None = None
     devices: int | str = 1
     strategy: str = "auto"

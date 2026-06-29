@@ -1,5 +1,5 @@
 name: wmt19-mixed-smoke
-default_root_dir: outputs/train
+default_root_dir: null
 accelerator:
 devices: 1
 strategy: auto
