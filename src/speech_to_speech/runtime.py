@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from anytrain.codec import LongCatAudioCodec
-from anytrain.tokenizer import IntBPE
+from anytrain.tokenizer import CodecBPE
 from .config import BPEConfig, DatasetInput, ModelConfig
 from .types import BPEArtifactMeta, SpeechPair, TranslationExample
 
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from torch import Tensor
 
 _QWEN3_TOKENIZERS: dict[tuple[str, bool], PreTrainedTokenizerBase] = {}
-_LONGCAT_TOKENIZERS: dict[Path, IntBPE] = {}
+_LONGCAT_TOKENIZERS: dict[Path, CodecBPE] = {}
 _LONGCAT_CODEC: LongCatAudioCodec | None = None
 
 
@@ -56,12 +56,12 @@ def longcat_tokenizer(
     config: BPEConfig | None = None,
     *,
     cache_dir: str | Path | None = None,
-) -> IntBPE:
+) -> CodecBPE:
     config = config or BPEConfig()
     path = longcat_bpe_path(config, cache_dir=cache_dir)
     if path not in _LONGCAT_TOKENIZERS:
         _validate_cached_bpe(path, config)
-        _LONGCAT_TOKENIZERS[path] = IntBPE.from_pretrained(path)
+        _LONGCAT_TOKENIZERS[path] = CodecBPE.from_pretrained(path)
     return _LONGCAT_TOKENIZERS[path]
 
 
@@ -71,13 +71,16 @@ def prepare_longcat_tokenizer(
     datasets: Iterable[DatasetInput] = (),
     config: BPEConfig | None = None,
     cache_dir: str | Path | None = None,
-) -> IntBPE:
+) -> CodecBPE:
     config = config or BPEConfig()
     path = longcat_bpe_path(config, cache_dir=cache_dir)
+    dataset_meta = tuple(_dataset_meta(dataset) for dataset in datasets)
     if _bpe_state_path(path).exists():
+        if dataset_meta:
+            _validate_cached_bpe(path, config, datasets=dataset_meta)
         return longcat_tokenizer(config, cache_dir=cache_dir)
 
-    bpe = IntBPE.train(
+    bpe = CodecBPE.train(
         _chunked_pair_corpus(pairs, config.max_piece_frames),
         vocab_size=config.vocab_size,
     )
@@ -89,7 +92,7 @@ def prepare_longcat_tokenizer(
             codec_name=config.codec_name,
             vocab_size=config.vocab_size,
             max_piece_frames=config.max_piece_frames,
-            datasets=tuple(_dataset_meta(dataset) for dataset in datasets),
+            datasets=dataset_meta,
         ),
     )
     _LONGCAT_TOKENIZERS[path] = bpe
@@ -168,7 +171,12 @@ def _chunks(units: Sequence[int], size: int) -> Iterable[list[int]]:
             yield chunk
 
 
-def _validate_cached_bpe(path: Path, config: BPEConfig) -> None:
+def _validate_cached_bpe(
+    path: Path,
+    config: BPEConfig,
+    *,
+    datasets: tuple[Mapping[str, object], ...] = (),
+) -> None:
     state_path = _bpe_state_path(path)
     if not state_path.exists():
         raise FileNotFoundError(
@@ -196,6 +204,8 @@ def _validate_cached_bpe(path: Path, config: BPEConfig) -> None:
             for key, (cached, requested) in mismatches.items()
         )
         raise ValueError(f"LongCat BPE cache config mismatch at {path}: {details}.")
+    if datasets and tuple(meta.get("datasets", ())) != datasets:
+        raise ValueError(f"LongCat BPE cache dataset mismatch at {path}.")
 
 
 def _dataset_meta(dataset: DatasetInput) -> Mapping[str, object]:
@@ -210,7 +220,7 @@ def _write_bpe_meta(path: Path, meta: BPEArtifactMeta) -> None:
 
 
 def _bpe_state_path(path: Path) -> Path:
-    return path / "int_bpe.json"
+    return path / "codec_bpe.json"
 
 
 def _bpe_meta_path(path: Path) -> Path:

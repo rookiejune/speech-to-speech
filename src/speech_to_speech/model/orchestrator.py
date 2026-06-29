@@ -7,7 +7,7 @@ from typing import cast
 import torch
 import torch.nn.functional as F
 from anytrain.idspace import IdSpace, IdSpaceEmbedding, Modality, ModalityBlock
-from anytrain.tokenizer import IntBPE
+from anytrain.tokenizer import CodecBPE
 from torch import Tensor, nn
 from transformers import BitsAndBytesConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -244,7 +244,7 @@ class Orchestrator(nn.Module):
     def acoustic_condition(
         self,
         batch: CausalLMBatch,
-        bpe: IntBPE,
+        bpe: CodecBPE,
         *,
         hidden_states: Tensor | None = None,
     ) -> AcousticCondition:
@@ -266,7 +266,7 @@ class Orchestrator(nn.Module):
     def acoustic_flow_loss(
         self,
         batch: CausalLMBatch,
-        bpe: IntBPE,
+        bpe: CodecBPE,
         target_features: Tensor,
         *,
         hidden_states: Tensor | None = None,

@@ -4,7 +4,7 @@ from collections.abc import Mapping
 
 import torch
 from anytrain.idspace import IdSpaceEmbedding, Modality
-from anytrain.tokenizer import IntBPE
+from anytrain.tokenizer import CodecBPE
 from torch import Tensor, nn
 
 from ..types import (
@@ -90,7 +90,7 @@ def acoustic_condition(
     batch: CausalLMBatch,
     hidden_states: Tensor,
     embedding: IdSpaceEmbedding,
-    bpe: IntBPE,
+    bpe: CodecBPE,
 ) -> AcousticCondition:
     labels = batch.labels
     if hidden_states.dim() != 3:

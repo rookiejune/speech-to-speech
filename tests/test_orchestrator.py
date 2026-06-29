@@ -6,7 +6,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 
 import torch
-from anytrain.tokenizer import IntBPE
+from anytrain.tokenizer import CodecBPE
 from anytrain.idspace import Modality
 from torch import nn
 from transformers.modeling_outputs import BaseModelOutputWithPast
@@ -688,8 +688,8 @@ def _set_lm_head_weights(model: Orchestrator, weights: dict[int, torch.Tensor]) 
             audio.weight[token_id - block.start].copy_(value)
 
 
-def _bpe() -> IntBPE:
-    return IntBPE.from_dict(
+def _bpe() -> CodecBPE:
+    return CodecBPE.from_dict(
         {
             "tokens": {
                 "0": [0],

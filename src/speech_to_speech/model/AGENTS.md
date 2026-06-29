@@ -41,7 +41,7 @@ acoustic 侧输入输出契约：
 
 - acoustic condition 从 `labels != IGNORE_INDEX` 的目标 audio segment 推导，排除 `BOA/EOA`。
 - BPE token 对应的 condition hidden 使用其下一位 input token 的 Qwen3 hidden state。
-- BPE hidden 通过 `IntBPE.repeat_interleave(..., mask=...)` 展开到原始 semantic frame 粒度。
+- BPE hidden 通过 `CodecBPE.repeat_interleave(..., mask=...)` 展开到原始 semantic frame 粒度。
 - `acoustic_flow_loss` 接收连续 `target_features`，形状为 `[batch, time, acoustic_dim]`，并要求 time 维与展开后的 condition mask 对齐。
 - `acoustic_flow_loss` 可选接收 `source_feature_extractor`，将 `batch.source_audio` 的 LongCat acoustic codes 转为连续 features 后按 mask mean 池化成 DiT 的 batch-level `acoustic_condition`；缺失 source 的行使用 DiT null acoustic condition。
 - `ModelConfig.acoustic_condition_dropout` 只作用于训练态、由 source features 池化得到的 acoustic condition；显式传入的 `acoustic_condition` 不被隐式替换。
