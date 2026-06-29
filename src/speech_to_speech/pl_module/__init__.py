@@ -1,6 +1,6 @@
 from __future__ import annotations
 
 from .module import SpeechToSpeechModule
-from .sample_logger import TaskSampleLogger
+from .sample_logger import TaskGenerationLogger, TaskSampleLogger
 
-__all__ = ["SpeechToSpeechModule", "TaskSampleLogger"]
+__all__ = ["SpeechToSpeechModule", "TaskGenerationLogger", "TaskSampleLogger"]

@@ -13,15 +13,7 @@
 
 ## Dataset
 
-数据从 Anydataset 读取。样本持有 source 和 target 两侧语音，`AudioView.LONGCAT` 存的是 LongCat 原始 codes，不是 BPE 后的 ids；训练侧读取 `semantic_codes`，样本日志还会读取 `acoustic_codes` 做 decode 监督。
-
-复旦 121 上有一个测试数据集：
-
-```python
-from anydataset import AnyDataset
-
-AnyDataset(spec="store://~/repos/anydataset/storage/fleurs-full-longcat")
-```
+默认训练数据从 `zhuyin.datasets.wmt19_tts.wmt19_tts_longcat()` 读取。样本持有 source 和 target 两侧语音，`AudioView.LONGCAT` 存的是 LongCat 原始 codes，不是 BPE 后的 ids；训练侧读取 `semantic_codes`，样本日志还会读取 `acoustic_codes` 做 decode 监督。
 
 训练契约只要求：
 
@@ -53,10 +45,10 @@ BPE 语料使用 source 和 target 两侧全部 speech semantic ids。
 ```text
 BPE_CACHE_DIR/
   longcat/
-    vocab_100k_piece_32/
+    vocab_100k_minfreq_0_maxlen_none_codes_8192/
       tokenizer.json
       meta.json
-    vocab_200k_piece_32/
+    vocab_200k_minfreq_0_maxlen_none_codes_8192/
       tokenizer.json
       meta.json
 ```
@@ -64,10 +56,10 @@ BPE_CACHE_DIR/
 运行逻辑：
 
 1. 从环境变量 `BPE_CACHE_DIR` 读取缓存根目录。
-2. 根据 `vocab_size` 和 `max_piece_frames` 拼出目录名，例如 `vocab_100k_piece_32`。
+2. 根据 `vocab_size`、`min_frequency`、`max_token_length` 和 `codebook_sizes` 拼出目录名，例如 `vocab_100k_minfreq_0_maxlen_none_codes_8192`。
 3. 如果缓存中已有 tokenizer，直接加载。
 4. 如果没有缓存，用当前数据集的 source+target 原始 semantic ids 训练 BPE。
-5. 写入 `meta.json`，记录 vocab size、max piece frames、数据集 spec 等信息。
+5. 写入 `meta.json`，记录 BpeTrainer 参数、数据集 spec 等信息。
 
 ## Dataloader
 
@@ -76,7 +68,7 @@ BPE_CACHE_DIR/
 1. `autoregression`
 2. `translation`
 
-本次训练包含哪些任务由配置决定。第一版只需要启用/关闭任务族，不需要阶段式 schedule 或采样权重。
+本次训练包含哪些任务由配置决定，并可通过 task family 权重控制 source/target AR 与双向 translation 的展开比例。
 
 示例：
 
@@ -85,6 +77,11 @@ tasks:
   enabled:
     - autoregression
     - translation
+  weights:
+    source_ar: 1.0
+    target_ar: 1.0
+    source_to_target: 1.0
+    target_to_source: 1.0
 ```
 
 之后可以通过重新提交训练任务切换任务组合：
@@ -95,7 +92,7 @@ tasks:
     - autoregression
 ```
 
-连续过渡策略以后再设计，不要先塞进 dataloader 核心。
+连续过渡策略通过重新提交不同 task weight 配置完成，不在 dataloader 核心里维护随 step 变化的 schedule。
 
 data module 的结构应保持为：
 

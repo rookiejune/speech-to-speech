@@ -1,0 +1,22 @@
+name: wmt19-mixed-smoke
+default_root_dir: outputs/train
+accelerator:
+devices: 1
+strategy: auto
+ckpt_path:
+log_every_n_steps:
+checkpoint_every_n_steps: 10000
+sample_log_every_n_steps: 0
+samples_per_task: 1
+sample_log_max_audio_samples: 320000
+generation_log_every_n_steps: 5000
+generation_sample_index: 0
+generation_flow_steps: 32
+generation_chunk_size: 64
+generation_guidance_scale: 1.0
+generation_acoustic_sampler: diagonal
+generation_preview_tokens: 256
+generation_log_max_audio_samples: 320000
+save_top_k: 2
+enable_model_summary: true
+enable_progress_bar: true

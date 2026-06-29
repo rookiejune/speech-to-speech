@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/env.sh"
+
+cd "$S2S_ROOT"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-3}"
+
+"$S2S_PYTHON" scripts/train.py \
+  experiment=wmt19_quality_full_adamw \
+  tasks=s1_bidirectional_mixed \
+  trainer.name=wmt19-quality-001-s1-full-adamw \
+  trainer.default_root_dir="$S2S_TRAIN_ROOT" \
+  "$@"

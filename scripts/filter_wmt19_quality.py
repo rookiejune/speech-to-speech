@@ -23,7 +23,6 @@ DEFAULT_ROOT = Path("storage/wmt19-zh-en-tts-longcat-1000")
 class Paths:
     root: Path
     full: Path
-    filter_cache: Path
     reports: Path
     train: Path
 
@@ -34,33 +33,29 @@ def main(argv: Sequence[str] | None = None) -> None:
     paths.reports.mkdir(parents=True, exist_ok=True)
 
     started_at = time.perf_counter()
-    dataset = AnyDataset(
-        Spec(source=Source.STORE, path=str(paths.full), split=args.split),
-        cache_root=paths.root / "dataset-cache",
-    )
+    dataset_factory = StoreFactory(paths.full, args.split)
+    dataset = dataset_factory()
     speech = FilteredDataset(
-        dataset,
-        FilterRule(args.speech_rule_name, missing_speech_cache),
+        args.speech_rule_name,
+        MissingSpeechCacheFactory(),
+        dataset_factory=dataset_factory,
         labels=args.speech_labels,
-        cache_root=paths.filter_cache,
     )
     text_rule = FilterRule(
         args.text_rule_name,
-        TranslationQuality.from_preset(
-            Preset.WMT19,
+        TranslationQualityFactory(
             source_lang=args.source_lang,
             target_lang=args.target_lang,
         ),
     )
     text_result = text_rule.apply(
-        speech,
+        dataset_factory=speech.dataset_factory,
         metrics=True,
         num_workers=args.num_workers,
         commit_samples=args.commit_samples,
         max_shard_samples=args.max_shard_samples,
-        cache_root=paths.filter_cache,
     )
-    selected = text_result.select(*args.text_labels)
+    selected = text_result.select_by(*args.text_labels)
 
     if args.write_store:
         DatasetWriter(
@@ -112,12 +107,39 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
 
 
+@dataclass(frozen=True)
+class StoreFactory:
+    path: Path
+    split: str
+
+    def __call__(self) -> AnyDataset:
+        return AnyDataset(Spec(source=Source.STORE, path=str(self.path), split=self.split))
+
+
+@dataclass(frozen=True)
+class MissingSpeechCacheFactory:
+    def __call__(self):
+        return missing_speech_cache
+
+
+@dataclass(frozen=True)
+class TranslationQualityFactory:
+    source_lang: str
+    target_lang: str
+
+    def __call__(self):
+        return TranslationQuality.from_preset(
+            Preset.WMT19,
+            source_lang=self.source_lang,
+            target_lang=self.target_lang,
+        )
+
+
 def resolve_paths(root: Path) -> Paths:
     root = root.expanduser().resolve()
     return Paths(
         root=root,
         full=root / "full-store",
-        filter_cache=root / "filter-cache",
         reports=root / "reports",
         train=root / "train-store",
     )
@@ -126,7 +148,7 @@ def resolve_paths(root: Path) -> Paths:
 def missing_speech_cache(sample: Sample) -> str:
     del sample
     raise RuntimeError(
-        "speech quality cache is missing; run prepare_wmt19_tts_longcat.py first."
+        "speech quality cache is missing; run workspace/scripts/prepare_wmt19_tts.py first."
     )
 
 
@@ -176,7 +198,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--target-lang", default="en")
     parser.add_argument(
         "--speech-rule-name",
-        default="wmt19_zh_en_tts_speech_quality_v1_utmos3_wer04_chrf50",
+        default="wmt19_zh_en_tts_speech_quality_v2_utmos28_chrf50_len4_peak005_zhsimp",
     )
     parser.add_argument("--speech-labels", nargs="+", default=("accept",))
     parser.add_argument(

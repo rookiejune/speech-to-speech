@@ -4,20 +4,21 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from math import isfinite
 
 import torch
-from anydataset import AnyDataset, MultipleAnyDataset, WeightedRandomStrategy
 from torch import Tensor, device as TorchDevice
 from torch.utils.data import IterableDataset
 
-from ..config import DatasetInput, TaskConfig
+from ..config import DatasetFactoryConfig, TaskConfig
+from ..dataset import training_dataset
 from ..types import (
     AutoregressionExample,
     CausalLMBatch,
     LongCatBatchSide,
     LongCatSide,
     Task,
+    TaskFamily,
     TranslationExample,
 )
 from .batch_builder import CausalLMBatchBuilder
@@ -103,31 +104,71 @@ type TaskSample = (
 class TaskSampleStream(IterableDataset[TaskSample]):
     def __init__(
         self,
-        datasets: Sequence[DatasetInput],
+        dataset_factory: DatasetFactoryConfig,
         *,
-        cache_root: str | Path | None,
         tasks: TaskConfig,
     ) -> None:
-        if not datasets:
-            raise ValueError("data.datasets must contain at least one dataset.")
-        self.datasets = tuple(datasets)
-        self.cache_root = cache_root
+        self.dataset_factory = dataset_factory
         enabled = _enabled_tasks(tasks)
         self.autoregression = Task.AUTOREGRESSION in enabled
         self.translation = Task.TRANSLATION in enabled
         if not self.autoregression and not self.translation:
             raise ValueError("tasks.enabled must contain at least one task.")
+        self.weights = tasks.weights
+        _validate_positive_enabled_weight(
+            (
+                TaskFamily.SOURCE_AR,
+                TaskFamily.TARGET_AR,
+            )
+            if self.autoregression
+            else (),
+            (
+                TaskFamily.SOURCE_TO_TARGET,
+                TaskFamily.TARGET_TO_SOURCE,
+            )
+            if self.translation
+            else (),
+            weights=self.weights,
+        )
 
     def __iter__(self) -> Iterator[TaskSample]:
-        source = _build_dataset(self.datasets, cache_root=self.cache_root)
+        source = training_dataset(self.dataset_factory)
+        accumulators = {family: 0.0 for family in TaskFamily}
         for sample in source:
             pair = longcat_pair_from_sample(sample)
+            candidates: list[tuple[TaskFamily, TaskSample]] = []
             if self.autoregression:
-                yield SourceAutoregressionSample(pair.source)
-                yield TargetAutoregressionSample(pair.target)
+                candidates.extend(
+                    (
+                        (
+                            TaskFamily.SOURCE_AR,
+                            SourceAutoregressionSample(pair.source),
+                        ),
+                        (
+                            TaskFamily.TARGET_AR,
+                            TargetAutoregressionSample(pair.target),
+                        ),
+                    )
+                )
             if self.translation:
-                yield SourceToTargetSample(source=pair.source, target=pair.target)
-                yield TargetToSourceSample(source=pair.target, target=pair.source)
+                candidates.extend(
+                    (
+                        (
+                            TaskFamily.SOURCE_TO_TARGET,
+                            SourceToTargetSample(source=pair.source, target=pair.target),
+                        ),
+                        (
+                            TaskFamily.TARGET_TO_SOURCE,
+                            TargetToSourceSample(source=pair.target, target=pair.source),
+                        ),
+                    )
+                )
+            for family, task_sample in candidates:
+                accumulators[family] += self.weights.weight(family)
+                count = int(accumulators[family])
+                accumulators[family] -= count
+                for _ in range(count):
+                    yield task_sample
 
 
 class TaskSampleCollator:
@@ -194,6 +235,11 @@ class TaskBatchBuilder:
                 [_target_side(sample) for sample in samples],
                 device=self.device,
             ),
+            task_family=torch.tensor(
+                [_task_family(sample).id for sample in samples],
+                dtype=torch.long,
+                device=self.device,
+            ),
         )
 
 
@@ -234,6 +280,18 @@ def _target_side(sample: TaskSample) -> LongCatSide:
         return sample.target
     if isinstance(sample, SourceToTargetSample | TargetToSourceSample):
         return sample.target
+    raise TypeError("unknown task sample type.")
+
+
+def _task_family(sample: TaskSample) -> TaskFamily:
+    if isinstance(sample, SourceAutoregressionSample):
+        return TaskFamily.SOURCE_AR
+    if isinstance(sample, TargetAutoregressionSample):
+        return TaskFamily.TARGET_AR
+    if isinstance(sample, SourceToTargetSample):
+        return TaskFamily.SOURCE_TO_TARGET
+    if isinstance(sample, TargetToSourceSample):
+        return TaskFamily.TARGET_TO_SOURCE
     raise TypeError("unknown task sample type.")
 
 
@@ -320,12 +378,21 @@ def _enabled_tasks(tasks: TaskConfig) -> frozenset[Task]:
     return frozenset(enabled)
 
 
-def _build_dataset(
-    datasets: Sequence[DatasetInput],
+def _validate_positive_enabled_weight(
+    ar_families: Sequence[TaskFamily],
+    translation_families: Sequence[TaskFamily],
     *,
-    cache_root: str | Path | None,
-) -> AnyDataset | MultipleAnyDataset:
-    sources = tuple(AnyDataset(dataset, cache_root=cache_root) for dataset in datasets)
-    if len(sources) == 1:
-        return sources[0]
-    return MultipleAnyDataset(sources, strategy=WeightedRandomStrategy())
+    weights: object,
+) -> None:
+    enabled_families = (*ar_families, *translation_families)
+    total = 0.0
+    for family in TaskFamily:
+        weight = weights.weight(family)
+        if not isinstance(weight, int | float) or isinstance(weight, bool):
+            raise TypeError(f"task weight for {family.value} must be a number.")
+        if not isfinite(float(weight)) or weight < 0.0:
+            raise ValueError(f"task weight for {family.value} must be finite and non-negative.")
+        if family in enabled_families:
+            total += float(weight)
+    if total <= 0.0:
+        raise ValueError("enabled tasks must have at least one positive task weight.")

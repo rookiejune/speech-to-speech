@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - /datamodule: wmt19
+  - /bpe: longcat_10k
+  - /tasks: ar
+  - /model: qwen3_0_6b_lora_4bit
+  - /train: smoke
+  - /trainer: default
+  - _self_
+
+trainer:
+  name: wmt19-ar-smoke

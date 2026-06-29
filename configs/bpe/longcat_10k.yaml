@@ -1,0 +1,7 @@
+cache_dir_env: BPE_CACHE_DIR
+codec_name: longcat
+vocab_size: 10000
+min_frequency: 0
+max_token_length: null
+codebook_sizes:
+  - 8192

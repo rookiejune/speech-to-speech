@@ -1,0 +1,16 @@
+# @package _global_
+defaults:
+  - /datamodule: wmt19
+  - /bpe: longcat_10k
+  - /tasks: mixed
+  - /model: qwen3_0_6b_lora_4bit
+  - /train: smoke
+  - /trainer: default
+  - _self_
+
+datamodule:
+  dataloader:
+    batch_size: 4
+
+trainer:
+  name: wmt19-mixed-smoke

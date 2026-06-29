@@ -13,7 +13,12 @@ from speech_to_speech.config import ModelConfig, TrainConfig
 from speech_to_speech.datamodule.batch_builder import CausalLMBatchBuilder
 from speech_to_speech.model.orchestrator import Orchestrator
 from speech_to_speech.pl_module import SpeechToSpeechModule
-from speech_to_speech.types import AutoregressionExample, CausalLMBatch, LongCatBatchSide
+from speech_to_speech.types import (
+    AutoregressionExample,
+    CausalLMBatch,
+    IGNORE_INDEX,
+    LongCatBatchSide,
+)
 from helpers import MockQwen, MockTokenizer
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
@@ -45,6 +50,24 @@ class SpeechToSpeechModuleTest(unittest.TestCase):
         audio_weight = module.model.embed_tokens.modality_embeddings[Modality.AUDIO.value].weight
         self.assertTrue(audio_weight.requires_grad)
         self.assertIn(id(audio_weight), params)
+
+    def test_configure_optimizers_supports_muon_and_adamw_lrs(self) -> None:
+        module, _ = _module_and_batch(
+            train=TrainConfig(
+                learning_rate=1e-4,
+                adamw_learning_rate=2e-4,
+                muon_learning_rate=3e-4,
+            )
+        )
+
+        configured = module.configure_optimizers()
+
+        optimizer = configured["optimizer"]
+        self.assertIsInstance(optimizer, CompositeOptimizer)
+        self.assertEqual(optimizer.optimizers["muon"].param_groups[0]["lr"], 3e-4)
+        self.assertTrue(
+            all(group["lr"] == 2e-4 for group in optimizer.optimizers["adamw"].param_groups)
+        )
 
     def test_trainer_runs_one_step(self) -> None:
         module, batch = _module_and_batch()
@@ -108,6 +131,35 @@ class SpeechToSpeechModuleTest(unittest.TestCase):
         self.assertTrue(torch.equal(model.target_features, torch.full((1, 2, 4), 3.0)))
         self.assertTrue(torch.equal(model.target_mask, torch.tensor([[True, True]])))
 
+    def test_loss_uses_supervised_token_weighted_row_loss(self) -> None:
+        module = SpeechToSpeechModule(RowLossModel(torch.tensor([2.0, 8.0])))
+        batch = CausalLMBatch(
+            input_ids=torch.tensor([[1, 2, 3], [4, 5, 0]]),
+            attention_mask=torch.tensor([[1, 1, 1], [1, 1, 0]]),
+            labels=torch.tensor([[1, 2, 3], [4, IGNORE_INDEX, IGNORE_INDEX]]),
+            logits_to_keep=3,
+        )
+
+        loss = module._loss(batch)
+
+        self.assertTrue(torch.equal(loss, torch.tensor(3.5)))
+
+    def test_acoustic_feature_extractor_is_not_registered_as_submodule(self) -> None:
+        model = JointLossModel()
+        extractor = FakeModuleFeatureExtractor(torch.full((1, 2, 4), 3.0))
+        module = SpeechToSpeechModule(
+            model,
+            TrainConfig(acoustic_loss_weight=0.5),
+            bpe=object(),
+            acoustic_feature_extractor=extractor,
+        )
+
+        self.assertIs(module.acoustic_feature_extractor, extractor)
+        self.assertNotIn("acoustic_feature_extractor", module._modules)
+        self.assertNotIn("_acoustic_feature_extractor", module._modules)
+        parameter_ids = {id(parameter) for parameter in module.parameters()}
+        self.assertNotIn(id(extractor.weight), parameter_ids)
+
 
 def _module_and_batch(
     *,
@@ -162,6 +214,16 @@ class JointLossModel(torch.nn.Module):
         return torch.tensor(3.0)
 
 
+class RowLossModel(torch.nn.Module):
+    def __init__(self, loss: torch.Tensor) -> None:
+        super().__init__()
+        self.loss = loss
+
+    def forward(self, batch: CausalLMBatch) -> CausalLMOutputWithPast:
+        del batch
+        return CausalLMOutputWithPast(loss=self.loss, logits=torch.empty(0))
+
+
 class FakeFeatureExtractor:
     def __init__(self, features: torch.Tensor) -> None:
         self.features = features
@@ -169,6 +231,18 @@ class FakeFeatureExtractor:
     def acoustic_codes_to_features(self, acoustic_ids: torch.Tensor) -> torch.Tensor:
         del acoustic_ids
         return self.features
+
+
+class FakeModuleFeatureExtractor(torch.nn.Module):
+    def __init__(self, features: torch.Tensor) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(()))
+        self.features = features
+        self.device = torch.device("cpu")
+
+    def acoustic_codes_to_features(self, acoustic_ids: torch.Tensor) -> torch.Tensor:
+        del acoustic_ids
+        return self.features.to(device=self.device)
 
 
 if __name__ == "__main__":

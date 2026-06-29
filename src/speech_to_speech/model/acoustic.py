@@ -138,10 +138,10 @@ def acoustic_condition(
     )
     if len(expanded) != 3:
         raise ValueError("batched acoustic condition expansion must return padded values.")
-    expanded_hidden, semantic_ids, mask = expanded
+    expanded_hidden, semantic_frames, mask = expanded
     return AcousticCondition(
         hidden_states=expanded_hidden,
-        semantic_ids=semantic_ids,
+        semantic_ids=_single_codebook_ids(semantic_frames),
         mask=mask,
     )
 
@@ -291,6 +291,12 @@ def _expand_acoustic_condition(
     if condition.shape != (batch_size, hidden_size):
         raise ValueError("empty_condition must have shape [hidden] or [batch, hidden].")
     return condition
+
+
+def _single_codebook_ids(frames: Tensor) -> Tensor:
+    if frames.dim() != 3 or frames.size(-1) != 1:
+        raise ValueError("LongCat semantic BPE must expand to [batch, time, 1] frames.")
+    return frames.squeeze(-1)
 
 
 def _dit_velocity(

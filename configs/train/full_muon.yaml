@@ -1,0 +1,16 @@
+max_steps: 5000
+learning_rate: 0.00001
+adamw_learning_rate:
+muon_learning_rate:
+acoustic_loss_weight: 0.01
+optimizer_preset: pretrain
+optimizer: muon
+weight_decay:
+schedule: constant
+warmup_steps: 0
+stable_steps:
+decay_steps:
+min_lr_ratio: 0.1
+seed: 0
+device: cuda
+precision: bf16-mixed

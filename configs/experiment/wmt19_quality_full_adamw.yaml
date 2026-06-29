@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - /datamodule: wmt19
+  - /bpe: longcat_10k
+  - /tasks: mixed
+  - /model: qwen3_0_6b_full
+  - /train: full_adamw
+  - /trainer: default
+  - _self_
+
+trainer:
+  name: wmt19-quality-full-adamw

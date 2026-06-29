@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import TypedDict
 
+import torch
 from anytrain.optim import create_llm_lightning_optimizers
 from lightning.pytorch import LightningModule
 from torch import Tensor, device as TorchDevice
@@ -13,7 +14,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from ..config import TrainConfig
 from ..model.acoustic import acoustic_features_from_batch_side
 from ..model.orchestrator import Orchestrator
-from ..types import CausalLMBatch, IGNORE_INDEX, LongCatBatchSide
+from ..types import CausalLMBatch, IGNORE_INDEX, LongCatBatchSide, TaskFamily
 
 
 class _LRSchedulerConfig(TypedDict):
@@ -41,17 +42,23 @@ class SpeechToSpeechModule(LightningModule):
         self.model = model
         self.train_config = train or TrainConfig()
         self.bpe = bpe
-        self.acoustic_feature_extractor = acoustic_feature_extractor
+        self.__dict__["_acoustic_feature_extractor"] = acoustic_feature_extractor
         self.save_hyperparameters({"train": asdict(self.train_config)})
+
+    @property
+    def acoustic_feature_extractor(self) -> object | None:
+        return self.__dict__.get("_acoustic_feature_extractor")
 
     def forward(self, batch: CausalLMBatch) -> CausalLMOutputWithPast:
         return self.model(batch)
 
     def training_step(self, batch: CausalLMBatch, batch_idx: int) -> Tensor:
         del batch_idx
-        loss = self._loss(batch)
+        row_loss = self._semantic_row_loss(batch)
+        token_counts = _loss_token_counts(batch, dtype=row_loss.dtype)
+        loss = self._loss(batch, row_loss, token_counts, stage=None)
         self.log(
-            "train/loss",
+            "loss",
             loss,
             batch_size=batch.input_ids.size(0),
             on_step=True,
@@ -59,19 +66,24 @@ class SpeechToSpeechModule(LightningModule):
             prog_bar=True,
             sync_dist=True,
         )
+        self._log_task_losses(batch, row_loss, token_counts, stage=None)
+        self._log_family_group_losses(batch, row_loss, token_counts, stage=None)
         self.log(
-            "train/supervised_tokens",
-            batch.labels.ne(IGNORE_INDEX).sum().float(),
+            "supervised_tokens",
+            token_counts.sum(),
             batch_size=batch.input_ids.size(0),
             on_step=True,
             on_epoch=False,
             sync_dist=True,
         )
+        self._log_acoustic_frame_count(batch, stage=None)
         return loss
 
     def validation_step(self, batch: CausalLMBatch, batch_idx: int) -> Tensor:
         del batch_idx
-        loss = self._loss(batch)
+        row_loss = self._semantic_row_loss(batch)
+        token_counts = _loss_token_counts(batch, dtype=row_loss.dtype)
+        loss = self._loss(batch, row_loss, token_counts, stage="val")
         self.log(
             "val/loss",
             loss,
@@ -81,6 +93,9 @@ class SpeechToSpeechModule(LightningModule):
             prog_bar=True,
             sync_dist=True,
         )
+        self._log_task_losses(batch, row_loss, token_counts, stage="val")
+        self._log_family_group_losses(batch, row_loss, token_counts, stage="val")
+        self._log_acoustic_frame_count(batch, stage="val")
         return loss
 
     def transfer_batch_to_device(
@@ -93,6 +108,9 @@ class SpeechToSpeechModule(LightningModule):
         logits_to_keep = batch.logits_to_keep
         if isinstance(logits_to_keep, Tensor):
             logits_to_keep = logits_to_keep.to(device=device)
+        task_family = batch.task_family
+        if task_family is not None:
+            task_family = task_family.to(device=device)
         return CausalLMBatch(
             input_ids=batch.input_ids.to(device=device),
             attention_mask=batch.attention_mask.to(device=device),
@@ -100,6 +118,7 @@ class SpeechToSpeechModule(LightningModule):
             logits_to_keep=logits_to_keep,
             source_audio=_move_longcat_side(batch.source_audio, device),
             target_audio=_move_longcat_side(batch.target_audio, device),
+            task_family=task_family,
         )
 
     def configure_optimizers(self) -> _LightningOptimizerConfig:
@@ -108,8 +127,9 @@ class SpeechToSpeechModule(LightningModule):
             self.model,
             preset=train.optimizer_preset,
             optimizer=train.optimizer,
-            lr=train.learning_rate,
+            lr=_adamw_learning_rate(train),
             weight_decay=train.weight_decay,
+            muon_lr=_muon_learning_rate(train),
             schedule=train.schedule,
             warmup_steps=train.warmup_steps,
             total_steps=_scheduler_total_steps(train),
@@ -118,14 +138,124 @@ class SpeechToSpeechModule(LightningModule):
             min_lr_ratio=train.min_lr_ratio,
         )
 
-    def _loss(self, batch: CausalLMBatch) -> Tensor:
-        loss = self.model(batch).loss
-        if loss is None:
-            raise RuntimeError("model output must include loss.")
+    def _loss(
+        self,
+        batch: CausalLMBatch,
+        row_loss: Tensor | None = None,
+        token_counts: Tensor | None = None,
+        *,
+        stage: str | None = None,
+    ) -> Tensor:
+        if row_loss is None:
+            row_loss = self._semantic_row_loss(batch)
+        if token_counts is None:
+            token_counts = _loss_token_counts(batch, dtype=row_loss.dtype)
+        loss = _weighted_mean(row_loss, token_counts)
         acoustic_weight = self.train_config.acoustic_loss_weight
         if acoustic_weight <= 0.0:
             return loss
-        return loss + acoustic_weight * self._acoustic_loss(batch)
+        acoustic_loss = self._acoustic_loss(batch)
+        self.log(
+            _log_name("loss/acoustic", stage=stage),
+            acoustic_loss,
+            batch_size=batch.input_ids.size(0),
+            on_step=stage is None,
+            on_epoch=True,
+            sync_dist=True,
+        )
+        return loss + acoustic_weight * acoustic_loss
+
+    def _semantic_row_loss(self, batch: CausalLMBatch) -> Tensor:
+        loss = self.model(batch).loss
+        if loss is None:
+            raise RuntimeError("model output must include loss.")
+        if loss.dim() == 0:
+            return loss.unsqueeze(0).expand(batch.input_ids.size(0))
+        if loss.dim() != 1 or loss.size(0) != batch.input_ids.size(0):
+            raise RuntimeError("model loss must be scalar or one value per batch row.")
+        return loss
+
+    def _log_task_losses(
+        self,
+        batch: CausalLMBatch,
+        row_loss: Tensor,
+        token_counts: Tensor,
+        *,
+        stage: str | None,
+    ) -> None:
+        if batch.task_family is None:
+            return
+        row_loss = row_loss.detach()
+        for family in TaskFamily:
+            mask = batch.task_family.eq(family.id)
+            if not bool(mask.any()):
+                continue
+            tokens = token_counts[mask].sum()
+            self.log(
+                _log_name(f"loss/{family.value}", stage=stage),
+                _weighted_mean(row_loss[mask], token_counts[mask]),
+                batch_size=int(mask.sum().item()),
+                on_step=stage is None,
+                on_epoch=True,
+                sync_dist=True,
+            )
+            self.log(
+                _log_name(f"tokens/{family.value}", stage=stage),
+                tokens,
+                batch_size=int(mask.sum().item()),
+                on_step=stage is None,
+                on_epoch=False,
+                sync_dist=True,
+            )
+
+    def _log_family_group_losses(
+        self,
+        batch: CausalLMBatch,
+        row_loss: Tensor,
+        token_counts: Tensor,
+        *,
+        stage: str | None,
+    ) -> None:
+        if batch.task_family is None:
+            return
+        row_loss = row_loss.detach()
+        groups = {
+            "semantic_ar": (
+                TaskFamily.SOURCE_AR,
+                TaskFamily.TARGET_AR,
+            ),
+            "translation": (
+                TaskFamily.SOURCE_TO_TARGET,
+                TaskFamily.TARGET_TO_SOURCE,
+            ),
+        }
+        for name, families in groups.items():
+            mask = torch.zeros_like(batch.task_family, dtype=torch.bool)
+            for family in families:
+                mask |= batch.task_family.eq(family.id)
+            if not bool(mask.any()):
+                continue
+            self.log(
+                _log_name(f"loss/{name}", stage=stage),
+                _weighted_mean(row_loss[mask], token_counts[mask]),
+                batch_size=int(mask.sum().item()),
+                on_step=stage is None,
+                on_epoch=True,
+                sync_dist=True,
+            )
+
+    def _log_acoustic_frame_count(self, batch: CausalLMBatch, *, stage: str | None) -> None:
+        if batch.target_audio is None:
+            return
+        frames = batch.target_audio.acoustic_mask.sum()
+        self.log(
+            _log_name("acoustic_frames", stage=stage),
+            frames,
+            batch_size=batch.input_ids.size(0),
+            on_step=stage is None,
+            on_epoch=stage is not None,
+            sync_dist=True,
+        )
 
     def _acoustic_loss(self, batch: CausalLMBatch) -> Tensor:
         if self.bpe is None:
@@ -134,16 +264,20 @@ class SpeechToSpeechModule(LightningModule):
             raise RuntimeError("acoustic loss requires an acoustic feature extractor.")
         if batch.target_audio is None:
             raise RuntimeError("acoustic loss requires target_audio in the batch.")
+        feature_extractor = _feature_extractor_to_device(
+            self.acoustic_feature_extractor,
+            batch.target_audio.acoustic_ids.device,
+        )
         target_features, target_mask = acoustic_features_from_batch_side(
             batch.target_audio,
-            feature_extractor=self.acoustic_feature_extractor,
+            feature_extractor=feature_extractor,
         )
         return self.model.acoustic_flow_loss(
             batch,
             self.bpe,
             target_features,
             target_mask=target_mask,
-            source_feature_extractor=self.acoustic_feature_extractor,
+            source_feature_extractor=feature_extractor,
         )
 
 
@@ -151,6 +285,62 @@ def _scheduler_total_steps(train: TrainConfig) -> int | None:
     if train.schedule == "constant":
         return None
     return train.max_steps
+
+
+def _adamw_learning_rate(train: TrainConfig) -> float:
+    if train.adamw_learning_rate is None:
+        return train.learning_rate
+    return train.adamw_learning_rate
+
+
+def _muon_learning_rate(train: TrainConfig) -> float | None:
+    if train.optimizer != "muon" and train.muon_learning_rate is not None:
+        raise ValueError("train.muon_learning_rate requires train.optimizer='muon'.")
+    return train.muon_learning_rate
+
+
+def _loss_token_counts(batch: CausalLMBatch, *, dtype: torch.dtype) -> Tensor:
+    if isinstance(batch.logits_to_keep, Tensor):
+        positions = batch.logits_to_keep.to(device=batch.labels.device, dtype=torch.long)
+        if positions.dim() != 2 or positions.size(-1) != 2:
+            raise ValueError("logits_to_keep tensor must have shape (n, 2).")
+        counts = torch.zeros(batch.input_ids.size(0), device=batch.labels.device)
+        counts.scatter_add_(
+            0,
+            positions[:, 0],
+            torch.ones_like(positions[:, 0], dtype=counts.dtype),
+        )
+        return counts.to(dtype=dtype)
+
+    mask = batch.labels.ne(IGNORE_INDEX)
+    if batch.logits_to_keep >= mask.size(1):
+        return mask.sum(dim=1).to(dtype=dtype)
+    keep = mask.cumsum(dim=1) > (mask.sum(dim=1, keepdim=True) - batch.logits_to_keep).clamp_min(0)
+    return (mask & keep).sum(dim=1).to(dtype=dtype)
+
+
+def _weighted_mean(values: Tensor, weights: Tensor) -> Tensor:
+    total = weights.sum()
+    if not bool(total.gt(0)):
+        raise ValueError("weighted mean requires a positive weight sum.")
+    return (values * weights).sum() / total
+
+
+def _log_name(name: str, *, stage: str | None) -> str:
+    if stage is None:
+        return name
+    return f"{stage}/{name}"
+
+
+def _feature_extractor_to_device(extractor: object, device: TorchDevice) -> object:
+    move = getattr(extractor, "to", None)
+    if callable(move):
+        moved = move(device)
+        if moved is not None:
+            extractor = moved
+    if hasattr(extractor, "device"):
+        setattr(extractor, "device", device)
+    return extractor
 
 
 def _move_longcat_side(

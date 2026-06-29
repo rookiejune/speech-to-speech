@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
 from anytrain.codec import LongCatAudioCodec
 from anytrain.tokenizer import CodecBPE
-from .config import BPEConfig, DatasetInput, ModelConfig
+from .config import BPEConfig, ModelConfig
 from .types import BPEArtifactMeta, SpeechPair, TranslationExample
 
 if TYPE_CHECKING:
@@ -66,23 +67,27 @@ def longcat_tokenizer(
 
 
 def prepare_longcat_tokenizer(
-    pairs: Iterable[SpeechPair | TranslationExample],
+    pairs: Iterable[SpeechPair | TranslationExample]
+    | Callable[[], Iterable[SpeechPair | TranslationExample]],
     *,
-    datasets: Iterable[DatasetInput] = (),
+    datasets: Iterable[Mapping[str, object]] = (),
     config: BPEConfig | None = None,
     cache_dir: str | Path | None = None,
 ) -> CodecBPE:
     config = config or BPEConfig()
     path = longcat_bpe_path(config, cache_dir=cache_dir)
-    dataset_meta = tuple(_dataset_meta(dataset) for dataset in datasets)
+    datasets = tuple(datasets)
     if _bpe_state_path(path).exists():
-        if dataset_meta:
-            _validate_cached_bpe(path, config, datasets=dataset_meta)
+        if datasets:
+            _validate_cached_bpe(path, config, datasets=datasets)
         return longcat_tokenizer(config, cache_dir=cache_dir)
 
     bpe = CodecBPE.train(
-        _chunked_pair_corpus(pairs, config.max_piece_frames),
+        _pair_corpus_factory(pairs),
+        codebook_sizes=config.codebook_sizes,
         vocab_size=config.vocab_size,
+        min_frequency=config.min_frequency,
+        max_token_length=config.max_token_length,
     )
     path.mkdir(parents=True, exist_ok=True)
     bpe.save_pretrained(path)
@@ -91,8 +96,10 @@ def prepare_longcat_tokenizer(
         BPEArtifactMeta(
             codec_name=config.codec_name,
             vocab_size=config.vocab_size,
-            max_piece_frames=config.max_piece_frames,
-            datasets=dataset_meta,
+            min_frequency=config.min_frequency,
+            max_token_length=config.max_token_length,
+            codebook_sizes=config.codebook_sizes,
+            datasets=datasets,
         ),
     )
     _LONGCAT_TOKENIZERS[path] = bpe
@@ -144,31 +151,39 @@ def _batched_acoustic_codes(acoustic_codes: Tensor) -> Tensor:
     return acoustic_codes
 
 
-def _chunked_pair_corpus(
-    pairs: Iterable[SpeechPair | TranslationExample],
-    max_piece_frames: int,
-) -> Iterable[list[int]]:
-    if max_piece_frames <= 0:
-        raise ValueError("max_piece_frames must be positive.")
-
+def _pair_corpus(pairs: Iterable[SpeechPair | TranslationExample]) -> Iterable[list[list[int]]]:
     for pair in pairs:
-        yield from _chunks(_unit_sequence(pair.source_ids), max_piece_frames)
-        yield from _chunks(_unit_sequence(pair.target_ids), max_piece_frames)
+        source = _unit_sequence(pair.source_ids)
+        if source:
+            yield source
+        target = _unit_sequence(pair.target_ids)
+        if target:
+            yield target
 
 
-def _unit_sequence(ids: Tensor | Sequence[int]) -> list[int]:
+def _pair_corpus_factory(
+    pairs: Iterable[SpeechPair | TranslationExample]
+    | Callable[[], Iterable[SpeechPair | TranslationExample]],
+) -> Callable[[], Iterable[list[list[int]]]]:
+    if callable(pairs):
+        return partial(_pair_corpus_from_factory, pairs)
+    if isinstance(pairs, Iterator):
+        raise TypeError("pairs must be re-iterable or a callable returning a fresh iterator.")
+    return partial(_pair_corpus, pairs)
+
+
+def _pair_corpus_from_factory(
+    pairs: Callable[[], Iterable[SpeechPair | TranslationExample]],
+) -> Iterable[list[list[int]]]:
+    return _pair_corpus(pairs())
+
+
+def _unit_sequence(ids: Tensor | Sequence[int]) -> list[list[int]]:
     if hasattr(ids, "reshape") and hasattr(ids, "tolist"):
         values = ids.reshape(-1).tolist()
     else:
         values = list(ids)
-    return [int(value) for value in values]
-
-
-def _chunks(units: Sequence[int], size: int) -> Iterable[list[int]]:
-    for start in range(0, len(units), size):
-        chunk = [int(unit) for unit in units[start : start + size]]
-        if chunk:
-            yield chunk
+    return [[int(value)] for value in values]
 
 
 def _validate_cached_bpe(
@@ -191,7 +206,9 @@ def _validate_cached_bpe(
     expected = {
         "codec_name": config.codec_name,
         "vocab_size": config.vocab_size,
-        "max_piece_frames": config.max_piece_frames,
+        "min_frequency": config.min_frequency,
+        "max_token_length": config.max_token_length,
+        "codebook_sizes": list(config.codebook_sizes),
     }
     mismatches = {
         key: (meta.get(key), value)
@@ -206,12 +223,6 @@ def _validate_cached_bpe(
         raise ValueError(f"LongCat BPE cache config mismatch at {path}: {details}.")
     if datasets and tuple(meta.get("datasets", ())) != datasets:
         raise ValueError(f"LongCat BPE cache dataset mismatch at {path}.")
-
-
-def _dataset_meta(dataset: DatasetInput) -> Mapping[str, object]:
-    from anydataset import resolve_dataset
-
-    return resolve_dataset(dataset).to_dict()
 
 
 def _write_bpe_meta(path: Path, meta: BPEArtifactMeta) -> None:

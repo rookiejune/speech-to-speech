@@ -24,6 +24,7 @@ from ..types import (
     IGNORE_INDEX,
     SemanticBPE,
     SemanticGeneration,
+    TeacherForcedWaveformGeneration,
     WaveformCodec,
     WaveformGeneration,
 )
@@ -232,7 +233,8 @@ class Orchestrator(nn.Module):
         labels = batch.labels[positions[:, 0], positions[:, 1]]
         target = self.lm_head.to_head_ids(labels)
         logits = self.lm_head(selected_hidden)
-        loss = F.cross_entropy(logits.float(), target)
+        token_loss = F.cross_entropy(logits.float(), target, reduction="none")
+        loss = _batch_loss(token_loss, positions[:, 0], batch.input_ids.size(0))
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
@@ -467,6 +469,7 @@ class Orchestrator(nn.Module):
         chunk_size: int | None = None,
         guidance_scale: float = 1.0,
         sampler: AcousticSampler = AcousticSampler.DIAGONAL,
+        acoustic_condition: Tensor | None = None,
     ) -> AcousticFeatureGenerator:
         if self.dit is None:
             raise RuntimeError("acoustic_feature_generator requires a DiT acoustic decoder.")
@@ -476,7 +479,51 @@ class Orchestrator(nn.Module):
             chunk_size=chunk_size,
             guidance_scale=guidance_scale,
             sampler=sampler,
+            acoustic_condition=acoustic_condition,
         )
+
+    @torch.no_grad()
+    def teacher_forced_waveform(
+        self,
+        batch: CausalLMBatch,
+        *,
+        bpe: CodecBPE,
+        codec: WaveformCodec,
+        acoustic_generator: AcousticFeatureGenerator,
+    ) -> TeacherForcedWaveformGeneration:
+        condition = self.acoustic_condition(batch, bpe)
+        acoustic_features = acoustic_generator(condition)
+        validate_acoustic_features(acoustic_features, condition.mask, target_mask=None)
+        if not torch.is_floating_point(acoustic_features) or torch.is_complex(acoustic_features):
+            raise TypeError("acoustic generator must return floating point features.")
+        acoustic_features = acoustic_features.to(device=condition.mask.device)
+        audio = _decode_features(codec, condition.semantic_ids, acoustic_features)
+        return TeacherForcedWaveformGeneration(
+            audio=audio,
+            audio_mask=torch.ones(
+                audio.shape[:2],
+                dtype=torch.bool,
+                device=audio.device,
+            ),
+            semantic_ids=condition.semantic_ids,
+            semantic_mask=condition.mask,
+            acoustic_features=acoustic_features,
+            condition_hidden_states=condition.hidden_states,
+        )
+
+
+def _decode_features(codec: object, semantic_ids: Tensor, acoustic_features: Tensor) -> Tensor:
+    decode = getattr(codec, "decode_features", None)
+    if not callable(decode):
+        raise TypeError("LongCat codec must provide decode_features().")
+    audio = decode(semantic_ids, acoustic_features)
+    if not isinstance(audio, Tensor):
+        raise TypeError("LongCat codec decode_features() must return a Tensor.")
+    if audio.dim() == 2:
+        audio = audio.unsqueeze(1)
+    if audio.dim() != 3:
+        raise ValueError("decoded waveform must have shape [batch, channels, time].")
+    return audio.detach().float()
 
 
 @dataclass(frozen=True)
@@ -486,6 +533,7 @@ class DiTAcousticFeatureGenerator:
     chunk_size: int | None = None
     guidance_scale: float = 1.0
     sampler: AcousticSampler = AcousticSampler.DIAGONAL
+    acoustic_condition: Tensor | None = None
 
     @torch.no_grad()
     def __call__(self, condition: AcousticCondition) -> Tensor:
@@ -497,7 +545,21 @@ class DiTAcousticFeatureGenerator:
         projection_dtype = _module_dtype(projection, hidden.dtype)
         hidden = projection(hidden.to(dtype=projection_dtype)).to(dtype=flow_dtype)
         initial = hidden.new_zeros(hidden.shape)
-        acoustic_condition = null_acoustic_condition(self.model.dit, initial)
+        if self.acoustic_condition is None:
+            acoustic_condition = null_acoustic_condition(self.model.dit, initial)
+        else:
+            acoustic_condition = self.acoustic_condition.to(
+                device=hidden.device,
+                dtype=projection_dtype,
+            )
+            if acoustic_condition.size(-1) != hidden.size(-1):
+                acoustic_condition = projection(acoustic_condition).to(dtype=flow_dtype)
+            else:
+                acoustic_condition = acoustic_condition.to(dtype=flow_dtype)
+            if acoustic_condition.shape != (hidden.size(0), hidden.size(-1)):
+                raise ValueError(
+                    "acoustic_condition must have shape [batch, acoustic feature dim]."
+                )
         chunk_size = self.chunk_size or hidden.size(1)
         sample_kwargs = {
             "last_hidden_state": hidden,
@@ -532,3 +594,13 @@ def _loss_positions(batch: CausalLMBatch) -> Tensor:
         return mask.nonzero(as_tuple=False)
     keep = mask.cumsum(dim=1) > (mask.sum(dim=1, keepdim=True) - batch.logits_to_keep).clamp_min(0)
     return (mask & keep).nonzero(as_tuple=False)
+
+
+def _batch_loss(token_loss: Tensor, batch_index: Tensor, batch_size: int) -> Tensor:
+    loss = token_loss.new_zeros(batch_size)
+    counts = token_loss.new_zeros(batch_size)
+    loss.scatter_add_(0, batch_index, token_loss)
+    counts.scatter_add_(0, batch_index, torch.ones_like(token_loss))
+    if not bool(counts.gt(0).all()):
+        raise ValueError("each batch row must contain at least one supervised token.")
+    return loss / counts

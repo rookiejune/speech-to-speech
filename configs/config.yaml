@@ -1,0 +1,3 @@
+defaults:
+  - experiment: wmt19_mixed_smoke
+  - _self_

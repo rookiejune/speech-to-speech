@@ -6,14 +6,14 @@ import sys
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
-from pathlib import Path
+from functools import partial
 
 import torch
-from anydataset import AnyDataset, MultipleAnyDataset, WeightedRandomStrategy
 from lightning.pytorch import seed_everything
 from torch import Tensor, nn
 
-from speech_to_speech.config import DataConfig
+from speech_to_speech.config import DatasetFactoryConfig
+from speech_to_speech.dataset import dataset_metadata, training_dataset
 from speech_to_speech.datamodule.batch_builder import CausalLMBatchBuilder
 from speech_to_speech.datamodule.example import longcat_pair_from_sample, speech_pair_from_sample
 from speech_to_speech.model.DiT.model import DiT
@@ -47,7 +47,7 @@ class TimedSample:
 @torch.no_grad()
 def run(args: argparse.Namespace) -> dict[str, object]:
     started_at = time.perf_counter()
-    config = load_config(args.config)
+    config = load_config(args.config_name, overrides=args.overrides, config_dir=args.config_dir)
     seed_everything(config.train.seed, workers=True)
     torch.set_float32_matmul_precision("high")
 
@@ -55,12 +55,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     tokenizer = qwen3_tokenizer(config.model)
     _log_stage(args, "prepare bpe", started_at)
     bpe = prepare_longcat_tokenizer(
-        _speech_pairs(config.data),
-        datasets=config.data.datasets,
+        partial(_speech_pairs, config.datamodule.dataset_factory),
+        datasets=dataset_metadata(config.datamodule.dataset_factory),
         config=config.bpe,
     )
     _log_stage(args, "load sample", started_at)
-    pair = _longcat_pair_at(config.data, args.sample_index)
+    pair = _longcat_pair_at(config.datamodule.dataset_factory, args.sample_index)
 
     device = torch.device(args.device)
     flow_dtype = _flow_dtype(args.flow_dtype, precision=config.train.precision, device=device)
@@ -202,25 +202,18 @@ def _tile_time(hidden: Tensor, mask: Tensor, *, frames: int) -> tuple[Tensor, Te
     return hidden, mask
 
 
-def _speech_pairs(data: DataConfig) -> Iterable[SpeechPair]:
-    for sample in _dataset(data):
+def _speech_pairs(config: DatasetFactoryConfig) -> Iterable[SpeechPair]:
+    for sample in training_dataset(config):
         yield speech_pair_from_sample(sample)
 
 
-def _longcat_pair_at(data: DataConfig, index: int) -> LongCatPair:
+def _longcat_pair_at(config: DatasetFactoryConfig, index: int) -> LongCatPair:
     if index < 0:
         raise ValueError("sample_index must be non-negative.")
-    for sample_index, sample in enumerate(_dataset(data)):
+    for sample_index, sample in enumerate(training_dataset(config)):
         if sample_index == index:
             return longcat_pair_from_sample(sample)
     raise IndexError(f"sample_index {index} is outside the dataset.")
-
-
-def _dataset(data: DataConfig) -> AnyDataset | MultipleAnyDataset:
-    datasets = tuple(AnyDataset(dataset, cache_root=data.cache_root) for dataset in data.datasets)
-    if len(datasets) == 1:
-        return datasets[0]
-    return MultipleAnyDataset(datasets, strategy=WeightedRandomStrategy())
 
 
 def _target_translation_batch(
@@ -230,8 +223,8 @@ def _target_translation_batch(
     pair: LongCatPair,
 ) -> CausalLMBatch:
     builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
-    source_ids = _encode_units(bpe, pair.source.semantic_ids)
-    target_ids = _encode_units(bpe, pair.target.semantic_ids)
+    source_ids = _encode_frames(bpe, pair.source.semantic_ids)
+    target_ids = _encode_frames(bpe, pair.target.semantic_ids)
     batch = builder.translation(TranslationExample(source_ids=source_ids, target_ids=target_ids))
     return CausalLMBatch(
         input_ids=batch.input_ids,
@@ -264,10 +257,10 @@ def _batch_side(side: LongCatSide) -> LongCatBatchSide:
     )
 
 
-def _encode_units(bpe: object, ids: torch.Tensor) -> torch.Tensor:
-    encode_units = bpe.encode_units
-    units = [int(value) for value in ids.reshape(-1).detach().cpu().tolist()]
-    return torch.tensor(encode_units(units), dtype=torch.long)
+def _encode_frames(bpe: object, ids: torch.Tensor) -> torch.Tensor:
+    encode_frames = bpe.encode_frames
+    frames = [[int(value)] for value in ids.reshape(-1).detach().cpu().tolist()]
+    return torch.tensor(encode_frames(frames), dtype=torch.long)
 
 
 def _dit_config(*, layers: int, heads: int) -> Qwen3Config:
@@ -367,7 +360,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Profile real DiT serial vs diagonal flow sampling."
     )
-    parser.add_argument("config", type=Path)
+    parser.add_argument("config_name", nargs="?", default="config")
+    parser.add_argument("overrides", nargs="*", help="Hydra overrides.")
+    parser.add_argument("--config-dir", default="configs")
     parser.add_argument("--sample-index", type=int, default=0)
     parser.add_argument("--frames", type=int, default=128)
     parser.add_argument("--flow-steps", type=int, default=16)

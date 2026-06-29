@@ -349,7 +349,7 @@ def _semantic_frames_from_generation(
             if not bool(token_mask[row_index, hidden_index]):
                 raise ValueError("generated BPE hidden mask is missing an active token.")
             local_id = token_id - block.start
-            expanded = [int(value) for value in bpe.expand_ids([local_id])]
+            expanded = _single_codebook_ids(bpe.expand_ids([local_id]))
             token_ids_row.extend(expanded)
             hidden = hidden_states[row_index, hidden_index]
             hidden_parts.append(hidden.unsqueeze(0).expand(len(expanded), -1))
@@ -407,6 +407,19 @@ def _decode_waveform(codec: object, semantic_ids: Tensor, acoustic_features: Ten
     if audio.dim() != 3:
         raise ValueError("decoded waveform must have shape [batch, channels, time].")
     return audio.detach().float()
+
+
+def _single_codebook_ids(frames: object) -> list[int]:
+    ids: list[int] = []
+    if not isinstance(frames, list | tuple):
+        raise TypeError("LongCat BPE expand_ids() must return a sequence of frames.")
+    for frame in frames:
+        if isinstance(frame, int) or not isinstance(frame, list | tuple):
+            raise TypeError("LongCat BPE expand_ids() must return frame sequences.")
+        if len(frame) != 1:
+            raise ValueError("LongCat semantic BPE must use exactly one codebook.")
+        ids.append(int(frame[0]))
+    return ids
 
 
 def _sample_next_head_ids(

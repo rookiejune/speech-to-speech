@@ -1,10 +1,29 @@
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+import os
+from pathlib import Path
+import sys
+import types
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
+from anydataset import AnyDataset
+from anydataset import AudioItem, AudioView, Modality, Role
+from anydataset.store import DatasetWriter
+from anytrain.idspace import (
+    IdSpace,
+    IdSpaceEmbedding,
+    Modality as IdModality,
+    ModalityBlock,
+)
 from torch import nn
 from transformers.modeling_outputs import BaseModelOutputWithPast
+
+TensorLike = torch.Tensor | Sequence[int]
+ToyPair = tuple[TensorLike, TensorLike]
 
 
 class MockTokenizer:
@@ -61,3 +80,123 @@ class MockQwen(nn.Module):
     ):
         del kwargs
         return BaseModelOutputWithPast(last_hidden_state=self.proj(inputs_embeds))
+
+
+class MockFrameBPE:
+    def __init__(
+        self,
+        *,
+        expanded: Sequence[int] | None = None,
+        vocab_size: int = 16,
+    ) -> None:
+        self.expanded = expanded
+        self.vocab_size = vocab_size
+
+    def encode_frames(self, frames: list[list[int]]) -> list[int]:
+        return [int(frame[0]) for frame in frames]
+
+    def expand_ids(self, ids: list[int]) -> list[tuple[int]]:
+        values = self.expanded if self.expanded is not None else ids
+        return [(int(value),) for value in values]
+
+
+@contextmanager
+def isolated_anydataset_home(root: Path) -> Iterator[None]:
+    with patch.dict(os.environ, {"ANYDATASET_HOME": str(root / "anydataset")}):
+        yield
+
+
+def toy_embedding(*, audio_vocab_size: int = 5, hidden_size: int = 4) -> IdSpaceEmbedding:
+    space = IdSpace(
+        {
+            "<|endoftext|>": 0,
+            "<|im_start|>": 1,
+            "<|im_end|>": 2,
+            "user": 3,
+            "assistant": 4,
+            "\n": 5,
+            "<think>": 6,
+            "</think>": 7,
+            "boa": 16,
+            "eoa": 17,
+        },
+        [
+            ModalityBlock(IdModality.TEXT, 0, 16),
+            ModalityBlock(IdModality.AUDIO, 18, audio_vocab_size),
+        ],
+    )
+    return IdSpaceEmbedding(space, hidden_size)
+
+
+def toy_longcat_sample(
+    source: TensorLike,
+    target: TensorLike,
+    *,
+    include_acoustic: bool = True,
+):
+    source_view = toy_longcat_view(source, include_acoustic=include_acoustic)
+    target_view = toy_longcat_view(target, include_acoustic=include_acoustic)
+    return {
+        (Role.SOURCE, Modality.AUDIO): AudioItem(
+            views={AudioView.LONGCAT: source_view}
+        ),
+        (Role.TARGET, Modality.AUDIO): AudioItem(
+            views={AudioView.LONGCAT: target_view}
+        ),
+    }
+
+
+def toy_longcat_view(
+    semantic: TensorLike,
+    *,
+    include_acoustic: bool = True,
+) -> dict[str, torch.Tensor]:
+    semantic = _tensor(semantic)
+    view = {"semantic_codes": semantic}
+    if include_acoustic:
+        view["acoustic_codes"] = torch.zeros((4, _time_length(semantic)), dtype=torch.long)
+    return view
+
+
+def write_toy_longcat_store(
+    path: Path,
+    *,
+    pairs: Sequence[ToyPair] | None = None,
+) -> Path:
+    pairs = pairs or (
+        (torch.tensor([0, 1, 2]), torch.tensor([2, 3])),
+        (torch.tensor([3]), torch.tensor([4, 0, 1])),
+    )
+    DatasetWriter(path, dataset_id="toy-s2s", split="train").write(
+        [toy_longcat_sample(source, target) for source, target in pairs]
+    )
+    return path
+
+
+@contextmanager
+def patched_wmt19_longcat(store: Path) -> Iterator[None]:
+    zhuyin = types.ModuleType("zhuyin")
+    datasets = types.ModuleType("zhuyin.datasets")
+    wmt19_tts = types.ModuleType("zhuyin.datasets.wmt19_tts")
+    wmt19_tts.wmt19_tts_longcat = lambda: AnyDataset(f"store://{store}:train")
+    with patch.dict(
+        sys.modules,
+        {
+            "zhuyin": zhuyin,
+            "zhuyin.datasets": datasets,
+            "zhuyin.datasets.wmt19_tts": wmt19_tts,
+        },
+    ):
+        yield
+
+
+def _tensor(value: TensorLike) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        return value
+    return torch.tensor(value)
+
+
+def _time_length(value: torch.Tensor) -> int:
+    if value.dim() == 0:
+        return 1
+    return int(value.shape[-1])

@@ -1,0 +1,22 @@
+model_name_or_path: Qwen/Qwen3-0.6B
+trust_remote_code: false
+load_in_4bit: false
+train_text_embedding: false
+train_audio_embedding: true
+train_audio_special_tokens: true
+train_backbone: false
+train_dit: true
+acoustic_condition_dropout: 0.1
+lora:
+  enabled: true
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  targets:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj

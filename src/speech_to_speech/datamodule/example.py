@@ -198,11 +198,11 @@ def _encode_ids(
     *,
     device: torch.device | str | None,
 ) -> Tensor:
-    encode_units = getattr(tokenizer, "encode_units", None)
-    if not callable(encode_units):
-        raise TypeError("LongCat BPE tokenizer must provide encode_units().")
-    units = [int(value) for value in ids.reshape(-1).detach().cpu().tolist()]
-    encoded = encode_units(units)
+    encode_frames = getattr(tokenizer, "encode_frames", None)
+    if not callable(encode_frames):
+        raise TypeError("LongCat BPE tokenizer must provide encode_frames().")
+    frames = [[int(value)] for value in ids.reshape(-1).detach().cpu().tolist()]
+    encoded = encode_frames(frames)
     return torch.tensor(encoded, dtype=torch.long, device=device)
 
 

@@ -8,7 +8,7 @@ from lightning.pytorch import LightningDataModule
 from torch import device as TorchDevice
 from torch.utils.data import DataLoader
 
-from ..config import BPEConfig, DataConfig, TaskConfig
+from ..config import BPEConfig, DataModuleConfig, TaskConfig
 from ..runtime import longcat_tokenizer
 from ..types import CausalLMBatch
 from .batch_builder import CausalLMBatchBuilder
@@ -26,48 +26,46 @@ class SpeechToSpeechDataModule(LightningDataModule):
 
     def __init__(
         self,
-        data: DataConfig,
+        datamodule: DataModuleConfig,
         tasks: TaskConfig,
         embedding: IdSpaceEmbedding,
         *,
         tokenizer: object | None = None,
         bpe_tokenizer: object | None = None,
         bpe: BPEConfig | None = None,
-        enable_lba: bool = False,
     ) -> None:
         super().__init__()
-        self.data = data
+        self.datamodule = datamodule
         self.tasks = tasks
         self.builder = CausalLMBatchBuilder(embedding, tokenizer=tokenizer)
         self.bpe_tokenizer = bpe_tokenizer
         self.bpe = bpe or BPEConfig()
-        self.enable_lba = enable_lba
 
     def setup(self, stage: str | None = None) -> None:
         return
 
     def train_dataloader(self) -> Iterable[CausalLMBatch]:
+        dataloader = self.datamodule.dataloader
         loader = DataLoader(
             TaskSampleStream(
-                self.data.datasets,
-                cache_root=self.data.cache_root,
+                self.datamodule.dataset_factory,
                 tasks=self.tasks,
             ),
-            batch_size=self.data.batch_size,
-            num_workers=self.data.num_workers,
-            pin_memory=self.data.pin_memory,
-            drop_last=self.data.drop_last,
+            batch_size=dataloader.batch_size,
+            num_workers=dataloader.num_workers,
+            pin_memory=dataloader.pin_memory,
+            drop_last=dataloader.drop_last,
             collate_fn=TaskSampleCollator(),
         )
         source: Iterable[Sequence[TaskSample]]
-        if self.enable_lba:
+        if self.datamodule.lba.enabled:
             from lba import LBA
 
             source = LBA(
                 loader,
                 len_fn=task_sample_length,
-                drop_last_flush=self.data.drop_last,
-                log_dir=_lba_log_dir(self.data),
+                drop_last_flush=dataloader.drop_last,
+                log_dir=_lba_log_dir(self.datamodule),
             )
         else:
             source = loader
@@ -88,9 +86,7 @@ class SpeechToSpeechDataModule(LightningDataModule):
         return TorchDevice("cpu")
 
 
-def _lba_log_dir(data: DataConfig) -> Path:
-    if data.lba_log_dir is not None:
-        return Path(data.lba_log_dir)
-    if data.cache_root is not None:
-        return Path(data.cache_root) / "lba_logs"
+def _lba_log_dir(datamodule: DataModuleConfig) -> Path:
+    if datamodule.lba.log_dir is not None:
+        return Path(datamodule.lba.log_dir)
     return Path(".lba") / "logs"

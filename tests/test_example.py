@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 import torch
-from anydataset import AnyDataset, AudioItem, AudioView, Modality, Role, collate_fn
+from anydataset import AnyDataset, Modality, Role, collate_fn
 
 from speech_to_speech.datamodule.example import (
     autoregression_example_from_sample,
@@ -17,6 +17,7 @@ from speech_to_speech.datamodule.schema import (
     TARGET_AUTOREGRESSION,
     TRANSLATION,
 )
+from helpers import toy_longcat_sample
 
 
 class ExampleTest(unittest.TestCase):
@@ -107,14 +108,7 @@ class ExampleTest(unittest.TestCase):
 
 
 def _sample(source: torch.Tensor, target: torch.Tensor):
-    return {
-        (Role.SOURCE, Modality.AUDIO): AudioItem(
-            views={AudioView.LONGCAT: {"semantic_codes": source}}
-        ),
-        (Role.TARGET, Modality.AUDIO): AudioItem(
-            views={AudioView.LONGCAT: {"semantic_codes": target}}
-        ),
-    }
+    return toy_longcat_sample(source, target, include_acoustic=False)
 
 
 if __name__ == "__main__":

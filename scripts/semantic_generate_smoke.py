@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Sequence
-from pathlib import Path
+from collections.abc import Iterable, Sequence
+from functools import partial
 
 import torch
-from anydataset import AnyDataset, MultipleAnyDataset, WeightedRandomStrategy
 from lightning.pytorch import seed_everything
 
-from speech_to_speech.config import DataConfig
+from speech_to_speech.config import DatasetFactoryConfig
+from speech_to_speech.dataset import dataset_metadata, training_dataset
 from speech_to_speech.datamodule.batch_builder import CausalLMBatchBuilder
 from speech_to_speech.datamodule.example import speech_pair_from_sample
 from speech_to_speech.model.orchestrator import Orchestrator
@@ -20,13 +20,13 @@ from speech_to_speech.types import GenerationBatch, SpeechPair
 
 @torch.no_grad()
 def run(args: argparse.Namespace) -> dict[str, object]:
-    config = load_config(args.config)
+    config = load_config(args.config_name, overrides=args.overrides, config_dir=args.config_dir)
     seed_everything(config.train.seed, workers=True)
 
     tokenizer = qwen3_tokenizer(config.model)
     bpe = prepare_longcat_tokenizer(
-        _speech_pairs(config.data),
-        datasets=config.data.datasets,
+        partial(_speech_pairs, config.datamodule.dataset_factory),
+        datasets=dataset_metadata(config.datamodule.dataset_factory),
         config=config.bpe,
     )
     model = Orchestrator(
@@ -36,8 +36,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         bpe_vocab_size=bpe.vocab_size,
     ).eval()
 
-    pair = _speech_pair_at(config.data, args.sample_index)
-    source_bpe_ids = _encode_units(bpe, pair.source_ids)
+    pair = _speech_pair_at(config.datamodule.dataset_factory, args.sample_index)
+    source_bpe_ids = _encode_frames(bpe, pair.source_ids)
     builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
     batch = builder.translation_generation(source_bpe_ids)
     batch = _move_generation_batch(batch, _module_device(model))
@@ -64,30 +64,24 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
-def _speech_pairs(data: DataConfig) -> Sequence[SpeechPair]:
-    return [speech_pair_from_sample(sample) for sample in _dataset(data)]
+def _speech_pairs(config: DatasetFactoryConfig) -> Iterable[SpeechPair]:
+    for sample in training_dataset(config):
+        yield speech_pair_from_sample(sample)
 
 
-def _speech_pair_at(data: DataConfig, index: int) -> SpeechPair:
+def _speech_pair_at(config: DatasetFactoryConfig, index: int) -> SpeechPair:
     if index < 0:
         raise ValueError("sample_index must be non-negative.")
-    for sample_index, sample in enumerate(_dataset(data)):
+    for sample_index, sample in enumerate(training_dataset(config)):
         if sample_index == index:
             return speech_pair_from_sample(sample)
     raise IndexError(f"sample_index {index} is outside the dataset.")
 
 
-def _dataset(data: DataConfig) -> AnyDataset | MultipleAnyDataset:
-    datasets = tuple(AnyDataset(dataset, cache_root=data.cache_root) for dataset in data.datasets)
-    if len(datasets) == 1:
-        return datasets[0]
-    return MultipleAnyDataset(datasets, strategy=WeightedRandomStrategy())
-
-
-def _encode_units(bpe: object, ids: torch.Tensor) -> torch.Tensor:
-    encode_units = bpe.encode_units
-    units = [int(value) for value in ids.reshape(-1).detach().cpu().tolist()]
-    return torch.tensor(encode_units(units), dtype=torch.long)
+def _encode_frames(bpe: object, ids: torch.Tensor) -> torch.Tensor:
+    encode_frames = bpe.encode_frames
+    frames = [[int(value)] for value in ids.reshape(-1).detach().cpu().tolist()]
+    return torch.tensor(encode_frames(frames), dtype=torch.long)
 
 
 def _module_device(module: torch.nn.Module) -> torch.device:
@@ -103,7 +97,9 @@ def _move_generation_batch(batch: GenerationBatch, device: torch.device) -> Gene
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run semantic generation sanity check.")
-    parser.add_argument("config", type=Path)
+    parser.add_argument("config_name", nargs="?", default="config")
+    parser.add_argument("overrides", nargs="*", help="Hydra overrides.")
+    parser.add_argument("--config-dir", default="configs")
     parser.add_argument("--sample-index", type=int, default=0)
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--temperature", type=float, default=0.0)

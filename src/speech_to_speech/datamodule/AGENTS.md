@@ -2,15 +2,15 @@
 
 ## 对外职责
 
-`datamodule` 负责把 Anydataset 中的原始 LongCat semantic codes 转成模型训练 batch。它向外部提供的是数据契约和 batch 构造能力，不暴露数据集内部字段遍历细节。
+`datamodule` 负责把训练数据集中的原始 LongCat semantic codes 转成模型训练 batch。它向外部提供的是数据契约和 batch 构造能力，不暴露数据集内部字段遍历细节。默认训练数据集由 `speech_to_speech.dataset` 从 `zhuyin.datasets.wmt19_tts.wmt19_tts_longcat()` 取得。
 
 对外能力：
 
 - 定义 source autoregression、target autoregression、source-to-target translation 和 target-to-source translation task sample。
 - 从 anydataset `Sample` 中提取双向 autoregression 和双向 translation task example。
-- 将 `AudioView.LONGCAT` 的原始 `semantic_codes` 编码成 LongCat BPE ids。
-- 根据配置启用 `autoregression` 和 `translation` 任务族。
-- 构造模型可消费的 `CausalLMBatch`，包含 `input_ids`、`attention_mask`、`labels` 和 `logits_to_keep`。
+- 将 `AudioView.LONGCAT` 的原始 `semantic_codes` 包装成单 codebook frame，并编码成 LongCat BPE ids。
+- 根据配置启用 `autoregression` 和 `translation` 任务族，并按 task family 权重确定展开比例。
+- 构造模型可消费的 `CausalLMBatch`，包含 `input_ids`、`attention_mask`、`labels`、`logits_to_keep` 和训练监控用 task family。
 - 构造生成侧 `GenerationBatch` prompt，用于模型生成 acoustic condition hidden states。
 
 ## 输入输出契约
@@ -30,10 +30,10 @@ task example 转换：
 - source-to-target translation 转成 `TranslationExample(source_ids, target_ids)`。
 - target-to-source translation 转成 `TranslationExample(source_ids=target_ids, target_ids=source_ids)`。
 - BPE 训练语料使用 source/target pair 转成 `SpeechPair`。
-- sample logging 使用 `semantic_codes` 的 BPE 展开结果和原始 `acoustic_codes` 解码音频；展开后 semantic length 必须和 acoustic time 一致。
+- sample logging 使用 `semantic_codes` 的 BPE frame 展开结果和原始 `acoustic_codes` 解码音频；LongCat 当前要求单 codebook semantic frame，展开后 semantic length 必须和 acoustic time 一致。
 
 speech-to-speech 不定义额外底层 dataset wrapper。datamodule 内部让 anydataset 负责读取和
-rank/worker 分片，并用 `TaskSampleStream` 在每条 source/target raw sample 上展开训练
+rank/worker 分片，并用 `TaskSampleStream` 在每条 source/target raw sample 上按权重展开训练
 task sample。DataLoader worker 只负责读取 raw sample 和展开 task sample；BPE encode、
 prompt/label 构造留在主进程完成，`inputs_embeds` 由模型 forward 内部生成。
 
@@ -45,7 +45,7 @@ prompt/label 构造留在主进程完成，`inputs_embeds` 由模型 forward 内
 - `labels` 只覆盖需要计算 loss 的目标 token，包括目标 audio segment 的 `BOA` 和 `EOA`。
 - `source_audio` / `target_audio` 可选携带 batch 对齐后的原始 LongCat semantic/acoustic codes 和 mask；semantic loss 不依赖它们，acoustic loss 和 feature 转换从这里读取。
 - prompt 和 user/assistant 结构 token 默认不计算 loss。
-- dataloader 对外只返回统一的 `CausalLMBatch`，不暴露 task/schema tag；任务来源由 prompt 和 label 结构表达。
+- dataloader 对外只返回统一的 `CausalLMBatch`；`task_family` 只用于 loss/计数日志，不参与模型输入语义。
 - Qwen3 文本模板必须通过 tokenizer 的 `apply_chat_template` 生成；不要手写 `<|im_start|>` / `assistant` / thinking token 序列。
 
 生成 batch 的约束：

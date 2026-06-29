@@ -6,7 +6,8 @@
 
 模块边界：
 
-- `config.py` 提供顶层配置结构，复用 anydataset 的 dataset spec 和 schema。
+- `config.py` 提供顶层配置结构，顶层配置使用 `datamodule.dataset_factory`、`datamodule.dataloader` 和 `datamodule.lba` 分层表达数据入口和加载策略。
+- `dataset.py` 提供训练数据集加载入口，当前只支持从 `zhuyin.datasets.wmt19_tts.wmt19_tts_longcat()` 取处理好的对象。
 - `types.py` 提供跨模块共享的轻量类型，例如任务名、特殊 token、speech pair、batch 和后续公共输出结构。
 - `runtime.py` 提供运行期资源加载入口，例如 Qwen3 tokenizer、LongCat BPE tokenizer、LongCat codec。
 - `datamodule/` 负责定义任务 schema、task example 转换函数和模型可消费的 batch。

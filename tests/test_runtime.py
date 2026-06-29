@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import json
 import unittest
 from unittest.mock import patch
 
 import torch
 
-from speech_to_speech.config import ModelConfig
+from speech_to_speech.config import BPEConfig, ModelConfig
 from speech_to_speech import runtime
+from speech_to_speech.types import SpeechPair
 
 
 class RuntimeTest(unittest.TestCase):
@@ -62,6 +66,80 @@ class RuntimeTest(unittest.TestCase):
         self.assertTrue(torch.equal(codec.acoustic_codes, acoustic_codes.unsqueeze(0)))
         self.assertEqual(codec.decoder, "24k_4codebooks")
 
+    def test_prepare_longcat_tokenizer_rejects_dataset_cache_mismatch(self) -> None:
+        pair = SpeechPair(
+            source_ids=torch.tensor([0, 1, 2]),
+            target_ids=torch.tensor([2, 1, 0]),
+        )
+        config = BPEConfig(vocab_size=16, max_token_length=4)
+
+        with TemporaryDirectory() as tmpdir:
+            runtime.prepare_longcat_tokenizer(
+                [pair],
+                datasets=(_fake_dataset_meta("store://first"),),
+                config=config,
+                cache_dir=tmpdir,
+            )
+            with self.assertRaisesRegex(ValueError, "dataset mismatch"):
+                runtime.prepare_longcat_tokenizer(
+                    [pair],
+                    datasets=(_fake_dataset_meta("store://second"),),
+                    config=config,
+                    cache_dir=tmpdir,
+                )
+
+    def test_prepare_longcat_tokenizer_accepts_matching_dataset_cache(self) -> None:
+        pair = SpeechPair(
+            source_ids=torch.tensor([0, 1, 2]),
+            target_ids=torch.tensor([2, 1, 0]),
+        )
+        config = BPEConfig(vocab_size=16, max_token_length=4)
+
+        with TemporaryDirectory() as tmpdir:
+            first = runtime.prepare_longcat_tokenizer(
+                [pair],
+                datasets=(_fake_dataset_meta("store://same"),),
+                config=config,
+                cache_dir=tmpdir,
+            )
+            runtime._LONGCAT_TOKENIZERS.pop(
+                Path(tmpdir) / "longcat" / "vocab_16_minfreq_0_maxlen_4_codes_8192"
+            )
+            second = runtime.prepare_longcat_tokenizer(
+                [pair],
+                datasets=(_fake_dataset_meta("store://same"),),
+                config=config,
+                cache_dir=tmpdir,
+            )
+
+        self.assertEqual(first.vocab_size, second.vocab_size)
+
+    def test_prepare_longcat_tokenizer_writes_datasets_metadata(self) -> None:
+        pair = SpeechPair(
+            source_ids=torch.tensor([0, 1, 2]),
+            target_ids=torch.tensor([2, 1, 0]),
+        )
+        config = BPEConfig(vocab_size=16, max_token_length=4)
+        datasets = (_fake_dataset_meta("store://same"),)
+
+        with TemporaryDirectory() as tmpdir:
+            runtime.prepare_longcat_tokenizer(
+                [pair],
+                datasets=datasets,
+                config=config,
+                cache_dir=tmpdir,
+            )
+            meta_path = (
+                Path(tmpdir)
+                / "longcat"
+                / "vocab_16_minfreq_0_maxlen_4_codes_8192"
+                / "meta.json"
+            )
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(meta["datasets"], list(datasets))
+        self.assertNotIn("dataset_meta", meta)
+
 
 class FakeLongCatCodec:
     def __init__(self) -> None:
@@ -78,6 +156,10 @@ class FakeLongCatCodec:
         self.acoustic_codes = acoustic_codes
         self.decoder = decoder
         return self.features
+
+
+def _fake_dataset_meta(dataset: str) -> dict[str, object]:
+    return {"source": "store", "path": dataset}
 
 
 if __name__ == "__main__":

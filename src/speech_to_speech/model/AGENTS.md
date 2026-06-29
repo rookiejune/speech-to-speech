@@ -41,7 +41,7 @@ acoustic 侧输入输出契约：
 
 - acoustic condition 从 `labels != IGNORE_INDEX` 的目标 audio segment 推导，排除 `BOA/EOA`。
 - BPE token 对应的 condition hidden 使用其下一位 input token 的 Qwen3 hidden state。
-- BPE hidden 通过 `CodecBPE.repeat_interleave(..., mask=...)` 展开到原始 semantic frame 粒度。
+- BPE hidden 通过 `CodecBPE.repeat_interleave(..., mask=...)` 展开到原始 semantic frame 粒度；LongCat 当前只接受单 codebook semantic ids，模型层会显式把 `[B, T, 1]` frame 压成 `[B, T]`。
 - `acoustic_flow_loss` 接收连续 `target_features`，形状为 `[batch, time, acoustic_dim]`，并要求 time 维与展开后的 condition mask 对齐。
 - `acoustic_flow_loss` 可选接收 `source_feature_extractor`，将 `batch.source_audio` 的 LongCat acoustic codes 转为连续 features 后按 mask mean 池化成 DiT 的 batch-level `acoustic_condition`；缺失 source 的行使用 DiT null acoustic condition。
 - `ModelConfig.acoustic_condition_dropout` 只作用于训练态、由 source features 池化得到的 acoustic condition；显式传入的 `acoustic_condition` 不被隐式替换。
@@ -56,6 +56,7 @@ acoustic 侧输入输出契约：
 - 生成侧的 hidden condition 使用每个 sampled BPE token 的下一步 Qwen hidden state，与训练侧 acoustic condition 的 shifted hidden 契约对齐。
 - 离散 token ids 只在 `return_token_ids=True` 时返回，用于 debug、EOA 停止检查或简单 sanity check；不要把它当作 DiT 的主要条件输入。
 - `generate_waveform` 先走 full-sequence 路线，必须显式接收 acoustic feature generator；当前模型层不隐式把 condition 变成 LongCat acoustic features。
+- `teacher_forced_waveform` 用训练侧 labels 的 shifted hidden states 生成 waveform，主要用于诊断 acoustic/DiT 是否能在接近正确 semantic hidden 的条件下产生可听音频，不替代最终 free-running waveform 评估。
 - `acoustic_velocity(..., guidance_scale=...)` 是 CFG 速度预测边界；`guidance_scale=1` 只跑 conditional DiT，其他值会再跑 null acoustic condition 并做 `uncond + scale * (cond - uncond)`。
 - `Orchestrator.acoustic_feature_generator(...)` 返回可传给 `generate_waveform` 的 DiT acoustic feature generator，先用 diagonal sampler 生成连续 LongCat acoustic features，再交给 codec decode。
 

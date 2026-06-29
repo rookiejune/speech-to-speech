@@ -15,6 +15,25 @@ class Task(StrEnum):
     TRANSLATION = auto()
 
 
+class TaskFamily(StrEnum):
+    SOURCE_AR = auto()
+    TARGET_AR = auto()
+    SOURCE_TO_TARGET = auto()
+    TARGET_TO_SOURCE = auto()
+
+    @property
+    def id(self) -> int:
+        match self:
+            case TaskFamily.SOURCE_AR:
+                return 0
+            case TaskFamily.TARGET_AR:
+                return 1
+            case TaskFamily.SOURCE_TO_TARGET:
+                return 2
+            case TaskFamily.TARGET_TO_SOURCE:
+                return 3
+
+
 class SpecialToken(StrEnum):
     # Qwen3
     PAD = "<|endoftext|>"
@@ -73,7 +92,9 @@ class TranslationExample:
 class BPEArtifactMeta:
     codec_name: str
     vocab_size: int
-    max_piece_frames: int
+    min_frequency: int = 0
+    max_token_length: int | None = None
+    codebook_sizes: tuple[int, ...] = (8192,)
     datasets: tuple[Mapping[str, object], ...] = ()
 
 
@@ -85,6 +106,7 @@ class CausalLMBatch:
     logits_to_keep: int | LongTensor
     source_audio: LongCatBatchSide | None = None
     target_audio: LongCatBatchSide | None = None
+    task_family: LongTensor | None = None
 
 
 @dataclass
@@ -105,7 +127,7 @@ class AcousticFeatureGenerator(Protocol):
 
 
 class SemanticBPE(Protocol):
-    def expand_ids(self, ids: Sequence[int]) -> Sequence[int]: ...
+    def expand_ids(self, ids: Sequence[int]) -> Sequence[Sequence[int]]: ...
 
 
 class WaveformCodec(Protocol):
@@ -135,6 +157,16 @@ class WaveformGeneration:
     acoustic_features: FloatTensor
     condition_hidden_states: FloatTensor
     token_ids: LongTensor
+
+
+@dataclass
+class TeacherForcedWaveformGeneration:
+    audio: FloatTensor
+    audio_mask: Tensor
+    semantic_ids: LongTensor
+    semantic_mask: Tensor
+    acoustic_features: FloatTensor
+    condition_hidden_states: FloatTensor
 
 
 # all special tokens:

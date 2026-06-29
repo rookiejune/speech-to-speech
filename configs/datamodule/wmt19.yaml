@@ -1,0 +1,12 @@
+dataset_factory:
+  name: wmt19_tts_longcat
+
+dataloader:
+  batch_size: 1
+  num_workers: 0
+  pin_memory: false
+  drop_last: false
+
+lba:
+  enabled: false
+  log_dir:

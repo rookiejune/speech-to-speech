@@ -1,34 +1,48 @@
 from __future__ import annotations
 
-import argparse
-from collections.abc import Sequence
-from dataclasses import replace
+import os
+from collections.abc import Iterable
+from functools import partial
 from pathlib import Path
 
+import hydra
+import torch
 from lightning.pytorch import Trainer, seed_everything
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
+from omegaconf import DictConfig, OmegaConf
 
+from speech_to_speech.config import DatasetFactoryConfig
+from speech_to_speech.dataset import dataset_metadata, training_dataset
 from speech_to_speech.datamodule import SpeechToSpeechDataModule
 from speech_to_speech.datamodule.example import speech_pair_from_sample
 from speech_to_speech.model.DiT.model import DiT
 from speech_to_speech.model.orchestrator import Orchestrator, dit_config
-from speech_to_speech.pl_module import SpeechToSpeechModule
+from speech_to_speech.pl_module import (
+    SpeechToSpeechModule,
+    TaskGenerationLogger,
+    TaskSampleLogger,
+)
 from speech_to_speech.runtime import longcat_codec, prepare_longcat_tokenizer, qwen3_tokenizer
-from speech_to_speech.smoke import _dataset, load_config
+from speech_to_speech.smoke import _accelerator, _mapping, _speech_to_speech_config
+from speech_to_speech.types import SpeechPair
 
 
-def main(argv: Sequence[str] | None = None) -> None:
-    args = parse_args(argv)
-    config = load_config(args.config)
-    if args.max_steps is not None:
-        config = replace(config, train=replace(config.train, max_steps=args.max_steps))
+@hydra.main(version_base=None, config_path="../configs", config_name="config")
+def main(cfg: DictConfig) -> None:
+    _bind_local_cuda_device()
+    config = _speech_to_speech_config(
+        _mapping(OmegaConf.to_container(cfg, resolve=True), "config")
+    )
+    if config.trainer.ckpt_path is not None:
+        allow_trusted_checkpoint_globals()
 
     seed_everything(config.train.seed, workers=True)
     tokenizer = qwen3_tokenizer(config.model)
+    dataset_factory = config.datamodule.dataset_factory
     bpe = prepare_longcat_tokenizer(
-        (speech_pair_from_sample(sample) for sample in _dataset(config.data)),
-        datasets=config.data.datasets,
+        partial(_speech_pairs, dataset_factory),
+        datasets=dataset_metadata(dataset_factory),
         config=config.bpe,
     )
     acoustic_training = config.train.acoustic_loss_weight > 0.0
@@ -46,7 +60,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         acoustic_feature_extractor=longcat_codec() if acoustic_training else None,
     )
     datamodule = SpeechToSpeechDataModule(
-        config.data,
+        config.datamodule,
         config.tasks,
         model.embed_tokens,
         tokenizer=tokenizer,
@@ -54,74 +68,85 @@ def main(argv: Sequence[str] | None = None) -> None:
         bpe=config.bpe,
     )
 
-    root = Path(args.default_root_dir)
+    root = Path(config.trainer.default_root_dir)
     logger = TensorBoardLogger(
         save_dir=str(root / "tensorboard"),
-        name=args.name,
+        name=config.trainer.name,
     )
     checkpoint = ModelCheckpoint(
-        dirpath=str(root / "checkpoints" / args.name),
+        dirpath=str(root / "checkpoints" / config.trainer.name),
         filename="{step:08d}",
-        monitor="train/loss",
+        monitor="loss",
         mode="min",
-        save_top_k=args.save_top_k,
+        save_top_k=config.trainer.save_top_k,
         save_last=True,
-        every_n_train_steps=args.checkpoint_every_n_steps,
+        every_n_train_steps=config.trainer.checkpoint_every_n_steps,
     )
-    trainer = Trainer(
-        default_root_dir=str(root),
-        max_steps=config.train.max_steps,
-        accelerator=args.accelerator or accelerator(config.train.device),
-        devices=args.devices,
-        strategy=args.strategy,
-        precision=config.train.precision,
-        logger=logger,
-        callbacks=[checkpoint],
-        enable_checkpointing=True,
-        enable_model_summary=not args.no_model_summary,
-        enable_progress_bar=not args.no_progress_bar,
-        log_every_n_steps=args.log_every_n_steps,
-    )
-    trainer.fit(module, datamodule=datamodule, ckpt_path=args.ckpt_path)
+    callbacks = [checkpoint]
+    if config.trainer.sample_log_every_n_steps is not None:
+        callbacks.append(
+            TaskSampleLogger(
+                datamodule=config.datamodule,
+                tasks=config.tasks,
+                bpe=config.bpe,
+                every_n_steps=config.trainer.sample_log_every_n_steps,
+                samples_per_task=config.trainer.samples_per_task,
+                max_audio_samples=config.trainer.sample_log_max_audio_samples,
+            )
+        )
+    if config.trainer.generation_log_every_n_steps is not None:
+        callbacks.append(
+            TaskGenerationLogger(
+                datamodule=config.datamodule,
+                bpe=config.bpe,
+                tokenizer=tokenizer,
+                every_n_steps=config.trainer.generation_log_every_n_steps,
+                sample_index=config.trainer.generation_sample_index,
+                flow_steps=config.trainer.generation_flow_steps,
+                chunk_size=config.trainer.generation_chunk_size,
+                guidance_scale=config.trainer.generation_guidance_scale,
+                acoustic_sampler=config.trainer.generation_acoustic_sampler,
+                preview_tokens=config.trainer.generation_preview_tokens,
+                max_audio_samples=config.trainer.generation_log_max_audio_samples,
+            )
+        )
+    trainer_kwargs = {
+        "default_root_dir": str(root),
+        "max_steps": config.train.max_steps,
+        "accelerator": config.trainer.accelerator or _accelerator(config.train),
+        "devices": config.trainer.devices,
+        "strategy": config.trainer.strategy,
+        "precision": config.train.precision,
+        "logger": logger,
+        "callbacks": callbacks,
+        "enable_checkpointing": True,
+        "enable_model_summary": config.trainer.enable_model_summary,
+        "enable_progress_bar": config.trainer.enable_progress_bar,
+    }
+    if config.trainer.log_every_n_steps is not None:
+        trainer_kwargs["log_every_n_steps"] = config.trainer.log_every_n_steps
+    trainer = Trainer(**trainer_kwargs)
+    trainer.fit(module, datamodule=datamodule, ckpt_path=config.trainer.ckpt_path)
     print(f"training finished: global_step={trainer.global_step}")
 
 
-def accelerator(device: str) -> str:
-    if device in {"cuda", "gpu"}:
-        return "cuda"
-    return device
+def _bind_local_cuda_device() -> None:
+    rank = os.environ.get("LOCAL_RANK")
+    if rank is None or not torch.cuda.is_available():
+        return
+    torch.cuda.set_device(int(rank))
 
 
-def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run speech-to-speech training.")
-    parser.add_argument("config", help="Path to a speech-to-speech YAML config.")
-    parser.add_argument("--name", default="wmt19-quality-longrun")
-    parser.add_argument("--max-steps", type=int)
-    parser.add_argument("--default-root-dir", default="outputs/train")
-    parser.add_argument("--accelerator")
-    parser.add_argument("--devices", type=devices, default=1)
-    parser.add_argument("--strategy", default="auto")
-    parser.add_argument("--ckpt-path")
-    parser.add_argument("--log-every-n-steps", type=positive_int, default=10)
-    parser.add_argument("--checkpoint-every-n-steps", type=positive_int, default=500)
-    parser.add_argument("--save-top-k", type=int, default=2)
-    parser.add_argument("--no-model-summary", action="store_true")
-    parser.add_argument("--no-progress-bar", action="store_true")
-    return parser.parse_args(argv)
+def _speech_pairs(dataset_factory: DatasetFactoryConfig) -> Iterable[SpeechPair]:
+    for sample in training_dataset(dataset_factory):
+        yield speech_pair_from_sample(sample)
 
 
-def positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("value must be positive.")
-    return parsed
+def allow_trusted_checkpoint_globals() -> None:
+    from anytrain.optim.config import MuonAdjustLRFn
+    from torch.serialization import add_safe_globals
 
-
-def devices(value: str) -> int | str:
-    try:
-        return int(value)
-    except ValueError:
-        return value
+    add_safe_globals([MuonAdjustLRFn])
 
 
 if __name__ == "__main__":
