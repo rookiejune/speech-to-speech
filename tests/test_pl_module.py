@@ -25,7 +25,9 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 class SpeechToSpeechModuleTest(unittest.TestCase):
     def test_configure_optimizers_uses_muon_llm_optimizer(self) -> None:
-        module, _ = _module_and_batch(train=TrainConfig(learning_rate=1e-4))
+        module, _ = _module_and_batch(
+            train=TrainConfig(learning_rate=1e-4, schedule="constant", warmup_steps=0)
+        )
 
         configured = module.configure_optimizers()
 
@@ -37,7 +39,9 @@ class SpeechToSpeechModuleTest(unittest.TestCase):
         )
 
     def test_configure_optimizers_keeps_audio_embedding_trainable(self) -> None:
-        module, _ = _module_and_batch(train=TrainConfig(learning_rate=1e-4))
+        module, _ = _module_and_batch(
+            train=TrainConfig(learning_rate=1e-4, schedule="constant", warmup_steps=0)
+        )
 
         configured = module.configure_optimizers()
 
@@ -57,6 +61,8 @@ class SpeechToSpeechModuleTest(unittest.TestCase):
                 learning_rate=1e-4,
                 adamw_learning_rate=2e-4,
                 muon_learning_rate=3e-4,
+                schedule="constant",
+                warmup_steps=0,
             )
         )
 

@@ -122,7 +122,7 @@ class TaskGenerationLogger(Callback):
     chunk_size: int | None = 64
     guidance_scale: float = 1.0
     acoustic_sampler: str = AcousticSampler.DIAGONAL.value
-    preview_tokens: int = 256
+    preview_tokens: int = 1024
     max_audio_samples: int | None = SAMPLE_RATE * 20
     _pair: LongCatPair | None = field(default=None, init=False)
     _last_logged_step: int | None = field(default=None, init=False)

@@ -23,9 +23,13 @@ class SmokeRunnerTest(unittest.TestCase):
 
         self.assertEqual(config.datamodule.dataset_factory.name, "wmt19_tts_longcat")
         self.assertEqual(config.datamodule.dataloader.batch_size, 1)
+        self.assertEqual(config.datamodule.dataloader.num_workers, 8)
         self.assertEqual(config.tasks.enabled, ("autoregression",))
         self.assertEqual(config.bpe.vocab_size, 10000)
-        self.assertEqual(config.train.max_steps, 100)
+        self.assertEqual(config.train.max_steps, 5_000_000)
+        self.assertEqual(config.train.schedule, "warmup_cosine")
+        self.assertEqual(config.train.warmup_steps, 50_000)
+        self.assertEqual(config.train.device, "auto")
 
     def test_load_config_reads_wmt19_mixed_smoke_experiment(self) -> None:
         config = smoke.load_config(overrides=("experiment=wmt19_mixed_smoke",))
@@ -77,6 +81,7 @@ class SmokeRunnerTest(unittest.TestCase):
                 "train.optimizer=adamw",
                 "train.device=cpu",
                 "train.precision=32-true",
+                "datamodule.dataloader.num_workers=0",
             )
             with isolated_anydataset_home(root):
                 with patched_wmt19_longcat(store):

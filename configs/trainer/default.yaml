@@ -15,7 +15,7 @@ generation_flow_steps: 32
 generation_chunk_size: 64
 generation_guidance_scale: 1.0
 generation_acoustic_sampler: diagonal
-generation_preview_tokens: 256
+generation_preview_tokens: 1024
 generation_log_max_audio_samples: 320000
 save_top_k: 2
 enable_model_summary: true

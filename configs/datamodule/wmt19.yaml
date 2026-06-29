@@ -3,7 +3,7 @@ dataset_factory:
 
 dataloader:
   batch_size: 1
-  num_workers: 0
+  num_workers: 8
   pin_memory: false
   drop_last: false
 

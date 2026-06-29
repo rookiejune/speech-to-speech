@@ -117,7 +117,7 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class TrainConfig:
-    max_steps: int = 100
+    max_steps: int = 5_000_000
     learning_rate: float = 1e-4
     adamw_learning_rate: float | None = None
     muon_learning_rate: float | None = None
@@ -125,13 +125,13 @@ class TrainConfig:
     optimizer_preset: str = "pretrain"
     optimizer: str = "muon"
     weight_decay: float | None = None
-    schedule: str = "constant"
-    warmup_steps: int = 0
+    schedule: str = "warmup_cosine"
+    warmup_steps: int = 50_000
     stable_steps: int | None = None
     decay_steps: int | None = None
     min_lr_ratio: float = 0.1
     seed: int = 0
-    device: str = "cuda"
+    device: str = "auto"
     precision: str = "bf16-mixed"
 
 
@@ -154,7 +154,7 @@ class TrainerConfig:
     generation_chunk_size: int | None = 64
     generation_guidance_scale: float = 1.0
     generation_acoustic_sampler: str = "diagonal"
-    generation_preview_tokens: int = 256
+    generation_preview_tokens: int = 1024
     generation_log_max_audio_samples: int | None = 320_000
     save_top_k: int = 2
     enable_model_summary: bool = True
