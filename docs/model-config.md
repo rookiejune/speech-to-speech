@@ -1,0 +1,51 @@
+# Model Config
+
+模型配置按职责分成三层：
+
+- `model.backbone`：Qwen3 权重来源、4bit 加载、backbone full/LoRA 训练策略。
+- `model.token_space`：text embedding、audio embedding 和 audio boundary special token 是否训练。
+- `model.acoustic`：是否构建 DiT acoustic decoder、是否训练 acoustic decoder/projection、source acoustic condition dropout 和 DiT 尺寸。
+- `model.acoustic.dit.attention_mode`：控制 DiT acoustic decoder 的时序注意力，支持 `causal` 和 `bidirectional`。preset 显式保持 `causal` 旧实验语义；offline full-sequence acoustic flow 对照建议 override 为 `bidirectional`。
+- `model.acoustic.dit.norm_time`、`norm_hidden`、`norm_acoustic`：控制 DiT 内部三路条件在相加前是否做无 affine LayerNorm；默认关闭以保持旧实验语义。
+
+`train.acoustic_loss_weight` 只决定 acoustic loss 是否进入训练目标。权重大于 0 时，`model.acoustic.enabled` 必须为 true；权重等于 0 时可以关闭 acoustic decoder，semantic-only smoke 配置应显式写：
+
+```yaml
+model:
+  acoustic:
+    enabled: false
+```
+
+临时评估或 smoke 脚本需要加载 acoustic decoder 时，使用 `with_acoustic_decoder(...)` 派生运行期 `ModelConfig`，不要在 Qwen/LoRA preset 名字里隐含 DiT 是否存在。
+
+## Preset 含义
+
+- `qwen3_0_6b_lora`：Qwen3-0.6B fp/bf16 加载，backbone 冻结，只训练 LoRA 和 token space。
+- `qwen3_0_6b_lora_4bit`：Qwen3-0.6B 4bit 加载，backbone 冻结，只训练 LoRA 和 token space。
+- `qwen3_0_6b_full`：Qwen3-0.6B 非 4bit 加载，backbone 全量训练，不启用 LoRA。
+
+这些 preset 当前都默认 `model.acoustic.enabled=true`，用于 quality/acoustic 训练。semantic-only smoke 实验在 experiment 配置里覆盖关闭 acoustic decoder。
+
+## 常用 override
+
+```bash
+# 改 acoustic/FM loss 权重
+python scripts/train.py experiment=wmt19_quality_100k_muon train.acoustic_loss_weight=0.03
+
+# 临时关闭 acoustic decoder，只跑 semantic 训练闭环
+python scripts/train.py experiment=wmt19_mixed_smoke model.acoustic.enabled=false
+
+# 切 full backbone 对照
+python scripts/train.py experiment=wmt19_quality_100k_full_adamw
+
+# 打开 Qwen hidden 和 source acoustic 条件 norm
+python scripts/train.py experiment=wmt19_quality_100k_muon model.acoustic.dit.norm_hidden=true model.acoustic.dit.norm_acoustic=true
+
+# offline full-sequence DiT attention 对照
+python scripts/train.py experiment=wmt19_quality_100k_muon model.acoustic.dit.attention_mode=bidirectional
+```
+
+acoustic 训练会记录 `condition/{time,hidden,acoustic}_{mean,std}`，统计的是实际送入 DiT 条件融合前的三路张量；`hidden` 按有效 acoustic frame 统计，`time` 和 `acoustic` 按包含有效帧的 batch 行统计。
+
+训练过程中的 checkpoint、sample logging 和 generation logging 属于 trainer callback
+配置，见 `docs/trainer-config.md`。

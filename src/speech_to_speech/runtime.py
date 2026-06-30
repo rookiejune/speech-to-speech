@@ -31,8 +31,8 @@ def qwen3_tokenizer(
     trust_remote_code: bool | None = None,
 ) -> PreTrainedTokenizerBase:
     config = config or ModelConfig()
-    name = model_name_or_path or config.model_name_or_path
-    trust = config.trust_remote_code if trust_remote_code is None else trust_remote_code
+    name = model_name_or_path or config.backbone.model_name_or_path
+    trust = config.backbone.trust_remote_code if trust_remote_code is None else trust_remote_code
     key = (name, trust)
     if key not in _QWEN3_TOKENIZERS:
         from transformers import AutoTokenizer

@@ -18,13 +18,31 @@ def audio_special_embeddings(
     hidden_size: int,
     *,
     like: Tensor,
+    std: float,
 ) -> nn.ParameterDict:
     embeddings = nn.ParameterDict()
     for name in (AudioBoundary.BOA.value, AudioBoundary.EOA.value):
         parameter = nn.Parameter(torch.empty(hidden_size, device=like.device, dtype=like.dtype))
-        nn.init.normal_(parameter)
+        nn.init.normal_(parameter, std=std)
         embeddings[name] = parameter
     return embeddings
+
+
+def audio_embedding(
+    vocab_size: int,
+    hidden_size: int,
+    *,
+    like: Tensor,
+    std: float,
+) -> nn.Embedding:
+    embedding = nn.Embedding(
+        vocab_size,
+        hidden_size,
+        device=like.device,
+        dtype=like.dtype,
+    )
+    nn.init.normal_(embedding.weight, std=std)
+    return embedding
 
 
 def text_embedding(model: nn.Module) -> nn.Embedding | IdSpaceEmbedding:
@@ -84,16 +102,16 @@ def configure_trainable(
     config: ModelConfig,
     peft_applied: bool,
 ) -> None:
-    if config.train_backbone:
+    if config.backbone.train:
         _set_trainable(qwen3, True)
     else:
         _set_trainable(qwen3, False)
-    if peft_applied and config.lora.enabled:
+    if peft_applied and config.backbone.lora.enabled:
         _set_lora_trainable(qwen3)
     _set_embedding_trainable(cast(IdSpaceEmbedding, embedding), config)
     if dit is not None:
-        _set_trainable(dit, config.train_dit)
-    _set_trainable(acoustic_condition_proj, config.train_dit)
+        _set_trainable(dit, config.acoustic.train)
+    _set_trainable(acoustic_condition_proj, config.acoustic.train)
 
 
 def _token_id(tokenizer: object, token: str) -> int:
@@ -123,13 +141,13 @@ def _set_lora_trainable(module: nn.Module) -> None:
 
 def _set_embedding_trainable(embedding: IdSpaceEmbedding, config: ModelConfig) -> None:
     embedding.modality_embeddings[Modality.TEXT.value].requires_grad_(
-        config.train_text_embedding
+        config.token_space.train_text_embedding
     )
     embedding.modality_embeddings[Modality.AUDIO.value].requires_grad_(
-        config.train_audio_embedding
+        config.token_space.train_audio_embedding
     )
     for name, parameter in embedding.special_embeddings.items():
         parameter.requires_grad = name in {
             AudioBoundary.BOA.value,
             AudioBoundary.EOA.value,
-        } and config.train_audio_special_tokens
+        } and config.token_space.train_audio_special_tokens

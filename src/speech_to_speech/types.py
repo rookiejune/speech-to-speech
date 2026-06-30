@@ -120,6 +120,7 @@ class AcousticCondition:
     hidden_states: FloatTensor
     semantic_ids: LongTensor
     mask: Tensor
+    chunk_lengths: tuple[tuple[int, ...], ...] | None = None
 
 
 class AcousticFeatureGenerator(Protocol):

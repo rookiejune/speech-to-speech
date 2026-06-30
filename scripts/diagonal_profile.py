@@ -12,19 +12,17 @@ import torch
 from lightning.pytorch import seed_everything
 from torch import Tensor, nn
 
-from speech_to_speech.config import DatasetFactoryConfig
+from speech_to_speech.config import DatasetFactoryConfig, with_acoustic_decoder
 from speech_to_speech.dataset import dataset_metadata, training_dataset
 from speech_to_speech.datamodule.batch_builder import CausalLMBatchBuilder
 from speech_to_speech.datamodule.example import longcat_pair_from_sample, speech_pair_from_sample
-from speech_to_speech.model.DiT.model import DiT
 from speech_to_speech.model.acoustic import null_acoustic_condition
 from speech_to_speech.model.diagonal import (
-    diagonal_flow_sample,
-    serial_flow_sample,
-    serial_forward_count,
+    diagonal_flow_sample_chunks,
+    full_sequence_flow_sample,
+    serial_flow_sample_chunks,
 )
 from speech_to_speech.model.orchestrator import Orchestrator
-from speech_to_speech.model.qwen3 import Qwen3Config
 from speech_to_speech.runtime import prepare_longcat_tokenizer, qwen3_tokenizer
 from speech_to_speech.smoke import load_config
 from speech_to_speech.types import (
@@ -64,11 +62,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
 
     device = torch.device(args.device)
     flow_dtype = _flow_dtype(args.flow_dtype, precision=config.train.precision, device=device)
-    dit_config = _dit_config(layers=args.dit_layers, heads=args.dit_heads)
-    model_config = replace(config.model, train_dit=True)
+    model_config = with_acoustic_decoder(
+        config.model,
+        train=True,
+        dit=_dit_config(config.model.acoustic.dit, layers=args.dit_layers, heads=args.dit_heads),
+    )
     _log_stage(args, "load qwen and dit", started_at)
     model = Orchestrator(
-        dit=DiT(dit_config),
         model_config=model_config,
         bpe_config=config.bpe,
         tokenizer=tokenizer,
@@ -85,47 +85,69 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     condition = model.acoustic_condition(batch, bpe)
     hidden, mask = _flow_condition(model, condition, dtype=flow_dtype)
     if args.frames is not None:
-        hidden, mask = _tile_time(hidden, mask, frames=args.frames)
+        hidden, mask, chunk_lengths = _tile_time(
+            hidden,
+            mask,
+            chunk_lengths=_single_chunk_lengths(condition),
+            frames=args.frames,
+        )
+    else:
+        chunk_lengths = _single_chunk_lengths(condition)
     initial = hidden.new_zeros(hidden.shape)
     acoustic_condition = null_acoustic_condition(model.dit, initial)
-    sampler_kwargs = {
+    full_kwargs = {
         "last_hidden_state": hidden,
         "acoustic_condition": acoustic_condition,
         "mask": mask,
         "num_steps": args.flow_steps,
-        "chunk_size": args.chunk_size,
         "guidance_scale": args.guidance_scale,
     }
+    chunk_kwargs = {
+        **full_kwargs,
+        "chunk_lengths": chunk_lengths,
+    }
 
-    serial_fn = lambda: serial_flow_sample(model.dit, initial, **sampler_kwargs)
-    diagonal_fn = lambda: diagonal_flow_sample(
+    full_fn = lambda: full_sequence_flow_sample(model.dit, initial, **full_kwargs)
+    serial_chunks_fn = lambda: serial_flow_sample_chunks(model.dit, initial, **chunk_kwargs)
+    diagonal_chunks_fn = lambda: diagonal_flow_sample_chunks(
         model.dit,
         initial,
         wave_stride=args.wave_stride,
-        **sampler_kwargs,
+        **chunk_kwargs,
     )
     _log_stage(args, "warmup samplers", started_at)
     for _ in range(args.warmup):
-        serial_fn()
-        diagonal_fn()
+        full_fn()
+        serial_chunks_fn()
+        diagonal_chunks_fn()
 
-    _log_stage(args, "time serial sampler", started_at)
-    serial_timing = _time_repeats(args.repeats, serial_fn, device=device)
-    serial_sample = serial_fn()
-    _log_stage(args, "time diagonal sampler", started_at)
-    diagonal_timing = _time_repeats(args.repeats, diagonal_fn, device=device)
-    diagonal_sample = diagonal_fn()
+    _log_stage(args, "time full sequence sampler", started_at)
+    full_timing = _time_repeats(args.repeats, full_fn, device=device)
+    full_sample = full_fn()
+    _log_stage(args, "time serial BPE chunk sampler", started_at)
+    serial_chunks_timing = _time_repeats(args.repeats, serial_chunks_fn, device=device)
+    serial_chunks_sample = serial_chunks_fn()
+    _log_stage(args, "time diagonal BPE chunk sampler", started_at)
+    diagonal_chunks_timing = _time_repeats(args.repeats, diagonal_chunks_fn, device=device)
+    diagonal_chunks_sample = diagonal_chunks_fn()
     _log_stage(args, "done", started_at)
 
-    diff = (serial_sample.final - diagonal_sample.final).abs().detach().float()
-    active = mask.unsqueeze(-1).expand_as(diff)
-    active_diff = diff[active]
+    chunk_diff = (serial_chunks_sample.final - diagonal_chunks_sample.final).abs().detach().float()
+    active = mask.unsqueeze(-1).expand_as(chunk_diff)
+    active_chunk_diff = chunk_diff[active]
+    full_chunk_diff = (full_sample.final - diagonal_chunks_sample.final).abs().detach().float()
+    active_full_chunk_diff = full_chunk_diff[active]
     cfg_multiplier = 1 if args.guidance_scale == 1.0 else 2
-    max_wave_width = max(len(batch.cells) for batch in diagonal_sample.schedule)
-    speedup = (
+    max_wave_width = max(len(batch.cells) for batch in diagonal_chunks_sample.schedule)
+    diagonal_vs_serial_chunk_speedup = (
         float("inf")
-        if diagonal_timing.seconds == 0
-        else serial_timing.seconds / diagonal_timing.seconds
+        if diagonal_chunks_timing.seconds == 0
+        else serial_chunks_timing.seconds / diagonal_chunks_timing.seconds
+    )
+    diagonal_vs_full_sequence_speedup = (
+        float("inf")
+        if diagonal_chunks_timing.seconds == 0
+        else full_timing.seconds / diagonal_chunks_timing.seconds
     )
 
     return {
@@ -136,7 +158,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "target_frame_count": int(pair.target.semantic_ids.numel()),
         "condition_frame_count": int(condition.mask.sum().detach().cpu()),
         "profile_frame_count": int(hidden.size(1)),
-        "chunk_size": args.chunk_size,
+        "chunk_count": len(chunk_lengths),
+        "chunk_lengths_preview": list(chunk_lengths[: args.preview_chunks]),
         "flow_steps": args.flow_steps,
         "wave_stride": args.wave_stride,
         "guidance_scale": args.guidance_scale,
@@ -144,28 +167,35 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "dit_heads": args.dit_heads,
         "warmup": args.warmup,
         "repeats": args.repeats,
-        "serial_seconds": serial_timing.seconds,
-        "diagonal_seconds": diagonal_timing.seconds,
-        "speedup": speedup,
-        "serial_velocity_count": serial_sample.forward_count,
-        "diagonal_velocity_count": diagonal_sample.forward_count,
-        "serial_dit_forward_count": serial_sample.forward_count * cfg_multiplier,
-        "diagonal_dit_forward_count": diagonal_sample.forward_count * cfg_multiplier,
-        "expected_serial_velocity_count": serial_forward_count(
-            frame_count=hidden.size(1),
-            chunk_size=args.chunk_size,
-            num_steps=args.flow_steps,
-        ),
-        "diagonal_packed_row_count": diagonal_sample.packed_row_count,
-        "diagonal_schedule_length": len(diagonal_sample.schedule),
+        "full_sequence_seconds": full_timing.seconds,
+        "serial_bpe_chunk_seconds": serial_chunks_timing.seconds,
+        "diagonal_bpe_seconds": diagonal_chunks_timing.seconds,
+        "diagonal_vs_serial_bpe_chunk_speedup": diagonal_vs_serial_chunk_speedup,
+        "diagonal_vs_full_sequence_speedup": diagonal_vs_full_sequence_speedup,
+        "full_sequence_velocity_count": full_sample.forward_count,
+        "serial_bpe_chunk_velocity_count": serial_chunks_sample.forward_count,
+        "diagonal_bpe_velocity_count": diagonal_chunks_sample.forward_count,
+        "full_sequence_dit_forward_count": full_sample.forward_count * cfg_multiplier,
+        "serial_bpe_chunk_dit_forward_count": serial_chunks_sample.forward_count * cfg_multiplier,
+        "diagonal_bpe_dit_forward_count": diagonal_chunks_sample.forward_count * cfg_multiplier,
+        "diagonal_packed_row_count": diagonal_chunks_sample.packed_row_count,
+        "diagonal_schedule_length": len(diagonal_chunks_sample.schedule),
         "diagonal_max_wave_width": max_wave_width,
-        "serial_peak_memory_mb": serial_timing.peak_memory_mb,
-        "diagonal_peak_memory_mb": diagonal_timing.peak_memory_mb,
-        "max_abs_diff": float(diff.max().detach().cpu()),
-        "active_max_abs_diff": float(active_diff.max().detach().cpu())
-        if active_diff.numel() > 0
+        "full_sequence_peak_memory_mb": full_timing.peak_memory_mb,
+        "serial_bpe_chunk_peak_memory_mb": serial_chunks_timing.peak_memory_mb,
+        "diagonal_bpe_peak_memory_mb": diagonal_chunks_timing.peak_memory_mb,
+        "chunk_max_abs_diff": float(chunk_diff.max().detach().cpu()),
+        "chunk_active_max_abs_diff": float(active_chunk_diff.max().detach().cpu())
+        if active_chunk_diff.numel() > 0
         else 0.0,
-        "mean_abs_diff": float(diff.mean().detach().cpu()),
+        "chunk_mean_abs_diff": float(chunk_diff.mean().detach().cpu()),
+        "full_vs_diagonal_bpe_max_abs_diff": float(full_chunk_diff.max().detach().cpu()),
+        "full_vs_diagonal_bpe_active_max_abs_diff": float(
+            active_full_chunk_diff.max().detach().cpu()
+        )
+        if active_full_chunk_diff.numel() > 0
+        else 0.0,
+        "full_vs_diagonal_bpe_mean_abs_diff": float(full_chunk_diff.mean().detach().cpu()),
     }
 
 
@@ -191,7 +221,13 @@ def _module_dtype(module: nn.Module, fallback: torch.dtype) -> torch.dtype:
     return fallback
 
 
-def _tile_time(hidden: Tensor, mask: Tensor, *, frames: int) -> tuple[Tensor, Tensor]:
+def _tile_time(
+    hidden: Tensor,
+    mask: Tensor,
+    *,
+    chunk_lengths: tuple[int, ...],
+    frames: int,
+) -> tuple[Tensor, Tensor, tuple[int, ...]]:
     if frames <= 0:
         raise ValueError("frames must be positive.")
     if hidden.size(1) == 0:
@@ -199,7 +235,28 @@ def _tile_time(hidden: Tensor, mask: Tensor, *, frames: int) -> tuple[Tensor, Te
     repeats = (frames + hidden.size(1) - 1) // hidden.size(1)
     hidden = hidden.repeat(1, repeats, 1)[:, :frames].contiguous()
     mask = mask.repeat(1, repeats)[:, :frames].contiguous()
-    return hidden, mask
+    repeated_lengths = (chunk_lengths * repeats)
+    trimmed_lengths: list[int] = []
+    remaining = frames
+    for length in repeated_lengths:
+        if remaining <= 0:
+            break
+        current = min(length, remaining)
+        trimmed_lengths.append(current)
+        remaining -= current
+    return hidden, mask, tuple(trimmed_lengths)
+
+
+def _single_chunk_lengths(condition: AcousticCondition) -> tuple[int, ...]:
+    lengths = condition.chunk_lengths
+    if lengths is None:
+        raise ValueError("acoustic condition must include BPE chunk lengths.")
+    if len(lengths) != 1:
+        raise ValueError("diagonal profile expects a single batch row.")
+    active_frames = int(condition.mask[0].sum().detach().cpu())
+    if sum(lengths[0]) != active_frames:
+        raise ValueError("BPE chunk lengths must sum to active acoustic frames.")
+    return lengths[0]
 
 
 def _speech_pairs(config: DatasetFactoryConfig) -> Iterable[SpeechPair]:
@@ -263,18 +320,17 @@ def _encode_frames(bpe: object, ids: torch.Tensor) -> torch.Tensor:
     return torch.tensor(encode_frames(frames), dtype=torch.long)
 
 
-def _dit_config(*, layers: int, heads: int) -> Qwen3Config:
+def _dit_config(config: object, *, layers: int, heads: int) -> object:
     if layers <= 0:
         raise ValueError("dit_layers must be positive.")
     if heads <= 0:
         raise ValueError("dit_heads must be positive.")
-    config = Qwen3Config()
-    config.hidden_size = 1024
-    config.num_hidden_layers = layers
-    config.num_attention_heads = heads
-    config.num_key_value_heads = heads
-    config.intermediate_size = 3072
-    return config
+    return replace(
+        config,
+        num_hidden_layers=layers,
+        num_attention_heads=heads,
+        num_key_value_heads=heads,
+    )
 
 
 def _move_batch(batch: CausalLMBatch, device: torch.device) -> CausalLMBatch:
@@ -358,7 +414,7 @@ def _log_stage(args: argparse.Namespace, stage: str, started_at: float) -> None:
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Profile real DiT serial vs diagonal flow sampling."
+        description="Profile full-sequence acoustic flow vs BPE-boundary diagonal flow."
     )
     parser.add_argument("config_name", nargs="?", default="config")
     parser.add_argument("overrides", nargs="*", help="Hydra overrides.")
@@ -366,7 +422,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sample-index", type=int, default=0)
     parser.add_argument("--frames", type=int, default=128)
     parser.add_argument("--flow-steps", type=int, default=16)
-    parser.add_argument("--chunk-size", type=int, default=32)
+    parser.add_argument("--preview-chunks", type=int, default=16)
     parser.add_argument("--wave-stride", type=int, default=1)
     parser.add_argument("--guidance-scale", type=float, default=1.0)
     parser.add_argument("--dit-layers", type=int, default=1)

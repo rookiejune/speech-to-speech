@@ -7,7 +7,7 @@ optimizer_preset: pretrain
 optimizer: muon
 weight_decay:
 schedule: warmup_cosine
-warmup_steps: 50000
+warmup_ratio: 0.01
 stable_steps:
 decay_steps:
 min_lr_ratio: 0.1

@@ -138,7 +138,7 @@ class Generator:
         )
         if generation.token_ids is None:
             raise RuntimeError("semantic generation must return token ids.")
-        semantic_ids, semantic_mask, _ = _semantic_frames_from_generation(
+        semantic_ids, semantic_mask, _, _ = _semantic_frames_from_generation(
             generation.token_ids,
             generation.hidden_states,
             generation.mask,
@@ -176,7 +176,7 @@ class Generator:
         )
         if generation.token_ids is None:
             raise RuntimeError("semantic generation must return token ids.")
-        semantic_ids, semantic_mask, hidden_states = _semantic_frames_from_generation(
+        semantic_ids, semantic_mask, hidden_states, chunk_lengths = _semantic_frames_from_generation(
             generation.token_ids,
             generation.hidden_states,
             generation.mask,
@@ -187,6 +187,7 @@ class Generator:
             hidden_states=hidden_states,
             semantic_ids=semantic_ids,
             mask=semantic_mask,
+            chunk_lengths=chunk_lengths,
         )
         acoustic_features = acoustic_generator(condition)
         acoustic_features = _validate_acoustic_features(acoustic_features, condition.mask)
@@ -333,12 +334,14 @@ def _semantic_frames_from_generation(
     *,
     bpe: SemanticBPE,
     block: ModalityBlock,
-) -> tuple[Tensor, Tensor, Tensor]:
+) -> tuple[Tensor, Tensor, Tensor, tuple[tuple[int, ...], ...]]:
     semantic_rows: list[Tensor] = []
     hidden_rows: list[Tensor] = []
+    chunk_lengths: list[tuple[int, ...]] = []
     for row_index, row in enumerate(token_ids.detach().cpu()):
         token_ids_row: list[int] = []
         hidden_parts: list[Tensor] = []
+        row_chunk_lengths: list[int] = []
         hidden_index = 0
         for token_id in row.tolist():
             token_id = int(token_id)
@@ -351,6 +354,7 @@ def _semantic_frames_from_generation(
             local_id = token_id - block.start
             expanded = _single_codebook_ids(bpe.expand_ids([local_id]))
             token_ids_row.extend(expanded)
+            row_chunk_lengths.append(len(expanded))
             hidden = hidden_states[row_index, hidden_index]
             hidden_parts.append(hidden.unsqueeze(0).expand(len(expanded), -1))
             hidden_index += 1
@@ -361,6 +365,7 @@ def _semantic_frames_from_generation(
             hidden_rows.append(torch.cat(hidden_parts, dim=0))
         else:
             hidden_rows.append(hidden_states.new_empty((0, hidden_states.size(-1))))
+        chunk_lengths.append(tuple(row_chunk_lengths))
 
     max_length = max((row.numel() for row in semantic_rows), default=0)
     semantic_ids = token_ids.new_zeros((token_ids.size(0), max_length))
@@ -380,7 +385,7 @@ def _semantic_frames_from_generation(
             device=hidden_states.device,
             dtype=hidden_states.dtype,
         )
-    return semantic_ids, mask, expanded_hidden
+    return semantic_ids, mask, expanded_hidden, tuple(chunk_lengths)
 
 
 def _validate_acoustic_features(acoustic_features: Tensor, mask: Tensor) -> Tensor:

@@ -48,6 +48,15 @@
 第一轮不要把模型规模和训练配方同时铺成大矩阵。主变量仍然是双向 mixed +
 低权重 acoustic/FM 常驻；模型训练方式只做最小对照，用来判断 LoRA 是否成为瓶颈。
 
+配置上按 `model.backbone`、`model.token_space` 和 `model.acoustic` 三层表达：
+
+- LoRA 对照对应 `model.backbone.train=false` 且 `model.backbone.lora.enabled=true`。
+- full backbone 对照对应 `model.backbone.train=true` 且 `model.backbone.lora.enabled=false`。
+- audio embedding/head 对应 `model.token_space.train_audio_embedding=true` 和
+  `model.token_space.train_audio_special_tokens=true`。
+- acoustic/FM 常驻要求 `model.acoustic.enabled=true`，实际损失权重由
+  `train.acoustic_loss_weight` 控制。
+
 建议顺序：
 
 | 优先级 | 模型 | 训练方式 | 目的 |
@@ -75,7 +84,7 @@ DiT/FM: 1e-4
 ```
 
 当前训练入口已经支持 AdamW 参数组和 Muon 参数组分别设置 learning rate；更细的
-audio embedding/head、backbone、DiT 三路 learning rate 需要先扩展 `anytrain.optim`
+`model.token_space`、`model.backbone`、`model.acoustic` 三路 learning rate 需要先扩展 `anytrain.optim`
 的公共分组接口，不在本轮 `speech-to-speech` 内复制实现。
 
 ## 建议阶段

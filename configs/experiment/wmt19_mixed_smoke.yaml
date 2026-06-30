@@ -14,3 +14,7 @@ datamodule:
 
 trainer:
   name: wmt19-mixed-smoke
+
+model:
+  acoustic:
+    enabled: false

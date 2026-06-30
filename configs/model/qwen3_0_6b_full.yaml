@@ -1,22 +1,33 @@
-model_name_or_path: Qwen/Qwen3-0.6B
-trust_remote_code: false
-load_in_4bit: false
-train_text_embedding: false
-train_audio_embedding: true
-train_audio_special_tokens: true
-train_backbone: true
-train_dit: true
-acoustic_condition_dropout: 0.1
-lora:
-  enabled: false
-  rank: 16
-  alpha: 32
-  dropout: 0.05
-  targets:
-    - q_proj
-    - k_proj
-    - v_proj
-    - o_proj
-    - gate_proj
-    - up_proj
-    - down_proj
+backbone:
+  model_name_or_path: Qwen/Qwen3-0.6B
+  trust_remote_code: false
+  load_in_4bit: false
+  train: true
+  lora:
+    enabled: false
+    rank: 16
+    alpha: 32
+    dropout: 0.05
+    targets:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+
+token_space:
+  train_text_embedding: false
+  train_audio_embedding: true
+  train_audio_special_tokens: true
+
+acoustic:
+  enabled: true
+  train: true
+  condition_dropout: 0.1
+  dit:
+    attention_mode: causal
+    norm_time: false
+    norm_hidden: false
+    norm_acoustic: false

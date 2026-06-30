@@ -1,21 +1,33 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import TypedDict
 
 import torch
 from anytrain.optim import create_llm_lightning_optimizers
 from lightning.pytorch import LightningModule
-from torch import Tensor, device as TorchDevice
+from torch import Tensor
+from torch import device as TorchDevice
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from ..config import TrainConfig
 from ..model.acoustic import AcousticFlowLossStats, acoustic_features_from_batch_side
-from ..model.orchestrator import Orchestrator
-from ..types import CausalLMBatch, IGNORE_INDEX, LongCatBatchSide, TaskFamily
-
+from ..model.orchestrator import (
+    AcousticFlowInputs,
+    DiTConditionTensors,
+    Orchestrator,
+)
+from ..types import IGNORE_INDEX, CausalLMBatch, LongCatBatchSide, TaskFamily
+from .metrics import (
+    ReducedMean,
+    log_reduced_mean,
+    log_reduced_sum,
+    log_reduced_value,
+    reduced_weighted_mean,
+    scaled_loss,
+)
 
 ACOUSTIC_T_BINS = (
     ("0_025", 0.0, 0.25),
@@ -62,47 +74,46 @@ class SpeechToSpeechModule(LightningModule):
 
     def training_step(self, batch: CausalLMBatch, batch_idx: int) -> Tensor:
         del batch_idx
-        output = self.model(batch)
+        output = self.model(
+            batch,
+            return_hidden_states=self.train_config.acoustic_loss_weight > 0.0,
+        )
         row_loss = self._semantic_row_loss(batch, output)
         token_counts = _loss_token_counts(batch, dtype=row_loss.dtype)
-        loss = self._loss(batch, row_loss, token_counts, stage=None)
-        self.log(
-            "loss",
-            loss,
-            batch_size=batch.input_ids.size(0),
-            on_step=True,
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=True,
+        loss = self._loss(
+            batch,
+            row_loss,
+            token_counts,
+            stage=None,
+            hidden_states=_last_hidden_state(output),
         )
         self._log_semantic_accuracy(batch, output, token_counts, stage=None)
         self._log_task_losses(batch, row_loss, token_counts, stage=None)
         self._log_family_group_losses(batch, row_loss, token_counts, stage=None)
-        self.log(
+        log_reduced_sum(
+            self,
             "supervised_tokens",
             token_counts.sum(),
-            batch_size=batch.input_ids.size(0),
             on_step=True,
             on_epoch=False,
-            sync_dist=True,
         )
         self._log_acoustic_frame_count(batch, stage=None)
         return loss
 
     def validation_step(self, batch: CausalLMBatch, batch_idx: int) -> Tensor:
         del batch_idx
-        output = self.model(batch)
+        output = self.model(
+            batch,
+            return_hidden_states=self.train_config.acoustic_loss_weight > 0.0,
+        )
         row_loss = self._semantic_row_loss(batch, output)
         token_counts = _loss_token_counts(batch, dtype=row_loss.dtype)
-        loss = self._loss(batch, row_loss, token_counts, stage="val")
-        self.log(
-            "val/loss",
-            loss,
-            batch_size=batch.input_ids.size(0),
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=True,
+        loss = self._loss(
+            batch,
+            row_loss,
+            token_counts,
+            stage="val",
+            hidden_states=_last_hidden_state(output),
         )
         self._log_semantic_accuracy(batch, output, token_counts, stage="val")
         self._log_task_losses(batch, row_loss, token_counts, stage="val")
@@ -135,6 +146,7 @@ class SpeechToSpeechModule(LightningModule):
 
     def configure_optimizers(self) -> _LightningOptimizerConfig:
         train = self.train_config
+        _validate_scheduler(train)
         return create_llm_lightning_optimizers(
             self.model,
             preset=train.optimizer_preset,
@@ -143,7 +155,7 @@ class SpeechToSpeechModule(LightningModule):
             weight_decay=train.weight_decay,
             muon_lr=_muon_learning_rate(train),
             schedule=train.schedule,
-            warmup_steps=train.warmup_steps,
+            warmup_steps=_scheduler_warmup_steps(train),
             total_steps=_scheduler_total_steps(train),
             stable_steps=train.stable_steps,
             decay_steps=train.decay_steps,
@@ -157,28 +169,47 @@ class SpeechToSpeechModule(LightningModule):
         token_counts: Tensor | None = None,
         *,
         stage: str | None = None,
+        hidden_states: Tensor | None = None,
     ) -> Tensor:
         if row_loss is None:
             row_loss = self._semantic_row_loss(batch)
         if token_counts is None:
             token_counts = _loss_token_counts(batch, dtype=row_loss.dtype)
-        loss = _weighted_mean(row_loss, token_counts)
+        semantic_mean = reduced_weighted_mean(row_loss, token_counts)
+        loss = scaled_loss(semantic_mean)
+        logged_loss = semantic_mean.value
         acoustic_weight = self.train_config.acoustic_loss_weight
-        if acoustic_weight <= 0.0:
-            return loss
-        acoustic = self._acoustic_loss(batch)
-        acoustic_loss = acoustic.loss if isinstance(acoustic, AcousticFlowLossStats) else acoustic
-        self.log(
-            _log_name("loss/acoustic", stage=stage),
-            acoustic_loss,
-            batch_size=batch.input_ids.size(0),
+        if acoustic_weight > 0.0:
+            acoustic = self._acoustic_loss(
+                batch,
+                hidden_states=hidden_states,
+                stage=stage,
+            )
+            acoustic_mean = _acoustic_reduced_mean(batch, acoustic)
+            acoustic_loss = scaled_loss(acoustic_mean)
+            loss = loss + acoustic_weight * acoustic_loss
+            logged_loss = logged_loss + acoustic_weight * acoustic_mean.value
+            log_reduced_mean(
+                self,
+                _log_name("loss/acoustic", stage=stage),
+                acoustic_mean,
+                on_step=stage is None,
+                on_epoch=True,
+            )
+            if isinstance(acoustic, AcousticFlowLossStats):
+                self._log_acoustic_t_bin_losses(acoustic, stage=stage)
+        log_reduced_value(
+            self,
+            _log_name("loss", stage=stage),
+            logged_loss,
+            semantic_mean.weight,
             on_step=stage is None,
             on_epoch=True,
-            sync_dist=True,
+            prog_bar=True,
         )
-        if isinstance(acoustic, AcousticFlowLossStats):
-            self._log_acoustic_t_bin_losses(acoustic, stage=stage)
-        return loss + acoustic_weight * acoustic_loss
+        if stage is None:
+            return loss
+        return logged_loss
 
     def _semantic_row_loss(
         self,
@@ -204,14 +235,18 @@ class SpeechToSpeechModule(LightningModule):
         *,
         stage: str | None,
     ) -> None:
-        self.log(
+        accuracy = self._semantic_accuracy(batch, output).reshape(())
+        mean = reduced_weighted_mean(
+            accuracy.detach(),
+            token_counts.sum().detach().reshape(()),
+        )
+        log_reduced_mean(
+            self,
             _log_name("accuracy", stage=stage),
-            self._semantic_accuracy(batch, output),
-            batch_size=int(token_counts.sum().detach().item()),
+            mean,
             on_step=stage is None,
             on_epoch=True,
             prog_bar=True,
-            sync_dist=True,
         )
 
     def _semantic_accuracy(
@@ -240,24 +275,22 @@ class SpeechToSpeechModule(LightningModule):
         row_loss = row_loss.detach()
         for family in TaskFamily:
             mask = batch.task_family.eq(family.id)
-            if not bool(mask.any()):
-                continue
+            mean = reduced_weighted_mean(row_loss[mask], token_counts[mask])
             tokens = token_counts[mask].sum()
-            self.log(
+            log_reduced_mean(
+                self,
                 _log_name(f"loss/{family.value}", stage=stage),
-                _weighted_mean(row_loss[mask], token_counts[mask]),
-                batch_size=int(mask.sum().item()),
+                mean,
                 on_step=stage is None,
                 on_epoch=True,
-                sync_dist=True,
             )
-            self.log(
+            log_reduced_sum(
+                self,
                 _log_name(f"tokens/{family.value}", stage=stage),
                 tokens,
-                batch_size=int(mask.sum().item()),
                 on_step=stage is None,
                 on_epoch=False,
-                sync_dist=True,
+                skip_zero=True,
             )
 
     def _log_family_group_losses(
@@ -285,31 +318,33 @@ class SpeechToSpeechModule(LightningModule):
             mask = torch.zeros_like(batch.task_family, dtype=torch.bool)
             for family in families:
                 mask |= batch.task_family.eq(family.id)
-            if not bool(mask.any()):
-                continue
-            self.log(
+            log_reduced_mean(
+                self,
                 _log_name(f"loss/{name}", stage=stage),
-                _weighted_mean(row_loss[mask], token_counts[mask]),
-                batch_size=int(mask.sum().item()),
+                reduced_weighted_mean(row_loss[mask], token_counts[mask]),
                 on_step=stage is None,
                 on_epoch=True,
-                sync_dist=True,
             )
 
     def _log_acoustic_frame_count(self, batch: CausalLMBatch, *, stage: str | None) -> None:
         if batch.target_audio is None:
             return
-        frames = batch.target_audio.acoustic_mask.sum()
-        self.log(
+        frames = batch.target_audio.acoustic_mask.sum().float()
+        log_reduced_sum(
+            self,
             _log_name("acoustic_frames", stage=stage),
             frames,
-            batch_size=batch.input_ids.size(0),
             on_step=stage is None,
             on_epoch=stage is not None,
-            sync_dist=True,
         )
 
-    def _acoustic_loss(self, batch: CausalLMBatch) -> Tensor | AcousticFlowLossStats:
+    def _acoustic_loss(
+        self,
+        batch: CausalLMBatch,
+        *,
+        hidden_states: Tensor | None = None,
+        stage: str | None = None,
+    ) -> Tensor | AcousticFlowLossStats:
         if self.bpe is None:
             raise RuntimeError("acoustic loss requires a LongCat BPE tokenizer.")
         if self.acoustic_feature_extractor is None:
@@ -324,12 +359,45 @@ class SpeechToSpeechModule(LightningModule):
             batch.target_audio,
             feature_extractor=feature_extractor,
         )
+        acoustic_flow_inputs = getattr(self.model, "acoustic_flow_inputs", None)
+        if callable(acoustic_flow_inputs):
+            inputs = acoustic_flow_inputs(
+                batch,
+                self.bpe,
+                target_features,
+                hidden_states=hidden_states,
+                target_mask=target_mask,
+                noise=None,
+                acoustic_condition=None,
+                source_feature_extractor=feature_extractor,
+            )
+            if not isinstance(inputs, AcousticFlowInputs):
+                raise TypeError("model acoustic_flow_inputs() must return AcousticFlowInputs.")
+            stats_from_inputs = getattr(self.model, "acoustic_flow_loss_stats_from_inputs", None)
+            if not callable(stats_from_inputs):
+                raise TypeError(
+                    "model with acoustic_flow_inputs() must provide "
+                    "acoustic_flow_loss_stats_from_inputs()."
+                )
+            stats = stats_from_inputs(inputs, timesteps=None)
+            if not isinstance(stats, AcousticFlowLossStats):
+                raise TypeError(
+                    "model acoustic_flow_loss_stats_from_inputs() must return "
+                    "AcousticFlowLossStats."
+                )
+            self._log_acoustic_condition_stats(
+                inputs,
+                timesteps=stats.timesteps,
+                stage=stage,
+            )
+            return stats
         acoustic_flow_loss_stats = getattr(self.model, "acoustic_flow_loss_stats", None)
         if callable(acoustic_flow_loss_stats):
             return acoustic_flow_loss_stats(
                 batch,
                 self.bpe,
                 target_features,
+                hidden_states=hidden_states,
                 target_mask=target_mask,
                 source_feature_extractor=feature_extractor,
             )
@@ -337,6 +405,7 @@ class SpeechToSpeechModule(LightningModule):
             batch,
             self.bpe,
             target_features,
+            hidden_states=hidden_states,
             target_mask=target_mask,
             source_feature_extractor=feature_extractor,
         )
@@ -355,27 +424,94 @@ class SpeechToSpeechModule(LightningModule):
                 mask = timesteps.ge(start) & timesteps.le(end)
             else:
                 mask = timesteps.ge(start) & timesteps.lt(end)
-            if not bool(mask.any()):
-                continue
-            weight = row_weight[mask]
-            if not bool(weight.gt(0).any()):
-                continue
-            loss = (row_loss[mask] * weight).sum() / weight.sum()
-            batch_size = int(weight.sum().detach().item())
-            self.log(
+            log_reduced_mean(
+                self,
                 _log_name(f"loss/acoustic_t/{name}", stage=stage),
-                loss,
-                batch_size=batch_size,
+                reduced_weighted_mean(row_loss[mask], row_weight[mask]),
                 on_step=stage is None,
                 on_epoch=True,
-                sync_dist=True,
             )
 
+    def _log_acoustic_condition_stats(
+        self,
+        inputs: AcousticFlowInputs,
+        *,
+        timesteps: Tensor,
+        stage: str | None,
+    ) -> None:
+        condition_tensors = getattr(self.model, "acoustic_condition_tensors", None)
+        if not callable(condition_tensors):
+            return
+        tensors = condition_tensors(inputs, timesteps=timesteps)
+        if not isinstance(tensors, DiTConditionTensors):
+            raise TypeError("model acoustic_condition_tensors() must return DiTConditionTensors.")
+        mask = inputs.mask.to(device=inputs.last_hidden_state.device, dtype=torch.bool)
+        frame_weights = mask.to(dtype=inputs.last_hidden_state.dtype)
+        batch_weights = frame_weights.sum(dim=1).gt(0).to(dtype=inputs.last_hidden_state.dtype)
+        self._log_tensor_stats(
+            _log_name("condition/hidden", stage=stage),
+            tensors.hidden.detach(),
+            frame_weights,
+            on_step=stage is None,
+            on_epoch=True,
+        )
+        self._log_tensor_stats(
+            _log_name("condition/time", stage=stage),
+            tensors.time.detach().squeeze(1),
+            batch_weights,
+            on_step=stage is None,
+            on_epoch=True,
+        )
+        self._log_tensor_stats(
+            _log_name("condition/acoustic", stage=stage),
+            tensors.acoustic.detach().squeeze(1),
+            batch_weights,
+            on_step=stage is None,
+            on_epoch=True,
+        )
 
-def _scheduler_total_steps(train: TrainConfig) -> int | None:
-    if train.schedule == "constant":
-        return None
+    def _log_tensor_stats(
+        self,
+        prefix: str,
+        values: Tensor,
+        weights: Tensor,
+        *,
+        on_step: bool,
+        on_epoch: bool,
+    ) -> None:
+        stats = _weighted_tensor_stats(values, weights)
+        log_reduced_value(
+            self,
+            f"{prefix}_mean",
+            stats.mean,
+            stats.weight,
+            on_step=on_step,
+            on_epoch=on_epoch,
+        )
+        log_reduced_value(
+            self,
+            f"{prefix}_std",
+            stats.std,
+            stats.weight,
+            on_step=on_step,
+            on_epoch=on_epoch,
+        )
+
+
+def _validate_scheduler(train: TrainConfig) -> None:
+    if train.schedule != "warmup_cosine":
+        raise ValueError("train.schedule must be 'warmup_cosine'.")
+
+
+def _scheduler_total_steps(train: TrainConfig) -> int:
     return train.max_steps
+
+
+def _scheduler_warmup_steps(train: TrainConfig) -> int:
+    ratio = train.warmup_ratio
+    if ratio < 0.0 or ratio >= 1.0:
+        raise ValueError("train.warmup_ratio must be greater than or equal to 0 and less than 1.")
+    return round(train.max_steps * ratio)
 
 
 def _adamw_learning_rate(train: TrainConfig) -> float:
@@ -418,11 +554,43 @@ def _loss_positions(batch: CausalLMBatch) -> Tensor:
     return (mask & keep).nonzero(as_tuple=False)
 
 
-def _weighted_mean(values: Tensor, weights: Tensor) -> Tensor:
-    total = weights.sum()
-    if not bool(total.gt(0)):
-        raise ValueError("weighted mean requires a positive weight sum.")
-    return (values * weights).sum() / total
+def _acoustic_reduced_mean(
+    batch: CausalLMBatch,
+    acoustic: Tensor | AcousticFlowLossStats,
+) -> ReducedMean:
+    if isinstance(acoustic, AcousticFlowLossStats):
+        return reduced_weighted_mean(acoustic.row_loss, acoustic.row_weight)
+    if batch.target_audio is None:
+        raise RuntimeError("acoustic loss requires target_audio in the batch.")
+    weight = batch.target_audio.acoustic_mask.sum().to(device=acoustic.device, dtype=acoustic.dtype)
+    return reduced_weighted_mean(acoustic.reshape(()), weight.reshape(()))
+
+
+@dataclass(frozen=True)
+class _TensorStats:
+    mean: Tensor
+    std: Tensor
+    weight: Tensor
+
+
+def _weighted_tensor_stats(values: Tensor, weights: Tensor) -> _TensorStats:
+    if values.dim() < 1:
+        raise ValueError("condition stats values must have at least one dimension.")
+    if weights.shape != values.shape[:-1]:
+        raise ValueError("condition stats weights must match values except feature dimension.")
+    weights = weights.to(device=values.device, dtype=values.dtype)
+    expanded_weights = weights.unsqueeze(-1).expand_as(values)
+    mean = reduced_weighted_mean(values.reshape(-1), expanded_weights.reshape(-1))
+    centered = values - mean.value.to(device=values.device, dtype=values.dtype)
+    variance = reduced_weighted_mean(
+        centered.square().reshape(-1),
+        expanded_weights.reshape(-1),
+    )
+    return _TensorStats(
+        mean=mean.value,
+        std=variance.value.clamp_min(0.0).sqrt(),
+        weight=mean.weight,
+    )
 
 
 def _log_name(name: str, *, stage: str | None) -> str:
@@ -440,6 +608,15 @@ def _feature_extractor_to_device(extractor: object, device: TorchDevice) -> obje
     if hasattr(extractor, "device"):
         setattr(extractor, "device", device)
     return extractor
+
+
+def _last_hidden_state(output: CausalLMOutputWithPast) -> Tensor | None:
+    hidden_states = output.hidden_states
+    if hidden_states is None:
+        return None
+    if len(hidden_states) == 0:
+        raise RuntimeError("model output hidden_states must not be empty.")
+    return hidden_states[-1]
 
 
 def _move_longcat_side(

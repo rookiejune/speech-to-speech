@@ -86,6 +86,7 @@ def acoustic_velocity(
     last_hidden_state: Tensor,
     acoustic_condition: Tensor,
     mask: Tensor,
+    position_ids: Tensor | None = None,
     guidance_scale: float = 1.0,
 ) -> Tensor:
     _validate_guidance_scale(guidance_scale)
@@ -96,6 +97,7 @@ def acoustic_velocity(
         last_hidden_state=last_hidden_state,
         acoustic_condition=acoustic_condition,
         mask=mask,
+        position_ids=position_ids,
     )
     if guidance_scale == 1.0:
         return conditional
@@ -106,6 +108,7 @@ def acoustic_velocity(
         last_hidden_state=last_hidden_state,
         acoustic_condition=null_acoustic_condition(dit, x_t),
         mask=mask,
+        position_ids=position_ids,
     )
     return unconditional + guidance_scale * (conditional - unconditional)
 
@@ -168,6 +171,11 @@ def acoustic_condition(
         hidden_states=expanded_hidden,
         semantic_ids=_single_codebook_ids(semantic_frames),
         mask=mask,
+        chunk_lengths=_chunk_lengths_from_bpe_mask(
+            bpe_mask,
+            local_ids,
+            bpe=bpe,
+        ),
     )
 
 
@@ -407,6 +415,22 @@ def _single_codebook_ids(frames: Tensor) -> Tensor:
     return frames.squeeze(-1)
 
 
+def _chunk_lengths_from_bpe_mask(
+    mask: Tensor,
+    local_ids: Tensor,
+    *,
+    bpe: CodecBPE,
+) -> tuple[tuple[int, ...], ...]:
+    lengths: list[tuple[int, ...]] = []
+    for row_mask, row_ids in zip(mask.detach().cpu(), local_ids.detach().cpu(), strict=True):
+        row_lengths: list[int] = []
+        for token_id in row_ids[row_mask].tolist():
+            expanded = bpe.expand_ids([int(token_id)])
+            row_lengths.append(len(expanded))
+        lengths.append(tuple(row_lengths))
+    return tuple(lengths)
+
+
 def _dit_velocity(
     dit: nn.Module,
     *,
@@ -415,14 +439,18 @@ def _dit_velocity(
     last_hidden_state: Tensor,
     acoustic_condition: Tensor,
     mask: Tensor,
+    position_ids: Tensor | None,
 ) -> Tensor:
-    outputs = dit(
-        x_t=x_t,
-        last_hidden_state=last_hidden_state,
-        timesteps=timesteps,
-        acoustic_condition=acoustic_condition,
-        attention_mask=mask.to(device=x_t.device, dtype=torch.long),
-    )
+    kwargs: dict[str, Tensor] = {
+        "x_t": x_t,
+        "last_hidden_state": last_hidden_state,
+        "timesteps": timesteps,
+        "acoustic_condition": acoustic_condition,
+        "attention_mask": mask.to(device=x_t.device, dtype=torch.long),
+    }
+    if position_ids is not None:
+        kwargs["position_ids"] = position_ids.to(device=x_t.device, dtype=torch.long)
+    outputs = dit(**kwargs)
     prediction = outputs.last_hidden_state
     if prediction.shape != x_t.shape:
         raise ValueError("DiT output and acoustic velocity target must have the same shape.")

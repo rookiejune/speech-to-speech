@@ -23,6 +23,11 @@ a wrapper. The shell env does not initialize those homes, and the default
 training root is resolved inside Python as
 `zhuyin.env.train_dir("speech-to-speech")`.
 
+Callback settings live under `trainer.callbacks`. For example, append
+`trainer.callbacks.generation.every_n_steps=1000` or
+`trainer.callbacks.generation.acoustic_sampler=diagonal_bpe` to a wrapper
+command.
+
 ## Experiment Groups
 
 - `jobs/001/`: staged S0/S1/S2 and first LoRA/full training checks.

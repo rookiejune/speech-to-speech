@@ -10,3 +10,7 @@ defaults:
 
 trainer:
   name: wmt19-ar-smoke
+
+model:
+  acoustic:
+    enabled: false

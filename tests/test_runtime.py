@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import torch
 
-from speech_to_speech.config import BPEConfig, ModelConfig
+from speech_to_speech.config import BPEConfig, ModelConfig, QwenBackboneConfig
 from speech_to_speech import runtime
 from speech_to_speech.types import SpeechPair
 
@@ -25,20 +25,26 @@ class RuntimeTest(unittest.TestCase):
             with patch("transformers.AutoTokenizer.from_pretrained", from_pretrained):
                 first = runtime.qwen3_tokenizer(
                     ModelConfig(
-                        model_name_or_path="Qwen/Qwen3-0.6B",
-                        trust_remote_code=False,
+                        backbone=QwenBackboneConfig(
+                            model_name_or_path="Qwen/Qwen3-0.6B",
+                            trust_remote_code=False,
+                        ),
                     )
                 )
                 second = runtime.qwen3_tokenizer(
                     ModelConfig(
-                        model_name_or_path="Qwen/Qwen3-0.6B",
-                        trust_remote_code=False,
+                        backbone=QwenBackboneConfig(
+                            model_name_or_path="Qwen/Qwen3-0.6B",
+                            trust_remote_code=False,
+                        ),
                     )
                 )
                 third = runtime.qwen3_tokenizer(
                     ModelConfig(
-                        model_name_or_path="Qwen/Qwen3-8B",
-                        trust_remote_code=True,
+                        backbone=QwenBackboneConfig(
+                            model_name_or_path="Qwen/Qwen3-8B",
+                            trust_remote_code=True,
+                        ),
                     )
                 )
 

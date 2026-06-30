@@ -12,7 +12,13 @@ from torch import nn
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from speech_to_speech.config import LoRAConfig, ModelConfig
+from speech_to_speech.config import (
+    AcousticDecoderConfig,
+    DiTModelConfig,
+    LoRAConfig,
+    ModelConfig,
+    QwenBackboneConfig,
+)
 from speech_to_speech.datamodule.batch_builder import CausalLMBatchBuilder
 from speech_to_speech.model.orchestrator import AcousticSampler, Orchestrator
 from speech_to_speech.model import orchestrator
@@ -184,6 +190,38 @@ class OrchestratorTest(unittest.TestCase):
         self.assertTrue(torch.equal(stats.row_weight, torch.tensor([8.0])))
         self.assertTrue(torch.equal(stats.timesteps, torch.tensor([0.25])))
 
+    def test_acoustic_flow_inputs_exposes_prepared_condition_tensors(self) -> None:
+        tokenizer = MockTokenizer()
+        bpe = _bpe()
+        dit = MockDiT(hidden_size=4)
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            dit=dit,
+            tokenizer=tokenizer,
+            bpe_vocab_size=bpe.vocab_size,
+            pretrained=False,
+        )
+        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        batch = builder.translation(
+            TranslationExample(
+                source_ids=torch.tensor([3]),
+                target_ids=torch.tensor([4]),
+            )
+        )
+        hidden_states = torch.ones(batch.input_ids.size(0), batch.input_ids.size(1), 4)
+
+        inputs = model.acoustic_flow_inputs(
+            batch,
+            bpe,
+            torch.ones((1, 2, 4)),
+            hidden_states=hidden_states,
+            noise=torch.zeros((1, 2, 4)),
+        )
+
+        self.assertEqual(tuple(inputs.last_hidden_state.shape), (1, 2, 4))
+        self.assertEqual(tuple(inputs.acoustic_condition.shape), (1, 4))
+        self.assertEqual(inputs.mask.tolist(), [[True, True]])
+
     def test_acoustic_flow_loss_aligns_condition_dtype_to_dit(self) -> None:
         tokenizer = MockTokenizer()
         bpe = _bpe()
@@ -268,7 +306,7 @@ class OrchestratorTest(unittest.TestCase):
             )
         )
 
-    def test_acoustic_condition_dropout_only_runs_in_training(self) -> None:
+    def test_acoustic_condition_drop_only_runs_in_training(self) -> None:
         tokenizer = MockTokenizer()
         bpe = _bpe()
         dit = MockDiT(hidden_size=4)
@@ -277,7 +315,9 @@ class OrchestratorTest(unittest.TestCase):
             dit=dit,
             tokenizer=tokenizer,
             bpe_vocab_size=bpe.vocab_size,
-            model_config=ModelConfig(acoustic_condition_dropout=1.0),
+            model_config=ModelConfig(
+                acoustic=AcousticDecoderConfig(condition_dropout=1.0)
+            ),
             pretrained=False,
         )
         builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
@@ -518,7 +558,7 @@ class OrchestratorTest(unittest.TestCase):
         self.assertEqual(codec.semantic_ids.tolist(), [[2, 1]])
         self.assertEqual(acoustic.condition.semantic_ids.tolist(), [[2, 1]])
 
-    def test_acoustic_feature_generator_runs_default_diagonal_sampler(self) -> None:
+    def test_acoustic_feature_generator_runs_default_full_sequence_sampler(self) -> None:
         tokenizer = MockTokenizer()
         dit = ConstantDiT(hidden_size=4)
         model = Orchestrator(
@@ -539,7 +579,7 @@ class OrchestratorTest(unittest.TestCase):
         self.assertEqual(tuple(features.shape), (1, 3, 4))
         self.assertTrue(torch.equal(features[:, :2], torch.ones((1, 2, 4))))
         self.assertTrue(torch.equal(features[:, 2:], torch.zeros((1, 1, 4))))
-        self.assertEqual(dit.forward_count, 3)
+        self.assertEqual(dit.forward_count, 2)
 
     def test_acoustic_feature_generator_can_use_serial_sampler(self) -> None:
         tokenizer = MockTokenizer()
@@ -566,7 +606,93 @@ class OrchestratorTest(unittest.TestCase):
         self.assertEqual(tuple(features.shape), (1, 3, 4))
         self.assertTrue(torch.equal(features[:, :2], torch.ones((1, 2, 4))))
         self.assertTrue(torch.equal(features[:, 2:], torch.zeros((1, 1, 4))))
+        self.assertEqual(dit.forward_count, 2)
+
+    def test_acoustic_feature_generator_can_use_causal_window_sampler(self) -> None:
+        tokenizer = MockTokenizer()
+        dit = ConstantDiT(hidden_size=4)
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            dit=dit,
+            tokenizer=tokenizer,
+            bpe_vocab_size=5,
+            pretrained=False,
+        )
+        condition = AcousticCondition(
+            hidden_states=torch.ones((1, 3, 4)),
+            semantic_ids=torch.tensor([[1, 2, 3]]),
+            mask=torch.tensor([[True, True, False]]),
+        )
+
+        features = model.acoustic_feature_generator(
+            num_steps=2,
+            chunk_size=2,
+            left_context_chunks=1,
+            sampler=AcousticSampler.CAUSAL_WINDOW,
+        )(condition)
+
+        self.assertEqual(tuple(features.shape), (1, 3, 4))
+        self.assertTrue(torch.equal(features[:, :2], torch.ones((1, 2, 4))))
+        self.assertTrue(torch.equal(features[:, 2:], torch.zeros((1, 1, 4))))
         self.assertEqual(dit.forward_count, 4)
+
+    def test_causal_window_sampler_defaults_to_full_left_context(self) -> None:
+        tokenizer = MockTokenizer()
+        dit = ShapeTrackingDiT(hidden_size=4)
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            dit=dit,
+            tokenizer=tokenizer,
+            bpe_vocab_size=5,
+            pretrained=False,
+        )
+        condition = AcousticCondition(
+            hidden_states=torch.ones((1, 5, 4)),
+            semantic_ids=torch.tensor([[1, 2, 3, 4, 5]]),
+            mask=torch.tensor([[True, True, True, True, True]]),
+        )
+
+        model.acoustic_feature_generator(
+            num_steps=1,
+            chunk_size=2,
+            sampler=AcousticSampler.CAUSAL_WINDOW,
+        )(condition)
+
+        self.assertEqual(
+            dit.forward_shapes,
+            [
+                (1, 2, 4),
+                (1, 4, 4),
+                (1, 5, 4),
+            ],
+        )
+
+    def test_acoustic_feature_generator_can_use_bpe_diagonal_sampler(self) -> None:
+        tokenizer = MockTokenizer()
+        dit = ConstantDiT(hidden_size=4)
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            dit=dit,
+            tokenizer=tokenizer,
+            bpe_vocab_size=5,
+            pretrained=False,
+        )
+        condition = AcousticCondition(
+            hidden_states=torch.ones((1, 5, 4)),
+            semantic_ids=torch.tensor([[1, 2, 3, 4, 5]]),
+            mask=torch.tensor([[True, True, True, True, False]]),
+            chunk_lengths=((2, 2),),
+        )
+
+        features = model.acoustic_feature_generator(
+            num_steps=2,
+            sampler=AcousticSampler.DIAGONAL_BPE,
+        )(condition)
+
+        self.assertEqual(tuple(features.shape), (1, 5, 4))
+        self.assertTrue(torch.equal(features[:, :4], torch.ones((1, 4, 4))))
+        self.assertTrue(torch.equal(features[:, 4:], torch.zeros((1, 1, 4))))
+        self.assertEqual(dit.forward_count, 3)
 
     def test_acoustic_feature_generator_uses_explicit_acoustic_condition(self) -> None:
         tokenizer = MockTokenizer()
@@ -590,6 +716,30 @@ class OrchestratorTest(unittest.TestCase):
         )(condition)
 
         self.assertEqual(dit.conditions, [[1.0, 2.0, 3.0, 4.0]])
+
+    def test_model_config_can_create_dit(self) -> None:
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            tokenizer=MockTokenizer(),
+            bpe_vocab_size=5,
+            model_config=ModelConfig(
+                acoustic=AcousticDecoderConfig(
+                    enabled=True,
+                    dit=DiTModelConfig(
+                        hidden_size=4,
+                        num_hidden_layers=1,
+                        intermediate_size=8,
+                        num_attention_heads=2,
+                        num_key_value_heads=2,
+                    ),
+                )
+            ),
+            pretrained=False,
+        )
+
+        self.assertIsNotNone(model.dit)
+        self.assertEqual(model.dit.config.hidden_size, 4)
+        self.assertEqual(model.dit.config.num_hidden_layers, 1)
 
     def test_default_trainable_policy_freezes_text_and_trains_audio(self) -> None:
         tokenizer = MockTokenizer()
@@ -616,6 +766,23 @@ class OrchestratorTest(unittest.TestCase):
             )
         )
         self.assertTrue(any(parameter.requires_grad for parameter in dit.parameters()))
+
+    def test_audio_embedding_uses_qwen_initializer_range(self) -> None:
+        tokenizer = MockTokenizer()
+        qwen = MockQwen(vocab_size=16, hidden_size=512)
+        qwen.config.initializer_range = 0.01
+
+        model = Orchestrator(
+            qwen3=qwen,
+            tokenizer=tokenizer,
+            bpe_vocab_size=4096,
+            pretrained=False,
+        )
+
+        audio = model.embed_tokens.modality_embeddings[Modality.AUDIO.value].weight
+        self.assertLess(abs(float(audio.detach().std()) - 0.01), 0.002)
+        self.assertLess(abs(float(model.embed_tokens.special_embeddings["boa"].detach().std()) - 0.01), 0.006)
+        self.assertLess(abs(float(model.embed_tokens.special_embeddings["eoa"].detach().std()) - 0.01), 0.006)
 
     def test_lora_parameters_are_trainable_when_peft_is_applied(self) -> None:
         tokenizer = MockTokenizer()
@@ -651,8 +818,10 @@ class OrchestratorTest(unittest.TestCase):
                 tokenizer=MockTokenizer(),
                 bpe_vocab_size=5,
                 model_config=ModelConfig(
-                    load_in_4bit=False,
-                    lora=LoRAConfig(enabled=False),
+                    backbone=QwenBackboneConfig(
+                        load_in_4bit=False,
+                        lora=LoRAConfig(enabled=False),
+                    ),
                 ),
             )
 
@@ -677,7 +846,9 @@ class MockDiT(nn.Module):
         timesteps: torch.Tensor,
         acoustic_condition: torch.Tensor,
         attention_mask: torch.Tensor,
+        position_ids: torch.Tensor | None = None,
     ) -> BaseModelOutputWithPast:
+        del position_ids
         self.attention_mask = attention_mask
         self.last_hidden_state = last_hidden_state
         self.timesteps = timesteps
@@ -700,11 +871,38 @@ class ConstantDiT(nn.Module):
         timesteps: torch.Tensor,
         acoustic_condition: torch.Tensor,
         attention_mask: torch.Tensor,
+        position_ids: torch.Tensor | None = None,
     ) -> BaseModelOutputWithPast:
-        del last_hidden_state, timesteps, acoustic_condition
+        del last_hidden_state, timesteps, acoustic_condition, position_ids
         self.forward_count += 1
         velocity = attention_mask.to(dtype=x_t.dtype).unsqueeze(-1).expand_as(x_t)
         return BaseModelOutputWithPast(last_hidden_state=velocity)
+
+
+class ShapeTrackingDiT(ConstantDiT):
+    def __init__(self, *, hidden_size: int) -> None:
+        super().__init__(hidden_size=hidden_size)
+        self.forward_shapes: list[tuple[int, int, int]] = []
+
+    def forward(
+        self,
+        *,
+        x_t: torch.Tensor,
+        last_hidden_state: torch.Tensor,
+        timesteps: torch.Tensor,
+        acoustic_condition: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor | None = None,
+    ) -> BaseModelOutputWithPast:
+        self.forward_shapes.append(tuple(x_t.shape))
+        return super().forward(
+            x_t=x_t,
+            last_hidden_state=last_hidden_state,
+            timesteps=timesteps,
+            acoustic_condition=acoustic_condition,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+        )
 
 
 class ConditionDiT(nn.Module):
@@ -722,8 +920,9 @@ class ConditionDiT(nn.Module):
         timesteps: torch.Tensor,
         acoustic_condition: torch.Tensor,
         attention_mask: torch.Tensor,
+        position_ids: torch.Tensor | None = None,
     ) -> BaseModelOutputWithPast:
-        del last_hidden_state, timesteps, attention_mask
+        del last_hidden_state, timesteps, attention_mask, position_ids
         self.conditions.append([float(value) for value in acoustic_condition[0].detach().cpu()])
         return BaseModelOutputWithPast(last_hidden_state=torch.zeros_like(x_t))
 

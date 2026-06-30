@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from speech_to_speech.config import ModelConfig
+from speech_to_speech.config import DiTAttentionMode, ModelConfig
 from speech_to_speech import smoke
 from helpers import (
     MockFrameBPE,
@@ -28,8 +28,16 @@ class SmokeRunnerTest(unittest.TestCase):
         self.assertEqual(config.bpe.vocab_size, 10000)
         self.assertEqual(config.train.max_steps, 5_000_000)
         self.assertEqual(config.train.schedule, "warmup_cosine")
-        self.assertEqual(config.train.warmup_steps, 50_000)
+        self.assertEqual(config.train.warmup_ratio, 0.01)
         self.assertEqual(config.train.device, "auto")
+        self.assertEqual(config.trainer.callbacks.checkpoint.every_n_steps, 10_000)
+        self.assertEqual(config.trainer.callbacks.sample.every_n_steps, 0)
+        generation = config.trainer.callbacks.generation
+        self.assertEqual(generation.every_n_steps, 5_000)
+        self.assertEqual(generation.flow_steps, 32)
+        self.assertIsNone(generation.chunk_size)
+        self.assertIsNone(generation.left_context_chunks)
+        self.assertEqual(generation.acoustic_sampler, "serial")
 
     def test_load_config_reads_wmt19_mixed_smoke_experiment(self) -> None:
         config = smoke.load_config(overrides=("experiment=wmt19_mixed_smoke",))
@@ -38,9 +46,13 @@ class SmokeRunnerTest(unittest.TestCase):
         self.assertEqual(config.tasks.enabled, ("autoregression", "translation"))
         self.assertEqual(config.tasks.weights.source_ar, 1.0)
         self.assertEqual(config.tasks.weights.source_to_target, 1.0)
-        self.assertTrue(config.model.load_in_4bit)
-        self.assertTrue(config.model.lora.enabled)
-        self.assertEqual(config.model.acoustic_condition_dropout, 0.1)
+        self.assertTrue(config.model.backbone.load_in_4bit)
+        self.assertTrue(config.model.backbone.lora.enabled)
+        self.assertEqual(config.model.acoustic.condition_dropout, 0.1)
+        self.assertFalse(config.model.acoustic.enabled)
+        self.assertFalse(config.model.acoustic.dit.norm_time)
+        self.assertFalse(config.model.acoustic.dit.norm_hidden)
+        self.assertFalse(config.model.acoustic.dit.norm_acoustic)
         self.assertEqual(config.train.acoustic_loss_weight, 0.0)
 
     def test_load_config_reads_stage_task_weights(self) -> None:
@@ -62,7 +74,71 @@ class SmokeRunnerTest(unittest.TestCase):
         self.assertEqual(config.tasks.enabled, ("translation",))
         self.assertEqual(config.datamodule.dataloader.batch_size, 4)
         self.assertEqual(config.train.acoustic_loss_weight, 0.01)
-        self.assertEqual(config.model.acoustic_condition_dropout, 0.1)
+        self.assertEqual(config.model.acoustic.condition_dropout, 0.1)
+        self.assertTrue(config.model.acoustic.enabled)
+        self.assertIs(config.model.acoustic.dit.attention_mode, DiTAttentionMode.CAUSAL)
+
+    def test_load_config_reads_dit_overrides(self) -> None:
+        config = smoke.load_config(
+            overrides=(
+                "experiment=wmt19_acoustic_smoke",
+                "model.acoustic.dit.attention_mode=bidirectional",
+                "model.acoustic.dit.norm_hidden=true",
+                "model.acoustic.dit.norm_acoustic=true",
+            )
+        )
+
+        self.assertIs(config.model.acoustic.dit.attention_mode, DiTAttentionMode.BIDIRECTIONAL)
+        self.assertFalse(config.model.acoustic.dit.norm_time)
+        self.assertTrue(config.model.acoustic.dit.norm_hidden)
+        self.assertTrue(config.model.acoustic.dit.norm_acoustic)
+
+    def test_load_config_rejects_unknown_dit_attention_mode(self) -> None:
+        with self.assertRaises(ValueError):
+            smoke.load_config(
+                overrides=(
+                    "experiment=wmt19_acoustic_smoke",
+                    "model.acoustic.dit.attention_mode=offline",
+                )
+            )
+
+    def test_acoustic_training_requires_acoustic_decoder(self) -> None:
+        config = smoke.load_config(
+            overrides=(
+                "experiment=wmt19_acoustic_smoke",
+                "model.acoustic.enabled=false",
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "model.acoustic.enabled"):
+            smoke._validate_acoustic_training_model(config.model, config.train)
+
+    def test_unknown_model_fields_are_rejected(self) -> None:
+        with self.assertRaisesRegex(KeyError, "unknown ModelConfig field"):
+            smoke.load_config(
+                overrides=(
+                    "experiment=wmt19_acoustic_smoke",
+                    "+model.unknown=false",
+                )
+            )
+
+    def test_unknown_trainer_fields_are_rejected(self) -> None:
+        with self.assertRaisesRegex(KeyError, "unknown TrainerConfig field"):
+            smoke.load_config(
+                overrides=(
+                    "experiment=wmt19_acoustic_smoke",
+                    "+trainer.unknown=2",
+                )
+            )
+
+    def test_unknown_trainer_callback_fields_are_rejected(self) -> None:
+        with self.assertRaisesRegex(KeyError, "unknown TrainerCallbacksConfig field"):
+            smoke.load_config(
+                overrides=(
+                    "experiment=wmt19_acoustic_smoke",
+                    "+trainer.callbacks.unknown.enabled=true",
+                )
+            )
 
     def test_run_smoke_wires_real_dataset_to_trainer(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -75,9 +151,9 @@ class SmokeRunnerTest(unittest.TestCase):
                 "experiment=wmt19_ar_smoke",
                 "bpe.vocab_size=16",
                 "bpe.max_token_length=4",
-                "model.train_dit=false",
-                "model.acoustic_condition_dropout=0.25",
-                "model.lora.enabled=false",
+                "model.acoustic.train=false",
+                "model.acoustic.condition_dropout=0.25",
+                "model.backbone.lora.enabled=false",
                 "train.optimizer=adamw",
                 "train.device=cpu",
                 "train.precision=32-true",
@@ -111,7 +187,7 @@ class SmokeRunnerTest(unittest.TestCase):
             self.assertFalse(FakeTrainer.last_kwargs["enable_progress_bar"])
             self.assertEqual(FakeTrainer.last_fit_module.train.max_steps, 1)
             self.assertEqual(
-                FakeTrainer.last_fit_module.model.model_config.acoustic_condition_dropout,
+                FakeTrainer.last_fit_module.model.model_config.acoustic.condition_dropout,
                 0.25,
             )
             with isolated_anydataset_home(root):
@@ -124,13 +200,12 @@ class FakeOrchestrator:
     def __init__(
         self,
         *,
-        dit: object | None = None,
         model_config: ModelConfig,
         bpe_config: object,
         tokenizer: object,
         bpe_vocab_size: int,
     ) -> None:
-        del dit, bpe_config, tokenizer
+        del bpe_config, tokenizer
         self.model_config = model_config
         self.embed_tokens = toy_embedding(audio_vocab_size=bpe_vocab_size)
 

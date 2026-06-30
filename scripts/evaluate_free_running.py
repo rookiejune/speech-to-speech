@@ -4,7 +4,6 @@ import argparse
 import json
 import time
 from collections.abc import Sequence
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -12,12 +11,11 @@ import torch
 from lightning.pytorch import seed_everything
 from torch import Tensor
 
-from speech_to_speech.config import DatasetFactoryConfig, SpeechToSpeechConfig
+from speech_to_speech.config import DatasetFactoryConfig, SpeechToSpeechConfig, with_acoustic_decoder
 from speech_to_speech.dataset import training_dataset
 from speech_to_speech.datamodule.batch_builder import CausalLMBatchBuilder
 from speech_to_speech.datamodule.example import longcat_pair_from_sample
-from speech_to_speech.model.DiT.model import DiT
-from speech_to_speech.model.orchestrator import AcousticSampler, Orchestrator, dit_config
+from speech_to_speech.model.orchestrator import AcousticSampler, Orchestrator
 from speech_to_speech.runtime import longcat_codec, longcat_tokenizer, qwen3_tokenizer
 from speech_to_speech.smoke import load_config
 from speech_to_speech.types import (
@@ -88,6 +86,7 @@ def run(args: argparse.Namespace) -> None:
                         acoustic_generator=model.acoustic_feature_generator(
                             num_steps=args.flow_steps,
                             chunk_size=args.chunk_size,
+                            left_context_chunks=args.left_context_chunks,
                             guidance_scale=args.guidance_scale,
                             sampler=AcousticSampler(args.acoustic_sampler),
                         ),
@@ -133,6 +132,7 @@ def run(args: argparse.Namespace) -> None:
                     "top_p": args.top_p,
                     "flow_steps": args.flow_steps,
                     "chunk_size": args.chunk_size,
+                    "left_context_chunks": args.left_context_chunks,
                     "guidance_scale": args.guidance_scale,
                     "acoustic_sampler": args.acoustic_sampler,
                     "generation_seconds": time.perf_counter() - generated_at,
@@ -149,9 +149,8 @@ def _load_model(
     bpe_vocab_size: int,
     ckpt_path: Path,
 ) -> Orchestrator:
-    model_config = replace(config.model, train_dit=True)
+    model_config = with_acoustic_decoder(config.model, enabled=True, train=True)
     model = Orchestrator(
-        dit=DiT(dit_config()),
         model_config=model_config,
         bpe_config=config.bpe,
         tokenizer=qwen3_tokenizer(model_config),
@@ -317,12 +316,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--flow-steps", type=int, default=32)
-    parser.add_argument("--chunk-size", type=int, default=64)
+    parser.add_argument("--chunk-size", type=int)
+    parser.add_argument("--left-context-chunks", type=int)
     parser.add_argument("--guidance-scale", type=float, default=1.0)
     parser.add_argument(
         "--acoustic-sampler",
         choices=tuple(sampler.value for sampler in AcousticSampler),
-        default=AcousticSampler.DIAGONAL.value,
+        default=AcousticSampler.SERIAL.value,
     )
     parser.add_argument("--device", default=_default_device())
     return parser.parse_args(argv)

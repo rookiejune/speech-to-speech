@@ -9,7 +9,7 @@
 模型路线：
 
 1. 预训练 Qwen3 + LongCat BPE token 做 semantic token 的 causal LM 微调。
-2. 后续接入 DiT，基于 Qwen3 hidden states 生成声学特征。
+2. 通过可选 DiT acoustic decoder，基于 Qwen3 hidden states 生成声学特征。
 
 ## Dataset
 
@@ -146,4 +146,13 @@ source speech semantic BPE tokens -> target speech semantic BPE tokens
 - `BOA` 和 `EOA` 注册为 `anytrain.idspace` special tokens，不注册进 Qwen tokenizer，也不占用 LongCat BPE vocab。
 - LM head 覆盖 audio token、`BOA` 和 `EOA`；生成侧用 `EOA` 停止，不用 Qwen EOS。
 
-优先先跑通 Qwen3 semantic causal LM 微调，再接入 DiT 声学生成。
+模型配置只按职责分层：
+
+- `model.backbone` 表达 Qwen3 权重来源、4bit 加载和 backbone LoRA/full 训练策略。
+- `model.token_space` 表达 text/audio embedding 和 audio boundary special token 是否训练。
+- `model.acoustic` 表达 DiT acoustic decoder 是否构建、是否训练、condition dropout 和 DiT 尺寸。
+
+`train.acoustic_loss_weight` 决定 acoustic/FM loss 是否进入训练目标；权重大于 0 时
+`model.acoustic.enabled` 必须为 true。详细配置契约见 `docs/model-config.md`。
+Lightning callback 的启用和参数通过 `trainer.callbacks` 表达，callback preset 放在
+`configs/callback/`；详细契约见 `docs/trainer-config.md`。

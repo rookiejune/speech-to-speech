@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum, auto
 from typing import cast
+import warnings
 
 import torch
 import torch.nn.functional as F
@@ -12,7 +13,7 @@ from torch import Tensor, nn
 from transformers import BitsAndBytesConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from ..config import BPEConfig, LoRAConfig, ModelConfig
+from ..config import BPEConfig, DiTModelConfig, LoRAConfig, ModelConfig
 from ..runtime import longcat_tokenizer, qwen3_tokenizer
 from ..types import (
     AcousticCondition,
@@ -37,10 +38,19 @@ from .acoustic import (
     pooled_acoustic_condition_from_batch_side,
     validate_acoustic_features,
 )
-from .diagonal import DiagonalSample, diagonal_flow_sample, serial_flow_sample
+from .diagonal import (
+    DiagonalSample,
+    causal_window_flow_sample,
+    diagonal_flow_sample,
+    diagonal_flow_sample_chunks,
+    full_sequence_flow_sample,
+    serial_flow_sample,
+)
+from .DiT.model import DiT, DiTConditionTensors
 from .generation import Generator
 from .qwen3 import Qwen3Config, Qwen3Model
 from .token_space import (
+    audio_embedding,
     audio_special_embeddings,
     configure_trainable,
     hidden_size,
@@ -58,11 +68,20 @@ def _qwen3_config():
     return config
 
 
-def dit_config():
+def dit_config(config: DiTModelConfig | None = None):
+    model_config = config or DiTModelConfig()
     config = Qwen3Config()
-    config.num_hidden_layers = 8
-    config.hidden_size = 1024  # LongCat Acoustic dim
-    config.intermediate_size = 3072  # 3 x hidden_size
+    config.num_hidden_layers = model_config.num_hidden_layers
+    config.hidden_size = model_config.hidden_size
+    config.intermediate_size = model_config.intermediate_size
+    if model_config.num_attention_heads is not None:
+        config.num_attention_heads = model_config.num_attention_heads
+    if model_config.num_key_value_heads is not None:
+        config.num_key_value_heads = model_config.num_key_value_heads
+    config.attention_mode = model_config.attention_mode
+    config.norm_time = model_config.norm_time
+    config.norm_hidden = model_config.norm_hidden
+    config.norm_acoustic = model_config.norm_acoustic
     return config
 
 
@@ -100,9 +119,27 @@ def _module_dtype(module: nn.Module, fallback: torch.dtype) -> torch.dtype:
     return fallback
 
 
+def _embedding_init_std(config: object) -> float:
+    value = getattr(config, "initializer_range", None)
+    if isinstance(value, int | float) and not isinstance(value, bool) and value > 0.0:
+        return float(value)
+    return 0.02
+
+
 class AcousticSampler(StrEnum):
     SERIAL = auto()
     DIAGONAL = auto()
+    DIAGONAL_BPE = auto()
+    CAUSAL_WINDOW = auto()
+
+
+@dataclass(frozen=True)
+class AcousticFlowInputs:
+    target_features: Tensor
+    noise: Tensor
+    last_hidden_state: Tensor
+    acoustic_condition: Tensor
+    mask: Tensor
 
 
 class Orchestrator(nn.Module):
@@ -120,37 +157,47 @@ class Orchestrator(nn.Module):
         bpe_config: BPEConfig | None = None,
         tokenizer: object | None = None,
         bpe_vocab_size: int | None = None,
-        pretrained: bool = True,
+        qwen3_pretrained: bool = True,
+        pretrained: bool | None = None,
     ) -> None:
         super().__init__()
 
         model_config = model_config or ModelConfig()
-        self.acoustic_condition_dropout = model_config.acoustic_condition_dropout
+        if pretrained is not None:
+            qwen3_pretrained = pretrained
+        self.acoustic_condition_drop = model_config.acoustic.condition_dropout
 
         peft_applied = False
         if qwen3 is not None:
             self.qwen3 = qwen3
-        elif pretrained:
+        elif qwen3_pretrained:
             quantization_config = bnb_config
-            if quantization_config is None and model_config.load_in_4bit:
+            if quantization_config is None and model_config.backbone.load_in_4bit:
                 quantization_config = _bnb_config()
             self.qwen3 = Qwen3Model.from_pretrained(
-                model_config.model_name_or_path,
-                trust_remote_code=model_config.trust_remote_code,
+                model_config.backbone.model_name_or_path,
+                trust_remote_code=model_config.backbone.trust_remote_code,
                 quantization_config=quantization_config,
             )
         else:
             self.qwen3 = Qwen3Model(qwen3_config or _qwen3_config())
 
-        if pretrained and model_config.lora.enabled:
+        if qwen3_pretrained and model_config.backbone.lora.enabled:
             from peft import get_peft_model
 
             self.qwen3 = get_peft_model(
                 self.qwen3,
-                lora_config or _lora_config(model_config.lora),
+                lora_config or _lora_config(model_config.backbone.lora),
             )
             peft_applied = True
             self.qwen3.print_trainable_parameters()
+
+        if dit is not None:
+            self.dit = dit
+        elif model_config.acoustic.enabled:
+            self.dit = DiT(dit_config(model_config.acoustic.dit))
+        else:
+            self.dit = None
 
         tokenizer = tokenizer or qwen3_tokenizer(model_config)
         special_ids = special_token_ids(tokenizer)
@@ -166,6 +213,7 @@ class Orchestrator(nn.Module):
         }
         all_special_token_ids = {**special_ids, **audio_special_ids}
         text_embed = text_embedding(self.qwen3)
+        audio_init_std = _embedding_init_std(self.qwen3.config)
 
         embedding = IdSpaceEmbedding(
             space=IdSpace(
@@ -187,15 +235,21 @@ class Orchestrator(nn.Module):
             special_embeddings=audio_special_embeddings(
                 qwen_hidden_size,
                 like=text_embed.weight,
+                std=audio_init_std,
             ),
             modality_embeddings={
                 Modality.TEXT: text_embed,
+                Modality.AUDIO: audio_embedding(
+                    audio_modality_vocab_size,
+                    qwen_hidden_size,
+                    like=text_embed.weight,
+                    std=audio_init_std,
+                ),
             },
             init_missing_special_embeddings=False,
         )
         set_text_embedding(self.qwen3, embedding)
-        self.dit = dit
-        dit_hidden_size = hidden_size(dit)
+        dit_hidden_size = hidden_size(self.dit)
         self.acoustic_condition_proj = (
             nn.Identity()
             if dit_hidden_size is None or dit_hidden_size == qwen_hidden_size
@@ -222,12 +276,18 @@ class Orchestrator(nn.Module):
     def embed_tokens(self) -> IdSpaceEmbedding:
         return cast(IdSpaceEmbedding, text_embedding(self.qwen3))
 
-    def forward(self, batch: CausalLMBatch) -> CausalLMOutputWithPast:
+    def forward(
+        self,
+        batch: CausalLMBatch,
+        *,
+        return_hidden_states: bool = False,
+    ) -> CausalLMOutputWithPast:
         inputs_embeds = self.embed_tokens(batch.input_ids)
         outputs = self.qwen3(
             attention_mask=batch.attention_mask,
             inputs_embeds=inputs_embeds,
             use_cache=False,
+            output_hidden_states=return_hidden_states,
         )
         hidden_states = outputs.last_hidden_state
         positions = _loss_positions(batch)
@@ -298,26 +358,24 @@ class Orchestrator(nn.Module):
         acoustic_condition: Tensor | None = None,
         source_feature_extractor: object | None = None,
     ) -> Tensor:
-        target_features, noise, last_hidden_state, acoustic_condition, mask = (
-            self._acoustic_flow_inputs(
-                batch,
-                bpe,
-                target_features,
-                hidden_states=hidden_states,
-                target_mask=target_mask,
-                noise=noise,
-                acoustic_condition=acoustic_condition,
-                source_feature_extractor=source_feature_extractor,
-            )
+        inputs = self.acoustic_flow_inputs(
+            batch,
+            bpe,
+            target_features,
+            hidden_states=hidden_states,
+            target_mask=target_mask,
+            noise=noise,
+            acoustic_condition=acoustic_condition,
+            source_feature_extractor=source_feature_extractor,
         )
         return continuous_flow_loss(
-            self.dit,
-            target_features,
-            x_0=noise,
+            self._require_dit(),
+            inputs.target_features,
+            x_0=inputs.noise,
             timesteps=timesteps,
-            last_hidden_state=last_hidden_state,
-            acoustic_condition=acoustic_condition,
-            mask=mask,
+            last_hidden_state=inputs.last_hidden_state,
+            acoustic_condition=inputs.acoustic_condition,
+            mask=inputs.mask,
         )
 
     def acoustic_flow_loss_stats(
@@ -333,40 +391,70 @@ class Orchestrator(nn.Module):
         acoustic_condition: Tensor | None = None,
         source_feature_extractor: object | None = None,
     ) -> AcousticFlowLossStats:
-        target_features, noise, last_hidden_state, acoustic_condition, mask = (
-            self._acoustic_flow_inputs(
-                batch,
-                bpe,
-                target_features,
-                hidden_states=hidden_states,
-                target_mask=target_mask,
-                noise=noise,
-                acoustic_condition=acoustic_condition,
-                source_feature_extractor=source_feature_extractor,
-            )
-        )
-        return continuous_flow_loss_stats(
-            self.dit,
+        inputs = self.acoustic_flow_inputs(
+            batch,
+            bpe,
             target_features,
-            x_0=noise,
-            timesteps=timesteps,
-            last_hidden_state=last_hidden_state,
+            hidden_states=hidden_states,
+            target_mask=target_mask,
+            noise=noise,
             acoustic_condition=acoustic_condition,
-            mask=mask,
+            source_feature_extractor=source_feature_extractor,
+        )
+        return self.acoustic_flow_loss_stats_from_inputs(inputs, timesteps=timesteps)
+
+    def acoustic_flow_loss_stats_from_inputs(
+        self,
+        inputs: AcousticFlowInputs,
+        *,
+        timesteps: Tensor | None = None,
+    ) -> AcousticFlowLossStats:
+        return continuous_flow_loss_stats(
+            self._require_dit(),
+            inputs.target_features,
+            x_0=inputs.noise,
+            timesteps=timesteps,
+            last_hidden_state=inputs.last_hidden_state,
+            acoustic_condition=inputs.acoustic_condition,
+            mask=inputs.mask,
         )
 
-    def _acoustic_flow_inputs(
+    def acoustic_condition_tensors(
+        self,
+        inputs: AcousticFlowInputs,
+        *,
+        timesteps: Tensor,
+    ) -> DiTConditionTensors:
+        dit = self._require_dit()
+        condition_tensors = getattr(dit, "condition_tensors", None)
+        if not callable(condition_tensors):
+            raise TypeError("DiT acoustic decoder must provide condition_tensors().")
+        tensors = condition_tensors(
+            last_hidden_state=inputs.last_hidden_state,
+            timesteps=timesteps,
+            acoustic_condition=inputs.acoustic_condition,
+        )
+        if not isinstance(tensors, DiTConditionTensors):
+            raise TypeError("DiT condition_tensors() must return DiTConditionTensors.")
+        return tensors
+
+    def _require_dit(self) -> nn.Module:
+        if self.dit is None:
+            raise RuntimeError("acoustic flow requires a DiT acoustic decoder.")
+        return self.dit
+
+    def acoustic_flow_inputs(
         self,
         batch: CausalLMBatch,
         bpe: CodecBPE,
         target_features: Tensor,
         *,
-        hidden_states: Tensor | None,
-        target_mask: Tensor | None,
-        noise: Tensor | None,
-        acoustic_condition: Tensor | None,
-        source_feature_extractor: object | None,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        hidden_states: Tensor | None = None,
+        target_mask: Tensor | None = None,
+        noise: Tensor | None = None,
+        acoustic_condition: Tensor | None = None,
+        source_feature_extractor: object | None = None,
+    ) -> AcousticFlowInputs:
         if self.dit is None:
             raise RuntimeError("acoustic_flow_loss requires a DiT acoustic decoder.")
 
@@ -423,14 +511,20 @@ class Orchestrator(nn.Module):
                 "acoustic_condition must have shape [batch, target_features dim]."
             )
 
-        return target_features, noise, last_hidden_state, acoustic_condition, condition.mask
+        return AcousticFlowInputs(
+            target_features=target_features,
+            noise=noise,
+            last_hidden_state=last_hidden_state,
+            acoustic_condition=acoustic_condition,
+            mask=condition.mask,
+        )
 
     def _maybe_drop_acoustic_condition(
         self,
         condition: Tensor,
         null_condition: Tensor,
     ) -> Tensor:
-        probability = self.acoustic_condition_dropout
+        probability = self.acoustic_condition_drop
         if not self.training or probability <= 0.0:
             return condition
         if probability >= 1.0:
@@ -548,16 +642,26 @@ class Orchestrator(nn.Module):
         *,
         num_steps: int,
         chunk_size: int | None = None,
+        left_context_chunks: int | None = None,
         guidance_scale: float = 1.0,
-        sampler: AcousticSampler = AcousticSampler.DIAGONAL,
+        sampler: AcousticSampler = AcousticSampler.SERIAL,
         acoustic_condition: Tensor | None = None,
     ) -> AcousticFeatureGenerator:
         if self.dit is None:
             raise RuntimeError("acoustic_feature_generator requires a DiT acoustic decoder.")
+        if sampler is AcousticSampler.DIAGONAL:
+            warnings.warn(
+                "AcousticSampler.DIAGONAL is deprecated; use "
+                "AcousticSampler.DIAGONAL_BPE for BPE-boundary diagonal generation "
+                "or AcousticSampler.SERIAL for full-sequence acoustic generation.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         return DiTAcousticFeatureGenerator(
             model=self,
             num_steps=num_steps,
             chunk_size=chunk_size,
+            left_context_chunks=left_context_chunks,
             guidance_scale=guidance_scale,
             sampler=sampler,
             acoustic_condition=acoustic_condition,
@@ -612,8 +716,9 @@ class DiTAcousticFeatureGenerator:
     model: Orchestrator
     num_steps: int
     chunk_size: int | None = None
+    left_context_chunks: int | None = None
     guidance_scale: float = 1.0
-    sampler: AcousticSampler = AcousticSampler.DIAGONAL
+    sampler: AcousticSampler = AcousticSampler.SERIAL
     acoustic_condition: Tensor | None = None
 
     @torch.no_grad()
@@ -652,12 +757,74 @@ class DiTAcousticFeatureGenerator:
         }
         match self.sampler:
             case AcousticSampler.SERIAL:
-                sample = serial_flow_sample(self.model.dit, initial, **sample_kwargs)
+                sample = full_sequence_flow_sample(
+                    self.model.dit,
+                    initial,
+                    last_hidden_state=hidden,
+                    acoustic_condition=acoustic_condition,
+                    mask=condition.mask.to(device=hidden.device, dtype=torch.bool),
+                    num_steps=self.num_steps,
+                    guidance_scale=self.guidance_scale,
+                )
             case AcousticSampler.DIAGONAL:
                 sample = diagonal_flow_sample(self.model.dit, initial, **sample_kwargs)
+            case AcousticSampler.DIAGONAL_BPE:
+                chunk_lengths = _single_chunk_lengths(condition)
+                active_frames = sum(chunk_lengths)
+                sample = diagonal_flow_sample_chunks(
+                    self.model.dit,
+                    initial[:, :active_frames],
+                    chunk_lengths=chunk_lengths,
+                    last_hidden_state=hidden[:, :active_frames],
+                    acoustic_condition=acoustic_condition,
+                    mask=condition.mask[:, :active_frames].to(
+                        device=hidden.device,
+                        dtype=torch.bool,
+                    ),
+                    num_steps=self.num_steps,
+                    guidance_scale=self.guidance_scale,
+                )
+                final = initial.clone()
+                final[:, :active_frames] = sample.final
+                return final
+            case AcousticSampler.CAUSAL_WINDOW:
+                sample = causal_window_flow_sample(
+                    self.model.dit,
+                    initial,
+                    left_context_chunks=_left_context_chunks(
+                        self.left_context_chunks,
+                        frame_count=hidden.size(1),
+                        chunk_size=chunk_size,
+                    ),
+                    **sample_kwargs,
+                )
             case _:
                 raise ValueError(f"unsupported acoustic sampler: {self.sampler}")
         return sample.final
+
+
+def _left_context_chunks(
+    value: int | None,
+    *,
+    frame_count: int,
+    chunk_size: int,
+) -> int:
+    if value is not None:
+        return value
+    return max(0, (frame_count + chunk_size - 1) // chunk_size - 1)
+
+
+def _single_chunk_lengths(condition: AcousticCondition) -> tuple[int, ...]:
+    lengths = condition.chunk_lengths
+    if lengths is None:
+        raise ValueError("BPE diagonal acoustic generation requires condition chunk_lengths.")
+    if len(lengths) != 1:
+        raise ValueError("BPE diagonal acoustic generation currently requires batch size 1.")
+    if sum(lengths[0]) != int(condition.mask[0].sum().detach().cpu()):
+        raise ValueError("condition chunk_lengths must sum to active frame count.")
+    if bool(condition.mask[0, : sum(lengths[0])].logical_not().any()):
+        raise ValueError("BPE diagonal acoustic generation requires contiguous active frames.")
+    return lengths[0]
 
 
 def _loss_positions(batch: CausalLMBatch) -> Tensor:

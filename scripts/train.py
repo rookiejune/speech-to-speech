@@ -8,23 +8,27 @@ from pathlib import Path
 import hydra
 import torch
 from lightning.pytorch import Trainer, seed_everything
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.callbacks import Callback, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
 from omegaconf import DictConfig, OmegaConf
 
-from speech_to_speech.config import DatasetFactoryConfig
+from speech_to_speech.config import DatasetFactoryConfig, SpeechToSpeechConfig
 from speech_to_speech.dataset import dataset_metadata, training_dataset
 from speech_to_speech.datamodule import SpeechToSpeechDataModule
 from speech_to_speech.datamodule.example import speech_pair_from_sample
-from speech_to_speech.model.DiT.model import DiT
-from speech_to_speech.model.orchestrator import Orchestrator, dit_config
+from speech_to_speech.model.orchestrator import Orchestrator
 from speech_to_speech.pl_module import (
     SpeechToSpeechModule,
     TaskGenerationLogger,
     TaskSampleLogger,
 )
 from speech_to_speech.runtime import longcat_codec, prepare_longcat_tokenizer, qwen3_tokenizer
-from speech_to_speech.smoke import _accelerator, _mapping, _speech_to_speech_config
+from speech_to_speech.smoke import (
+    _accelerator,
+    _mapping,
+    _speech_to_speech_config,
+    _validate_acoustic_training_model,
+)
 from speech_to_speech.types import SpeechPair
 
 
@@ -36,6 +40,7 @@ def main(cfg: DictConfig) -> None:
     )
     if config.trainer.ckpt_path is not None:
         allow_trusted_checkpoint_globals()
+    _validate_acoustic_training_model(config.model, config.train)
 
     seed_everything(config.train.seed, workers=True)
     tokenizer = qwen3_tokenizer(config.model)
@@ -45,14 +50,13 @@ def main(cfg: DictConfig) -> None:
         datasets=dataset_metadata(dataset_factory),
         config=config.bpe,
     )
-    acoustic_training = config.train.acoustic_loss_weight > 0.0
     model = Orchestrator(
-        dit=DiT(dit_config()) if acoustic_training else None,
         model_config=config.model,
         bpe_config=config.bpe,
         tokenizer=tokenizer,
         bpe_vocab_size=bpe.vocab_size,
     )
+    acoustic_training = config.train.acoustic_loss_weight > 0.0
     module = SpeechToSpeechModule(
         model,
         config.train,
@@ -73,43 +77,7 @@ def main(cfg: DictConfig) -> None:
         save_dir=str(root / "tensorboard"),
         name=config.trainer.name,
     )
-    checkpoint = ModelCheckpoint(
-        dirpath=str(root / "checkpoints" / config.trainer.name),
-        filename="{step:08d}",
-        monitor="loss",
-        mode="min",
-        save_top_k=config.trainer.save_top_k,
-        save_last=True,
-        every_n_train_steps=config.trainer.checkpoint_every_n_steps,
-    )
-    callbacks = [checkpoint, LearningRateMonitor(logging_interval="step")]
-    if config.trainer.sample_log_every_n_steps is not None:
-        callbacks.append(
-            TaskSampleLogger(
-                datamodule=config.datamodule,
-                tasks=config.tasks,
-                bpe=config.bpe,
-                every_n_steps=config.trainer.sample_log_every_n_steps,
-                samples_per_task=config.trainer.samples_per_task,
-                max_audio_samples=config.trainer.sample_log_max_audio_samples,
-            )
-        )
-    if config.trainer.generation_log_every_n_steps is not None:
-        callbacks.append(
-            TaskGenerationLogger(
-                datamodule=config.datamodule,
-                bpe=config.bpe,
-                tokenizer=tokenizer,
-                every_n_steps=config.trainer.generation_log_every_n_steps,
-                sample_index=config.trainer.generation_sample_index,
-                flow_steps=config.trainer.generation_flow_steps,
-                chunk_size=config.trainer.generation_chunk_size,
-                guidance_scale=config.trainer.generation_guidance_scale,
-                acoustic_sampler=config.trainer.generation_acoustic_sampler,
-                preview_tokens=config.trainer.generation_preview_tokens,
-                max_audio_samples=config.trainer.generation_log_max_audio_samples,
-            )
-        )
+    callbacks = _callbacks(config, root=root, tokenizer=tokenizer)
     trainer_kwargs = {
         "default_root_dir": str(root),
         "max_steps": config.train.max_steps,
@@ -119,7 +87,7 @@ def main(cfg: DictConfig) -> None:
         "precision": config.train.precision,
         "logger": logger,
         "callbacks": callbacks,
-        "enable_checkpointing": True,
+        "enable_checkpointing": config.trainer.callbacks.checkpoint.enabled,
         "enable_model_summary": config.trainer.enable_model_summary,
         "enable_progress_bar": config.trainer.enable_progress_bar,
     }
@@ -145,6 +113,65 @@ def _trainer_root(default_root_dir: str | Path | None) -> Path:
     if isinstance(default_root_dir, str) and not default_root_dir:
         raise ValueError("trainer.default_root_dir must not be empty.")
     return Path(default_root_dir)
+
+
+def _callbacks(
+    config: SpeechToSpeechConfig,
+    *,
+    root: Path,
+    tokenizer: object,
+) -> list[Callback]:
+    trainer = config.trainer
+    callbacks = []
+    checkpoint = trainer.callbacks.checkpoint
+    if checkpoint.enabled:
+        callbacks.append(
+            ModelCheckpoint(
+                dirpath=str(root / "checkpoints" / trainer.name),
+                filename=checkpoint.filename,
+                monitor=checkpoint.monitor,
+                mode=checkpoint.mode,
+                save_top_k=checkpoint.save_top_k,
+                save_last=checkpoint.save_last,
+                every_n_train_steps=checkpoint.every_n_steps,
+            )
+        )
+    learning_rate_monitor = trainer.callbacks.learning_rate_monitor
+    if learning_rate_monitor.enabled:
+        callbacks.append(
+            LearningRateMonitor(logging_interval=learning_rate_monitor.logging_interval)
+        )
+    sample = trainer.callbacks.sample
+    if sample.enabled:
+        callbacks.append(
+            TaskSampleLogger(
+                datamodule=config.datamodule,
+                tasks=config.tasks,
+                bpe=config.bpe,
+                every_n_steps=sample.every_n_steps,
+                samples_per_task=sample.samples_per_task,
+                max_audio_samples=sample.max_audio_samples,
+            )
+        )
+    generation = trainer.callbacks.generation
+    if generation.enabled and generation.every_n_steps is not None:
+        callbacks.append(
+            TaskGenerationLogger(
+                datamodule=config.datamodule,
+                bpe=config.bpe,
+                tokenizer=tokenizer,
+                every_n_steps=generation.every_n_steps,
+                sample_index=generation.sample_index,
+                flow_steps=generation.flow_steps,
+                chunk_size=generation.chunk_size,
+                left_context_chunks=generation.left_context_chunks,
+                guidance_scale=generation.guidance_scale,
+                acoustic_sampler=generation.acoustic_sampler,
+                preview_tokens=generation.preview_tokens,
+                max_audio_samples=generation.max_audio_samples,
+            )
+        )
+    return callbacks
 
 
 def _speech_pairs(dataset_factory: DatasetFactoryConfig) -> Iterable[SpeechPair]:

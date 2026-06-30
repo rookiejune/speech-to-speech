@@ -10,13 +10,11 @@ from functools import partial
 import torch
 from lightning.pytorch import seed_everything
 
-from speech_to_speech.config import DatasetFactoryConfig
+from speech_to_speech.config import DatasetFactoryConfig, with_acoustic_decoder
 from speech_to_speech.dataset import dataset_metadata, training_dataset
 from speech_to_speech.datamodule.batch_builder import CausalLMBatchBuilder
 from speech_to_speech.datamodule.example import speech_pair_from_sample
-from speech_to_speech.model.DiT.model import DiT
 from speech_to_speech.model.orchestrator import AcousticSampler, Orchestrator
-from speech_to_speech.model.qwen3 import Qwen3Config
 from speech_to_speech.runtime import longcat_codec, prepare_longcat_tokenizer, qwen3_tokenizer
 from speech_to_speech.smoke import load_config
 from speech_to_speech.types import GenerationBatch, SpeechPair
@@ -34,9 +32,18 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         datasets=dataset_metadata(config.datamodule.dataset_factory),
         config=config.bpe,
     )
-    model_config = replace(config.model, train_dit=True)
+    model_config = with_acoustic_decoder(
+        config.model,
+        enabled=True,
+        train=True,
+        dit=replace(
+            config.model.acoustic.dit,
+            num_hidden_layers=args.dit_layers,
+            num_attention_heads=args.dit_heads,
+            num_key_value_heads=args.dit_heads,
+        ),
+    )
     model = Orchestrator(
-        dit=DiT(_dit_config(layers=args.dit_layers, heads=args.dit_heads)),
         model_config=model_config,
         bpe_config=config.bpe,
         tokenizer=tokenizer,
@@ -58,6 +65,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         acoustic_generator=model.acoustic_feature_generator(
             num_steps=args.flow_steps,
             chunk_size=args.chunk_size,
+            left_context_chunks=args.left_context_chunks,
             guidance_scale=args.guidance_scale,
             sampler=AcousticSampler(args.acoustic_sampler),
         ),
@@ -73,6 +81,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "max_new_tokens": args.max_new_tokens,
         "flow_steps": args.flow_steps,
         "chunk_size": args.chunk_size,
+        "left_context_chunks": args.left_context_chunks,
         "guidance_scale": args.guidance_scale,
         "source_frame_count": int(pair.source_ids.numel()),
         "target_frame_count": int(pair.target_ids.numel()),
@@ -114,20 +123,6 @@ def _move_generation_batch(batch: GenerationBatch, device: torch.device) -> Gene
     )
 
 
-def _dit_config(*, layers: int, heads: int) -> Qwen3Config:
-    if layers <= 0:
-        raise ValueError("dit_layers must be positive.")
-    if heads <= 0:
-        raise ValueError("dit_heads must be positive.")
-    config = Qwen3Config()
-    config.hidden_size = 1024
-    config.num_hidden_layers = layers
-    config.num_attention_heads = heads
-    config.num_key_value_heads = heads
-    config.intermediate_size = 3072
-    return config
-
-
 def _default_device() -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -147,12 +142,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--flow-steps", type=int, default=2)
-    parser.add_argument("--chunk-size", type=int, default=32)
+    parser.add_argument("--chunk-size", type=int)
+    parser.add_argument("--left-context-chunks", type=int)
     parser.add_argument("--guidance-scale", type=float, default=1.0)
     parser.add_argument(
         "--acoustic-sampler",
         choices=tuple(sampler.value for sampler in AcousticSampler),
-        default=AcousticSampler.DIAGONAL.value,
+        default=AcousticSampler.SERIAL.value,
     )
     parser.add_argument("--dit-layers", type=int, default=1)
     parser.add_argument("--dit-heads", type=int, default=8)

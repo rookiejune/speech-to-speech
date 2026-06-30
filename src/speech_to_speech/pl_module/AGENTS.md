@@ -11,6 +11,7 @@
 - 配置 optimizer、scheduler 和 precision 相关策略。
 - 记录长时间训练需要的 loss、task weight、学习率等曲线。
 - 保存和恢复 checkpoint。
+- 提供 sample/generation logging callback，callback 是否启用由 trainer 配置决定。
 
 ## 开发边界
 

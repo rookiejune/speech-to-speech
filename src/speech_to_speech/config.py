@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from enum import StrEnum, auto
 from pathlib import Path
 
 from .types import Task, TaskFamily
@@ -101,18 +102,69 @@ class LoRAConfig:
     )
 
 
+class DiTAttentionMode(StrEnum):
+    CAUSAL = auto()
+    BIDIRECTIONAL = auto()
+
+
 @dataclass(frozen=True)
-class ModelConfig:
+class DiTModelConfig:
+    hidden_size: int = 1024
+    num_hidden_layers: int = 8
+    intermediate_size: int = 3072
+    num_attention_heads: int | None = None
+    num_key_value_heads: int | None = None
+    attention_mode: DiTAttentionMode = DiTAttentionMode.CAUSAL
+    norm_time: bool = False
+    norm_hidden: bool = False
+    norm_acoustic: bool = False
+
+
+@dataclass(frozen=True)
+class QwenBackboneConfig:
     model_name_or_path: str = "Qwen/Qwen3-0.6B"
     trust_remote_code: bool = False
     load_in_4bit: bool = True
+    train: bool = False
+    lora: LoRAConfig = field(default_factory=LoRAConfig)
+
+
+@dataclass(frozen=True)
+class TokenSpaceConfig:
     train_text_embedding: bool = False
     train_audio_embedding: bool = True
     train_audio_special_tokens: bool = True
-    train_backbone: bool = False
-    train_dit: bool = True
-    acoustic_condition_dropout: float = 0.0
-    lora: LoRAConfig = field(default_factory=LoRAConfig)
+
+
+@dataclass(frozen=True)
+class AcousticDecoderConfig:
+    enabled: bool = False
+    train: bool = True
+    condition_dropout: float = 0.0
+    dit: DiTModelConfig = field(default_factory=DiTModelConfig)
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    backbone: QwenBackboneConfig = field(default_factory=QwenBackboneConfig)
+    token_space: TokenSpaceConfig = field(default_factory=TokenSpaceConfig)
+    acoustic: AcousticDecoderConfig = field(default_factory=AcousticDecoderConfig)
+
+
+def with_acoustic_decoder(
+    config: ModelConfig,
+    *,
+    enabled: bool = True,
+    train: bool | None = None,
+    dit: DiTModelConfig | None = None,
+) -> ModelConfig:
+    acoustic = config.acoustic
+    if train is not None:
+        acoustic = replace(acoustic, train=train)
+    if dit is not None:
+        acoustic = replace(acoustic, dit=dit)
+    acoustic = replace(acoustic, enabled=enabled)
+    return replace(config, acoustic=acoustic)
 
 
 @dataclass(frozen=True)
@@ -126,13 +178,62 @@ class TrainConfig:
     optimizer: str = "muon"
     weight_decay: float | None = None
     schedule: str = "warmup_cosine"
-    warmup_steps: int = 50_000
+    warmup_ratio: float = 0.01
     stable_steps: int | None = None
     decay_steps: int | None = None
     min_lr_ratio: float = 0.1
     seed: int = 0
     device: str = "auto"
     precision: str = "bf16-mixed"
+
+
+@dataclass(frozen=True)
+class CheckpointCallbackConfig:
+    enabled: bool = True
+    every_n_steps: int = 10_000
+    save_top_k: int = 2
+    monitor: str = "loss"
+    mode: str = "min"
+    save_last: bool = True
+    filename: str = "{step:08d}"
+
+
+@dataclass(frozen=True)
+class LearningRateMonitorCallbackConfig:
+    enabled: bool = True
+    logging_interval: str | None = "step"
+
+
+@dataclass(frozen=True)
+class SampleCallbackConfig:
+    enabled: bool = True
+    every_n_steps: int = 0
+    samples_per_task: int = 1
+    max_audio_samples: int | None = 320_000
+
+
+@dataclass(frozen=True)
+class GenerationCallbackConfig:
+    enabled: bool = True
+    every_n_steps: int | None = 5_000
+    sample_index: int = 0
+    flow_steps: int = 32
+    chunk_size: int | None = None
+    left_context_chunks: int | None = None
+    guidance_scale: float = 1.0
+    acoustic_sampler: str = "serial"
+    preview_tokens: int = 1024
+    max_audio_samples: int | None = 320_000
+
+
+@dataclass(frozen=True)
+class TrainerCallbacksConfig:
+    checkpoint: CheckpointCallbackConfig = field(default_factory=CheckpointCallbackConfig)
+    learning_rate_monitor: LearningRateMonitorCallbackConfig = field(
+        default_factory=LearningRateMonitorCallbackConfig
+    )
+    sample: SampleCallbackConfig = field(default_factory=SampleCallbackConfig)
+    generation: GenerationCallbackConfig = field(default_factory=GenerationCallbackConfig)
 
 
 @dataclass(frozen=True)
@@ -144,19 +245,7 @@ class TrainerConfig:
     strategy: str = "auto"
     ckpt_path: str | Path | None = None
     log_every_n_steps: int | None = None
-    checkpoint_every_n_steps: int = 10_000
-    sample_log_every_n_steps: int | None = 0
-    samples_per_task: int = 1
-    sample_log_max_audio_samples: int | None = 320_000
-    generation_log_every_n_steps: int | None = 5_000
-    generation_sample_index: int = 0
-    generation_flow_steps: int = 32
-    generation_chunk_size: int | None = 64
-    generation_guidance_scale: float = 1.0
-    generation_acoustic_sampler: str = "diagonal"
-    generation_preview_tokens: int = 1024
-    generation_log_max_audio_samples: int | None = 320_000
-    save_top_k: int = 2
+    callbacks: TrainerCallbacksConfig = field(default_factory=TrainerCallbacksConfig)
     enable_model_summary: bool = True
     enable_progress_bar: bool = True
 

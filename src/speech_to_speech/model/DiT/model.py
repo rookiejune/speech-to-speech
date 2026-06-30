@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Unpack, cast
 
@@ -15,8 +16,16 @@ from transformers.masking_utils import (
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.utils.generic import TransformersKwargs
 
+from ...config import DiTAttentionMode
 from ..qwen3 import Qwen3Config, Qwen3RotaryEmbedding
 from .module import DiTLayer
+
+
+@dataclass(frozen=True)
+class DiTConditionTensors:
+    time: Tensor
+    hidden: Tensor
+    acoustic: Tensor
 
 
 class DiT(nn.Module):
@@ -30,6 +39,12 @@ class DiT(nn.Module):
         self.null_acoustic_condition = nn.Parameter(torch.zeros(1, config.hidden_size))
 
         self.config = config
+        self.attention_mode = DiTAttentionMode(
+            getattr(config, "attention_mode", DiTAttentionMode.CAUSAL)
+        )
+        self.time_norm = _condition_norm(config, "norm_time")
+        self.hidden_norm = _condition_norm(config, "norm_hidden")
+        self.acoustic_norm = _condition_norm(config, "norm_acoustic")
 
         self.layers = nn.ModuleList(
             [
@@ -48,11 +63,32 @@ class DiT(nn.Module):
         timesteps: torch.Tensor,
         acoustic_condition: torch.Tensor,
     ):
+        tensors = self.condition_tensors(
+            last_hidden_state=last_hidden_state,
+            timesteps=timesteps,
+            acoustic_condition=acoustic_condition,
+        )
+        return tensors.time + tensors.acoustic + tensors.hidden
+
+    def condition_tensors(
+        self,
+        *,
+        last_hidden_state: Tensor,
+        timesteps: Tensor,
+        acoustic_condition: Tensor,
+    ) -> DiTConditionTensors:
         time_emb = _timestep_embedding(
             timesteps, dim=self.config.hidden_size, max_period=10000.0
         ).unsqueeze(1)
+        time_emb = self.time_norm(time_emb)
+        last_hidden_state = self.hidden_norm(last_hidden_state)
         acoustic_condition = acoustic_condition.unsqueeze(1)
-        return time_emb + acoustic_condition + last_hidden_state
+        acoustic_condition = self.acoustic_norm(acoustic_condition)
+        return DiTConditionTensors(
+            time=time_emb,
+            hidden=last_hidden_state,
+            acoustic=acoustic_condition,
+        )
 
     def forward(
         self,
@@ -70,46 +106,28 @@ class DiT(nn.Module):
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
 
+        past_seen_tokens = (
+            past_key_values.get_seq_length() if past_key_values is not None else 0
+        )
+        cache_position = torch.arange(x_t.shape[1], device=x_t.device) + past_seen_tokens
         if position_ids is None:
-            past_seen_tokens = (
-                past_key_values.get_seq_length() if past_key_values is not None else 0
-            )
-            cache_position = torch.arange(x_t.shape[1], device=x_t.device) + past_seen_tokens
             position_ids = cache_position.unsqueeze(0)  # type: ignore
-        else:
-            cache_position = position_ids.reshape(-1)
+        mask_position_ids = cache_position.unsqueeze(0)
 
         # It may already have been prepared by e.g. `generate`
-        if not isinstance(causal_mask_mapping := attention_mask, dict):
-            # Create the masks
-            causal_mask_mapping = {
-                "full_attention": create_causal_mask(
-                    **_mask_kwargs(
-                        create_causal_mask,
-                        config=self.config,
-                        inputs=x_t,
-                        attention_mask=attention_mask,
-                        cache_position=cache_position,
-                        past_key_values=past_key_values,
-                        position_ids=position_ids,
-                    )
-                ),
-            }
-            # The sliding window alternating layers are not always activated depending on the config
-            if self.has_sliding_layers:
-                causal_mask_mapping["sliding_attention"] = (
-                    create_sliding_window_causal_mask(
-                        **_mask_kwargs(
-                            create_sliding_window_causal_mask,
-                            config=self.config,
-                            inputs=x_t,
-                            attention_mask=attention_mask,
-                            cache_position=cache_position,
-                            past_key_values=past_key_values,
-                            position_ids=position_ids,
-                        )
-                    )
-                )
+        if isinstance(mask_mapping := attention_mask, dict):
+            attention_mask_mapping = mask_mapping
+        else:
+            attention_mask_mapping = _attention_mask_mapping(
+                mode=self.attention_mode,
+                config=self.config,
+                inputs=x_t,
+                attention_mask=attention_mask,
+                cache_position=cache_position,
+                past_key_values=past_key_values,
+                position_ids=mask_position_ids,
+                has_sliding_layers=self.has_sliding_layers,
+            )
 
         position_embeddings = self.rotary_emb(x_t, position_ids)
         condition = self._fuse_condition(
@@ -123,7 +141,7 @@ class DiT(nn.Module):
             x_t = decoder_layer.forward(
                 x_t,
                 condition=condition,
-                attention_mask=causal_mask_mapping[self.config.layer_types[i]],  # type: ignore
+                attention_mask=attention_mask_mapping[self.config.layer_types[i]],  # type: ignore
                 position_embeddings=position_embeddings,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
@@ -135,6 +153,67 @@ class DiT(nn.Module):
             last_hidden_state=x_t,  # type: ignore
             past_key_values=past_key_values if use_cache else None,
         )
+
+
+def _attention_mask_mapping(
+    *,
+    mode: DiTAttentionMode,
+    config: Qwen3Config,
+    inputs: Tensor,
+    attention_mask: Tensor | None,
+    cache_position: Tensor,
+    past_key_values: Cache | None,
+    position_ids: Tensor,
+    has_sliding_layers: bool,
+) -> dict[str, Tensor | None]:
+    if mode is DiTAttentionMode.BIDIRECTIONAL:
+        mask = _bidirectional_mask(inputs, attention_mask)
+        return {
+            "full_attention": mask,
+            "sliding_attention": mask,
+        }
+    mapping: dict[str, Tensor | None] = {
+        "full_attention": create_causal_mask(
+            **_mask_kwargs(
+                create_causal_mask,
+                config=config,
+                inputs=inputs,
+                attention_mask=attention_mask,
+                cache_position=cache_position,
+                past_key_values=past_key_values,
+                position_ids=position_ids,
+            )
+        ),
+    }
+    # The sliding window alternating layers are not always activated depending on the config.
+    if has_sliding_layers:
+        mapping["sliding_attention"] = create_sliding_window_causal_mask(
+            **_mask_kwargs(
+                create_sliding_window_causal_mask,
+                config=config,
+                inputs=inputs,
+                attention_mask=attention_mask,
+                cache_position=cache_position,
+                past_key_values=past_key_values,
+                position_ids=position_ids,
+            )
+        )
+    return mapping
+
+
+def _bidirectional_mask(inputs: Tensor, attention_mask: Tensor | None) -> Tensor | None:
+    if attention_mask is None:
+        return None
+    if attention_mask.dim() != 2:
+        raise ValueError("bidirectional DiT attention_mask must have shape [batch, time].")
+    if attention_mask.shape != inputs.shape[:2]:
+        raise ValueError("bidirectional DiT attention_mask must align with x_t.")
+    if bool(attention_mask.to(device=inputs.device, dtype=torch.bool).all()):
+        return None
+    keep = attention_mask.to(device=inputs.device, dtype=torch.bool)
+    mask = inputs.new_zeros((inputs.size(0), 1, inputs.size(1), inputs.size(1)))
+    mask = mask.masked_fill(~keep[:, None, None, :], torch.finfo(inputs.dtype).min)
+    return mask
 
 
 def _mask_kwargs(
@@ -170,6 +249,12 @@ def _mask_signature(mask_fn: Callable[..., object]) -> tuple[str, bool]:
     else:
         raise TypeError("Transformers mask function must accept input embeddings.")
     return embeds_name, "cache_position" in parameters
+
+
+def _condition_norm(config: Qwen3Config, name: str) -> nn.Module:
+    if bool(getattr(config, name, False)):
+        return nn.LayerNorm(config.hidden_size, elementwise_affine=False)
+    return nn.Identity()
 
 
 def _timestep_embedding(

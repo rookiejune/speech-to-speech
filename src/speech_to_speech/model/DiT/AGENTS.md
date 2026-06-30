@@ -10,6 +10,8 @@
 - 接收 Qwen3 semantic hidden states 作为条件。
 - 接收 diffusion/flow timestep。
 - 接收 acoustic condition，支持后续 CFG 设计。
+- 通过 `attention_mode` 显式选择 causal 或 bidirectional self-attention。
+- 在 wrapper 内部对 time、Qwen hidden 和 acoustic condition 三路条件做可配置归一化并融合。
 - 返回 `BaseModelOutputWithPast`，其中 `last_hidden_state` 是 acoustic decoder 输出。
 
 ## 模块边界
@@ -21,5 +23,5 @@
 
 - Do: 让 `model.py` 承担对外 forward 契约；Don't: 让外部模块直接调用 `DiTLayer` 或 `AdaLN`。
 - Do: 保持 transformer cache、mask、position ids 的接口和 Qwen3 兼容；Don't: 在 data module 或 pl_module 里复制 DiT mask 逻辑。
+- Do: offline full-sequence acoustic flow 用 `bidirectional` 做对照；streaming、diagonal 或 causal-window 实验保留 `causal` 对照。
 - Do: 把 CFG、time embedding、condition 融合策略收敛在 DiT wrapper；Don't: 把这些声学生成规则散落到训练循环。
-

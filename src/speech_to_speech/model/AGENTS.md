@@ -16,7 +16,7 @@
 - 提供 supervised semantic token accuracy 计算入口，统计范围与 semantic loss 使用的 supervised positions 对齐。
 - 提供基于 Qwen3 hidden states 的 DiT acoustic condition 生成接口；离散 BPE token 只用于自回归反馈、停止条件和可选 debug。
 - 提供 full-sequence waveform 生成编排入口：semantic BPE 生成、frame-level acoustic condition 展开、外部 acoustic feature generator 调用和 LongCat codec `decode_features()`。
-- 提供 serial/diagonal acoustic flow 调度边界，用 synthetic condition/feature 先验证 wavefront 并行逻辑；真实 waveform 加速结论必须等 full-sequence baseline 和真实 sampler 接入后再判断。
+- 提供 full-sequence serial、BPE-boundary diagonal 和旧 fixed-size diagonal acoustic flow 调度边界。`serial` 是语义解码完成后的常规整段 acoustic flow；`diagonal_bpe` 按每个 BPE token 展开的帧数作为非均匀 chunk 做 wavefront 调度。旧 fixed-size `diagonal` 和 `causal_window` 暂保留用于对照，不作为默认路径。
 
 ## 模块边界
 
@@ -24,7 +24,7 @@
 - `token_space.py` 负责 idspace、embedding 替换、special token embedding 和 trainable policy。
 - `generation.py` 负责语义 token 增量生成、EOA 停止和 acoustic condition hidden 收集。
 - `acoustic.py` 负责训练侧 acoustic condition 展开、连续 acoustic flow loss 和相关校验。
-- `diagonal.py` 负责 acoustic flow 的 serial chunk baseline、diagonal wavefront 调度和 synthetic Euler 采样验证。
+- `diagonal.py` 负责 acoustic flow 的 full-sequence baseline、BPE token 非均匀 chunk baseline、diagonal wavefront 调度和 synthetic Euler 采样验证。
 - `qwen3.py` 是 Hugging Face Qwen3 相关类的本地导入层，避免其他文件到处依赖 transformers 的深层路径。
 - `DiT/` 是 acoustic decoder 子模块，外部优先通过 `Orchestrator` 调用。
 
@@ -44,8 +44,9 @@ acoustic 侧输入输出契约：
 - BPE token 对应的 condition hidden 使用其下一位 input token 的 Qwen3 hidden state。
 - BPE hidden 通过 `CodecBPE.repeat_interleave(..., mask=...)` 展开到原始 semantic frame 粒度；LongCat 当前只接受单 codebook semantic ids，模型层会显式把 `[B, T, 1]` frame 压成 `[B, T]`。
 - `acoustic_flow_loss` 接收连续 `target_features`，形状为 `[batch, time, acoustic_dim]`，并要求 time 维与展开后的 condition mask 对齐。
+- `acoustic_flow_inputs` 暴露与 `acoustic_flow_loss` 相同的准备结果，供训练日志复用同一份 Qwen hidden、source acoustic condition、noise 和 mask。
 - `acoustic_flow_loss` 可选接收 `source_feature_extractor`，将 `batch.source_audio` 的 LongCat acoustic codes 转为连续 features 后按 mask mean 池化成 DiT 的 batch-level `acoustic_condition`；缺失 source 的行使用 DiT null acoustic condition。
-- `ModelConfig.acoustic_condition_dropout` 只作用于训练态、由 source features 池化得到的 acoustic condition；显式传入的 `acoustic_condition` 不被隐式替换。
+- `ModelConfig.acoustic.condition_dropout` 只作用于训练态、由 source features 池化得到的 acoustic condition；显式传入的 `acoustic_condition` 不被隐式替换。
 - Lightning 联合训练由 `TrainConfig.acoustic_loss_weight` 开启；权重为 0 时保持 semantic-only，权重大于 0 时必须显式传入 BPE 和 LongCat acoustic feature extractor。
 - LongCat discrete acoustic codes 到连续 features 的转换由 `anytrain.codec.longcat` 显式提供，模型层只消费连续 `target_features`。
 
@@ -59,7 +60,7 @@ acoustic 侧输入输出契约：
 - `generate_waveform` 先走 full-sequence 路线，必须显式接收 acoustic feature generator；当前模型层不隐式把 condition 变成 LongCat acoustic features。
 - `teacher_forced_waveform` 用训练侧 labels 的 shifted hidden states 生成 waveform，主要用于诊断 acoustic/DiT 是否能在接近正确 semantic hidden 的条件下产生可听音频，不替代最终 free-running waveform 评估。
 - `acoustic_velocity(..., guidance_scale=...)` 是 CFG 速度预测边界；`guidance_scale=1` 只跑 conditional DiT，其他值会再跑 null acoustic condition 并做 `uncond + scale * (cond - uncond)`。
-- `Orchestrator.acoustic_feature_generator(...)` 返回可传给 `generate_waveform` 的 DiT acoustic feature generator，先用 diagonal sampler 生成连续 LongCat acoustic features，再交给 codec decode。
+- `Orchestrator.acoustic_feature_generator(...)` 返回可传给 `generate_waveform` 的 DiT acoustic feature generator，按 `AcousticSampler` 选择 `serial` 整段 acoustic flow 或 `diagonal_bpe` BPE-boundary wavefront sampler 生成连续 LongCat acoustic features，再交给 codec decode。
 
 模型层不负责：
 
@@ -68,6 +69,18 @@ acoustic 侧输入输出契约：
 - 决定任务采样权重。
 - 做音频质量过滤。
 - 隐式解释 LongCat acoustic codebook 到连续 acoustic target feature 的映射；需要转换时调用 `anytrain.codec.longcat` 或 `runtime.longcat_acoustic_features()`。
+
+## 配置边界
+
+模型配置按职责分层：
+
+- `ModelConfig.backbone` 表达 Qwen3 权重来源、4bit 加载、backbone full/LoRA 训练策略。
+- `ModelConfig.token_space` 表达 text/audio embedding 和 audio boundary special token 是否训练。
+- `ModelConfig.acoustic` 表达是否构建 DiT acoustic decoder、是否训练 acoustic decoder/projection、source acoustic condition dropout 和 DiT 尺寸。
+- `ModelConfig.acoustic.dit.attention_mode` 表达 DiT acoustic decoder 的时序注意力约束；`causal` 保持旧实验语义并适合 streaming/causal-window 对照，`bidirectional` 用于 offline full-sequence acoustic flow 对照。
+- `ModelConfig.acoustic.dit.norm_time`、`norm_hidden`、`norm_acoustic` 表达 DiT 内部三路条件相加前的可选无 affine LayerNorm。
+
+训练入口只用 `TrainConfig.acoustic_loss_weight` 决定 acoustic loss 是否参与训练；当权重大于 0 时，`ModelConfig.acoustic.enabled` 必须为 true。评估或 smoke 脚本需要加载 acoustic decoder 时，应显式构造带 acoustic decoder 的 `ModelConfig`，不要把 DiT 是否存在隐含在 Qwen/LoRA preset 名字里。
 
 ## 开发边界
 

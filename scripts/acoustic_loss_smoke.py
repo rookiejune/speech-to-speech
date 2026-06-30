@@ -11,13 +11,11 @@ from functools import partial
 import torch
 from lightning.pytorch import seed_everything
 
-from speech_to_speech.config import DatasetFactoryConfig
+from speech_to_speech.config import DatasetFactoryConfig, with_acoustic_decoder
 from speech_to_speech.dataset import dataset_metadata, training_dataset
 from speech_to_speech.datamodule.batch_builder import CausalLMBatchBuilder
 from speech_to_speech.datamodule.example import longcat_pair_from_sample, speech_pair_from_sample
-from speech_to_speech.model.DiT.model import DiT
 from speech_to_speech.model.orchestrator import Orchestrator
-from speech_to_speech.model.qwen3 import Qwen3Config
 from speech_to_speech.runtime import (
     longcat_acoustic_features,
     longcat_codec,
@@ -58,15 +56,21 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         target_features = target_features[:, : args.max_frames]
     codec = longcat_codec()
 
-    dit_config = _dit_config(
-        hidden_size=target_features.size(-1),
-        layers=args.dit_layers,
-        heads=args.dit_heads,
+    model_config = with_acoustic_decoder(
+        config.model,
+        enabled=True,
+        train=True,
+        dit=replace(
+            config.model.acoustic.dit,
+            hidden_size=target_features.size(-1),
+            intermediate_size=max(target_features.size(-1) * 3, 1),
+            num_hidden_layers=args.dit_layers,
+            num_attention_heads=args.dit_heads,
+            num_key_value_heads=args.dit_heads,
+        ),
     )
-    model_config = replace(config.model, train_dit=True)
     _log_stage(args, "load qwen and dit", started_at)
     model = Orchestrator(
-        dit=DiT(dit_config),
         model_config=model_config,
         bpe_config=config.bpe,
         tokenizer=tokenizer,
@@ -171,20 +175,6 @@ def _normalize_features(features: torch.Tensor) -> torch.Tensor:
     if features.dim() == 3:
         return features
     raise ValueError("LongCat acoustic features must have shape [time, dim] or [batch, time, dim].")
-
-
-def _dit_config(*, hidden_size: int, layers: int, heads: int) -> Qwen3Config:
-    if layers <= 0:
-        raise ValueError("dit_layers must be positive.")
-    if heads <= 0:
-        raise ValueError("dit_heads must be positive.")
-    config = Qwen3Config()
-    config.hidden_size = hidden_size
-    config.num_hidden_layers = layers
-    config.num_attention_heads = heads
-    config.num_key_value_heads = heads
-    config.intermediate_size = max(hidden_size * 3, 1)
-    return config
 
 
 def _move_batch(batch: CausalLMBatch, device: torch.device) -> CausalLMBatch:

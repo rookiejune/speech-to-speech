@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import fields, is_dataclass, replace
+from enum import StrEnum
 from functools import partial
 from pathlib import Path
 from typing import Any, get_origin, get_type_hints
@@ -21,24 +22,32 @@ from lightning.pytorch import Trainer, seed_everything
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
 from .config import (
+    AcousticDecoderConfig,
     BPEConfig,
+    CheckpointCallbackConfig,
     DataLoaderConfig,
     DataModuleConfig,
     DatasetFactoryConfig,
+    DiTModelConfig,
+    GenerationCallbackConfig,
     LBAConfig,
     LoRAConfig,
+    LearningRateMonitorCallbackConfig,
     ModelConfig,
+    QwenBackboneConfig,
+    SampleCallbackConfig,
     SpeechToSpeechConfig,
     TaskConfig,
     TaskWeightsConfig,
+    TokenSpaceConfig,
     TrainConfig,
+    TrainerCallbacksConfig,
     TrainerConfig,
 )
 from .dataset import dataset_metadata, training_dataset
 from .datamodule import SpeechToSpeechDataModule
 from .datamodule.example import speech_pair_from_sample
-from .model.DiT.model import DiT
-from .model.orchestrator import Orchestrator, dit_config
+from .model.orchestrator import Orchestrator
 from .pl_module import SpeechToSpeechModule
 from .runtime import longcat_codec, prepare_longcat_tokenizer, qwen3_tokenizer
 from .types import SpeechPair
@@ -73,6 +82,7 @@ def run_smoke(
     config = load_config(config_name, overrides=overrides, config_dir=config_dir)
     if max_steps is not None:
         config = replace(config, train=replace(config.train, max_steps=max_steps))
+    _validate_acoustic_training_model(config.model, config.train)
 
     seed_everything(config.train.seed, workers=True)
     tokenizer = qwen3_tokenizer(config.model)
@@ -81,14 +91,13 @@ def run_smoke(
         datasets=dataset_metadata(config.datamodule.dataset_factory),
         config=config.bpe,
     )
-    acoustic_training = config.train.acoustic_loss_weight > 0.0
     model = Orchestrator(
-        dit=DiT(dit_config()) if acoustic_training else None,
         model_config=config.model,
         bpe_config=config.bpe,
         tokenizer=tokenizer,
         bpe_vocab_size=bpe.vocab_size,
     )
+    acoustic_training = config.train.acoustic_loss_weight > 0.0
     module = SpeechToSpeechModule(
         model,
         config.train,
@@ -171,6 +180,13 @@ def _accelerator(train: TrainConfig) -> str:
     return train.device
 
 
+def _validate_acoustic_training_model(model: ModelConfig, train: TrainConfig) -> None:
+    if train.acoustic_loss_weight > 0.0 and not model.acoustic.enabled:
+        raise ValueError(
+            "model.acoustic.enabled must be true when acoustic_loss_weight is positive."
+        )
+
+
 def _speech_to_speech_config(data: Mapping[str, object]) -> SpeechToSpeechConfig:
     return SpeechToSpeechConfig(
         datamodule=_datamodule_config(_optional_mapping(data, "datamodule")),
@@ -178,7 +194,7 @@ def _speech_to_speech_config(data: Mapping[str, object]) -> SpeechToSpeechConfig
         tasks=_task_config(_optional_mapping(data, "tasks")),
         model=_model_config(_optional_mapping(data, "model")),
         train=_from_mapping(TrainConfig, _optional_mapping(data, "train")),
-        trainer=_from_mapping(TrainerConfig, _optional_mapping(data, "trainer")),
+        trainer=_trainer_config(_optional_mapping(data, "trainer")),
     )
 
 
@@ -196,9 +212,34 @@ def _datamodule_config(data: Mapping[str, object] | None) -> DataModuleConfig:
 
 def _model_config(data: Mapping[str, object] | None) -> ModelConfig:
     data = data or {}
+    allowed = {field.name for field in fields(ModelConfig)}
+    unknown = set(data) - allowed
+    if unknown:
+        names = ", ".join(sorted(unknown))
+        raise KeyError(f"unknown ModelConfig field(s): {names}")
     return ModelConfig(
-        **_dataclass_kwargs(ModelConfig, data, skip={"lora"}),
+        backbone=_backbone_config(_optional_mapping(data, "backbone")),
+        token_space=_from_mapping(
+            TokenSpaceConfig,
+            _optional_mapping(data, "token_space"),
+        ),
+        acoustic=_acoustic_config(_optional_mapping(data, "acoustic")),
+    )
+
+
+def _backbone_config(data: Mapping[str, object] | None) -> QwenBackboneConfig:
+    data = data or {}
+    return QwenBackboneConfig(
+        **_dataclass_kwargs(QwenBackboneConfig, data, skip={"lora"}),
         lora=_from_mapping(LoRAConfig, _optional_mapping(data, "lora")),
+    )
+
+
+def _acoustic_config(data: Mapping[str, object] | None) -> AcousticDecoderConfig:
+    data = data or {}
+    return AcousticDecoderConfig(
+        **_dataclass_kwargs(AcousticDecoderConfig, data, skip={"dit"}),
+        dit=_from_mapping(DiTModelConfig, _optional_mapping(data, "dit")),
     )
 
 
@@ -207,6 +248,38 @@ def _task_config(data: Mapping[str, object] | None) -> TaskConfig:
     return TaskConfig(
         **_dataclass_kwargs(TaskConfig, data, skip={"weights"}),
         weights=_from_mapping(TaskWeightsConfig, _optional_mapping(data, "weights")),
+    )
+
+
+def _trainer_config(data: Mapping[str, object] | None) -> TrainerConfig:
+    data = data or {}
+    return TrainerConfig(
+        **_dataclass_kwargs(TrainerConfig, data, skip={"callbacks"}),
+        callbacks=_trainer_callbacks_config(_optional_mapping(data, "callbacks")),
+    )
+
+
+def _trainer_callbacks_config(data: Mapping[str, object] | None) -> TrainerCallbacksConfig:
+    data = data or {}
+    allowed = {field.name for field in fields(TrainerCallbacksConfig)}
+    unknown = set(data) - allowed
+    if unknown:
+        names = ", ".join(sorted(unknown))
+        raise KeyError(f"unknown TrainerCallbacksConfig field(s): {names}")
+    return TrainerCallbacksConfig(
+        checkpoint=_from_mapping(
+            CheckpointCallbackConfig,
+            _optional_mapping(data, "checkpoint"),
+        ),
+        learning_rate_monitor=_from_mapping(
+            LearningRateMonitorCallbackConfig,
+            _optional_mapping(data, "learning_rate_monitor"),
+        ),
+        sample=_from_mapping(SampleCallbackConfig, _optional_mapping(data, "sample")),
+        generation=_from_mapping(
+            GenerationCallbackConfig,
+            _optional_mapping(data, "generation"),
+        ),
     )
 
 
@@ -248,6 +321,8 @@ def _coerce_value(value: object, annotation: object, name: str) -> object:
         if not isinstance(value, Sequence) or isinstance(value, str | bytes):
             raise TypeError(f"{name} must be a sequence.")
         return tuple(value)
+    if isinstance(annotation, type) and issubclass(annotation, StrEnum):
+        return annotation(value)
     return value
 
 

@@ -119,9 +119,10 @@ class TaskGenerationLogger(Callback):
     every_n_steps: int = 500
     sample_index: int = 0
     flow_steps: int = 2
-    chunk_size: int | None = 64
+    chunk_size: int | None = None
+    left_context_chunks: int | None = None
     guidance_scale: float = 1.0
-    acoustic_sampler: str = AcousticSampler.DIAGONAL.value
+    acoustic_sampler: str = AcousticSampler.SERIAL.value
     preview_tokens: int = 1024
     max_audio_samples: int | None = SAMPLE_RATE * 20
     _pair: LongCatPair | None = field(default=None, init=False)
@@ -136,6 +137,8 @@ class TaskGenerationLogger(Callback):
             raise ValueError("flow_steps must be positive.")
         if self.chunk_size is not None and self.chunk_size <= 0:
             raise ValueError("chunk_size must be positive when set.")
+        if self.left_context_chunks is not None and self.left_context_chunks < 0:
+            raise ValueError("left_context_chunks must be non-negative.")
         if self.guidance_scale < 0.0:
             raise ValueError("guidance_scale must be non-negative.")
         AcousticSampler(self.acoustic_sampler)
@@ -213,6 +216,7 @@ class TaskGenerationLogger(Callback):
                     acoustic_generator=model.acoustic_feature_generator(
                         num_steps=self.flow_steps,
                         chunk_size=self.chunk_size,
+                        left_context_chunks=self.left_context_chunks,
                         guidance_scale=self.guidance_scale,
                         sampler=AcousticSampler(self.acoustic_sampler),
                         acoustic_condition=acoustic_condition,
@@ -227,6 +231,7 @@ class TaskGenerationLogger(Callback):
                     sample_index=self.sample_index,
                     flow_steps=self.flow_steps,
                     chunk_size=self.chunk_size,
+                    left_context_chunks=self.left_context_chunks,
                     guidance_scale=self.guidance_scale,
                     acoustic_sampler=self.acoustic_sampler,
                     step=step,
@@ -286,6 +291,7 @@ def _log_generation_result(
     sample_index: int,
     flow_steps: int,
     chunk_size: int | None,
+    left_context_chunks: int | None,
     guidance_scale: float,
     acoustic_sampler: str,
     step: int,
@@ -303,6 +309,7 @@ def _log_generation_result(
                 "mode: teacher_forced_waveform",
                 f"flow_steps: {flow_steps}",
                 f"chunk_size: {chunk_size}",
+                f"left_context_chunks: {left_context_chunks}",
                 f"guidance_scale: {guidance_scale}",
                 f"acoustic_sampler: {acoustic_sampler}",
                 f"semantic_frame_count: {semantic_ids.numel()}",

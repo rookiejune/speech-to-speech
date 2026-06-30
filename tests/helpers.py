@@ -78,8 +78,11 @@ class MockQwen(nn.Module):
         inputs_embeds: torch.Tensor,
         **kwargs: object,
     ):
-        del kwargs
-        return BaseModelOutputWithPast(last_hidden_state=self.proj(inputs_embeds))
+        del attention_mask
+        hidden = self.proj(inputs_embeds)
+        output_hidden_states = kwargs.get("output_hidden_states")
+        hidden_states = (inputs_embeds, hidden) if output_hidden_states else None
+        return BaseModelOutputWithPast(last_hidden_state=hidden, hidden_states=hidden_states)
 
 
 class MockFrameBPE:

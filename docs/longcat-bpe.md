@@ -57,3 +57,7 @@ python scripts/train.py experiment=wmt19_quality_muon bpe=longcat_100k
 python scripts/train.py experiment=wmt19_quality_100k_muon
 python scripts/train.py experiment=wmt19_quality_100k_full_adamw
 ```
+
+这些 quality 实验的模型配置默认启用 `model.acoustic.enabled=true`，并通过
+`train.acoustic_loss_weight` 控制 acoustic/FM loss 权重；模型配置分层约定见
+[model-config.md](model-config.md)。

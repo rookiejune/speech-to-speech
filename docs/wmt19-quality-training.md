@@ -5,6 +5,11 @@
 当前 WMT19 quality 训练使用 `acoustic_loss_weight=0.01`。LoRA 对照实验默认使用
 `batch_size=4`，Muon 全量更新实验先使用 `batch_size=1` 和 `learning_rate=1e-5`。
 
+模型配置入口已经拆分为 `model.backbone`、`model.token_space` 和 `model.acoustic`。
+当前 quality 配置默认启用 `model.acoustic.enabled=true`；`qwen3_0_6b_lora*`
+只表示 Qwen backbone 使用 LoRA，`qwen3_0_6b_full` 表示 Qwen backbone 全量更新，
+不再把 DiT 是否存在隐含在 preset 名字里。详细契约见 [model-config.md](model-config.md)。
+
 BPE 默认可使用 100k LongCat artifact。配置入口是 `bpe=longcat_100k`，已固定到
 `experiment=wmt19_quality_100k_muon` 和
 `experiment=wmt19_quality_100k_full_adamw`；artifact 和压缩统计见

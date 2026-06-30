@@ -1,0 +1,10 @@
+enabled: true
+every_n_steps: 5000
+sample_index: 0
+flow_steps: 32
+chunk_size:
+left_context_chunks:
+guidance_scale: 1.0
+acoustic_sampler: serial
+preview_tokens: 1024
+max_audio_samples: 320000
