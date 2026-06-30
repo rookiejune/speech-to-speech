@@ -148,6 +148,42 @@ class OrchestratorTest(unittest.TestCase):
         self.assertEqual(tuple(dit.last_hidden_state.shape), (1, 2, 4))
         self.assertEqual(dit.timesteps.tolist(), [0.25])
 
+    def test_acoustic_flow_loss_stats_returns_timesteps_and_row_loss(self) -> None:
+        tokenizer = MockTokenizer()
+        bpe = _bpe()
+        dit = MockDiT(hidden_size=4)
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            dit=dit,
+            tokenizer=tokenizer,
+            bpe_vocab_size=bpe.vocab_size,
+            pretrained=False,
+        )
+        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        batch = builder.translation(
+            TranslationExample(
+                source_ids=torch.tensor([3]),
+                target_ids=torch.tensor([4]),
+            )
+        )
+        hidden_states = torch.zeros(batch.input_ids.size(0), batch.input_ids.size(1), 4)
+        target_features = torch.tensor([[[1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 6.0, 8.0]]])
+
+        stats = model.acoustic_flow_loss_stats(
+            batch,
+            bpe,
+            target_features,
+            hidden_states=hidden_states,
+            noise=torch.zeros_like(target_features),
+            timesteps=torch.tensor([0.25]),
+        )
+
+        expected = target_features.square().mean()
+        self.assertTrue(torch.equal(stats.loss, expected))
+        self.assertTrue(torch.equal(stats.row_loss, expected.reshape(1)))
+        self.assertTrue(torch.equal(stats.row_weight, torch.tensor([8.0])))
+        self.assertTrue(torch.equal(stats.timesteps, torch.tensor([0.25])))
+
     def test_acoustic_flow_loss_aligns_condition_dtype_to_dit(self) -> None:
         tokenizer = MockTokenizer()
         bpe = _bpe()

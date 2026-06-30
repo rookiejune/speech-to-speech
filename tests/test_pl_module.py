@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 
 from speech_to_speech.config import ModelConfig, TrainConfig
 from speech_to_speech.datamodule.batch_builder import CausalLMBatchBuilder
+from speech_to_speech.model.acoustic import AcousticFlowLossStats
 from speech_to_speech.model.orchestrator import Orchestrator
 from speech_to_speech.pl_module import SpeechToSpeechModule
 from speech_to_speech.types import (
@@ -137,6 +138,47 @@ class SpeechToSpeechModuleTest(unittest.TestCase):
         self.assertTrue(torch.equal(model.target_features, torch.full((1, 2, 4), 3.0)))
         self.assertTrue(torch.equal(model.target_mask, torch.tensor([[True, True]])))
 
+    def test_loss_logs_acoustic_t_bin_losses(self) -> None:
+        model = JointLossStatsModel()
+        module = SpeechToSpeechModule(
+            model,
+            TrainConfig(acoustic_loss_weight=0.5),
+            bpe=object(),
+            acoustic_feature_extractor=FakeFeatureExtractor(torch.ones((4, 1, 1))),
+        )
+        batch = CausalLMBatch(
+            input_ids=torch.ones((4, 2), dtype=torch.long),
+            attention_mask=torch.ones((4, 2), dtype=torch.long),
+            labels=torch.ones((4, 2), dtype=torch.long),
+            logits_to_keep=1,
+            target_audio=LongCatBatchSide(
+                semantic_ids=torch.ones((4, 1), dtype=torch.long),
+                semantic_mask=torch.ones((4, 1), dtype=torch.bool),
+                acoustic_ids=torch.zeros((4, 1, 1), dtype=torch.long),
+                acoustic_mask=torch.ones((4, 1), dtype=torch.bool),
+            ),
+        )
+        logged: dict[str, torch.Tensor] = {}
+        batch_sizes: dict[str, int] = {}
+
+        def log(name: str, value: torch.Tensor, **kwargs: object) -> None:
+            logged[name] = value.detach()
+            batch_size = kwargs["batch_size"]
+            if isinstance(batch_size, int):
+                batch_sizes[name] = batch_size
+
+        module.log = log  # type: ignore[method-assign]
+
+        loss = module._loss(batch)
+
+        self.assertTrue(torch.equal(loss, torch.tensor(3.625)))
+        self.assertTrue(torch.equal(logged["loss/acoustic"], torch.tensor(3.25)))
+        self.assertTrue(torch.equal(logged["loss/acoustic_t/0_025"], torch.tensor(1.0)))
+        self.assertTrue(torch.equal(logged["loss/acoustic_t/025_050"], torch.tensor(2.0)))
+        self.assertTrue(torch.equal(logged["loss/acoustic_t/050_075"], torch.tensor(3.0)))
+        self.assertTrue(torch.equal(logged["loss/acoustic_t/075_100"], torch.tensor(4.0)))
+        self.assertEqual(batch_sizes["loss/acoustic_t/075_100"], 5)
+
     def test_loss_uses_supervised_token_weighted_row_loss(self) -> None:
         module = SpeechToSpeechModule(RowLossModel(torch.tensor([2.0, 8.0])))
         batch = CausalLMBatch(
@@ -218,6 +260,31 @@ class JointLossModel(torch.nn.Module):
         self.target_features = target_features
         self.target_mask = target_mask
         return torch.tensor(3.0)
+
+
+class JointLossStatsModel(torch.nn.Module):
+    def forward(self, batch: CausalLMBatch) -> CausalLMOutputWithPast:
+        del batch
+        return CausalLMOutputWithPast(loss=torch.tensor(2.0), logits=torch.empty(0))
+
+    def acoustic_flow_loss_stats(
+        self,
+        batch: CausalLMBatch,
+        bpe: object,
+        target_features: torch.Tensor,
+        *,
+        target_mask: torch.Tensor,
+        source_feature_extractor: object,
+    ) -> AcousticFlowLossStats:
+        del batch, bpe, target_features, target_mask, source_feature_extractor
+        row_loss = torch.tensor([1.0, 2.0, 3.0, 4.0])
+        row_weight = torch.tensor([1.0, 1.0, 1.0, 5.0])
+        return AcousticFlowLossStats(
+            loss=(row_loss * row_weight).sum() / row_weight.sum(),
+            timesteps=torch.tensor([0.1, 0.3, 0.7, 1.0]),
+            row_loss=row_loss,
+            row_weight=row_weight,
+        )
 
 
 class RowLossModel(torch.nn.Module):

@@ -12,9 +12,17 @@ from torch.optim.lr_scheduler import LRScheduler
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from ..config import TrainConfig
-from ..model.acoustic import acoustic_features_from_batch_side
+from ..model.acoustic import AcousticFlowLossStats, acoustic_features_from_batch_side
 from ..model.orchestrator import Orchestrator
 from ..types import CausalLMBatch, IGNORE_INDEX, LongCatBatchSide, TaskFamily
+
+
+ACOUSTIC_T_BINS = (
+    ("0_025", 0.0, 0.25),
+    ("025_050", 0.25, 0.5),
+    ("050_075", 0.5, 0.75),
+    ("075_100", 0.75, 1.0),
+)
 
 
 class _LRSchedulerConfig(TypedDict):
@@ -158,7 +166,8 @@ class SpeechToSpeechModule(LightningModule):
         acoustic_weight = self.train_config.acoustic_loss_weight
         if acoustic_weight <= 0.0:
             return loss
-        acoustic_loss = self._acoustic_loss(batch)
+        acoustic = self._acoustic_loss(batch)
+        acoustic_loss = acoustic.loss if isinstance(acoustic, AcousticFlowLossStats) else acoustic
         self.log(
             _log_name("loss/acoustic", stage=stage),
             acoustic_loss,
@@ -167,6 +176,8 @@ class SpeechToSpeechModule(LightningModule):
             on_epoch=True,
             sync_dist=True,
         )
+        if isinstance(acoustic, AcousticFlowLossStats):
+            self._log_acoustic_t_bin_losses(acoustic, stage=stage)
         return loss + acoustic_weight * acoustic_loss
 
     def _semantic_row_loss(
@@ -298,7 +309,7 @@ class SpeechToSpeechModule(LightningModule):
             sync_dist=True,
         )
 
-    def _acoustic_loss(self, batch: CausalLMBatch) -> Tensor:
+    def _acoustic_loss(self, batch: CausalLMBatch) -> Tensor | AcousticFlowLossStats:
         if self.bpe is None:
             raise RuntimeError("acoustic loss requires a LongCat BPE tokenizer.")
         if self.acoustic_feature_extractor is None:
@@ -313,6 +324,15 @@ class SpeechToSpeechModule(LightningModule):
             batch.target_audio,
             feature_extractor=feature_extractor,
         )
+        acoustic_flow_loss_stats = getattr(self.model, "acoustic_flow_loss_stats", None)
+        if callable(acoustic_flow_loss_stats):
+            return acoustic_flow_loss_stats(
+                batch,
+                self.bpe,
+                target_features,
+                target_mask=target_mask,
+                source_feature_extractor=feature_extractor,
+            )
         return self.model.acoustic_flow_loss(
             batch,
             self.bpe,
@@ -320,6 +340,36 @@ class SpeechToSpeechModule(LightningModule):
             target_mask=target_mask,
             source_feature_extractor=feature_extractor,
         )
+
+    def _log_acoustic_t_bin_losses(
+        self,
+        stats: AcousticFlowLossStats,
+        *,
+        stage: str | None,
+    ) -> None:
+        timesteps = stats.timesteps.detach()
+        row_loss = stats.row_loss.detach()
+        row_weight = stats.row_weight.detach()
+        for name, start, end in ACOUSTIC_T_BINS:
+            if end >= 1.0:
+                mask = timesteps.ge(start) & timesteps.le(end)
+            else:
+                mask = timesteps.ge(start) & timesteps.lt(end)
+            if not bool(mask.any()):
+                continue
+            weight = row_weight[mask]
+            if not bool(weight.gt(0).any()):
+                continue
+            loss = (row_loss[mask] * weight).sum() / weight.sum()
+            batch_size = int(weight.sum().detach().item())
+            self.log(
+                _log_name(f"loss/acoustic_t/{name}", stage=stage),
+                loss,
+                batch_size=batch_size,
+                on_step=stage is None,
+                on_epoch=True,
+                sync_dist=True,
+            )
 
 
 def _scheduler_total_steps(train: TrainConfig) -> int | None:

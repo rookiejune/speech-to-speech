@@ -29,8 +29,10 @@ from ..types import (
     WaveformGeneration,
 )
 from .acoustic import (
+    AcousticFlowLossStats,
     acoustic_condition,
     continuous_flow_loss,
+    continuous_flow_loss_stats,
     null_acoustic_condition,
     pooled_acoustic_condition_from_batch_side,
     validate_acoustic_features,
@@ -296,6 +298,75 @@ class Orchestrator(nn.Module):
         acoustic_condition: Tensor | None = None,
         source_feature_extractor: object | None = None,
     ) -> Tensor:
+        target_features, noise, last_hidden_state, acoustic_condition, mask = (
+            self._acoustic_flow_inputs(
+                batch,
+                bpe,
+                target_features,
+                hidden_states=hidden_states,
+                target_mask=target_mask,
+                noise=noise,
+                acoustic_condition=acoustic_condition,
+                source_feature_extractor=source_feature_extractor,
+            )
+        )
+        return continuous_flow_loss(
+            self.dit,
+            target_features,
+            x_0=noise,
+            timesteps=timesteps,
+            last_hidden_state=last_hidden_state,
+            acoustic_condition=acoustic_condition,
+            mask=mask,
+        )
+
+    def acoustic_flow_loss_stats(
+        self,
+        batch: CausalLMBatch,
+        bpe: CodecBPE,
+        target_features: Tensor,
+        *,
+        hidden_states: Tensor | None = None,
+        target_mask: Tensor | None = None,
+        noise: Tensor | None = None,
+        timesteps: Tensor | None = None,
+        acoustic_condition: Tensor | None = None,
+        source_feature_extractor: object | None = None,
+    ) -> AcousticFlowLossStats:
+        target_features, noise, last_hidden_state, acoustic_condition, mask = (
+            self._acoustic_flow_inputs(
+                batch,
+                bpe,
+                target_features,
+                hidden_states=hidden_states,
+                target_mask=target_mask,
+                noise=noise,
+                acoustic_condition=acoustic_condition,
+                source_feature_extractor=source_feature_extractor,
+            )
+        )
+        return continuous_flow_loss_stats(
+            self.dit,
+            target_features,
+            x_0=noise,
+            timesteps=timesteps,
+            last_hidden_state=last_hidden_state,
+            acoustic_condition=acoustic_condition,
+            mask=mask,
+        )
+
+    def _acoustic_flow_inputs(
+        self,
+        batch: CausalLMBatch,
+        bpe: CodecBPE,
+        target_features: Tensor,
+        *,
+        hidden_states: Tensor | None,
+        target_mask: Tensor | None,
+        noise: Tensor | None,
+        acoustic_condition: Tensor | None,
+        source_feature_extractor: object | None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         if self.dit is None:
             raise RuntimeError("acoustic_flow_loss requires a DiT acoustic decoder.")
 
@@ -352,15 +423,7 @@ class Orchestrator(nn.Module):
                 "acoustic_condition must have shape [batch, target_features dim]."
             )
 
-        return continuous_flow_loss(
-            self.dit,
-            target_features,
-            x_0=noise,
-            timesteps=timesteps,
-            last_hidden_state=last_hidden_state,
-            acoustic_condition=acoustic_condition,
-            mask=condition.mask,
-        )
+        return target_features, noise, last_hidden_state, acoustic_condition, condition.mask
 
     def _maybe_drop_acoustic_condition(
         self,
