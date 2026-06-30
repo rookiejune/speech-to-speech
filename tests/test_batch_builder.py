@@ -117,31 +117,6 @@ class CausalLMBatchBuilderTest(unittest.TestCase):
         self.assertEqual(batch.input_ids.tolist(), [[1, 10, 11, 16, 18, 19, 17, 12, 13, 16]])
         self.assertEqual(batch.attention_mask.tolist(), [[1, 1, 1, 1, 1, 1, 1, 1, 1, 1]])
 
-    def test_chat_template_mapping_output_is_supported(self) -> None:
-        builder = CausalLMBatchBuilder(toy_embedding(), tokenizer=MappingTokenizer())
-
-        batch = builder.autoregression_generation()
-
-        self.assertEqual(batch.input_ids.tolist(), [[1, 10, 11, 12, 13, 16]])
-
-class MappingTokenizer(MockTokenizer):
-    def apply_chat_template(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        tokenize: bool,
-        add_generation_prompt: bool,
-        enable_thinking: bool,
-        return_dict: bool = True,
-    ) -> dict[str, list[int]]:
-        ids = super().apply_chat_template(
-            messages,
-            tokenize=tokenize,
-            add_generation_prompt=add_generation_prompt,
-            enable_thinking=enable_thinking,
-        )
-        return {"input_ids": ids}
-
 
 if __name__ == "__main__":
     unittest.main()

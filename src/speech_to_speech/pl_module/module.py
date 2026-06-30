@@ -254,10 +254,7 @@ class SpeechToSpeechModule(LightningModule):
         batch: CausalLMBatch,
         output: CausalLMOutputWithPast,
     ) -> Tensor:
-        semantic_accuracy = getattr(self.model, "semantic_accuracy", None)
-        if not callable(semantic_accuracy):
-            raise TypeError("model must provide semantic_accuracy().")
-        accuracy = semantic_accuracy(batch, output)
+        accuracy = self.model.semantic_accuracy(batch, output)
         if not isinstance(accuracy, Tensor):
             raise TypeError("model semantic_accuracy() must return a Tensor.")
         return accuracy
@@ -359,56 +356,30 @@ class SpeechToSpeechModule(LightningModule):
             batch.target_audio,
             feature_extractor=feature_extractor,
         )
-        acoustic_flow_inputs = getattr(self.model, "acoustic_flow_inputs", None)
-        if callable(acoustic_flow_inputs):
-            inputs = acoustic_flow_inputs(
-                batch,
-                self.bpe,
-                target_features,
-                hidden_states=hidden_states,
-                target_mask=target_mask,
-                noise=None,
-                acoustic_condition=None,
-                source_feature_extractor=feature_extractor,
-            )
-            if not isinstance(inputs, AcousticFlowInputs):
-                raise TypeError("model acoustic_flow_inputs() must return AcousticFlowInputs.")
-            stats_from_inputs = getattr(self.model, "acoustic_flow_loss_stats_from_inputs", None)
-            if not callable(stats_from_inputs):
-                raise TypeError(
-                    "model with acoustic_flow_inputs() must provide "
-                    "acoustic_flow_loss_stats_from_inputs()."
-                )
-            stats = stats_from_inputs(inputs, timesteps=None)
-            if not isinstance(stats, AcousticFlowLossStats):
-                raise TypeError(
-                    "model acoustic_flow_loss_stats_from_inputs() must return "
-                    "AcousticFlowLossStats."
-                )
-            self._log_acoustic_condition_stats(
-                inputs,
-                timesteps=stats.timesteps,
-                stage=stage,
-            )
-            return stats
-        acoustic_flow_loss_stats = getattr(self.model, "acoustic_flow_loss_stats", None)
-        if callable(acoustic_flow_loss_stats):
-            return acoustic_flow_loss_stats(
-                batch,
-                self.bpe,
-                target_features,
-                hidden_states=hidden_states,
-                target_mask=target_mask,
-                source_feature_extractor=feature_extractor,
-            )
-        return self.model.acoustic_flow_loss(
+        inputs = self.model.acoustic_flow_inputs(
             batch,
             self.bpe,
             target_features,
             hidden_states=hidden_states,
             target_mask=target_mask,
+            noise=None,
+            acoustic_condition=None,
             source_feature_extractor=feature_extractor,
         )
+        if not isinstance(inputs, AcousticFlowInputs):
+            raise TypeError("model acoustic_flow_inputs() must return AcousticFlowInputs.")
+        stats = self.model.acoustic_flow_loss_stats_from_inputs(inputs, timesteps=None)
+        if not isinstance(stats, AcousticFlowLossStats):
+            raise TypeError(
+                "model acoustic_flow_loss_stats_from_inputs() must return "
+                "AcousticFlowLossStats."
+            )
+        self._log_acoustic_condition_stats(
+            inputs,
+            timesteps=stats.timesteps,
+            stage=stage,
+        )
+        return stats
 
     def _log_acoustic_t_bin_losses(
         self,
@@ -439,10 +410,7 @@ class SpeechToSpeechModule(LightningModule):
         timesteps: Tensor,
         stage: str | None,
     ) -> None:
-        condition_tensors = getattr(self.model, "acoustic_condition_tensors", None)
-        if not callable(condition_tensors):
-            return
-        tensors = condition_tensors(inputs, timesteps=timesteps)
+        tensors = self.model.acoustic_condition_tensors(inputs, timesteps=timesteps)
         if not isinstance(tensors, DiTConditionTensors):
             raise TypeError("model acoustic_condition_tensors() must return DiTConditionTensors.")
         mask = inputs.mask.to(device=inputs.last_hidden_state.device, dtype=torch.bool)

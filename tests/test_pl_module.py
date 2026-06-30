@@ -365,7 +365,7 @@ def _module_and_batch(
         tokenizer=tokenizer,
         bpe_vocab_size=5,
         model_config=ModelConfig(backbone=QwenBackboneConfig(train=True)),
-        pretrained=False,
+        qwen3_pretrained=False,
     )
     builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
     batch = builder.autoregression(
@@ -409,7 +409,7 @@ class JointLossModel(torch.nn.Module):
             hidden_states=hidden_states,
         )
 
-    def acoustic_flow_loss(
+    def acoustic_flow_inputs(
         self,
         batch: CausalLMBatch,
         bpe: object,
@@ -417,13 +417,52 @@ class JointLossModel(torch.nn.Module):
         *,
         hidden_states: torch.Tensor | None = None,
         target_mask: torch.Tensor,
+        noise: torch.Tensor | None = None,
+        acoustic_condition: torch.Tensor | None = None,
         source_feature_extractor: object,
-    ) -> torch.Tensor:
-        del batch, bpe, source_feature_extractor
+    ) -> AcousticFlowInputs:
+        del batch, bpe, noise, acoustic_condition, source_feature_extractor
         self.target_features = target_features
         self.target_mask = target_mask
         self.hidden_states = hidden_states
-        return torch.tensor(3.0)
+        return AcousticFlowInputs(
+            target_features=target_features,
+            noise=torch.zeros_like(target_features),
+            last_hidden_state=torch.zeros_like(target_features),
+            acoustic_condition=torch.zeros(
+                (target_features.size(0), target_features.size(-1)),
+                dtype=target_features.dtype,
+                device=target_features.device,
+            ),
+            mask=target_mask,
+        )
+
+    def acoustic_flow_loss_stats_from_inputs(
+        self,
+        inputs: AcousticFlowInputs,
+        *,
+        timesteps: torch.Tensor | None = None,
+    ) -> AcousticFlowLossStats:
+        del inputs, timesteps
+        return AcousticFlowLossStats(
+            loss=torch.tensor(3.0),
+            timesteps=torch.tensor([0.5]),
+            row_loss=torch.tensor([3.0]),
+            row_weight=torch.tensor([1.0]),
+        )
+
+    def acoustic_condition_tensors(
+        self,
+        inputs: AcousticFlowInputs,
+        *,
+        timesteps: torch.Tensor,
+    ) -> DiTConditionTensors:
+        del timesteps
+        return DiTConditionTensors(
+            time=torch.zeros((inputs.target_features.size(0), 1, inputs.target_features.size(-1))),
+            hidden=inputs.last_hidden_state,
+            acoustic=inputs.acoustic_condition.unsqueeze(1),
+        )
 
     def semantic_accuracy(
         self,
@@ -449,7 +488,7 @@ class JointLossStatsModel(torch.nn.Module):
             hidden_states=hidden_states,
         )
 
-    def acoustic_flow_loss_stats(
+    def acoustic_flow_inputs(
         self,
         batch: CausalLMBatch,
         bpe: object,
@@ -457,9 +496,30 @@ class JointLossStatsModel(torch.nn.Module):
         *,
         hidden_states: torch.Tensor | None = None,
         target_mask: torch.Tensor,
+        noise: torch.Tensor | None = None,
+        acoustic_condition: torch.Tensor | None = None,
         source_feature_extractor: object,
+    ) -> AcousticFlowInputs:
+        del batch, bpe, hidden_states, noise, acoustic_condition, source_feature_extractor
+        return AcousticFlowInputs(
+            target_features=target_features,
+            noise=torch.zeros_like(target_features),
+            last_hidden_state=torch.zeros_like(target_features),
+            acoustic_condition=torch.zeros(
+                (target_features.size(0), target_features.size(-1)),
+                dtype=target_features.dtype,
+                device=target_features.device,
+            ),
+            mask=target_mask,
+        )
+
+    def acoustic_flow_loss_stats_from_inputs(
+        self,
+        inputs: AcousticFlowInputs,
+        *,
+        timesteps: torch.Tensor | None = None,
     ) -> AcousticFlowLossStats:
-        del batch, bpe, target_features, hidden_states, target_mask, source_feature_extractor
+        del inputs, timesteps
         row_loss = torch.tensor([1.0, 2.0, 3.0, 4.0])
         row_weight = torch.tensor([1.0, 1.0, 1.0, 5.0])
         return AcousticFlowLossStats(
@@ -467,6 +527,19 @@ class JointLossStatsModel(torch.nn.Module):
             timesteps=torch.tensor([0.1, 0.3, 0.7, 1.0]),
             row_loss=row_loss,
             row_weight=row_weight,
+        )
+
+    def acoustic_condition_tensors(
+        self,
+        inputs: AcousticFlowInputs,
+        *,
+        timesteps: torch.Tensor,
+    ) -> DiTConditionTensors:
+        del timesteps
+        return DiTConditionTensors(
+            time=torch.zeros((inputs.target_features.size(0), 1, inputs.target_features.size(-1))),
+            hidden=inputs.last_hidden_state,
+            acoustic=inputs.acoustic_condition.unsqueeze(1),
         )
 
 

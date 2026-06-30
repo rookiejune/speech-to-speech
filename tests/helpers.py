@@ -54,7 +54,9 @@ class MockTokenizer:
         tokenize: bool,
         add_generation_prompt: bool,
         enable_thinking: bool,
+        return_dict: bool = False,
     ) -> list[int]:
+        del tokenize, enable_thinking, return_dict
         ids = [1, 10, 11]
         content = messages[0]["content"]
         if "<<<SPEECH_TO_SPEECH_SOURCE_AUDIO>>>" in content:

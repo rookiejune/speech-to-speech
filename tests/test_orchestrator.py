@@ -40,7 +40,7 @@ class OrchestratorTest(unittest.TestCase):
             qwen3=MockQwen(),
             tokenizer=tokenizer,
             bpe_vocab_size=5,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
         batch = builder.autoregression(
@@ -59,7 +59,7 @@ class OrchestratorTest(unittest.TestCase):
             qwen3=MockQwen(),
             tokenizer=MockTokenizer(),
             bpe_vocab_size=5,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         batch = CausalLMBatch(
             input_ids=torch.zeros((2, 3), dtype=torch.long),
@@ -95,7 +95,7 @@ class OrchestratorTest(unittest.TestCase):
             qwen3=MockQwen(),
             tokenizer=tokenizer,
             bpe_vocab_size=bpe.vocab_size,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
         batch = builder.translation(
@@ -125,7 +125,7 @@ class OrchestratorTest(unittest.TestCase):
             dit=dit,
             tokenizer=tokenizer,
             bpe_vocab_size=bpe.vocab_size,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
         batch = builder.translation(
@@ -163,7 +163,7 @@ class OrchestratorTest(unittest.TestCase):
             dit=dit,
             tokenizer=tokenizer,
             bpe_vocab_size=bpe.vocab_size,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
         batch = builder.translation(
@@ -199,7 +199,7 @@ class OrchestratorTest(unittest.TestCase):
             dit=dit,
             tokenizer=tokenizer,
             bpe_vocab_size=bpe.vocab_size,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
         batch = builder.translation(
@@ -231,7 +231,7 @@ class OrchestratorTest(unittest.TestCase):
             dit=dit,
             tokenizer=tokenizer,
             bpe_vocab_size=bpe.vocab_size,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
         batch = builder.translation(
@@ -269,7 +269,7 @@ class OrchestratorTest(unittest.TestCase):
             dit=dit,
             tokenizer=tokenizer,
             bpe_vocab_size=bpe.vocab_size,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
         batch = builder.translation(
@@ -318,7 +318,7 @@ class OrchestratorTest(unittest.TestCase):
             model_config=ModelConfig(
                 acoustic=AcousticDecoderConfig(condition_dropout=1.0)
             ),
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
         batch = builder.translation(
@@ -369,7 +369,7 @@ class OrchestratorTest(unittest.TestCase):
             qwen3=MockQwen(),
             tokenizer=tokenizer,
             bpe_vocab_size=5,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
         batch = builder.autoregression(
@@ -398,7 +398,7 @@ class OrchestratorTest(unittest.TestCase):
             qwen3=qwen,
             tokenizer=tokenizer,
             bpe_vocab_size=5,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         _set_lm_head_weights(
             model,
@@ -437,7 +437,7 @@ class OrchestratorTest(unittest.TestCase):
             qwen3=qwen,
             tokenizer=tokenizer,
             bpe_vocab_size=5,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         _set_lm_head_weights(
             model,
@@ -472,7 +472,7 @@ class OrchestratorTest(unittest.TestCase):
             qwen3=qwen,
             tokenizer=tokenizer,
             bpe_vocab_size=5,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         _set_lm_head_weights(
             model,
@@ -510,7 +510,7 @@ class OrchestratorTest(unittest.TestCase):
             qwen3=ScriptedQwen(next_hidden_values=(torch.tensor([1.0, 0.0, 0.0, 0.0]),)),
             tokenizer=tokenizer,
             bpe_vocab_size=5,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
         batch = builder.translation_generation(torch.tensor([0]))
@@ -532,7 +532,7 @@ class OrchestratorTest(unittest.TestCase):
             dit=MockDiT(hidden_size=4),
             tokenizer=tokenizer,
             bpe_vocab_size=bpe.vocab_size,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
         batch = builder.translation(
@@ -566,7 +566,7 @@ class OrchestratorTest(unittest.TestCase):
             dit=dit,
             tokenizer=tokenizer,
             bpe_vocab_size=5,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         condition = AcousticCondition(
             hidden_states=torch.ones((1, 3, 4)),
@@ -589,7 +589,7 @@ class OrchestratorTest(unittest.TestCase):
             dit=dit,
             tokenizer=tokenizer,
             bpe_vocab_size=5,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         condition = AcousticCondition(
             hidden_states=torch.ones((1, 3, 4)),
@@ -616,7 +616,7 @@ class OrchestratorTest(unittest.TestCase):
             dit=dit,
             tokenizer=tokenizer,
             bpe_vocab_size=5,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         condition = AcousticCondition(
             hidden_states=torch.ones((1, 3, 4)),
@@ -644,7 +644,7 @@ class OrchestratorTest(unittest.TestCase):
             dit=dit,
             tokenizer=tokenizer,
             bpe_vocab_size=5,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         condition = AcousticCondition(
             hidden_states=torch.ones((1, 5, 4)),
@@ -675,7 +675,7 @@ class OrchestratorTest(unittest.TestCase):
             dit=dit,
             tokenizer=tokenizer,
             bpe_vocab_size=5,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         condition = AcousticCondition(
             hidden_states=torch.ones((1, 5, 4)),
@@ -702,7 +702,7 @@ class OrchestratorTest(unittest.TestCase):
             dit=dit,
             tokenizer=tokenizer,
             bpe_vocab_size=5,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         condition = AcousticCondition(
             hidden_states=torch.ones((1, 2, 4)),
@@ -734,7 +734,7 @@ class OrchestratorTest(unittest.TestCase):
                     ),
                 )
             ),
-            pretrained=False,
+            qwen3_pretrained=False,
         )
 
         self.assertIsNotNone(model.dit)
@@ -749,7 +749,7 @@ class OrchestratorTest(unittest.TestCase):
             dit=dit,
             tokenizer=tokenizer,
             bpe_vocab_size=5,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
 
         embedding = model.embed_tokens
@@ -776,7 +776,7 @@ class OrchestratorTest(unittest.TestCase):
             qwen3=qwen,
             tokenizer=tokenizer,
             bpe_vocab_size=4096,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
 
         audio = model.embed_tokens.modality_embeddings[Modality.AUDIO.value].weight
@@ -793,7 +793,7 @@ class OrchestratorTest(unittest.TestCase):
                 qwen3=qwen,
                 tokenizer=tokenizer,
                 bpe_vocab_size=5,
-                pretrained=True,
+                qwen3_pretrained=True,
                 lora_config=object(),
             )
 

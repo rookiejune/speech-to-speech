@@ -44,7 +44,6 @@ from .diagonal import (
     diagonal_flow_sample,
     diagonal_flow_sample_chunks,
     full_sequence_flow_sample,
-    serial_flow_sample,
 )
 from .DiT.model import DiT, DiTConditionTensors
 from .generation import Generator
@@ -158,13 +157,10 @@ class Orchestrator(nn.Module):
         tokenizer: object | None = None,
         bpe_vocab_size: int | None = None,
         qwen3_pretrained: bool = True,
-        pretrained: bool | None = None,
     ) -> None:
         super().__init__()
 
         model_config = model_config or ModelConfig()
-        if pretrained is not None:
-            qwen3_pretrained = pretrained
         self.acoustic_condition_drop = model_config.acoustic.condition_dropout
 
         peft_applied = False

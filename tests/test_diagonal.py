@@ -83,7 +83,7 @@ class DiagonalScheduleTest(unittest.TestCase):
             dit=TrackingVelocityDiT(hidden_size=4),
             tokenizer=tokenizer,
             bpe_vocab_size=5,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         x_0 = torch.zeros((1, 4, 4))
 

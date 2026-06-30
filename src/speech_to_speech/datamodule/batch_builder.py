@@ -1,4 +1,4 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 
 import torch
 from anytrain.idspace import IdSpaceEmbedding, Modality
@@ -55,17 +55,9 @@ class CausalLMBatchBuilder:
         ]
         return self._collate(rows)
 
-    def _autoregression(
-        self,
-        audio_ids: Tensor | Sequence[int] | Sequence[Tensor | Sequence[int]],
-    ) -> CausalLMBatch:
-        return self.autoregression(
-            [AutoregressionExample(audio_ids=ids) for ids in _normalize_id_batch(audio_ids)]
-        )
-
     def autoregression_generation(
         self,
-        prefix_ids: Tensor | Sequence[int] | None = None,
+        prefix_ids: Tensor | None = None,
     ) -> GenerationBatch:
         prompt_ids = [
             *self._autoregression_prompt_ids,
@@ -74,10 +66,12 @@ class CausalLMBatchBuilder:
         if prefix_ids is None:
             device = None
         else:
-            prefix = _normalize_id_tensor(_as_tensor(prefix_ids))
+            prefix = _normalize_id_tensor(prefix_ids)
             prompt_ids.extend(self.to_global(Modality.AUDIO, _tensor_to_list(prefix)))
             device = prefix.device
-        return self._generation_batch(_long_tensor(prompt_ids, device=device))
+        return self._generation_batch(
+            torch.tensor(prompt_ids, dtype=torch.long, device=device)
+        )
 
     def _autoregression_row(self, audio_ids: LongTensor) -> tuple[LongTensor, LongTensor]:
         prefix = torch.tensor(
@@ -155,19 +149,15 @@ class CausalLMBatchBuilder:
             raise TypeError("examples must contain task example values.")
         return self._collate(rows)
 
-    def _translation(
-        self,
-        examples: TranslationExample | Sequence[TranslationExample],
-    ) -> CausalLMBatch:
-        return self.translation(examples)
-
-    def translation_generation(self, source_ids: Tensor | Sequence[int]) -> GenerationBatch:
-        source = _normalize_id_tensor(_as_tensor(source_ids))
+    def translation_generation(self, source_ids: Tensor) -> GenerationBatch:
+        source = _normalize_id_tensor(source_ids)
         prompt_ids = [
             *self._translation_prompt_ids(source),
             self.boa_id,
         ]
-        return self._generation_batch(_long_tensor(prompt_ids, device=source.device))
+        return self._generation_batch(
+            torch.tensor(prompt_ids, dtype=torch.long, device=source.device)
+        )
 
     def _translation_row(
         self,
@@ -242,26 +232,6 @@ class CausalLMBatchBuilder:
         )
 
 
-def _normalize_id_batch(
-    ids: Tensor | Sequence[int] | Sequence[Tensor | Sequence[int]],
-) -> list[LongTensor]:
-    if isinstance(ids, Tensor):
-        if ids.dim() == 1:
-            return [_normalize_id_tensor(ids)]
-        if ids.dim() == 2:
-            return [_normalize_id_tensor(row) for row in ids]
-        raise ValueError("audio_ids tensor must be 1D or 2D.")
-
-    if not isinstance(ids, Sequence) or isinstance(ids, str | bytes):
-        raise TypeError("audio_ids must be a tensor or sequence.")
-    if not ids:
-        raise ValueError("audio_ids must not be empty.")
-
-    if _is_id_sequence(ids):
-        return [_normalize_id_tensor(torch.tensor(ids, dtype=torch.long))]
-    return [_normalize_id_tensor(_as_tensor(row)) for row in ids]
-
-
 def _normalize_examples[ExampleT](
     examples: ExampleT | Sequence[ExampleT],
     example_type: type[ExampleT],
@@ -288,78 +258,25 @@ def _normalize_id_tensor(ids: Tensor) -> LongTensor:
     return ids.to(dtype=torch.long)
 
 
-def _as_tensor(ids: Tensor | Sequence[int]) -> Tensor:
-    if isinstance(ids, Tensor):
-        return ids
-    if not _is_id_sequence(ids):
-        raise TypeError("each audio id sequence must contain integer ids.")
-    return torch.tensor(ids, dtype=torch.long)
-
-
-def _is_id_sequence(ids: object) -> bool:
-    if not isinstance(ids, Sequence) or isinstance(ids, str | bytes):
-        return False
-    return all(isinstance(token_id, int) and not isinstance(token_id, bool) for token_id in ids)
-
-
 def _tensor_to_list(ids: Tensor) -> list[int]:
     return [int(token_id) for token_id in ids.detach().cpu().tolist()]
 
 
-def _long_tensor(ids: Sequence[int], *, device: torch.device | None = None) -> LongTensor:
-    if device is None:
-        return torch.tensor(ids, dtype=torch.long)
-    return torch.tensor(ids, dtype=torch.long, device=device)
-
-
 def _apply_chat_template(tokenizer: object, content: str) -> list[int]:
-    apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
-    if not callable(apply_chat_template):
-        raise TypeError("Qwen3 tokenizer with apply_chat_template is required.")
-    try:
-        ids = apply_chat_template(
-            [{"role": "user", "content": content}],
-            tokenize=True,
-            add_generation_prompt=True,
-            enable_thinking=False,
-            return_dict=False,
-        )
-    except TypeError:
-        ids = apply_chat_template(
-            [{"role": "user", "content": content}],
-            tokenize=True,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-    return _normalize_template_ids(ids)
-
-
-def _normalize_template_ids(ids: object) -> list[int]:
-    if isinstance(ids, Mapping):
-        try:
-            ids = ids["input_ids"]
-        except KeyError as error:
-            raise ValueError("chat template output must contain input_ids.") from error
-    if isinstance(ids, Tensor):
-        if ids.dim() == 2 and ids.size(0) == 1:
-            ids = ids.squeeze(0)
-        if ids.dim() != 1:
-            raise ValueError("chat template input_ids must be 1D.")
-        return [int(token_id) for token_id in ids.detach().cpu().tolist()]
-    if not isinstance(ids, Sequence) or isinstance(ids, str | bytes):
-        raise TypeError("chat template output must be a token id sequence.")
-    if ids and isinstance(ids[0], Sequence) and not isinstance(ids[0], str | bytes):
-        if len(ids) != 1:
-            raise ValueError("batched chat template output must contain one row.")
-        ids = ids[0]
-    return [int(token_id) for token_id in ids]
+    ids = tokenizer.apply_chat_template(
+        [{"role": "user", "content": content}],
+        tokenize=True,
+        add_generation_prompt=True,
+        enable_thinking=False,
+        return_dict=False,
+    )
+    if not isinstance(ids, list) or not all(isinstance(token_id, int) for token_id in ids):
+        raise TypeError("chat template must return a flat token id list.")
+    return ids
 
 
 def _encode_text(tokenizer: object, text: str) -> list[int]:
-    encode = getattr(tokenizer, "encode", None)
-    if not callable(encode):
-        raise TypeError("tokenizer must provide encode().")
-    return [int(token_id) for token_id in encode(text, add_special_tokens=False)]
+    return [int(token_id) for token_id in tokenizer.encode(text, add_special_tokens=False)]
 
 
 def _to_global_text_ids(embedding: IdSpaceEmbedding, ids: Sequence[int]) -> list[int]:

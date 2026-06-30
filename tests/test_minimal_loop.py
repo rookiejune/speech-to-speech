@@ -29,7 +29,7 @@ class MinimalLoopTest(unittest.TestCase):
             qwen3=MockQwen(),
             tokenizer=tokenizer,
             bpe_vocab_size=bpe.vocab_size,
-            pretrained=False,
+            qwen3_pretrained=False,
         )
         builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
         audio_ids = torch.tensor(
