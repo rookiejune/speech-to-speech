@@ -8,7 +8,7 @@ from pathlib import Path
 import hydra
 import torch
 from lightning.pytorch import Trainer, seed_everything
-from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
 from omegaconf import DictConfig, OmegaConf
 
@@ -82,7 +82,7 @@ def main(cfg: DictConfig) -> None:
         save_last=True,
         every_n_train_steps=config.trainer.checkpoint_every_n_steps,
     )
-    callbacks = [checkpoint]
+    callbacks = [checkpoint, LearningRateMonitor(logging_interval="step")]
     if config.trainer.sample_log_every_n_steps is not None:
         callbacks.append(
             TaskSampleLogger(

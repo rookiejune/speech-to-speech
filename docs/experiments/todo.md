@@ -2,7 +2,7 @@
 
 ## 下一步
 
-- 固定 checkpoint 生成评估入口，保存 generated waveform、EOA 命中、生成长度和人工听感备注。
+- 用 `scripts/evaluate_free_running.py` 对 003 checkpoints 跑同一组 sample 评估，记录 generated waveform、EOA 命中、生成长度和人工听感备注。
 - 视第一组结果决定是否追加 Qwen3-8B LoRA 短程容量检查。
 - 明确第一轮正式训练是否以 source-to-target 为主方向。
 

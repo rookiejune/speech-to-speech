@@ -1,7 +1,7 @@
 name: wmt19-mixed-smoke
 default_root_dir: null
 accelerator:
-devices: 1
+devices: auto
 strategy: auto
 ckpt_path:
 log_every_n_steps:

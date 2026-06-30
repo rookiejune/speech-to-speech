@@ -22,3 +22,9 @@ Local runs may set `LOCATION`, `STATIC_HOME`, or `DYNAMIC_HOME` before invoking
 a wrapper. The shell env does not initialize those homes, and the default
 training root is resolved inside Python as
 `zhuyin.env.train_dir("speech-to-speech")`.
+
+## Experiment Groups
+
+- `jobs/001/`: staged S0/S1/S2 and first LoRA/full training checks.
+- `jobs/003/`: parallel 100k BPE free-running ablations from
+  `docs/experiments/schedules/003_parallel_free_running_ablation.md`.
