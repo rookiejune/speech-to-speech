@@ -126,6 +126,51 @@ def acoustic_condition(
     if hidden_states.shape[:2] != labels.shape:
         raise ValueError("hidden_states and labels must align on batch and sequence dimensions.")
 
+    bpe_mask, local_ids = _target_bpe_labels(
+        batch,
+        embedding=embedding,
+        require_following_input=True,
+    )
+    shifted_hidden = hidden_states.new_zeros(hidden_states.shape)
+    shifted_hidden[:, :-1] = hidden_states[:, 1:]
+
+    return _expanded_condition(
+        shifted_hidden,
+        bpe_mask,
+        local_ids,
+        bpe=bpe,
+    )
+
+
+def acoustic_condition_from_target_audio_embedding(
+    *,
+    batch: CausalLMBatch,
+    embedding: IdSpaceEmbedding,
+    bpe: CodecBPE,
+) -> AcousticCondition:
+    bpe_mask, local_ids = _target_bpe_labels(
+        batch,
+        embedding=embedding,
+        require_following_input=False,
+    )
+    audio_ids = local_ids.clamp_min(0)
+    hidden = embedding.modality_embeddings[Modality.AUDIO.value](audio_ids)
+    hidden = hidden * bpe_mask.to(device=hidden.device, dtype=hidden.dtype).unsqueeze(-1)
+    return _expanded_condition(
+        hidden,
+        bpe_mask,
+        local_ids,
+        bpe=bpe,
+    )
+
+
+def _target_bpe_labels(
+    batch: CausalLMBatch,
+    *,
+    embedding: IdSpaceEmbedding,
+    require_following_input: bool,
+) -> tuple[Tensor, Tensor]:
+    labels = batch.labels
     block = embedding.space.modality_block(Modality.AUDIO)
     boa_global_id = embedding.space.special_token_id(AudioBoundary.BOA)
     eoa_global_id = embedding.space.special_token_id(AudioBoundary.EOA)
@@ -141,25 +186,33 @@ def acoustic_condition(
         raise ValueError(f"labels contain non-audio target token: {bad_id}.")
 
     bpe_mask = active_mask & labels.ne(boa_global_id) & labels.ne(eoa_global_id)
-    if bool(bpe_mask[:, -1].any()):
-        raise ValueError("target BPE labels must have a following input position.")
+    if require_following_input:
+        if bool(bpe_mask[:, -1].any()):
+            raise ValueError("target BPE labels must have a following input position.")
 
-    shifted_input_ids = batch.input_ids[:, 1:]
-    shifted_attention = batch.attention_mask[:, 1:]
-    bpe_mask_without_last = bpe_mask[:, :-1]
-    labels_without_last = labels[:, :-1]
-    if bool((bpe_mask_without_last & shifted_input_ids.ne(labels_without_last)).any()):
-        raise ValueError("target BPE labels must match the following input token.")
-    if bool((bpe_mask_without_last & shifted_attention.eq(0)).any()):
-        raise ValueError("target BPE labels must shift to non-padding input tokens.")
+        shifted_input_ids = batch.input_ids[:, 1:]
+        shifted_attention = batch.attention_mask[:, 1:]
+        bpe_mask_without_last = bpe_mask[:, :-1]
+        labels_without_last = labels[:, :-1]
+        if bool((bpe_mask_without_last & shifted_input_ids.ne(labels_without_last)).any()):
+            raise ValueError("target BPE labels must match the following input token.")
+        if bool((bpe_mask_without_last & shifted_attention.eq(0)).any()):
+            raise ValueError("target BPE labels must shift to non-padding input tokens.")
 
     local_ids = torch.zeros_like(labels)
     local_ids[bpe_mask] = labels[bpe_mask] - block.start
-    shifted_hidden = hidden_states.new_zeros(hidden_states.shape)
-    shifted_hidden[:, :-1] = hidden_states[:, 1:]
+    return bpe_mask, local_ids
 
+
+def _expanded_condition(
+    hidden_states: Tensor,
+    bpe_mask: Tensor,
+    local_ids: Tensor,
+    *,
+    bpe: CodecBPE,
+) -> AcousticCondition:
     expanded = bpe.repeat_interleave(
-        shifted_hidden,
+        hidden_states,
         local_ids,
         bpe_mask,
         dim=1,

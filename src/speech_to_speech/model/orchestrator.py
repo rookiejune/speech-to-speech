@@ -13,7 +13,7 @@ from torch import Tensor, nn
 from transformers import BitsAndBytesConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from ..config import BPEConfig, DiTModelConfig, LoRAConfig, ModelConfig
+from ..config import AcousticConditionSource, BPEConfig, DiTModelConfig, LoRAConfig, ModelConfig
 from ..runtime import longcat_tokenizer, qwen3_tokenizer
 from ..types import (
     AcousticCondition,
@@ -32,6 +32,7 @@ from ..types import (
 from .acoustic import (
     AcousticFlowLossStats,
     acoustic_condition,
+    acoustic_condition_from_target_audio_embedding,
     continuous_flow_loss,
     continuous_flow_loss_stats,
     null_acoustic_condition,
@@ -162,6 +163,7 @@ class Orchestrator(nn.Module):
 
         model_config = model_config or ModelConfig()
         self.acoustic_condition_drop = model_config.acoustic.condition_dropout
+        self.acoustic_condition_source = model_config.acoustic.condition_source
 
         peft_applied = False
         if qwen3 is not None:
@@ -326,6 +328,13 @@ class Orchestrator(nn.Module):
         *,
         hidden_states: Tensor | None = None,
     ) -> AcousticCondition:
+        if self.acoustic_condition_source is AcousticConditionSource.TARGET_AUDIO_EMBEDDING:
+            return acoustic_condition_from_target_audio_embedding(
+                batch=batch,
+                embedding=self.embed_tokens,
+                bpe=bpe,
+            )
+
         if hidden_states is None:
             inputs_embeds = self.embed_tokens(batch.input_ids)
             outputs = self.qwen3(

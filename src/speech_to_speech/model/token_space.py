@@ -6,7 +6,7 @@ import torch
 from anytrain.idspace import IdSpaceEmbedding, Modality
 from torch import Tensor, nn
 
-from ..config import ModelConfig
+from ..config import ModelConfig, ModelTrainMode
 from ..types import AudioBoundary, SpecialToken
 
 
@@ -102,6 +102,15 @@ def configure_trainable(
     config: ModelConfig,
     peft_applied: bool,
 ) -> None:
+    if config.train_mode is ModelTrainMode.ACOUSTIC_ONLY:
+        _set_trainable(qwen3, False)
+        _set_acoustic_only_embedding_trainable(cast(IdSpaceEmbedding, embedding))
+        if dit is None:
+            raise ValueError("model.train_mode=acoustic_only requires an acoustic decoder.")
+        _set_trainable(dit, config.acoustic.train)
+        _set_trainable(acoustic_condition_proj, config.acoustic.train)
+        return
+
     if config.backbone.train:
         _set_trainable(qwen3, True)
     else:
@@ -151,3 +160,10 @@ def _set_embedding_trainable(embedding: IdSpaceEmbedding, config: ModelConfig) -
             AudioBoundary.BOA.value,
             AudioBoundary.EOA.value,
         } and config.token_space.train_audio_special_tokens
+
+
+def _set_acoustic_only_embedding_trainable(embedding: IdSpaceEmbedding) -> None:
+    embedding.modality_embeddings[Modality.TEXT.value].requires_grad_(False)
+    embedding.modality_embeddings[Modality.AUDIO.value].requires_grad_(True)
+    for parameter in embedding.special_embeddings.values():
+        parameter.requires_grad = False

@@ -74,50 +74,54 @@ class SpeechToSpeechModule(LightningModule):
 
     def training_step(self, batch: CausalLMBatch, batch_idx: int) -> Tensor:
         del batch_idx
-        output = self.model(
-            batch,
-            return_hidden_states=self.train_config.acoustic_loss_weight > 0.0,
+        output = self._semantic_output(batch)
+        row_loss = self._semantic_row_loss(batch, output) if output is not None else None
+        token_counts = (
+            _loss_token_counts(batch, dtype=row_loss.dtype)
+            if row_loss is not None
+            else None
         )
-        row_loss = self._semantic_row_loss(batch, output)
-        token_counts = _loss_token_counts(batch, dtype=row_loss.dtype)
         loss = self._loss(
             batch,
             row_loss,
             token_counts,
             stage=None,
-            hidden_states=_last_hidden_state(output),
+            hidden_states=_last_hidden_state(output) if output is not None else None,
         )
-        self._log_semantic_accuracy(batch, output, token_counts, stage=None)
-        self._log_task_losses(batch, row_loss, token_counts, stage=None)
-        self._log_family_group_losses(batch, row_loss, token_counts, stage=None)
-        log_reduced_sum(
-            self,
-            "supervised_tokens",
-            token_counts.sum(),
-            on_step=True,
-            on_epoch=False,
-        )
+        if output is not None and row_loss is not None and token_counts is not None:
+            self._log_semantic_accuracy(batch, output, token_counts, stage=None)
+            self._log_task_losses(batch, row_loss, token_counts, stage=None)
+            self._log_family_group_losses(batch, row_loss, token_counts, stage=None)
+            log_reduced_sum(
+                self,
+                "supervised_tokens",
+                token_counts.sum(),
+                on_step=True,
+                on_epoch=False,
+            )
         self._log_acoustic_frame_count(batch, stage=None)
         return loss
 
     def validation_step(self, batch: CausalLMBatch, batch_idx: int) -> Tensor:
         del batch_idx
-        output = self.model(
-            batch,
-            return_hidden_states=self.train_config.acoustic_loss_weight > 0.0,
+        output = self._semantic_output(batch)
+        row_loss = self._semantic_row_loss(batch, output) if output is not None else None
+        token_counts = (
+            _loss_token_counts(batch, dtype=row_loss.dtype)
+            if row_loss is not None
+            else None
         )
-        row_loss = self._semantic_row_loss(batch, output)
-        token_counts = _loss_token_counts(batch, dtype=row_loss.dtype)
         loss = self._loss(
             batch,
             row_loss,
             token_counts,
             stage="val",
-            hidden_states=_last_hidden_state(output),
+            hidden_states=_last_hidden_state(output) if output is not None else None,
         )
-        self._log_semantic_accuracy(batch, output, token_counts, stage="val")
-        self._log_task_losses(batch, row_loss, token_counts, stage="val")
-        self._log_family_group_losses(batch, row_loss, token_counts, stage="val")
+        if output is not None and row_loss is not None and token_counts is not None:
+            self._log_semantic_accuracy(batch, output, token_counts, stage="val")
+            self._log_task_losses(batch, row_loss, token_counts, stage="val")
+            self._log_family_group_losses(batch, row_loss, token_counts, stage="val")
         self._log_acoustic_frame_count(batch, stage="val")
         return loss
 
@@ -171,13 +175,25 @@ class SpeechToSpeechModule(LightningModule):
         stage: str | None = None,
         hidden_states: Tensor | None = None,
     ) -> Tensor:
-        if row_loss is None:
-            row_loss = self._semantic_row_loss(batch)
-        if token_counts is None:
-            token_counts = _loss_token_counts(batch, dtype=row_loss.dtype)
-        semantic_mean = reduced_weighted_mean(row_loss, token_counts)
-        loss = scaled_loss(semantic_mean)
-        logged_loss = semantic_mean.value
+        semantic_weight = self.train_config.semantic_loss_weight
+        acoustic_weight = self.train_config.acoustic_loss_weight
+        if semantic_weight <= 0.0 and acoustic_weight <= 0.0:
+            raise ValueError("at least one loss weight must be positive.")
+
+        loss: Tensor | None = None
+        logged_loss: Tensor | None = None
+        logged_weight: Tensor | None = None
+        if semantic_weight > 0.0:
+            if row_loss is None:
+                row_loss = self._semantic_row_loss(batch)
+            if token_counts is None:
+                token_counts = _loss_token_counts(batch, dtype=row_loss.dtype)
+            semantic_mean = reduced_weighted_mean(row_loss, token_counts)
+            semantic_loss = scaled_loss(semantic_mean)
+            loss = semantic_weight * semantic_loss
+            logged_loss = semantic_weight * semantic_mean.value
+            logged_weight = semantic_mean.weight
+
         acoustic_weight = self.train_config.acoustic_loss_weight
         if acoustic_weight > 0.0:
             acoustic = self._acoustic_loss(
@@ -187,8 +203,18 @@ class SpeechToSpeechModule(LightningModule):
             )
             acoustic_mean = _acoustic_reduced_mean(batch, acoustic)
             acoustic_loss = scaled_loss(acoustic_mean)
-            loss = loss + acoustic_weight * acoustic_loss
-            logged_loss = logged_loss + acoustic_weight * acoustic_mean.value
+            loss = (
+                acoustic_weight * acoustic_loss
+                if loss is None
+                else loss + acoustic_weight * acoustic_loss
+            )
+            logged_loss = (
+                acoustic_weight * acoustic_mean.value
+                if logged_loss is None
+                else logged_loss + acoustic_weight * acoustic_mean.value
+            )
+            if logged_weight is None:
+                logged_weight = acoustic_mean.weight
             log_reduced_mean(
                 self,
                 _log_name("loss/acoustic", stage=stage),
@@ -198,11 +224,13 @@ class SpeechToSpeechModule(LightningModule):
             )
             if isinstance(acoustic, AcousticFlowLossStats):
                 self._log_acoustic_t_bin_losses(acoustic, stage=stage)
+        if loss is None or logged_loss is None or logged_weight is None:
+            raise RuntimeError("loss weights did not produce a training objective.")
         log_reduced_value(
             self,
             _log_name("loss", stage=stage),
             logged_loss,
-            semantic_mean.weight,
+            logged_weight,
             on_step=stage is None,
             on_epoch=True,
             prog_bar=True,
@@ -210,6 +238,14 @@ class SpeechToSpeechModule(LightningModule):
         if stage is None:
             return loss
         return logged_loss
+
+    def _semantic_output(self, batch: CausalLMBatch) -> CausalLMOutputWithPast | None:
+        if self.train_config.semantic_loss_weight <= 0.0:
+            return None
+        return self.model(
+            batch,
+            return_hidden_states=self.train_config.acoustic_loss_weight > 0.0,
+        )
 
     def _semantic_row_loss(
         self,

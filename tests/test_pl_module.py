@@ -196,6 +196,34 @@ class SpeechToSpeechModuleTest(unittest.TestCase):
         self.assertTrue(model.forward_requested_hidden_states)
         self.assertIs(model.hidden_states, model.forward_hidden_states[-1])
 
+    def test_acoustic_only_training_step_skips_semantic_forward(self) -> None:
+        model = JointLossModel()
+        extractor = FakeFeatureExtractor(torch.full((1, 2, 4), 3.0))
+        module = SpeechToSpeechModule(
+            model,
+            TrainConfig(semantic_loss_weight=0.0, acoustic_loss_weight=1.0),
+            bpe=object(),
+            acoustic_feature_extractor=extractor,
+        )
+        batch = CausalLMBatch(
+            input_ids=torch.tensor([[1, 2]]),
+            attention_mask=torch.tensor([[1, 1]]),
+            labels=torch.tensor([[1, 2]]),
+            logits_to_keep=1,
+            target_audio=LongCatBatchSide(
+                semantic_ids=torch.tensor([[1, 2]]),
+                semantic_mask=torch.tensor([[True, True]]),
+                acoustic_ids=torch.zeros((1, 4, 2), dtype=torch.long),
+                acoustic_mask=torch.tensor([[True, True]]),
+            ),
+        )
+
+        loss = module.training_step(batch, 0)
+
+        self.assertTrue(torch.equal(loss, torch.tensor(3.0)))
+        self.assertFalse(model.forward_called)
+        self.assertIsNone(model.hidden_states)
+
     def test_loss_logs_acoustic_t_bin_losses(self) -> None:
         model = JointLossStatsModel()
         module = SpeechToSpeechModule(
@@ -391,6 +419,7 @@ class JointLossModel(torch.nn.Module):
             torch.zeros((1, 2, 4)),
             torch.ones((1, 2, 4)),
         )
+        self.forward_called = False
         self.forward_requested_hidden_states = False
         self.hidden_states: torch.Tensor | None = None
 
@@ -401,6 +430,7 @@ class JointLossModel(torch.nn.Module):
         return_hidden_states: bool = False,
     ) -> CausalLMOutputWithPast:
         del batch
+        self.forward_called = True
         self.forward_requested_hidden_states = return_hidden_states
         hidden_states = self.forward_hidden_states if return_hidden_states else None
         return CausalLMOutputWithPast(

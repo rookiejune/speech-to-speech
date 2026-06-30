@@ -218,6 +218,11 @@ def _model_config(data: Mapping[str, object] | None) -> ModelConfig:
         names = ", ".join(sorted(unknown))
         raise KeyError(f"unknown ModelConfig field(s): {names}")
     return ModelConfig(
+        **_dataclass_kwargs(
+            ModelConfig,
+            data,
+            skip={"backbone", "token_space", "acoustic"},
+        ),
         backbone=_backbone_config(_optional_mapping(data, "backbone")),
         token_space=_from_mapping(
             TokenSpaceConfig,

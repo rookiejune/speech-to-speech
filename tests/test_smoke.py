@@ -5,7 +5,12 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from speech_to_speech.config import DiTAttentionMode, ModelConfig
+from speech_to_speech.config import (
+    AcousticConditionSource,
+    DiTAttentionMode,
+    ModelConfig,
+    ModelTrainMode,
+)
 from speech_to_speech import smoke
 from helpers import (
     MockFrameBPE,
@@ -77,6 +82,21 @@ class SmokeRunnerTest(unittest.TestCase):
         self.assertEqual(config.model.acoustic.condition_dropout, 0.1)
         self.assertTrue(config.model.acoustic.enabled)
         self.assertIs(config.model.acoustic.dit.attention_mode, DiTAttentionMode.CAUSAL)
+
+    def test_load_config_reads_target_embedding_acoustic_ablation(self) -> None:
+        config = smoke.load_config(
+            overrides=("experiment=wmt19_acoustic_target_embed_100k_muon",)
+        )
+
+        self.assertEqual(config.tasks.enabled, ("autoregression", "translation"))
+        self.assertIs(config.model.train_mode, ModelTrainMode.ACOUSTIC_ONLY)
+        self.assertIs(
+            config.model.acoustic.condition_source,
+            AcousticConditionSource.TARGET_AUDIO_EMBEDDING,
+        )
+        self.assertEqual(config.train.semantic_loss_weight, 0.0)
+        self.assertEqual(config.train.acoustic_loss_weight, 1.0)
+        self.assertTrue(config.model.acoustic.enabled)
 
     def test_load_config_reads_dit_overrides(self) -> None:
         config = smoke.load_config(

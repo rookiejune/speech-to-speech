@@ -13,10 +13,12 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from speech_to_speech.config import (
+    AcousticConditionSource,
     AcousticDecoderConfig,
     DiTModelConfig,
     LoRAConfig,
     ModelConfig,
+    ModelTrainMode,
     QwenBackboneConfig,
 )
 from speech_to_speech.datamodule.batch_builder import CausalLMBatchBuilder
@@ -114,6 +116,36 @@ class OrchestratorTest(unittest.TestCase):
         self.assertEqual(condition.semantic_ids.tolist(), [[2, 1]])
         self.assertEqual(condition.mask.tolist(), [[True, True]])
         expected = hidden_states[:, 9:10].repeat_interleave(2, dim=1)
+        self.assertTrue(torch.equal(condition.hidden_states, expected))
+
+    def test_target_audio_embedding_condition_uses_target_bpe_embedding(self) -> None:
+        tokenizer = MockTokenizer()
+        bpe = _bpe()
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            tokenizer=tokenizer,
+            bpe_vocab_size=bpe.vocab_size,
+            model_config=ModelConfig(
+                acoustic=AcousticDecoderConfig(
+                    condition_source=AcousticConditionSource.TARGET_AUDIO_EMBEDDING,
+                ),
+            ),
+            qwen3_pretrained=False,
+        )
+        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        batch = builder.translation(
+            TranslationExample(
+                source_ids=torch.tensor([3]),
+                target_ids=torch.tensor([4]),
+            )
+        )
+
+        condition = model.acoustic_condition(batch, bpe)
+
+        audio = model.embed_tokens.modality_embeddings[Modality.AUDIO.value]
+        expected = audio(torch.tensor([[4]])).repeat_interleave(2, dim=1)
+        self.assertEqual(condition.semantic_ids.tolist(), [[2, 1]])
+        self.assertEqual(condition.mask.tolist(), [[True, True]])
         self.assertTrue(torch.equal(condition.hidden_states, expected))
 
     def test_acoustic_flow_loss_uses_masked_velocity_target(self) -> None:
@@ -766,6 +798,35 @@ class OrchestratorTest(unittest.TestCase):
             )
         )
         self.assertTrue(any(parameter.requires_grad for parameter in dit.parameters()))
+
+    def test_acoustic_only_train_mode_trains_acoustic_branch(self) -> None:
+        tokenizer = MockTokenizer()
+        dit = MockDiT(hidden_size=4)
+        qwen = MockQwen()
+        model = Orchestrator(
+            qwen3=qwen,
+            dit=dit,
+            tokenizer=tokenizer,
+            bpe_vocab_size=5,
+            model_config=ModelConfig(
+                train_mode=ModelTrainMode.ACOUSTIC_ONLY,
+                acoustic=AcousticDecoderConfig(enabled=True, train=True),
+            ),
+            qwen3_pretrained=False,
+        )
+
+        embedding = model.embed_tokens
+
+        self.assertFalse(any(parameter.requires_grad for parameter in qwen.proj.parameters()))
+        self.assertFalse(embedding.modality_embeddings[Modality.TEXT.value].weight.requires_grad)
+        self.assertTrue(embedding.modality_embeddings[Modality.AUDIO.value].weight.requires_grad)
+        self.assertTrue(
+            all(not parameter.requires_grad for parameter in embedding.special_embeddings.values())
+        )
+        self.assertTrue(any(parameter.requires_grad for parameter in model.dit.parameters()))
+        self.assertTrue(
+            all(parameter.requires_grad for parameter in model.acoustic_condition_proj.parameters())
+        )
 
     def test_audio_embedding_uses_qwen_initializer_range(self) -> None:
         tokenizer = MockTokenizer()

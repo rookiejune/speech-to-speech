@@ -1,0 +1,27 @@
+# @package _global_
+defaults:
+  - /datamodule: wmt19
+  - /bpe: longcat_100k
+  - /tasks: mixed
+  - /model: qwen3_0_6b_lora
+  - /train: quality_muon
+  - /trainer: default
+  - _self_
+
+datamodule:
+  dataloader:
+    batch_size: 4
+
+model:
+  train_mode: acoustic_only
+  acoustic:
+    enabled: true
+    train: true
+    condition_source: target_audio_embedding
+
+train:
+  semantic_loss_weight: 0.0
+  acoustic_loss_weight: 1.0
+
+trainer:
+  name: wmt19-acoustic-target-embed-100k-muon

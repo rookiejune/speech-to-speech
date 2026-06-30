@@ -107,6 +107,16 @@ class DiTAttentionMode(StrEnum):
     BIDIRECTIONAL = auto()
 
 
+class AcousticConditionSource(StrEnum):
+    QWEN_HIDDEN = auto()
+    TARGET_AUDIO_EMBEDDING = auto()
+
+
+class ModelTrainMode(StrEnum):
+    DEFAULT = auto()
+    ACOUSTIC_ONLY = auto()
+
+
 @dataclass(frozen=True)
 class DiTModelConfig:
     hidden_size: int = 1024
@@ -141,11 +151,13 @@ class AcousticDecoderConfig:
     enabled: bool = False
     train: bool = True
     condition_dropout: float = 0.0
+    condition_source: AcousticConditionSource = AcousticConditionSource.QWEN_HIDDEN
     dit: DiTModelConfig = field(default_factory=DiTModelConfig)
 
 
 @dataclass(frozen=True)
 class ModelConfig:
+    train_mode: ModelTrainMode = ModelTrainMode.DEFAULT
     backbone: QwenBackboneConfig = field(default_factory=QwenBackboneConfig)
     token_space: TokenSpaceConfig = field(default_factory=TokenSpaceConfig)
     acoustic: AcousticDecoderConfig = field(default_factory=AcousticDecoderConfig)
@@ -173,6 +185,7 @@ class TrainConfig:
     learning_rate: float = 1e-4
     adamw_learning_rate: float | None = None
     muon_learning_rate: float | None = None
+    semantic_loss_weight: float = 1.0
     acoustic_loss_weight: float = 0.0
     optimizer_preset: str = "pretrain"
     optimizer: str = "muon"
