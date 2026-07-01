@@ -17,11 +17,13 @@ from ..config import (
     BPEConfig,
     ModelConfig,
 )
-from ..datamodule.types import CausalLMBatch, GenerationBatch, IGNORE_INDEX
-from .types import (
+from ..types.datamodule import CausalLMBatch, GenerationBatch
+from ..types.model import (
     AcousticCondition,
     AcousticConditionGeneration,
+    AcousticFeatureExtractor,
     AcousticFeatureGenerator,
+    AudioBoundary,
     SemanticBPE,
     SemanticGeneration,
     TeacherForcedWaveformGeneration,
@@ -47,7 +49,7 @@ from .builder import build_orchestrator_components
 from .DiT.model import DiTConditionTensors
 from .qwen3 import Qwen3Config
 from .semantic import Generator, batch_loss, loss_positions, loss_weights
-from .token_space import text_embedding
+from .token_space import AudioLMHead, audio_lm_head, text_embedding
 
 
 @dataclass(frozen=True)
@@ -103,7 +105,6 @@ class Orchestrator(nn.Module):
         self.output_adapter = components.output_adapter
         self.acoustic_condition_adapter = components.acoustic_condition_adapter
         self.acoustic_condition_encoder = components.acoustic_condition_encoder
-        self.lm_head = components.lm_head
 
     @property
     def idspace(self) -> IdSpace:
@@ -112,6 +113,13 @@ class Orchestrator(nn.Module):
     @property
     def embed_tokens(self) -> IdSpaceEmbedding:
         return cast(IdSpaceEmbedding, text_embedding(self.qwen3))
+
+    @property
+    def lm_head(self) -> AudioLMHead:
+        return audio_lm_head(
+            self.embed_tokens,
+            special_tokens=(AudioBoundary.EOA.value,),
+        )
 
     def forward(
         self,
@@ -131,8 +139,9 @@ class Orchestrator(nn.Module):
             hidden_states[positions[:, 0], positions[:, 1]]
         )
         labels = batch.labels[positions[:, 0], positions[:, 1]]
-        target = self.lm_head.to_head_ids(labels)
-        logits = self.lm_head(selected_hidden)
+        lm_head = self.lm_head
+        target = lm_head.to_head_ids(labels)
+        logits = lm_head(selected_hidden)
         token_loss = F.cross_entropy(logits.float(), target, reduction="none")
         token_weights = loss_weights(batch, positions, dtype=token_loss.dtype)
         loss = batch_loss(
@@ -164,7 +173,8 @@ class Orchestrator(nn.Module):
         if logits.dim() != 2 or logits.size(0) != positions.size(0):
             raise RuntimeError("model logits must have one row per supervised token.")
         labels = batch.labels[positions[:, 0], positions[:, 1]]
-        target = self.lm_head.to_head_ids(labels)
+        lm_head = self.lm_head
+        target = lm_head.to_head_ids(labels)
         return logits.detach().argmax(dim=-1).eq(target).float().mean()
 
     def acoustic_condition(
@@ -207,7 +217,7 @@ class Orchestrator(nn.Module):
         noise: Tensor | None = None,
         timesteps: Tensor | None = None,
         acoustic_condition: Tensor | None = None,
-        source_feature_extractor: object | None = None,
+        source_feature_extractor: AcousticFeatureExtractor | None = None,
     ) -> Tensor:
         inputs = self.acoustic_flow_inputs(
             batch,
@@ -240,7 +250,7 @@ class Orchestrator(nn.Module):
         noise: Tensor | None = None,
         timesteps: Tensor | None = None,
         acoustic_condition: Tensor | None = None,
-        source_feature_extractor: object | None = None,
+        source_feature_extractor: AcousticFeatureExtractor | None = None,
     ) -> AcousticFlowLossStats:
         inputs = self.acoustic_flow_inputs(
             batch,
@@ -304,7 +314,7 @@ class Orchestrator(nn.Module):
         target_mask: Tensor | None = None,
         noise: Tensor | None = None,
         acoustic_condition: Tensor | None = None,
-        source_feature_extractor: object | None = None,
+        source_feature_extractor: AcousticFeatureExtractor | None = None,
     ) -> AcousticFlowInputs:
         if self.dit is None:
             raise RuntimeError("acoustic_flow_loss requires a DiT acoustic decoder.")
@@ -582,11 +592,8 @@ class Orchestrator(nn.Module):
         )
 
 
-def _decode_features(codec: object, semantic_ids: Tensor, acoustic_features: Tensor) -> Tensor:
-    decode = getattr(codec, "decode_features", None)
-    if not callable(decode):
-        raise TypeError("LongCat codec must provide decode_features().")
-    audio = decode(semantic_ids, acoustic_features)
+def _decode_features(codec: WaveformCodec, semantic_ids: Tensor, acoustic_features: Tensor) -> Tensor:
+    audio = codec.decode_features(semantic_ids, acoustic_features)
     if not isinstance(audio, Tensor):
         raise TypeError("LongCat codec decode_features() must return a Tensor.")
     if audio.dim() == 2:

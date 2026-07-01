@@ -5,7 +5,7 @@ from __future__ import annotations
 from torch import Tensor
 from torch import device as TorchDevice
 
-from ..datamodule.types import CausalLMBatch, LongCatBatchSide
+from ..types.datamodule import CausalLMBatch, LongCatBatchSide
 
 
 def batch_to_device(batch: CausalLMBatch, device: TorchDevice) -> CausalLMBatch:

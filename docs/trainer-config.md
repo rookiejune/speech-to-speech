@@ -10,7 +10,6 @@ resume checkpoint、日志频率和 UI 开关。训练过程中挂载的 Lightni
 defaults:
   - /callback@callbacks.checkpoint: checkpoint
   - /callback@callbacks.learning_rate_monitor: learning_rate_monitor
-  - /callback@callbacks.sample: sample
   - /callback@callbacks.generation: generation
   - _self_
 ```
@@ -33,11 +32,6 @@ trainer:
       enabled: true
       every_n_steps: 10000
       save_top_k: 2
-    sample:
-      enabled: true
-      every_n_steps: 0
-      samples_per_task: 1
-      max_audio_samples: 320000
     generation:
       enabled: true
       every_n_steps: 5000
@@ -53,7 +47,7 @@ trainer:
 默认 `acoustic_sampler=serial` 走 full-sequence acoustic flow，`chunk_size` 和
 `left_context_chunks` 保持 `null`。只有切到 chunk/window sampler 时才需要设置
 `chunk_size`；`causal_window` 下 `left_context_chunks=null` 表示使用全部左侧 chunks，
-显式整数才会限制窗口。`trainer.callbacks.sample` 记录数据/task sample，不触发模型生成。
+显式整数才会限制窗口。
 
 梯度裁剪是 Lightning Trainer 参数，默认配置为：
 

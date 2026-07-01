@@ -38,7 +38,6 @@ class SmokeRunnerTest(unittest.TestCase):
         self.assertEqual(config.train.warmup_ratio, 0.01)
         self.assertEqual(config.train.device, "auto")
         self.assertEqual(config.trainer.callbacks.checkpoint.every_n_steps, 10_000)
-        self.assertEqual(config.trainer.callbacks.sample.every_n_steps, 0)
         generation = config.trainer.callbacks.generation
         self.assertEqual(generation.every_n_steps, 5_000)
         self.assertEqual(generation.flow_steps, 32)

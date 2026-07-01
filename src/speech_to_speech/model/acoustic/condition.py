@@ -11,12 +11,12 @@ from anytrain.idspace import IdSpaceEmbedding, Modality
 from anytrain.tokenizer import CodecBPE
 from torch import Tensor, nn
 
-from ...datamodule.types import (
+from ...types.datamodule import (
     CausalLMBatch,
     IGNORE_INDEX,
     LongCatBatchSide,
 )
-from ..types import AcousticCondition, AudioBoundary
+from ...types.model import AcousticCondition, AcousticFeatureExtractor, AudioBoundary
 
 
 class _TimeSampler(Protocol):
@@ -177,16 +177,15 @@ def _target_bpe_labels(
     eoa_global_id = embedding.space.special_token_id(AudioBoundary.EOA)
 
     active_mask = labels.ne(IGNORE_INDEX)
-    audio_mask = (
-        (labels.ge(block.start) & labels.lt(block.end))
-        | labels.eq(boa_global_id)
-        | labels.eq(eoa_global_id)
-    )
+    if bool((active_mask & labels.eq(boa_global_id)).any()):
+        raise ValueError("labels must not contain BOA target token.")
+
+    audio_mask = (labels.ge(block.start) & labels.lt(block.end)) | labels.eq(eoa_global_id)
     if bool((active_mask & ~audio_mask).any()):
         bad_id = int(labels[active_mask & ~audio_mask].reshape(-1)[0].detach().cpu())
         raise ValueError(f"labels contain non-audio target token: {bad_id}.")
 
-    bpe_mask = active_mask & labels.ne(boa_global_id) & labels.ne(eoa_global_id)
+    bpe_mask = active_mask & labels.ne(eoa_global_id)
     if require_following_input:
         if bool(bpe_mask[:, -1].any()):
             raise ValueError("target BPE labels must have a following input position.")
@@ -257,15 +256,12 @@ def validate_acoustic_features(
 def acoustic_features_from_batch_side(
     side: LongCatBatchSide,
     *,
-    feature_extractor: object,
+    feature_extractor: AcousticFeatureExtractor,
 ) -> tuple[Tensor, Tensor]:
-    convert = getattr(feature_extractor, "acoustic_codes_to_features", None)
-    if not callable(convert):
-        raise TypeError("feature_extractor must provide acoustic_codes_to_features().")
     acoustic_ids = side.acoustic_ids
     if acoustic_ids.dim() != 3:
         raise ValueError("LongCat batch acoustic_ids must have shape [batch, nq, time].")
-    features = convert(acoustic_ids)
+    features = feature_extractor.acoustic_codes_to_features(acoustic_ids)
     if not isinstance(features, Tensor):
         raise TypeError("acoustic_codes_to_features() must return a Tensor.")
     if features.dim() != 3:
@@ -280,7 +276,7 @@ def acoustic_features_from_batch_side(
 def pooled_acoustic_condition_from_batch_side(
     side: LongCatBatchSide,
     *,
-    feature_extractor: object,
+    feature_extractor: AcousticFeatureExtractor,
     empty_condition: Tensor | None = None,
 ) -> Tensor:
     features, mask = acoustic_features_from_batch_side(
@@ -388,24 +384,6 @@ def continuous_flow_loss_stats(
         row_loss=holder["row_loss"],
         row_weight=holder["row_weight"],
     )
-
-
-def _masked_mse(prediction: Tensor, target: Tensor, extras: object) -> Tensor:
-    if not isinstance(extras, Mapping):
-        raise TypeError("masked acoustic flow loss requires model extras.")
-    mask = extras["mask"]
-    if not isinstance(mask, Tensor):
-        raise TypeError("masked acoustic flow loss requires a tensor mask.")
-    if prediction.shape != target.shape:
-        raise ValueError("prediction and target must have the same shape.")
-    if prediction.shape[:2] != mask.shape:
-        raise ValueError("prediction and mask must align on batch and time.")
-    loss = (prediction - target).square()
-    weights = mask.to(device=prediction.device, dtype=prediction.dtype).unsqueeze(-1)
-    denominator = weights.sum() * prediction.size(-1)
-    if denominator <= 0:
-        raise ValueError("acoustic mask must contain at least one valid frame.")
-    return (loss * weights).sum() / denominator
 
 
 def _masked_mse_stats(

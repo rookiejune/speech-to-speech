@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
-from ...datamodule.types import CausalLMBatch, IGNORE_INDEX
+from ...types.datamodule import CausalLMBatch, IGNORE_INDEX
 
 
 def loss_positions(batch: CausalLMBatch) -> Tensor:

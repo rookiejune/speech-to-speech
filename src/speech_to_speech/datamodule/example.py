@@ -7,7 +7,7 @@ from torch import Tensor
 
 from anydataset import AudioView, Batch, FieldGroup, FieldRef, Modality, Role, Sample
 
-from .types import (
+from ..types.datamodule import (
     AutoregressionExample,
     LongCatBPETokenizer,
     LongCatPair,

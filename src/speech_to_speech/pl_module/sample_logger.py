@@ -1,36 +1,30 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Any
 
 import torch
 from lightning.pytorch import Callback, LightningModule, Trainer
 from lightning.pytorch.loggers import TensorBoardLogger
 from torch import Tensor
 
-from ..config import BPEConfig, DataModuleConfig, TaskConfig
+from ..config import BPEConfig, DataModuleConfig
 from ..dataset import training_dataset
 from ..datamodule.batch_builder import CausalLMBatchBuilder
 from ..datamodule.example import longcat_pair_from_sample
-from ..datamodule.types import (
+from ..types.datamodule import (
     AutoregressionExample,
     CausalLMBatch,
+    LongCatBPETokenizer,
     LongCatBatchSide,
     LongCatPair,
     LongCatSide,
-    Task,
-    TaskFamily,
     TranslationExample,
 )
 from ..runtime import longcat_codec, longcat_tokenizer
 from ..model.acoustic import AcousticSampler, pooled_acoustic_condition_from_batch_side
-from ..model.types import TeacherForcedWaveformGeneration
+from ..types.model import LongCatCodec, TeacherForcedWaveformGeneration
 from .batch import batch_to_device
-from ..datamodule.pipeline import (
-    TaskSample,
-    TaskSampleStream,
-)
 
 SAMPLE_RATE = 16_000
 
@@ -42,70 +36,6 @@ class _GenerationSpec:
     batch: CausalLMBatch
     prefix: LongCatSide | None
     reference: LongCatSide
-
-
-@dataclass
-class TaskSampleLogger(Callback):
-    datamodule: DataModuleConfig = field(default_factory=DataModuleConfig)
-    tasks: TaskConfig = field(default_factory=TaskConfig)
-    bpe: BPEConfig = field(default_factory=BPEConfig)
-    every_n_steps: int = 500
-    samples_per_task: int = 1
-    max_audio_samples: int | None = SAMPLE_RATE * 20
-
-    def __post_init__(self) -> None:
-        if self.every_n_steps < 0:
-            raise ValueError("every_n_steps must be non-negative.")
-        if self.samples_per_task <= 0:
-            raise ValueError("samples_per_task must be positive.")
-
-    def on_train_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        self._log_samples(trainer)
-
-    def on_train_batch_start(
-        self,
-        trainer: Trainer,
-        pl_module: LightningModule,
-        batch: object,
-        batch_idx: int,
-    ) -> None:
-        if self.every_n_steps == 0:
-            return
-        if trainer.global_step == 0 or trainer.global_step % self.every_n_steps != 0:
-            return
-        self._log_samples(trainer)
-
-    def _log_samples(self, trainer: Trainer) -> None:
-        if not trainer.is_global_zero:
-            return
-        logger = _tensorboard_logger(trainer.loggers)
-        step = trainer.global_step
-        bpe = longcat_tokenizer(self.bpe)
-        codec = longcat_codec()
-        target_tasks = _enabled_task_names(self.tasks)
-        counts: dict[str, int] = {}
-        for sample in TaskSampleStream(
-            self.datamodule.dataset_factory,
-            tasks=self.tasks,
-        ):
-            task = _task_name(sample)
-            count = counts.get(task, 0)
-            if count >= self.samples_per_task:
-                if _all_tasks_logged(counts, target_tasks, self.samples_per_task):
-                    break
-                continue
-            _log_task_sample(
-                logger,
-                codec,
-                bpe,
-                sample,
-                index=count,
-                step=step,
-                max_audio_samples=self.max_audio_samples,
-            )
-            counts[task] = count + 1
-            if _all_tasks_logged(counts, target_tasks, self.samples_per_task):
-                break
 
 
 @dataclass
@@ -239,49 +169,10 @@ class TaskGenerationLogger(Callback):
             _restore_training_modes(training_modes)
 
 
-def _log_task_sample(
-    logger: TensorBoardLogger,
-    codec: object,
-    bpe: object,
-    sample: TaskSample,
-    *,
-    index: int,
-    step: int,
-    max_audio_samples: int | None,
-) -> None:
-    task = _task_name(sample)
-    root = f"samples/{task}/{index}"
-    logger.experiment.add_text(f"{root}/prompt", _prompt(sample), global_step=step)
-    if sample.source is not None:
-        logger.experiment.add_text(
-            f"{root}/source/codes",
-            _codes_text(_roundtrip_semantic_ids(bpe, sample.source.semantic_ids)),
-            global_step=step,
-        )
-        logger.experiment.add_audio(
-            f"{root}/source/audio",
-            _decode_side(codec, bpe, sample.source, max_audio_samples=max_audio_samples),
-            global_step=step,
-            sample_rate=SAMPLE_RATE,
-        )
-
-    logger.experiment.add_text(
-        f"{root}/label/codes",
-        _codes_text(_roundtrip_semantic_ids(bpe, _target_side(sample).semantic_ids)),
-        global_step=step,
-    )
-    logger.experiment.add_audio(
-        f"{root}/label/audio",
-        _decode_side(codec, bpe, _target_side(sample), max_audio_samples=max_audio_samples),
-        global_step=step,
-        sample_rate=SAMPLE_RATE,
-    )
-
-
 def _log_generation_result(
     logger: TensorBoardLogger,
-    codec: object,
-    bpe: object,
+    codec: LongCatCodec,
+    bpe: LongCatBPETokenizer,
     spec: _GenerationSpec,
     generation: TeacherForcedWaveformGeneration,
     *,
@@ -368,8 +259,8 @@ def _log_generation_skip(
 
 def _log_reference_side(
     logger: TensorBoardLogger,
-    codec: object,
-    bpe: object,
+    codec: LongCatCodec,
+    bpe: LongCatBPETokenizer,
     side: LongCatSide,
     *,
     root: str,
@@ -405,8 +296,8 @@ def _first_audio(audio: Tensor, *, max_audio_samples: int | None) -> Tensor:
 
 
 def _decode_side(
-    codec: object,
-    bpe: object,
+    codec: LongCatCodec,
+    bpe: LongCatBPETokenizer,
     side: LongCatSide,
     *,
     max_audio_samples: int | None,
@@ -426,10 +317,7 @@ def _decode_side(
             "BPE-expanded semantic length must match LongCat acoustic length: "
             f"semantic={semantic_ids.numel()} acoustic={acoustic_length}."
         )
-    decode = getattr(codec, "decode", None)
-    if not callable(decode):
-        raise TypeError("LongCat codec must provide decode().")
-    audio = decode(semantic_ids.unsqueeze(0), acoustic_ids.unsqueeze(0))
+    audio = codec.decode(semantic_ids.unsqueeze(0), acoustic_ids.unsqueeze(0))
     if not isinstance(audio, Tensor):
         raise TypeError("LongCat codec decode() must return a Tensor.")
     audio = audio.detach().float().cpu()
@@ -446,23 +334,16 @@ def _decode_side(
     return audio
 
 
-def _roundtrip_semantic_ids(bpe: object, ids: Tensor) -> Tensor:
-    encode_frames = getattr(bpe, "encode_frames", None)
-    expand_ids = getattr(bpe, "expand_ids", None)
-    if not callable(encode_frames) or not callable(expand_ids):
-        raise TypeError("LongCat BPE tokenizer must provide encode_frames() and expand_ids().")
+def _roundtrip_semantic_ids(bpe: LongCatBPETokenizer, ids: Tensor) -> Tensor:
     frames = [[int(value)] for value in ids.reshape(-1).detach().cpu().tolist()]
-    encoded = encode_frames(frames)
-    expanded = expand_ids(encoded)
+    encoded = bpe.encode_frames(frames)
+    expanded = bpe.expand_ids(encoded)
     return torch.tensor(_single_codebook_ids(expanded), dtype=torch.long)
 
 
-def _encode_frames(bpe: object, ids: Tensor) -> Tensor:
-    encode_frames = getattr(bpe, "encode_frames", None)
-    if not callable(encode_frames):
-        raise TypeError("LongCat BPE tokenizer must provide encode_frames().")
+def _encode_frames(bpe: LongCatBPETokenizer, ids: Tensor) -> Tensor:
     frames = [[int(value)] for value in ids.reshape(-1).detach().cpu().tolist()]
-    return torch.tensor([int(value) for value in encode_frames(frames)], dtype=torch.long)
+    return torch.tensor([int(value) for value in bpe.encode_frames(frames)], dtype=torch.long)
 
 
 def _single_codebook_ids(frames: object) -> list[int]:
@@ -495,7 +376,7 @@ def _canary_pair(config: DataModuleConfig, sample_index: int) -> LongCatPair:
 
 def _generation_specs(
     builder: CausalLMBatchBuilder,
-    bpe: object,
+    bpe: LongCatBPETokenizer,
     pair: LongCatPair,
 ) -> tuple[_GenerationSpec, ...]:
     source_ids = _encode_frames(bpe, pair.source.semantic_ids)
@@ -622,7 +503,7 @@ def _move_causal_lm_batch(batch: CausalLMBatch, device: torch.device) -> CausalL
 
 def _source_acoustic_condition(
     model: torch.nn.Module,
-    codec: object,
+    codec: LongCatCodec,
     batch: CausalLMBatch,
 ) -> Tensor | None:
     if batch.source_audio is None:
@@ -647,52 +528,12 @@ def _move_runtime_to_device(value: object, device: torch.device) -> object:
     return value
 
 
-def _task_name(sample: TaskSample) -> str:
-    return sample.family.value
-
-
-def _prompt(sample: TaskSample) -> str:
-    match sample.family:
-        case TaskFamily.SOURCE_AR | TaskFamily.TARGET_AR:
-            return "Continue the speech."
-        case TaskFamily.SOURCE_TO_TARGET | TaskFamily.TARGET_TO_SOURCE:
-            return "Translate the source speech."
-    raise ValueError(f"unsupported task family: {sample.family.value}")
-
-
-def _target_side(sample: TaskSample) -> LongCatSide:
-    return sample.target
-
-
-def _tensorboard_logger(loggers: Iterable[Any]) -> TensorBoardLogger:
+def _tensorboard_logger(loggers: Iterable[object]) -> TensorBoardLogger:
     for logger in loggers:
         if isinstance(logger, TensorBoardLogger):
             return logger
     names = ", ".join(type(logger).__name__ for logger in loggers)
     raise RuntimeError(
-        "TaskSampleLogger requires TensorBoardLogger. "
+        "TaskGenerationLogger requires TensorBoardLogger. "
         f"Configured loggers: {names or '<none>'}."
-    )
-
-
-def _enabled_task_names(tasks: TaskConfig) -> tuple[str, ...]:
-    names: list[str] = []
-    enabled = frozenset(Task(name) for name in tasks.enabled)
-    if Task.AUTOREGRESSION in enabled:
-        names.extend(("source_ar", "target_ar"))
-    if Task.TRANSLATION in enabled:
-        names.extend(("source_to_target", "target_to_source"))
-    if not names:
-        raise ValueError("tasks.enabled must contain at least one task.")
-    return tuple(names)
-
-
-def _all_tasks_logged(
-    counts: Mapping[str, int],
-    target_tasks: Sequence[str],
-    samples_per_task: int,
-) -> bool:
-    return all(
-        counts.get(task, 0) >= samples_per_task
-        for task in target_tasks
     )

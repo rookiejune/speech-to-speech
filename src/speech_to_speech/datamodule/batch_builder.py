@@ -5,14 +5,14 @@ from anytrain.idspace import IdSpace, Modality
 from torch import LongTensor, Tensor
 
 from ..runtime import qwen3_tokenizer
-from ..model.types import AudioBoundary, SpecialToken
-from .types import (
+from ..types.datamodule import (
     IGNORE_INDEX,
     AutoregressionExample,
     CausalLMBatch,
     GenerationBatch,
     TranslationExample,
 )
+from ..types.model import AudioBoundary, SpecialToken
 
 SOURCE_AUDIO_PLACEHOLDER = "<<<SPEECH_TO_SPEECH_SOURCE_AUDIO>>>"
 
@@ -221,13 +221,13 @@ class CausalLMBatchBuilder:
             raise ValueError("target ids and loss weights must have the same length.")
         input_ids = torch.cat((prefix, target_global_ids[:-1]))
         labels = torch.full_like(input_ids, IGNORE_INDEX)
-        labels[prefix.numel() - 1 :] = target_global_ids
+        labels[prefix.numel() :] = target_global_ids[1:]
         loss_weights = torch.zeros(
             input_ids.shape,
             dtype=target_loss_weights.dtype,
             device=input_ids.device,
         )
-        loss_weights[prefix.numel() - 1 :] = target_loss_weights
+        loss_weights[prefix.numel() :] = target_loss_weights[1:]
         return input_ids, labels, loss_weights
 
     def _audio_global_ids(self, audio_ids: LongTensor) -> LongTensor:

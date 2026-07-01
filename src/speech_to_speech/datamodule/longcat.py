@@ -5,7 +5,7 @@ from collections.abc import Sequence
 import torch
 from torch import Tensor, device as TorchDevice
 
-from .types import LongCatBatchSide, LongCatSide
+from ..types.datamodule import LongCatBatchSide, LongCatSide
 
 
 def collate_longcat_sides(

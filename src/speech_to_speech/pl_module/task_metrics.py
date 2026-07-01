@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
-from ..datamodule.types import CausalLMBatch, TaskFamily
+from ..types.datamodule import CausalLMBatch, TaskFamily
 from .metrics import MetricLogger, log_reduced_mean, log_reduced_sum, reduced_weighted_mean
 
 TASK_FAMILY_GROUPS = {

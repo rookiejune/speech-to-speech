@@ -15,7 +15,7 @@ from dataclasses import fields, is_dataclass, replace
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
-from typing import Any, get_origin, get_type_hints
+from typing import get_origin, get_type_hints
 
 from hydra import compose, initialize_config_dir
 from lightning.pytorch import Trainer, seed_everything
@@ -37,7 +37,6 @@ from .config import (
     LearningRateMonitorCallbackConfig,
     ModelConfig,
     QwenBackboneConfig,
-    SampleCallbackConfig,
     SpeechToSpeechConfig,
     TaskConfig,
     TaskWeightsConfig,
@@ -57,7 +56,7 @@ from .runtime import (
     qwen3_longcat_idspace,
     qwen3_tokenizer,
 )
-from .datamodule.types import SpeechPair
+from .types.datamodule import SpeechPair
 
 
 def load_config(
@@ -322,7 +321,6 @@ def _trainer_callbacks_config(data: Mapping[str, object] | None) -> TrainerCallb
             LearningRateMonitorCallbackConfig,
             _optional_mapping(data, "learning_rate_monitor"),
         ),
-        sample=_from_mapping(SampleCallbackConfig, _optional_mapping(data, "sample")),
         generation=_from_mapping(
             GenerationCallbackConfig,
             _optional_mapping(data, "generation"),
@@ -330,13 +328,13 @@ def _trainer_callbacks_config(data: Mapping[str, object] | None) -> TrainerCallb
     )
 
 
-def _from_mapping(cls: type[Any], data: Mapping[str, object] | None) -> Any:
+def _from_mapping[T](cls: type[T], data: Mapping[str, object] | None) -> T:
     data = data or {}
     return cls(**_dataclass_kwargs(cls, data))
 
 
 def _dataclass_kwargs(
-    cls: type[Any],
+    cls: type[object],
     data: Mapping[str, object],
     *,
     skip: set[str] | None = None,

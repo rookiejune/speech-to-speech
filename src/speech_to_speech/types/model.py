@@ -39,12 +39,20 @@ class AcousticFeatureGenerator(Protocol):
     def __call__(self, condition: AcousticCondition) -> FloatTensor: ...
 
 
+class AcousticFeatureExtractor(Protocol):
+    def acoustic_codes_to_features(self, acoustic_ids: Tensor) -> FloatTensor: ...
+
+
 class SemanticBPE(Protocol):
     def expand_ids(self, ids: Sequence[int]) -> Sequence[Sequence[int]]: ...
 
 
 class WaveformCodec(Protocol):
     def decode_features(self, semantic_codes: Tensor, acoustic_features: Tensor) -> Tensor: ...
+
+
+class LongCatCodec(WaveformCodec, AcousticFeatureExtractor, Protocol):
+    def decode(self, semantic_codes: Tensor, acoustic_codes: Tensor) -> Tensor: ...
 
 
 @dataclass

@@ -30,7 +30,7 @@ task example 转换：
 - source-to-target translation 转成 `TranslationExample(source_ids, target_ids)`。
 - target-to-source translation 转成 `TranslationExample(source_ids=target_ids, target_ids=source_ids)`。
 - BPE 训练语料使用 source/target pair 转成 `SpeechPair`。
-- sample logging 使用 `semantic_codes` 的 BPE frame 展开结果和原始 `acoustic_codes` 解码音频；LongCat 当前要求单 codebook semantic frame，展开后 semantic length 必须和 acoustic time 一致。
+- generation logging 的 reference audio 使用 `semantic_codes` 的 BPE frame 展开结果和原始 `acoustic_codes` 解码音频；LongCat 当前要求单 codebook semantic frame，展开后 semantic length 必须和 acoustic time 一致。
 
 speech-to-speech 不定义额外底层 dataset wrapper。datamodule 内部让 anydataset 负责读取和
 rank/worker 分片，并用 `TaskSampleStream` 在每条 source/target raw sample 上按权重展开训练
@@ -43,8 +43,8 @@ prompt/label 构造留在主进程完成，`inputs_embeds` 由模型 forward 内
 - `attention_mask` 标记 padding 位置。
 - audio segment 使用 idspace special token `BOA` 和 `EOA` 表达边界；LongCat BPE audio block 只包含真实 BPE token。
 - batch builder 依赖运行期构造好的 `IdSpace` 做 local/global id 转换，不依赖模型 embedding 权重。
-- `labels` 只覆盖需要计算 loss 的目标 token，包括目标 audio segment 的 `BOA` 和 `EOA`。
-- `loss_weights` 与 `labels` 对齐；audio BPE token 使用展开后的 LongCat semantic frame 数作为权重，`BOA`/`EOA` 默认权重为 1。
+- `labels` 只覆盖需要计算 loss 的目标 token，包括目标 audio BPE token 和 `EOA`；目标 `BOA` 只作为第一个已知输入。
+- `loss_weights` 与 `labels` 对齐；audio BPE token 使用展开后的 LongCat semantic frame 数作为权重，`EOA` 默认权重为 1。
 - `source_audio` / `target_audio` 可选携带 batch 对齐后的原始 LongCat semantic/acoustic codes 和 mask；semantic loss 不依赖它们，acoustic loss 和 feature 转换从这里读取。
 - prompt 和 user/assistant 结构 token 默认不计算 loss。
 - dataloader 对外只返回统一的 `CausalLMBatch`；`task_family` 只用于 loss/计数日志，不参与模型输入语义。

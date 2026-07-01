@@ -12,10 +12,10 @@ import torch
 from anytrain.codec import LongCatAudioCodec
 from anytrain.idspace import IdSpace, Modality, ModalityBlock
 from anytrain.tokenizer import CodecBPE
-from .bpe_types import BPEArtifactMeta
 from .config import BPEConfig, ModelConfig
-from .datamodule.types import SpeechPair, TranslationExample
-from .types import AudioBoundary, SpecialToken
+from .types.bpe import BPEArtifactMeta
+from .types.datamodule import SpeechPair, TranslationExample
+from .types.model import AudioBoundary, SpecialToken
 
 if TYPE_CHECKING:
     from anytrain.codec import LongCatDecoderName

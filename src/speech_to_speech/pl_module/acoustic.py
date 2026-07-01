@@ -9,7 +9,8 @@ import torch
 from torch import Tensor
 from torch import device as TorchDevice
 
-from ..datamodule.types import CausalLMBatch
+from ..types.datamodule import CausalLMBatch
+from ..types.model import AcousticFeatureExtractor
 from ..model.acoustic import AcousticFlowLossStats, acoustic_features_from_batch_side
 from ..model.orchestrator import AcousticFlowInputs, DiTConditionTensors
 from .metrics import ReducedMean, reduced_weighted_mean
@@ -33,7 +34,7 @@ class AcousticModel(Protocol):
         target_mask: Tensor | None = None,
         noise: Tensor | None = None,
         acoustic_condition: Tensor | None = None,
-        source_feature_extractor: object | None = None,
+        source_feature_extractor: AcousticFeatureExtractor | None = None,
     ) -> AcousticFlowInputs: ...
 
     def acoustic_flow_loss_stats_from_inputs(
@@ -69,7 +70,7 @@ def acoustic_loss_stats(
     batch: CausalLMBatch,
     *,
     bpe: object | None,
-    acoustic_feature_extractor: object | None,
+    acoustic_feature_extractor: AcousticFeatureExtractor | None,
     hidden_states: Tensor | None = None,
 ) -> tuple[AcousticFlowInputs, AcousticFlowLossStats]:
     if bpe is None:
@@ -183,7 +184,10 @@ def weighted_tensor_stats(values: Tensor, weights: Tensor) -> TensorStats:
     )
 
 
-def feature_extractor_to_device(extractor: object, device: TorchDevice) -> object:
+def feature_extractor_to_device(
+    extractor: AcousticFeatureExtractor,
+    device: TorchDevice,
+) -> AcousticFeatureExtractor:
     move = getattr(extractor, "to", None)
     if callable(move):
         moved = move(device)

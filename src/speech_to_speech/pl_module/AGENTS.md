@@ -15,7 +15,7 @@
 - 通过 `acoustic.py` 处理 acoustic loss 准备、timestep 分桶和 condition 统计。
 - 记录长时间训练需要的 loss、task weight、学习率等曲线。
 - 保存和恢复 checkpoint。
-- 提供 sample/generation logging callback，callback 是否启用由 trainer 配置决定。
+- 提供 generation logging callback，callback 是否启用由 trainer 配置决定。
 
 ## 开发边界
 

@@ -32,13 +32,13 @@ from speech_to_speech.model import acoustic
 from speech_to_speech.model.acoustic import AcousticSampler
 from speech_to_speech.model.orchestrator import Orchestrator
 from speech_to_speech.model import builder
-from speech_to_speech.model import orchestrator
 from speech_to_speech.model.audio_embedding import BPEAudioEmbedding
 from speech_to_speech.model.qwen3 import Qwen3Config
 from speech_to_speech.model.semantic import batch_loss
 from speech_to_speech.types import (
     AcousticCondition,
     AutoregressionExample,
+    AudioBoundary,
     CausalLMBatch,
     IGNORE_INDEX,
     LongCatBatchSide,
@@ -65,7 +65,7 @@ class OrchestratorTest(unittest.TestCase):
 
         self.assertIsNotNone(output.loss)
         self.assertEqual(tuple(output.loss.shape), (1,))
-        self.assertEqual(tuple(output.logits.shape), (5, 7))
+        self.assertEqual(tuple(output.logits.shape), (4, 6))
         output.loss.mean().backward()
 
     def test_semantic_accuracy_uses_supervised_positions(self) -> None:
@@ -94,7 +94,7 @@ class OrchestratorTest(unittest.TestCase):
         )
         logits = torch.full((3, model.lm_head.vocab_size), -1.0)
         logits[0, model.lm_head.to_head_ids(torch.tensor(18))] = 1.0
-        logits[1, model.lm_head.to_head_ids(torch.tensor(16))] = 1.0
+        logits[1, model.lm_head.to_head_ids(torch.tensor(17))] = 1.0
         logits[2, model.lm_head.to_head_ids(torch.tensor(20))] = 1.0
         output = CausalLMOutputWithPast(loss=torch.ones(2), logits=logits)
 
@@ -159,6 +159,27 @@ class OrchestratorTest(unittest.TestCase):
         self.assertEqual(condition.semantic_ids.tolist(), [[2, 1]])
         self.assertEqual(condition.mask.tolist(), [[True, True]])
         self.assertTrue(torch.equal(condition.hidden_states, expected))
+
+    def test_acoustic_condition_rejects_boa_label(self) -> None:
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            tokenizer=MockTokenizer(),
+            bpe_vocab_size=5,
+            qwen3_pretrained=False,
+        )
+        batch = CausalLMBatch(
+            input_ids=torch.tensor([[1, 16, 18]]),
+            attention_mask=torch.ones((1, 3), dtype=torch.long),
+            labels=torch.tensor([[IGNORE_INDEX, 16, 18]]),
+            logits_to_keep=2,
+        )
+
+        with self.assertRaisesRegex(ValueError, "BOA target token"):
+            model.acoustic_condition(
+                batch,
+                _bpe(),
+                hidden_states=torch.zeros((1, 3, 4)),
+            )
 
     def test_acoustic_flow_loss_uses_masked_velocity_target(self) -> None:
         tokenizer = MockTokenizer()
@@ -425,8 +446,8 @@ class OrchestratorTest(unittest.TestCase):
 
         output = model(batch)
 
-        self.assertEqual(batch.logits_to_keep, 5)
-        self.assertEqual(tuple(output.logits.shape), (8, 7))
+        self.assertEqual(batch.logits_to_keep, 4)
+        self.assertEqual(tuple(output.logits.shape), (6, 6))
         self.assertIsNotNone(output.loss)
         self.assertEqual(tuple(output.loss.shape), (2,))
 
@@ -1029,7 +1050,7 @@ class OrchestratorTest(unittest.TestCase):
                 audio.base_weight + audio.shift_up(audio.shift_down.weight),
             )
         )
-        self.assertEqual(tuple(model.lm_head(torch.zeros(1, 4)).shape), (1, 7))
+        self.assertEqual(tuple(model.lm_head(torch.zeros(1, 4)).shape), (1, 6))
 
     def test_input_adapter_lives_inside_audio_embedding_weight(self) -> None:
         tokenizer = MockTokenizer()
@@ -1058,19 +1079,28 @@ class OrchestratorTest(unittest.TestCase):
                     hidden,
                     torch.cat(
                         (
-                            torch.stack(
-                                [
-                                    model.embed_tokens.special_embeddings["boa"],
-                                    model.embed_tokens.special_embeddings["eoa"],
-                                ]
-                            ),
+                            model.embed_tokens.special_embeddings["eoa"].unsqueeze(0),
                             audio.weight,
                         )
                     ),
                 ),
             )
         )
-        self.assertEqual(model.lm_head.global_ids[:2], (block.start - 2, block.start - 1))
+        self.assertEqual(model.lm_head.global_ids[:2], (block.start - 1, block.start))
+
+    def test_lm_head_is_derived_from_embedding(self) -> None:
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            tokenizer=MockTokenizer(),
+            bpe_vocab_size=5,
+            qwen3_pretrained=False,
+        )
+
+        self.assertNotIn("lm_head", dict(model.named_modules()))
+        self.assertEqual(
+            model.lm_head.global_ids,
+            (model.embed_tokens.space.special_token_id(AudioBoundary.EOA), 18, 19, 20, 21, 22),
+        )
 
     def test_lora_is_ignored_when_qwen3_is_provided(self) -> None:
         tokenizer = MockTokenizer()

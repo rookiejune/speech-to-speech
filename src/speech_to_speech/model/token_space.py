@@ -7,7 +7,7 @@ import torch
 from anytrain.idspace import IdSpaceEmbedding, Modality
 from torch import Tensor, nn
 
-from .types import AudioBoundary
+from ..types.model import AudioBoundary
 
 
 def audio_special_embeddings(

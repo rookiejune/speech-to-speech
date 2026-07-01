@@ -13,7 +13,7 @@ from torch.utils.data import IterableDataset
 from ..config import DatasetFactoryConfig, TaskConfig
 from ..dataset import training_dataset
 from .batch_builder import CausalLMBatchBuilder
-from .types import (
+from ..types.datamodule import (
     AutoregressionExample,
     CausalLMBatch,
     LongCatBPETokenizer,

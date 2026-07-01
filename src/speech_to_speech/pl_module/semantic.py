@@ -7,9 +7,9 @@ from anytrain.idspace import IdSpace
 from torch import Tensor
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from ..datamodule.types import CausalLMBatch, IGNORE_INDEX
+from ..types.datamodule import CausalLMBatch, IGNORE_INDEX
 from ..model.semantic import loss_positions, loss_weights
-from ..model.types import AudioBoundary
+from ..types.model import AudioBoundary
 
 
 def semantic_batch(

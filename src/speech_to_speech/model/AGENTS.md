@@ -8,7 +8,7 @@
 
 - 加载或构建 Qwen3 semantic decoder。
 - 将 Qwen3 text token 和 LongCat BPE audio token 放入同一个 token space。
-- 将 `BOA`/`EOA` 注册为 idspace special token，并提供覆盖 audio token 和 BOA/EOA 的 LM head。
+- 将 `BOA`/`EOA` 注册为 idspace special token，并提供覆盖 audio token 和 `EOA` 的 LM head。
 - 接收 data module 构造的 batch，执行 semantic token 训练。
 - 从 semantic labels 推导目标侧 BPE token，使用 Qwen3 shifted hidden states 和 LongCat BPE 展开得到 frame-level acoustic condition。
 - 提供基于 DiT 的连续 acoustic flow loss 入口；LongCat discrete acoustic code 到连续 target feature 的转换由调用方或后续数据层显式提供，source acoustic condition 只在调用方显式传入 feature extractor 时从 batch source side 池化得到。
@@ -21,8 +21,8 @@
 ## 模块边界
 
 - `orchestrator.py` 是模型对外入口，负责 forward、semantic/acoustic condition、flow loss 和生成编排。
-- `builder.py` 负责把配置和运行期资源组装成 Qwen3、token embedding、LM head、adapter、DiT 和训练开关。
-- `runtime.py` 负责构造 Qwen3/LongCat 共享 `IdSpace`；`token_space.py` 负责 embedding 替换、special token embedding 和 LM head；`audio_embedding/` 负责 audio BPE embedding 的 lookup 和 semantic-composition 两种内部实现；`trainable.py` 负责模型级参数训练策略。
+- `builder.py` 负责把配置和运行期资源组装成 Qwen3、token embedding、adapter、DiT 和训练开关。
+- `runtime.py` 负责构造 Qwen3/LongCat 共享 `IdSpace`；`token_space.py` 负责 embedding 替换、special token embedding 和 tied head view helper；`audio_embedding/` 负责 audio BPE embedding 的 lookup 和 semantic-composition 两种内部实现；`trainable.py` 负责模型级参数训练策略。
 - `semantic/` 负责 semantic token 增量生成、EOA 停止、acoustic condition hidden 收集，以及 semantic LM supervised positions、loss weights 和 batch row loss 归约。
 - `acoustic/` 是 acoustic 公开入口；调用方从 `model.acoustic` import，不依赖内部文件。
 - `acoustic/condition.py` 负责训练侧 acoustic condition 展开、连续 acoustic flow loss 和相关校验。
@@ -35,7 +35,7 @@
 
 ## 输入输出契约
 
-训练侧输入来自 `types.CausalLMBatch`：
+训练侧输入来自 `types.datamodule.CausalLMBatch`：
 
 - `input_ids` 用于 token 对齐、mask 和生成。
 - `attention_mask` 用于屏蔽 padding。
@@ -45,7 +45,7 @@
 
 acoustic 侧输入输出契约：
 
-- acoustic condition 从 `labels != IGNORE_INDEX` 的目标 audio segment 推导，排除 `BOA/EOA`。
+- acoustic condition 从 `labels != IGNORE_INDEX` 的目标 audio segment 推导，排除 `EOA`。
 - BPE token 对应的 condition hidden 使用其下一位 input token 的 Qwen3 hidden state。
 - BPE hidden 通过 `CodecBPE.repeat_interleave(..., mask=...)` 展开到原始 semantic frame 粒度；LongCat 当前只接受单 codebook semantic ids，模型层会显式把 `[B, T, 1]` frame 压成 `[B, T]`。
 - `acoustic_flow_loss` 接收连续 `target_features`，形状为 `[batch, time, acoustic_dim]`，并要求 time 维与展开后的 condition mask 对齐。
@@ -55,7 +55,7 @@ acoustic 侧输入输出契约：
 - Lightning 联合训练由 `TrainConfig.acoustic_loss_weight` 开启；权重为 0 时保持 semantic-only，权重大于 0 时必须显式传入 BPE 和 LongCat acoustic feature extractor。
 - LongCat discrete acoustic codes 到连续 features 的转换由 `anytrain.codec.longcat` 显式提供，模型层只消费连续 `target_features`。
 
-生成侧输入来自 `types.GenerationBatch`：
+生成侧输入来自 `types.datamodule.GenerationBatch`：
 
 - `input_ids` 和 `attention_mask` 表达已经构造好的 Qwen3 prompt。
 - `generate_acoustic_condition` 内部采样目标 audio BPE token 维持自回归，但对外主输出是 `AcousticConditionGeneration.hidden_states` 和 `mask`。

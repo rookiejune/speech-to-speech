@@ -17,7 +17,7 @@ from .diagonal import (
     diagonal_flow_sample_chunks,
     full_sequence_flow_sample,
 )
-from ..types import AcousticCondition
+from ...types.model import AcousticCondition
 
 
 class AcousticSampler(StrEnum):

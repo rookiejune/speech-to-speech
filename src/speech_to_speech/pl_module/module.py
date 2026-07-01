@@ -10,7 +10,8 @@ from torch import device as TorchDevice
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from ..config import TrainConfig
-from ..datamodule.types import CausalLMBatch
+from ..types.datamodule import CausalLMBatch
+from ..types.model import AcousticFeatureExtractor
 from ..model.acoustic import AcousticFlowLossStats
 from ..model.orchestrator import AcousticFlowInputs, Orchestrator
 from .acoustic import (
@@ -54,7 +55,7 @@ class SpeechToSpeechModule(LightningModule):
         train: TrainConfig | None = None,
         *,
         bpe: object | None = None,
-        acoustic_feature_extractor: object | None = None,
+        acoustic_feature_extractor: AcousticFeatureExtractor | None = None,
     ) -> None:
         super().__init__()
         self.model = model
@@ -65,7 +66,7 @@ class SpeechToSpeechModule(LightningModule):
         self.save_hyperparameters({"train": asdict(self.train_config)})
 
     @property
-    def acoustic_feature_extractor(self) -> object | None:
+    def acoustic_feature_extractor(self) -> AcousticFeatureExtractor | None:
         return self.__dict__.get("_acoustic_feature_extractor")
 
     def forward(self, batch: CausalLMBatch) -> CausalLMOutputWithPast:
@@ -196,12 +197,9 @@ class SpeechToSpeechModule(LightningModule):
         stop_weight = self.train_config.stop_loss_weight
         if stop_weight == 1.0:
             return batch
-        idspace = getattr(self.model, "idspace", None)
-        if idspace is None:
-            raise TypeError("stop_loss_weight requires model.idspace.")
         return semantic_batch(
             batch,
-            idspace=idspace,
+            idspace=self.model.idspace,
             stop_loss_weight=stop_weight,
         )
 

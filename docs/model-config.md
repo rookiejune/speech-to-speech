@@ -62,5 +62,5 @@ python scripts/train.py experiment=wmt19_quality_100k_muon model.token_space.aud
 
 acoustic 训练会记录 `condition/{time,hidden,acoustic}_{mean,std}`，统计的是实际送入 DiT 条件融合前的三路张量；`hidden` 按有效 acoustic frame 统计，`time` 和 `acoustic` 按包含有效帧的 batch 行统计。
 
-训练过程中的 checkpoint、sample logging 和 generation logging 属于 trainer callback
-配置，见 `docs/trainer-config.md`。
+训练过程中的 checkpoint 和 generation logging 属于 trainer callback 配置，见
+`docs/trainer-config.md`。

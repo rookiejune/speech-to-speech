@@ -1,9 +1,9 @@
-"""Public type re-exports for speech-to-speech components."""
+"""Public type contracts for speech-to-speech components."""
 
 from __future__ import annotations
 
-from .bpe_types import BPEArtifactMeta
-from .datamodule.types import (
+from .bpe import BPEArtifactMeta
+from .datamodule import (
     IGNORE_INDEX,
     AutoregressionExample,
     CausalLMBatch,
@@ -17,11 +17,13 @@ from .datamodule.types import (
     TaskFamily,
     TranslationExample,
 )
-from .model.types import (
+from .model import (
     AcousticCondition,
     AcousticConditionGeneration,
+    AcousticFeatureExtractor,
     AcousticFeatureGenerator,
     AudioBoundary,
+    LongCatCodec,
     SemanticBPE,
     SemanticGeneration,
     SpecialToken,
@@ -34,6 +36,7 @@ __all__ = [
     "IGNORE_INDEX",
     "AcousticCondition",
     "AcousticConditionGeneration",
+    "AcousticFeatureExtractor",
     "AcousticFeatureGenerator",
     "AudioBoundary",
     "AutoregressionExample",
@@ -42,6 +45,7 @@ __all__ = [
     "GenerationBatch",
     "LongCatBPETokenizer",
     "LongCatBatchSide",
+    "LongCatCodec",
     "LongCatPair",
     "LongCatSide",
     "SemanticBPE",

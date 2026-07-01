@@ -7,8 +7,8 @@ from anytrain.idspace import IdSpaceEmbedding, Modality, ModalityBlock
 from torch import Tensor, nn
 from transformers.cache_utils import Cache
 
-from ...datamodule.types import GenerationBatch
-from ..types import (
+from ...types.datamodule import GenerationBatch
+from ...types.model import (
     AcousticCondition,
     AcousticConditionGeneration,
     AcousticFeatureGenerator,
@@ -19,6 +19,7 @@ from ..types import (
     WaveformCodec,
     WaveformGeneration,
 )
+from ..token_space import AudioLMHead
 
 
 @dataclass(frozen=True)
@@ -26,7 +27,7 @@ class Generator:
     qwen3: nn.Module
     embed_tokens: IdSpaceEmbedding
     output_adapter: nn.Module
-    lm_head: object
+    lm_head: AudioLMHead
 
     @torch.no_grad()
     def acoustic_condition(
@@ -400,11 +401,8 @@ def _validate_acoustic_features(acoustic_features: Tensor, mask: Tensor) -> Tens
     return acoustic_features.to(device=mask.device)
 
 
-def _decode_waveform(codec: object, semantic_ids: Tensor, acoustic_features: Tensor) -> Tensor:
-    decode = getattr(codec, "decode_features", None)
-    if not callable(decode):
-        raise TypeError("LongCat codec must provide decode_features().")
-    audio = decode(semantic_ids, acoustic_features)
+def _decode_waveform(codec: WaveformCodec, semantic_ids: Tensor, acoustic_features: Tensor) -> Tensor:
+    audio = codec.decode_features(semantic_ids, acoustic_features)
     if not isinstance(audio, Tensor):
         raise TypeError("LongCat codec decode_features() must return a Tensor.")
     if audio.dim() == 2:

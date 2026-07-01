@@ -9,7 +9,6 @@ import torch
 from speech_to_speech.config import DataModuleConfig
 from speech_to_speech.datamodule.batch_builder import CausalLMBatchBuilder
 from speech_to_speech.pl_module.sample_logger import (
-    TaskSampleLogger,
     _canary_pair,
     _decode_side,
     _generation_specs,
@@ -37,20 +36,7 @@ class FakeCodec:
         return torch.ones(1, 8)
 
 
-class TaskSampleLoggerTest(unittest.TestCase):
-    def test_task_sample_logger_accepts_lightning_runtime_attributes(self) -> None:
-        logger = TaskSampleLogger()
-        marker = object()
-
-        logger.log = marker
-
-        self.assertIs(logger.log, marker)
-
-    def test_task_sample_logger_accepts_start_only_schedule(self) -> None:
-        logger = TaskSampleLogger(every_n_steps=0)
-
-        self.assertEqual(logger.every_n_steps, 0)
-
+class TaskGenerationLoggerTest(unittest.TestCase):
     def test_decode_side_rejects_bpe_acoustic_length_mismatch(self) -> None:
         side = LongCatSide(
             semantic_ids=torch.tensor([1, 2]),
@@ -134,7 +120,7 @@ class TaskSampleLoggerTest(unittest.TestCase):
         self.assertIs(specs[3].prefix, pair.target)
         self.assertIs(specs[3].reference, pair.source)
 
-    def test_generation_specs_use_full_teacher_forcing_ar_target(self) -> None:
+    def test_generation_specs_use_shifted_teacher_forcing_ar_target(self) -> None:
         pair = LongCatPair(
             source=LongCatSide(
                 semantic_ids=torch.tensor([0, 1, 2]),
@@ -152,8 +138,8 @@ class TaskSampleLoggerTest(unittest.TestCase):
 
         specs = _generation_specs(builder, MockFrameBPE(vocab_size=8), pair)
 
-        self.assertEqual(int(specs[0].batch.labels.ne(-100).sum().item()), 5)
-        self.assertEqual(int(specs[1].batch.labels.ne(-100).sum().item()), 5)
+        self.assertEqual(int(specs[0].batch.labels.ne(-100).sum().item()), 4)
+        self.assertEqual(int(specs[1].batch.labels.ne(-100).sum().item()), 4)
         self.assertEqual(specs[0].batch.target_audio.semantic_ids.tolist(), [[0, 1, 2]])
         self.assertEqual(specs[1].batch.target_audio.semantic_ids.tolist(), [[3, 4, 5]])
 

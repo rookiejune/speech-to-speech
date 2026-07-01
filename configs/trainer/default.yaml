@@ -1,7 +1,6 @@
 defaults:
   - /callback@callbacks.checkpoint: checkpoint
   - /callback@callbacks.learning_rate_monitor: learning_rate_monitor
-  - /callback@callbacks.sample: sample
   - /callback@callbacks.generation: generation
   - _self_
 

@@ -18,7 +18,7 @@ from .pipeline import (
     TaskSample,
     task_sample_length,
 )
-from .types import CausalLMBatch, LongCatBPETokenizer
+from ..types.datamodule import CausalLMBatch, LongCatBPETokenizer
 
 
 class SpeechToSpeechDataModule(LightningDataModule):

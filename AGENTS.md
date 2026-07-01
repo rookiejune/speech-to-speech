@@ -113,7 +113,7 @@ source/target pair。
 标准目标是 speech semantic BPE token 的 next-token prediction：
 
 - 输入包含任务 prompt、`BOA` 和整段 audio ids。
-- loss 计算 `BOA`、audio continuation 和 `EOA`。
+- loss 计算 audio continuation 和 `EOA`；`BOA` 只作为目标侧第一个已知输入。
 - audio BPE token loss 按展开后的 LongCat semantic frame 数加权；`EOA` 作为 stop token，可通过 `train.stop_loss_weight` 单独调权。
 - 不对 prompt 计算 loss。
 - 不需要固定业务 prefix。
@@ -126,7 +126,7 @@ source/target pair。
 第二阶段加入翻译任务。
 
 翻译任务不依赖文本或语言字段。batch builder 只表达 source speech semantic BPE tokens 到 target speech semantic BPE tokens 的任务结构。
-翻译 prompt 同样通过 Qwen3 chat template 生成；source speech semantic BPE tokens 作为 user content 中带 `BOA`/`EOA` 的 audio segment 接入，loss 只计算 target 侧 `BOA`、speech semantic BPE tokens 和 `EOA`。
+翻译 prompt 同样通过 Qwen3 chat template 生成；source speech semantic BPE tokens 作为 user content 中带 `BOA`/`EOA` 的 audio segment 接入，target 侧以 `BOA` 作为已知起始输入，loss 只计算 speech semantic BPE tokens 和 `EOA`。
 
 翻译任务的核心目标是：
 
@@ -145,7 +145,7 @@ source speech semantic BPE tokens -> target speech semantic BPE tokens
 - text token 复用 Qwen3 embedding。
 - LongCat BPE audio token 使用新增 embedding，audio modality block 只包含真实 BPE vocab。
 - `BOA` 和 `EOA` 注册为 `anytrain.idspace` special tokens，不注册进 Qwen tokenizer，也不占用 LongCat BPE vocab。
-- LM head 覆盖 audio token、`BOA` 和 `EOA`；生成侧用 `EOA` 停止，不用 Qwen EOS。
+- LM head 覆盖 audio token 和 `EOA`；生成侧 prompt 已包含目标 `BOA`，并用 `EOA` 停止，不用 Qwen EOS。
 
 模型配置只按职责分层：
 

@@ -46,7 +46,7 @@ class CausalLMBatchBuilderTest(unittest.TestCase):
                     IGNORE_INDEX,
                     IGNORE_INDEX,
                     IGNORE_INDEX,
-                    16,
+                    IGNORE_INDEX,
                     18,
                     19,
                     20,
@@ -57,7 +57,7 @@ class CausalLMBatchBuilderTest(unittest.TestCase):
                     IGNORE_INDEX,
                     IGNORE_INDEX,
                     IGNORE_INDEX,
-                    16,
+                    IGNORE_INDEX,
                     21,
                     22,
                     17,
@@ -65,12 +65,12 @@ class CausalLMBatchBuilderTest(unittest.TestCase):
                 ],
             ],
         )
-        self.assertEqual(batch.logits_to_keep, 5)
+        self.assertEqual(batch.logits_to_keep, 4)
         self.assertEqual(
             batch.loss_weights.tolist(),
             [
-                [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-                [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0],
             ],
         )
 
@@ -84,8 +84,8 @@ class CausalLMBatchBuilderTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(batch.labels.tolist()[0][-4:], [16, 18, 19, 17])
-        self.assertEqual(batch.loss_weights.tolist()[0][-4:], [1.0, 2.0, 3.0, 1.0])
+        self.assertEqual(batch.labels.tolist()[0][-4:], [IGNORE_INDEX, 18, 19, 17])
+        self.assertEqual(batch.loss_weights.tolist()[0][-4:], [0.0, 2.0, 3.0, 1.0])
 
     def test_translation_uses_chat_template_and_replaces_source_placeholder(self) -> None:
         builder = CausalLMBatchBuilder(toy_idspace(), tokenizer=MockTokenizer())
@@ -113,14 +113,14 @@ class CausalLMBatchBuilderTest(unittest.TestCase):
                     IGNORE_INDEX,
                     IGNORE_INDEX,
                     IGNORE_INDEX,
-                    16,
+                    IGNORE_INDEX,
                     20,
                     21,
                     17,
                 ]
             ],
         )
-        self.assertEqual(batch.loss_weights.tolist()[0][-4:], [1.0, 1.0, 1.0, 1.0])
+        self.assertEqual(batch.loss_weights.tolist()[0][-4:], [0.0, 1.0, 1.0, 1.0])
 
     def test_autoregression_generation_uses_boa_without_eoa(self) -> None:
         builder = CausalLMBatchBuilder(toy_idspace(), tokenizer=MockTokenizer())

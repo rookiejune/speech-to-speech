@@ -20,7 +20,6 @@ from speech_to_speech.model.orchestrator import Orchestrator
 from speech_to_speech.pl_module import (
     SpeechToSpeechModule,
     TaskGenerationLogger,
-    TaskSampleLogger,
 )
 from speech_to_speech.runtime import (
     longcat_codec,
@@ -155,18 +154,6 @@ def _callbacks(
     if learning_rate_monitor.enabled:
         callbacks.append(
             LearningRateMonitor(logging_interval=learning_rate_monitor.logging_interval)
-        )
-    sample = trainer.callbacks.sample
-    if sample.enabled:
-        callbacks.append(
-            TaskSampleLogger(
-                datamodule=config.datamodule,
-                tasks=config.tasks,
-                bpe=config.bpe,
-                every_n_steps=sample.every_n_steps,
-                samples_per_task=sample.samples_per_task,
-                max_audio_samples=sample.max_audio_samples,
-            )
         )
     generation = trainer.callbacks.generation
     if generation.enabled and generation.every_n_steps is not None:

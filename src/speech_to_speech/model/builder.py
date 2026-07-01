@@ -1,7 +1,7 @@
 """Constructs speech-to-speech model submodules from runtime configuration.
 
 This module owns loading/configuring Qwen3, optional DiT acoustic decoder,
-shared text/audio token space, adapters, LM head, and trainability flags.
+shared text/audio token space, adapters, and trainability flags.
 The `Orchestrator` consumes the resulting modules and keeps the runtime
 forward/generation/acoustic contracts.
 """
@@ -32,15 +32,13 @@ from .DiT.model import DiT
 from .audio_embedding import audio_embedding
 from .qwen3 import Qwen3Config, Qwen3Model
 from .token_space import (
-    AudioLMHead,
-    audio_lm_head,
     audio_special_embeddings,
     hidden_size,
     set_text_embedding,
     text_embedding,
 )
 from .trainable import configure_trainable
-from .types import AudioBoundary
+from ..types.model import AudioBoundary
 
 
 @dataclass(frozen=True)
@@ -50,7 +48,6 @@ class OrchestratorComponents:
     output_adapter: HiddenAdapter
     acoustic_condition_adapter: HiddenAdapter
     acoustic_condition_encoder: ConditionEncoder | None
-    lm_head: AudioLMHead
 
 
 def build_orchestrator_components(
@@ -104,7 +101,6 @@ def build_orchestrator_components(
         output_adapter=token_space.output_adapter,
         acoustic_condition_adapter=token_space.acoustic_condition_adapter,
         acoustic_condition_encoder=token_space.acoustic_condition_encoder,
-        lm_head=token_space.lm_head,
     )
 
 
@@ -135,7 +131,6 @@ class _TokenSpaceComponents:
     output_adapter: HiddenAdapter
     acoustic_condition_adapter: HiddenAdapter
     acoustic_condition_encoder: ConditionEncoder | None
-    lm_head: AudioLMHead
 
 
 def _build_qwen3(
@@ -231,11 +226,6 @@ def _build_token_space(
     )
     text_embed = text_embedding(qwen3)
     audio_init_std = _embedding_init_std(qwen3.config)  # type: ignore[attr-defined]
-    audio_special_token_names = (
-        AudioBoundary.BOA.value,
-        AudioBoundary.EOA.value,
-    )
-
     audio_embed = audio_embedding(
         audio_modality_vocab_size,
         qwen_hidden_size,
@@ -308,16 +298,11 @@ def _build_token_space(
         if model_config.acoustic.condition_encoder.enabled
         else None
     )
-    lm_head = audio_lm_head(
-        embedding,
-        special_tokens=audio_special_token_names,
-    )
     return _TokenSpaceComponents(
         embedding=embedding,
         output_adapter=output_adapter,
         acoustic_condition_adapter=acoustic_condition_adapter,
         acoustic_condition_encoder=acoustic_condition_encoder,
-        lm_head=lm_head,
     )
 
 

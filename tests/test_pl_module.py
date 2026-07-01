@@ -337,9 +337,9 @@ class SpeechToSpeechModuleTest(unittest.TestCase):
         batch = CausalLMBatch(
             input_ids=torch.tensor([[1, 2, 3]]),
             attention_mask=torch.tensor([[1, 1, 1]]),
-            labels=torch.tensor([[16, 18, 17]]),
+            labels=torch.tensor([[IGNORE_INDEX, 18, 17]]),
             logits_to_keep=3,
-            loss_weights=torch.tensor([[1.0, 2.0, 1.0]]),
+            loss_weights=torch.tensor([[0.0, 2.0, 1.0]]),
         )
 
         semantic_batch = module._semantic_batch(batch)
@@ -347,7 +347,7 @@ class SpeechToSpeechModuleTest(unittest.TestCase):
         self.assertTrue(
             torch.equal(
                 semantic_batch.loss_weights,
-                torch.tensor([[1.0, 2.0, 3.0]]),
+                torch.tensor([[0.0, 2.0, 3.0]]),
             )
         )
 

@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-from typing import cast
-
 from anytrain.idspace import IdSpaceEmbedding, Modality
 from torch import nn
 
 from ..config import ModelConfig, ModelTrainMode
-from .types import AudioBoundary
+from ..types.model import AudioBoundary
 
 
 def configure_trainable(
     *,
     qwen3: nn.Module,
-    embedding: nn.Module,
+    embedding: IdSpaceEmbedding,
     output_adapter: nn.Module,
     dit: nn.Module | None,
     acoustic_condition_adapter: nn.Module,
@@ -22,7 +20,7 @@ def configure_trainable(
 ) -> None:
     if config.train_mode is ModelTrainMode.ACOUSTIC_ONLY:
         _set_trainable(qwen3, False)
-        _set_acoustic_only_embedding_trainable(cast(IdSpaceEmbedding, embedding))
+        _set_acoustic_only_embedding_trainable(embedding)
         _set_trainable(output_adapter, True)
         if dit is None:
             raise ValueError("model.train_mode=acoustic_only requires an acoustic decoder.")
@@ -38,7 +36,7 @@ def configure_trainable(
         _set_trainable(qwen3, False)
     if peft_applied and config.backbone.lora.enabled:
         _set_lora_trainable(qwen3)
-    _set_embedding_trainable(cast(IdSpaceEmbedding, embedding), config)
+    _set_embedding_trainable(embedding, config)
     _set_trainable(output_adapter, True)
     if dit is not None:
         _set_trainable(dit, config.acoustic.train)

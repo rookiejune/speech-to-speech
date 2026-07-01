@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum, auto
 from pathlib import Path
 
-from .datamodule.types import Task, TaskFamily
+from .types.datamodule import Task, TaskFamily
 
 
 @dataclass(frozen=True)
@@ -258,14 +258,6 @@ class LearningRateMonitorCallbackConfig:
 
 
 @dataclass(frozen=True)
-class SampleCallbackConfig:
-    enabled: bool = True
-    every_n_steps: int = 0
-    samples_per_task: int = 1
-    max_audio_samples: int | None = 320_000
-
-
-@dataclass(frozen=True)
 class GenerationCallbackConfig:
     enabled: bool = True
     every_n_steps: int | None = 5_000
@@ -285,7 +277,6 @@ class TrainerCallbacksConfig:
     learning_rate_monitor: LearningRateMonitorCallbackConfig = field(
         default_factory=LearningRateMonitorCallbackConfig
     )
-    sample: SampleCallbackConfig = field(default_factory=SampleCallbackConfig)
     generation: GenerationCallbackConfig = field(default_factory=GenerationCallbackConfig)
 
 
