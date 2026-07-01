@@ -22,7 +22,12 @@ from speech_to_speech.pl_module import (
     TaskGenerationLogger,
     TaskSampleLogger,
 )
-from speech_to_speech.runtime import longcat_codec, prepare_longcat_tokenizer, qwen3_tokenizer
+from speech_to_speech.runtime import (
+    longcat_codec,
+    prepare_longcat_tokenizer,
+    qwen3_longcat_idspace,
+    qwen3_tokenizer,
+)
 from speech_to_speech.smoke import (
     _accelerator,
     _mapping,
@@ -50,11 +55,17 @@ def main(cfg: DictConfig) -> None:
         datasets=dataset_metadata(dataset_factory),
         config=config.bpe,
     )
+    space = qwen3_longcat_idspace(
+        tokenizer=tokenizer,
+        bpe_vocab_size=bpe.vocab_size,
+        config=config.model,
+    )
     model = Orchestrator(
         model_config=config.model,
         bpe_config=config.bpe,
         tokenizer=tokenizer,
         bpe_vocab_size=bpe.vocab_size,
+        space=space,
     )
     acoustic_training = config.train.acoustic_loss_weight > 0.0
     module = SpeechToSpeechModule(
@@ -66,7 +77,7 @@ def main(cfg: DictConfig) -> None:
     datamodule = SpeechToSpeechDataModule(
         config.datamodule,
         config.tasks,
-        model.embed_tokens,
+        space,
         tokenizer=tokenizer,
         bpe_tokenizer=bpe,
         bpe=config.bpe,
@@ -91,6 +102,10 @@ def main(cfg: DictConfig) -> None:
         "enable_model_summary": config.trainer.enable_model_summary,
         "enable_progress_bar": config.trainer.enable_progress_bar,
     }
+    if config.trainer.gradient_clip_val is not None:
+        trainer_kwargs["gradient_clip_val"] = config.trainer.gradient_clip_val
+        if config.trainer.gradient_clip_algorithm is not None:
+            trainer_kwargs["gradient_clip_algorithm"] = config.trainer.gradient_clip_algorithm
     if config.trainer.log_every_n_steps is not None:
         trainer_kwargs["log_every_n_steps"] = config.trainer.log_every_n_steps
     trainer = Trainer(**trainer_kwargs)

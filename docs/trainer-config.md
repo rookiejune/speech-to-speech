@@ -54,3 +54,15 @@ trainer:
 `left_context_chunks` 保持 `null`。只有切到 chunk/window sampler 时才需要设置
 `chunk_size`；`causal_window` 下 `left_context_chunks=null` 表示使用全部左侧 chunks，
 显式整数才会限制窗口。`trainer.callbacks.sample` 记录数据/task sample，不触发模型生成。
+
+梯度裁剪是 Lightning Trainer 参数，默认配置为：
+
+```yaml
+trainer:
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: norm
+```
+
+`train.stop_loss_weight` 控制语义 `EOA` stop token 的 loss 倍率。语义 audio BPE token
+的 loss 权重由数据层按 BPE 展开后的 LongCat semantic frame 数生成，避免长跨度 BPE
+token 和短跨度 BPE token 在训练目标里被等权处理。

@@ -7,12 +7,12 @@ from anytrain.idspace import IdSpaceEmbedding, Modality, ModalityBlock
 from torch import Tensor, nn
 from transformers.cache_utils import Cache
 
+from ...datamodule.types import GenerationBatch
 from ..types import (
     AcousticCondition,
     AcousticConditionGeneration,
     AcousticFeatureGenerator,
     AudioBoundary,
-    GenerationBatch,
     SemanticBPE,
     SemanticGeneration,
     SpecialToken,
@@ -25,6 +25,7 @@ from ..types import (
 class Generator:
     qwen3: nn.Module
     embed_tokens: IdSpaceEmbedding
+    output_adapter: nn.Module
     lm_head: object
 
     @torch.no_grad()
@@ -65,7 +66,7 @@ class Generator:
                 pending_condition,
             )
 
-            logits = self.lm_head(last_hidden)
+            logits = self.lm_head(self.output_adapter(last_hidden))
             next_ids = self.lm_head.to_global_ids(
                 _sample_next_head_ids(logits, temperature=temperature, top_p=top_p)
             )
@@ -211,10 +212,9 @@ class Generator:
         input_ids: Tensor,
         attention_mask: Tensor,
     ) -> tuple[Tensor, Cache | None]:
-        inputs_embeds = self.embed_tokens(input_ids)
         outputs = self.qwen3(
             attention_mask=attention_mask,
-            inputs_embeds=inputs_embeds,
+            inputs_embeds=self.embed_tokens(input_ids),
             use_cache=True,
             cache_position=torch.arange(input_ids.size(1), device=input_ids.device),
         )

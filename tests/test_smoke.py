@@ -6,8 +6,10 @@ import unittest
 from unittest.mock import patch
 
 from speech_to_speech.config import (
+    AcousticAttentionMode,
     AcousticConditionSource,
-    DiTAttentionMode,
+    AdapterType,
+    AudioEmbeddingType,
     ModelConfig,
     ModelTrainMode,
 )
@@ -81,7 +83,7 @@ class SmokeRunnerTest(unittest.TestCase):
         self.assertEqual(config.train.acoustic_loss_weight, 0.01)
         self.assertEqual(config.model.acoustic.condition_dropout, 0.1)
         self.assertTrue(config.model.acoustic.enabled)
-        self.assertIs(config.model.acoustic.dit.attention_mode, DiTAttentionMode.CAUSAL)
+        self.assertIs(config.model.acoustic.attention_mode, AcousticAttentionMode.CAUSAL)
 
     def test_load_config_reads_target_embedding_acoustic_ablation(self) -> None:
         config = smoke.load_config(
@@ -94,6 +96,10 @@ class SmokeRunnerTest(unittest.TestCase):
             config.model.acoustic.condition_source,
             AcousticConditionSource.TARGET_AUDIO_EMBEDDING,
         )
+        self.assertIs(
+            config.model.token_space.audio_embedding_type,
+            AudioEmbeddingType.SEMANTIC_COMPOSITION,
+        )
         self.assertEqual(config.train.semantic_loss_weight, 0.0)
         self.assertEqual(config.train.acoustic_loss_weight, 1.0)
         self.assertTrue(config.model.acoustic.enabled)
@@ -102,23 +108,29 @@ class SmokeRunnerTest(unittest.TestCase):
         config = smoke.load_config(
             overrides=(
                 "experiment=wmt19_acoustic_smoke",
-                "model.acoustic.dit.attention_mode=bidirectional",
+                "model.acoustic.condition_adapter.type=linear",
+                "model.acoustic.condition_encoder.enabled=true",
+                "model.acoustic.condition_encoder.num_hidden_layers=1",
+                "model.acoustic.attention_mode=bidirectional",
                 "model.acoustic.dit.norm_hidden=true",
                 "model.acoustic.dit.norm_acoustic=true",
             )
         )
 
-        self.assertIs(config.model.acoustic.dit.attention_mode, DiTAttentionMode.BIDIRECTIONAL)
+        self.assertIs(config.model.acoustic.condition_adapter.type, AdapterType.LINEAR)
+        self.assertTrue(config.model.acoustic.condition_encoder.enabled)
+        self.assertEqual(config.model.acoustic.condition_encoder.num_hidden_layers, 1)
+        self.assertIs(config.model.acoustic.attention_mode, AcousticAttentionMode.BIDIRECTIONAL)
         self.assertFalse(config.model.acoustic.dit.norm_time)
         self.assertTrue(config.model.acoustic.dit.norm_hidden)
         self.assertTrue(config.model.acoustic.dit.norm_acoustic)
 
-    def test_load_config_rejects_unknown_dit_attention_mode(self) -> None:
+    def test_load_config_rejects_unknown_acoustic_attention_mode(self) -> None:
         with self.assertRaises(ValueError):
             smoke.load_config(
                 overrides=(
                     "experiment=wmt19_acoustic_smoke",
-                    "model.acoustic.dit.attention_mode=offline",
+                    "model.acoustic.attention_mode=offline",
                 )
             )
 
@@ -224,10 +236,13 @@ class FakeOrchestrator:
         bpe_config: object,
         tokenizer: object,
         bpe_vocab_size: int,
+        space: object,
+        bpe: object | None = None,
     ) -> None:
-        del bpe_config, tokenizer
+        del bpe_config, tokenizer, bpe
         self.model_config = model_config
         self.embed_tokens = toy_embedding(audio_vocab_size=bpe_vocab_size)
+        self.idspace = space
 
 
 class FakeModule:

@@ -12,7 +12,8 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor, nn
 
-from .acoustic import acoustic_velocity
+from .condition import acoustic_velocity
+from .flow import full_sequence_acoustic_flow_sample
 
 
 @dataclass(frozen=True)
@@ -175,26 +176,20 @@ def full_sequence_flow_sample(
         dtype=x_0.dtype,
         value=time_grid,
     )
-    state = x_0.clone()
-
-    for step_index in range(num_steps):
-        velocity = acoustic_velocity(
-            dit,
-            x_t=state,
-            last_hidden_state=last_hidden_state,
-            timesteps=time_grid[step_index].expand(x_0.size(0)),
-            acoustic_condition=acoustic_condition,
-            mask=mask,
-            guidance_scale=guidance_scale,
-        )
-        delta = time_grid[step_index + 1] - time_grid[step_index]
-        updated = state + delta * velocity
-        state = torch.where(mask.unsqueeze(-1), updated, state)
+    sample = full_sequence_acoustic_flow_sample(
+        dit,
+        x_0,
+        last_hidden_state=last_hidden_state,
+        acoustic_condition=acoustic_condition,
+        mask=mask,
+        time_grid=time_grid,
+        guidance_scale=guidance_scale,
+    )
 
     return FullSequenceSample(
-        final=state,
-        time_grid=time_grid,
-        forward_count=num_steps,
+        final=sample.final,
+        time_grid=sample.time_grid,
+        forward_count=sample.forward_count,
     )
 
 

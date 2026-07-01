@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
-from speech_to_speech.model.diagonal import (
+from speech_to_speech.model.acoustic import (
     causal_window_flow_sample,
     diagonal_flow_sample,
     diagonal_flow_sample_chunks,

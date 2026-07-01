@@ -20,11 +20,16 @@
 
 ## 模块边界
 
-- `orchestrator.py` 是模型对外入口，负责组合 Qwen3、token embedding、LM head 和 DiT。
-- `token_space.py` 负责 idspace、embedding 替换、special token embedding 和 trainable policy。
-- `generation.py` 负责语义 token 增量生成、EOA 停止和 acoustic condition hidden 收集。
-- `acoustic.py` 负责训练侧 acoustic condition 展开、连续 acoustic flow loss 和相关校验。
-- `diagonal.py` 负责 acoustic flow 的 full-sequence baseline、BPE token 非均匀 chunk baseline、diagonal wavefront 调度和 synthetic Euler 采样验证。
+- `orchestrator.py` 是模型对外入口，负责 forward、semantic/acoustic condition、flow loss 和生成编排。
+- `builder.py` 负责把配置和运行期资源组装成 Qwen3、token embedding、LM head、adapter、DiT 和训练开关。
+- `runtime.py` 负责构造 Qwen3/LongCat 共享 `IdSpace`；`token_space.py` 负责 embedding 替换、special token embedding 和 LM head；`audio_embedding/` 负责 audio BPE embedding 的 lookup 和 semantic-composition 两种内部实现；`trainable.py` 负责模型级参数训练策略。
+- `semantic/` 负责 semantic token 增量生成、EOA 停止、acoustic condition hidden 收集，以及 semantic LM supervised positions、loss weights 和 batch row loss 归约。
+- `acoustic/` 是 acoustic 公开入口；调用方从 `model.acoustic` import，不依赖内部文件。
+- `acoustic/condition.py` 负责训练侧 acoustic condition 展开、连续 acoustic flow loss 和相关校验。
+- `acoustic/generation.py` 负责 DiT acoustic feature generator、`AcousticSampler` 和 waveform 生成侧 acoustic sampler 选择。
+- `acoustic/flow.py` 负责对接 `anytrain.framework.flow_matching`，提供 acoustic flow source 和 full-sequence sampler 适配。
+- `acoustic/diagonal.py` 负责 acoustic flow 的 full-sequence baseline、BPE token 非均匀 chunk baseline、diagonal wavefront 调度和 synthetic Euler 采样验证。
+- `acoustic/condition_encoder.py` 负责 repeated frame-level condition hidden 送入 DiT 前的轻量 temporal encoder。
 - `qwen3.py` 是 Hugging Face Qwen3 相关类的本地导入层，避免其他文件到处依赖 transformers 的深层路径。
 - `DiT/` 是 acoustic decoder 子模块，外部优先通过 `Orchestrator` 调用。
 
@@ -76,8 +81,11 @@ acoustic 侧输入输出契约：
 
 - `ModelConfig.backbone` 表达 Qwen3 权重来源、4bit 加载、backbone full/LoRA 训练策略。
 - `ModelConfig.token_space` 表达 text/audio embedding 和 audio boundary special token 是否训练。
-- `ModelConfig.acoustic` 表达是否构建 DiT acoustic decoder、是否训练 acoustic decoder/projection、source acoustic condition dropout 和 DiT 尺寸。
-- `ModelConfig.acoustic.dit.attention_mode` 表达 DiT acoustic decoder 的时序注意力约束；`causal` 保持旧实验语义并适合 streaming/causal-window 对照，`bidirectional` 用于 offline full-sequence acoustic flow 对照。
+- `ModelConfig.acoustic` 表达是否构建 DiT acoustic decoder、是否训练 acoustic decoder/condition adapter、source acoustic condition dropout 和 DiT 尺寸。
+- `ModelConfig.token_space.audio_embedding_type` 表达 audio BPE embedding 的内部实现，支持直接 lookup 和 LongCat semantic code 组装；外部调用方只依赖 audio embedding 的 forward/weight 契约，不依赖内部实现。
+- `ModelConfig.token_space.input_adapter` 表达 audio embedding `weight` 内部的输入侧投影；LM head 通过 tied `head_view` 读取同一张 audio weight。`ModelConfig.token_space.output_adapter` 属于 semantic logits 路径，负责把 Qwen hidden 投影到这张 tied weight 对应的空间。`ModelConfig.acoustic.condition_adapter` 负责 Qwen/DiT hidden 对齐；semantic-composed audio embedding 的低秩 shift 留在 `audio_embedding/` 和 token space 配置里。
+- `ModelConfig.acoustic.condition_encoder` 表达 repeated frame-level condition hidden 送入 DiT 前的轻量 Qwen3 decoder layer temporal encoder。
+- `ModelConfig.acoustic.attention_mode` 表达 acoustic branch 的时序注意力约束；DiT 和 condition encoder 共享该策略。`causal` 保持旧实验语义并适合 streaming/causal-window 对照，`bidirectional` 用于 offline full-sequence acoustic flow 对照。
 - `ModelConfig.acoustic.dit.norm_time`、`norm_hidden`、`norm_acoustic` 表达 DiT 内部三路条件相加前的可选无 affine LayerNorm。
 
 训练入口只用 `TrainConfig.acoustic_loss_weight` 决定 acoustic loss 是否参与训练；当权重大于 0 时，`ModelConfig.acoustic.enabled` 必须为 true。评估或 smoke 脚本需要加载 acoustic decoder 时，应显式构造带 acoustic decoder 的 `ModelConfig`，不要把 DiT 是否存在隐含在 Qwen/LoRA preset 名字里。
@@ -85,5 +93,6 @@ acoustic 侧输入输出契约：
 ## 开发边界
 
 - Do: 修改 token space、embedding 或 LM head 时同步更新本文件的对外契约；Don't: 让 data module 依赖模型内部 layout 细节。
-- Do: 把 Qwen3/DiT 组合逻辑收敛在 `Orchestrator`；Don't: 在训练入口重复拼装子模块。
+- Do: 让 data module 和 model 共享 runtime 构造的 `IdSpace`；Don't: 让 batch builder 依赖 `IdSpaceEmbedding` 权重对象。
+- Do: 把 Qwen3/DiT/token-space 构建逻辑收敛在 `builder.py`，让 `Orchestrator` 保持运行期编排入口；Don't: 在训练入口重复拼装子模块。
 - Do: 保持 `qwen3.py` 作为兼容导入层；Don't: 在跨模块代码里直接依赖 transformers 的私有路径。

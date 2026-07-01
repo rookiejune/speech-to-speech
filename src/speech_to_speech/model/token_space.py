@@ -1,17 +1,13 @@
 from __future__ import annotations
 
-from typing import cast
+from collections.abc import Sequence
+from typing import Protocol
 
 import torch
 from anytrain.idspace import IdSpaceEmbedding, Modality
 from torch import Tensor, nn
 
-from ..config import ModelConfig, ModelTrainMode
-from ..types import AudioBoundary, SpecialToken
-
-
-def special_token_ids(tokenizer: object) -> dict[str, int]:
-    return {member.value: _token_id(tokenizer, member.value) for member in SpecialToken}
+from .types import AudioBoundary
 
 
 def audio_special_embeddings(
@@ -28,21 +24,29 @@ def audio_special_embeddings(
     return embeddings
 
 
-def audio_embedding(
-    vocab_size: int,
-    hidden_size: int,
+class AudioLMHead(Protocol):
+    @property
+    def vocab_size(self) -> int: ...
+
+    @property
+    def global_ids(self) -> tuple[int, ...]: ...
+
+    def __call__(self, hidden_states: Tensor) -> Tensor: ...
+
+    def to_head_ids(self, ids: Sequence[int] | Tensor) -> list[int] | Tensor: ...
+
+    def to_global_ids(self, ids: Sequence[int] | Tensor) -> list[int] | Tensor: ...
+
+
+def audio_lm_head(
+    embedding: IdSpaceEmbedding,
     *,
-    like: Tensor,
-    std: float,
-) -> nn.Embedding:
-    embedding = nn.Embedding(
-        vocab_size,
-        hidden_size,
-        device=like.device,
-        dtype=like.dtype,
+    special_tokens: tuple[str, ...],
+) -> AudioLMHead:
+    return embedding.head_view(
+        special_tokens=special_tokens,
+        modalities=(Modality.AUDIO,),
     )
-    nn.init.normal_(embedding.weight, std=std)
-    return embedding
 
 
 def text_embedding(model: nn.Module) -> nn.Embedding | IdSpaceEmbedding:
@@ -91,79 +95,3 @@ def set_text_embedding(model: nn.Module, embedding: IdSpaceEmbedding) -> None:
         return
 
     raise AttributeError("qwen3 model must expose embed_tokens.")
-
-
-def configure_trainable(
-    *,
-    qwen3: nn.Module,
-    embedding: nn.Module,
-    dit: nn.Module | None,
-    acoustic_condition_proj: nn.Module,
-    config: ModelConfig,
-    peft_applied: bool,
-) -> None:
-    if config.train_mode is ModelTrainMode.ACOUSTIC_ONLY:
-        _set_trainable(qwen3, False)
-        _set_acoustic_only_embedding_trainable(cast(IdSpaceEmbedding, embedding))
-        if dit is None:
-            raise ValueError("model.train_mode=acoustic_only requires an acoustic decoder.")
-        _set_trainable(dit, config.acoustic.train)
-        _set_trainable(acoustic_condition_proj, config.acoustic.train)
-        return
-
-    if config.backbone.train:
-        _set_trainable(qwen3, True)
-    else:
-        _set_trainable(qwen3, False)
-    if peft_applied and config.backbone.lora.enabled:
-        _set_lora_trainable(qwen3)
-    _set_embedding_trainable(cast(IdSpaceEmbedding, embedding), config)
-    if dit is not None:
-        _set_trainable(dit, config.acoustic.train)
-    _set_trainable(acoustic_condition_proj, config.acoustic.train)
-
-
-def _token_id(tokenizer: object, token: str) -> int:
-    convert = getattr(tokenizer, "convert_tokens_to_ids", None)
-    if callable(convert):
-        token_id = convert(token)
-        if isinstance(token_id, int) and token_id >= 0:
-            return token_id
-
-    encode = getattr(tokenizer, "encode")
-    ids = encode(token, add_special_tokens=False)
-    if len(ids) != 1:
-        raise ValueError(f"special token {token!r} must map to exactly one token id.")
-    return int(ids[0])
-
-
-def _set_trainable(module: nn.Module, trainable: bool) -> None:
-    for parameter in module.parameters():
-        parameter.requires_grad = trainable
-
-
-def _set_lora_trainable(module: nn.Module) -> None:
-    for name, parameter in module.named_parameters():
-        if "lora_" in name:
-            parameter.requires_grad = True
-
-
-def _set_embedding_trainable(embedding: IdSpaceEmbedding, config: ModelConfig) -> None:
-    embedding.modality_embeddings[Modality.TEXT.value].requires_grad_(
-        config.token_space.train_text_embedding
-    )
-    embedding.modality_embeddings[Modality.AUDIO.value].requires_grad_(
-        config.token_space.train_audio_embedding
-    )
-    for name, parameter in embedding.special_embeddings.items():
-        parameter.requires_grad = name in {
-            AudioBoundary.BOA.value,
-            AudioBoundary.EOA.value,
-        } and config.token_space.train_audio_special_tokens
-
-
-def _set_acoustic_only_embedding_trainable(embedding: IdSpaceEmbedding) -> None:
-    embedding.modality_embeddings[Modality.TEXT.value].requires_grad_(False)
-    embedding.modality_embeddings[Modality.AUDIO.value].requires_grad_(True)
-    for parameter in embedding.special_embeddings.values():
-        parameter.requires_grad = False

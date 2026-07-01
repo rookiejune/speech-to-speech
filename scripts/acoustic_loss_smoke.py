@@ -128,7 +128,7 @@ def _target_translation_batch(
     bpe: object,
     pair: LongCatPair,
 ) -> CausalLMBatch:
-    builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+    builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
     source_ids = _encode_frames(bpe, pair.source.semantic_ids)
     target_ids = _encode_frames(bpe, pair.target.semantic_ids)
     batch = builder.translation(TranslationExample(source_ids=source_ids, target_ids=target_ids))

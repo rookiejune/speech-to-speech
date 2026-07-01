@@ -9,7 +9,7 @@
 - `config.py` 提供顶层配置结构，顶层配置使用 `datamodule.dataset_factory`、`datamodule.dataloader` 和 `datamodule.lba` 分层表达数据入口和加载策略；模型配置使用 `model.backbone`、`model.token_space` 和 `model.acoustic` 分层表达 Qwen 加载/适配、新增 audio token 训练策略和 acoustic decoder 边界；callback 参数通过 `trainer.callbacks` 分层表达。
 - `dataset.py` 提供训练数据集加载入口，当前只支持从 `zhuyin.datasets.wmt19_tts.wmt19_tts_longcat()` 取处理好的对象。
 - `types.py` 提供跨模块共享的轻量类型，例如任务名、特殊 token、speech pair、batch 和后续公共输出结构。
-- `runtime.py` 提供运行期资源加载入口，例如 Qwen3 tokenizer、LongCat BPE tokenizer、LongCat codec。
+- `runtime.py` 提供运行期资源加载入口，例如 Qwen3 tokenizer、LongCat BPE tokenizer、Qwen3/LongCat 共享 `IdSpace`、LongCat codec。
 - `datamodule/` 负责定义任务 schema、task example 转换函数和模型可消费的 batch。
 - `model/` 负责 Qwen3、LongCat token space、LM head、DiT 等模型结构和 acoustic condition 生成接口。
 - `pl_module/` 负责训练框架适配、日志、优化器、checkpoint 等训练编排。

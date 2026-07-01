@@ -14,7 +14,8 @@ from speech_to_speech.config import DatasetFactoryConfig, with_acoustic_decoder
 from speech_to_speech.dataset import dataset_metadata, training_dataset
 from speech_to_speech.datamodule.batch_builder import CausalLMBatchBuilder
 from speech_to_speech.datamodule.example import speech_pair_from_sample
-from speech_to_speech.model.orchestrator import AcousticSampler, Orchestrator
+from speech_to_speech.model.acoustic import AcousticSampler
+from speech_to_speech.model.orchestrator import Orchestrator
 from speech_to_speech.runtime import longcat_codec, prepare_longcat_tokenizer, qwen3_tokenizer
 from speech_to_speech.smoke import load_config
 from speech_to_speech.types import GenerationBatch, SpeechPair
@@ -54,7 +55,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
 
     pair = _speech_pair_at(config.datamodule.dataset_factory, args.sample_index)
     source_bpe_ids = _encode_frames(bpe, pair.source_ids)
-    builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+    builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
     batch = _move_generation_batch(builder.translation_generation(source_bpe_ids), device)
     _sync(device)
     generation_started_at = time.perf_counter()

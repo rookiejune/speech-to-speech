@@ -2,6 +2,8 @@ max_steps: 5000000
 learning_rate: 0.0001
 adamw_learning_rate:
 muon_learning_rate:
+semantic_loss_weight: 1.0
+stop_loss_weight: 1.0
 acoustic_loss_weight: 0.0
 optimizer_preset: pretrain
 optimizer: muon

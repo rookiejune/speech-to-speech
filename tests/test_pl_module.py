@@ -25,7 +25,7 @@ from speech_to_speech.types import (
     LongCatBatchSide,
     TaskFamily,
 )
-from helpers import MockQwen, MockTokenizer
+from helpers import MockQwen, MockTokenizer, toy_idspace
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 
@@ -315,6 +315,42 @@ class SpeechToSpeechModuleTest(unittest.TestCase):
 
         self.assertTrue(torch.equal(loss, torch.tensor(3.5)))
 
+    def test_loss_uses_semantic_loss_weights(self) -> None:
+        module = SpeechToSpeechModule(RowLossModel(torch.tensor([2.0, 8.0])))
+        batch = CausalLMBatch(
+            input_ids=torch.tensor([[1, 2, 3], [4, 5, 0]]),
+            attention_mask=torch.tensor([[1, 1, 1], [1, 1, 0]]),
+            labels=torch.tensor([[1, 2, 3], [4, IGNORE_INDEX, IGNORE_INDEX]]),
+            logits_to_keep=3,
+            loss_weights=torch.tensor([[1.0, 2.0, 1.0], [4.0, 0.0, 0.0]]),
+        )
+
+        loss = module._loss(batch)
+
+        self.assertTrue(torch.equal(loss, torch.tensor(5.0)))
+
+    def test_stop_loss_weight_scales_eoa_loss_weight(self) -> None:
+        module = SpeechToSpeechModule(
+            RowLossModel(torch.tensor([1.0])),
+            TrainConfig(stop_loss_weight=3.0),
+        )
+        batch = CausalLMBatch(
+            input_ids=torch.tensor([[1, 2, 3]]),
+            attention_mask=torch.tensor([[1, 1, 1]]),
+            labels=torch.tensor([[16, 18, 17]]),
+            logits_to_keep=3,
+            loss_weights=torch.tensor([[1.0, 2.0, 1.0]]),
+        )
+
+        semantic_batch = module._semantic_batch(batch)
+
+        self.assertTrue(
+            torch.equal(
+                semantic_batch.loss_weights,
+                torch.tensor([[1.0, 2.0, 3.0]]),
+            )
+        )
+
     def test_task_loss_logs_reduce_ready_metrics_without_sync_dist(self) -> None:
         module, _ = _module_and_batch()
         batch = CausalLMBatch(
@@ -336,13 +372,7 @@ class SpeechToSpeechModuleTest(unittest.TestCase):
 
         module.log = log  # type: ignore[method-assign]
 
-        module._log_task_losses(
-            batch,
-            torch.tensor([2.0, 8.0]),
-            torch.tensor([3.0, 1.0]),
-            stage=None,
-        )
-        module._log_family_group_losses(
+        module._log_task_metrics(
             batch,
             torch.tensor([2.0, 8.0]),
             torch.tensor([3.0, 1.0]),
@@ -395,7 +425,7 @@ def _module_and_batch(
         model_config=ModelConfig(backbone=QwenBackboneConfig(train=True)),
         qwen3_pretrained=False,
     )
-    builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+    builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
     batch = builder.autoregression(
         AutoregressionExample(audio_ids=torch.tensor([0, 1, 2]))
     )
@@ -650,6 +680,7 @@ class RowLossModel(torch.nn.Module):
     def __init__(self, loss: torch.Tensor) -> None:
         super().__init__()
         self.loss = loss
+        self.idspace = toy_idspace()
 
     def forward(
         self,

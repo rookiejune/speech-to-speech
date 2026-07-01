@@ -7,8 +7,9 @@ from torch import Tensor
 
 from anydataset import AudioView, Batch, FieldGroup, FieldRef, Modality, Role, Sample
 
-from ..types import (
+from .types import (
     AutoregressionExample,
+    LongCatBPETokenizer,
     LongCatPair,
     LongCatSide,
     SpeechPair,
@@ -78,24 +79,41 @@ def speech_pairs_from_batch(batch: Batch) -> list[SpeechPair]:
 
 def encode_autoregression_example(
     example: AutoregressionExample,
-    tokenizer: object,
+    tokenizer: LongCatBPETokenizer,
     *,
     device: torch.device | str | None = None,
 ) -> AutoregressionExample:
+    audio_ids, audio_weights = _encode_ids_and_weights(
+        example.audio_ids,
+        tokenizer,
+        device=device,
+    )
     return AutoregressionExample(
-        audio_ids=_encode_ids(example.audio_ids, tokenizer, device=device)
+        audio_ids=audio_ids,
+        audio_weights=audio_weights,
     )
 
 
 def encode_translation_example(
     example: TranslationExample,
-    tokenizer: object,
+    tokenizer: LongCatBPETokenizer,
     *,
     device: torch.device | str | None = None,
 ) -> TranslationExample:
+    source_ids, _ = _encode_ids_and_weights(
+        example.source_ids,
+        tokenizer,
+        device=device,
+    )
+    target_ids, target_weights = _encode_ids_and_weights(
+        example.target_ids,
+        tokenizer,
+        device=device,
+    )
     return TranslationExample(
-        source_ids=_encode_ids(example.source_ids, tokenizer, device=device),
-        target_ids=_encode_ids(example.target_ids, tokenizer, device=device),
+        source_ids=source_ids,
+        target_ids=target_ids,
+        target_weights=target_weights,
     )
 
 
@@ -192,18 +210,31 @@ def _acoustic_ids(view: object) -> Tensor:
     return value
 
 
-def _encode_ids(
+def _encode_ids_and_weights(
     ids: Tensor,
-    tokenizer: object,
+    tokenizer: LongCatBPETokenizer,
+    *,
+    device: torch.device | str | None,
+) -> tuple[Tensor, Tensor]:
+    frames = [[int(value)] for value in ids.reshape(-1).detach().cpu().tolist()]
+    encoded = tokenizer.encode_frames(frames)
+    token_ids = torch.tensor(encoded, dtype=torch.long, device=device)
+    return token_ids, _expanded_lengths(encoded, tokenizer, device=device)
+
+
+def _expanded_lengths(
+    encoded: Sequence[int],
+    tokenizer: LongCatBPETokenizer,
     *,
     device: torch.device | str | None,
 ) -> Tensor:
-    encode_frames = getattr(tokenizer, "encode_frames", None)
-    if not callable(encode_frames):
-        raise TypeError("LongCat BPE tokenizer must provide encode_frames().")
-    frames = [[int(value)] for value in ids.reshape(-1).detach().cpu().tolist()]
-    encoded = encode_frames(frames)
-    return torch.tensor(encoded, dtype=torch.long, device=device)
+    expanded = tokenizer.expand_ids([int(token_id) for token_id in encoded])
+    lengths = [len(span) for span in expanded]
+    if len(lengths) != len(encoded):
+        raise ValueError("LongCat BPE expand_ids() must return one span per token.")
+    if any(length <= 0 for length in lengths):
+        raise ValueError("LongCat BPE expanded spans must be non-empty.")
+    return torch.tensor(lengths, dtype=torch.float, device=device)
 
 
 def _check_row_count(

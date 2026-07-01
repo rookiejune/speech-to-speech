@@ -18,7 +18,7 @@ from helpers import (
     MockTokenizer,
     isolated_anydataset_home,
     patched_wmt19_longcat,
-    toy_embedding,
+    toy_idspace,
     write_toy_longcat_store,
 )
 
@@ -38,7 +38,7 @@ class SpeechToSpeechDataModuleTest(unittest.TestCase):
                 TaskConfig(
                     enabled=(Task.AUTOREGRESSION.value, Task.TRANSLATION.value)
                 ),
-                toy_embedding(),
+                toy_idspace(),
                 tokenizer=MockTokenizer(),
                 bpe_tokenizer=MockFrameBPE(),
             )
@@ -67,7 +67,7 @@ class SpeechToSpeechDataModuleTest(unittest.TestCase):
                 TaskConfig(
                     enabled=(Task.AUTOREGRESSION.value, Task.TRANSLATION.value)
                 ),
-                toy_embedding(),
+                toy_idspace(),
                 tokenizer=MockTokenizer(),
                 bpe_tokenizer=MockFrameBPE(),
             )
@@ -105,7 +105,7 @@ class SpeechToSpeechDataModuleTest(unittest.TestCase):
                         target_to_source=0.0,
                     ),
                 ),
-                toy_embedding(),
+                toy_idspace(),
                 tokenizer=MockTokenizer(),
                 bpe_tokenizer=MockFrameBPE(),
             )
@@ -138,7 +138,7 @@ class SpeechToSpeechDataModuleTest(unittest.TestCase):
                     dataloader=DataLoaderConfig(batch_size=2, num_workers=0),
                 ),
                 TaskConfig(enabled=(Task.TRANSLATION.value,)),
-                toy_embedding(),
+                toy_idspace(),
                 tokenizer=MockTokenizer(),
                 bpe_tokenizer=MockFrameBPE(),
             )
@@ -170,7 +170,7 @@ class SpeechToSpeechDataModuleTest(unittest.TestCase):
                     dataloader=DataLoaderConfig(batch_size=2, num_workers=0),
                 ),
                 TaskConfig(enabled=(Task.TRANSLATION.value,)),
-                toy_embedding(),
+                toy_idspace(),
                 tokenizer=MockTokenizer(),
                 bpe_tokenizer=MockFrameBPE(),
             )
@@ -213,7 +213,7 @@ class SpeechToSpeechDataModuleTest(unittest.TestCase):
                     dataloader=DataLoaderConfig(batch_size=1, num_workers=2),
                 ),
                 TaskConfig(),
-                toy_embedding(),
+                toy_idspace(),
                 tokenizer=MockTokenizer(),
                 bpe_tokenizer=MockFrameBPE(),
             )

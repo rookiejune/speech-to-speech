@@ -21,7 +21,7 @@ from helpers import (
     MockTokenizer,
     isolated_anydataset_home,
     patched_wmt19_longcat,
-    toy_embedding,
+    toy_idspace,
     write_toy_longcat_store,
 )
 
@@ -115,7 +115,7 @@ class TaskSampleLoggerTest(unittest.TestCase):
             ),
         )
         builder = CausalLMBatchBuilder(
-            toy_embedding(audio_vocab_size=8),
+            toy_idspace(audio_vocab_size=8),
             tokenizer=MockTokenizer(),
         )
 
@@ -146,7 +146,7 @@ class TaskSampleLoggerTest(unittest.TestCase):
             ),
         )
         builder = CausalLMBatchBuilder(
-            toy_embedding(audio_vocab_size=8),
+            toy_idspace(audio_vocab_size=8),
             tokenizer=MockTokenizer(),
         )
 

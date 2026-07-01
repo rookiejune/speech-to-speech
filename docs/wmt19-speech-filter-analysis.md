@@ -103,12 +103,12 @@ WER 放大。因此有不少 source 样本虽然 WER 高，但 chrF 仍然很高
 可听样本和 ASR 对照已经放在：
 
 ```text
-debug/wmt19-speech-reject-samples/
+../debug/speech-to-speech/wmt19-speech-reject-samples/
 ```
 
 每个样本目录包含 `source.wav`、`target.wav`、reference text、重新跑出的
 Whisper ASR 文本和 `summary.json`。总览见
-`debug/wmt19-speech-reject-samples/README.md` 和 `summary.jsonl`。
+`../debug/speech-to-speech/wmt19-speech-reject-samples/README.md` 和 `summary.jsonl`。
 
 `source_wer_high`：
 

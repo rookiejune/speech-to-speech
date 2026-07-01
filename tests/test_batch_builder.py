@@ -10,12 +10,12 @@ from speech_to_speech.types import (
     IGNORE_INDEX,
     TranslationExample,
 )
-from helpers import MockTokenizer, toy_embedding
+from helpers import MockTokenizer, toy_idspace
 
 
 class CausalLMBatchBuilderTest(unittest.TestCase):
     def test_autoregression_builds_padded_global_batch(self) -> None:
-        builder = CausalLMBatchBuilder(toy_embedding(), tokenizer=MockTokenizer())
+        builder = CausalLMBatchBuilder(toy_idspace(), tokenizer=MockTokenizer())
 
         batch = builder.autoregression(
             [
@@ -66,9 +66,29 @@ class CausalLMBatchBuilderTest(unittest.TestCase):
             ],
         )
         self.assertEqual(batch.logits_to_keep, 5)
+        self.assertEqual(
+            batch.loss_weights.tolist(),
+            [
+                [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0],
+            ],
+        )
+
+    def test_autoregression_carries_bpe_expansion_loss_weights(self) -> None:
+        builder = CausalLMBatchBuilder(toy_idspace(), tokenizer=MockTokenizer())
+
+        batch = builder.autoregression(
+            AutoregressionExample(
+                audio_ids=torch.tensor([0, 1]),
+                audio_weights=torch.tensor([2.0, 3.0]),
+            )
+        )
+
+        self.assertEqual(batch.labels.tolist()[0][-4:], [16, 18, 19, 17])
+        self.assertEqual(batch.loss_weights.tolist()[0][-4:], [1.0, 2.0, 3.0, 1.0])
 
     def test_translation_uses_chat_template_and_replaces_source_placeholder(self) -> None:
-        builder = CausalLMBatchBuilder(toy_embedding(), tokenizer=MockTokenizer())
+        builder = CausalLMBatchBuilder(toy_idspace(), tokenizer=MockTokenizer())
 
         batch = builder.translation(
             TranslationExample(
@@ -100,9 +120,10 @@ class CausalLMBatchBuilderTest(unittest.TestCase):
                 ]
             ],
         )
+        self.assertEqual(batch.loss_weights.tolist()[0][-4:], [1.0, 1.0, 1.0, 1.0])
 
     def test_autoregression_generation_uses_boa_without_eoa(self) -> None:
-        builder = CausalLMBatchBuilder(toy_embedding(), tokenizer=MockTokenizer())
+        builder = CausalLMBatchBuilder(toy_idspace(), tokenizer=MockTokenizer())
 
         batch = builder.autoregression_generation(torch.tensor([0, 1]))
 
@@ -110,7 +131,7 @@ class CausalLMBatchBuilderTest(unittest.TestCase):
         self.assertEqual(batch.attention_mask.tolist(), [[1, 1, 1, 1, 1, 1, 1, 1]])
 
     def test_translation_generation_ends_at_target_boa(self) -> None:
-        builder = CausalLMBatchBuilder(toy_embedding(), tokenizer=MockTokenizer())
+        builder = CausalLMBatchBuilder(toy_idspace(), tokenizer=MockTokenizer())
 
         batch = builder.translation_generation(torch.tensor([0, 1]))
 

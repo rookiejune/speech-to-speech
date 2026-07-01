@@ -38,7 +38,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
 
     pair = _speech_pair_at(config.datamodule.dataset_factory, args.sample_index)
     source_bpe_ids = _encode_frames(bpe, pair.source_ids)
-    builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+    builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
     batch = builder.translation_generation(source_bpe_ids)
     batch = _move_generation_batch(batch, _module_device(model))
 

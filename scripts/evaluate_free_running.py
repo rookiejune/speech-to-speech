@@ -15,7 +15,8 @@ from speech_to_speech.config import DatasetFactoryConfig, SpeechToSpeechConfig, 
 from speech_to_speech.dataset import training_dataset
 from speech_to_speech.datamodule.batch_builder import CausalLMBatchBuilder
 from speech_to_speech.datamodule.example import longcat_pair_from_sample
-from speech_to_speech.model.orchestrator import AcousticSampler, Orchestrator
+from speech_to_speech.model.acoustic import AcousticSampler
+from speech_to_speech.model.orchestrator import Orchestrator
 from speech_to_speech.runtime import longcat_codec, longcat_tokenizer, qwen3_tokenizer
 from speech_to_speech.smoke import load_config
 from speech_to_speech.types import (
@@ -42,7 +43,7 @@ def run(args: argparse.Namespace) -> None:
     device = torch.device(args.device)
     model = model.to(device).eval()
     codec = _move_runtime_to_device(longcat_codec(), device)
-    builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+    builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
 
     summary_path = output_dir / "summary.jsonl"
     with summary_path.open("w", encoding="utf-8") as summary_file:

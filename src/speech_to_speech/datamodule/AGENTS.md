@@ -10,7 +10,7 @@
 - 从 anydataset `Sample` 中提取双向 autoregression 和双向 translation task example。
 - 将 `AudioView.LONGCAT` 的原始 `semantic_codes` 包装成单 codebook frame，并编码成 LongCat BPE ids。
 - 根据配置启用 `autoregression` 和 `translation` 任务族，并按 task family 权重确定展开比例。
-- 构造模型可消费的 `CausalLMBatch`，包含 `input_ids`、`attention_mask`、`labels`、`logits_to_keep` 和训练监控用 task family。
+- 构造模型可消费的 `CausalLMBatch`，包含 `input_ids`、`attention_mask`、`labels`、`logits_to_keep`、按 LongCat BPE 展开长度得到的 `loss_weights` 和训练监控用 task family。
 - 构造生成侧 `GenerationBatch` prompt，用于模型生成 acoustic condition hidden states。
 
 ## 输入输出契约
@@ -42,7 +42,9 @@ prompt/label 构造留在主进程完成，`inputs_embeds` 由模型 forward 内
 - `input_ids` 使用全局 token id space。
 - `attention_mask` 标记 padding 位置。
 - audio segment 使用 idspace special token `BOA` 和 `EOA` 表达边界；LongCat BPE audio block 只包含真实 BPE token。
+- batch builder 依赖运行期构造好的 `IdSpace` 做 local/global id 转换，不依赖模型 embedding 权重。
 - `labels` 只覆盖需要计算 loss 的目标 token，包括目标 audio segment 的 `BOA` 和 `EOA`。
+- `loss_weights` 与 `labels` 对齐；audio BPE token 使用展开后的 LongCat semantic frame 数作为权重，`BOA`/`EOA` 默认权重为 1。
 - `source_audio` / `target_audio` 可选携带 batch 对齐后的原始 LongCat semantic/acoustic codes 和 mask；semantic loss 不依赖它们，acoustic loss 和 feature 转换从这里读取。
 - prompt 和 user/assistant 结构 token 默认不计算 loss。
 - dataloader 对外只返回统一的 `CausalLMBatch`；`task_family` 只用于 loss/计数日志，不参与模型输入语义。

@@ -28,6 +28,7 @@ ToyPair = tuple[TensorLike, TensorLike]
 
 class MockTokenizer:
     def __init__(self) -> None:
+        self.vocab_size = 16
         self.ids = {
             "<|endoftext|>": 0,
             "<|im_start|>": 1,
@@ -41,6 +42,9 @@ class MockTokenizer:
 
     def convert_tokens_to_ids(self, token: str) -> int:
         return self.ids.get(token, -1)
+
+    def __len__(self) -> int:
+        return 16
 
     def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
         if text == "<<<SPEECH_TO_SPEECH_SOURCE_AUDIO>>>":
@@ -102,7 +106,13 @@ class MockFrameBPE:
 
     def expand_ids(self, ids: list[int]) -> list[tuple[int]]:
         values = self.expanded if self.expanded is not None else ids
-        return [(int(value),) for value in values]
+        spans = []
+        for value in values:
+            if isinstance(value, Sequence) and not isinstance(value, int | str | bytes):
+                spans.append(tuple(int(item) for item in value))
+            else:
+                spans.append((int(value),))
+        return spans
 
 
 @contextmanager
@@ -111,8 +121,8 @@ def isolated_anydataset_home(root: Path) -> Iterator[None]:
         yield
 
 
-def toy_embedding(*, audio_vocab_size: int = 5, hidden_size: int = 4) -> IdSpaceEmbedding:
-    space = IdSpace(
+def toy_idspace(*, audio_vocab_size: int = 5) -> IdSpace:
+    return IdSpace(
         {
             "<|endoftext|>": 0,
             "<|im_start|>": 1,
@@ -130,6 +140,10 @@ def toy_embedding(*, audio_vocab_size: int = 5, hidden_size: int = 4) -> IdSpace
             ModalityBlock(IdModality.AUDIO, 18, audio_vocab_size),
         ],
     )
+
+
+def toy_embedding(*, audio_vocab_size: int = 5, hidden_size: int = 4) -> IdSpaceEmbedding:
+    space = toy_idspace(audio_vocab_size=audio_vocab_size)
     return IdSpaceEmbedding(space, hidden_size)
 
 

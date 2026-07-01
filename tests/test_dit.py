@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import torch
 
-from speech_to_speech.config import DiTAttentionMode
+from speech_to_speech.config import AcousticAttentionMode
 from speech_to_speech.model.DiT import model as dit_model
 from speech_to_speech.model.DiT.model import DiT
 from speech_to_speech.model.qwen3 import Qwen3Config
@@ -66,7 +66,7 @@ class DiTTest(unittest.TestCase):
 
     def test_bidirectional_attention_uses_padding_only_mask(self) -> None:
         config = _minimal_config()
-        config.attention_mode = DiTAttentionMode.BIDIRECTIONAL
+        config.attention_mode = AcousticAttentionMode.BIDIRECTIONAL
         model = DiT(config)
         masks: list[torch.Tensor] = []
 
@@ -102,7 +102,7 @@ class DiTTest(unittest.TestCase):
 
     def test_bidirectional_attention_does_not_call_causal_mask_builder(self) -> None:
         config = _minimal_config(num_hidden_layers=0)
-        config.attention_mode = DiTAttentionMode.BIDIRECTIONAL
+        config.attention_mode = AcousticAttentionMode.BIDIRECTIONAL
         model = DiT(config)
 
         with patch.object(dit_model, "create_causal_mask") as create_causal_mask:

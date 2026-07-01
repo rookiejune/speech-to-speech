@@ -13,17 +13,29 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from speech_to_speech.config import (
+    AcousticAttentionMode,
     AcousticConditionSource,
     AcousticDecoderConfig,
+    AdapterConfig,
+    AdapterType,
+    AudioEmbeddingType,
+    ConditionEncoderConfig,
     DiTModelConfig,
     LoRAConfig,
     ModelConfig,
     ModelTrainMode,
     QwenBackboneConfig,
+    TokenSpaceConfig,
 )
 from speech_to_speech.datamodule.batch_builder import CausalLMBatchBuilder
-from speech_to_speech.model.orchestrator import AcousticSampler, Orchestrator
+from speech_to_speech.model import acoustic
+from speech_to_speech.model.acoustic import AcousticSampler
+from speech_to_speech.model.orchestrator import Orchestrator
+from speech_to_speech.model import builder
 from speech_to_speech.model import orchestrator
+from speech_to_speech.model.audio_embedding import BPEAudioEmbedding
+from speech_to_speech.model.qwen3 import Qwen3Config
+from speech_to_speech.model.semantic import batch_loss
 from speech_to_speech.types import (
     AcousticCondition,
     AutoregressionExample,
@@ -44,7 +56,7 @@ class OrchestratorTest(unittest.TestCase):
             bpe_vocab_size=5,
             qwen3_pretrained=False,
         )
-        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
         batch = builder.autoregression(
             AutoregressionExample(audio_ids=torch.tensor([0, 1, 2]))
         )
@@ -99,7 +111,7 @@ class OrchestratorTest(unittest.TestCase):
             bpe_vocab_size=bpe.vocab_size,
             qwen3_pretrained=False,
         )
-        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
         batch = builder.translation(
             TranslationExample(
                 source_ids=torch.tensor([3]),
@@ -132,7 +144,7 @@ class OrchestratorTest(unittest.TestCase):
             ),
             qwen3_pretrained=False,
         )
-        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
         batch = builder.translation(
             TranslationExample(
                 source_ids=torch.tensor([3]),
@@ -159,7 +171,7 @@ class OrchestratorTest(unittest.TestCase):
             bpe_vocab_size=bpe.vocab_size,
             qwen3_pretrained=False,
         )
-        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
         batch = builder.translation(
             TranslationExample(
                 source_ids=torch.tensor([3]),
@@ -197,7 +209,7 @@ class OrchestratorTest(unittest.TestCase):
             bpe_vocab_size=bpe.vocab_size,
             qwen3_pretrained=False,
         )
-        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
         batch = builder.translation(
             TranslationExample(
                 source_ids=torch.tensor([3]),
@@ -233,7 +245,7 @@ class OrchestratorTest(unittest.TestCase):
             bpe_vocab_size=bpe.vocab_size,
             qwen3_pretrained=False,
         )
-        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
         batch = builder.translation(
             TranslationExample(
                 source_ids=torch.tensor([3]),
@@ -265,7 +277,7 @@ class OrchestratorTest(unittest.TestCase):
             bpe_vocab_size=bpe.vocab_size,
             qwen3_pretrained=False,
         )
-        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
         batch = builder.translation(
             TranslationExample(
                 source_ids=torch.tensor([3]),
@@ -303,7 +315,7 @@ class OrchestratorTest(unittest.TestCase):
             bpe_vocab_size=bpe.vocab_size,
             qwen3_pretrained=False,
         )
-        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
         batch = builder.translation(
             TranslationExample(
                 source_ids=torch.tensor([3]),
@@ -352,7 +364,7 @@ class OrchestratorTest(unittest.TestCase):
             ),
             qwen3_pretrained=False,
         )
-        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
         batch = builder.translation(
             TranslationExample(
                 source_ids=torch.tensor([3]),
@@ -403,7 +415,7 @@ class OrchestratorTest(unittest.TestCase):
             bpe_vocab_size=5,
             qwen3_pretrained=False,
         )
-        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
         batch = builder.autoregression(
             [
                 AutoregressionExample(audio_ids=torch.tensor([0, 1, 2])),
@@ -417,6 +429,16 @@ class OrchestratorTest(unittest.TestCase):
         self.assertEqual(tuple(output.logits.shape), (8, 7))
         self.assertIsNotNone(output.loss)
         self.assertEqual(tuple(output.loss.shape), (2,))
+
+    def test_batch_loss_uses_token_weights(self) -> None:
+        loss = batch_loss(
+            torch.tensor([2.0, 8.0, 10.0]),
+            torch.tensor([0, 0, 1]),
+            2,
+            torch.tensor([1.0, 3.0, 2.0]),
+        )
+
+        self.assertTrue(torch.equal(loss, torch.tensor([6.5, 10.0])))
 
     def test_generate_acoustic_condition_returns_hidden_condition(self) -> None:
         tokenizer = MockTokenizer()
@@ -439,7 +461,7 @@ class OrchestratorTest(unittest.TestCase):
                 17: torch.tensor([0.0, 1.0, 0.0, 0.0]),
             },
         )
-        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
         batch = builder.translation_generation(torch.tensor([0]))
 
         condition = model.generate_acoustic_condition(
@@ -479,7 +501,7 @@ class OrchestratorTest(unittest.TestCase):
                 17: torch.tensor([0.0, 0.0, 1.0, 0.0]),
             },
         )
-        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
         batch = builder.translation_generation(torch.tensor([0]))
 
         generation = model.generate_semantic(
@@ -513,7 +535,7 @@ class OrchestratorTest(unittest.TestCase):
                 17: torch.tensor([0.0, 1.0, 0.0, 0.0]),
             },
         )
-        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
         batch = builder.translation_generation(torch.tensor([0]))
         codec = FakeCodec()
         acoustic = FakeAcousticGenerator(dim=4)
@@ -544,7 +566,7 @@ class OrchestratorTest(unittest.TestCase):
             bpe_vocab_size=5,
             qwen3_pretrained=False,
         )
-        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
         batch = builder.translation_generation(torch.tensor([0]))
 
         with self.assertRaisesRegex(RuntimeError, "requires an acoustic feature generator"):
@@ -566,7 +588,7 @@ class OrchestratorTest(unittest.TestCase):
             bpe_vocab_size=bpe.vocab_size,
             qwen3_pretrained=False,
         )
-        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
         batch = builder.translation(
             TranslationExample(
                 source_ids=torch.tensor([3]),
@@ -606,7 +628,8 @@ class OrchestratorTest(unittest.TestCase):
             mask=torch.tensor([[True, True, False]]),
         )
 
-        features = model.acoustic_feature_generator(num_steps=2, chunk_size=2)(condition)
+        with patch.object(acoustic, "acoustic_flow_source_sample_like", torch.zeros_like):
+            features = model.acoustic_feature_generator(num_steps=2, chunk_size=2)(condition)
 
         self.assertEqual(tuple(features.shape), (1, 3, 4))
         self.assertTrue(torch.equal(features[:, :2], torch.ones((1, 2, 4))))
@@ -629,11 +652,12 @@ class OrchestratorTest(unittest.TestCase):
             mask=torch.tensor([[True, True, False]]),
         )
 
-        features = model.acoustic_feature_generator(
-            num_steps=2,
-            chunk_size=2,
-            sampler=AcousticSampler.SERIAL,
-        )(condition)
+        with patch.object(acoustic, "acoustic_flow_source_sample_like", torch.zeros_like):
+            features = model.acoustic_feature_generator(
+                num_steps=2,
+                chunk_size=2,
+                sampler=AcousticSampler.SERIAL,
+            )(condition)
 
         self.assertEqual(tuple(features.shape), (1, 3, 4))
         self.assertTrue(torch.equal(features[:, :2], torch.ones((1, 2, 4))))
@@ -656,12 +680,13 @@ class OrchestratorTest(unittest.TestCase):
             mask=torch.tensor([[True, True, False]]),
         )
 
-        features = model.acoustic_feature_generator(
-            num_steps=2,
-            chunk_size=2,
-            left_context_chunks=1,
-            sampler=AcousticSampler.CAUSAL_WINDOW,
-        )(condition)
+        with patch.object(acoustic, "acoustic_flow_source_sample_like", torch.zeros_like):
+            features = model.acoustic_feature_generator(
+                num_steps=2,
+                chunk_size=2,
+                left_context_chunks=1,
+                sampler=AcousticSampler.CAUSAL_WINDOW,
+            )(condition)
 
         self.assertEqual(tuple(features.shape), (1, 3, 4))
         self.assertTrue(torch.equal(features[:, :2], torch.ones((1, 2, 4))))
@@ -716,10 +741,11 @@ class OrchestratorTest(unittest.TestCase):
             chunk_lengths=((2, 2),),
         )
 
-        features = model.acoustic_feature_generator(
-            num_steps=2,
-            sampler=AcousticSampler.DIAGONAL_BPE,
-        )(condition)
+        with patch.object(acoustic, "acoustic_flow_source_sample_like", torch.zeros_like):
+            features = model.acoustic_feature_generator(
+                num_steps=2,
+                sampler=AcousticSampler.DIAGONAL_BPE,
+            )(condition)
 
         self.assertEqual(tuple(features.shape), (1, 5, 4))
         self.assertTrue(torch.equal(features[:, :4], torch.ones((1, 4, 4))))
@@ -748,6 +774,121 @@ class OrchestratorTest(unittest.TestCase):
         )(condition)
 
         self.assertEqual(dit.conditions, [[1.0, 2.0, 3.0, 4.0]])
+
+    def test_linear_acoustic_condition_adapter_can_change_hidden_size(self) -> None:
+        tokenizer = MockTokenizer()
+        bpe = _bpe()
+        dit = MockDiT(hidden_size=2)
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            dit=dit,
+            tokenizer=tokenizer,
+            bpe_vocab_size=bpe.vocab_size,
+            model_config=ModelConfig(
+                acoustic=AcousticDecoderConfig(
+                    enabled=True,
+                    condition_adapter=AdapterConfig(type=AdapterType.LINEAR),
+                )
+            ),
+            qwen3_pretrained=False,
+        )
+        builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
+        batch = builder.translation(
+            TranslationExample(
+                source_ids=torch.tensor([3]),
+                target_ids=torch.tensor([4]),
+            )
+        )
+
+        model.acoustic_flow_loss(
+            batch,
+            bpe,
+            torch.ones((1, 2, 2)),
+            hidden_states=torch.ones(batch.input_ids.size(0), batch.input_ids.size(1), 4),
+            noise=torch.zeros((1, 2, 2)),
+            timesteps=torch.tensor([0.25]),
+        )
+
+        self.assertIsNotNone(dit.last_hidden_state)
+        self.assertEqual(tuple(dit.last_hidden_state.shape), (1, 2, 2))
+
+    def test_identity_acoustic_condition_adapter_requires_matching_hidden_size(self) -> None:
+        with self.assertRaisesRegex(ValueError, "identity adapter"):
+            Orchestrator(
+                qwen3=MockQwen(),
+                dit=MockDiT(hidden_size=2),
+                tokenizer=MockTokenizer(),
+                bpe_vocab_size=5,
+                model_config=ModelConfig(acoustic=AcousticDecoderConfig(enabled=True)),
+                qwen3_pretrained=False,
+            )
+
+    def test_condition_encoder_runs_after_condition_adapter(self) -> None:
+        tokenizer = MockTokenizer()
+        bpe = _bpe()
+        dit = MockDiT(hidden_size=4)
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            dit=dit,
+            tokenizer=tokenizer,
+            bpe_vocab_size=bpe.vocab_size,
+            model_config=ModelConfig(
+                acoustic=AcousticDecoderConfig(
+                    enabled=True,
+                    condition_encoder=ConditionEncoderConfig(
+                        enabled=True,
+                        num_hidden_layers=1,
+                        intermediate_size=8,
+                        num_attention_heads=2,
+                        num_key_value_heads=2,
+                    ),
+                )
+            ),
+            qwen3_pretrained=False,
+        )
+        builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
+        batch = builder.translation(
+            TranslationExample(
+                source_ids=torch.tensor([3]),
+                target_ids=torch.tensor([4]),
+            )
+        )
+
+        model.acoustic_flow_loss(
+            batch,
+            bpe,
+            torch.ones((1, 2, 4)),
+            hidden_states=torch.ones(batch.input_ids.size(0), batch.input_ids.size(1), 4),
+            noise=torch.zeros((1, 2, 4)),
+            timesteps=torch.tensor([0.25]),
+        )
+
+        self.assertIsNotNone(model.acoustic_condition_encoder)
+        self.assertIsNotNone(dit.last_hidden_state)
+        self.assertEqual(tuple(dit.last_hidden_state.shape), (1, 2, 4))
+
+    def test_model_acoustic_attention_mode_configures_dit(self) -> None:
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            tokenizer=MockTokenizer(),
+            bpe_vocab_size=5,
+            model_config=ModelConfig(
+                acoustic=AcousticDecoderConfig(
+                    enabled=True,
+                    attention_mode=AcousticAttentionMode.BIDIRECTIONAL,
+                    dit=DiTModelConfig(
+                        hidden_size=4,
+                        num_hidden_layers=1,
+                        intermediate_size=8,
+                        num_attention_heads=2,
+                        num_key_value_heads=2,
+                    ),
+                )
+            ),
+            qwen3_pretrained=False,
+        )
+
+        self.assertIs(model.dit.attention_mode, AcousticAttentionMode.BIDIRECTIONAL)
 
     def test_model_config_can_create_dit(self) -> None:
         model = Orchestrator(
@@ -825,7 +966,10 @@ class OrchestratorTest(unittest.TestCase):
         )
         self.assertTrue(any(parameter.requires_grad for parameter in model.dit.parameters()))
         self.assertTrue(
-            all(parameter.requires_grad for parameter in model.acoustic_condition_proj.parameters())
+            all(
+                parameter.requires_grad
+                for parameter in model.acoustic_condition_adapter.parameters()
+            )
         )
 
     def test_audio_embedding_uses_qwen_initializer_range(self) -> None:
@@ -845,10 +989,93 @@ class OrchestratorTest(unittest.TestCase):
         self.assertLess(abs(float(model.embed_tokens.special_embeddings["boa"].detach().std()) - 0.01), 0.006)
         self.assertLess(abs(float(model.embed_tokens.special_embeddings["eoa"].detach().std()) - 0.01), 0.006)
 
-    def test_lora_parameters_are_trainable_when_peft_is_applied(self) -> None:
+    def test_semantic_composition_audio_embedding_uses_bpe_expansion(self) -> None:
+        tokenizer = MockTokenizer()
+        bpe = _bpe()
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            tokenizer=tokenizer,
+            bpe=bpe,
+            bpe_vocab_size=bpe.vocab_size,
+            model_config=ModelConfig(
+                token_space=TokenSpaceConfig(
+                    audio_embedding_type=AudioEmbeddingType.SEMANTIC_COMPOSITION,
+                    semantic_codebook_size=8,
+                    semantic_shift_rank=2,
+                ),
+            ),
+            qwen3_pretrained=False,
+        )
+
+        audio = model.embed_tokens.modality_embeddings[Modality.AUDIO.value]
+
+        self.assertIsInstance(audio, BPEAudioEmbedding)
+        self.assertEqual(audio.expansion[4].tolist(), [2, 1])
+        self.assertEqual(audio.expansion_mask[4].tolist(), [True, True])
+        self.assertEqual(audio.shift_rank, 2)
+        self.assertNotIn("codec_embedding", dict(audio.named_modules()))
+        self.assertEqual(
+            sorted(dict(audio.named_parameters())),
+            ["shift_down.weight", "shift_up.weight"],
+        )
+        self.assertEqual(
+            sorted(dict(audio.named_buffers())),
+            ["base_weight", "expansion", "expansion_mask"],
+        )
+        self.assertTrue(torch.equal(audio.base_embedding(torch.tensor([4])), audio.base_weight[4:5]))
+        self.assertTrue(
+            torch.equal(
+                audio.weight,
+                audio.base_weight + audio.shift_up(audio.shift_down.weight),
+            )
+        )
+        self.assertEqual(tuple(model.lm_head(torch.zeros(1, 4)).shape), (1, 7))
+
+    def test_input_adapter_lives_inside_audio_embedding_weight(self) -> None:
+        tokenizer = MockTokenizer()
+        model = Orchestrator(
+            qwen3=MockQwen(),
+            tokenizer=tokenizer,
+            bpe_vocab_size=5,
+            model_config=ModelConfig(
+                token_space=TokenSpaceConfig(
+                    input_adapter=AdapterConfig(type=AdapterType.LINEAR),
+                ),
+            ),
+            qwen3_pretrained=False,
+        )
+
+        audio = model.embed_tokens.modality_embeddings[Modality.AUDIO.value]
+        block = model.embed_tokens.space.modality_block(Modality.AUDIO)
+        hidden = torch.eye(4)
+
+        self.assertEqual(tuple(audio.weight.shape), (5, 4))
+        self.assertTrue(torch.equal(audio(torch.tensor([0, 1])), audio.weight[:2]))
+        self.assertTrue(
+            torch.allclose(
+                model.lm_head(hidden),
+                torch.nn.functional.linear(
+                    hidden,
+                    torch.cat(
+                        (
+                            torch.stack(
+                                [
+                                    model.embed_tokens.special_embeddings["boa"],
+                                    model.embed_tokens.special_embeddings["eoa"],
+                                ]
+                            ),
+                            audio.weight,
+                        )
+                    ),
+                ),
+            )
+        )
+        self.assertEqual(model.lm_head.global_ids[:2], (block.start - 2, block.start - 1))
+
+    def test_lora_is_ignored_when_qwen3_is_provided(self) -> None:
         tokenizer = MockTokenizer()
         qwen = MockPeftQwen()
-        fake_peft = SimpleNamespace(get_peft_model=lambda model, config: model)
+        fake_peft = SimpleNamespace(get_peft_model=lambda model, config: self.fail("unexpected PEFT"))
         with patch.dict(sys.modules, {"peft": fake_peft}):
             Orchestrator(
                 qwen3=qwen,
@@ -859,7 +1086,25 @@ class OrchestratorTest(unittest.TestCase):
             )
 
         self.assertFalse(qwen.proj.weight.requires_grad)
-        self.assertTrue(qwen.lora_adapter.requires_grad)
+        self.assertFalse(qwen.lora_adapter.requires_grad)
+
+    def test_random_init_lora_warns_and_is_ignored(self) -> None:
+        tokenizer = MockTokenizer()
+        config = Qwen3Config()
+        config.vocab_size = 16
+        config.hidden_size = 4
+        config.num_hidden_layers = 1
+        config.num_attention_heads = 2
+        config.num_key_value_heads = 2
+        config.intermediate_size = 8
+
+        with self.assertWarnsRegex(UserWarning, "requires qwen3_pretrained=True"):
+            Orchestrator(
+                qwen3_config=config,
+                tokenizer=tokenizer,
+                bpe_vocab_size=5,
+                qwen3_pretrained=False,
+            )
 
     def test_pretrained_load_can_disable_4bit_quantization(self) -> None:
         calls: list[object] = []
@@ -874,7 +1119,7 @@ class OrchestratorTest(unittest.TestCase):
             calls.append(quantization_config)
             return MockQwen()
 
-        with patch.object(orchestrator.Qwen3Model, "from_pretrained", from_pretrained):
+        with patch.object(builder.Qwen3Model, "from_pretrained", from_pretrained):
             Orchestrator(
                 tokenizer=MockTokenizer(),
                 bpe_vocab_size=5,

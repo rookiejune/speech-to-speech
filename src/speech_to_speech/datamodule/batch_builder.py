@@ -1,17 +1,16 @@
 from collections.abc import Sequence
 
 import torch
-from anytrain.idspace import IdSpaceEmbedding, Modality
+from anytrain.idspace import IdSpace, Modality
 from torch import LongTensor, Tensor
 
 from ..runtime import qwen3_tokenizer
-from ..types import (
+from ..model.types import AudioBoundary, SpecialToken
+from .types import (
     IGNORE_INDEX,
     AutoregressionExample,
-    AudioBoundary,
     CausalLMBatch,
     GenerationBatch,
-    SpecialToken,
     TranslationExample,
 )
 
@@ -29,15 +28,15 @@ def _translation_prompt() -> str:
 class CausalLMBatchBuilder:
     def __init__(
         self,
-        embedding: IdSpaceEmbedding,
+        space: IdSpace,
         tokenizer: object | None = None,
     ) -> None:
-        self.embedding = embedding
+        self.space = space
         self.tokenizer = tokenizer or qwen3_tokenizer()
 
-        self.to_global = self.embedding.space.to_global
-        self.special_token_id = self.embedding.space.special_token_id
-        audio_vocab_size = self.embedding.space.modality_block(Modality.AUDIO).vocab_size
+        self.to_global = self.space.to_global
+        self.special_token_id = self.space.special_token_id
+        audio_vocab_size = self.space.modality_block(Modality.AUDIO).vocab_size
         self.audio_vocab_size = audio_vocab_size
         self.boa_id = self.special_token_id(AudioBoundary.BOA)
         self.eoa_id = self.special_token_id(AudioBoundary.EOA)
@@ -50,7 +49,7 @@ class CausalLMBatchBuilder:
         examples: AutoregressionExample | Sequence[AutoregressionExample],
     ) -> CausalLMBatch:
         rows = [
-            self._autoregression_row(example.audio_ids)
+            self._autoregression_row(example.audio_ids, example.audio_weights)
             for example in _normalize_examples(examples, AutoregressionExample)
         ]
         return self._collate(rows)
@@ -73,21 +72,32 @@ class CausalLMBatchBuilder:
             torch.tensor(prompt_ids, dtype=torch.long, device=device)
         )
 
-    def _autoregression_row(self, audio_ids: LongTensor) -> tuple[LongTensor, LongTensor]:
+    def _autoregression_row(
+        self,
+        audio_ids: LongTensor,
+        audio_weights: Tensor | None = None,
+    ) -> tuple[LongTensor, LongTensor, Tensor]:
         prefix = torch.tensor(
             self._autoregression_prompt_ids,
             dtype=torch.long,
             device=audio_ids.device,
         )
-        return self._causal_row(prefix, self._audio_global_ids(audio_ids))
+        return self._causal_row(
+            prefix,
+            self._audio_global_ids(audio_ids),
+            self._audio_loss_weights(audio_ids, audio_weights),
+        )
 
-    def _collate(self, rows: Sequence[tuple[LongTensor, LongTensor]]) -> CausalLMBatch:
+    def _collate(
+        self,
+        rows: Sequence[tuple[LongTensor, LongTensor, Tensor]],
+    ) -> CausalLMBatch:
         if not rows:
             raise ValueError("rows must not be empty.")
 
         device = rows[0][0].device
         pad_id = self.special_token_id(SpecialToken.PAD)
-        max_length = max(input_ids.numel() for input_ids, _ in rows)
+        max_length = max(input_ids.numel() for input_ids, _, _ in rows)
         input_ids = torch.full(
             (len(rows), max_length),
             pad_id,
@@ -105,20 +115,31 @@ class CausalLMBatchBuilder:
             dtype=torch.long,
             device=device,
         )
+        loss_weights = torch.zeros(
+            (len(rows), max_length),
+            dtype=torch.float,
+            device=device,
+        )
 
-        for index, (row_ids, row_labels) in enumerate(rows):
-            if row_ids.device != device or row_labels.device != device:
+        for index, (row_ids, row_labels, row_weights) in enumerate(rows):
+            if (
+                row_ids.device != device
+                or row_labels.device != device
+                or row_weights.device != device
+            ):
                 raise ValueError("all rows must be on the same device.")
             length = row_ids.numel()
             input_ids[index, :length] = row_ids
             attention_mask[index, :length] = 1
             labels[index, :length] = row_labels
+            loss_weights[index, :length] = row_weights
 
         return CausalLMBatch(
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
             logits_to_keep=int(labels.ne(IGNORE_INDEX).sum(dim=1).max().item()),
+            loss_weights=loss_weights,
         )
 
     def translation(
@@ -126,7 +147,11 @@ class CausalLMBatchBuilder:
         examples: TranslationExample | Sequence[TranslationExample],
     ) -> CausalLMBatch:
         rows = [
-            self._translation_row(example.source_ids, example.target_ids)
+            self._translation_row(
+                example.source_ids,
+                example.target_ids,
+                example.target_weights,
+            )
             for example in _normalize_examples(examples, TranslationExample)
         ]
         return self._collate(rows)
@@ -138,13 +163,24 @@ class CausalLMBatchBuilder:
         if not examples:
             raise ValueError("examples must not be empty.")
 
-        rows: list[tuple[LongTensor, LongTensor]] = []
+        rows: list[tuple[LongTensor, LongTensor, Tensor]] = []
         for example in examples:
             if isinstance(example, AutoregressionExample):
-                rows.append(self._autoregression_row(_normalize_id_tensor(example.audio_ids)))
+                rows.append(
+                    self._autoregression_row(
+                        _normalize_id_tensor(example.audio_ids),
+                        example.audio_weights,
+                    )
+                )
                 continue
             if isinstance(example, TranslationExample):
-                rows.append(self._translation_row(example.source_ids, example.target_ids))
+                rows.append(
+                    self._translation_row(
+                        example.source_ids,
+                        example.target_ids,
+                        example.target_weights,
+                    )
+                )
                 continue
             raise TypeError("examples must contain task example values.")
         return self._collate(rows)
@@ -163,22 +199,36 @@ class CausalLMBatchBuilder:
         self,
         source_ids: Tensor,
         target_ids: Tensor,
-    ) -> tuple[LongTensor, LongTensor]:
+        target_weights: Tensor | None = None,
+    ) -> tuple[LongTensor, LongTensor, Tensor]:
         source_ids = _normalize_id_tensor(source_ids)
         target_ids = _normalize_id_tensor(target_ids)
         prefix_ids = self._translation_prompt_ids(source_ids)
         prefix = torch.tensor(prefix_ids, dtype=torch.long, device=source_ids.device)
-        return self._causal_row(prefix, self._audio_global_ids(target_ids))
+        return self._causal_row(
+            prefix,
+            self._audio_global_ids(target_ids),
+            self._audio_loss_weights(target_ids, target_weights),
+        )
 
     @staticmethod
     def _causal_row(
         prefix: LongTensor,
         target_global_ids: LongTensor,
-    ) -> tuple[LongTensor, LongTensor]:
+        target_loss_weights: Tensor,
+    ) -> tuple[LongTensor, LongTensor, Tensor]:
+        if target_global_ids.numel() != target_loss_weights.numel():
+            raise ValueError("target ids and loss weights must have the same length.")
         input_ids = torch.cat((prefix, target_global_ids[:-1]))
         labels = torch.full_like(input_ids, IGNORE_INDEX)
         labels[prefix.numel() - 1 :] = target_global_ids
-        return input_ids, labels
+        loss_weights = torch.zeros(
+            input_ids.shape,
+            dtype=target_loss_weights.dtype,
+            device=input_ids.device,
+        )
+        loss_weights[prefix.numel() - 1 :] = target_loss_weights
+        return input_ids, labels, loss_weights
 
     def _audio_global_ids(self, audio_ids: LongTensor) -> LongTensor:
         audio_ids = _normalize_id_tensor(audio_ids)
@@ -193,6 +243,27 @@ class CausalLMBatchBuilder:
             device=audio_ids.device,
         )
 
+    def _audio_loss_weights(
+        self,
+        audio_ids: LongTensor,
+        audio_weights: Tensor | None,
+    ) -> Tensor:
+        audio_ids = _normalize_id_tensor(audio_ids)
+        if audio_weights is None:
+            weights = torch.ones(
+                audio_ids.shape,
+                dtype=torch.float,
+                device=audio_ids.device,
+            )
+        else:
+            weights = _normalize_weight_tensor(
+                audio_weights,
+                length=audio_ids.numel(),
+                device=audio_ids.device,
+            )
+        boundary = weights.new_ones(1)
+        return torch.cat((boundary, weights, boundary))
+
     def _translation_prompt_ids(self, source_audio_ids: LongTensor) -> list[int]:
         prefix_ids, suffix_ids = self._translation_prompt_parts
         source_global_ids = self.to_global(
@@ -203,14 +274,14 @@ class CausalLMBatchBuilder:
 
     def _chat_prompt_ids(self, prompt: str) -> list[int]:
         ids = _apply_chat_template(self.tokenizer, prompt)
-        global_ids = _to_global_text_ids(self.embedding, ids)
+        global_ids = _to_global_text_ids(self.space, ids)
         return global_ids
 
     def _chat_prompt_parts(self, prompt: str) -> tuple[list[int], list[int]]:
         ids = _apply_chat_template(self.tokenizer, f"{prompt}\n{SOURCE_AUDIO_PLACEHOLDER}")
-        global_ids = _to_global_text_ids(self.embedding, ids)
+        global_ids = _to_global_text_ids(self.space, ids)
         placeholder_ids = _to_global_text_ids(
-            self.embedding,
+            self.space,
             _encode_text(self.tokenizer, SOURCE_AUDIO_PLACEHOLDER),
         )
         return _split_subsequence(
@@ -258,6 +329,26 @@ def _normalize_id_tensor(ids: Tensor) -> LongTensor:
     return ids.to(dtype=torch.long)
 
 
+def _normalize_weight_tensor(
+    weights: Tensor,
+    *,
+    length: int,
+    device: torch.device,
+) -> Tensor:
+    if weights.dim() != 1:
+        raise ValueError("audio loss weights must be 1D.")
+    if weights.numel() != length:
+        raise ValueError("audio ids and loss weights must have the same length.")
+    if weights.dtype == torch.bool or torch.is_complex(weights):
+        raise TypeError("audio loss weights must be real numbers.")
+    weights = weights.to(device=device, dtype=torch.float)
+    if not bool(torch.isfinite(weights).all()):
+        raise ValueError("audio loss weights must be finite.")
+    if not bool(weights.gt(0).all()):
+        raise ValueError("audio loss weights must be positive.")
+    return weights
+
+
 def _tensor_to_list(ids: Tensor) -> list[int]:
     return [int(token_id) for token_id in ids.detach().cpu().tolist()]
 
@@ -279,13 +370,13 @@ def _encode_text(tokenizer: object, text: str) -> list[int]:
     return [int(token_id) for token_id in tokenizer.encode(text, add_special_tokens=False)]
 
 
-def _to_global_text_ids(embedding: IdSpaceEmbedding, ids: Sequence[int]) -> list[int]:
+def _to_global_text_ids(space: IdSpace, ids: Sequence[int]) -> list[int]:
     global_ids: list[int] = []
     for token_id in ids:
-        if embedding.space.is_special_token_id(int(token_id)):
+        if space.is_special_token_id(int(token_id)):
             global_ids.append(int(token_id))
             continue
-        global_ids.extend(embedding.space.to_global(Modality.TEXT, [int(token_id)]))
+        global_ids.extend(space.to_global(Modality.TEXT, [int(token_id)]))
     return global_ids
 
 

@@ -10,9 +10,12 @@ from typing import TYPE_CHECKING
 
 import torch
 from anytrain.codec import LongCatAudioCodec
+from anytrain.idspace import IdSpace, Modality, ModalityBlock
 from anytrain.tokenizer import CodecBPE
+from .bpe_types import BPEArtifactMeta
 from .config import BPEConfig, ModelConfig
-from .types import BPEArtifactMeta, SpeechPair, TranslationExample
+from .datamodule.types import SpeechPair, TranslationExample
+from .types import AudioBoundary, SpecialToken
 
 if TYPE_CHECKING:
     from anytrain.codec import LongCatDecoderName
@@ -41,6 +44,37 @@ def qwen3_tokenizer(
             name, trust_remote_code=trust
         )
     return _QWEN3_TOKENIZERS[key]
+
+
+def qwen3_longcat_idspace(
+    *,
+    tokenizer: object | None = None,
+    bpe_vocab_size: int,
+    config: ModelConfig | None = None,
+    qwen_vocab_size: int | None = None,
+) -> IdSpace:
+    tokenizer = tokenizer or qwen3_tokenizer(config)
+    text_vocab_size = _qwen_vocab_size(tokenizer, explicit=qwen_vocab_size)
+    audio_start = text_vocab_size + len(AudioBoundary)
+    return IdSpace(
+        special_token_ids={
+            **_qwen3_special_token_ids(tokenizer),
+            AudioBoundary.BOA.value: text_vocab_size,
+            AudioBoundary.EOA.value: text_vocab_size + 1,
+        },
+        modality_blocks=(
+            ModalityBlock(
+                modality=Modality.TEXT,
+                start=0,
+                vocab_size=text_vocab_size,
+            ),
+            ModalityBlock(
+                modality=Modality.AUDIO,
+                start=audio_start,
+                vocab_size=bpe_vocab_size,
+            ),
+        ),
+    )
 
 
 def longcat_bpe_path(
@@ -95,7 +129,8 @@ def prepare_longcat_tokenizer(
         path,
         BPEArtifactMeta(
             codec_name=config.codec_name,
-            vocab_size=config.vocab_size,
+            requested_vocab_size=config.vocab_size,
+            actual_vocab_size=bpe.vocab_size,
             min_frequency=config.min_frequency,
             max_token_length=config.max_token_length,
             codebook_sizes=config.codebook_sizes,
@@ -135,6 +170,49 @@ def _cache_dir(config: BPEConfig, cache_dir: str | Path | None) -> Path:
             f"{config.cache_dir_env} is required to locate LongCat BPE artifacts."
         )
     return Path(value)
+
+
+def _qwen3_special_token_ids(tokenizer: object) -> dict[str, int]:
+    return {member.value: _token_id(tokenizer, member.value) for member in SpecialToken}
+
+
+def _qwen_vocab_size(tokenizer: object, *, explicit: int | None) -> int:
+    if explicit is not None:
+        _validate_positive_int(explicit, name="qwen_vocab_size")
+        return explicit
+
+    value = getattr(tokenizer, "vocab_size", None)
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+
+    length = getattr(tokenizer, "__len__", None)
+    if callable(length):
+        value = length()
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+
+    raise AttributeError("qwen3 tokenizer must expose a positive vocab_size or __len__.")
+
+
+def _token_id(tokenizer: object, token: str) -> int:
+    convert = getattr(tokenizer, "convert_tokens_to_ids", None)
+    if callable(convert):
+        token_id = convert(token)
+        if isinstance(token_id, int) and token_id >= 0:
+            return token_id
+
+    encode = getattr(tokenizer, "encode")
+    ids = encode(token, add_special_tokens=False)
+    if len(ids) != 1:
+        raise ValueError(f"special token {token!r} must map to exactly one token id.")
+    return int(ids[0])
+
+
+def _validate_positive_int(value: int, *, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an integer.")
+    if value <= 0:
+        raise ValueError(f"{name} must be positive.")
 
 
 def _batched_acoustic_codes(acoustic_codes: Tensor) -> Tensor:
@@ -205,7 +283,7 @@ def _validate_cached_bpe(
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     expected = {
         "codec_name": config.codec_name,
-        "vocab_size": config.vocab_size,
+        "requested_vocab_size": config.vocab_size,
         "min_frequency": config.min_frequency,
         "max_token_length": config.max_token_length,
         "codebook_sizes": list(config.codebook_sizes),
@@ -215,12 +293,22 @@ def _validate_cached_bpe(
         for key, value in expected.items()
         if meta.get(key) != value
     }
+    if "requested_vocab_size" not in meta and meta.get("vocab_size") == config.vocab_size:
+        mismatches.pop("requested_vocab_size", None)
     if mismatches:
         details = ", ".join(
             f"{key}: cached={cached!r}, requested={requested!r}"
             for key, (cached, requested) in mismatches.items()
         )
         raise ValueError(f"LongCat BPE cache config mismatch at {path}: {details}.")
+    if "actual_vocab_size" not in meta:
+        meta["requested_vocab_size"] = meta.get("requested_vocab_size", meta.get("vocab_size"))
+        meta["actual_vocab_size"] = CodecBPE.from_pretrained(path).vocab_size
+        meta.pop("vocab_size", None)
+        meta_path.write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
     if datasets and tuple(meta.get("datasets", ())) != datasets:
         raise ValueError(f"LongCat BPE cache dataset mismatch at {path}.")
 

@@ -10,6 +10,8 @@ default_root_dir: null
 accelerator:
 devices: auto
 strategy: auto
+gradient_clip_val: 1.0
+gradient_clip_algorithm: norm
 ckpt_path:
 log_every_n_steps:
 enable_model_summary: true

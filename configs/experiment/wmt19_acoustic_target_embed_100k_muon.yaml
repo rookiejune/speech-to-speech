@@ -14,6 +14,8 @@ datamodule:
 
 model:
   train_mode: acoustic_only
+  token_space:
+    audio_embedding_type: semantic_composition
   acoustic:
     enabled: true
     train: true

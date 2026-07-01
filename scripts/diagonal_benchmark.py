@@ -10,7 +10,7 @@ import torch
 from torch import Tensor, nn
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
-from speech_to_speech.model.diagonal import (
+from speech_to_speech.model.acoustic import (
     diagonal_flow_sample,
     serial_flow_sample,
     serial_forward_count,

@@ -16,7 +16,7 @@ from transformers.masking_utils import (
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.utils.generic import TransformersKwargs
 
-from ...config import DiTAttentionMode
+from ...config import AcousticAttentionMode
 from ..qwen3 import Qwen3Config, Qwen3RotaryEmbedding
 from .module import DiTLayer
 
@@ -39,8 +39,8 @@ class DiT(nn.Module):
         self.null_acoustic_condition = nn.Parameter(torch.zeros(1, config.hidden_size))
 
         self.config = config
-        self.attention_mode = DiTAttentionMode(
-            getattr(config, "attention_mode", DiTAttentionMode.CAUSAL)
+        self.attention_mode = AcousticAttentionMode(
+            getattr(config, "attention_mode", AcousticAttentionMode.CAUSAL)
         )
         self.time_norm = _condition_norm(config, "norm_time")
         self.hidden_norm = _condition_norm(config, "norm_hidden")
@@ -157,7 +157,7 @@ class DiT(nn.Module):
 
 def _attention_mask_mapping(
     *,
-    mode: DiTAttentionMode,
+    mode: AcousticAttentionMode,
     config: Qwen3Config,
     inputs: Tensor,
     attention_mask: Tensor | None,
@@ -166,7 +166,7 @@ def _attention_mask_mapping(
     position_ids: Tensor,
     has_sliding_layers: bool,
 ) -> dict[str, Tensor | None]:
-    if mode is DiTAttentionMode.BIDIRECTIONAL:
+    if mode is AcousticAttentionMode.BIDIRECTIONAL:
         mask = _bidirectional_mask(inputs, attention_mask)
         return {
             "full_attention": mask,

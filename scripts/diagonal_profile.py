@@ -16,10 +16,10 @@ from speech_to_speech.config import DatasetFactoryConfig, with_acoustic_decoder
 from speech_to_speech.dataset import dataset_metadata, training_dataset
 from speech_to_speech.datamodule.batch_builder import CausalLMBatchBuilder
 from speech_to_speech.datamodule.example import longcat_pair_from_sample, speech_pair_from_sample
-from speech_to_speech.model.acoustic import null_acoustic_condition
-from speech_to_speech.model.diagonal import (
+from speech_to_speech.model.acoustic import (
     diagonal_flow_sample_chunks,
     full_sequence_flow_sample,
+    null_acoustic_condition,
     serial_flow_sample_chunks,
 )
 from speech_to_speech.model.orchestrator import Orchestrator
@@ -78,7 +78,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if model.dit is None:
         raise RuntimeError("diagonal profile requires a DiT decoder.")
     model.dit.to(dtype=flow_dtype)
-    model.acoustic_condition_proj.to(dtype=flow_dtype)
+    model.acoustic_condition_adapter.to(dtype=flow_dtype)
+    if model.acoustic_condition_encoder is not None:
+        model.acoustic_condition_encoder.to(dtype=flow_dtype)
 
     _log_stage(args, "build acoustic condition", started_at)
     batch = _move_batch(_target_translation_batch(model, tokenizer, bpe, pair), device)
@@ -205,10 +207,7 @@ def _flow_condition(
     *,
     dtype: torch.dtype,
 ) -> tuple[Tensor, Tensor]:
-    hidden = condition.hidden_states
-    projection = model.acoustic_condition_proj
-    projection_dtype = _module_dtype(projection, hidden.dtype)
-    hidden = projection(hidden.to(dtype=projection_dtype)).to(dtype=dtype)
+    hidden = model.acoustic_condition_hidden(condition, dtype=dtype)
     mask = condition.mask.to(device=hidden.device, dtype=torch.bool)
     return hidden, mask
 
@@ -279,7 +278,7 @@ def _target_translation_batch(
     bpe: object,
     pair: LongCatPair,
 ) -> CausalLMBatch:
-    builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+    builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
     source_ids = _encode_frames(bpe, pair.source.semantic_ids)
     target_ids = _encode_frames(bpe, pair.target.semantic_ids)
     batch = builder.translation(TranslationExample(source_ids=source_ids, target_ids=target_ids))

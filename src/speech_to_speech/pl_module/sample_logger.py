@@ -13,24 +13,21 @@ from ..config import BPEConfig, DataModuleConfig, TaskConfig
 from ..dataset import training_dataset
 from ..datamodule.batch_builder import CausalLMBatchBuilder
 from ..datamodule.example import longcat_pair_from_sample
-from ..runtime import longcat_codec, longcat_tokenizer
-from ..model.acoustic import pooled_acoustic_condition_from_batch_side
-from ..model.orchestrator import AcousticSampler
-from ..types import (
+from ..datamodule.types import (
+    AutoregressionExample,
     CausalLMBatch,
     LongCatBatchSide,
     LongCatPair,
     LongCatSide,
     Task,
-    TeacherForcedWaveformGeneration,
-    AutoregressionExample,
+    TaskFamily,
     TranslationExample,
 )
+from ..runtime import longcat_codec, longcat_tokenizer
+from ..model.acoustic import AcousticSampler, pooled_acoustic_condition_from_batch_side
+from ..model.types import TeacherForcedWaveformGeneration
+from .batch import batch_to_device
 from ..datamodule.pipeline import (
-    SourceAutoregressionSample,
-    SourceToTargetSample,
-    TargetAutoregressionSample,
-    TargetToSourceSample,
     TaskSample,
     TaskSampleStream,
 )
@@ -192,7 +189,7 @@ class TaskGenerationLogger(Callback):
             return
         bpe = longcat_tokenizer(self.bpe)
         codec = longcat_codec()
-        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=self.tokenizer)
+        builder = CausalLMBatchBuilder(model.idspace, tokenizer=self.tokenizer)
         device = _module_device(model)
         training_modes = _module_training_modes(model)
         codec = _move_runtime_to_device(codec, device)
@@ -255,7 +252,7 @@ def _log_task_sample(
     task = _task_name(sample)
     root = f"samples/{task}/{index}"
     logger.experiment.add_text(f"{root}/prompt", _prompt(sample), global_step=step)
-    if isinstance(sample, SourceToTargetSample | TargetToSourceSample):
+    if sample.source is not None:
         logger.experiment.add_text(
             f"{root}/source/codes",
             _codes_text(_roundtrip_semantic_ids(bpe, sample.source.semantic_ids)),
@@ -566,6 +563,7 @@ def _task_batch(
         attention_mask=batch.attention_mask,
         labels=batch.labels,
         logits_to_keep=batch.logits_to_keep,
+        loss_weights=batch.loss_weights,
         source_audio=_batch_side(source) if source is not None else None,
         target_audio=_batch_side(target),
     )
@@ -619,32 +617,7 @@ def _restore_training_modes(modes: Iterable[tuple[torch.nn.Module, bool]]) -> No
 
 
 def _move_causal_lm_batch(batch: CausalLMBatch, device: torch.device) -> CausalLMBatch:
-    logits_to_keep = batch.logits_to_keep
-    if isinstance(logits_to_keep, Tensor):
-        logits_to_keep = logits_to_keep.to(device=device)
-    task_family = batch.task_family
-    if task_family is not None:
-        task_family = task_family.to(device=device)
-    return CausalLMBatch(
-        input_ids=batch.input_ids.to(device=device),
-        attention_mask=batch.attention_mask.to(device=device),
-        labels=batch.labels.to(device=device),
-        logits_to_keep=logits_to_keep,
-        source_audio=_move_batch_side(batch.source_audio, device),
-        target_audio=_move_batch_side(batch.target_audio, device),
-        task_family=task_family,
-    )
-
-
-def _move_batch_side(side: LongCatBatchSide | None, device: torch.device) -> LongCatBatchSide | None:
-    if side is None:
-        return None
-    return LongCatBatchSide(
-        semantic_ids=side.semantic_ids.to(device=device),
-        semantic_mask=side.semantic_mask.to(device=device),
-        acoustic_ids=side.acoustic_ids.to(device=device),
-        acoustic_mask=side.acoustic_mask.to(device=device),
-    )
+    return batch_to_device(batch, device)
 
 
 def _source_acoustic_condition(
@@ -675,31 +648,20 @@ def _move_runtime_to_device(value: object, device: torch.device) -> object:
 
 
 def _task_name(sample: TaskSample) -> str:
-    if isinstance(sample, SourceAutoregressionSample):
-        return "source_ar"
-    if isinstance(sample, TargetAutoregressionSample):
-        return "target_ar"
-    if isinstance(sample, SourceToTargetSample):
-        return "source_to_target"
-    if isinstance(sample, TargetToSourceSample):
-        return "target_to_source"
-    raise TypeError("unknown task sample type.")
+    return sample.family.value
 
 
 def _prompt(sample: TaskSample) -> str:
-    if isinstance(sample, SourceAutoregressionSample | TargetAutoregressionSample):
-        return "Continue the speech."
-    if isinstance(sample, SourceToTargetSample | TargetToSourceSample):
-        return "Translate the source speech."
-    raise TypeError("unknown task sample type.")
+    match sample.family:
+        case TaskFamily.SOURCE_AR | TaskFamily.TARGET_AR:
+            return "Continue the speech."
+        case TaskFamily.SOURCE_TO_TARGET | TaskFamily.TARGET_TO_SOURCE:
+            return "Translate the source speech."
+    raise ValueError(f"unsupported task family: {sample.family.value}")
 
 
 def _target_side(sample: TaskSample) -> LongCatSide:
-    if isinstance(sample, SourceAutoregressionSample | TargetAutoregressionSample):
-        return sample.target
-    if isinstance(sample, SourceToTargetSample | TargetToSourceSample):
-        return sample.target
-    raise TypeError("unknown task sample type.")
+    return sample.target
 
 
 def _tensorboard_logger(loggers: Iterable[Any]) -> TensorBoardLogger:

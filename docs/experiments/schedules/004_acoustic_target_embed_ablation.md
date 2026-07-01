@@ -11,7 +11,7 @@ speech BPE token 的 audio embedding 条件学习 acoustic flow。
 - 完整初始化 Qwen、token space 和 DiT。
 - `model.train_mode=acoustic_only`：
   - freeze Qwen backbone、text embedding、audio special tokens 和语义 LM 路径。
-  - train audio embedding、DiT acoustic decoder 和 acoustic condition projection。
+  - train audio embedding、DiT acoustic decoder 和 acoustic condition adapter。
 - `model.acoustic.condition_source=target_audio_embedding`：
   - target BPE labels 直接查 audio embedding。
   - BPE embedding 按 tokenizer 展开到 frame 粒度后作为 DiT condition。

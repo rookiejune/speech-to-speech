@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum, auto
 from pathlib import Path
 
-from .types import Task, TaskFamily
+from .datamodule.types import Task, TaskFamily
 
 
 @dataclass(frozen=True)
@@ -102,7 +102,7 @@ class LoRAConfig:
     )
 
 
-class DiTAttentionMode(StrEnum):
+class AcousticAttentionMode(StrEnum):
     CAUSAL = auto()
     BIDIRECTIONAL = auto()
 
@@ -112,9 +112,31 @@ class AcousticConditionSource(StrEnum):
     TARGET_AUDIO_EMBEDDING = auto()
 
 
+class AudioEmbeddingType(StrEnum):
+    LOOKUP = auto()
+    SEMANTIC_COMPOSITION = auto()
+
+    @property
+    def requires_bpe(self) -> bool:
+        return self is AudioEmbeddingType.SEMANTIC_COMPOSITION
+
+
 class ModelTrainMode(StrEnum):
     DEFAULT = auto()
     ACOUSTIC_ONLY = auto()
+
+
+class AdapterType(StrEnum):
+    IDENTITY = auto()
+    LINEAR = auto()
+    QWEN_MLP = auto()
+
+
+@dataclass(frozen=True)
+class AdapterConfig:
+    type: AdapterType = AdapterType.IDENTITY
+    in_features: int | None = None
+    out_features: int | None = None
 
 
 @dataclass(frozen=True)
@@ -124,10 +146,18 @@ class DiTModelConfig:
     intermediate_size: int = 3072
     num_attention_heads: int | None = None
     num_key_value_heads: int | None = None
-    attention_mode: DiTAttentionMode = DiTAttentionMode.CAUSAL
     norm_time: bool = False
     norm_hidden: bool = False
     norm_acoustic: bool = False
+
+
+@dataclass(frozen=True)
+class ConditionEncoderConfig:
+    enabled: bool = False
+    num_hidden_layers: int = 1
+    intermediate_size: int | None = None
+    num_attention_heads: int | None = None
+    num_key_value_heads: int | None = None
 
 
 @dataclass(frozen=True)
@@ -144,14 +174,23 @@ class TokenSpaceConfig:
     train_text_embedding: bool = False
     train_audio_embedding: bool = True
     train_audio_special_tokens: bool = True
+    input_adapter: AdapterConfig = field(default_factory=AdapterConfig)
+    output_adapter: AdapterConfig = field(default_factory=AdapterConfig)
+    audio_embedding_type: AudioEmbeddingType = AudioEmbeddingType.LOOKUP
+    semantic_codebook_size: int = 8192
+    semantic_rope_base: float = 10_000.0
+    semantic_shift_rank: int = 16
 
 
 @dataclass(frozen=True)
 class AcousticDecoderConfig:
     enabled: bool = False
     train: bool = True
+    attention_mode: AcousticAttentionMode = AcousticAttentionMode.CAUSAL
     condition_dropout: float = 0.0
     condition_source: AcousticConditionSource = AcousticConditionSource.QWEN_HIDDEN
+    condition_adapter: AdapterConfig = field(default_factory=AdapterConfig)
+    condition_encoder: ConditionEncoderConfig = field(default_factory=ConditionEncoderConfig)
     dit: DiTModelConfig = field(default_factory=DiTModelConfig)
 
 
@@ -186,6 +225,7 @@ class TrainConfig:
     adamw_learning_rate: float | None = None
     muon_learning_rate: float | None = None
     semantic_loss_weight: float = 1.0
+    stop_loss_weight: float = 1.0
     acoustic_loss_weight: float = 0.0
     optimizer_preset: str = "pretrain"
     optimizer: str = "muon"
@@ -256,6 +296,8 @@ class TrainerConfig:
     accelerator: str | None = None
     devices: int | str = 1
     strategy: str = "auto"
+    gradient_clip_val: float | None = 1.0
+    gradient_clip_algorithm: str | None = "norm"
     ckpt_path: str | Path | None = None
     log_every_n_steps: int | None = None
     callbacks: TrainerCallbacksConfig = field(default_factory=TrainerCallbacksConfig)

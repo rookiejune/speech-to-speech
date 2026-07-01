@@ -114,6 +114,7 @@ source/target pair。
 
 - 输入包含任务 prompt、`BOA` 和整段 audio ids。
 - loss 计算 `BOA`、audio continuation 和 `EOA`。
+- audio BPE token loss 按展开后的 LongCat semantic frame 数加权；`EOA` 作为 stop token，可通过 `train.stop_loss_weight` 单独调权。
 - 不对 prompt 计算 loss。
 - 不需要固定业务 prefix。
 - prompt 必须通过 Qwen3 tokenizer 的 chat template 生成，不手写 Qwen3 对话模板 token。

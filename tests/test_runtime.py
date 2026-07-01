@@ -7,10 +7,12 @@ import unittest
 from unittest.mock import patch
 
 import torch
+from anytrain.idspace import Modality
 
 from speech_to_speech.config import BPEConfig, ModelConfig, QwenBackboneConfig
 from speech_to_speech import runtime
-from speech_to_speech.types import SpeechPair
+from speech_to_speech.types import AudioBoundary, SpecialToken, SpeechPair
+from helpers import MockTokenizer
 
 
 class RuntimeTest(unittest.TestCase):
@@ -56,6 +58,27 @@ class RuntimeTest(unittest.TestCase):
                 ("Qwen/Qwen3-0.6B", False),
                 ("Qwen/Qwen3-8B", True),
             ],
+        )
+
+    def test_qwen3_longcat_idspace_uses_tokenizer_and_bpe_vocab(self) -> None:
+        tokenizer = MockTokenizer()
+        tokenizer.vocab_size = 16
+        tokenizer.__len__ = lambda: 16
+
+        space = runtime.qwen3_longcat_idspace(
+            tokenizer=tokenizer,
+            bpe_vocab_size=5,
+        )
+
+        self.assertEqual(space.modality_block(Modality.TEXT).start, 0)
+        self.assertEqual(space.modality_block(Modality.TEXT).vocab_size, 16)
+        self.assertEqual(space.special_token_id(AudioBoundary.BOA), 16)
+        self.assertEqual(space.special_token_id(AudioBoundary.EOA), 17)
+        self.assertEqual(space.modality_block(Modality.AUDIO).start, 18)
+        self.assertEqual(space.modality_block(Modality.AUDIO).vocab_size, 5)
+        self.assertEqual(
+            space.special_token_id(SpecialToken.PAD),
+            tokenizer.convert_tokens_to_ids(SpecialToken.PAD.value),
         )
 
     def test_longcat_acoustic_features_uses_codec_feature_boundary(self) -> None:
@@ -145,6 +168,44 @@ class RuntimeTest(unittest.TestCase):
 
         self.assertEqual(meta["datasets"], list(datasets))
         self.assertNotIn("dataset_meta", meta)
+        self.assertEqual(meta["requested_vocab_size"], config.vocab_size)
+        self.assertIsInstance(meta["actual_vocab_size"], int)
+        self.assertGreater(meta["actual_vocab_size"], 0)
+        self.assertNotEqual(meta["actual_vocab_size"], config.vocab_size)
+        self.assertNotIn("vocab_size", meta)
+
+    def test_prepare_longcat_tokenizer_backfills_actual_vocab_size(self) -> None:
+        pair = SpeechPair(
+            source_ids=torch.tensor([0, 1, 2]),
+            target_ids=torch.tensor([2, 1, 0]),
+        )
+        config = BPEConfig(vocab_size=16, max_token_length=4)
+
+        with TemporaryDirectory() as tmpdir:
+            runtime.prepare_longcat_tokenizer([pair], config=config, cache_dir=tmpdir)
+            path = Path(tmpdir) / "longcat" / "vocab_16_minfreq_0_maxlen_4_codes_8192"
+            meta_path = path / "meta.json"
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            legacy_meta = {
+                "codec_name": meta["codec_name"],
+                "vocab_size": meta["requested_vocab_size"],
+                "min_frequency": meta["min_frequency"],
+                "max_token_length": meta["max_token_length"],
+                "codebook_sizes": meta["codebook_sizes"],
+                "datasets": meta["datasets"],
+            }
+            meta_path.write_text(
+                json.dumps(legacy_meta, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            runtime._LONGCAT_TOKENIZERS.pop(path)
+
+            bpe = runtime.longcat_tokenizer(config, cache_dir=tmpdir)
+            updated = json.loads(meta_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(updated["requested_vocab_size"], config.vocab_size)
+        self.assertEqual(updated["actual_vocab_size"], bpe.vocab_size)
+        self.assertNotIn("vocab_size", updated)
 
 
 class FakeLongCatCodec:

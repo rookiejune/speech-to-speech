@@ -3,14 +3,13 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
-from anytrain.idspace import IdSpaceEmbedding
+from anytrain.idspace import IdSpace
 from lightning.pytorch import LightningDataModule
 from torch import device as TorchDevice
 from torch.utils.data import DataLoader
 
 from ..config import BPEConfig, DataModuleConfig, TaskConfig
 from ..runtime import longcat_tokenizer
-from ..types import CausalLMBatch
 from .batch_builder import CausalLMBatchBuilder
 from .pipeline import (
     TaskBatchMapper,
@@ -19,6 +18,7 @@ from .pipeline import (
     TaskSample,
     task_sample_length,
 )
+from .types import CausalLMBatch, LongCatBPETokenizer
 
 
 class SpeechToSpeechDataModule(LightningDataModule):
@@ -28,16 +28,16 @@ class SpeechToSpeechDataModule(LightningDataModule):
         self,
         datamodule: DataModuleConfig,
         tasks: TaskConfig,
-        embedding: IdSpaceEmbedding,
+        space: IdSpace,
         *,
         tokenizer: object | None = None,
-        bpe_tokenizer: object | None = None,
+        bpe_tokenizer: LongCatBPETokenizer | None = None,
         bpe: BPEConfig | None = None,
     ) -> None:
         super().__init__()
         self.datamodule = datamodule
         self.tasks = tasks
-        self.builder = CausalLMBatchBuilder(embedding, tokenizer=tokenizer)
+        self.builder = CausalLMBatchBuilder(space, tokenizer=tokenizer)
         self.bpe_tokenizer = bpe_tokenizer
         self.bpe = bpe or BPEConfig()
 
@@ -77,7 +77,7 @@ class SpeechToSpeechDataModule(LightningDataModule):
             device=self._device(),
         )
 
-    def _bpe_tokenizer(self) -> object:
+    def _bpe_tokenizer(self) -> LongCatBPETokenizer:
         if self.bpe_tokenizer is None:
             self.bpe_tokenizer = longcat_tokenizer(self.bpe)
         return self.bpe_tokenizer

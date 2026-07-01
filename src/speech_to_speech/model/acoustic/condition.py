@@ -1,3 +1,5 @@
+"""Prepare acoustic conditions and continuous-flow losses."""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -9,13 +11,12 @@ from anytrain.idspace import IdSpaceEmbedding, Modality
 from anytrain.tokenizer import CodecBPE
 from torch import Tensor, nn
 
-from ..types import (
-    AcousticCondition,
-    AudioBoundary,
+from ...datamodule.types import (
     CausalLMBatch,
     IGNORE_INDEX,
     LongCatBatchSide,
 )
+from ..types import AcousticCondition, AudioBoundary
 
 
 class _TimeSampler(Protocol):

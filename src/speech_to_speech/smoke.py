@@ -23,6 +23,8 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 
 from .config import (
     AcousticDecoderConfig,
+    ConditionEncoderConfig,
+    AdapterConfig,
     BPEConfig,
     CheckpointCallbackConfig,
     DataLoaderConfig,
@@ -49,8 +51,13 @@ from .datamodule import SpeechToSpeechDataModule
 from .datamodule.example import speech_pair_from_sample
 from .model.orchestrator import Orchestrator
 from .pl_module import SpeechToSpeechModule
-from .runtime import longcat_codec, prepare_longcat_tokenizer, qwen3_tokenizer
-from .types import SpeechPair
+from .runtime import (
+    longcat_codec,
+    prepare_longcat_tokenizer,
+    qwen3_longcat_idspace,
+    qwen3_tokenizer,
+)
+from .datamodule.types import SpeechPair
 
 
 def load_config(
@@ -91,12 +98,21 @@ def run_smoke(
         datasets=dataset_metadata(config.datamodule.dataset_factory),
         config=config.bpe,
     )
-    model = Orchestrator(
-        model_config=config.model,
-        bpe_config=config.bpe,
+    space = qwen3_longcat_idspace(
         tokenizer=tokenizer,
         bpe_vocab_size=bpe.vocab_size,
+        config=config.model,
     )
+    model_kwargs: dict[str, object] = {
+        "model_config": config.model,
+        "bpe_config": config.bpe,
+        "tokenizer": tokenizer,
+        "bpe_vocab_size": bpe.vocab_size,
+        "space": space,
+    }
+    if config.model.token_space.audio_embedding_type.requires_bpe:
+        model_kwargs["bpe"] = bpe
+    model = Orchestrator(**model_kwargs)
     acoustic_training = config.train.acoustic_loss_weight > 0.0
     module = SpeechToSpeechModule(
         model,
@@ -107,7 +123,7 @@ def run_smoke(
     datamodule = SpeechToSpeechDataModule(
         config.datamodule,
         config.tasks,
-        model.embed_tokens,
+        space,
         tokenizer=tokenizer,
         bpe_tokenizer=bpe,
         bpe=config.bpe,
@@ -123,6 +139,10 @@ def run_smoke(
         "enable_model_summary": False,
         "enable_progress_bar": enable_progress_bar,
     }
+    if config.trainer.gradient_clip_val is not None:
+        trainer_kwargs["gradient_clip_val"] = config.trainer.gradient_clip_val
+        if config.trainer.gradient_clip_algorithm is not None:
+            trainer_kwargs["gradient_clip_algorithm"] = config.trainer.gradient_clip_algorithm
     if devices is not None:
         trainer_kwargs["devices"] = devices
     else:
@@ -224,10 +244,7 @@ def _model_config(data: Mapping[str, object] | None) -> ModelConfig:
             skip={"backbone", "token_space", "acoustic"},
         ),
         backbone=_backbone_config(_optional_mapping(data, "backbone")),
-        token_space=_from_mapping(
-            TokenSpaceConfig,
-            _optional_mapping(data, "token_space"),
-        ),
+        token_space=_token_space_config(_optional_mapping(data, "token_space")),
         acoustic=_acoustic_config(_optional_mapping(data, "acoustic")),
     )
 
@@ -240,10 +257,35 @@ def _backbone_config(data: Mapping[str, object] | None) -> QwenBackboneConfig:
     )
 
 
+def _token_space_config(data: Mapping[str, object] | None) -> TokenSpaceConfig:
+    data = data or {}
+    return TokenSpaceConfig(
+        **_dataclass_kwargs(
+            TokenSpaceConfig,
+            data,
+            skip={"input_adapter", "output_adapter"},
+        ),
+        input_adapter=_from_mapping(AdapterConfig, _optional_mapping(data, "input_adapter")),
+        output_adapter=_from_mapping(AdapterConfig, _optional_mapping(data, "output_adapter")),
+    )
+
+
 def _acoustic_config(data: Mapping[str, object] | None) -> AcousticDecoderConfig:
     data = data or {}
     return AcousticDecoderConfig(
-        **_dataclass_kwargs(AcousticDecoderConfig, data, skip={"dit"}),
+        **_dataclass_kwargs(
+            AcousticDecoderConfig,
+            data,
+            skip={"condition_adapter", "condition_encoder", "dit"},
+        ),
+        condition_adapter=_from_mapping(
+            AdapterConfig,
+            _optional_mapping(data, "condition_adapter"),
+        ),
+        condition_encoder=_from_mapping(
+            ConditionEncoderConfig,
+            _optional_mapping(data, "condition_encoder"),
+        ),
         dit=_from_mapping(DiTModelConfig, _optional_mapping(data, "dit")),
     )
 

@@ -31,7 +31,7 @@ class MinimalLoopTest(unittest.TestCase):
             bpe_vocab_size=bpe.vocab_size,
             qwen3_pretrained=False,
         )
-        builder = CausalLMBatchBuilder(model.embed_tokens, tokenizer=tokenizer)
+        builder = CausalLMBatchBuilder(model.idspace, tokenizer=tokenizer)
         audio_ids = torch.tensor(
             bpe.encode_frames([[int(value)] for value in pair.source_ids.tolist()])
         )
