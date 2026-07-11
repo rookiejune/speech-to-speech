@@ -1,2 +1,2 @@
 from . import definitions
-from .abc import TaskBase, TaskFactory
+from .base import TaskBase, TaskFactory

@@ -86,32 +86,65 @@ def merge_by_positions(
 def base_weight(codec: Codec, tokenizer: AudioTokenizer) -> Tensor:
     """Create one fixed feature vector for every audio-tokenizer ID."""
     codebook = codec.semantic_codebook
-    if codebook.dim() != 2:
-        raise ValueError("codec semantic_codebook must have shape [vocab, dim].")
+    if codebook.dim() not in {2, 3}:
+        raise ValueError(
+            "codec semantic_codebook must have shape [vocab, dim] or "
+            "[codebooks, vocab, dim]."
+        )
 
     rows = []
     for token_id in range(tokenizer.vocab_size):
         units, counts = tokenizer.expand_with_counts([token_id])
-        if isinstance(units, Tensor):
-            if units.dim() != 2 or units.size(0) != 1:
-                raise ValueError("audio tokenizer expand returned an invalid shape.")
-            unit_ids = units[0].to(device=codebook.device, dtype=torch.long)
-        else:
-            if len(units) != 1:
-                raise ValueError("audio tokenizer expand returned an invalid length.")
-            unit_ids = torch.tensor(units[0], device=codebook.device, dtype=torch.long)
+        unit_ids = _unit_ids(units, codebook)
         count = int(counts[0].item()) if isinstance(counts, Tensor) else int(counts[0])
-        if count != unit_ids.numel():
+        if count != unit_ids.size(0):
             raise ValueError(
                 "audio tokenizer expansion count does not match expansion."
             )
-        if unit_ids.numel() == 0:
+        if unit_ids.size(0) == 0:
             raise ValueError(
                 f"audio tokenizer token {token_id} expands to no codec units."
             )
-        rows.append(_merge(codebook.index_select(0, unit_ids)))
+        rows.append(_merge(_unit_embeddings(codebook, unit_ids)))
 
     return torch.stack(rows)
+
+
+def _unit_ids(units: list[tuple[int, ...]] | Tensor, codebook: Tensor) -> Tensor:
+    if isinstance(units, Tensor):
+        unit_ids = units.to(device=codebook.device, dtype=torch.long)
+    else:
+        unit_ids = torch.tensor(units, device=codebook.device, dtype=torch.long)
+    if unit_ids.dim() != 2:
+        raise ValueError(
+            "audio tokenizer expand must return [frames, semantic_codebooks]."
+        )
+    return unit_ids
+
+
+def _unit_embeddings(codebook: Tensor, unit_ids: Tensor) -> Tensor:
+    if codebook.dim() == 2:
+        if unit_ids.size(-1) != 1:
+            raise ValueError(
+                "single semantic codebook cannot initialize multi-codebook units."
+            )
+        ids = unit_ids.flatten()
+        if bool((ids < 0).any()) or bool((ids >= codebook.size(0)).any()):
+            raise ValueError("semantic unit id is outside the codec codebook.")
+        return codebook.index_select(0, ids)
+
+    if unit_ids.size(-1) != codebook.size(0):
+        raise ValueError(
+            "semantic units must match the codec semantic codebook count."
+        )
+    frames = []
+    for index in range(codebook.size(0)):
+        ids = unit_ids[:, index]
+        table = codebook[index]
+        if bool((ids < 0).any()) or bool((ids >= table.size(0)).any()):
+            raise ValueError("semantic unit id is outside the codec codebook.")
+        frames.append(table.index_select(0, ids))
+    return torch.stack(frames, dim=1).mean(dim=1)
 
 
 def embedding(codec: Codec, tokenizer: AudioTokenizer) -> nn.Embedding:

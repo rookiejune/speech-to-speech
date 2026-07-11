@@ -1,5 +1,8 @@
 # Speech-to-Speech 模型设计
 
+本文保留详细设计背景和推理过程。稳定接口见 `contracts.md`，实施顺序见
+`roadmap.md`。
+
 本文定义 `speech_to_speech` 的模型边界、数据契约和实现路线。目标是先冻结接口，使 semantic 模型和 acoustic decoder 可以独立演进。
 
 ## 1. 总体结构
@@ -57,7 +60,7 @@ class Speech:
 
 `bpe_ids` 是 audio tokenizer 产生的本地 BPE ids。`bpe_spans` 与 `bpe_ids` 等长，记录每个 BPE token 覆盖的 semantic frame 数量，例如 `[2, 1, 2]` 表示三个 BPE token 分别覆盖 2、1、2 个 frame。
 
-`audio_tokenizer.expand(bpe_ids)` 返回 frame-level semantic units，形状为 `[T, K_semantic]`；每个 frame unit 包含全部 semantic codebooks，不能只取第一个 codebook。生成或解码 batch 时，调用方负责检查各行的 `T` 是否一致并进行 `stack` 或 padding；tokenizer 只负责单条序列的 token 到 frame 展开。
+`audio_tokenizer.expand(bpe_ids)` 返回 frame-level semantic units，形状为 `[T, K_semantic]`；每个 frame unit 包含全部 semantic codebooks，不能只取第一个 codebook。生成或解码 batch 时，调用方负责检查各行的 `T` 是否一致并进行 `stack` 或 padding；tokenizer 只负责单条序列的 token 到 frame 展开。正式 BPE tokenizer 使用 `anytrain.tokenizer.CodecBPE`，其 frame 契约就是 `[T, K]`；`speech_to_speech` 只在 runtime 里通过 `TorchCodecBPE` 做 Tensor 便利包装，不重新定义 tokenizer 语义。
 
 `global_ids` 不属于 `Speech` 的缓存属性。datamodule 在把 prompt 拼接进 backbone 输入时，使用 layout 将 `bpe_ids` 转成 global ids。
 
@@ -171,7 +174,7 @@ inputs_embeds = semantic_feature + acoustic_feature
 
 acoustic target 的 codebook 数量是 model/runtime 的固定配置，不属于 batch。batch 保存完整的离散 acoustic codes，decoder 在统一配置下选择前 `k` 个 codebook 转为连续 latent。该配置必须同时决定 `acoustic_codes_to_features()` 的输入、latent feature dimension 和 `decode_features()` 使用的 codec decoder；如果底层 codec 只提供固定 codebook decoder，应配置 decoder 名称而不是在模型中假设任意 `k` 都可用。
 
-当前 `model/embedding/audio.py` 已经提供 codec codebook 初始化和 BPE merge 的雏形，可以沿用；但 tokenizer 的 `expand_with_counts()` 需要先修正实现错误。
+当前 `model/embedding/audio.py` 已经提供 codec codebook 初始化和 BPE merge 的雏形，可以沿用；多码本 BPE token 先展开为 `[frames, K_semantic]`，同一 frame 内聚合各 semantic codebook embedding，再沿 frame 轴应用 RoPE 和 mean-pooling。
 
 ## 5. 推荐的第一版模型
 

@@ -48,7 +48,7 @@ class TaskBase:
         )
 
     @classmethod
-    def _parse_speech_pair(cls, sample: SpeechPair):
+    def _source_target(cls, sample: SpeechPair):
         if cls.paired:
             return sample.source, sample.target
         else:
@@ -58,7 +58,7 @@ class TaskBase:
     def sample(cls, speech_pair: SpeechPair) -> Sample:
         _prompt_ids = cls._prompt_ids(speech_pair)
 
-        source, target = cls._parse_speech_pair(speech_pair)
+        source, target = cls._source_target(speech_pair)
 
         source_acoustic_ids = None
         source_acoustic_positions = None

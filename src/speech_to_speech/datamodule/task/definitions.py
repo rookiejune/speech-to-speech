@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ..types import Task
-from .abc import TaskBase, TaskFactory
+from .base import TaskBase, TaskFactory
 
 
 @TaskFactory.register(Task.AUDIO_AR)

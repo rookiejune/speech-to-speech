@@ -10,7 +10,7 @@ from anytrain.codec.longcat import LongCat
 from anytrain.idspace import Layout
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .audio_tokenizer import NativeAudioTokenizer
+from .audio_tokenizer import NativeAudioTokenizer, TorchCodecBPE
 from .special_tokens import AudioSpecialToken, TextSpecialToken
 from .types import AudioTokenizer, Backbone, Codec, TextTokenizer
 
@@ -172,14 +172,16 @@ def _audio_vocab_size(name: str) -> int:
 
 
 def _audio_tokenizer(name: str) -> AudioTokenizer:
-    from anytrain.tokenizer import CodecBPE
     from zhuyin.env import bpe_cache_dir, configure_environment
     from zhuyin.tokenizers.longcat import longcat_bpe
 
     configure_environment()
     path = bpe_cache_dir() / name
     if path.exists():
-        return cast(AudioTokenizer, CodecBPE.from_pretrained(path))
+        return cast(AudioTokenizer, TorchCodecBPE.from_pretrained(path))
     if "/" in name:
-        return cast(AudioTokenizer, CodecBPE.from_pretrained(Path(name).expanduser()))
-    return cast(AudioTokenizer, longcat_bpe(vocab_size=_audio_vocab_size(name)))
+        return cast(AudioTokenizer, TorchCodecBPE.from_pretrained(Path(name).expanduser()))
+    return cast(
+        AudioTokenizer,
+        TorchCodecBPE.wrap(longcat_bpe(vocab_size=_audio_vocab_size(name))),
+    )
