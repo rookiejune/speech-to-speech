@@ -54,22 +54,16 @@ class SpeechToSpeechFlowModel(SemanticModel):
 
     @torch.no_grad()
     def sample_acoustic(self, condition: Tensor) -> Tensor:
-        from anytrain.framework.flow_matching import ODESampler
-
         latent = torch.randn(
             (*condition.shape[:2], self.acoustic_decoder.latent_dim),
             device=condition.device,
             dtype=condition.dtype,
         )
-        return (
-            ODESampler(return_intermediates=False)
-            .sample(
-                self.acoustic_decoder,
-                latent,
-                condition=condition,
-            )
-            .final
-        )
+        return self.runtime.flow_matching.sample(
+            self.acoustic_decoder,
+            latent,
+            condition=condition,
+        ).final
 
     @torch.no_grad()
     def generate_audio(
@@ -82,8 +76,10 @@ class SpeechToSpeechFlowModel(SemanticModel):
         acoustic_input_ids: Tensor | None = None,
         acoustic_input_positions: Tensor | None = None,
         acoustic_input_mask: Tensor | None = None,
+        do_sample: bool = True,
+        use_cache: bool = True,
     ) -> tuple[Tensor, Tensor, Tensor]:
-        generated = self.generate_semantic(
+        generated, condition, spans = self._generate(
             prompt_ids,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
@@ -93,44 +89,12 @@ class SpeechToSpeechFlowModel(SemanticModel):
             acoustic_input_mask=acoustic_input_mask,
             stop_token_id=self.runtime.eoa_token_id,
             allowed_token_ids=self.runtime.audio_generation_allowed_ids,
+            do_sample=do_sample,
+            use_cache=use_cache,
+            collect_audio_condition=True,
         )
-        audio_ids = generated[:, prompt_ids.size(1) :]
-        audio_ids = audio_ids[:, audio_ids.ne(self.runtime.eoa_token_id).all(dim=0)]
-        local_start, local_end = self.runtime.codec_audio_range
-        valid = audio_ids.ge(local_start) & audio_ids.lt(local_end)
-        if not bool(valid.all()):
+        if condition is None or spans is None:
             raise ValueError(
-                "semantic generation produced non-audio tokens in the response."
+                "semantic generation produced no codec-decodable audio tokens."
             )
-        positions: list[Tensor] = []
-        spans: list[Tensor] = []
-        tokenizer = self.runtime.audio_tokenizer
-        for row in audio_ids:
-            local = row - local_start
-            row_spans = torch.as_tensor(
-                [len(tokenizer.decode([int(token)])) for token in local],
-                device=row.device,
-                dtype=torch.long,
-            )
-            positions.append(
-                torch.repeat_interleave(
-                    torch.arange(
-                        prompt_ids.size(1),
-                        prompt_ids.size(1) + row.numel(),
-                        device=row.device,
-                    ),
-                    row_spans,
-                )
-            )
-            spans.append(row_spans)
-        if not positions or len({value.numel() for value in positions}) != 1:
-            raise ValueError(
-                "generated audio rows must expand to the same frame count."
-            )
-        output = self(generated, output_hidden_states=True)
-        if output.hidden_states is None:
-            raise RuntimeError("model did not return hidden states.")
-        condition = self.target_frame_condition(
-            output.hidden_states[-1], torch.stack(positions)
-        )
-        return generated, self.sample_acoustic(condition), torch.stack(spans)
+        return generated, self.sample_acoustic(condition), spans

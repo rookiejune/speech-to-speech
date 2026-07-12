@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import torch
@@ -10,7 +11,8 @@ from ..datamodule.types import ModelBatch
 from ..loss.module import Loss
 from ..loss.types import Outputs
 from ..model.protocol import FlowMatching
-from .generation import generate_batch, generate_waveforms
+from .generation import Request, Result, generate
+from .text import TextProbe, TextProbeResult, evaluate_text
 
 
 @dataclass(frozen=True)
@@ -52,46 +54,45 @@ class SpeechToSpeech(LightningModule):
         self._current_loss_outputs = None
 
     @torch.no_grad()
-    def generate_batch(
+    def generate(
         self,
-        batch: ModelBatch,
+        requests: Sequence[Request],
         *,
         max_new_tokens: int = 256,
         temperature: float = 1.0,
         top_p: float = 1.0,
-    ) -> list[torch.Tensor]:
-        """Generate responses while preserving variable prompt lengths."""
+        do_sample: bool = True,
+        use_cache: bool = True,
+    ) -> list[Result]:
         was_training = self.training
         self.eval()
         try:
-            return generate_batch(
-                batch,
+            return generate(
+                requests,
                 self.model,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_p=top_p,
+                do_sample=do_sample,
+                use_cache=use_cache,
             )
         finally:
             self.train(was_training)
 
     @torch.no_grad()
-    def generate_waveforms(
+    def evaluate_text(
         self,
-        batch: ModelBatch,
+        probes: Mapping[str, TextProbe],
         *,
-        max_new_tokens: int = 256,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
-    ) -> list[torch.Tensor]:
+        max_new_tokens: int = 128,
+    ) -> dict[str, TextProbeResult]:
         was_training = self.training
         self.eval()
         try:
-            return generate_waveforms(
-                batch,
+            return evaluate_text(
+                probes,
                 self.model,
                 max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
             )
         finally:
             self.train(was_training)

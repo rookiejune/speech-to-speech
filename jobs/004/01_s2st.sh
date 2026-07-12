@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
+
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+
+cd "${SPEECH_TO_SPEECH_ROOT}"
+"${SPEECH_TO_SPEECH_PYTHON}" scripts/generation_smoke.py \
+  --audio-tokenizer "${SPEECH_TO_SPEECH_AUDIO_TOKENIZER}" \
+  --output-dir "${SPEECH_TO_SPEECH_TRAIN_ROOT}/004-real-cached-generation" \
+  "$@"

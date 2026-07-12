@@ -5,6 +5,7 @@ from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 
 from ...datamodule import DataModule
+from ...pl_module.generation import requests_from_batch
 
 
 class SampleLogger(Callback):
@@ -32,28 +33,23 @@ class SampleLogger(Callback):
             return
         datamodule = cast(DataModule, pl_module.datamodule)
         causal_batch = datamodule.collator(self.samples)
-        outputs = cast(Any, pl_module).generate_batch(causal_batch)
+        results = cast(Any, pl_module).generate(requests_from_batch(causal_batch))
         logger = trainer.logger
         if logger is None or not hasattr(logger, "experiment"):
             return
         experiment = logger.experiment
-        waveforms = None
-        if all(
-            task.value in {"audio_ar", "s2st", "t2st", "tts"}
-            for task in causal_batch.tasks
-        ):
-            waveforms = cast(Any, pl_module).generate_waveforms(causal_batch)
-        for index, output in enumerate(outputs):
-            if waveforms is not None and hasattr(experiment, "add_audio"):
+        for index, result in enumerate(results):
+            waveform = result["waveform"]
+            if waveform is not None and hasattr(experiment, "add_audio"):
                 experiment.add_audio(
                     f"sample/{index}",
-                    waveforms[index].detach().cpu(),
+                    waveform.detach().cpu(),
                     trainer.global_step,
                     sample_rate=self.sample_rate,
                 )
             elif hasattr(experiment, "add_text"):
                 experiment.add_text(
                     f"sample/{index}",
-                    " ".join(str(value) for value in output.tolist()),
+                    " ".join(str(value) for value in result["token_ids"].tolist()),
                     trainer.global_step,
                 )

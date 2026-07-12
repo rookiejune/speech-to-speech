@@ -53,6 +53,8 @@ class FlowMatching(BaseModel, Protocol):
         acoustic_input_ids: Tensor | None = None,
         acoustic_input_positions: Tensor | None = None,
         acoustic_input_mask: Tensor | None = None,
+        do_sample: bool = True,
+        use_cache: bool = True,
     ) -> tuple[Tensor, Tensor, Tensor]: ...
 
 

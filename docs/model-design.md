@@ -155,12 +155,13 @@ padding 与 mask 约定：
 | S2ST | audio | audio semantic | yes |
 | TTS | text | audio semantic | yes |
 | T2ST | text | audio semantic | yes |
+| T2TT | text | text | no |
 | TEXT_AR | none | text | no |
 | AUDIO_AR | none/audio context | audio semantic | yes |
 
 任务能力以 `Task` 枚举为唯一事实来源。`Task` 公开 source modality、target modality 和 paired 语义；task builder、collator、generation、loss 与 callback 不各自维护 audio-task 集合。modality 使用 `anydataset.types.Modality`，不使用裸字符串。
 
-所有 audio-target task（AUDIO_AR、S2ST、T2ST、TTS）都必须提供 semantic audio target 与 acoustic target；缺失时在 task 构造 `Sample` 时立即报错。所有 text-target task 都不允许 acoustic target。
+所有 audio-target task（AUDIO_AR、S2ST、T2ST、TTS）都必须提供 semantic audio target 与 acoustic target；缺失时在 task 构造 `Sample` 时立即报错。所有 text-target task 都不允许 acoustic target。T2TT 使用 paired source/target text，作为纯文本训练与 backbone retention evaluation 的正式任务语义。
 
 ## 4. Runtime 与模块所有权
 
@@ -201,7 +202,7 @@ Model 提供 semantic generation 与 acoustic sampling 原语；上层 generatio
 
 batch generation 的目标契约是标准批量自回归：变长响应通过 padding 和 attention mask 处理，每行独立跟踪 eoa；frame 轴同样以 padding + frame mask 贯穿 flow sampling 和 `decode_features()`，不要求 batch 内各行 frame 数相等。
 
-当前实现是过渡状态：`pl_module` 的 generation 按行循环调用单样本路径，`generate_audio` 对 batch 内不等长的 frame 展开直接报错；这些限制属于实现欠账（见 todo），不属于契约。
+当前实现是过渡状态：`pl_module` 的 generation service 按 request 调用单样本 cached 路径，model generation 原语不接收 padded batch；这些限制属于实现欠账（见 todo），不属于契约。
 
 ## 7. 数据与阶段配置
 

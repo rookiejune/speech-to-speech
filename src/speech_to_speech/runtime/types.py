@@ -53,6 +53,13 @@ class TextTokenizer(Protocol):
         add_special_tokens: bool = False,
     ) -> list[int]: ...
 
+    def decode(
+        self,
+        token_ids: Sequence[int],
+        *,
+        skip_special_tokens: bool = True,
+    ) -> str: ...
+
     def apply_chat_template(
         self,
         conversation: Sequence[Mapping[str, str]],

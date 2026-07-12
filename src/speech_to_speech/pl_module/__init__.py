@@ -1,11 +1,17 @@
 from .decode import decode_generated_audio
-from .generation import generate_batch, generate_waveforms
+from .generation import Request, Result, generate, requests_from_batch
 from .module import Config, SpeechToSpeech
+from .text import TextProbe, TextProbeResult, evaluate_text
 
 __all__ = [
     "Config",
+    "Request",
+    "Result",
     "SpeechToSpeech",
+    "TextProbe",
+    "TextProbeResult",
     "decode_generated_audio",
-    "generate_batch",
-    "generate_waveforms",
+    "generate",
+    "evaluate_text",
+    "requests_from_batch",
 ]

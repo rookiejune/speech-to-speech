@@ -83,4 +83,4 @@ class AcousticDecoder(Protocol):
 - semantic generation 使用 backbone KV cache：首步编码完整多模态 prompt，后续只输入新 token。cache 不保存在 model 实例上，也不通过公开 API 暴露具体 backbone 类型。
 - audio generation 在每个 semantic token 被采样时在线收集预测该 token 的 hidden，并按 BPE span 展开 frame condition；不在生成完成后追加一次全序列 forward。
 - source acoustic prompt 在首步进入 KV cache，因此在整个生成过程中持续有效。
-- batch acoustic generation 的目标契约见总览 §6；当前 `generate_audio` 要求各行 frame 数相等，属于实现欠账。
+- batch acoustic generation 的目标契约见总览 §6；当前 model generation 原语只接收单个无 padding prompt，由上层 service 逐 request 调用，属于实现欠账。

@@ -6,32 +6,25 @@
 
 - P0（冻结契约）：设计、代码与纯 contract tests 已对齐。
 - P1-core：native audio tokenizer、semantic embedding、acoustic prompt、semantic CE、flow objective 和 waveform decode 已按冻结契约对齐。
-- P1-closure：7 个任务的 fake raw sample、collator、forward/backward、optimizer step 与 waveform decode 闭环已完成。
+- P1-closure：8 个任务的 fake raw sample、collator、forward/backward、optimizer step 与 waveform decode 闭环已完成。
+- P1-real：121 上真实 WMT19/LongCat/Qwen3 TTS 与 S2ST 训练闭环及短 S2ST generation/decode smoke 已完成，结果见 `results/001-real-resource-smoke.md`。
+- P1-overfit：真实单 batch TTS/S2ST 的 semantic 与 flow objective 均可优化，结果见 `results/002-single-batch-overfit.md`。
 - P2：Flow/RVQ 相关实现已存在；flow condition/objective 已有 contract tests，RVQ objective contract tests 未完成。
-- P3：当前只有过渡性的逐行 generation、teacher-forcing decode 和 sample logging；KV cache、独立推理入口及标准变长 batch generation 未完成。
-- 测试现状：20 个纯本地测试和 14 个任务子测试覆盖 audio tokenizer、P0 数据/ID 契约、模块所有权、HF backbone 加载与 vocabulary 边界、condition 对齐、全任务 semantic/flow objective 路由与 fake P1 closure。
+- P3：独立 request/result、单样本 KV cache、在线 acoustic condition、一次性 generation/decode 和 SampleLogger 复用已完成；标准变长 batch generation 未完成。
+- 测试现状：29 个纯本地测试和 16 个任务子测试覆盖 audio tokenizer、P0 数据/ID 契约、模块所有权、HF backbone 加载与 vocabulary 边界、condition 对齐、全任务 semantic/flow objective 路由、fake P1 closure、cached generation 与 text retention contract。
 
 ## Generation
 
-- 实现 KV cache：首步编码完整多模态 prompt，后续只输入新 token。
-- source acoustic prompt 通过 cache 在整个生成过程中持续生效。
-- text/audio generation 使用各自 allowed IDs；audio 不生成 BOA，EOA 只作为 stop token。
-- semantic token 采样时在线收集预测 hidden，并按 BPE span 展开 acoustic frame condition。
-- 建立独立真实推理入口，不通过 `ModelBatch.acoustic_labels is None` 判断 generation。
-- 同一次生成结果同时提供 token、acoustic output 和 waveform，SampleLogger 不重复随机生成。
 - padding + attention mask + 每行独立 EOS/EOA；frame mask 贯穿 acoustic sampling 和 decode。
-- KV cache 与非 cache greedy 路径输出一致。
+- 在真实 Qwen3/LongCat S2ST 上验收 cached generation/decode，并比较 cache 与非 cache greedy 输出。
 
 ## 真实资源验收
 
-- 使用 `wmt19_tts_codec(config.codec)` 完成一个真实 batch 的 forward、backward 和 optimizer step。
-- 完成 S2ST semantic/acoustic generation 和 waveform decode。
 - 长时间完整训练使用 TensorBoard 记录监督曲线。
-- 将 smoke、generation 和 decode 结果记录到 `docs/experiments/results/`。
+- 用真实 Qwen checkpoint 验收中英双向 `TextRetentionLogger`，确认训练前 wrapper 与 backbone 的文本输出一致，并观察语音训练期间的 NLL 漂移。
 
 ## 其他工程欠账
 
-- 单 batch overfit diagnostic。
 - `Speech.language` 接入 `Language` 枚举。
 - `loss/causal_lm.py`：实现 RVQ 离散 acoustic objective 后再暴露正式入口。
 - 第一版 DDP 使用 `find_unused_parameters=True`；路径稳定后评估冻结策略或 DDP 优化。

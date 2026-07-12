@@ -123,9 +123,11 @@ class Runtime:
 
     @cached_property
     def flow_matching(self) -> ContinuousFlowRuntime:
-        from anytrain.framework.flow_matching import ContinuousFlowRuntime
+        from anytrain.framework.flow_matching import ContinuousFlowRuntime, ODESampler
 
-        return ContinuousFlowRuntime()
+        return ContinuousFlowRuntime(
+            sampler=ODESampler(return_intermediates=False),
+        )
 
     def _text_special_id(self, token: TextSpecialToken) -> int:
         ids = self.text_tokenizer.encode(token.value, add_special_tokens=False)

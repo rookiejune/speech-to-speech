@@ -66,7 +66,9 @@ class _Codec:
         self, semantic_codes: Tensor, acoustic_features: Tensor
     ) -> Tensor:
         if semantic_codes.dim() != 3:
-            raise ValueError("fake codec expects [batch, frame, codebook] semantic codes.")
+            raise ValueError(
+                "fake codec expects [batch, frame, codebook] semantic codes."
+            )
         if semantic_codes.shape[:2] != acoustic_features.shape[:2]:
             raise ValueError("fake semantic codes and acoustic features must align.")
         semantic = semantic_codes.to(dtype=acoustic_features.dtype).sum(dim=-1)
@@ -98,6 +100,9 @@ class _Backbone(nn.Module):
 
 
 class _FlowRuntime:
+    def __init__(self) -> None:
+        self.sampled = False
+
     def training_sample(self, x_1: Tensor, *, x_0: Tensor | None = None):
         del x_0
         x_0 = torch.zeros_like(x_1)
@@ -106,6 +111,11 @@ class _FlowRuntime:
             velocity=x_1 - x_0,
             t=torch.full((x_1.size(0),), 0.5, device=x_1.device),
         )
+
+    def sample(self, model: nn.Module, x_0: Tensor, **model_extras: object):
+        del model, model_extras
+        self.sampled = True
+        return SimpleNamespace(final=torch.zeros_like(x_0))
 
 
 class _Runtime:
@@ -128,6 +138,22 @@ class _Runtime:
 
 
 class FakeClosureTest(unittest.TestCase):
+    def test_flow_model_uses_runtime_sampler(self):
+        rt = _Runtime()
+        with _runtime(rt):
+            model = SpeechToSpeechFlowModel(
+                ModelConfig(
+                    audio_embed_adapter=None,
+                    audio_output_adapter=None,
+                    acoustic_adapter=None,
+                ),
+                runtime_snapshot=rt,
+            )
+            output = model.sample_acoustic(torch.zeros(2, 3, 4))
+
+        self.assertTrue(rt.flow_matching.sampled)
+        self.assertEqual(output.shape, (2, 3, 4))
+
     def test_all_tasks_build_expected_model_batches(self):
         rt = _Runtime()
         with _runtime(rt):

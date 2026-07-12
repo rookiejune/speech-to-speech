@@ -34,6 +34,11 @@ class T2ST(TaskBase):
     template = "Translate the following text into {language} speech: {source}"
 
 
+@TaskFactory.register(Task.T2TT)
+class T2TT(TaskBase):
+    template = "Translate the following text into {language}: {source}"
+
+
 @TaskFactory.register(Task.TTS)
 class TTS(TaskBase):
     template = "Synthesize speech from the following text: {source}"

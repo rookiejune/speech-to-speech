@@ -147,18 +147,65 @@ class SemanticModel(nn.Module):
         acoustic_input_mask: torch.Tensor | None = None,
         stop_token_id: int | None = None,
         allowed_token_ids: Sequence[int] | torch.Tensor | None = None,
+        do_sample: bool = True,
+        use_cache: bool = True,
     ) -> torch.Tensor:
+        generated, _, _ = self._generate(
+            prompt_ids,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            acoustic_input_ids=acoustic_input_ids,
+            acoustic_input_positions=acoustic_input_positions,
+            acoustic_input_mask=acoustic_input_mask,
+            stop_token_id=stop_token_id,
+            allowed_token_ids=allowed_token_ids,
+            do_sample=do_sample,
+            use_cache=use_cache,
+            collect_audio_condition=False,
+        )
+        return generated
+
+    def _generate(
+        self,
+        prompt_ids: torch.Tensor,
+        *,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        acoustic_input_ids: torch.Tensor | None,
+        acoustic_input_positions: torch.Tensor | None,
+        acoustic_input_mask: torch.Tensor | None,
+        stop_token_id: int | None,
+        allowed_token_ids: Sequence[int] | torch.Tensor | None,
+        do_sample: bool,
+        use_cache: bool,
+        collect_audio_condition: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         if max_new_tokens < 0 or temperature <= 0 or not 0 < top_p <= 1:
             raise ValueError("invalid generation parameters")
+        if prompt_ids.dim() != 2 or prompt_ids.size(0) != 1:
+            raise ValueError("generation currently requires one unpadded prompt row.")
+
         generated = prompt_ids
-        for step in range(max_new_tokens):
+        input_ids = prompt_ids
+        attention_mask = torch.ones_like(prompt_ids, dtype=torch.bool)
+        past_key_values = None
+        conditions: list[torch.Tensor] = []
+        spans: list[int] = []
+        for _ in range(max_new_tokens):
+            inject_acoustic = past_key_values is None
             output = self(
-                generated,
-                acoustic_input_ids=acoustic_input_ids if step == 0 else None,
+                input_ids,
+                attention_mask=attention_mask,
+                acoustic_input_ids=acoustic_input_ids if inject_acoustic else None,
                 acoustic_input_positions=acoustic_input_positions
-                if step == 0
+                if inject_acoustic
                 else None,
-                acoustic_input_mask=acoustic_input_mask if step == 0 else None,
+                acoustic_input_mask=acoustic_input_mask if inject_acoustic else None,
+                output_hidden_states=collect_audio_condition,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
             )
             logits = output.logits[:, -1] / temperature
             if allowed_token_ids is not None:
@@ -166,21 +213,58 @@ class SemanticModel(nn.Module):
                     allowed_token_ids, device=logits.device, dtype=torch.long
                 )
                 if ids.dim() != 1 or ids.numel() == 0:
-                    raise ValueError("allowed_token_ids must be a non-empty 1D sequence.")
+                    raise ValueError(
+                        "allowed_token_ids must be a non-empty 1D sequence."
+                    )
                 if bool((ids < 0).any()) or bool((ids >= logits.size(-1)).any()):
-                    raise ValueError("allowed_token_ids contains an invalid vocabulary id.")
+                    raise ValueError(
+                        "allowed_token_ids contains an invalid vocabulary id."
+                    )
                 allowed = logits.new_full(logits.shape, float("-inf"))
                 allowed.index_copy_(-1, ids, logits.index_select(-1, ids))
                 logits = allowed
             if top_p < 1.0:
                 logits = _top_p_filter(logits, top_p)
             next_ids = (
-                torch.distributions.Categorical(logits=logits).sample().unsqueeze(-1)
+                torch.distributions.Categorical(logits=logits).sample()
+                if do_sample
+                else logits.argmax(dim=-1)
             )
+            next_ids = next_ids.unsqueeze(-1)
+
+            if collect_audio_condition and self.runtime.is_codec_audio_id(
+                int(next_ids.item())
+            ):
+                if output.hidden_states is None:
+                    raise RuntimeError("model did not return generation hidden states.")
+                local_id = int(next_ids.item()) - self.runtime.codec_audio_range[0]
+                span = len(self.runtime.audio_tokenizer.decode([local_id]))
+                if span <= 0:
+                    raise ValueError(
+                        "generated audio token decoded to no semantic frames."
+                    )
+                conditions.append(output.hidden_states[-1][0, -1].expand(span, -1))
+                spans.append(span)
+
             generated = torch.cat((generated, next_ids), dim=-1)
-            if stop_token_id is not None and bool(next_ids.eq(stop_token_id).all()):
+            if stop_token_id is not None and int(next_ids.item()) == stop_token_id:
                 break
-        return generated
+            if use_cache:
+                past_key_values = output.past_key_values
+                if past_key_values is None:
+                    raise RuntimeError("backbone did not return a generation cache.")
+                input_ids = next_ids
+            else:
+                input_ids = generated
+            attention_mask = torch.ones_like(generated, dtype=torch.bool)
+
+        if not conditions:
+            return generated, None, None
+        condition = torch.cat(conditions, dim=0).unsqueeze(0)
+        frame_spans = torch.tensor(spans, device=generated.device, dtype=torch.long)[
+            None
+        ]
+        return generated, condition, frame_spans
 
     def target_frame_condition(
         self,

@@ -23,6 +23,7 @@ class Task(StrEnum):
     S2TT = auto()
     TEXT_AR = auto()
     T2ST = auto()
+    T2TT = auto()
     TTS = auto()
 
     @property
@@ -35,13 +36,13 @@ class Task(StrEnum):
 
     @property
     def target_modality(self) -> Modality:
-        if self in {Task.ASR, Task.S2TT, Task.TEXT_AR}:
+        if self in {Task.ASR, Task.S2TT, Task.TEXT_AR, Task.T2TT}:
             return Modality.TEXT
         return Modality.AUDIO
 
     @property
     def paired(self) -> bool:
-        return self in {Task.S2ST, Task.S2TT, Task.T2ST}
+        return self in {Task.S2ST, Task.S2TT, Task.T2ST, Task.T2TT}
 
 
 class Language(StrEnum):
