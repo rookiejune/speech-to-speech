@@ -20,6 +20,8 @@ from anydataset.types import (
 
 from speech_to_speech.datamodule.collator import Collator
 from speech_to_speech.datamodule.types import ModelBatch, Sample, SpeechPair, Task
+from speech_to_speech.callback.stage import Config as StageConfig
+from speech_to_speech.callback.stage import StageSwitcher
 from speech_to_speech.runtime.singleton import Config, Runtime
 from speech_to_speech.runtime.singleton import _audio_tokenizer, _dtype
 from speech_to_speech.runtime.audio_tokenizer import TorchCodecBPE
@@ -157,6 +159,20 @@ class ContractTest(unittest.TestCase):
 
         self.assertIs(collator, original)
         self.assertEqual({task.name for task in collator.tasks}, {Task.ASR, Task.S2TT})
+
+    def test_stage_switcher_restores_the_strategy_from_current_epoch(self):
+        strategies = [{Task.TTS: 1.0}, {Task.ASR: 1.0}, {Task.TEXT_AR: 1.0}]
+        datamodule = SimpleNamespace(set_strategy=Mock())
+        trainer = SimpleNamespace(datamodule=datamodule, current_epoch=3)
+        switcher = StageSwitcher(StageConfig(strategies, milestones=[2, 4]))
+
+        switcher.on_fit_start(trainer, Mock())
+        switcher.on_train_epoch_end(trainer, Mock())
+
+        self.assertEqual(
+            datamodule.set_strategy.call_args_list,
+            [unittest.mock.call(strategies[1]), unittest.mock.call(strategies[2])],
+        )
 
 
 def _sample(task: Task) -> Sample:

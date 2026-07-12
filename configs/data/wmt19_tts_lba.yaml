@@ -1,0 +1,16 @@
+root:
+split: train
+sample_index: 0
+max_seconds: 4.0
+sample_limit: 32
+batch_size: 8
+num_workers: 0
+pin_memory: true
+persistent_workers: false
+lba:
+  enabled: true
+  max_batch_seconds: 8.0
+  max_padding_ratio: 0.05
+  prefetch_batches: 0
+  planner_mode: quality
+  drop_last_flush: true

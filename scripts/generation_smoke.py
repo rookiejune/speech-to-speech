@@ -111,14 +111,20 @@ def run(
         )
 
     def observe_output(module, args, kwargs, output) -> None:
-        del args, kwargs
+        del args
         ids = torch.as_tensor(
             module.runtime.audio_generation_allowed_ids,
             device=output.logits.device,
             dtype=torch.long,
         )
+        requested_ids = kwargs.get("_generation_token_ids")
+        values = output.logits[0, -1]
+        if requested_ids is None:
+            values = values.index_select(0, ids)
+        elif not torch.equal(requested_ids, ids):
+            raise RuntimeError("generation used unexpected allowed token ids.")
         allowed_logits.append(
-            output.logits[0, -1].index_select(0, ids).detach().float().cpu()
+            values.detach().float().cpu()
         )
 
     pre_handle = model.register_forward_pre_hook(observe, with_kwargs=True)

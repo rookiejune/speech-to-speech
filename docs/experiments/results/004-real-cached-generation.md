@@ -9,7 +9,7 @@
 - 模型：`Qwen/Qwen3-0.6B` 与 LongCat `16k_4codebooks`；diagnostic 将
   `acoustic_gate` 设为 1。
 
-## 结果
+## 初次结果
 
 真实 cached/full-recompute greedy parity 未通过：
 
@@ -37,10 +37,35 @@
 不再注入 acoustic prompt。观察到的首层差接近 `1 / sqrt(1024) = 0.03125`，与 linear
 bias 初始化范围一致。
 
+## 修复
+
+选择直接修复 model 边界：根据有效 acoustic frame positions 构造 token mask，在
+`acoustic_adapter` 之后把未占用 token 重新置零。这样 linear bias 只在实际 source
+acoustic token 位置生效，训练、full-recompute 与 cached generation 使用同一注入语义。
+
+新增 contract test 使用 weight 为 0、bias 为 `0.25` 的 linear adapter，验证只有 source
+acoustic prompt 占用位置为 `0.25`，前后未占用 token 都严格为 0。
+
+## 复验
+
+修复后使用正式 bf16 + Flash Attention 2 配置重跑：
+
+- cached/full greedy tokens 完全一致，均为 `[152417, 153381]`。
+- cached 输入长度为 `25, 1`，acoustic prompt 注入为 `True, False`，past 状态为
+  `False, True`。
+- full-recompute 输入长度为 `25, 26`，两步都重新注入 acoustic prompt且不携带 past。
+- 两边 acoustic features 均为 `(2, 1024)`，waveform 均为 `(1, 1920)`，全部 finite。
+- 第 1 step logits 最大绝对差 `0.09375`；acoustic features 最大绝对差 `0.125`；
+  waveform 最大绝对差 `0.002497`。这些 bf16 cache/full 数值差没有改变 greedy token。
+- cached/full peak allocated CUDA memory 分别为 `4,843,997,184` 与
+  `5,017,998,848` bytes。
+
+cached 首次计时 `0.979s`，full-recompute `0.414s`；前者包含首次 flow/decode lazy
+warmup，本实验不据此比较性能。
+
 ## 状态
 
-004 验收失败，真实 cached generation 待修复后重跑。当前结果支持两个处理边界：
+004 真实 cached generation/decode 验收通过。标准 padded variable-length batch 仍未验证。
 
-1. 只在实验 wrapper 中禁用 acoustic adapter bias，并记录偏离正式模型配置。
-2. 在 model 层把 adapted acoustic feature 重新 mask 到实际 source acoustic token 位置，
-   使训练、full-recompute 与 cached generation 使用同一注入语义。
+本地回归：`30 passed, 16 subtests passed`；改动文件 Ruff、`py_compile`、shell syntax
+与 `git diff --check` 通过。

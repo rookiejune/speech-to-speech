@@ -18,13 +18,14 @@ acoustic decoding experiments.
 - `docs/design/`: module capabilities and boundaries.
 - `docs/experiments/todo.md`: implementation stages and validation status.
 
-## Smoke Checks
+## Local Checks
 
-Use the local Torch environment recorded in the workspace docs:
+Use the workspace's documented `py312` Torch environment and run from the
+repository collection root:
 
 ```bash
-PYTHONPATH=speech-to-speech/src /Users/zhuyin/miniconda3/envs/py312/bin/python -m py_compile $(rg --files speech-to-speech/src -g '*.py')
-PYTHONPATH=speech-to-speech/src /Users/zhuyin/miniconda3/envs/py312/bin/python -c "import speech_to_speech.pl_module"
+PYTHONPATH=speech-to-speech:speech-to-speech/src:workspace/src /Users/zhuyin/miniconda3/envs/py312/bin/python -m unittest discover -s speech-to-speech/tests -v
+PYTHONPATH=speech-to-speech/src:workspace/src /Users/zhuyin/miniconda3/envs/py312/bin/python -m compileall -q speech-to-speech/src speech-to-speech/scripts speech-to-speech/tests
 ```
 
 ## Docs

@@ -9,19 +9,25 @@
 - P1-closure：8 个任务的 fake raw sample、collator、forward/backward、optimizer step 与 waveform decode 闭环已完成。
 - P1-real：121 上真实 WMT19/LongCat/Qwen3 TTS 与 S2ST 训练闭环及短 S2ST generation/decode smoke 已完成，结果见 `results/001-real-resource-smoke.md`。
 - P1-overfit：真实单 batch TTS/S2ST 的 semantic 与 flow objective 均可优化，结果见 `results/002-single-batch-overfit.md`。
-- P2：Flow/RVQ 相关实现已存在；flow condition/objective 已有 contract tests，RVQ objective contract tests 未完成。
-- P3：独立 request/result、单样本 KV cache、在线 acoustic condition、一次性 generation/decode 和 SampleLogger 复用已完成；标准变长 batch generation 未完成。
-- 测试现状：29 个纯本地测试和 16 个任务子测试覆盖 audio tokenizer、P0 数据/ID 契约、模块所有权、HF backbone 加载与 vocabulary 边界、condition 对齐、全任务 semantic/flow objective 路由、fake P1 closure、cached generation 与 text retention contract。
+- P2：Flow condition/objective 已接入正式训练并有 contract tests；RVQ decoder/model
+  原语已存在，离散 acoustic objective、Lightning 训练组合和 generation service 未完成。
+- P3：独立 request/result、单样本 KV cache、在线 acoustic condition、一次性 generation/decode、SampleLogger 复用及真实 Qwen3/LongCat cached smoke 已完成；标准变长 batch generation 未完成。
+- 测试现状：40 个纯本地测试和 16 个任务子测试覆盖 audio tokenizer、P0 数据/ID 契约、
+  模块所有权、HF backbone 加载与 vocabulary 边界、condition 对齐、全任务 semantic/flow
+  objective 路由、fake P1 closure、cached generation、张量化 acoustic merge、stage resume、
+  codec oracle 与 text retention contract。
 
 ## Generation
 
 - padding + attention mask + 每行独立 EOS/EOA；frame mask 贯穿 acoustic sampling 和 decode。
-- 在真实 Qwen3/LongCat S2ST 上验收 cached generation/decode，并比较 cache 与非 cache greedy 输出。
 
 ## 真实资源验收
 
 - 长时间完整训练使用 TensorBoard 记录监督曲线。
 - 用真实 Qwen checkpoint 验收中英双向 `TextRetentionLogger`，确认训练前 wrapper 与 backbone 的文本输出一致，并观察语音训练期间的 NLL 漂移。
+- 按 `schedules/005-acoustic-oracle-codec-screening.md` 完成 LongCat acoustic flow oracle
+  与 UniCodec unified-token oracle 的 codec/random initialization 500-step single-batch
+  overfit；121 smoke 已完成，结果见 `results/005-acoustic-oracle-codec-screening.md`。
 
 ## 其他工程欠账
 

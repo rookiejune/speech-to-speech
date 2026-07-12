@@ -1,0 +1,7 @@
+name: longcat
+objective: flow
+view: longcat
+frame_rate: 16.6666666667
+decoder: 16k_4codebooks
+cache_dir:
+local_files_only: false

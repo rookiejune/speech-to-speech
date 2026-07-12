@@ -12,14 +12,16 @@ def _merge(embeddings: Tensor) -> Tensor:
     """Apply one-dimensional RoPE over expanded units, then mean-pool them."""
     if embeddings.dim() != 2:
         raise ValueError("embeddings must have shape [units, dim].")
+    positions = torch.arange(embeddings.size(0), device=embeddings.device)
+    return _rotate(embeddings, positions).mean(0)
+
+
+def _rotate(embeddings: Tensor, positions: Tensor) -> Tensor:
     if embeddings.size(-1) % 2 != 0:
         raise ValueError("embedding dimension must be even for RoPE.")
-
-    positions = torch.arange(
-        embeddings.size(0),
-        device=embeddings.device,
-        dtype=torch.float32,
-    )
+    if positions.shape != embeddings.shape[:1]:
+        raise ValueError("RoPE positions must align with embedding units.")
+    positions = positions.to(dtype=torch.float32)
     dimensions = torch.arange(
         0,
         embeddings.size(-1),
@@ -38,7 +40,7 @@ def _merge(embeddings: Tensor) -> Tensor:
         [even * cosines - odd * sines, even * sines + odd * cosines],
         dim=-1,
     )
-    return rotated.flatten(-2).mean(0)
+    return rotated.flatten(-2)
 
 
 def merge_by_positions(
@@ -68,19 +70,37 @@ def merge_by_positions(
     if sequence_length < 1:
         raise ValueError("sequence_length must be positive.")
 
-    output = features.new_zeros(features.size(0), sequence_length, features.size(-1))
-    for row in range(features.size(0)):
-        active = mask[row] & positions[row].ge(0)
-        if not bool(active.any()):
-            continue
-        row_positions = positions[row][active]
-        if bool((row_positions >= sequence_length).any()):
-            raise ValueError("frame position exceeds sequence length.")
-        for position in row_positions.unique(sorted=True).tolist():
-            output[row, position] = _merge(
-                features[row][active & positions[row].eq(position)]
-            )
-    return output
+    active = mask & positions.ge(0)
+    active_positions = positions[active]
+    if bool((active_positions >= sequence_length).any()):
+        raise ValueError("frame position exceeds sequence length.")
+    if active_positions.numel() == 0:
+        return features.new_zeros(
+            features.size(0), sequence_length, features.size(-1)
+        )
+
+    rows = torch.arange(features.size(0), device=features.device)[:, None]
+    groups = (rows * sequence_length + positions)[active]
+    order = groups.argsort(stable=True)
+    groups = groups[order]
+    values = features[active][order]
+
+    indices = torch.arange(groups.numel(), device=groups.device)
+    starts = torch.zeros_like(indices)
+    new_group = torch.ones_like(groups, dtype=torch.bool)
+    new_group[1:] = groups[1:] != groups[:-1]
+    starts[new_group] = indices[new_group]
+    offsets = indices - starts.cummax(dim=0).values
+    values = _rotate(values, offsets)
+
+    size = features.size(0) * sequence_length
+    output = features.new_zeros(size, features.size(-1))
+    output.index_add_(0, groups, values)
+    counts = features.new_zeros(size, 1)
+    counts.index_add_(0, groups, features.new_ones(groups.numel(), 1))
+    return (output / counts.clamp_min(1)).view(
+        features.size(0), sequence_length, features.size(-1)
+    )
 
 
 def base_weight(codec: Codec, tokenizer: AudioTokenizer) -> Tensor:

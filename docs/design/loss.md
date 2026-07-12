@@ -30,6 +30,9 @@ def forward(self, batch: ModelBatch, model) -> Outputs:
 
 正常训练的 objective 组合固定为：所有 batch 计算 semantic CE；audio-target batch 额外计算模型对应的 acoustic objective。Loss 根据已验证的 task target modality 选择路径，不通过布尔开关表达非法组合。
 
+当前正式 `Loss` 只组合 flow acoustic objective。RVQ decoder/model 原语虽然已经存在，离散
+acoustic objective 和对应的 Lightning 训练组合仍未实现。
+
 oracle、REPA 等 diagnostic 或消融使用独立 objective/入口，不进入正式 `Loss` 的模式矩阵。audio-target batch 必须携带完整 acoustic target 字段；缺失直接报错，不静默跳过。
 
 ## 边界

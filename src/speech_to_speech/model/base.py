@@ -79,7 +79,14 @@ class SemanticModel(nn.Module):
         projected = self._audio_output_adapter(hidden_state)
         return F.linear(projected, self.audio_embed_tokens.weight)
 
-    def _logits(self, hidden_state: torch.Tensor) -> torch.Tensor:
+    def _logits(
+        self,
+        hidden_state: torch.Tensor,
+        token_ids: torch.Tensor | None = None,
+        modalities: tuple[bool, bool] | None = None,
+    ) -> torch.Tensor:
+        if token_ids is not None:
+            return self._selected_logits(hidden_state, token_ids, modalities)
         logits = hidden_state.new_full(
             (*hidden_state.shape[:-1], self.runtime.layout.vocab_size),
             float("-inf"),
@@ -88,6 +95,32 @@ class SemanticModel(nn.Module):
         audio_start, audio_end = self.runtime.layout.blocks["audio"]
         logits[..., text_start:text_end] = self.text_logits(hidden_state)
         logits[..., audio_start:audio_end] = self.audio_logits(hidden_state)
+        return logits
+
+    def _selected_logits(
+        self,
+        hidden_state: torch.Tensor,
+        token_ids: torch.Tensor,
+        modalities: tuple[bool, bool] | None,
+    ) -> torch.Tensor:
+        logits = hidden_state.new_empty(*hidden_state.shape[:-1], token_ids.numel())
+        text_start, text_end = self.runtime.layout.blocks["text"]
+        audio_start, audio_end = self.runtime.layout.blocks["audio"]
+        text_mask = token_ids.ge(text_start) & token_ids.lt(text_end)
+        audio_mask = token_ids.ge(audio_start) & token_ids.lt(audio_end)
+        if modalities is None:
+            modalities = bool(text_mask.any()), bool(audio_mask.any())
+
+        if modalities[0]:
+            text_ids = token_ids[text_mask] - text_start
+            logits[..., text_mask] = self.text_logits(hidden_state).index_select(
+                -1, text_ids
+            )
+        if modalities[1]:
+            audio_ids = token_ids[audio_mask] - audio_start
+            logits[..., audio_mask] = self.audio_logits(hidden_state).index_select(
+                -1, audio_ids
+            )
         return logits
 
     def forward(
@@ -99,6 +132,8 @@ class SemanticModel(nn.Module):
         acoustic_input_positions: torch.Tensor | None = None,
         acoustic_input_mask: torch.Tensor | None = None,
         output_hidden_states: bool = False,
+        _generation_token_ids: torch.Tensor | None = None,
+        _generation_modalities: tuple[bool, bool] | None = None,
         **kwargs: Any,
     ) -> CausalLMOutputWithPast:
         if input_ids.dim() != 2:
@@ -124,7 +159,16 @@ class SemanticModel(nn.Module):
             **kwargs,
         )
         hidden_states = backbone_output.hidden_states[-1]
-        logits = self._logits(hidden_states)
+        logit_hidden_states = (
+            hidden_states
+            if _generation_token_ids is None
+            else hidden_states[:, -1:]
+        )
+        logits = self._logits(
+            logit_hidden_states,
+            _generation_token_ids,
+            _generation_modalities,
+        )
         return CausalLMOutputWithPast(
             loss=None,
             logits=logits,
@@ -187,6 +231,32 @@ class SemanticModel(nn.Module):
         if prompt_ids.dim() != 2 or prompt_ids.size(0) != 1:
             raise ValueError("generation currently requires one unpadded prompt row.")
 
+        generation_token_ids = None
+        generation_modalities = None
+        if allowed_token_ids is not None:
+            generation_token_ids = torch.as_tensor(
+                allowed_token_ids,
+                device=prompt_ids.device,
+                dtype=torch.long,
+            )
+            if generation_token_ids.dim() != 1 or generation_token_ids.numel() == 0:
+                raise ValueError(
+                    "allowed_token_ids must be a non-empty 1D sequence."
+                )
+            text_start, text_end = self.runtime.layout.blocks["text"]
+            audio_start, audio_end = self.runtime.layout.blocks["audio"]
+            text_mask = generation_token_ids.ge(text_start) & generation_token_ids.lt(
+                text_end
+            )
+            audio_mask = generation_token_ids.ge(
+                audio_start
+            ) & generation_token_ids.lt(audio_end)
+            if not bool((text_mask | audio_mask).all()):
+                raise ValueError(
+                    "allowed_token_ids contains an invalid vocabulary id."
+                )
+            generation_modalities = bool(text_mask.any()), bool(audio_mask.any())
+
         generated = prompt_ids
         input_ids = prompt_ids
         attention_mask = torch.ones_like(prompt_ids, dtype=torch.bool)
@@ -204,31 +274,23 @@ class SemanticModel(nn.Module):
                 else None,
                 acoustic_input_mask=acoustic_input_mask if inject_acoustic else None,
                 output_hidden_states=collect_audio_condition,
+                _generation_token_ids=generation_token_ids,
+                _generation_modalities=generation_modalities,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
             )
             logits = output.logits[:, -1] / temperature
-            if allowed_token_ids is not None:
-                ids = torch.as_tensor(
-                    allowed_token_ids, device=logits.device, dtype=torch.long
-                )
-                if ids.dim() != 1 or ids.numel() == 0:
-                    raise ValueError(
-                        "allowed_token_ids must be a non-empty 1D sequence."
-                    )
-                if bool((ids < 0).any()) or bool((ids >= logits.size(-1)).any()):
-                    raise ValueError(
-                        "allowed_token_ids contains an invalid vocabulary id."
-                    )
-                allowed = logits.new_full(logits.shape, float("-inf"))
-                allowed.index_copy_(-1, ids, logits.index_select(-1, ids))
-                logits = allowed
             if top_p < 1.0:
                 logits = _top_p_filter(logits, top_p)
-            next_ids = (
+            next_indices = (
                 torch.distributions.Categorical(logits=logits).sample()
                 if do_sample
                 else logits.argmax(dim=-1)
+            )
+            next_ids = (
+                next_indices
+                if generation_token_ids is None
+                else generation_token_ids.index_select(0, next_indices)
             )
             next_ids = next_ids.unsqueeze(-1)
 
@@ -351,6 +413,11 @@ class SemanticModel(nn.Module):
             frame_mask,
         )
         frame_features = self.acoustic_adapter(frame_features)
+        active = frame_mask & positions.ge(0)
+        safe_positions = positions.clamp(0, input_ids.size(1) - 1)
+        token_counts = torch.zeros_like(input_ids)
+        token_counts.scatter_add_(1, safe_positions, active.to(token_counts.dtype))
+        frame_features = frame_features.masked_fill(token_counts.eq(0)[..., None], 0)
         return frame_features * self.acoustic_gate.to(dtype=frame_features.dtype)
 
     def _acoustic_features(self, codes: torch.Tensor) -> torch.Tensor:

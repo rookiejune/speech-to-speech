@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import torch
 from anydataset.types import Modality
@@ -126,6 +126,7 @@ class _GenerationModel(SpeechToSpeechFlowModel):
         use_cache: bool = False,
         **kwargs,
     ) -> CausalLMOutputWithPast:
+        generation_token_ids = kwargs.pop("_generation_token_ids", None)
         del kwargs
         cached_length = 0 if past_key_values is None else past_key_values.length
         source = (
@@ -143,6 +144,8 @@ class _GenerationModel(SpeechToSpeechFlowModel):
             (*input_ids.shape, self.runtime.layout.vocab_size), float("-inf")
         )
         logits[:, -1, next_id] = 0
+        if generation_token_ids is not None:
+            logits = logits.index_select(-1, generation_token_ids)
         hidden = torch.zeros(*input_ids.shape, 2)
         hidden[:, -1] = torch.tensor([source, length])
         cache = SimpleNamespace(length=length, source=source) if use_cache else None
@@ -159,6 +162,62 @@ class _GenerationModel(SpeechToSpeechFlowModel):
 
 
 class GenerationTest(unittest.TestCase):
+    def test_generation_only_computes_the_allowed_output_head(self):
+        model = SemanticModel(
+            ModelConfig(
+                audio_embed_adapter=None,
+                audio_output_adapter=None,
+                acoustic_adapter=None,
+            ),
+            runtime_snapshot=_TinyRuntime(),
+        ).eval()
+
+        with patch.object(
+            model,
+            "text_logits",
+            side_effect=AssertionError("text head should not run"),
+        ), patch.object(
+            model,
+            "audio_logits",
+            wraps=model.audio_logits,
+        ) as audio_logits:
+            generated = model.generate_semantic(
+                torch.tensor([[1, 2]]),
+                max_new_tokens=1,
+                allowed_token_ids=model.runtime.audio_generation_allowed_ids,
+                do_sample=False,
+                use_cache=False,
+            )
+
+        self.assertIn(int(generated[0, -1]), model.runtime.audio_generation_allowed_ids)
+        self.assertEqual(audio_logits.call_args.args[0].size(1), 1)
+
+    def test_acoustic_adapter_bias_only_affects_prompt_positions(self):
+        rt = _TinyRuntime()
+        model = SemanticModel(
+            ModelConfig(
+                audio_embed_adapter=None,
+                audio_output_adapter=None,
+                acoustic_adapter="linear",
+            ),
+            runtime_snapshot=rt,
+        ).eval()
+        with torch.no_grad():
+            model.acoustic_adapter.weight.zero_()
+            model.acoustic_adapter.bias.fill_(0.25)
+            model.acoustic_gate.fill_(1)
+
+        acoustic = model._acoustic_prompt_embedding(
+            torch.tensor([[1, 2, 3]]),
+            torch.tensor([[[2], [1]]]),
+            torch.tensor([[1, 1]]),
+            None,
+        )
+
+        self.assertTrue(torch.equal(acoustic[0, 0], torch.zeros(8)))
+        self.assertTrue(torch.equal(acoustic[0, 1], torch.full((8,), 0.25)))
+        self.assertTrue(torch.equal(acoustic[0, 2], torch.zeros(8)))
+
     def test_tiny_qwen_cache_matches_full_recompute(self):
         torch.manual_seed(0)
         rt = _TinyRuntime()

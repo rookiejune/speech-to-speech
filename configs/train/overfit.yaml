@@ -1,0 +1,9 @@
+seed: 0
+max_steps: 500
+learning_rate: 0.0003
+weight_decay: 0.01
+normalize_features: true
+flow:
+  method: midpoint
+  nfe: 20
+  num_steps: 10

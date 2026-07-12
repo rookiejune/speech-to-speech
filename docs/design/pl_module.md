@@ -13,14 +13,21 @@ Lightning 训练循环、生成路径和日志。生成契约的权威定义见 
 - `generation.Request`：无 padding 的 semantic prompt、task 和可选 source acoustic condition；不携带 target labels。
 - `generation.Result`：裁掉 BOA/EOA 后的 token、可选 acoustic features 和 waveform；三个输出来自同一次生成。
 - `generation.requests_from_batch()`：仅供 teacher-forcing 样本日志使用的 adapter，不是真实推理入口。
-- `decode_generated_audio()`：`semantic ids [B, T, K_semantic]` + `acoustic features [B, T, D]` → waveform，只要求 frame 轴对齐。FM 模型直接提供 features，RVQ 模型提供 codes 由 codec dequantize。
+- `decode_generated_audio()`：`semantic ids [B, T, K_semantic]` 与 acoustic features 或
+  codes → waveform，只要求 frame 轴对齐。helper 已支持 codes dequantize，但当前正式
+  generation service 只组合 flow model。
 
 ## callback 对外能力
 
-- `StageSwitcher`：按 epoch milestone 切换 datamodule 的任务权重策略。
+- `StageSwitcher`：按 epoch milestone 切换 datamodule 的任务权重策略；fit start 根据
+  `current_epoch` 恢复对应阶段，不依赖 callback 私有状态续训。
+- `DistributedContract`：在 fit start 校验实际 world size，并为显式
+  `DistributedSampler` 推进 epoch。
+- `logging.CodecOracleLogger`：对固定 prepared codec codes 聚合 oracle loss/metric，
+  调用模块公开采样入口，并通过 codec decoder 记录 reconstruction 与 sampled waveform。
 - `logging.OutputsLogger`：只消费 `Outputs` 中的 `LossItem`，按 task 聚合记录，不依赖模型内部 head；不同 rank 的 task 列表可能不同，不做同步。
 - `logging.GradLogger`：对指定参数比较两个 loss 分项的梯度范数。
-- `logging.FlowMatchingLogger`:记录 flow time sampler 配置和训练采样时间。
+- `logging.FlowMatchingLogger`：记录 flow time sampler 配置和训练采样时间。
 - `logging.SampleLogger`：定期对固定样本生成；token、acoustic output 与 waveform 必须复用同一次生成结果。
 - `logging.TextRetentionLogger`：在 fit 开始和固定 step 对用户提供的纯文本 probes 做 greedy generation，并记录 reference teacher-forced NLL、相对初始 NLL 变化和解码文本；不接入训练 loss。
 

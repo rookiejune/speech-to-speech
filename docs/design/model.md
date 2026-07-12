@@ -26,6 +26,8 @@ def forward(
 
 - 模型只返回 logits 和可选 hidden states，不接收 labels，也不计算 loss；objective 由外部 `Loss` 组合。
 - `logits` 是拼接后的 global token 分布；内部保留 text/audio 两个 output head，但对外只承诺 global `logits`。
+- generation 已知 allowed token IDs 时，内部只计算对应 modality 的 output head，并直接在
+  该 ID 子集上采样；这条私有优化不改变公开 `forward()` 的 global logits 契约。
 - text 输入和输出分别通过 HF 的 `get_input_embeddings()` / `get_output_embeddings()` 获取；当模型 embedding 行数大于 tokenizer vocabulary 时，text logits 只覆盖 layout 的 text block。
 - acoustic decoder 需要 backbone 表示时传 `output_hidden_states=True` 并使用 `output.hidden_states[-1]`。
 - condition 接口 `target_frame_condition()` / `target_frame_label_condition()` 统一消费 token 自身位置 `p`；causal shift `p - 1` 只在 model 内部处理（见总览 §2.4）。
@@ -58,7 +60,9 @@ inputs_embeds = semantic_feature + acoustic_feature
 
 gate 初始化为 0，避免在训练初期破坏原始 backbone。实现状态：acoustic 路径的 gate 已实现（`base.py` 的 `acoustic_gate`）；semantic 路径的 `semantic_gate * semantic_shift` 在 anytrain 的 `Embedding` 中没有实现，目前 semantic embedding 直接输出 `semantic_base`，该项作为待实现的注入形式保留。
 
-acoustic ids 先经过 codec 得到 frame-level feature，再按 `acoustic_input_positions` 使用 `embedding/audio.py` 的 merge 规则合成为 BPE-level feature，加到对应 input embedding 上。
+acoustic ids 先经过 codec 得到 frame-level feature，再按 `acoustic_input_positions` 使用
+`embedding/audio.py` 的张量化 RoPE + grouped mean 规则合成为 BPE-level feature，加到对应
+input embedding 上。
 codec feature 进入模型时统一转换到 backbone embedding 的 device/dtype；codec wrapper
 不绑定训练模型的精度或设备策略。source acoustic prompt 与 flow target 共用这条边界。
 
@@ -76,6 +80,8 @@ class AcousticDecoder(Protocol):
 - acoustic representation 由 Runtime codec 固定，不属于 batch 或 model 的任意切片配置。batch 保存完整离散 acoustic codes，`acoustic_codes_to_features()` 的输入、latent feature dimension 和 `decode_features()` 必须属于同一 codec contract。
 - target 对齐：target BPE hidden 按 `bpe_spans` repeat_interleave 得到 frame condition `[B, F, H]`；target 完整、有序 acoustic codebooks 经 codec 得到 latent `[B, F, D]`。
 - RVQ decoder 是 frame 并行、codebook 自回归的离散预测器，teacher forcing 返回每个 codebook 的 logits。
+- RVQ 当前只完成 model/decoder 原语；正式 acoustic objective、`SpeechToSpeech` 训练组合和
+  generation service 尚未接入。
 
 ## 边界
 
