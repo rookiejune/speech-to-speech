@@ -1,10 +1,12 @@
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, TypedDict
+from collections.abc import Iterable, Mapping
+from typing import TypedDict
 
 from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader
 
-from .collator import Batch, Collator, Task
+from .collator import Collator
+from .types import ModelBatch, Task
 
 
 class DataLoaderConfig(TypedDict):
@@ -14,39 +16,35 @@ class DataLoaderConfig(TypedDict):
 
 @dataclass
 class Config:
-    dataset: str
+    codec: str
     dataloader: DataLoaderConfig
-    lba: bool = True
 
     def train_dataset(self):
-        from zhuyin.datasets.wmt19_tts import wmt19_tts_longcat
+        from zhuyin.datasets.wmt19_tts import wmt19_tts_codec
 
-        return wmt19_tts_longcat()
+        return wmt19_tts_codec(codec=self.codec)
 
 
 class DataModule(LightningDataModule):
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, strategy: Mapping[Task, float]) -> None:
         super().__init__()
 
         self.config = config
-
-        self._strategy: Mapping[Task, float]
+        self.collator = Collator(strategy)
+        self._train_dataset = None
 
     def setup(self, stage: str) -> None:
-        self.train_dataset = self.config.train_dataset()
+        self._train_dataset = self.config.train_dataset()
 
-    def set_strategy(self, strategy: Mapping[Task, float]):
-        self._strategy = strategy
+    def set_strategy(self, strategy: Mapping[Task, float]) -> None:
+        self.collator.set_strategy(strategy)
 
-    @property
-    def collator(self):
-        return Collator(self._strategy)
-
-    def train_dataloader(self) -> Iterable[Batch]:
-        # 通过外层的callback控制weight_dict
+    def train_dataloader(self) -> Iterable[ModelBatch]:
+        if self._train_dataset is None:
+            raise RuntimeError("DataModule.setup() must run before train_dataloader().")
         return DataLoader(
-            self.train_dataset,
+            self._train_dataset,
             **self.config.dataloader,
-            persistent_workers=False,  # 每个epoch需要重建
+            persistent_workers=False,
             collate_fn=self.collator,
         )

@@ -94,16 +94,11 @@ def base_weight(codec: Codec, tokenizer: AudioTokenizer) -> Tensor:
 
     rows = []
     for token_id in range(tokenizer.vocab_size):
-        units, counts = tokenizer.expand_with_counts([token_id])
+        units = tokenizer.decode([token_id])
         unit_ids = _unit_ids(units, codebook)
-        count = int(counts[0].item()) if isinstance(counts, Tensor) else int(counts[0])
-        if count != unit_ids.size(0):
-            raise ValueError(
-                "audio tokenizer expansion count does not match expansion."
-            )
         if unit_ids.size(0) == 0:
             raise ValueError(
-                f"audio tokenizer token {token_id} expands to no codec units."
+                f"audio tokenizer token {token_id} decodes to no codec units."
             )
         rows.append(_merge(_unit_embeddings(codebook, unit_ids)))
 

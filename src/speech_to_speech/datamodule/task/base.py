@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from functools import cache
-from typing import ClassVar
+from typing import ClassVar, cast
 
 import torch
+from anydataset.types import Modality
 from torch import Tensor
 
 from ...runtime import runtime
@@ -19,11 +19,7 @@ class TaskBase:
     samples stay uncached because they only wrap existing speech tensors.
     """
 
-    source: ClassVar[str | None]
-    target: ClassVar[str]
     template: ClassVar[str]
-    paired: ClassVar[bool]
-
     name: ClassVar[Task]
     _placeholder: ClassVar[str] = "$$$PLACEHOLDER$$$"
 
@@ -36,11 +32,12 @@ class TaskBase:
         return cls.template.format(**fields)
 
     @classmethod
-    def _prompt_ids(cls, sample: SpeechPair):
-        return torch.tensor(
+    def _prompt(cls, sample: SpeechPair) -> str:
+        return cast(
+            str,
             runtime().text_tokenizer.apply_chat_template(
                 [{"role": "user", "content": cls.instruction(sample)}],
-                tokenize=True,
+                tokenize=False,
                 add_generation_prompt=True,
                 enable_thinking=False,
                 return_dict=False,
@@ -49,24 +46,27 @@ class TaskBase:
 
     @classmethod
     def _source_target(cls, sample: SpeechPair):
-        if cls.paired:
+        if cls.name.paired:
             return sample.source, sample.target
-        else:
-            return sample.target, sample.target
+        return sample.target, sample.target
 
     @classmethod
     def sample(cls, speech_pair: SpeechPair) -> Sample:
-        _prompt_ids = cls._prompt_ids(speech_pair)
+        prompt = cls._prompt(speech_pair)
 
         source, target = cls._source_target(speech_pair)
 
         source_acoustic_ids = None
         source_acoustic_positions = None
-        if cls.source is not None:
-            prefix, suffix = _split(_prompt_ids, cls.placeholder_ids())
-            source_ids = _global_ids(source, cls.source)
+        source_modality = cls.name.source_modality
+        target_modality = cls.name.target_modality
+        if source_modality is not None:
+            prefix_text, suffix_text = _split(prompt, cls._placeholder)
+            prefix = _text_ids(prefix_text)
+            suffix = _text_ids(suffix_text)
+            source_ids = _global_ids(source, source_modality)
 
-            if cls.source == "audio":
+            if source_modality is Modality.AUDIO:
                 source_ids = _boa_eoa(source_ids)
                 source_acoustic_ids = source.acoustic_ids
                 if source_acoustic_ids is not None:
@@ -81,13 +81,17 @@ class TaskBase:
 
             input_ids = torch.cat([prefix, source_ids, suffix])
         else:
-            input_ids = _prompt_ids
+            input_ids = _text_ids(prompt)
 
-        response_ids = _global_ids(target, cls.target)
+        response_ids = _global_ids(target, target_modality)
         target_acoustic_labels = None
         target_acoustic_positions = None
 
-        if cls.target == "audio":
+        if target_modality is Modality.AUDIO:
+            if target.acoustic_ids is None:
+                raise ValueError(
+                    f"{cls.name.value} requires target acoustic codes."
+                )
             response_ids = _boa_eoa(response_ids)  # <boa> ... <eoa>
             target_acoustic_labels = target.acoustic_ids
         else:
@@ -95,7 +99,7 @@ class TaskBase:
 
         full_ids = torch.cat([input_ids, response_ids])
         labels = torch.full_like(full_ids, -100)
-        if cls.target == "audio":
+        if target_modality is Modality.AUDIO:
             # BOA is already present in input_ids and is a structural prefix,
             # so only semantic BPE tokens and EOA are supervised.
             labels[len(input_ids) + 1 :] = response_ids[1:]
@@ -123,12 +127,6 @@ class TaskBase:
             acoustic_label_positions=target_acoustic_positions,
             task=cls.name,
         )
-
-    @classmethod
-    @cache
-    def placeholder_ids(cls):
-        return torch.tensor(runtime().text_tokenizer.encode(cls._placeholder))
-
 
 class TaskFactory:
     _registry: ClassVar[dict[Task, type[TaskBase]]] = {}
@@ -159,27 +157,29 @@ class TaskFactory:
 
 
 def _split(
-    sequence: Tensor,
-    delimiter: Tensor,
-) -> tuple[Tensor, Tensor]:
-    limit = len(sequence) - len(delimiter) + 1
-    for start in range(limit):
-        if (sequence[start : start + len(delimiter)] == delimiter).all():
-            return (
-                sequence[:start],
-                sequence[start + len(delimiter) :],
-            )
-    raise ValueError("input placeholder was not found in chat template ids.")
+    sequence: str,
+    delimiter: str,
+) -> tuple[str, str]:
+    parts = sequence.split(delimiter)
+    if len(parts) != 2:
+        raise ValueError("input placeholder must occur exactly once in chat template.")
+    return parts[0], parts[1]
 
 
-def _global_ids(speech: Speech, modality: str):
-    if modality == "text":
+def _text_ids(text: str) -> Tensor:
+    return torch.tensor(
+        runtime().text_tokenizer.encode(text, add_special_tokens=False)
+    )
+
+
+def _global_ids(speech: Speech, modality: Modality):
+    if modality is Modality.TEXT:
         local_ids = speech.text_ids
-    elif modality == "audio":
+    elif modality is Modality.AUDIO:
         local_ids = speech.bpe_ids
     else:
-        raise ValueError
-    return runtime().layout.to_global(modality, local_ids)
+        raise ValueError(f"unsupported modality: {modality.value}")
+    return runtime().layout.to_global(modality.value, local_ids)
 
 
 def _boa_eoa(ids: Tensor):

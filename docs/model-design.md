@@ -1,9 +1,14 @@
-# Speech-to-Speech 模型设计
+# Speech-to-Speech 设计总览
 
-本文保留详细设计背景和推理过程。稳定接口见 `contracts.md`，实施顺序见
-`roadmap.md`。
+本文只维护跨模块契约：总体结构、数据契约、position 语义、任务定义和生成契约。各模块对外提供的能力、输入输出和边界见 `docs/design/`：
 
-本文定义 `speech_to_speech` 的模型边界、数据契约和实现路线。目标是先冻结接口，使 semantic 模型和 acoustic decoder 可以独立演进。
+- [datamodule](design/datamodule.md)：raw sample 到 `ModelBatch` 的构造。
+- [model](design/model.md)：semantic backbone、embedding 注入和 acoustic decoder。
+- [loss](design/loss.md)：objective 组合和监督契约。
+- [runtime](design/runtime.md)：已加载资源的单一入口。
+- [pl_module 与 callback](design/pl_module.md)：训练循环、生成路径和日志。
+
+阶段状态与工程待办不在设计文档中维护，见 `docs/experiments/todo.md`。
 
 ## 1. 总体结构
 
@@ -20,13 +25,13 @@ ModelBatch
     └── acoustic target
          │
          ▼
-SpeechToSpeechFlowModel
+SpeechToSpeechFlowModel / SpeechToSpeechRVQModel
     ├── Input Embedding
     ├── Semantic Backbone
     ├── Text / Audio Logits
     └── Acoustic Decoder
-         ├── Causal RVQ Decoder
-         └── Flow Matching Decoder
+         ├── Flow Matching Decoder
+         └── Causal RVQ Decoder
 ```
 
 设计原则：
@@ -36,6 +41,7 @@ SpeechToSpeechFlowModel
 3. response 的 acoustic target 不作为 semantic backbone 的输入。
 4. semantic backbone 和 acoustic decoder 通过稳定的 hidden-state contract 连接。
 5. `SpeechToSpeechFlowModel` 和 `SpeechToSpeechRVQModel` 是显式的模型组装入口。
+6. codec 是实验级共享身份，同时决定 runtime codec、dataset codec view 和 raw audio view。
 
 ## 2. 数据契约
 
@@ -47,7 +53,7 @@ class Speech:
     semantic_ids: Tensor                    # [L, M_semantic]
     acoustic_ids: Tensor | None             # [L, M_acoustic]
     text_ids: Tensor
-    language: Language
+    language: str
 
     @cached_property
     def bpe_ids(self) -> Tensor: ...
@@ -56,19 +62,34 @@ class Speech:
     def bpe_spans(self) -> Tensor: ...
 ```
 
-`semantic_ids` 和 `acoustic_ids` 共享同一个 frame 轴，但可以有不同的 codebook 数量：`semantic_ids` 为 `[L, M_semantic]`，`acoustic_ids` 为 `[L, M_acoustic]`。
+`semantic_ids` 和 `acoustic_ids` 共享同一个 frame 轴，但可以有不同的 codebook 数量。single-codebook codec 仍使用 `[L, 1]` 的 `acoustic_ids`；`None` 只表示当前任务不需要 acoustic side-channel，不表示 codec 没有 acoustic code。
 
-`bpe_ids` 是 audio tokenizer 产生的本地 BPE ids。`bpe_spans` 与 `bpe_ids` 等长，记录每个 BPE token 覆盖的 semantic frame 数量，例如 `[2, 1, 2]` 表示三个 BPE token 分别覆盖 2、1、2 个 frame。
+`bpe_ids` 是 audio tokenizer 产生的本地 BPE ids。`bpe_spans` 与 `bpe_ids` 等长，记录每个 BPE token 覆盖的 semantic frame 数量，且必须完整覆盖全部 semantic frame。
 
-`audio_tokenizer.expand(bpe_ids)` 返回 frame-level semantic units，形状为 `[T, K_semantic]`；每个 frame unit 包含全部 semantic codebooks，不能只取第一个 codebook。生成或解码 batch 时，调用方负责检查各行的 `T` 是否一致并进行 `stack` 或 padding；tokenizer 只负责单条序列的 token 到 frame 展开。正式 BPE tokenizer 使用 `anytrain.tokenizer.CodecBPE`，其 frame 契约就是 `[T, K]`；`speech_to_speech` 只在 runtime 里通过 `TorchCodecBPE` 做 Tensor 便利包装，不重新定义 tokenizer 语义。
+`audio_tokenizer.decode(bpe_ids)` 返回 frame-level semantic units，形状为 `[T, K_semantic]`；每个 frame unit 包含全部 semantic codebooks。tokenizer 只负责单条序列的 token 到 frame 解码；batch 各行的 `T` 对齐和 padding 由调用方负责。
 
-`global_ids` 不属于 `Speech` 的缓存属性。datamodule 在把 prompt 拼接进 backbone 输入时，使用 layout 将 `bpe_ids` 转成 global ids。
+`global_ids` 不属于 `Speech` 的缓存属性。datamodule 在拼接 backbone 输入时使用 layout 将 `bpe_ids` 转成 global ids。
 
-single-codebook codec 仍使用 `[L, 1]` 的 `acoustic_ids`；`None` 只表示当前任务不需要 acoustic side-channel，不表示 codec 没有 acoustic code。
+`language` 当前为 `str`；`Language` 枚举已提供归一化逻辑但尚未接入（见 todo）。
 
-### 2.2 ModelBatch
+### 2.2 ID 空间与 special token
 
-当前 `CausalBatch` 的 acoustic 字段无法表达 acoustic frame 与 semantic token 的对齐关系。建议逐步替换为：
+所有跨模块接口必须区分 local ID 与 global ID：
+
+- `Speech.text_ids` 是 text tokenizer local ID。
+- `Speech.bpe_ids` 是 audio tokenizer local ID。
+- `Speech.acoustic_ids` 是 codec local ID。
+- `ModelBatch.input_ids`、`labels` 和 generation sequence 是 layout global ID。
+
+audio layout block 与 audio head 覆盖完整的 `semantic audio tokens + BOA + EOA`。但以下三个集合语义不同，不能混用：
+
+- audio head block：semantic audio tokens、BOA、EOA；用于模型输出维度。
+- audio generation allowed IDs：semantic audio tokens、EOA；BOA 已由 prompt builder 添加，不能再次生成。
+- codec-decodable audio IDs：仅 semantic audio tokens；BOA、EOA 不能传给 audio tokenizer 或 codec。
+
+text BOS/EOS 属于 text tokenizer 原生 vocabulary，因此不需要额外追加 head 行；generation 仍通过统一的 allowed-token 接口约束目标 modality。Runtime 负责公开上述范围或判断能力，消费方不自行从 layout block 推导。
+
+### 2.3 ModelBatch
 
 ```python
 ACOUSTIC_PAD_ID = -1
@@ -83,155 +104,47 @@ class ModelBatch:
     acoustic_labels: Tensor | None
     acoustic_label_positions: Tensor | None
     tasks: list[Task]
-
-    @cached_property
-    def attention_mask(self) -> Tensor:
-        return self.input_ids != runtime().pad_token_id
-
-    @cached_property
-    def acoustic_input_mask(self) -> Tensor | None:
-        if self.acoustic_input_ids is None:
-            return None
-        return (self.acoustic_input_ids != ACOUSTIC_PAD_ID).all(dim=-1)
-
-    @cached_property
-    def acoustic_label_mask(self) -> Tensor | None:
-        if self.acoustic_labels is None:
-            return None
-        return (self.acoustic_labels != ACOUSTIC_PAD_ID).all(dim=-1)
 ```
 
-acoustic input 和 labels 只需要在字段语义上明确区分，不额外包装成简单 dataclass：
+字段职责：
 
-- `acoustic_input_*`：输入条件，只覆盖 prompt 中已经可见的 audio semantic span；`spans` 描述 acoustic frame 与 semantic BPE token 的对齐。
+- `acoustic_input_*`：输入条件，只覆盖 prompt 中已经可见的 audio semantic span，供 semantic backbone 注入 source acoustic prompt。
 - `acoustic_labels`：输出监督，只用于训练 acoustic decoder，不能注入 semantic backbone。
-- `acoustic_label_positions`：输出 frame 对应的 semantic label position。它和 `acoustic_input_positions` 语义不同：前者供 acoustic decoder 从 target label 或对应的 response hidden 读取 condition，后者供 semantic backbone 注入 source acoustic prompt。
-- backbone hidden 的 condition position 是 `acoustic_label_positions - 1`，因为 causal LM 的 position `p - 1` 预测 `labels[p]`。
+- `acoustic_label_positions`：输出 frame 对应的 semantic label position（见 2.4）。
 
-mask 不作为独立字段存储，而是由 padding 值派生并缓存。`input_ids` 使用 `runtime().pad_token_id` padding；semantic `labels` 按 Transformers causal LM 契约使用 `-100` padding，使其不参与 loss。acoustic IDs 是未加 global offset 的 codec 局部 ID，使用不会与合法 code 冲突的固定负数 `ACOUSTIC_PAD_ID = -1` padding；`acoustic_input_positions` 对每个 acoustic frame 给出其对应的完整输入序列位置，padding 使用 `-1`。
+padding 与 mask 约定：
 
-acoustic IDs 传给 codec 或 embedding 前，必须先通过派生 mask 把 `-1` 替换成合法的占位 ID，并在得到 feature 后重新应用 mask。一个 batch 的 acoustic 字段必须整体存在或整体不存在：不支持 batch 内部分 row 为 `None`。由 task sampler/bucketing 保证同一 batch 的 source/target modality 一致，避免 DDP 中不同 rank 走不同参数路径。position tensor 的有效值必须小于对应 `input_ids` 的序列长度。
+- `input_ids` 使用 `runtime().pad_token_id` padding；semantic `labels` 按 Transformers causal LM 契约使用 `-100` padding，且与 `input_ids` 未移位对齐（shift 在 loss 内部完成）。
+- acoustic IDs 是未加 global offset 的 codec 局部 ID，使用 `ACOUSTIC_PAD_ID = -1` padding；position tensor 同样以 `-1` padding，有效值必须小于对应序列长度。
+- mask 不作为独立字段存储，由 padding 值派生并以 `cached_property` 缓存；`ModelBatch` 在完成 padding 和 device transfer 后视为不可变。
+- acoustic IDs 传给 codec 或 embedding 前，必须先通过派生 mask 把 `-1` 替换成合法的占位 ID，并在得到 feature 后重新应用 mask。
+- 一个 batch 的 acoustic 字段必须整体存在或整体不存在，不支持部分 row 为 `None`。由 task sampler/bucketing 保证同一 batch 的 source/target modality 一致，避免 DDP 中不同 rank 走不同参数路径。
 
-这些 mask 使用 `cached_property`，因此 `ModelBatch` 在完成 padding 和 device transfer 后视为不可变；不能在首次访问 mask 后原地替换其中的 tensor。
+`ModelBatch.from_samples()` 是进入模型前建立跨字段不变量的唯一边界：
 
-## 3. 模型接口
+- `input_ids` 与 `labels` shape 相同。
+- `acoustic_input_ids` 与 `acoustic_input_positions` 必须同时存在或同时不存在。
+- `acoustic_labels` 与 `acoustic_label_positions` 必须同时存在或同时不存在。
+- acoustic 字段存在时，batch/frame 轴严格对齐，有效 position 指向非 padding token。
+- 同一 batch 的 task 必须具有相同的 source/target modality，即相同模型执行路径。
 
-```python
-class SpeechToSpeechFlowModel(nn.Module):
-    def forward(
-        self,
-        input_ids: Tensor,
-        *,
-        attention_mask: Tensor | None = None,
-        acoustic_input_ids: Tensor | None = None,
-        acoustic_input_positions: Tensor | None = None,
-        acoustic_input_mask: Tensor | None = None,
-        output_hidden_states: bool = False,
-    ) -> CausalLMOutputWithPast: ...
+`ModelBatch` 是训练或 teacher-forcing evaluation 的完整监督结构，不表达缺少 target 的真实推理请求。真实推理使用独立的 generation 输入接口。
 
-```
+### 2.4 Position 语义
 
-模型只负责返回 logits 和可选 hidden states，不接收 labels，也不计算 loss。semantic、flow matching 等 objective 由外部 `Loss` 组合；objective 通过 `layout`、`target_frame_condition()` 和 `acoustic_decoder` 这些公开接口读取监督所需的表示。`OutputsLogger` 只消费 `LossItem` 中的 batch-level loss/detail，不依赖模型内部 head。
+设 target semantic BPE token `bpe_k` 在完整序列中的位置为 `p`，则 `labels[p] = bpe_k`（labels 未移位）。
 
-semantic 模型沿用 Transformers causal LM 的 logits 和 generation 契约，但不接收 `labels`，也不计算 loss。`logits` 表示拼接后的 global token 分布；外部 objective 根据 `layout` 对 text/audio token 分别统计 CE，`-100` padding 不参与计算。acoustic decoder 需要 backbone 表示时传入 `output_hidden_states=True` 并使用 `output.hidden_states[-1]`。KV cache 和 semantic generation 继续复用标准 causal LM 能力。
+- `acoustic_input_positions`：source acoustic frame 对应的输入序列位置，指向该 frame 所属 source BPE token 的位置。
+- `acoustic_label_positions`：target acoustic frame 记录 `p`，即该 frame 所属 target BPE token 自己的位置。
 
-模型内部可以保留 text/audio 两个 output head，但对外只承诺拼接后的 global `logits`；loss 不依赖具体 head 或 backbone 类型。
+所有 data、loss、teacher-forcing 和 generation 调用方统一传 **token 自身位置 `p`**。causal LM 的 position `p - 1` 预测 `labels[p]`，这一 shift 只由 model 内部处理，不暴露给调用方：
 
-acoustic decoder 的 hidden 对齐支持 teacher-forcing 和 generation 两条路径。训练时使用数据层提供的 `acoustic_label_positions`；使用 backbone hidden 时减一得到 causal prediction position。推理时没有 labels，则使用 `logits[:, :-1].argmax(-1)` 得到预测的 next-token，再根据预测 audio BPE 的 tokenizer spans 展开 hidden。两条路径最终都得到 frame-level condition，不在 generation 代码中重复实现对齐逻辑。
+- backbone hidden 路径：`target_frame_condition(hidden_states, acoustic_label_positions)`，内部取 `hidden[p - 1]`。
+- oracle 路径：`target_frame_label_condition(labels, acoustic_label_positions)`，直接读取并嵌入 `labels[p]`。
 
-acoustic decoder 的 condition 形态、采样结果和 codec 衔接取决于具体 decoder，P0 不统一其 output 类型。模型的公开接口不应暴露具体 Qwen layer、codec adapter 或 decoder layer，具体实现放在 model 内部 helper 中。
+两条路径的调用方约定完全对称。生成时每一步的最后一个 hidden 预测本步采样 token；若采样出 audio BPE token，则立即按该 token 的 span 展开并收集 hidden。EOA/EOS 的 hidden 不进入 acoustic frame condition。
 
-batch generation 的目标契约是标准批量自回归：变长响应通过 padding 和 attention mask 处理，每行独立跟踪 eoa；frame 轴同样以 padding + frame mask 贯穿 flow sampling 和 `decode_features()`，不要求 batch 内各行 frame 数相等。当前实现是过渡状态：`pl_module` 的 generation 按行循环调用单样本路径，`generate_audio` 对 batch 内不等长的 frame 展开直接报错；这些限制属于实现欠账，不属于契约。
-
-## 4. Embedding 和条件注入
-
-输入分成三路：
-
-```text
-text ids
-    └── backbone text embedding
-
-semantic audio ids
-    ├── codec semantic codebook 初始化的 embedding
-    └── semantic adapter
-
-acoustic prompt
-    └── codec.acoustic_codes_to_features()
-        └── acoustic adapter
-```
-
-建议注入形式：
-
-```python
-semantic_feature = semantic_base + semantic_gate * semantic_shift
-acoustic_feature = acoustic_gate * acoustic_feature
-inputs_embeds = semantic_feature + acoustic_feature
-```
-
-其中 gate 初始化为 0，避免在训练初期破坏原始 backbone。
-
-实现状态：acoustic 路径的 gate 已在 `model/base.py` 中实现（`acoustic_gate`，零初始化）。semantic 路径的 `semantic_gate * semantic_shift` 在 anytrain 的 `Embedding` 中没有实现，目前 semantic embedding 直接输出 `semantic_base`；该项作为待实现的注入形式保留在此。两路 embedding 分开计算：`input_ids` 先得到 BPE-level semantic embedding；acoustic ids 先经过 codec 得到 frame-level feature，再根据数据层提供的 `acoustic_input_positions` 使用 `model/embedding/audio.py` 的 merge 规则合成为 BPE-level feature，最后加到对应的 input embedding 上。model 不搜索 source audio token，也不判断 acoustic prompt 边界。
-
-acoustic target 的 codebook 数量是 model/runtime 的固定配置，不属于 batch。batch 保存完整的离散 acoustic codes，decoder 在统一配置下选择前 `k` 个 codebook 转为连续 latent。该配置必须同时决定 `acoustic_codes_to_features()` 的输入、latent feature dimension 和 `decode_features()` 使用的 codec decoder；如果底层 codec 只提供固定 codebook decoder，应配置 decoder 名称而不是在模型中假设任意 `k` 都可用。
-
-当前 `model/embedding/audio.py` 已经提供 codec codebook 初始化和 BPE merge 的雏形，可以沿用；多码本 BPE token 先展开为 `[frames, K_semantic]`，同一 frame 内聚合各 semantic codebook embedding，再沿 frame 轴应用 RoPE 和 mean-pooling。
-
-## 5. 推荐的第一版模型
-
-第一版采用：
-
-```text
-semantic backbone: causal language model
-acoustic decoder: flow matching
-```
-
-理由：semantic token 数量较少，适合 autoregressive；acoustic frame 数量较多，使用 flow matching 可避免 RVQ 多码本的长序列自回归开销。
-
-训练路径：
-
-```text
-semantic prompt + acoustic prompt
-        │
-        ▼
-semantic backbone
-        │
-        ├── semantic cross entropy
-        │
-        └── hidden states
-                │
-                ▼
-        BPE expand / frame alignment
-                │
-                ▼
-        flow matching acoustic loss
-```
-
-保留可替换 decoder 的 velocity-model 协议；training objective 放在 `loss/flow_matching.py`：
-
-```python
-class AcousticDecoder(Protocol):
-    latent_dim: int
-
-    def __call__(self, x_t: Tensor, t: Tensor, *, condition: Tensor) -> Tensor: ...
-```
-
-模型只冻结 velocity model 的输入输出；不同 decoder 的 objective 和采样策略由外部 loss/generation 模块组合，不让 model 承担 loss 聚合。
-
-acoustic target 的具体对齐为：
-
-```text
-target BPE hidden [B, BPE, H]
-        │ repeat_interleave(target.bpe_spans)
-        ▼
-target frame condition [B, F, H]
-
-target acoustic codes [B, F, N]
-        │ 选择配置中的前 k 个 codebook，再经 codec
-        ▼
-target acoustic latent [B, F, D]
-```
-
-## 6. 任务定义
+## 3. 任务定义
 
 任务与输出类型必须保持一致：
 
@@ -243,176 +156,59 @@ target acoustic latent [B, F, D]
 | TTS | text | audio semantic | yes |
 | T2ST | text | audio semantic | yes |
 | TEXT_AR | none | text | no |
-| AUDIO_AR | none/audio context | audio semantic | optional |
+| AUDIO_AR | none/audio context | audio semantic | yes |
 
-当前 `S2ST` 的 `target` 写成了 `"text"`，会导致它实际走 S2TT 路径；实现模型前必须修正为 `target = "audio"`。
+任务能力以 `Task` 枚举为唯一事实来源。`Task` 公开 source modality、target modality 和 paired 语义；task builder、collator、generation、loss 与 callback 不各自维护 audio-task 集合。modality 使用 `anydataset.types.Modality`，不使用裸字符串。
 
-## 7. Loss 组织
+所有 audio-target task（AUDIO_AR、S2ST、T2ST、TTS）都必须提供 semantic audio target 与 acoustic target；缺失时在 task 构造 `Sample` 时立即报错。所有 text-target task 都不允许 acoustic target。
 
-## 8. 模型代码拆分
+## 4. Runtime 与模块所有权
 
-公共层位于 `model/base.py` 的 `SemanticModel`，只负责 runtime/backbone/embedding 加载、semantic forward/logits、semantic generation、acoustic prompt 注入，以及 frame hidden 对齐等公共逻辑。
+Runtime 聚合一套相互兼容的已加载资源：backbone、text/audio tokenizer、codec、layout、special IDs 和 flow runtime。layout 依赖 backbone/tokenizer vocabulary 与 codec/audio-tokenizer vocabulary，因此这些资源属于同一个不可替换的 runtime snapshot。
 
-具体 acoustic decoder 分开实现：
+Runtime 不是 `nn.Module`，持有模块不等于注册模块。训练所有权由 model 的显式 `nn.Module` 属性决定：
 
-- `model/acoustic/flow.py`：Flow Matching decoder 和 `SpeechToSpeechFlowModel`；
-- `model/acoustic/rvq.py`：RVQ decoder 的独立实现入口，待 RVQ 的 codebook 生成契约冻结后补充。
+- 同一可训练模块只在 model 中注册一条路径；backbone text embedding 不能同时作为 backbone 子模块和 multimodal embedding 子模块重复注册。
+- 一个 Runtime 对应一个训练模型组合；不承诺从同一 Runtime 构造多个相互独立训练的模型。
+- 冻结 codec 可以留在 Runtime；若 codec 需要训练，model 必须显式注册并纳入 optimizer/checkpoint。
+- model、loss、datamodule 必须使用同一个 runtime snapshot 或同一个顶层 codec 身份，不能分别隐式选择不兼容资源。
 
-通过 `SpeechToSpeechFlowModel` 或 `SpeechToSpeechRVQModel` 显式选择 acoustic 组合类，不把两种 decoder 的训练、采样和 decode 逻辑重新塞回公共层。
+## 5. Model 与 Loss 契约
 
-`Loss` 负责组合 objective，不负责实现模型内部逻辑：
+Model 提供 semantic forward、condition 对齐和具体 acoustic decoder 能力；Loss 只依赖结构化 Protocol，不依赖具体组合类，也不向下读取 `model.runtime` 获取 objective 资源。
 
-```python
-def forward(self, batch: ModelBatch, model) -> Outputs:
-    need_acoustic = batch.acoustic_labels is not None
-    output = model(
-        batch.input_ids,
-        attention_mask=batch.attention_mask,
-        acoustic_input_ids=batch.acoustic_input_ids,
-        acoustic_input_positions=batch.acoustic_input_positions,
-        acoustic_input_mask=batch.acoustic_input_mask,
-        output_hidden_states=need_acoustic,
-    )
-    semantic = semantic_loss(output.logits, batch.labels, model.layout)
+正常训练只表达一种合法组合：所有 batch 计算 semantic CE；audio-target batch 额外计算模型对应的 acoustic objective。`semantic`、`flow_matching` 等布尔开关不用于表达正常训练路径；oracle、REPA 等 diagnostic 或消融使用独立 objective/入口。
 
-    acoustic = None
-    if batch.acoustic_labels is not None:
-        acoustic = acoustic_flow_loss(
-            model.acoustic_decoder,
-            model.target_frame_condition(
-                output.hidden_states[-1],
-                batch.acoustic_label_positions - 1,
-            ),
-            model.acoustic_target_latent(batch.acoustic_labels),
-            batch.acoustic_target_mask,
-            model.runtime.flow_matching,
-        )
+codec acoustic representation 是 Runtime 的固定契约：codebook 输入、feature dimension 和 waveform decode 必须匹配。model 不通过 `acoustic_codebooks` 任意切取 batch codebook；比较不同 representation 时选择不同 codec/profile。
 
-    return combine(semantic, acoustic)
-```
+## 6. 生成契约
 
-P1 只实现 semantic CE；P2 再加入 acoustic flow matching loss。REPA 等表示学习目标后续作为独立 objective 加入。
+生成分成两条清晰路径：
 
-## 9. Runtime 边界
+- `ModelBatch -> forward -> loss/metrics`：训练或 teacher-forcing evaluation。
+- `prompt + task + source acoustic condition -> semantic generation -> acoustic generation -> decode`：真实推理。
 
-runtime 负责提供已经加载好的资源：
+semantic generation 使用 KV cache 作为正式实现：首步编码完整多模态 prompt 并注入 source acoustic condition，后续只输入新 token 并复用 `past_key_values`。cache 只属于一次 generation 调用，不保存在 model 实例上；公开 generation API 不暴露具体 backbone cache 类型。
 
-- text tokenizer；
-- audio tokenizer；
-- codec；
-- backbone；
-- layout；
-- special tokens；
-- flow matching runtime。
+状态机约定：
 
-模型构造时建议接收 runtime snapshot：
+- text target：`prompt -> text tokens -> EOS`。
+- audio target：`prompt + BOA -> semantic audio tokens -> EOA`。
+- model 层返回包含 prompt 与 stop token 的完整 sequence；上层 service 裁剪为不含 BOA/EOA 的 response。
+- semantic token 被采样时在线收集用于预测它的 hidden，并按 BPE span 展开为 acoustic frame condition；不再生成完成后额外做一次全序列 forward。
 
-```python
-model = SpeechToSpeechFlowModel(
-    runtime=runtime(),
-    config=config,
-)
-```
+Model 提供 semantic generation 与 acoustic sampling 原语；上层 generation service 负责任务状态机、allowed tokens、变长裁剪、frame 对齐和 decode。同一次请求的 token、acoustic output 与 waveform 必须来自同一次生成结果。
 
-模型内部不应反复依赖全局 singleton。这样可以使用 fake codec、fake tokenizer 和 tiny backbone 做 contract test。
+batch generation 的目标契约是标准批量自回归：变长响应通过 padding 和 attention mask 处理，每行独立跟踪 eoa；frame 轴同样以 padding + frame mask 贯穿 flow sampling 和 `decode_features()`，不要求 batch 内各行 frame 数相等。
 
-## 10. 实施阶段
+当前实现是过渡状态：`pl_module` 的 generation 按行循环调用单样本路径，`generate_audio` 对 batch 内不等长的 frame 展开直接报错；这些限制属于实现欠账（见 todo），不属于契约。
 
-### P0：冻结契约
+## 7. 数据与阶段配置
 
-已完成
+`workspace` 提供多种已处理逻辑对象的加载入口；具体工程负责选择实际训练数据。speech-to-speech 的 DataModule 通过 `wmt19_tts_codec(config.codec)` 取得 codec view，而不是让 workspace 替工程选择数据集。
 
-### P1：最小闭环
+codec 是实验级共享身份：同一个顶层配置值同时传给 Runtime 与 DataModule，并决定 runtime codec、dataset codec view 和 raw audio view。DataModule 不通过全局 runtime 偷读 codec。
 
-P1 的核心模块已经具备，但尚未完成可运行闭环和验收。当前状态为：`P1-core` 基本完成，`P1-closure` 未完成。
+DataModule 持有一个可更新的 Collator。初始 strategy 在构造时确定；stage callback 只在 epoch 边界调用 `Collator.set_strategy()`，清空 task/weight 缓存。`persistent_workers=False` 使下一 epoch 的 worker 获得更新后的 collator 状态，阶段切换不依赖 Trainer 隐式重建 DataLoader。
 
-- Native audio tokenizer。
-- semantic embedding 和 acoustic prompt 聚合。
-- Qwen backbone。
-- semantic CE。
-- TTS/S2ST semantic generation。
-- codec waveform decode。
-
-P1 closure 仍需完成：
-
-- 完善 Lightning training step。
-- fake runtime、tiny backbone 和 fake codec 的 contract test。
-- TTS/S2ST semantic CE training smoke test：完成至少一次 forward、backward 和 optimizer step，loss 有限且参数发生更新。
-- S2ST semantic generation 的可运行测试。
-- `semantic ids → codec decode → waveform` 端到端验证。
-- 将上述结果记录到实验结果或 sample logging 中。
-
-P1 closure 不要求单 batch overfit。单 batch overfit 作为独立的 P1 diagnostic，在训练路径跑通后单独验证模型是否具备基本的拟合能力；它不阻塞最小代码闭环验收。
-
-### P2：加入 acoustic decoder
-
-P2 的正式训练依赖 P1 closure；本轮先跳过 P1 closure，完成 P2.0–P2.4 的实现和 fake contract 验证，不执行正式数据训练。
-
-P2 分为以下几个可独立验收的闭环：
-
-#### P2.0：target 对齐契约
-
-- `TaskBase.sample()` 直接传递 target 的缓存 `bpe_spans`。
-- 为 target acoustic frame 生成 `acoustic_label_positions`。
-- `acoustic_input_positions` 只负责 source acoustic prompt；`acoustic_label_positions` 负责 target semantic labels 及其对应的 response hidden。
-- 用 fake tokenizer/backbone 验证 BPE 到 frame 的位置和 mask 完全对齐。
-
-对于 response `[<boa>, bpe_0, ..., bpe_n, <eoa>]`，第一个 target BPE 对应的 hidden position 是 `len(input_ids)`；target frame position 是 BPE position 按 `bpe_spans` 展开后的结果。
-
-#### P2.1：frame-level acoustic condition
-
-- 从 hidden states 和 `acoustic_label_positions - 1` gather frame condition。
-- 将 target acoustic codes 按固定 decoder/model 配置选择 codebook 并转换为连续 latent。
-- 验证 condition、latent、frame mask 的 `[B, F]` 对齐。
-
-#### P2.2：flow matching training loss
-
-- 实现 frame-level 条件 velocity model，第一版使用 time embedding + FiLM/MLP。
-- 使用 `ContinuousVelocityObjective` 生成 noisy latent 和目标 velocity。
-- loss 只计算有效 acoustic frame。
-- 先在单一 audio-target task batch 上 overfit，确认 semantic CE 和 acoustic flow loss 都能下降。
-
-#### P2.3：acoustic sampling
-
-- 对 semantic response 做 generation。
-- 有 labels 时使用真实 target BPE；无 labels 时使用 `logits[:, :-1].argmax(-1)`。
-- 根据预测 audio BPE 得到 spans，展开 hidden 到 frame condition。
-- 使用 ODE sampler 生成 acoustic latent。
-
-#### P2.4：waveform 和端到端路径
-
-- 将预测 audio BPE 展开为 frame-level semantic ids。
-- 调用 `codec.decode_features(semantic_ids, acoustic_features)`。
-- `semantic_ids` 保持 `[B, T, K_semantic]`，`acoustic_features` 保持 `[B, T, D]`，只要求 frame 轴 `T` 对齐。
-- 覆盖 TTS、S2ST 的 teacher-forcing、semantic generation、acoustic generation 和 waveform decode。
-
-### P3：统一训练和推理
-
-- Lightning training step。
-- semantic generation。
-- acoustic generation。
-- batch generation。
-- sample logging。
-- 端到端 waveform 测试。
-
-当前实现状态：
-
-- `Loss.forward()` 返回含标量 `loss` 的 mapping，直接满足 Lightning 的训练契约。
-- semantic batch generation 按样本裁剪 prompt，支持 batch 内不同 prompt 长度。
-- acoustic generation 支持有 target labels 时的 teacher forcing，以及无 labels 时的 semantic generation。
-- sample logger 在 logger 支持 `add_audio` 时记录 waveform，否则记录生成 token。
-- fake runtime contract tests 覆盖 semantic batch generation、acoustic hidden position 对齐和 waveform decode 前的 token/frame 对齐。
-
-## 11. 验收标准
-
-1. tokenizer 的 `encode → expand → merge` 长度和内容符合预期。
-2. `bpe_spans` 能完整覆盖 semantic frame，且与 `bpe_ids` 等长。
-3. acoustic prompt 不会注入 response target。
-4. 没有 acoustic target 的 ASR/S2TT batch 可以正常计算 loss。
-5. 有 acoustic target 的 TTS/S2ST batch 可以正常计算 semantic 和 acoustic loss。
-6. `acoustic_input_positions` 和 `acoustic_label_positions` 的职责、shape 和 mask 始终对齐。
-7. batch 内 acoustic 字段整体存在或整体不存在，不出现部分 row 为 `None`。
-8. 无 labels 时可以从 logits argmax 得到 audio BPE，并完成 hidden 到 frame 的展开。
-9. acoustic decoder 可以替换为 fake decoder 完成上层测试。
-10. semantic ids 和 acoustic features 可以被 codec 正常 decode 为 waveform。
-11. S2ST 的 target 确实是 audio，而不是 text。
+第一版 DDP 允许 stage 间使用不同子模块，采用 `find_unused_parameters=True`。每个 batch 的所有 rank 必须使用相同执行签名；后续在路径稳定后再评估冻结策略或 DDP 优化。

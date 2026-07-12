@@ -173,17 +173,14 @@ class SpeechToSpeechRVQModel(SemanticModel):
         runtime_snapshot=None,
         *,
         codebook_embeddings: Sequence[Tensor] | None = None,
-        codebook_size: int | Sequence[int] = 1024,
     ) -> None:
         super().__init__(config=config, runtime_snapshot=runtime_snapshot)
-        codebooks = self.config.acoustic_codebooks
-        if codebooks is None:
-            raise ValueError("RVQ requires Config.acoustic_codebooks.")
-        backbone_weight = self.backbone.embed_tokens.weight
+        sizes = self.runtime.codec.acoustic_codebook_sizes
+        backbone_weight = self.backbone.get_input_embeddings().weight
         self.acoustic_decoder = AcousticRVQDecoder(
             self.backbone.config.hidden_size,
-            codebooks,
-            codebook_size,
+            len(sizes),
+            sizes,
             codebook_embeddings=codebook_embeddings,
         ).to(device=backbone_weight.device, dtype=backbone_weight.dtype)
 

@@ -39,7 +39,7 @@ class SpeechToSpeechFlowModel(SemanticModel):
 
     def __init__(self, config=None, runtime_snapshot=None) -> None:
         super().__init__(config=config, runtime_snapshot=runtime_snapshot)
-        backbone_weight = self.backbone.embed_tokens.weight
+        backbone_weight = self.backbone.get_input_embeddings().weight
         self.acoustic_decoder = AcousticFlowDecoder(
             self.backbone.config.hidden_size,
             self.runtime.codec.acoustic_feature_dim,
@@ -49,14 +49,7 @@ class SpeechToSpeechFlowModel(SemanticModel):
         if acoustic_labels.dim() != 3:
             raise ValueError("acoustic labels must have shape [B, F, N].")
         safe_labels = acoustic_labels.clamp_min(0)
-        codebooks = self.config.acoustic_codebooks
-        if codebooks is not None:
-            if codebooks <= 0 or codebooks > safe_labels.size(-1):
-                raise ValueError(
-                    "acoustic_codebooks must select valid target codebooks."
-                )
-            safe_labels = safe_labels[..., :codebooks]
-        features = self.runtime.codec.acoustic_codes_to_features(safe_labels)
+        features = self._acoustic_features(safe_labels)
         return features.masked_fill((acoustic_labels < 0).all(dim=-1)[..., None], 0)
 
     @torch.no_grad()
@@ -99,11 +92,11 @@ class SpeechToSpeechFlowModel(SemanticModel):
             acoustic_input_positions=acoustic_input_positions,
             acoustic_input_mask=acoustic_input_mask,
             stop_token_id=self.runtime.eoa_token_id,
-            token_range=self.runtime.layout.blocks["audio"],
+            allowed_token_ids=self.runtime.audio_generation_allowed_ids,
         )
         audio_ids = generated[:, prompt_ids.size(1) :]
         audio_ids = audio_ids[:, audio_ids.ne(self.runtime.eoa_token_id).all(dim=0)]
-        local_start, local_end = self.runtime.layout.blocks["audio"]
+        local_start, local_end = self.runtime.codec_audio_range
         valid = audio_ids.ge(local_start) & audio_ids.lt(local_end)
         if not bool(valid.all()):
             raise ValueError(
@@ -111,10 +104,14 @@ class SpeechToSpeechFlowModel(SemanticModel):
             )
         positions: list[Tensor] = []
         spans: list[Tensor] = []
+        tokenizer = self.runtime.audio_tokenizer
         for row in audio_ids:
             local = row - local_start
-            _, counts = self.runtime.audio_tokenizer.expand_with_counts(local)
-            row_spans = torch.as_tensor(counts, device=row.device, dtype=torch.long)
+            row_spans = torch.as_tensor(
+                [len(tokenizer.decode([int(token)])) for token in local],
+                device=row.device,
+                dtype=torch.long,
+            )
             positions.append(
                 torch.repeat_interleave(
                     torch.arange(

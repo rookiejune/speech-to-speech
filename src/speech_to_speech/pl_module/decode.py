@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import torch
-from anytrain.idspace import Layout
 from torch import Tensor
 
 from ..runtime.audio_tokenizer import semantic_ids_from_audio_tokens
@@ -15,7 +14,7 @@ def decode_generated_audio(
     acoustic_codes: Tensor | None = None,
     codec: Codec,
     audio_tokenizer: AudioTokenizer,
-    layout: Layout,
+    audio_token_range: tuple[int, int],
 ) -> Tensor:
     """Decode generated audio tokens and acoustic output into waveforms."""
     if (acoustic_features is None) == (acoustic_codes is None):
@@ -25,11 +24,11 @@ def decode_generated_audio(
     if acoustic_features is None:
         raise RuntimeError("acoustic features were not created.")
 
-    local_start, local_end = layout.blocks["audio"]
+    local_start, local_end = audio_token_range
     if bool((audio_token_ids < local_start).any()) or bool(
         (audio_token_ids >= local_end).any()
     ):
-        raise ValueError("audio token ids must be global ids from the audio layout block.")
+        raise ValueError("audio token ids must be codec-decodable global audio ids.")
     local_ids = audio_token_ids - local_start
     rows = [
         semantic_ids_from_audio_tokens(audio_tokenizer, row)

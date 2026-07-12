@@ -14,7 +14,9 @@ acoustic decoding experiments.
   helpers.
 - `src/speech_to_speech/runtime/`: tokenizer, codec, backbone, layout, and flow
   runtime loading.
-- `docs/`: model contracts, roadmap, and detailed design notes.
+- `docs/model-design.md`: cross-module contracts.
+- `docs/design/`: module capabilities and boundaries.
+- `docs/experiments/todo.md`: implementation stages and validation status.
 
 ## Smoke Checks
 
@@ -27,6 +29,6 @@ PYTHONPATH=speech-to-speech/src /Users/zhuyin/miniconda3/envs/py312/bin/python -
 
 ## Docs
 
-- `docs/contracts.md`: stable data, model, and loss contracts.
-- `docs/roadmap.md`: implementation stages and validation order.
-- `docs/model-design.md`: detailed design history and rationale.
+- `docs/model-design.md`: stable cross-module contracts.
+- `docs/design/`: datamodule, runtime, model, loss, and Lightning boundaries.
+- `docs/experiments/todo.md`: implementation work and validation order.

@@ -19,7 +19,6 @@ def generate_batch(
     top_p: float = 1.0,
 ) -> list[Tensor]:
     """Generate one variable-length semantic response for every batch row."""
-    audio_tasks = {Task.AUDIO_AR, Task.S2ST, Task.T2ST, Task.TTS}
     results: list[Tensor] = []
     for index, task in enumerate(batch.tasks):
         sequence = batch.input_ids[index]
@@ -34,7 +33,7 @@ def generate_batch(
             acoustic_positions = batch.acoustic_input_positions[index : index + 1]
             acoustic_mask = batch.acoustic_input_mask[index : index + 1]
 
-        modality = Modality.AUDIO if task in audio_tasks else Modality.TEXT
+        modality = task.target_modality
         results.append(
             model.generate_semantic(
                 prompt[None],
@@ -49,9 +48,7 @@ def generate_batch(
                     if modality == Modality.AUDIO
                     else model.runtime.eos_token_id
                 ),
-                token_range=model.runtime.layout.blocks[
-                    "audio" if modality == Modality.AUDIO else "text"
-                ],
+                allowed_token_ids=model.runtime.generation_allowed_ids(modality),
             )[0]
         )
     return results
@@ -67,11 +64,10 @@ def generate_waveforms(
     top_p: float = 1.0,
 ) -> list[Tensor]:
     """Generate and decode one waveform per audio-target batch row."""
-    audio_tasks = {Task.AUDIO_AR, Task.S2ST, Task.T2ST, Task.TTS}
-    start, end = model.runtime.layout.blocks["audio"]
+    start, end = model.runtime.codec_audio_range
     waveforms: list[Tensor] = []
     for index, task in enumerate(batch.tasks):
-        if task not in audio_tasks:
+        if task.target_modality is not Modality.AUDIO:
             raise ValueError("waveform generation requires an audio-target task.")
         labels = batch.labels[index]
         label_audio = (labels >= start) & (labels < end)
@@ -100,7 +96,7 @@ def generate_waveforms(
             if output.hidden_states is None:
                 raise RuntimeError("model did not return hidden states.")
             condition = model.target_frame_condition(
-                output.hidden_states[-1], label_positions[index : index + 1] - 1
+                output.hidden_states[-1], label_positions[index : index + 1]
             )
             features = model.sample_acoustic(condition)[0]
             frame_mask = batch.acoustic_target_mask
@@ -144,7 +140,7 @@ def generate_waveforms(
                 features[None],
                 codec=model.runtime.codec,
                 audio_tokenizer=model.runtime.audio_tokenizer,
-                layout=model.runtime.layout,
+                audio_token_range=model.runtime.codec_audio_range,
             )[0]
         )
     return waveforms

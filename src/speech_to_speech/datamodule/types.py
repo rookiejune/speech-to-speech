@@ -6,6 +6,7 @@ from typing import cast
 
 import torch
 from anydataset import types
+from anydataset.types import Modality
 from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
 
@@ -23,6 +24,24 @@ class Task(StrEnum):
     TEXT_AR = auto()
     T2ST = auto()
     TTS = auto()
+
+    @property
+    def source_modality(self) -> Modality | None:
+        if self in {Task.AUDIO_AR, Task.TEXT_AR}:
+            return None
+        if self in {Task.ASR, Task.S2ST, Task.S2TT}:
+            return Modality.AUDIO
+        return Modality.TEXT
+
+    @property
+    def target_modality(self) -> Modality:
+        if self in {Task.ASR, Task.S2TT, Task.TEXT_AR}:
+            return Modality.TEXT
+        return Modality.AUDIO
+
+    @property
+    def paired(self) -> bool:
+        return self in {Task.S2ST, Task.S2TT, Task.T2ST}
 
 
 class Language(StrEnum):
@@ -55,8 +74,10 @@ class Speech:
     @cached_property
     def bpe_spans(self) -> Tensor:
         """Number of semantic frames represented by each BPE token."""
-        _, counts = runtime().audio_tokenizer.expand_with_counts(self.bpe_ids)
-        spans = _as_tensor(counts).to(dtype=torch.long)
+        tokenizer = runtime().audio_tokenizer
+        spans = _as_tensor(
+            [len(tokenizer.decode([int(token)])) for token in self.bpe_ids]
+        ).to(dtype=torch.long)
         if spans.dim() != 1:
             raise ValueError("audio tokenizer spans must have shape [num_bpe_tokens].")
         if int(spans.sum().item()) != self.semantic_ids.size(0):
@@ -90,24 +111,32 @@ class SpeechPair:
 
 def _parse_audio_item(audio_item: types.AudioItem):
     if runtime().config.audio_view == types.AudioView.LONGCAT:
-        sementic_ids = audio_item.views[types.AudioView.LONGCAT]["semantic_codes"]
-        acoustic_ids = audio_item.views[types.AudioView.LONGCAT]["acoustic_codes"]
+        codes = audio_item.views[types.AudioView.LONGCAT]
+        if not isinstance(codes, Tensor):
+            raise TypeError("LongCat view must be a [frame, codebook] Tensor.")
+        if codes.dim() != 2 or codes.size(1) < 2:
+            raise ValueError(
+                "LongCat view must contain semantic and acoustic codebooks."
+            )
+        semantic_ids = codes[:, :1]
+        acoustic_ids = codes[:, 1:]
     elif runtime().config.audio_view == types.AudioView.VQ:
-        sementic_ids = audio_item.views[types.AudioView.VQ]
+        semantic_ids = audio_item.views[types.AudioView.VQ]
         acoustic_ids = None
     else:
         raise NotImplementedError
-    return sementic_ids, acoustic_ids
+    return semantic_ids, acoustic_ids
 
 
 def _parse_role(sample: types.Sample, role: types.Role):
     audio_item = cast(types.AudioItem, sample[(role, types.Modality.AUDIO)])
     semantic_ids, acoustic_ids = _parse_audio_item(audio_item)
     text_item = cast(types.TextItem, sample[(role, types.Modality.TEXT)])
+    text = text_item.views[types.TextView.TEXT]
     return Speech(
         semantic_ids=_frame_codes(semantic_ids),
         acoustic_ids=None if acoustic_ids is None else _frame_codes(acoustic_ids),
-        text_ids=text_item.views[types.TextView.TEXT],
+        text_ids=_text_ids(text),
         language=text_item.meta[types.TextMeta.LANG],
     )
 
@@ -118,6 +147,15 @@ def _frame_codes(codes: Tensor) -> Tensor:
     if codes.dim() != 2:
         raise ValueError("audio codes must have shape [frames, codebooks].")
     return codes
+
+
+def _text_ids(text: str) -> Tensor:
+    ids = _as_tensor(
+        runtime().text_tokenizer.encode(text, add_special_tokens=False)
+    ).to(dtype=torch.long)
+    if ids.dim() != 1:
+        raise ValueError("text tokenizer must return a 1D token sequence.")
+    return ids
 
 
 def _as_tensor(value: Tensor | list[int]) -> Tensor:
@@ -151,13 +189,34 @@ class ModelBatch:
     def from_samples(cls, samples: list[Sample]):
         if not samples:
             raise ValueError("ModelBatch requires at least one sample.")
+        for sample in samples:
+            _validate_sample(sample)
+        signatures = {
+            (sample.task.source_modality, sample.task.target_modality)
+            for sample in samples
+        }
+        if len(signatures) != 1:
+            raise ValueError(
+                "all samples in a batch must use the same source and target modalities."
+            )
         return cls(
-            cast(Tensor, _pad(samples, "input_ids", runtime().pad_token_id)),
-            cast(Tensor, _pad(samples, "labels", -100)),
-            _pad(samples, "acoustic_input_ids", ACOUSTIC_PAD_ID),
-            _pad(samples, "acoustic_input_positions", ACOUSTIC_PAD_ID),
-            _pad(samples, "acoustic_labels", ACOUSTIC_PAD_ID),
-            _pad(samples, "acoustic_label_positions", ACOUSTIC_PAD_ID),
+            cast(
+                Tensor,
+                _pad([sample.input_ids for sample in samples], runtime().pad_token_id),
+            ),
+            cast(Tensor, _pad([sample.labels for sample in samples], -100)),
+            _pad(
+                [sample.acoustic_input_ids for sample in samples], ACOUSTIC_PAD_ID
+            ),
+            _pad(
+                [sample.acoustic_input_positions for sample in samples],
+                ACOUSTIC_PAD_ID,
+            ),
+            _pad([sample.acoustic_labels for sample in samples], ACOUSTIC_PAD_ID),
+            _pad(
+                [sample.acoustic_label_positions for sample in samples],
+                ACOUSTIC_PAD_ID,
+            ),
             [sample.task for sample in samples],
         )
 
@@ -194,19 +253,65 @@ class ModelBatch:
 Batch = ModelBatch
 
 
-def _list_attrs(samples: list[Sample], name: str) -> list[Tensor | None]:
-    return [getattr(sample, name) for sample in samples]
-
-
-def _pad(samples: list[Sample], name: str, padding_value: int):
-    values = _list_attrs(samples, name)
+def _pad(values: list[Tensor | None], padding_value: int):
     has_none = any(value is None for value in values)
     if has_none:
         if any(value is not None for value in values):
-            raise ValueError(f"{name} must be present for every sample or none.")
+            raise ValueError("a batch field must be present for every sample or none.")
         return None
     return pad_sequence(
         cast(list[Tensor], values),
         batch_first=True,
         padding_value=padding_value,
     )
+
+
+def _validate_sample(sample: Sample) -> None:
+    if sample.input_ids.dim() != 1 or sample.labels.shape != sample.input_ids.shape:
+        raise ValueError("sample input_ids and labels must be aligned 1D tensors.")
+
+    _validate_acoustic_pair(
+        sample.input_ids,
+        sample.acoustic_input_ids,
+        sample.acoustic_input_positions,
+        name="acoustic input",
+    )
+    _validate_acoustic_pair(
+        sample.input_ids,
+        sample.acoustic_labels,
+        sample.acoustic_label_positions,
+        name="acoustic target",
+    )
+
+    has_target = sample.acoustic_labels is not None
+    if sample.task.target_modality is Modality.AUDIO and not has_target:
+        raise ValueError("audio-target tasks require acoustic target fields.")
+    if sample.task.target_modality is Modality.TEXT and has_target:
+        raise ValueError("text-target tasks must not provide acoustic target fields.")
+    if sample.acoustic_label_positions is not None:
+        labels = sample.labels[sample.acoustic_label_positions]
+        if bool(labels.eq(-100).any()):
+            raise ValueError("acoustic target positions must point to semantic labels.")
+
+
+def _validate_acoustic_pair(
+    input_ids: Tensor,
+    ids: Tensor | None,
+    positions: Tensor | None,
+    *,
+    name: str,
+) -> None:
+    if (ids is None) != (positions is None):
+        raise ValueError(f"{name} ids and positions must be provided together.")
+    if ids is None or positions is None:
+        return
+    if ids.dim() != 2 or positions.dim() != 1:
+        raise ValueError(
+            f"{name} ids and positions must have shapes [frames, codebooks] and [frames]."
+        )
+    if ids.size(0) != positions.numel():
+        raise ValueError(f"{name} ids and positions must share the frame axis.")
+    if bool((positions < 0).any()) or bool((positions >= input_ids.numel()).any()):
+        raise ValueError(f"{name} positions must point inside the semantic sequence.")
+    if bool(input_ids[positions].eq(runtime().pad_token_id).any()):
+        raise ValueError(f"{name} positions must not point to padding tokens.")

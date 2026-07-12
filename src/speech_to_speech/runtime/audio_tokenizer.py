@@ -29,67 +29,11 @@ class NativeAudioTokenizer:
             frames = frames.tolist()
         return torch.tensor([_single_code(frame) for frame in frames], dtype=torch.long)
 
-    def expand(
+    def decode(
         self,
-        ids: Sequence[int],
-        *,
-        strict: bool | None = None,
+        token_ids: Sequence[int],
     ) -> list[tuple[int, ...]]:
-        del strict
-        return [(int(token_id),) for token_id in ids]
-
-    def expand_with_counts(
-        self,
-        ids: Sequence[int],
-        *,
-        strict: bool | None = None,
-    ) -> tuple[list[tuple[int, ...]], list[int]]:
-        del strict
-        return self.expand(ids), [1 for _ in ids]
-
-    def repeat_interleave(
-        self,
-        x: Tensor,
-        spans: Tensor,
-        mask: Tensor | None = None,
-        *,
-        dim: int = -2,
-        strict: bool | None = None,
-    ) -> tuple[Tensor, Tensor]:
-        del strict
-        if spans.dim() != 2:
-            raise ValueError("audio spans must have shape [batch, bpe_frames].")
-        if mask is None:
-            mask = torch.ones_like(spans, dtype=torch.bool)
-        if mask.shape != spans.shape:
-            raise ValueError("audio span mask must align with spans.")
-        if dim < 0:
-            dim += x.dim()
-        if dim != 1:
-            raise ValueError("native audio tokenizer expects sequence dim 1.")
-        if x.size(0) != spans.size(0) or x.size(dim) != spans.size(1):
-            raise ValueError("values and audio spans must align on batch and sequence.")
-
-        counts = spans.masked_fill(~mask, 0).to(dtype=torch.long)
-        lengths = counts.sum(dim=1)
-        max_len = int(lengths.max().item()) if lengths.numel() > 0 else 0
-        expanded = x.new_zeros((spans.size(0), max_len, *x.shape[2:]))
-        expanded_mask = torch.zeros(
-            (spans.size(0), max_len),
-            dtype=torch.bool,
-            device=spans.device,
-        )
-        for row, length in enumerate(lengths.tolist()):
-            if length == 0:
-                continue
-            positions = mask[row].nonzero(as_tuple=False).flatten()
-            expanded[row, :length] = torch.repeat_interleave(
-                x[row].index_select(0, positions),
-                counts[row].index_select(0, positions),
-                dim=0,
-            )
-            expanded_mask[row, :length] = True
-        return expanded, expanded_mask
+        return [(int(token_id),) for token_id in token_ids]
 
 
 class TorchCodecBPE(CodecBPE):
@@ -110,63 +54,45 @@ class TorchCodecBPE(CodecBPE):
         token_ids = super().encode(_frames(frames, self.codebook_sizes))
         return torch.tensor(token_ids, dtype=torch.long, device=frames.device)
 
-    def expand(
+    def decode(
         self,
-        ids: Sequence[int] | Tensor,
-        *,
-        strict: bool | None = None,
+        token_ids: Sequence[int] | Tensor,
     ) -> list[tuple[int, ...]] | Tensor:
-        del strict
-        if not isinstance(ids, Tensor):
-            return super().expand(ids)
-        frames = super().expand(_ids(ids))
-        return torch.tensor(frames, dtype=torch.long, device=ids.device)
-
-    def expand_with_counts(
-        self,
-        ids: Sequence[int] | Tensor,
-        *,
-        strict: bool | None = None,
-    ) -> tuple[list[tuple[int, ...]] | Tensor, list[int] | Tensor]:
-        del strict
-        if not isinstance(ids, Tensor):
-            return super().expand_with_counts(ids)
-        frames, counts = super().expand_with_counts(_ids(ids))
-        return (
-            torch.tensor(frames, dtype=torch.long, device=ids.device),
-            torch.tensor(counts, dtype=torch.long, device=ids.device),
-        )
+        if not isinstance(token_ids, Tensor):
+            return super().decode(token_ids)
+        frames = super().decode(_ids(token_ids))
+        return torch.tensor(frames, dtype=torch.long, device=token_ids.device)
 
 
 def semantic_ids_from_audio_tokens(
     audio_tokenizer: AudioTokenizer,
     audio_token_ids: Sequence[int] | Tensor,
 ) -> Tensor:
-    """Expand one BPE audio sequence to ``[frames, semantic_codebooks]``."""
-    expanded = audio_tokenizer.expand(audio_token_ids)
+    """Decode one BPE audio sequence to ``[frames, semantic_codebooks]``."""
+    decoded = audio_tokenizer.decode(audio_token_ids)
     device = audio_token_ids.device if isinstance(audio_token_ids, Tensor) else None
-    if isinstance(expanded, Tensor):
-        if expanded.dim() != 2:
-            raise ValueError("expanded semantic ids must have shape [frames, codebooks].")
-        return expanded.to(device=device, dtype=torch.long)
+    if isinstance(decoded, Tensor):
+        if decoded.dim() != 2:
+            raise ValueError("decoded semantic ids must have shape [frames, codebooks].")
+        return decoded.to(device=device, dtype=torch.long)
 
     frames: list[Tensor] = []
-    for frame in expanded:
+    for frame in decoded:
         values = (
             frame.reshape(-1).tolist() if isinstance(frame, Tensor) else list(frame)
         )
         if not values:
             raise ValueError(
-                "audio tokenizer expanded a token to no semantic codebooks."
+                "audio tokenizer decoded a token to no semantic codebooks."
             )
         frames.append(torch.tensor(values, device=device, dtype=torch.long))
     if not frames:
-        raise ValueError("audio tokenizer expanded audio tokens to no frames.")
+        raise ValueError("audio tokenizer decoded audio tokens to no frames.")
     try:
         return torch.stack(frames)
     except RuntimeError as error:
         raise ValueError(
-            "expanded semantic frames must have the same codebook count."
+            "decoded semantic frames must have the same codebook count."
         ) from error
 
 
@@ -186,7 +112,7 @@ def _frames(frames: Tensor, codebook_sizes: Sequence[int]) -> list[list[int]]:
             raise ValueError(
                 "1D frame tensors are only valid for single-codebook tokenizers."
             )
-        return [[int(value)] for value in frames.detach().cpu().tolist()]
+        return [[value] for value in frames.detach().cpu().tolist()]
     if frames.dim() != 2:
         raise ValueError("frame tensor must have shape [frames, codebooks].")
     if frames.size(-1) != len(codebook_sizes):
@@ -198,7 +124,7 @@ def _ids(ids: Tensor) -> list[int]:
     _check_ids(ids, "token ids")
     if ids.dim() != 1:
         raise ValueError("token id tensor must have shape [tokens].")
-    return [int(value) for value in ids.detach().cpu().tolist()]
+    return ids.detach().cpu().tolist()
 
 
 def _check_ids(ids: Tensor, name: str) -> None:

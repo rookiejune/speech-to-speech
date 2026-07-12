@@ -5,7 +5,8 @@ from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from anydataset.types import AudioView
+import torch
+from anydataset.types import AudioView, Modality
 from anytrain.codec.longcat import LongCat
 from anytrain.idspace import Layout
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -22,8 +23,10 @@ if TYPE_CHECKING:
 class Config:
     codec: str = "longcat"
     backbone: str = "Qwen/Qwen3-0.6B"
-    audio_tokenizer: str | None = None
+    audio_tokenizer: str | Path | None = None
     device: str | None = None
+    dtype: str | None = None
+    attn_implementation: str | None = None
 
     @property
     def audio_view(self):
@@ -53,11 +56,15 @@ class _CodecContract:
     def semantic_codebook(self):
         return self._codec.semantic_codebook
 
+    @property
+    def acoustic_codebook_sizes(self) -> tuple[int, ...]:
+        return tuple(int(size) for size in self._codec.codebook_sizes[1:])
+
     def encode(self, audio, sample_rate):
         return self._codec.encode(audio, sample_rate)
 
-    def decode(self, semantic_codes, acoustic_codes):
-        return self._codec.decode(semantic_codes, acoustic_codes)
+    def decode(self, codes):
+        return self._codec.decode(codes)
 
     def acoustic_codes_to_features(self, acoustic_codes):
         return self._codec.acoustic_codes_to_features(acoustic_codes)
@@ -76,10 +83,18 @@ class Runtime:
 
     @cached_property
     def backbone(self) -> Backbone:
-        return cast(
-            Backbone,
-            AutoModelForCausalLM.from_pretrained(self.config.backbone),
+        kwargs = {}
+        if self.config.dtype is not None:
+            kwargs["dtype"] = _dtype(self.config.dtype)
+        if self.config.attn_implementation is not None:
+            kwargs["attn_implementation"] = self.config.attn_implementation
+        backbone = AutoModelForCausalLM.from_pretrained(
+            self.config.backbone,
+            **kwargs,
         )
+        if self.config.device is not None:
+            backbone = backbone.to(self.config.device)
+        return cast(Backbone, backbone)
 
     @cached_property
     def codec(self) -> Codec:
@@ -142,6 +157,32 @@ class Runtime:
     def eoa_token_id(self):
         return self.boa_token_id + 1
 
+    @property
+    def audio_head_range(self) -> tuple[int, int]:
+        return self.layout.blocks[Modality.AUDIO.value]
+
+    @property
+    def codec_audio_range(self) -> tuple[int, int]:
+        start, _ = self.audio_head_range
+        return start, self.boa_token_id
+
+    @cached_property
+    def audio_generation_allowed_ids(self) -> tuple[int, ...]:
+        start, end = self.codec_audio_range
+        return (*range(start, end), self.eoa_token_id)
+
+    def generation_allowed_ids(self, modality: Modality) -> tuple[int, ...]:
+        if modality is Modality.AUDIO:
+            return self.audio_generation_allowed_ids
+        if modality is Modality.TEXT:
+            start, end = self.layout.blocks[Modality.TEXT.value]
+            return tuple(range(start, end))
+        raise ValueError(f"unsupported generation modality: {modality.value}")
+
+    def is_codec_audio_id(self, token_id: int) -> bool:
+        start, end = self.codec_audio_range
+        return start <= token_id < end
+
 
 _runtime: Runtime | None = None
 
@@ -162,26 +203,18 @@ def runtime() -> Runtime:
     return _runtime
 
 
-def _audio_vocab_size(name: str) -> int:
-    suffix = name.rsplit("_", maxsplit=1)[-1]
-    if suffix.endswith("k") and suffix[:-1].isdigit():
-        return int(suffix[:-1]) * 1000
-    if suffix.isdigit():
-        return int(suffix)
-    raise ValueError(f"unable to infer audio tokenizer vocab size from {name!r}.")
+def _audio_tokenizer(path: str | Path) -> AudioTokenizer:
+    from zhuyin.tokenizers.codec_bpe import codec_bpe
+
+    tokenizer = codec_bpe(Path(path).expanduser())
+    return cast(AudioTokenizer, TorchCodecBPE.wrap(tokenizer))
 
 
-def _audio_tokenizer(name: str) -> AudioTokenizer:
-    from zhuyin.env import bpe_cache_dir, configure_environment
-    from zhuyin.tokenizers.longcat import longcat_bpe
-
-    configure_environment()
-    path = bpe_cache_dir() / name
-    if path.exists():
-        return cast(AudioTokenizer, TorchCodecBPE.from_pretrained(path))
-    if "/" in name:
-        return cast(AudioTokenizer, TorchCodecBPE.from_pretrained(Path(name).expanduser()))
-    return cast(
-        AudioTokenizer,
-        TorchCodecBPE.wrap(longcat_bpe(vocab_size=_audio_vocab_size(name))),
-    )
+def _dtype(value: str) -> torch.dtype:
+    try:
+        dtype = getattr(torch, value)
+    except AttributeError as error:
+        raise ValueError(f"unknown torch dtype: {value}") from error
+    if not isinstance(dtype, torch.dtype):
+        raise ValueError(f"unknown torch dtype: {value}")
+    return dtype

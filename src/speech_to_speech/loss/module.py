@@ -1,85 +1,56 @@
-from dataclasses import dataclass
-
+from anydataset.types import Modality
+from anytrain.idspace import Layout
 from torch import nn
 
 from ..datamodule.types import ModelBatch
-from ..model.acoustic import SpeechToSpeechFlowModel
-from ..runtime import runtime
-from .flow_matching import AcousticFlowLoss
+from ..model.protocol import FlowMatching
+from .flow_matching import AcousticFlowLoss, FlowRuntime
 from .semantic import SemanticLoss
 from .types import Outputs
 
 
-@dataclass
-class Config:
-    semantic: bool = True
-    flow_matching: bool = False
-    acoustic_oracle: bool = False
-    autoregression: bool = False
-    repa: bool = False
-
-
 class Loss(nn.Module):
-    def __init__(self, config: Config) -> None:
+    def __init__(self, layout: Layout, flow_runtime: FlowRuntime) -> None:
         super().__init__()
-
-        self.config = config
-        self.semantic = SemanticLoss(runtime().layout) if config.semantic else None
+        self.layout = layout
+        self.semantic = SemanticLoss(layout)
         self.flow = AcousticFlowLoss()
+        self.flow_runtime = flow_runtime
 
-    def forward(self, batch: ModelBatch, model: SpeechToSpeechFlowModel) -> Outputs:
-        if self.config.acoustic_oracle:
-            if self.config.semantic:
-                raise ValueError(
-                    "acoustic_oracle requires semantic=False to bypass the backbone."
-                )
-            if not self.config.flow_matching:
-                raise ValueError("acoustic_oracle requires flow_matching=True.")
-            output = None
-            result: Outputs = {"loss": batch.input_ids.new_zeros(())}
-        else:
-            if self.semantic is None:
-                raise NotImplementedError("P1 requires the semantic objective.")
-            output = model(
-                batch.input_ids,
-                attention_mask=batch.attention_mask,
-                acoustic_input_ids=batch.acoustic_input_ids,
-                acoustic_input_positions=batch.acoustic_input_positions,
-                acoustic_input_mask=batch.acoustic_input_mask,
-                output_hidden_states=self.config.flow_matching
-                and batch.acoustic_labels is not None,
-            )
-            semantic = self.semantic(output.logits, batch.labels)
-            result = {"loss": semantic.loss.mean(), "semantic": semantic}
+    def forward(self, batch: ModelBatch, model: FlowMatching) -> Outputs:
+        if model.layout.blocks != self.layout.blocks:
+            raise ValueError("model and loss must use the same runtime layout.")
+        audio_target = batch.tasks[0].target_modality is Modality.AUDIO
+        output = model(
+            batch.input_ids,
+            attention_mask=batch.attention_mask,
+            acoustic_input_ids=batch.acoustic_input_ids,
+            acoustic_input_positions=batch.acoustic_input_positions,
+            acoustic_input_mask=batch.acoustic_input_mask,
+            output_hidden_states=audio_target,
+        )
+        semantic = self.semantic(output.logits, batch.labels)
+        result: Outputs = {"loss": semantic.loss.mean(), "semantic": semantic}
 
-        total = result["loss"]
-        if self.config.flow_matching:
+        if audio_target:
             if batch.acoustic_labels is None or batch.acoustic_label_positions is None:
-                raise ValueError("flow matching requires acoustic target fields.")
+                raise ValueError("audio-target tasks require acoustic target fields.")
             if batch.acoustic_target_mask is None:
                 raise RuntimeError(
                     "model batch did not produce an acoustic target mask."
                 )
-            if self.config.acoustic_oracle:
-                condition = model.target_frame_label_condition(
-                    batch.labels, batch.acoustic_label_positions
-                )
-            else:
-                if output is None or output.hidden_states is None:
-                    raise RuntimeError(
-                        "model does not provide an acoustic flow decoder."
-                    )
-                condition = model.target_frame_condition(
-                    output.hidden_states[-1], batch.acoustic_label_positions - 1
-                )
+            if output.hidden_states is None:
+                raise RuntimeError("model did not return acoustic condition states.")
+            condition = model.target_frame_condition(
+                output.hidden_states[-1], batch.acoustic_label_positions
+            )
             acoustic = self.flow(
                 model.acoustic_decoder,
                 condition,
                 model.acoustic_target_latent(batch.acoustic_labels),
                 batch.acoustic_target_mask,
-                model.runtime.flow_matching,
+                self.flow_runtime,
             )
-            total = total + acoustic.loss.mean()
             result["flow_matching"] = acoustic
-            result["loss"] = total
+            result["loss"] = result["loss"] + acoustic.loss.mean()
         return result

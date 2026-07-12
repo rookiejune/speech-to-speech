@@ -9,7 +9,7 @@ from lightning.pytorch import LightningModule
 from ..datamodule.types import ModelBatch
 from ..loss.module import Loss
 from ..loss.types import Outputs
-from ..model.acoustic import SpeechToSpeechFlowModel
+from ..model.protocol import FlowMatching
 from .generation import generate_batch, generate_waveforms
 
 
@@ -24,7 +24,7 @@ class SpeechToSpeech(LightningModule):
         self,
         config: Config,
         *,
-        model: SpeechToSpeechFlowModel,
+        model: FlowMatching,
         loss: Loss,
     ) -> None:
         super().__init__()

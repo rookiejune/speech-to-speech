@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from anytrain.idspace import Layout
 from torch import Tensor
+from torch import nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 
 class BaseModel(Protocol):
+    layout: Layout
+
     def forward(
         self,
         input_ids: Tensor,
@@ -21,9 +25,17 @@ class BaseModel(Protocol):
 
 
 class FlowMatching(BaseModel, Protocol):
+    acoustic_decoder: nn.Module
+
     def target_frame_condition(
         self,
         hidden_states: Tensor,
+        target_positions: Tensor,
+    ) -> Tensor: ...
+
+    def target_frame_label_condition(
+        self,
+        labels: Tensor,
         target_positions: Tensor,
     ) -> Tensor: ...
 
