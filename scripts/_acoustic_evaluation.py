@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import time
 
 import torch
 from torch import Tensor
 
 from speech_to_speech.datamodule import ModelBatch
-from speech_to_speech.model import SpeechToSpeechFlowModel
+from speech_to_speech.model import SpeechToSpeechFlowModel, SpeechToSpeechRVQModel
 from speech_to_speech.runtime.types import Codec
 
 
 @torch.no_grad()
 def evaluate(
-    model: SpeechToSpeechFlowModel,
+    model: SpeechToSpeechFlowModel | SpeechToSpeechRVQModel,
     batch: ModelBatch,
     codec: Codec,
     *,
@@ -45,7 +46,8 @@ def evaluate(
         condition = model.target_frame_condition(
             output.hidden_states[-1], batch.acoustic_label_positions
         )
-        target = model.acoustic_target_latent(batch.acoustic_labels)
+        safe_labels = batch.acoustic_labels.clamp_min(0)
+        target = codec.acoustic_codes_to_features(safe_labels)
         mask = batch.acoustic_target_mask
         valid = mask[0]
         semantic = batch.semantic_frame_labels[0, valid].unsqueeze(0)
@@ -54,8 +56,20 @@ def evaluate(
 
         values: dict[str, list[float]] = {}
         for seed in seeds:
-            generator = torch.Generator(device=condition.device).manual_seed(seed)
-            sampled = model.acoustic_flow.sample(condition, generator=generator)
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            if condition.is_cuda:
+                torch.cuda.synchronize(condition.device)
+            started = time.perf_counter()
+            if isinstance(model, SpeechToSpeechFlowModel):
+                generator = torch.Generator(device=condition.device).manual_seed(seed)
+                sampled = model.acoustic_flow.sample(condition, generator=generator)
+            else:
+                codes = model.sample_acoustic(condition)
+                sampled = codec.acoustic_codes_to_features(codes)
+            if condition.is_cuda:
+                torch.cuda.synchronize(condition.device)
+            elapsed = time.perf_counter() - started
             sampled = sampled[0, valid].unsqueeze(0)
             waveform = mono(codec.decode_features(semantic, sampled))
             append(values, "feature_mse", torch.mean((sampled.float() - target.float()) ** 2))
@@ -65,6 +79,10 @@ def evaluate(
             append(values, "waveform_peak", waveform.abs().max())
             values.setdefault("duration_seconds", []).append(
                 waveform.numel() / codec.sample_rate
+            )
+            values.setdefault("sampling_seconds", []).append(elapsed)
+            values.setdefault("sampling_rtf", []).append(
+                elapsed / (waveform.numel() / codec.sample_rate)
             )
         return {name: sum(items) / len(items) for name, items in values.items()}
     finally:

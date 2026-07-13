@@ -89,7 +89,7 @@ class LossSummary(Callback):
 class AcousticEvaluation(Callback):
     def __init__(
         self,
-        model: SpeechToSpeechFlowModel,
+        model: SpeechToSpeechFlowModel | SpeechToSpeechRVQModel,
         batch: ModelBatch,
         codec: Codec,
         output_dir: Path,
@@ -277,18 +277,21 @@ def run(config: DictConfig) -> None:
         module = SpeechToSpeech(module_config, model=model, objective=objective)
         datamodule.setup("fit")
         batch = next(iter(datamodule.train_dataloader()))
+    else:
+        model = SpeechToSpeechRVQModel(model_config, runtime_snapshot=rt)
+        objective = RVQLoss(layout)
+        module = SpeechToSpeech(module_config, model=model, objective=objective)
+    if has_acoustic:
+        datamodule.setup("fit")
+        batch = next(iter(datamodule.train_dataloader()))
         evaluation = AcousticEvaluation(
-            model,
+            cast(SpeechToSpeechFlowModel | SpeechToSpeechRVQModel, model),
             batch,
             codec,
             output_dir,
             every_n_steps=max(1, int(config.train.max_steps) // 5),
             seeds=range(4),
         )
-    else:
-        model = SpeechToSpeechRVQModel(model_config, runtime_snapshot=rt)
-        objective = RVQLoss(layout)
-        module = SpeechToSpeech(module_config, model=model, objective=objective)
     summary = LossSummary()
     loss_pair = (
         ("flow_matching", "repa")
