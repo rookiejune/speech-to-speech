@@ -35,9 +35,11 @@ class TorchCodecBPETest(unittest.TestCase):
 
         token_ids = tokenizer.encode(torch.tensor([[1, 4], [2, 7], [3, 8]]))
         frames = tokenizer.decode(torch.tensor([4]))
+        spans = tokenizer.frame_spans(torch.tensor([4]))
 
         self.assertTrue(torch.equal(token_ids, torch.tensor([4])))
         self.assertTrue(torch.equal(frames, torch.tensor([[1, 4], [2, 7], [3, 8]])))
+        self.assertTrue(torch.equal(spans, torch.tensor([3])))
 
     def test_wrap_preserves_list_api(self):
         base = CodecBPE.train(
@@ -49,6 +51,7 @@ class TorchCodecBPETest(unittest.TestCase):
 
         self.assertEqual(tokenizer.encode([[1], [2], [3]]), [4])
         self.assertEqual(tokenizer.decode([4]), [(1,), (2,), (3,)])
+        self.assertEqual(tokenizer.frame_spans([4]), [3])
 
 
 if __name__ == "__main__":

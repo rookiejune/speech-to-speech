@@ -8,6 +8,9 @@ from torch import Tensor, nn
 
 class Codec(Protocol):
     @property
+    def sample_rate(self) -> int: ...
+
+    @property
     def acoustic_feature_dim(self) -> int: ...
 
     @property
@@ -40,6 +43,11 @@ class AudioTokenizer(Protocol):
         token_ids: Sequence[int] | Tensor,
     ) -> list[tuple[int, ...]] | Tensor: ...
 
+    def frame_spans(
+        self,
+        token_ids: Sequence[int] | Tensor,
+    ) -> list[int] | Tensor: ...
+
 
 class TextTokenizer(Protocol):
     special_tokens_map: Mapping[str, str | Sequence[str]]
@@ -71,12 +79,30 @@ class TextTokenizer(Protocol):
     ) -> str | list[int]: ...
 
 
+class BackboneConfig(Protocol):
+    hidden_size: int
+
+
+class BackboneOutput(Protocol):
+    last_hidden_state: Tensor
+    past_key_values: Any
+    hidden_states: tuple[Tensor, ...] | None
+    attentions: tuple[Tensor, ...] | None
+
+
+class BackboneBody(Protocol):
+    def __call__(self, **kwargs: Any) -> BackboneOutput: ...
+
+
 class Backbone(Protocol):
     @property
-    def config(self) -> Any: ...
+    def config(self) -> BackboneConfig: ...
 
     def get_input_embeddings(self) -> nn.Embedding: ...
 
-    def get_output_embeddings(self) -> nn.Module: ...
+    def get_output_embeddings(self) -> nn.Linear: ...
+
+    @property
+    def base_model(self) -> BackboneBody: ...
 
     def __call__(self, **kwargs: Any) -> Any: ...

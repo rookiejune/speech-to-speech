@@ -5,6 +5,7 @@ from typing import cast
 from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 
+from ._lightning import attached_datamodule
 from ..datamodule import DataModule, Task
 
 
@@ -55,5 +56,5 @@ class StageSwitcher(Callback):
         if stage == self._stage:
             return
         self._stage = stage
-        datamodule = cast(DataModule, trainer.datamodule)
+        datamodule = cast(DataModule, attached_datamodule(trainer))
         datamodule.set_strategy(self.config.strategies[stage])

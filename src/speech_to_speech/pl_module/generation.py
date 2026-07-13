@@ -8,21 +8,29 @@ from anydataset.types import Modality
 from torch import Tensor
 
 from ..datamodule.types import ModelBatch, Task
-from ..model.acoustic import SpeechToSpeechFlowModel
+from ..model.protocol import FlowGeneration
 from .decode import decode_generated_audio
+
+
+class AcousticPrompt(TypedDict):
+    ids: Tensor
+    positions: Tensor
 
 
 class Request(TypedDict):
     prompt_ids: Tensor
     task: Task
-    acoustic_input_ids: Tensor | None
-    acoustic_input_positions: Tensor | None
+    acoustic_prompt: AcousticPrompt | None
+
+
+class AudioOutput(TypedDict):
+    features: Tensor
+    waveform: Tensor
 
 
 class Result(TypedDict):
     token_ids: Tensor
-    acoustic_features: Tensor | None
-    waveform: Tensor | None
+    audio: AudioOutput | None
 
 
 def requests_from_batch(batch: ModelBatch) -> list[Request]:
@@ -35,21 +43,21 @@ def requests_from_batch(batch: ModelBatch) -> list[Request]:
             raise ValueError("teacher-forcing batch row has no target tokens.")
         prompt_end = int(target_positions[0].item())
 
-        acoustic_ids = None
-        acoustic_positions = None
+        acoustic_prompt = None
         if batch.acoustic_input_ids is not None:
             if batch.acoustic_input_positions is None or acoustic_mask is None:
                 raise RuntimeError("acoustic input fields are incomplete.")
             row_mask = acoustic_mask[index]
-            acoustic_ids = batch.acoustic_input_ids[index][row_mask]
-            acoustic_positions = batch.acoustic_input_positions[index][row_mask]
+            acoustic_prompt = AcousticPrompt(
+                ids=batch.acoustic_input_ids[index][row_mask],
+                positions=batch.acoustic_input_positions[index][row_mask],
+            )
 
         requests.append(
             Request(
                 prompt_ids=batch.input_ids[index, :prompt_end],
                 task=task,
-                acoustic_input_ids=acoustic_ids,
-                acoustic_input_positions=acoustic_positions,
+                acoustic_prompt=acoustic_prompt,
             )
         )
     return requests
@@ -58,7 +66,7 @@ def requests_from_batch(batch: ModelBatch) -> list[Request]:
 @torch.no_grad()
 def generate(
     requests: Sequence[Request],
-    model: SpeechToSpeechFlowModel,
+    model: FlowGeneration,
     *,
     max_new_tokens: int = 256,
     temperature: float = 1.0,
@@ -71,18 +79,25 @@ def generate(
     device = model.backbone.get_input_embeddings().weight.device
     for request in requests:
         prompt = request["prompt_ids"].to(device=device)[None]
-        acoustic_ids = request["acoustic_input_ids"]
-        acoustic_positions = request["acoustic_input_positions"]
+        task = request["task"]
+        acoustic_prompt = request["acoustic_prompt"]
+        if (
+            acoustic_prompt is not None
+            and task.source_modality is not Modality.AUDIO
+        ):
+            raise ValueError(
+                f"{task.value} does not accept a source acoustic prompt."
+            )
         acoustic_ids = (
-            None if acoustic_ids is None else acoustic_ids.to(device=device)[None]
+            None
+            if acoustic_prompt is None
+            else acoustic_prompt["ids"].to(device=device)[None]
         )
         acoustic_positions = (
             None
-            if acoustic_positions is None
-            else acoustic_positions.to(device=device)[None]
+            if acoustic_prompt is None
+            else acoustic_prompt["positions"].to(device=device)[None]
         )
-        task = request["task"]
-
         if task.target_modality is Modality.AUDIO:
             sequence, features, _ = model.generate_audio(
                 prompt,
@@ -107,8 +122,10 @@ def generate(
             results.append(
                 Result(
                     token_ids=token_ids,
-                    acoustic_features=features[0],
-                    waveform=waveform,
+                    audio=AudioOutput(
+                        features=features[0],
+                        waveform=waveform,
+                    ),
                 )
             )
             continue
@@ -130,8 +147,7 @@ def generate(
                 token_ids=_response(
                     sequence[0], prompt.size(1), model.runtime.eos_token_id
                 ),
-                acoustic_features=None,
-                waveform=None,
+                audio=None,
             )
         )
     return results

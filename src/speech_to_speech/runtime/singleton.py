@@ -9,10 +9,11 @@ import torch
 from anydataset.types import AudioView, Modality
 from anytrain.codec.longcat import LongCat
 from anytrain.idspace import Layout
+from torch import Tensor, nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .audio_tokenizer import NativeAudioTokenizer, TorchCodecBPE
-from .special_tokens import AudioSpecialToken, TextSpecialToken
+from .special_tokens import Qwen3SpecialToken
 from .types import AudioTokenizer, Backbone, Codec, TextTokenizer
 
 if TYPE_CHECKING:
@@ -29,11 +30,10 @@ class Config:
     attn_implementation: str | None = None
 
     @property
-    def audio_view(self):
+    def audio_view(self) -> AudioView:
         if self.codec == "longcat":
             return AudioView.LONGCAT
-        else:
-            raise ValueError()
+        raise ValueError(f"unsupported codec: {self.codec}")
 
 
 class _CodecContract:
@@ -42,34 +42,41 @@ class _CodecContract:
     def __init__(self, codec: LongCat) -> None:
         self._codec = codec
         decoders = list(codec.decoders.values())
-        if not decoders or not isinstance(
-            getattr(decoders[0], "latent_dim", None), int
-        ):
+        latent_dim = None if not decoders else getattr(decoders[0], "latent_dim", None)
+        if not isinstance(latent_dim, int):
             raise TypeError("LongCat decoder must expose an integer latent_dim.")
-        self._acoustic_feature_dim = decoders[0].latent_dim
+        self._acoustic_feature_dim = latent_dim
+
+    @property
+    def sample_rate(self) -> int:
+        return self._codec.sample_rate
 
     @property
     def acoustic_feature_dim(self) -> int:
         return self._acoustic_feature_dim
 
     @property
-    def semantic_codebook(self):
+    def semantic_codebook(self) -> Tensor:
         return self._codec.semantic_codebook
 
     @property
     def acoustic_codebook_sizes(self) -> tuple[int, ...]:
         return tuple(int(size) for size in self._codec.codebook_sizes[1:])
 
-    def encode(self, audio, sample_rate):
+    def encode(self, audio: Tensor, sample_rate: int) -> Tensor:
         return self._codec.encode(audio, sample_rate)
 
-    def decode(self, codes):
+    def decode(self, codes: Tensor) -> Tensor:
         return self._codec.decode(codes)
 
-    def acoustic_codes_to_features(self, acoustic_codes):
+    def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor:
         return self._codec.acoustic_codes_to_features(acoustic_codes)
 
-    def decode_features(self, semantic_codes, acoustic_features):
+    def decode_features(
+        self,
+        semantic_codes: Tensor,
+        acoustic_features: Tensor,
+    ) -> Tensor:
         return self._codec.decode_features(semantic_codes, acoustic_features)
 
 
@@ -79,7 +86,8 @@ class Runtime:
 
     @cached_property
     def text_tokenizer(self) -> TextTokenizer:
-        return cast(TextTokenizer, AutoTokenizer.from_pretrained(self.config.backbone))
+        tokenizer = AutoTokenizer.from_pretrained(self.config.backbone)
+        return cast(TextTokenizer, cast(object, tokenizer))
 
     @cached_property
     def backbone(self) -> Backbone:
@@ -93,8 +101,8 @@ class Runtime:
             **kwargs,
         )
         if self.config.device is not None:
-            backbone = backbone.to(self.config.device)
-        return cast(Backbone, backbone)
+            backbone = cast(nn.Module, cast(object, backbone)).to(self.config.device)
+        return cast(Backbone, cast(object, backbone))
 
     @cached_property
     def codec(self) -> Codec:
@@ -129,34 +137,30 @@ class Runtime:
             sampler=ODESampler(return_intermediates=False),
         )
 
-    def _text_special_id(self, token: TextSpecialToken) -> int:
+    def _text_special_id(self, token: Qwen3SpecialToken) -> int:
         ids = self.text_tokenizer.encode(token.value, add_special_tokens=False)
         if len(ids) != 1:
             raise ValueError(f"text token {token.value!r} must map to one id.")
         return ids[0]
 
     @cached_property
-    def text_special_ids(self) -> dict[TextSpecialToken, int]:
-        return {token: self._text_special_id(token) for token in TextSpecialToken}
+    def pad_token_id(self) -> int:
+        return self._text_special_id(Qwen3SpecialToken.PAD)
+
+    @cached_property
+    def bos_token_id(self) -> int:
+        return self._text_special_id(Qwen3SpecialToken.BOS)
+
+    @cached_property
+    def eos_token_id(self) -> int:
+        return self._text_special_id(Qwen3SpecialToken.EOS)
 
     @property
-    def pad_token_id(self):
-        return self.text_special_ids[TextSpecialToken.PAD]
-
-    @property
-    def bos_token_id(self):
-        return self.text_special_ids[TextSpecialToken.BOS]
-
-    @property
-    def eos_token_id(self):
-        return self.text_special_ids[TextSpecialToken.EOS]
-
-    @property
-    def boa_token_id(self):
+    def boa_token_id(self) -> int:
         return len(self.text_tokenizer) + self.audio_tokenizer.vocab_size
 
     @property
-    def eoa_token_id(self):
+    def eoa_token_id(self) -> int:
         return self.boa_token_id + 1
 
     @property
@@ -209,7 +213,7 @@ def _audio_tokenizer(path: str | Path) -> AudioTokenizer:
     from zhuyin.tokenizers.codec_bpe import codec_bpe
 
     tokenizer = codec_bpe(Path(path).expanduser())
-    return cast(AudioTokenizer, TorchCodecBPE.wrap(tokenizer))
+    return cast(AudioTokenizer, cast(object, TorchCodecBPE.wrap(tokenizer)))
 
 
 def _dtype(value: str) -> torch.dtype:

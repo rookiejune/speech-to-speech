@@ -9,12 +9,11 @@ from typing import Any
 
 import torch
 
-from speech_to_speech.datamodule.collator import Collator
-from speech_to_speech.datamodule.types import Task
-from speech_to_speech.model.acoustic import SpeechToSpeechFlowModel
-from speech_to_speech.pl_module import generate, requests_from_batch
+from speech_to_speech.datamodule import Collator, Task
+from speech_to_speech.model import SpeechToSpeechFlowModel
+from speech_to_speech.pl_module import AudioOutput, Result, generate, requests_from_batch
+from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import init_runtime
-from speech_to_speech.runtime.singleton import Config as RuntimeConfig
 from zhuyin.datasets.wmt19_tts import wmt19_tts_codec
 
 
@@ -40,7 +39,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     model = SpeechToSpeechFlowModel(runtime_snapshot=rt).eval()
     with torch.no_grad():
-        model.acoustic_gate.fill_(args.acoustic_gate)
+        model.acoustic_prompt_gate.fill_(args.acoustic_prompt_gate)
 
     semantic_probe = probe_second_step(model, request)
 
@@ -68,10 +67,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         "prompt_tokens": int(request["prompt_ids"].numel()),
         "source_acoustic_frames": (
             0
-            if request["acoustic_input_ids"] is None
-            else int(request["acoustic_input_ids"].size(0))
+            if request["acoustic_prompt"] is None
+            else int(request["acoustic_prompt"]["ids"].size(0))
         ),
-        "acoustic_gate": args.acoustic_gate,
+        "acoustic_prompt_gate": args.acoustic_prompt_gate,
         "semantic_probe": semantic_probe,
         "cached": summary(cached),
         "full_recompute": summary(full),
@@ -162,12 +161,11 @@ def run(
 def probe_second_step(model: SpeechToSpeechFlowModel, request) -> dict[str, Any]:
     device = model.backbone.get_input_embeddings().weight.device
     prompt = request["prompt_ids"].to(device=device)[None]
-    acoustic_ids = required(request["acoustic_input_ids"], "source acoustic ids").to(
-        device=device
-    )[None]
-    acoustic_positions = required(
-        request["acoustic_input_positions"], "source acoustic positions"
-    ).to(device=device)[None]
+    acoustic_prompt = request["acoustic_prompt"]
+    if acoustic_prompt is None:
+        raise RuntimeError("generation request has no source acoustic prompt.")
+    acoustic_ids = acoustic_prompt["ids"].to(device=device)[None]
+    acoustic_positions = acoustic_prompt["positions"].to(device=device)[None]
 
     def first_output():
         return model(
@@ -295,8 +293,9 @@ def probe_second_step(model: SpeechToSpeechFlowModel, request) -> dict[str, Any]
 
 def summary(run_output: dict[str, Any]) -> dict[str, Any]:
     result = run_output["result"]
-    features = required(result["acoustic_features"], "acoustic features")
-    waveform = required(result["waveform"], "waveform")
+    audio = audio_output(result, "generation result")
+    features = audio["features"]
+    waveform = audio["waveform"]
     return {
         "token_ids": result["token_ids"].detach().cpu().tolist(),
         "acoustic_shape": list(features.shape),
@@ -317,10 +316,12 @@ def summary(run_output: dict[str, Any]) -> dict[str, Any]:
 def compare(cached_run: dict[str, Any], full_run: dict[str, Any]) -> dict[str, Any]:
     cached = cached_run["result"]
     full = full_run["result"]
-    cached_features = required(cached["acoustic_features"], "cached features")
-    full_features = required(full["acoustic_features"], "full features")
-    cached_waveform = required(cached["waveform"], "cached waveform")
-    full_waveform = required(full["waveform"], "full waveform")
+    cached_audio = audio_output(cached, "cached result")
+    full_audio = audio_output(full, "full-recompute result")
+    cached_features = cached_audio["features"]
+    full_features = full_audio["features"]
+    cached_waveform = cached_audio["waveform"]
+    full_waveform = full_audio["waveform"]
     cached_tokens = cached["token_ids"]
     full_tokens = full["token_ids"]
     return {
@@ -412,10 +413,11 @@ def first_difference(left: torch.Tensor, right: torch.Tensor) -> int | None:
     return None
 
 
-def required(value: torch.Tensor | None, name: str) -> torch.Tensor:
-    if value is None:
-        raise RuntimeError(f"generation did not return {name}.")
-    return value
+def audio_output(result: Result, name: str) -> AudioOutput:
+    audio = result["audio"]
+    if audio is None:
+        raise RuntimeError(f"{name} did not return audio output.")
+    return audio
 
 
 def parser() -> argparse.ArgumentParser:
@@ -426,7 +428,7 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--split", default="train")
     parser.add_argument("--max-new-tokens", type=int, default=2)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--acoustic-gate", type=float, default=1.0)
+    parser.add_argument("--acoustic-prompt-gate", type=float, default=1.0)
     parser.add_argument("--codec", default="longcat")
     parser.add_argument("--backbone", default="Qwen/Qwen3-0.6B")
     parser.add_argument("--device", default="cuda")

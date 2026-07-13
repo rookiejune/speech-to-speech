@@ -1,37 +1,12 @@
 from __future__ import annotations
 
 import torch
-from torch import Tensor, nn
+from torch import Tensor
 
 from ..base import SemanticModel
+from .dit import AcousticDiT
 
-
-class AcousticFlowDecoder(nn.Module):
-    """Frame-level conditional velocity model for continuous acoustic latents."""
-
-    def __init__(self, condition_dim: int, latent_dim: int) -> None:
-        super().__init__()
-        if condition_dim <= 0 or latent_dim <= 0:
-            raise ValueError("condition_dim and latent_dim must be positive.")
-        self.latent_dim = latent_dim
-        hidden_dim = max(condition_dim, latent_dim)
-        self.time = nn.Sequential(
-            nn.Linear(1, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
-        self.condition = nn.Linear(condition_dim, hidden_dim)
-        self.input = nn.Linear(latent_dim, hidden_dim)
-        self.output = nn.Sequential(nn.SiLU(), nn.Linear(hidden_dim, latent_dim))
-
-    def forward(self, x_t: Tensor, t: Tensor, *, condition: Tensor) -> Tensor:
-        if x_t.shape != condition.shape[:-1] + (self.latent_dim,):
-            raise ValueError("acoustic latent and condition shapes do not align.")
-        if t.shape != (x_t.size(0),):
-            raise ValueError("flow time must have shape [batch].")
-        time = self.time(t[:, None].to(dtype=x_t.dtype))[:, None]
-        hidden = self.input(x_t) + self.condition(condition) + time
-        return self.output(hidden)
+AcousticFlowDecoder = AcousticDiT
 
 
 class SpeechToSpeechFlowModel(SemanticModel):
@@ -43,6 +18,12 @@ class SpeechToSpeechFlowModel(SemanticModel):
         self.acoustic_decoder = AcousticFlowDecoder(
             self.backbone.config.hidden_size,
             self.runtime.codec.acoustic_feature_dim,
+            hidden_dim=self.config.acoustic_decoder_dim,
+            layers=self.config.acoustic_decoder_layers,
+            heads=self.config.acoustic_decoder_heads,
+            ffn_ratio=self.config.acoustic_decoder_ffn_ratio,
+            repa_dim=self.config.acoustic_repa_dim,
+            repa_layer=self.config.acoustic_repa_layer,
         ).to(device=backbone_weight.device, dtype=backbone_weight.dtype)
 
     def acoustic_target_latent(self, acoustic_labels: Tensor) -> Tensor:

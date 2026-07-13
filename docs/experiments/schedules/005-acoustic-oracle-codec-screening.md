@@ -72,7 +72,8 @@ jobs/005/05_unicodec_ddp_lba.sh init=codec
   start/done/error 与耗时，用于定位远程卡点。
 - TensorBoard：公共 `train/grad_norm`；LongCat 记录 `train/flow_loss`、`flow/time`、
   `oracle/sample_feature_mse`；UniCodec 记录 `train/token_loss`、`train/token_accuracy`、
-  `oracle/token_accuracy`；两者都记录 reconstruction 与 sampled waveform。
+  `oracle/teacher_forced_accuracy`；LongCat 记录 sampled waveform，UniCodec 记录
+  teacher-forced prediction waveform。
 - `metrics.json`：codec、objective、初始化、shape/scale 元数据、首末 loss 窗口和采样指标。
 - non-finite callback：参数或梯度第一次出现非有限值时立即中止并暴露位置。
 

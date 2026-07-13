@@ -1,7 +1,8 @@
 from dataclasses import dataclass
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TypedDict
 
+from anydataset.types import Sample as RawSample
 from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader
 
@@ -19,11 +20,6 @@ class Config:
     codec: str
     dataloader: DataLoaderConfig
 
-    def train_dataset(self):
-        from zhuyin.datasets.wmt19_tts import wmt19_tts_codec
-
-        return wmt19_tts_codec(codec=self.codec)
-
 
 class DataModule(LightningDataModule):
     def __init__(self, config: Config, strategy: Mapping[Task, float]) -> None:
@@ -33,11 +29,21 @@ class DataModule(LightningDataModule):
         self.collator = Collator(strategy)
         self._train_dataset = None
 
-    def setup(self, stage: str) -> None:
-        self._train_dataset = self.config.train_dataset()
+    def setup(self, stage: str | None = None) -> None:
+        del stage
+        if self._train_dataset is not None:
+            return
+        from zhuyin.datasets.wmt19_tts import wmt19_tts_codec
+
+        self._train_dataset = wmt19_tts_codec(codec=self.config.codec)
 
     def set_strategy(self, strategy: Mapping[Task, float]) -> None:
         self.collator.set_strategy(strategy)
+
+    def train_samples(self, indices: Sequence[int]) -> list[RawSample]:
+        if self._train_dataset is None:
+            raise RuntimeError("DataModule.setup() must run before reading samples.")
+        return [self._train_dataset[index] for index in indices]
 
     def train_dataloader(self) -> Iterable[ModelBatch]:
         if self._train_dataset is None:

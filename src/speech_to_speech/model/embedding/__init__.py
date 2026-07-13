@@ -1,3 +1,3 @@
-from .module import create_embedding
+from .audio import create_semantic_audio_embedding
 
-__all__ = ["create_embedding"]
+__all__ = ["create_semantic_audio_embedding"]

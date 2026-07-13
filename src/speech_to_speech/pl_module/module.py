@@ -2,15 +2,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 from anytrain.optim.llm import create_optimizer
 from lightning.pytorch import LightningModule
+from torch import nn
 
 from ..datamodule.types import ModelBatch
 from ..loss.module import Loss
 from ..loss.types import Outputs
-from ..model.protocol import FlowMatching
+from ..model.protocol import FlowModel
 from .generation import Request, Result, generate
 from .text import TextProbe, TextProbeResult, evaluate_text
 
@@ -26,7 +28,7 @@ class SpeechToSpeech(LightningModule):
         self,
         config: Config,
         *,
-        model: FlowMatching,
+        model: FlowModel,
         loss: Loss,
     ) -> None:
         super().__init__()
@@ -99,7 +101,7 @@ class SpeechToSpeech(LightningModule):
 
     def configure_optimizers(self):
         return create_optimizer(
-            self.model,
+            cast(nn.Module, cast(object, self.model)),
             preset="sft",
             optimizer="adamw",
             lr=self.config.learning_rate,

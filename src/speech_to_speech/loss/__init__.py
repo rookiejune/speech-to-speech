@@ -1,4 +1,5 @@
 from .module import Loss
-from .types import LossItem, Outputs
+from .repa import RepaLoss, WavLMTeacher
+from .types import LossItem, Outputs, loss_items
 
-__all__ = ["Loss", "LossItem", "Outputs"]
+__all__ = ["Loss", "LossItem", "Outputs", "RepaLoss", "WavLMTeacher", "loss_items"]

@@ -1,41 +1,41 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
 from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 from torch import Tensor
 
+from .._lightning import histogram_experiment, text_experiment
 from ...loss.types import LossItem
 
 
 class _FlowRuntime(Protocol):
-    time_sampler: Any
-
-
-class _FlowModel(Protocol):
-    runtime: Any
+    @property
+    def time_sampler(self) -> object: ...
 
 
 class FlowMatchingLogger(Callback):
     """Log flow-matching sampler configuration and the sampled training times."""
 
-    def __init__(self, every_n_steps: int = 100) -> None:
+    def __init__(
+        self,
+        runtime: _FlowRuntime,
+        every_n_steps: int = 100,
+    ) -> None:
         super().__init__()
         if every_n_steps < 1:
             raise ValueError("every_n_steps must be positive")
+        self.runtime = runtime
         self.every_n_steps = every_n_steps
 
     def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        logger = trainer.logger
-        if logger is None or not hasattr(logger, "experiment"):
+        experiment = text_experiment(trainer)
+        if experiment is None:
             return
 
-        flow_runtime = cast(
-            _FlowRuntime, cast(_FlowModel, pl_module.model).runtime.flow_matching
-        )
-        sampler = flow_runtime.time_sampler
+        sampler = self.runtime.time_sampler
         config = vars(sampler)
         values = [f"sampler={type(sampler).__name__}"]
         values.extend(
@@ -43,8 +43,7 @@ class FlowMatchingLogger(Callback):
             for name in ("mean", "std", "t_min", "t_max")
             if name in config
         )
-        if hasattr(logger.experiment, "add_text"):
-            logger.experiment.add_text("flow/config", "\n".join(values), 0)
+        experiment.add_text("flow/config", "\n".join(values), 0)
 
     def on_train_batch_end(
         self,
@@ -63,12 +62,11 @@ class FlowMatchingLogger(Callback):
         if not isinstance(flow, LossItem) or flow.details is None:
             return
 
-        logger = trainer.logger
-        if logger is None or not hasattr(logger, "experiment"):
+        experiment = histogram_experiment(trainer)
+        if experiment is None:
             return
-        experiment = logger.experiment
         t = flow.details.get("t")
-        if isinstance(t, Tensor) and hasattr(experiment, "add_histogram"):
+        if isinstance(t, Tensor):
             experiment.add_histogram(
                 "flow/time",
                 t.detach().float().cpu(),

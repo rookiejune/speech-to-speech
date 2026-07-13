@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import cast
 
 import torch
 from torch import Tensor, nn
 
+from .._sampling import top_p_filter
 from ..base import SemanticModel
 
 
@@ -68,11 +70,13 @@ class AcousticRVQDecoder(nn.Module):
             nn.Embedding(size, embedding_dim) for size in sizes
         )
         if codebook_embeddings is None:
-            for embedding in self.codebook_embeddings:
+            for module in self.codebook_embeddings:
+                embedding = cast(nn.Embedding, cast(object, module))
                 nn.init.normal_(embedding.weight, std=embedding_dim**-0.5)
         else:
             with torch.no_grad():
-                for index, embedding in enumerate(self.codebook_embeddings):
+                for index, module in enumerate(self.codebook_embeddings):
+                    embedding = cast(nn.Embedding, cast(object, module))
                     embedding.weight.copy_(codebook_embeddings[index])
 
         self.embedding_projections = nn.ModuleList(
@@ -93,8 +97,16 @@ class AcousticRVQDecoder(nn.Module):
             raise TypeError("acoustic code labels must contain integer ids.")
         if bool((ids < 0).any()) or bool((ids >= self.codebook_sizes[codebook]).any()):
             raise ValueError("acoustic code label is outside the codec codebook.")
-        value = self.codebook_embeddings[codebook](ids)
-        return self.embedding_projections[codebook](value)
+        embedding = cast(
+            nn.Embedding,
+            cast(object, self.codebook_embeddings[codebook]),
+        )
+        projection = cast(
+            nn.Module,
+            cast(object, self.embedding_projections[codebook]),
+        )
+        value = embedding(ids)
+        return projection(value)
 
     def forward(
         self,
@@ -125,7 +137,8 @@ class AcousticRVQDecoder(nn.Module):
                     ),
                     start=torch.zeros_like(condition),
                 )
-            logits.append(self.heads[codebook](state))
+            head = cast(nn.Linear, cast(object, self.heads[codebook]))
+            logits.append(head(state))
         return tuple(logits)
 
     @torch.no_grad()
@@ -155,9 +168,10 @@ class AcousticRVQDecoder(nn.Module):
                     ),
                     start=torch.zeros_like(condition),
                 )
-            logits = self.heads[codebook](state) / temperature
+            head = cast(nn.Linear, cast(object, self.heads[codebook]))
+            logits = head(state) / temperature
             if top_p < 1.0:
-                logits = _top_p_filter(logits, top_p)
+                logits = top_p_filter(logits, top_p)
             value = torch.distributions.Categorical(logits=logits).sample()
             previous.append(value)
             output.append(value)
@@ -196,17 +210,3 @@ class SpeechToSpeechRVQModel(SemanticModel):
     @torch.no_grad()
     def sample_acoustic(self, condition: Tensor, **kwargs: float) -> Tensor:
         return self.acoustic_decoder.generate(condition, **kwargs)
-
-
-def _top_p_filter(logits: Tensor, top_p: float) -> Tensor:
-    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
-    probabilities = sorted_logits.softmax(dim=-1)
-    remove = probabilities.cumsum(dim=-1) - probabilities >= top_p
-    remove[..., 0] = False
-    filtered = logits.new_full(logits.shape, float("-inf"))
-    filtered.scatter_(
-        dim=-1,
-        index=sorted_indices,
-        src=sorted_logits.masked_fill(remove, float("-inf")),
-    )
-    return filtered

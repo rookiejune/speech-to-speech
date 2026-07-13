@@ -1,11 +1,42 @@
 from __future__ import annotations
 
+from typing import Protocol
+
 import torch
 from torch import Tensor, nn
 
-from ...runtime.types import AudioTokenizer, Codec
+from ...runtime.types import AudioTokenizer, Backbone, Codec
+from ..adapter import create_adapter
 
 _ROPE_THETA = 10000.0
+
+
+class _Runtime(Protocol):
+    @property
+    def audio_tokenizer(self) -> AudioTokenizer: ...
+
+    @property
+    def backbone(self) -> Backbone: ...
+
+    @property
+    def codec(self) -> Codec: ...
+
+
+def create_semantic_audio_embedding(
+    adapter_type: str | None,
+    runtime: _Runtime,
+) -> tuple[nn.Embedding, nn.Module]:
+    backbone_weight = runtime.backbone.get_input_embeddings().weight
+    adapter = create_adapter(
+        adapter_type,
+        runtime.codec.semantic_codebook.size(-1),
+        runtime.backbone.config.hidden_size,
+    ).to(device=backbone_weight.device, dtype=backbone_weight.dtype)
+    semantic_audio = embedding(runtime.codec, runtime.audio_tokenizer).to(
+        device=backbone_weight.device,
+        dtype=backbone_weight.dtype,
+    )
+    return semantic_audio, adapter
 
 
 def _merge(embeddings: Tensor) -> Tensor:
@@ -48,12 +79,13 @@ def merge_by_positions(
     positions: Tensor,
     sequence_length: int,
     mask: Tensor | None = None,
-) -> Tensor:
+) -> tuple[Tensor, Tensor]:
     """Merge frame features into the token positions they belong to.
 
     ``features`` stays frame-level while the returned tensor is aligned to the
     BPE-level input sequence. Each occupied position uses the same RoPE plus
-    mean-pooling rule as semantic audio-token embedding.
+    mean-pooling rule as semantic audio-token embedding. The second output marks
+    positions occupied by at least one active frame.
     """
     if features.dim() != 3 or positions.dim() != 2:
         raise ValueError(
@@ -75,8 +107,11 @@ def merge_by_positions(
     if bool((active_positions >= sequence_length).any()):
         raise ValueError("frame position exceeds sequence length.")
     if active_positions.numel() == 0:
-        return features.new_zeros(
+        output = features.new_zeros(
             features.size(0), sequence_length, features.size(-1)
+        )
+        return output, positions.new_zeros(
+            features.size(0), sequence_length, dtype=torch.bool
         )
 
     rows = torch.arange(features.size(0), device=features.device)[:, None]
@@ -98,9 +133,11 @@ def merge_by_positions(
     output.index_add_(0, groups, values)
     counts = features.new_zeros(size, 1)
     counts.index_add_(0, groups, features.new_ones(groups.numel(), 1))
-    return (output / counts.clamp_min(1)).view(
+    output = (output / counts.clamp_min(1)).view(
         features.size(0), sequence_length, features.size(-1)
     )
+    occupied = counts.view(features.size(0), sequence_length).gt(0)
+    return output, occupied
 
 
 def base_weight(codec: Codec, tokenizer: AudioTokenizer) -> Tensor:
@@ -149,9 +186,7 @@ def _unit_embeddings(codebook: Tensor, unit_ids: Tensor) -> Tensor:
         return codebook.index_select(0, ids)
 
     if unit_ids.size(-1) != codebook.size(0):
-        raise ValueError(
-            "semantic units must match the codec semantic codebook count."
-        )
+        raise ValueError("semantic units must match the codec semantic codebook count.")
     frames = []
     for index in range(codebook.size(0)):
         ids = unit_ids[:, index]

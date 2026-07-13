@@ -19,7 +19,15 @@ from anydataset.types import (
 )
 
 from speech_to_speech.datamodule.collator import Collator
-from speech_to_speech.datamodule.types import ModelBatch, Sample, SpeechPair, Task
+from speech_to_speech.datamodule.module import Config as DataConfig
+from speech_to_speech.datamodule.module import DataModule
+from speech_to_speech.datamodule.types import (
+    Language,
+    ModelBatch,
+    Sample,
+    SpeechPair,
+    Task,
+)
 from speech_to_speech.callback.stage import Config as StageConfig
 from speech_to_speech.callback.stage import StageSwitcher
 from speech_to_speech.runtime.singleton import Config, Runtime
@@ -124,11 +132,29 @@ class ContractTest(unittest.TestCase):
         pair = SpeechPair.from_raw(raw)
 
         self.assertTrue(torch.equal(pair.source.text_ids, torch.tensor([1, 2])))
+        self.assertIs(pair.source.language, Language.ZH)
+        self.assertIs(pair.target.language, Language.EN)
         self.assertEqual(pair.source.acoustic_ids.shape, (2, 1))
         self.assertTrue(
             torch.equal(pair.source.acoustic_ids, torch.tensor([[2], [3]]))
         )
         self.assertEqual(tokenizer.encoded, ("target text", False))
+
+    @patch("zhuyin.datasets.wmt19_tts.wmt19_tts_codec")
+    def test_datamodule_setup_loads_dataset_once(self, load_dataset):
+        load_dataset.return_value = []
+        datamodule = DataModule(
+            DataConfig(
+                codec="longcat",
+                dataloader={"batch_size": 1, "num_workers": 0},
+            ),
+            {Task.TTS: 1.0},
+        )
+
+        datamodule.setup()
+        datamodule.setup()
+
+        load_dataset.assert_called_once_with(codec="longcat")
 
     @patch(
         "speech_to_speech.datamodule.types.runtime",
@@ -153,12 +179,12 @@ class ContractTest(unittest.TestCase):
     def test_collator_updates_the_existing_strategy(self):
         collator = Collator({Task.TTS: 1.0, Task.T2ST: 1.0})
         original = collator
-        self.assertEqual({task.name for task in collator.tasks}, {Task.TTS, Task.T2ST})
+        self.assertEqual(set(collator.tasks), {Task.TTS, Task.T2ST})
 
         collator.set_strategy({Task.ASR: 1.0, Task.S2TT: 1.0})
 
         self.assertIs(collator, original)
-        self.assertEqual({task.name for task in collator.tasks}, {Task.ASR, Task.S2TT})
+        self.assertEqual(set(collator.tasks), {Task.ASR, Task.S2TT})
 
     def test_stage_switcher_restores_the_strategy_from_current_epoch(self):
         strategies = [{Task.TTS: 1.0}, {Task.ASR: 1.0}, {Task.TEXT_AR: 1.0}]
@@ -181,6 +207,7 @@ def _sample(task: Task) -> Sample:
         labels=torch.tensor([-100, 2]),
         acoustic_input_ids=None,
         acoustic_input_positions=None,
+        semantic_frame_labels=None,
         acoustic_labels=None,
         acoustic_label_positions=None,
         task=task,

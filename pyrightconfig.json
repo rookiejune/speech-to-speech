@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/DetachHead/basedpyright/main/packages/pyright-internal/src/schemas/pyrightconfig.schema.json",
+  "include": ["src", "scripts"],
+  "extraPaths": [
+    "src",
+    "../workspace/src",
+    "../third_party/anydataset/src",
+    "../third_party/anytrain/src",
+    "../third_party/length-based-batching-adapter/src"
+  ],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "standard"
+}

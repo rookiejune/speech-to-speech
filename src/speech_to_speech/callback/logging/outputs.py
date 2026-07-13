@@ -6,14 +6,14 @@ from lightning.pytorch.callbacks import Callback
 from torch import Tensor
 
 from ...datamodule.types import ModelBatch
-from ...loss.types import LossItem, Outputs
+from ...loss.types import Outputs, loss_items
 
 
 class OutputsLogger(Callback):
-    def __init__(self, tag="{stage}_{key}/{task}") -> None:
+    def __init__(self, template: str = "{objective}_{key}/{task}") -> None:
         super().__init__()
 
-        self.tag = tag
+        self.template = template
 
     def on_train_batch_end(
         self,
@@ -24,35 +24,38 @@ class OutputsLogger(Callback):
         batch_idx: int,
     ) -> None:
         # 不同rank的task列表可能不一样，不做同步
-        outputs = dict(cast(Outputs, outputs))
-        loss = cast(Tensor, outputs["loss"])
-        loss_items = cast(
-            dict[str, LossItem],
-            {key: value for key, value in outputs.items() if key != "loss"},
-        )
-        pl_module.log("loss", loss, prog_bar=True, on_step=True)
-
+        if not isinstance(outputs, Mapping):
+            raise TypeError("OutputsLogger requires mapping training outputs.")
+        typed_outputs = cast(Outputs, outputs)
+        device = typed_outputs["loss"].device
         batch = cast(ModelBatch, batch)
 
-        task_set = set(batch.tasks)
-
-        for task in task_set:
+        for task in dict.fromkeys(batch.tasks):
             mask = torch.tensor(
                 [value == task for value in batch.tasks],
-                device=loss.device,
-            ).bool()
+                device=device,
+                dtype=torch.bool,
+            )
 
-            for stage, loss_item in loss_items.items():
-                loss_item = loss_item.mask_by(mask)
+            for objective, loss_item in loss_items(typed_outputs):
+                loss_item = loss_item.mean(mask)
 
                 pl_module.log(
-                    self.tag.format(stage=stage, key="loss", task=task),
+                    self.template.format(
+                        objective=objective,
+                        key="loss",
+                        task=task,
+                    ),
                     loss_item.loss,
                 )
 
                 if loss_item.details is not None:
                     for key, scalar in loss_item.details.items():
                         pl_module.log(
-                            self.tag.format(stage=stage, key=key, task=task),
+                            self.template.format(
+                                objective=objective,
+                                key=key,
+                                task=task,
+                            ),
                             scalar,
                         )

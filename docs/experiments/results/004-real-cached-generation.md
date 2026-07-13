@@ -7,7 +7,7 @@
 - 数据：WMT19/LongCat train split 首条 S2ST request；prompt 25 tokens，source
   acoustic prompt 27 frames。
 - 模型：`Qwen/Qwen3-0.6B` 与 LongCat `16k_4codebooks`；diagnostic 将
-  `acoustic_gate` 设为 1。
+  `acoustic_prompt_gate` 设为 1。
 
 ## 初次结果
 
@@ -40,7 +40,7 @@ bias 初始化范围一致。
 ## 修复
 
 选择直接修复 model 边界：根据有效 acoustic frame positions 构造 token mask，在
-`acoustic_adapter` 之后把未占用 token 重新置零。这样 linear bias 只在实际 source
+`acoustic_prompt_adapter` 之后把未占用 token 重新置零。这样 linear bias 只在实际 source
 acoustic token 位置生效，训练、full-recompute 与 cached generation 使用同一注入语义。
 
 新增 contract test 使用 weight 为 0、bias 为 `0.25` 的 linear adapter，验证只有 source

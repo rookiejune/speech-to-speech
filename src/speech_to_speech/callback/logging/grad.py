@@ -51,7 +51,8 @@ class GradLogger(Callback):
                 "use a name from pl_module.named_parameters()"
             )
 
-        outputs = cast(_LossOutputProvider, pl_module).current_loss_outputs()
+        provider = cast(_LossOutputProvider, cast(object, pl_module))
+        outputs = provider.current_loss_outputs()
         loss_a = _loss_value(outputs, self.loss_pair[0])
         loss_b = _loss_value(outputs, self.loss_pair[1])
 
@@ -87,6 +88,32 @@ class GradLogger(Callback):
                 value.detach(),
                 on_step=True,
                 logger=True,
+                sync_dist=True,
+            )
+
+
+class GradNormLogger(Callback):
+    def __init__(self, tag: str = "train/grad_norm") -> None:
+        super().__init__()
+        self.tag = tag
+
+    def on_before_optimizer_step(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        optimizer: torch.optim.Optimizer,
+    ) -> None:
+        del trainer, optimizer
+        gradients = [
+            parameter.grad.detach().norm(2)
+            for parameter in pl_module.parameters()
+            if parameter.grad is not None
+        ]
+        if gradients:
+            pl_module.log(
+                self.tag,
+                torch.stack(gradients).norm(2),
+                on_step=True,
                 sync_dist=True,
             )
 

@@ -9,7 +9,7 @@ from anydataset.types import Modality
 from torch import Tensor
 
 from ..datamodule.types import Task
-from ..model.acoustic import SpeechToSpeechFlowModel
+from ..model.protocol import FlowGeneration, GenerationRuntime, SemanticGeneration
 from .generation import Request, generate
 
 
@@ -26,7 +26,7 @@ class TextProbeResult(TypedDict):
 @torch.no_grad()
 def evaluate_text(
     probes: Mapping[str, TextProbe],
-    model: SpeechToSpeechFlowModel,
+    model: FlowGeneration,
     *,
     max_new_tokens: int,
 ) -> dict[str, TextProbeResult]:
@@ -39,8 +39,7 @@ def evaluate_text(
         Request(
             prompt_ids=prompts[name],
             task=Task.T2TT,
-            acoustic_input_ids=None,
-            acoustic_input_positions=None,
+            acoustic_prompt=None,
         )
         for name in probes
     ]
@@ -60,7 +59,7 @@ def evaluate_text(
     return results
 
 
-def _prompt_ids(runtime, instruction: str) -> Tensor:
+def _prompt_ids(runtime: GenerationRuntime, instruction: str) -> Tensor:
     ids = runtime.text_tokenizer.apply_chat_template(
         [{"role": "user", "content": instruction}],
         tokenize=True,
@@ -73,7 +72,7 @@ def _prompt_ids(runtime, instruction: str) -> Tensor:
 
 
 def _reference_nll(
-    model: SpeechToSpeechFlowModel,
+    model: SemanticGeneration,
     prompt_ids: Tensor,
     reference: str,
 ) -> float:
@@ -90,6 +89,8 @@ def _reference_nll(
     device = model.backbone.get_input_embeddings().weight.device
     input_ids = torch.cat((prompt_ids, response_ids)).to(device=device)[None]
     output = model(input_ids, attention_mask=torch.ones_like(input_ids, dtype=torch.bool))
+    if output.logits is None:
+        raise RuntimeError("model did not return text logits.")
     prediction = output.logits[
         0, prompt_ids.numel() - 1 : -1, text_start:text_end
     ].float()
@@ -97,7 +98,7 @@ def _reference_nll(
     return float(F.cross_entropy(prediction, target).detach().cpu())
 
 
-def _decode(runtime, token_ids: Tensor) -> str:
+def _decode(runtime: GenerationRuntime, token_ids: Tensor) -> str:
     if token_ids.numel():
         local_ids = runtime.layout.to_local(token_ids).detach().cpu().tolist()
     else:

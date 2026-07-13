@@ -5,17 +5,32 @@ from torch import nn
 from ..datamodule.types import ModelBatch
 from ..model.protocol import FlowMatching
 from .flow_matching import AcousticFlowLoss, FlowRuntime
+from .repa import RepaLoss, Teacher
 from .semantic import SemanticLoss
 from .types import Outputs
 
 
 class Loss(nn.Module):
-    def __init__(self, layout: Layout, flow_runtime: FlowRuntime) -> None:
+    def __init__(
+        self,
+        layout: Layout,
+        flow_runtime: FlowRuntime,
+        *,
+        repa_weight: float | None = None,
+        repa_teacher: Teacher | None = None,
+    ) -> None:
         super().__init__()
+        if (repa_weight is None) != (repa_teacher is None):
+            raise ValueError("REPA weight and teacher must be provided together")
+        if repa_weight is not None and repa_weight <= 0:
+            raise ValueError("REPA weight must be positive")
         self.layout = layout
         self.semantic = SemanticLoss(layout)
-        self.flow = AcousticFlowLoss()
+        self.flow_matching = AcousticFlowLoss()
+        self.repa = RepaLoss()
+        self.repa_teacher = repa_teacher
         self.flow_runtime = flow_runtime
+        self.repa_weight = repa_weight
 
     def forward(self, batch: ModelBatch, model: FlowMatching) -> Outputs:
         if model.layout.blocks != self.layout.blocks:
@@ -44,13 +59,39 @@ class Loss(nn.Module):
             condition = model.target_frame_condition(
                 output.hidden_states[-1], batch.acoustic_label_positions
             )
-            acoustic = self.flow(
-                model.acoustic_decoder,
-                condition,
-                model.acoustic_target_latent(batch.acoustic_labels),
-                batch.acoustic_target_mask,
-                self.flow_runtime,
-            )
+            target = model.acoustic_target_latent(batch.acoustic_labels)
+            if self.repa_weight is None:
+                acoustic = self.flow_matching(
+                    model.acoustic_decoder,
+                    condition,
+                    target,
+                    batch.acoustic_target_mask,
+                    self.flow_runtime,
+                )
+            else:
+                if self.repa_teacher is None or batch.semantic_frame_labels is None:
+                    raise RuntimeError(
+                        "REPA requires a teacher and semantic frame labels"
+                    )
+                acoustic, representation = self.flow_matching.forward_with_features(
+                    model.acoustic_decoder,
+                    condition,
+                    target,
+                    batch.acoustic_target_mask,
+                    self.flow_runtime,
+                )
+                teacher = self.repa_teacher(
+                    batch.semantic_frame_labels,
+                    batch.acoustic_labels,
+                    batch.acoustic_target_mask,
+                )
+                repa = self.repa(
+                    representation,
+                    teacher,
+                    batch.acoustic_target_mask,
+                )
+                result["repa"] = repa
+                result["loss"] = result["loss"] + self.repa_weight * repa.loss.mean()
             result["flow_matching"] = acoustic
             result["loss"] = result["loss"] + acoustic.loss.mean()
         return result

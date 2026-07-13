@@ -9,15 +9,16 @@
 各运行 2 个训练 step。输入只包含 prepared codes；训练未调用 waveform encoder，也未保存
 连续 feature 数据。
 
-| codec / init | prepared codes | objective | codebook | step 1 -> 2 sample metric |
+| codec / init | prepared codes | objective | codebook | step 1 -> 2 probe metric |
 | --- | --- | --- | --- | ---: |
 | LongCat / codec | `[17, 4]` | acoustic flow | `[8192, 1280]` | feature MSE `2.06496 -> 2.05809` |
 | LongCat / random | `[17, 4]` | acoustic flow | matched `[8192, 1280]` | feature MSE `2.06438 -> 2.05682` |
-| UniCodec / codec | `[75, 1]` | causal token | `[16384, 512]` | token accuracy `0.0267 -> 0.1467` |
-| UniCodec / random | `[75, 1]` | causal token | matched `[16384, 512]` | token accuracy `0.0000 -> 0.1200` |
+| UniCodec / codec | `[75, 1]` | causal token | `[16384, 512]` | teacher-forced accuracy `0.0267 -> 0.1467` |
+| UniCodec / random | `[75, 1]` | causal token | matched `[16384, 512]` | teacher-forced accuracy `0.0000 -> 0.1200` |
 
 四组均完成 checkpoint 加载、objective forward/backward、TensorBoard、checkpoint、
-non-finite callback、oracle reconstruction、训练中 sample decode 和 `metrics.json` 写出。
+non-finite callback、oracle reconstruction、训练中 flow sample/token probe decode 和
+`metrics.json` 写出。
 2-step smoke 只验证路径有效和参数可更新，不支持初始化优劣或 codec 质量结论。
 
 ## LongCat 2000-Step DDP + LBA

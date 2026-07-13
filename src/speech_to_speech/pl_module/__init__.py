@@ -1,10 +1,19 @@
 from .decode import decode_generated_audio
-from .generation import Request, Result, generate, requests_from_batch
+from .generation import (
+    AcousticPrompt,
+    AudioOutput,
+    Request,
+    Result,
+    generate,
+    requests_from_batch,
+)
 from .module import Config, SpeechToSpeech
 from .text import TextProbe, TextProbeResult, evaluate_text
 
 __all__ = [
     "Config",
+    "AcousticPrompt",
+    "AudioOutput",
     "Request",
     "Result",
     "SpeechToSpeech",

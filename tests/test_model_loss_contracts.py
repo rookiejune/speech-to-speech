@@ -43,8 +43,26 @@ class _Codec:
 
 
 class _Decoder(nn.Module):
-    def forward(self, x_t: Tensor, t: Tensor, *, condition: Tensor) -> Tensor:
+    def forward(
+        self,
+        x_t: Tensor,
+        t: Tensor,
+        *,
+        condition: Tensor,
+        mask: Tensor | None = None,
+    ) -> Tensor:
+        del t, condition, mask
         return torch.zeros_like(x_t)
+
+    def forward_with_features(
+        self,
+        x_t: Tensor,
+        t: Tensor,
+        *,
+        condition: Tensor,
+        mask: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        return self(x_t, t, condition=condition, mask=mask), torch.ones_like(condition)
 
 
 class _FlowRuntime:
@@ -55,6 +73,19 @@ class _FlowRuntime:
             velocity=torch.ones_like(x_1),
             t=torch.zeros(x_1.size(0), device=x_1.device),
         )
+
+
+class _Teacher:
+    feature_dim = 2
+
+    def __call__(
+        self,
+        semantic_ids: Tensor,
+        acoustic_ids: Tensor,
+        mask: Tensor,
+    ) -> Tensor:
+        del semantic_ids, acoustic_ids
+        return torch.ones(mask.shape + (self.feature_dim,))
 
 
 class _FlowModel:
@@ -98,9 +129,9 @@ class ModelLossContractTest(unittest.TestCase):
         )
         model = SemanticModel(
             Config(
-                audio_embed_adapter=None,
-                audio_output_adapter=None,
-                acoustic_adapter=None,
+                semantic_audio_adapter=None,
+                semantic_audio_output_adapter=None,
+                acoustic_prompt_adapter=None,
             ),
             runtime_snapshot=rt,
         )
@@ -123,9 +154,9 @@ class ModelLossContractTest(unittest.TestCase):
         )
         model = SemanticModel(
             Config(
-                audio_embed_adapter=None,
-                audio_output_adapter=None,
-                acoustic_adapter=None,
+                semantic_audio_adapter=None,
+                semantic_audio_output_adapter=None,
+                acoustic_prompt_adapter=None,
             ),
             runtime_snapshot=rt,
         )
@@ -146,9 +177,9 @@ class ModelLossContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "input embedding"):
             SemanticModel(
                 Config(
-                    audio_embed_adapter=None,
-                    audio_output_adapter=None,
-                    acoustic_adapter=None,
+                    semantic_audio_adapter=None,
+                    semantic_audio_output_adapter=None,
+                    acoustic_prompt_adapter=None,
                 ),
                 runtime_snapshot=rt,
             )
@@ -197,6 +228,27 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertTrue(torch.equal(model.positions, positions))
         self.assertTrue(torch.isfinite(outputs["loss"]))
 
+    def test_repa_is_an_explicit_audio_objective(self):
+        layout = Layout(text=(0, 4), audio=(4, 7))
+        model = _FlowModel(layout)
+        loss = Loss(
+            layout,
+            _FlowRuntime(),
+            repa_weight=0.1,
+            repa_teacher=_Teacher(),
+        )
+        batch = _batch(
+            Task.TTS,
+            labels=torch.tensor([[-100, 4]]),
+            acoustic_labels=torch.tensor([[[2]]]),
+            acoustic_label_positions=torch.tensor([[1]]),
+        )
+
+        outputs = loss(batch, model)
+
+        self.assertIn("repa", outputs)
+        self.assertTrue(torch.isfinite(outputs["loss"]))
+
 
 def _batch(
     task: Task,
@@ -210,6 +262,7 @@ def _batch(
         labels=labels,
         acoustic_input_ids=None,
         acoustic_input_positions=None,
+        semantic_frame_labels=None if acoustic_labels is None else acoustic_labels,
         acoustic_labels=acoustic_labels,
         acoustic_label_positions=acoustic_label_positions,
         tasks=[task],

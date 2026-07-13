@@ -24,7 +24,7 @@ def event(name: str, state: str, **fields: Any) -> None:
 
 
 @contextmanager
-def stage(name: str, **fields: Any) -> Iterator[None]:
+def timed(name: str, **fields: Any) -> Iterator[None]:
     started_at = time.perf_counter()
     event(name, "start", **fields)
     try:
@@ -47,4 +47,4 @@ def stage(name: str, **fields: Any) -> Iterator[None]:
     )
 
 
-__all__ = ["event", "stage"]
+__all__ = ["event", "timed"]

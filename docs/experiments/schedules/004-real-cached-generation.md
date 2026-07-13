@@ -10,7 +10,7 @@
 - 使用 WMT19/LongCat train split 首条样本构造独立 S2ST request。
 - semantic generation 使用 greedy，最多生成 2 个 token。
 - cached 与 full-recompute 在各自运行前重置相同随机种子，使 flow source noise 一致。
-- diagnostic 将 `acoustic_gate` 设为 1，确保未训练模型的 source acoustic prompt
+- diagnostic 将 `acoustic_prompt_gate` 设为 1，确保未训练模型的 source acoustic prompt
   实际进入首步表示。
 
 ## 验收

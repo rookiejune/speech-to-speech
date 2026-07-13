@@ -79,8 +79,7 @@ class TextRetentionTest(unittest.TestCase):
         generate.return_value = [
             Result(
                 token_ids=torch.tensor([5, 6]),
-                acoustic_features=None,
-                waveform=None,
+                audio=None,
             )
             for _ in PROBES
         ]
@@ -133,6 +132,11 @@ class TextRetentionTest(unittest.TestCase):
 
         trainer.global_step = 2
         logger.on_train_batch_end(trainer, module, None, None, 1)
+        self.assertEqual(evaluate_text.call_count, 2)
+
+        trainer.is_global_zero = False
+        trainer.global_step = 4
+        logger.on_train_batch_end(trainer, module, None, None, 2)
         self.assertEqual(evaluate_text.call_count, 2)
 
 

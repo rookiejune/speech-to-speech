@@ -19,3 +19,6 @@ else:
 
         def __str__(self) -> str:
             return self.value
+
+
+__all__ = ["StrEnum", "auto"]

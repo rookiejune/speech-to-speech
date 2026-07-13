@@ -89,11 +89,16 @@ class _Backbone(nn.Module):
     def get_output_embeddings(self) -> nn.Module:
         return self.output_embeddings
 
+    @property
+    def base_model(self) -> _Backbone:
+        return self
+
     def forward(self, *, inputs_embeds: Tensor, **kwargs):
-        del kwargs
+        output_hidden_states = kwargs["output_hidden_states"]
         hidden, _ = self.rnn(inputs_embeds)
         return SimpleNamespace(
-            hidden_states=(hidden,),
+            last_hidden_state=hidden,
+            hidden_states=(hidden,) if output_hidden_states else None,
             past_key_values=None,
             attentions=None,
         )
@@ -143,9 +148,9 @@ class FakeClosureTest(unittest.TestCase):
         with _runtime(rt):
             model = SpeechToSpeechFlowModel(
                 ModelConfig(
-                    audio_embed_adapter=None,
-                    audio_output_adapter=None,
-                    acoustic_adapter=None,
+                    semantic_audio_adapter=None,
+                    semantic_audio_output_adapter=None,
+                    acoustic_prompt_adapter=None,
                 ),
                 runtime_snapshot=rt,
             )
@@ -171,6 +176,12 @@ class FakeClosureTest(unittest.TestCase):
                         batch.acoustic_labels is not None,
                         task.target_modality is Modality.AUDIO,
                     )
+                    if task.target_modality is Modality.AUDIO:
+                        supervised = batch.labels[0].ne(-100).nonzero().flatten()
+                        first = int(supervised[0])
+                        last = int(supervised[-1])
+                        self.assertEqual(int(batch.input_ids[0, first - 1]), rt.boa_token_id)
+                        self.assertEqual(int(batch.input_ids[0, last]), rt.eoa_token_id)
 
     def test_all_task_paths_forward_backward_and_update_parameters(self):
         for task in Task:
@@ -181,9 +192,9 @@ class FakeClosureTest(unittest.TestCase):
                     batch = Collator({task: 1.0})([_raw_sample(0), _raw_sample(1)])
                     model = SpeechToSpeechFlowModel(
                         ModelConfig(
-                            audio_embed_adapter=None,
-                            audio_output_adapter=None,
-                            acoustic_adapter=None,
+                            semantic_audio_adapter=None,
+                            semantic_audio_output_adapter=None,
+                            acoustic_prompt_adapter=None,
                         ),
                         runtime_snapshot=rt,
                     )
@@ -217,9 +228,9 @@ class FakeClosureTest(unittest.TestCase):
             batch = Collator({Task.TTS: 1.0})([_raw_sample(0)])
             model = SpeechToSpeechFlowModel(
                 ModelConfig(
-                    audio_embed_adapter=None,
-                    audio_output_adapter=None,
-                    acoustic_adapter=None,
+                    semantic_audio_adapter=None,
+                    semantic_audio_output_adapter=None,
+                    acoustic_prompt_adapter=None,
                 ),
                 runtime_snapshot=rt,
             )
