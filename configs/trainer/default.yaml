@@ -6,5 +6,4 @@ use_distributed_sampler: true
 precision: 32-true
 max_epochs: -1
 log_every_n_steps: 1
-enable_checkpointing: true
 gradient_clip_val: 1.0

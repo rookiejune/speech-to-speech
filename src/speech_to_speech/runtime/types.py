@@ -11,6 +11,9 @@ class Codec(Protocol):
     def sample_rate(self) -> int: ...
 
     @property
+    def frame_rate(self) -> float: ...
+
+    @property
     def acoustic_feature_dim(self) -> int: ...
 
     @property

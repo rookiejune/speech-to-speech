@@ -1,0 +1,4 @@
+enabled: true
+filename: step-{step}
+save_last: true
+save_top_k: 0

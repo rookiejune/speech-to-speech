@@ -11,5 +11,5 @@ cd "${SPEECH_TO_SPEECH_ROOT}"
 echo '{"event":"job.launch","codec":"longcat"}'
 "${SPEECH_TO_SPEECH_PYTHON}" scripts/codec_oracle.py \
   codec=longcat \
-  output_dir="${SPEECH_TO_SPEECH_TRAIN_ROOT}/005-codec-oracle/longcat/\${init.name}" \
+  output_dir="${SPEECH_TO_SPEECH_TRAIN_ROOT}/005-codec-oracle/longcat/\${acoustic.name}-\${acoustic.decoder.layers}l/\${init.name}" \
   "$@"

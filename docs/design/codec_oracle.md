@@ -29,8 +29,12 @@
 - `scripts/codec_oracle.py` 是真实运行入口，不重复实现 model、collate 或 DataModule。
 - codec 对象仍由入口按顶层 codec 配置构造；oracle model 只接收需要的 codebook、
   dequantize callable 和 flow runtime。
-- optimizer、flow、trainer、logging 与 codec 使用正常训练共用的 Hydra config group；
-  oracle 只在 experiment recipe 中选择专用 objective、initialization 和 probe 配置。
+- prepared-code 裁剪和 LBA budget 使用 runtime codec 暴露的 frame rate；codec config
+  只选择资源和 dataset view，不重复保存时间尺度。
+- codec config 只选择资源和 dataset view；acoustic config 选择 objective、decoder 结构与
+  flow target normalization。optimizer、flow、trainer 和 logging 继续与正式训练共用。
+- oracle logger、grad norm、non-finite check 与 checkpoint 分属独立 callback config；入口
+  显式注入 codec、codes、metadata 和 output directory 等运行时依赖。
 - objective 与 initialization 的字符串只在配置边界转换一次，内部使用枚举，不重复维护
   字符串分派。
 - 中间 metric、waveform 和 checkpoint 写入实验 output directory，不写入项目 repo。

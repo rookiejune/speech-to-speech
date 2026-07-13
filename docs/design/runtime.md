@@ -8,7 +8,8 @@
 
 - `text_tokenizer`：当前只承诺 Qwen3-compatible 的 HF tokenizer/chat template。
 - `audio_tokenizer`：`config.audio_tokenizer` 为 `None` 时为 `NativeAudioTokenizer`（identity，单 codebook）；否则该配置必须是明确的 CodecBPE artifact 路径，Runtime 通过 workspace 的 `codec_bpe(path)` 加载并包装为 `TorchCodecBPE`。
-- `codec`：经 `_CodecContract` 适配为本地 `Codec` 协议的 LongCat。
+- `codec`：经本地 adapter 统一为 `Codec` 协议；除 waveform sample rate 外，adapter
+  还从已加载 codec 推导 prepared-code frame rate，配置不重复声明该资源属性。
 - `backbone`：当前只承诺 Qwen3-compatible 的 HF causal LM。
 - `layout`：text/audio 两个 global id block；audio block 末尾预留 boa/eoa 两个位置。
 - audio ID 能力：完整 audio head block、generation allowed IDs（semantic + eoa）和 codec-decodable IDs（仅 semantic）是三个不同集合。

@@ -1,5 +1,1 @@
-logger: tensorboard
-sample_every_n_steps: 50
-histogram_every_n_steps: 10
-save_audio: true
-nonfinite_check: true
+name: tensorboard

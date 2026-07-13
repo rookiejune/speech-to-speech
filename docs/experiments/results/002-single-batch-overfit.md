@@ -1,38 +1,44 @@
 # 002 Single Batch Overfit Result
 
-> 状态：待重新验证。原入口的 `sample_index` 只用于日志样本，训练 DataLoader
-> 实际遍历了完整数据集。以下数值保留为历史运行记录，不支撑单 batch overfit
-> 结论；修正后的入口需重跑 TTS 与 S2ST。
+> 状态：已重新验证。修正后的入口通过 `Subset(dataset, [sample_index])` 固定同一条
+> raw sample；TTS 与 S2ST 均完成 100 个 optimizer steps。
 
 ## 环境
 
 - 日期：2026-07-13。
-- 机器：121，NVIDIA A100-PCIE-40GB，物理 GPU 0。
-- Python 3.12，PyTorch 2.9.1+cu128，Lightning 2.6.1，bf16，
+- 机器：144，NVIDIA GeForce RTX 4090 24 GiB，物理 GPU 1。
+- Python 3.12，PyTorch 2.9.0+cu129，Lightning 2.6.1，bf16 mixed，
   `flash_attention_2`。
 - Backbone：`Qwen/Qwen3-0.6B`；codec：LongCat `16k_4codebooks`；audio
   tokenizer：100k LongCat BPE artifact。
-- 数据：`wmt19_tts_codec(codec="longcat", split="train")` 首条样本，batch size 1。
-- 代码通过 `/tmp/s2s-overfit` 与 `/tmp/s2s-deps` 临时快照运行，没有修改 121
-  的共享 Git 工作树。
+- 数据：`wmt19_tts_codec(codec="longcat", split="train")` 的 sample 0，batch size 1。
+- 代码从本地工作树同步到 144 的 `/tmp/s2s-overfit-current` 隔离快照；模型、数据和输出
+  使用 `/mnt/pami202/zhuyin` 共享资源，没有修改远程共享 Git 工作树。
 
-## 配置
+计划原指定 121；运行前该机四张 A100 均已有约 29.6 GiB 占用，剩余显存不足以容纳
+本实验约 12 GiB 峰值，因此改用空闲的 144 GPU 1。模型、数据、样本和训练配置不变。
 
-TTS 和 S2ST 分别运行：
+## 配置与命令
 
-```text
-max_steps=100
-learning_rate=2e-5
-weight_decay=0.01
-seed=0
+两项任务均使用：`max_steps=100`、`learning_rate=2e-5`、`weight_decay=0.01`、
+`seed=0`、sample 0。正式入口为：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 jobs/002/01_tts.sh
+CUDA_VISIBLE_DEVICES=1 jobs/002/02_s2st.sh
 ```
 
-正式入口为 `jobs/002/01_tts.sh` 与 `jobs/002/02_s2st.sh`。两个任务均完成
-100 次 optimizer step；观察到的 CUDA memory 约 11.1 GiB，任务结束后 GPU memory
-恢复为空闲状态。TensorBoard event 位于：
+远程运行显式设置 `LOCATION=fudan`、共享 Hugging Face/anytrain cache 和 py312 Python。
+TTS 用时约 8 分 11 秒，S2ST 用时约 7 分 31 秒；观察到的 CUDA memory 峰值约
+12.0 GiB，结束后 GPU memory 恢复到 4 MiB。
 
-- TTS：`.../002-single-batch-overfit/tts/tensorboard/version_1/`
-- S2ST：`.../002-single-batch-overfit/s2st/tensorboard/version_0/`
+有效 TensorBoard event 位于：
+
+- TTS：`.../002-single-batch-overfit/tts/tensorboard/version_3/`
+- S2ST：`.../002-single-batch-overfit/s2st/tensorboard/version_1/`
+
+TTS `version_2` 是一次 SSH 中断后只写入初始化事件的无效运行，不包含训练 step，
+不参与下列统计。
 
 ## 结果
 
@@ -40,33 +46,25 @@ seed=0
 
 | Task | Objective | First 20 | Last 20 | Last / first |
 | --- | --- | ---: | ---: | ---: |
-| TTS | total | 7.2862 | 2.2657 | 0.3110 |
-| TTS | semantic | 4.5414 | 0.0550 | 0.0121 |
-| TTS | flow matching | 2.7448 | 2.2108 | 0.8054 |
-| S2ST | total | 6.5335 | 2.2364 | 0.3423 |
-| S2ST | semantic | 3.8921 | 0.0367 | 0.0094 |
-| S2ST | flow matching | 2.6413 | 2.1997 | 0.8328 |
+| TTS | total | 6.0757 | 1.6963 | 0.2792 |
+| TTS | semantic | 3.7896 | 0.0469 | 0.0124 |
+| TTS | flow matching | 2.2862 | 1.6493 | 0.7214 |
+| S2ST | total | 6.2989 | 1.6252 | 0.2580 |
+| S2ST | semantic | 4.0174 | 0.0251 | 0.0063 |
+| S2ST | flow matching | 2.2815 | 1.6001 | 0.7013 |
 
-TensorBoard 同时包含按 task 划分的 semantic text/audio loss、token count、flow loss、
-frame count 和 flow time。
+两个任务均达到 `max_steps=100`，semantic 与 flow matching 的后 20-step 均值都低于
+前 20-step 均值。模型摘要显示 991M 参数可训练、529 个模块处于 train mode、0 个模块
+处于 eval mode；loss、梯度和训练过程保持 finite，未发生 OOM 或持续显存增长。
 
-## 原结论（已失效）
+## 结论
 
-- TTS 与 S2ST 的 semantic objective 都能在 100 steps 内接近记忆固定样本。
-- 加入 source semantic/acoustic condition 后，S2ST 与 TTS 一样保持可优化。
-- flow matching 的随机训练均值下降约 17%–20%，证明当前路径能收到有效优化信号；
-  本实验不证明随机 flow objective 已充分 overfit，也不用于评价生成音质。
+- 固定同一条真实样本后，TTS 与 S2ST 的 semantic objective 都能在 100 steps 内接近记忆。
+- 加入 source semantic/acoustic condition 后，S2ST 仍保持与 TTS 一致的可优化性。
+- 随机 flow matching 的后 20-step 均值相对前 20 steps 下降约 28%（TTS）和 30%
+  （S2ST），说明两个路径都能收到有效优化信号。
+- 本实验不证明泛化、生成音质或 flow objective 已充分 overfit。
 
-## 暴露项
+## 回归检查
 
-- 首次前台运行没有传 Hugging Face 共享缓存环境，121 外网不可达；正式远程运行需要
-  按 workspace 约定设置 `HF_HOME`、`HF_HUB_CACHE`、`HF_DATASETS_CACHE` 和
-  `HF_ENDPOINT`。补齐并启用离线缓存后模型正常加载。
-- Lightning 报告训练开始时 427 个 backbone 子模块处于 eval mode。参数仍有梯度且
-  两项 objective 均下降，但完整训练前应明确 backbone 的训练/冻结与 module mode 契约。
-- Qwen tied-weight 配置提示、LongCat `weight_norm` deprecation warning 和单样本
-  DataLoader worker warning 未影响本次 100-step 运行。
-
-## 回归测试
-
-实验完成后的本地工作树测试：`26 passed, 14 subtests passed`。
+实验使用的本地工作树通过 basedpyright（0 errors）、68 个本地测试和 compileall。

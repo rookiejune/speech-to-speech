@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
 from anydataset.types import AudioItem, AudioView, Modality, Role
 from anytrain.idspace import Layout
+from lightning.pytorch.callbacks import Callback
 from omegaconf import OmegaConf
 from torch import nn
 
@@ -15,19 +17,46 @@ from speech_to_speech.codec_oracle import (
     collate,
     single_batch_loader,
 )
+from speech_to_speech.codec_oracle import SamplerEpochSetter
 from speech_to_speech.model import AcousticFlow
+from scripts.codec_oracle import training_callbacks
 
 
 class CodecOracleTest(unittest.TestCase):
-    def test_collate_pads_variable_length_codec_sequences(self):
-        codec = OmegaConf.create(
-            {"view": "longcat", "objective": "flow", "frame_rate": 2.0}
+    def test_experiment_precision_matches_bfloat16_runtime(self):
+        root = Path(__file__).parents[1]
+        config = OmegaConf.load(root / "configs/experiment/acoustic_oracle.yaml")
+
+        self.assertEqual(config.trainer.precision, "bf16-mixed")
+
+    def test_sampler_epoch_callback_is_only_enabled_for_lba(self):
+        config = OmegaConf.create(
+            {
+                "data": {"lba": {"enabled": False}},
+                "trainer": {"expected_world_size": 1},
+                "callbacks": {
+                    "grad_norm": {"enabled": False},
+                    "checkpoint": {"enabled": False},
+                    "nonfinite": {"enabled": False},
+                },
+            }
         )
+
+        callbacks = training_callbacks(config, Callback(), Path(self.id()))
+
+        self.assertFalse(any(isinstance(x, SamplerEpochSetter) for x in callbacks))
+        config.data.lba.enabled = True
+        callbacks = training_callbacks(config, Callback(), Path(self.id()))
+        self.assertTrue(any(isinstance(x, SamplerEpochSetter) for x in callbacks))
+
+    def test_collate_pads_variable_length_codec_sequences(self):
+        codec = OmegaConf.create({"view": "longcat", "objective": "flow"})
         data = OmegaConf.create({"max_seconds": 2.0})
         batch = collate(
             [_sample(3), _sample(1)],
             codec=codec,
             data=data,
+            frame_rate=2.0,
         )
 
         self.assertEqual(tuple(batch["codes"].shape), (2, 3, 4))

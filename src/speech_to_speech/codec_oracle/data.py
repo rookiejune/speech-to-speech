@@ -20,12 +20,14 @@ class DataModule(pl.LightningDataModule):
         data: DictConfig,
         codec: DictConfig,
         *,
+        frame_rate: float,
         output_dir: Path,
         seed: int,
     ) -> None:
         super().__init__()
         self.data = data
         self.codec = codec
+        self.frame_rate = frame_rate
         self.output_dir = output_dir
         self.seed = seed
         self.dataset: Any | None = None
@@ -72,7 +74,12 @@ class DataModule(pl.LightningDataModule):
             persistent_workers=(
                 bool(self.data.persistent_workers) and int(self.data.num_workers) > 0
             ),
-            collate_fn=partial(collate, codec=self.codec, data=self.data),
+            collate_fn=partial(
+                collate,
+                codec=self.codec,
+                data=self.data,
+                frame_rate=self.frame_rate,
+            ),
         )
         if not bool(self.data.lba.enabled):
             return loader
@@ -80,9 +87,14 @@ class DataModule(pl.LightningDataModule):
 
         return LBA(
             loader,
-            len_fn=partial(length, codec=self.codec, data=self.data),
+            len_fn=partial(
+                length,
+                codec=self.codec,
+                data=self.data,
+                frame_rate=self.frame_rate,
+            ),
             max_padded_length=round(
-                float(self.data.lba.max_batch_seconds) * float(self.codec.frame_rate)
+                float(self.data.lba.max_batch_seconds) * self.frame_rate
             ),
             max_padding_ratio=float(self.data.lba.max_padding_ratio),
             prefetch_batches=int(self.data.lba.prefetch_batches),
@@ -100,6 +112,7 @@ def codes(
     *,
     codec: DictConfig,
     data: DictConfig,
+    frame_rate: float,
 ) -> Tensor:
     item = sample[(Role.TARGET, Modality.AUDIO)]
     if not isinstance(item, AudioItem):
@@ -109,7 +122,7 @@ def codes(
         raise ValueError("prepared codec codes must have shape [frame, codebook].")
     frames = min(
         codes.size(0),
-        round(float(data.max_seconds) * float(codec.frame_rate)),
+        round(float(data.max_seconds) * frame_rate),
     )
     codes = codes[:frames].long().contiguous()
     if codes.size(0) == 0:
@@ -122,8 +135,9 @@ def length(
     *,
     codec: DictConfig,
     data: DictConfig,
+    frame_rate: float,
 ) -> int:
-    return codes(sample, codec=codec, data=data).size(0)
+    return codes(sample, codec=codec, data=data, frame_rate=frame_rate).size(0)
 
 
 def collate(
@@ -131,8 +145,12 @@ def collate(
     *,
     codec: DictConfig,
     data: DictConfig,
+    frame_rate: float,
 ) -> dict[str, Tensor]:
-    values = [codes(sample, codec=codec, data=data) for sample in samples]
+    values = [
+        codes(sample, codec=codec, data=data, frame_rate=frame_rate)
+        for sample in samples
+    ]
     padded = pad_sequence(values, batch_first=True, padding_value=-1)
     mask = (padded >= 0).all(dim=-1)
     return {"codes": padded, "mask": mask}

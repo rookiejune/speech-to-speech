@@ -4,9 +4,9 @@ from anydataset.types import Sample
 from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 
-from .._lightning import attached_datamodule, audio_experiment, text_experiment
 from ...datamodule import DataModule
 from ...pl_module.generation import Request, Result, requests_from_batch
+from .._lightning import attached_datamodule, audio_experiment, text_experiment
 
 
 class _Module(Protocol):

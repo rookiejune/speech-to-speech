@@ -56,6 +56,12 @@ class _CodecContract:
         return self._codec.sample_rate
 
     @property
+    def frame_rate(self) -> float:
+        return float(
+            self._codec.encoder.input_sample_rate / self._codec.encoder.hop_length
+        )
+
+    @property
     def acoustic_feature_dim(self) -> int:
         return self._acoustic_feature_dim
 
@@ -94,6 +100,10 @@ class _UnifiedCodecContract:
     @property
     def sample_rate(self) -> int:
         return int(self._codec.sample_rate)
+
+    @property
+    def frame_rate(self) -> float:
+        return float(self._codec.model.frame_rate)
 
     @property
     def acoustic_feature_dim(self) -> int:

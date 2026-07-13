@@ -1,0 +1,12 @@
+name: dit
+objective: flow
+normalize_features: true
+decoder:
+  dim:
+  layers: 8
+  heads: 8
+  ffn_ratio: 4
+repa:
+  weight:
+  teacher: microsoft/wavlm-base
+  layer: 9

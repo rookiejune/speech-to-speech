@@ -1,6 +1,7 @@
 # @package _global_
 defaults:
   - /codec: longcat
+  - /acoustic: dit
   - /data: wmt19_tts
   - /runtime: default
   - /init: codec
@@ -9,9 +10,16 @@ defaults:
   - /train: overfit
   - /trainer: default
   - /logging: tensorboard
+  - /callback/oracle@callbacks.oracle
+  - /callback/grad_norm@callbacks.grad_norm
+  - /callback/nonfinite@callbacks.nonfinite
+  - /callback/checkpoint@callbacks.checkpoint
   - _self_
 
-output_dir: ${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech/005-codec-oracle/${codec.name}/${init.name}
+output_dir: ${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech/005-codec-oracle/${codec.name}/${acoustic.name}-${acoustic.decoder.layers}l/${init.name}
 
 runtime:
   audio_tokenizer:
+
+trainer:
+  precision: bf16-mixed

@@ -6,11 +6,12 @@ from pathlib import Path
 from typing import Any, cast
 
 import hydra
+import torch
 from anydataset.types import Sample as RawSample
 from lightning import pytorch as pl
 from lightning.pytorch import LightningDataModule
 from lightning.pytorch.callbacks import Callback
-from lightning.pytorch.loggers import TensorBoardLogger
+from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
 from omegaconf import DictConfig, OmegaConf
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset, Subset
@@ -44,6 +45,11 @@ from speech_to_speech.pl_module import SpeechToSpeech
 from speech_to_speech.reporting import window_summary
 from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import init_runtime
+from speech_to_speech.runtime.types import Codec
+if __package__:
+    from ._acoustic_evaluation import evaluate
+else:
+    from _acoustic_evaluation import evaluate
 
 
 class LossSummary(Callback):
@@ -78,6 +84,79 @@ class LossSummary(Callback):
 
     def _append(self, name: str, value: Tensor) -> None:
         self.values.setdefault(name, []).append(float(value.detach().float().mean()))
+
+
+class AcousticEvaluation(Callback):
+    def __init__(
+        self,
+        model: SpeechToSpeechFlowModel,
+        batch: ModelBatch,
+        codec: Codec,
+        output_dir: Path,
+        *,
+        every_n_steps: int,
+        seeds: Sequence[int],
+    ) -> None:
+        super().__init__()
+        self.model = model
+        self.batch = batch
+        self.codec = codec
+        self.path = output_dir / "evaluation.json"
+        self.every_n_steps = every_n_steps
+        self.seeds = tuple(seeds)
+        self.values: dict[int, dict[str, float]] = {}
+
+    def on_fit_start(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+    ) -> None:
+        del pl_module
+        if trainer.is_global_zero:
+            self.evaluate(trainer, 0)
+
+    def on_train_batch_end(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        outputs: Tensor | Mapping[str, Any] | None,
+        batch: Any,
+        batch_idx: int,
+    ) -> None:
+        del pl_module, outputs, batch, batch_idx
+        if (
+            trainer.is_global_zero
+            and trainer.global_step % self.every_n_steps == 0
+        ):
+            self.evaluate(trainer, trainer.global_step)
+
+    def on_train_end(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+    ) -> None:
+        del pl_module
+        if trainer.is_global_zero:
+            self.evaluate(trainer, trainer.global_step)
+
+    def evaluate(self, trainer: pl.Trainer, step: int) -> None:
+        if step in self.values:
+            return
+        metrics = evaluate(self.model, self.batch, self.codec, seeds=self.seeds)
+        self.values[step] = metrics
+        if trainer.logger is not None:
+            trainer.logger.log_metrics(
+                {f"evaluation/{name}": value for name, value in metrics.items()},
+                step=step,
+            )
+        self.path.write_text(
+            json.dumps(
+                {str(key): value for key, value in self.values.items()},
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
 
 
 class FixedDataModule(LightningDataModule):
@@ -137,6 +216,10 @@ def run(config: DictConfig) -> None:
 
     pl.seed_everything(int(config.train.seed), workers=True)
     rt = init_runtime(runtime_config(config))
+    layout = rt.layout
+    codec = rt.codec
+    backbone = rt.backbone
+    flow_matching = rt.flow_matching
     task = Task(str(config.task))
     datamodule = FixedDataModule(
         str(config.codec.name),
@@ -145,57 +228,78 @@ def run(config: DictConfig) -> None:
     )
 
     repa_teacher = None
-    if config.objective == "rvq" and config.repa.weight is not None:
+    if config.acoustic.objective == "rvq" and config.acoustic.repa.weight is not None:
         raise ValueError("REPA is only defined for the flow objective.")
-    if config.repa.weight is not None:
+    if config.acoustic.repa.weight is not None:
         repa_teacher = WavLMTeacher(
-            rt.codec,
-            checkpoint=str(config.repa.teacher),
-            layer=int(config.repa.layer),
-            device=rt.backbone.get_input_embeddings().weight.device,
+            codec,
+            checkpoint=str(config.acoustic.repa.teacher),
+            layer=int(config.acoustic.repa.layer),
+            device=backbone.get_input_embeddings().weight.device,
         )
-    model_config = (
-        ModelConfig()
-        if repa_teacher is None
-        else ModelConfig(acoustic_repa_dim=repa_teacher.feature_dim)
+    torch.manual_seed(int(config.train.seed))
+    decoder_dim = config.acoustic.decoder.dim
+    model_config = ModelConfig(
+        acoustic_decoder_dim=(
+            None if decoder_dim is None else int(decoder_dim)
+        ),
+        acoustic_decoder_layers=int(config.acoustic.decoder.layers),
+        acoustic_decoder_heads=int(config.acoustic.decoder.heads),
+        acoustic_decoder_ffn_ratio=int(config.acoustic.decoder.ffn_ratio),
+        acoustic_repa_dim=(
+            768 if repa_teacher is None else repa_teacher.feature_dim
+        ),
     )
-    has_acoustic = bool(rt.codec.acoustic_codebook_sizes)
+    has_acoustic = bool(codec.acoustic_codebook_sizes)
     module_config = ModuleConfig(
         learning_rate=float(config.optimizer.learning_rate),
         weight_decay=float(config.optimizer.weight_decay),
     )
+    evaluation: AcousticEvaluation | None = None
     if not has_acoustic:
         model = SemanticModel(model_config, runtime_snapshot=rt)
-        objective = SemanticObjective(rt.layout)
+        objective = SemanticObjective(layout)
         module = SpeechToSpeech(module_config, model=model, objective=objective)
-    elif config.objective == "flow":
+    elif config.acoustic.objective == "flow":
         model = SpeechToSpeechFlowModel(model_config, runtime_snapshot=rt)
         objective = Loss(
-            rt.layout,
-            rt.flow_matching,
+            layout,
+            flow_matching,
             repa=(
                 None
-                if config.repa.weight is None or repa_teacher is None
-                else {"weight": float(config.repa.weight), "teacher": repa_teacher}
+                if config.acoustic.repa.weight is None or repa_teacher is None
+                else {
+                    "weight": float(config.acoustic.repa.weight),
+                    "teacher": repa_teacher,
+                }
             ),
         )
         module = SpeechToSpeech(module_config, model=model, objective=objective)
+        datamodule.setup("fit")
+        batch = next(iter(datamodule.train_dataloader()))
+        evaluation = AcousticEvaluation(
+            model,
+            batch,
+            codec,
+            output_dir,
+            every_n_steps=max(1, int(config.train.max_steps) // 5),
+            seeds=range(4),
+        )
     else:
         model = SpeechToSpeechRVQModel(model_config, runtime_snapshot=rt)
-        objective = RVQLoss(rt.layout)
+        objective = RVQLoss(layout)
         module = SpeechToSpeech(module_config, model=model, objective=objective)
     summary = LossSummary()
     loss_pair = (
         ("flow_matching", "repa")
-        if config.repa.weight is not None
+        if config.acoustic.repa.weight is not None
         else ("semantic", "flow_matching")
-        if config.objective == "flow"
+        if config.acoustic.objective == "flow"
         else ("semantic", "causal_lm")
     )
     callbacks = cast(list[Callback], [
         OutputsLogger(),
         GradNormLogger(),
-        SampleLogger([int(config.data.sample_index)], every_n_steps=1),
         TextRetentionLogger(
             {
                 "zh_en": {
@@ -209,26 +313,36 @@ def run(config: DictConfig) -> None:
         StageSwitcher(StageConfig(strategies=[{task: 1.0}], milestones=[])),
         summary,
     ])
+    if bool(config.callbacks.sample.enabled):
+        callbacks.insert(
+            2,
+            SampleLogger(
+                [int(config.data.sample_index)],
+                every_n_steps=int(config.callbacks.sample.every_n_steps),
+            ),
+        )
+    if evaluation is not None:
+        callbacks.append(evaluation)
     if has_acoustic:
         callbacks.insert(
             1,
             GradLogger(
                 loss_pair,
                 "model.acoustic_flow.decoder.input.weight"
-                if config.objective == "flow"
+                if config.acoustic.objective == "flow"
                 else "model.acoustic_decoder.decoder.layers.0.self_attn.q_proj.weight",
                 every_n_steps=1,
             ),
         )
-    if has_acoustic and config.objective == "flow":
-        callbacks.insert(1, FlowMatchingLogger(rt.flow_matching, every_n_steps=1))
+    if has_acoustic and config.acoustic.objective == "flow":
+        callbacks.insert(1, FlowMatchingLogger(flow_matching, every_n_steps=1))
     trainer = pl.Trainer(
         accelerator=str(config.trainer.accelerator),
         devices=config.trainer.devices,
         precision=cast(Any, str(config.trainer.precision)),
         max_steps=int(config.train.max_steps),
         default_root_dir=str(output_dir),
-        logger=TensorBoardLogger(save_dir=str(output_dir), name="tensorboard"),
+        logger=build_logger(config.logging, output_dir),
         callbacks=callbacks,
         log_every_n_steps=int(config.trainer.log_every_n_steps),
         enable_checkpointing=bool(config.trainer.enable_checkpointing),
@@ -261,6 +375,15 @@ def runtime_config(config: DictConfig) -> RuntimeConfig:
         flow_nfe=int(config.flow.nfe),
         flow_num_steps=int(config.flow.num_steps),
     )
+
+
+def build_logger(config: DictConfig, output_dir: Path):
+    name = str(config.name)
+    if name == "tensorboard":
+        return TensorBoardLogger(save_dir=str(output_dir), name="tensorboard")
+    if name == "csv":
+        return CSVLogger(save_dir=str(output_dir), name="csv")
+    raise ValueError("logging.name must be tensorboard or csv.")
 
 
 if __name__ == "__main__":

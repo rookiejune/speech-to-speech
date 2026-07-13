@@ -11,5 +11,5 @@ cd "${SPEECH_TO_SPEECH_ROOT}"
 echo '{"event":"job.launch","codec":"longcat","strategy":"ddp","lba":true}'
 "${SPEECH_TO_SPEECH_PYTHON}" scripts/codec_oracle.py \
   experiment=acoustic_oracle_ddp_lba \
-  output_dir="${SPEECH_TO_SPEECH_TRAIN_ROOT}/005-codec-oracle-ddp-lba/longcat/\${init.name}" \
+  output_dir="${SPEECH_TO_SPEECH_TRAIN_ROOT}/005-codec-oracle-ddp-lba/longcat/\${acoustic.name}-\${acoustic.decoder.layers}l/\${init.name}" \
   "$@"

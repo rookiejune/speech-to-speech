@@ -1,7 +1,5 @@
 name: unicodec
-objective: token
 view: unicodec
-frame_rate: 75.0
 cache_dir:
 domain: "0"
 bandwidth_id: 0
