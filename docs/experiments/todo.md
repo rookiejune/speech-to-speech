@@ -14,7 +14,9 @@
   到 DiT layer-4 的可选 REPA 已接入并有 contract tests，121 真实训练与全部 callback
   smoke 已完成，结果见 `results/006-real-callback-repa-smoke.md`；8 层 Qwen RVQ decoder、
   离散 acoustic objective、Lightning 训练组合和 generation service 已接入并有 contract tests，
-  真实训练与 generation/decode 尚未验收。
+  真实 TTS/S2ST 100-step 训练、packed-code sampling 和 waveform decode 已验收，
+  训练后 TTS/S2ST semantic-to-waveform generation 也已闭环，结果见
+  `results/009-real-rvq-overfit-generation.md`。
 - P3：独立 request/result、变长 batch KV cache、逐行 stop state、在线 acoustic
   condition/frame mask、一次性 generation/decode、SampleLogger 复用及真实
   Qwen3/LongCat cached smoke 已完成；真实变长 batch 4 在 float32 下完成与逐请求
@@ -29,9 +31,6 @@
 
 - 长时间完整训练使用 TensorBoard 记录监督曲线。
 - 用真实 Qwen checkpoint 验收中英双向 `TextRetentionLogger`，确认训练前 wrapper 与 backbone 的文本输出一致，并观察语音训练期间的 NLL 漂移。
-- 对 8 层 DiT flow 与 8 层 Qwen RVQ 分别完成相同固定样本、数据顺序、optimizer 和训练
-  step 的 overfit；分别报告 decoder 参数量、waveform 指标和生成 RTF，不横向比较 flow
-  loss 与 token CE 的数值。
 
 ## 其他工程欠账
 
