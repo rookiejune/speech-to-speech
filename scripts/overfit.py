@@ -352,10 +352,26 @@ def run(config: DictConfig) -> None:
     )
     trainer.fit(module, datamodule=datamodule)
 
+    acoustic_decoder_parameters = (
+        sum(parameter.numel() for parameter in model.acoustic_flow.decoder.parameters())
+        if isinstance(model, SpeechToSpeechFlowModel)
+        else sum(parameter.numel() for parameter in model.acoustic_decoder.parameters())
+        if isinstance(model, SpeechToSpeechRVQModel)
+        else 0
+    )
     result = {
         "task": task.value,
         "sample_index": int(config.data.sample_index),
         "max_steps": int(config.train.max_steps),
+        "parameters": {
+            "total": sum(parameter.numel() for parameter in model.parameters()),
+            "trainable": sum(
+                parameter.numel()
+                for parameter in model.parameters()
+                if parameter.requires_grad
+            ),
+            "acoustic_decoder": acoustic_decoder_parameters,
+        },
         "metrics": summary.report(),
     }
     result_path = output_dir / "metrics.json"
