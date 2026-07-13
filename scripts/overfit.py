@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -41,7 +42,7 @@ from speech_to_speech.model import (
     SpeechToSpeechRVQModel,
 )
 from speech_to_speech.pl_module import Config as ModuleConfig
-from speech_to_speech.pl_module import SpeechToSpeech
+from speech_to_speech.pl_module import SpeechToSpeech, requests_from_batch
 from speech_to_speech.reporting import window_summary
 from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import init_runtime
@@ -352,6 +353,14 @@ def run(config: DictConfig) -> None:
     )
     trainer.fit(module, datamodule=datamodule)
 
+    if has_acoustic:
+        if evaluation is None:
+            raise RuntimeError("acoustic evaluation is unavailable.")
+        generation = evaluate_generation(module, evaluation.batch, codec)
+        (output_dir / "generation.json").write_text(
+            json.dumps(generation, indent=2, sort_keys=True) + "\n"
+        )
+
     acoustic_decoder_parameters = (
         sum(parameter.numel() for parameter in model.acoustic_flow.decoder.parameters())
         if isinstance(model, SpeechToSpeechFlowModel)
@@ -377,6 +386,45 @@ def run(config: DictConfig) -> None:
     result_path = output_dir / "metrics.json"
     result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps(result, sort_keys=True))
+
+
+@torch.no_grad()
+def evaluate_generation(
+    module: SpeechToSpeech,
+    batch: ModelBatch,
+    codec: Codec,
+) -> dict[str, Any]:
+    device = next(module.parameters()).device
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    started = time.perf_counter()
+    result = module.generate(
+        requests_from_batch(batch),
+        max_new_tokens=64,
+        do_sample=False,
+    )[0]
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elapsed = time.perf_counter() - started
+    audio = result["audio"]
+    if audio is None:
+        raise RuntimeError("acoustic task generation did not return audio.")
+    features = audio["features"]
+    waveform = audio["waveform"]
+    if features is None:
+        raise RuntimeError("LongCat generation did not return acoustic features.")
+    if not bool(torch.isfinite(features).all() and torch.isfinite(waveform).all()):
+        raise RuntimeError("generation returned non-finite acoustic output.")
+    duration = waveform.numel() / codec.sample_rate
+    return {
+        "token_ids": result["token_ids"].detach().cpu().tolist(),
+        "feature_shape": list(features.shape),
+        "waveform_shape": list(waveform.shape),
+        "duration_seconds": duration,
+        "elapsed_seconds": elapsed,
+        "rtf": elapsed / duration,
+        "finite": True,
+    }
 
 
 def runtime_config(config: DictConfig) -> RuntimeConfig:
