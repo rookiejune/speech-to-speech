@@ -33,7 +33,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             attn_implementation=args.attn_implementation,
         )
     )
-    raw = wmt19_tts_codec(codec=args.codec, split=args.split)[args.sample_index]
+    dataset = wmt19_tts_codec(codec=args.codec, split=args.split)
+    raw = dataset[args.sample_index]
     batch = Collator({Task.S2ST: 1.0})([raw])
     request = requests_from_batch(batch)[0]
 
@@ -58,6 +59,34 @@ def main(argv: Sequence[str] | None = None) -> None:
         use_cache=False,
     )
     comparison = compare(cached, full)
+    batch_sizes = _batch_sizes(args.batch_sizes)
+    batch_requests = [
+        requests_from_batch(Collator({Task.S2ST: 1.0})([dataset[index]]))[0]
+        for index in range(args.sample_index, args.sample_index + max(batch_sizes))
+    ]
+    for prefix_length, batch_request in enumerate(batch_requests):
+        if prefix_length == 0:
+            continue
+        prefix = batch_request["prompt_ids"].new_full(
+            (prefix_length,), rt.bos_token_id
+        )
+        batch_request["prompt_ids"] = torch.cat(
+            (prefix, batch_request["prompt_ids"])
+        )
+        acoustic_prompt = batch_request["acoustic_prompt"]
+        if acoustic_prompt is not None:
+            acoustic_prompt["positions"] = (
+                acoustic_prompt["positions"] + prefix_length
+            )
+    batch_benchmark = [
+        benchmark_batch(
+            model,
+            batch_requests[:batch_size],
+            seed=args.seed,
+            max_new_tokens=args.max_new_tokens,
+        )
+        for batch_size in batch_sizes
+    ]
 
     result = {
         "task": Task.S2ST.value,
@@ -75,6 +104,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "cached": summary(cached),
         "full_recompute": summary(full),
         "comparison": comparison,
+        "batch_benchmark": batch_benchmark,
     }
     result_path = output_dir / "metrics.json"
     result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
@@ -83,6 +113,89 @@ def main(argv: Sequence[str] | None = None) -> None:
         raise RuntimeError("cached and full-recompute greedy tokens differ.")
     if not comparison["cached_finite"] or not comparison["full_finite"]:
         raise RuntimeError("generation produced non-finite acoustic output.")
+    if not all(item["tokens_equal"] for item in batch_benchmark):
+        raise RuntimeError("batch and per-request greedy tokens differ.")
+
+
+def benchmark_batch(
+    model: SpeechToSpeechFlowModel,
+    requests,
+    *,
+    seed: int,
+    max_new_tokens: int,
+) -> dict[str, Any]:
+    batched = timed_generate(model, requests, seed, max_new_tokens)
+    serial_started = time.perf_counter()
+    serial_results = []
+    serial_peak = 0
+    for offset, request in enumerate(requests):
+        output = timed_generate(model, [request], seed + offset, max_new_tokens)
+        serial_results.extend(output["results"])
+        serial_peak = max(serial_peak, output["peak_cuda_bytes"])
+    serial_elapsed = time.perf_counter() - serial_started
+    batch_results = batched["results"]
+    token_count = sum(result["token_ids"].numel() for result in batch_results)
+    finite = all(
+        torch.isfinite(audio_output(result, "batch result")["waveform"]).all()
+        for result in batch_results
+    )
+    return {
+        "batch_size": len(requests),
+        "prompt_tokens": [int(request["prompt_ids"].numel()) for request in requests],
+        "source_acoustic_frames": [
+            0
+            if request["acoustic_prompt"] is None
+            else int(request["acoustic_prompt"]["ids"].size(0))
+            for request in requests
+        ],
+        "response_tokens": [int(result["token_ids"].numel()) for result in batch_results],
+        "batch_token_ids": [
+            result["token_ids"].detach().cpu().tolist() for result in batch_results
+        ],
+        "serial_token_ids": [
+            result["token_ids"].detach().cpu().tolist() for result in serial_results
+        ],
+        "tokens_equal": all(
+            torch.equal(batch["token_ids"], serial["token_ids"])
+            for batch, serial in zip(batch_results, serial_results)
+        ),
+        "finite": bool(finite),
+        "batch_elapsed_seconds": batched["elapsed_seconds"],
+        "serial_elapsed_seconds": serial_elapsed,
+        "batch_tokens_per_second": token_count / batched["elapsed_seconds"],
+        "serial_tokens_per_second": token_count / serial_elapsed,
+        "batch_peak_cuda_bytes": batched["peak_cuda_bytes"],
+        "serial_peak_cuda_bytes": serial_peak,
+    }
+
+
+def timed_generate(model, requests, seed: int, max_new_tokens: int) -> dict[str, Any]:
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    torch.cuda.synchronize()
+    started = time.perf_counter()
+    results = generate(
+        requests,
+        model,
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+        use_cache=True,
+    )
+    torch.cuda.synchronize()
+    return {
+        "results": results,
+        "elapsed_seconds": time.perf_counter() - started,
+        "peak_cuda_bytes": torch.cuda.max_memory_allocated(),
+    }
+
+
+def _batch_sizes(value: str) -> list[int]:
+    sizes = [int(item) for item in value.split(",")]
+    if not sizes or any(size < 1 for size in sizes):
+        raise ValueError("batch sizes must be positive integers.")
+    return sizes
 
 
 def run(
@@ -429,6 +542,7 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--audio-tokenizer", required=True)
     parser.add_argument("--sample-index", type=int, default=0)
+    parser.add_argument("--batch-sizes", default="1,2,4")
     parser.add_argument("--split", default="train")
     parser.add_argument("--max-new-tokens", type=int, default=2)
     parser.add_argument("--seed", type=int, default=0)

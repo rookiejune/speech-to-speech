@@ -20,6 +20,15 @@ class TimeEmbedding(nn.Module):
     def __init__(self, hidden_dim: int) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
+        half = hidden_dim // 2
+        self.frequency = nn.Buffer(
+            torch.exp(
+                -math.log(10_000)
+                * torch.arange(half, dtype=torch.float32)
+                / max(half - 1, 1)
+            ),
+            persistent=False,
+        )
         self.projection = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim * 4),
             nn.SiLU(),
@@ -27,13 +36,7 @@ class TimeEmbedding(nn.Module):
         )
 
     def forward(self, time: Tensor) -> Tensor:
-        half = self.hidden_dim // 2
-        frequency = torch.exp(
-            -math.log(10_000)
-            * torch.arange(half, device=time.device, dtype=torch.float32)
-            / max(half - 1, 1)
-        )
-        angle = time.float()[:, None] * frequency[None]
+        angle = time.float()[:, None] * self.frequency[None]
         embedding = torch.cat((angle.cos(), angle.sin()), dim=-1)
         if self.hidden_dim % 2:
             embedding = torch.nn.functional.pad(embedding, (0, 1))
@@ -41,13 +44,12 @@ class TimeEmbedding(nn.Module):
         return self.projection(embedding.to(dtype=projection.weight.dtype))
 
 
-def _position(length: int, hidden_dim: int, reference: Tensor) -> Tensor:
-    half = hidden_dim // 2
-    frequency = torch.exp(
-        -math.log(10_000)
-        * torch.arange(half, device=reference.device, dtype=torch.float32)
-        / max(half - 1, 1)
-    )
+def _position(
+    length: int,
+    hidden_dim: int,
+    reference: Tensor,
+    frequency: Tensor,
+) -> Tensor:
     angle = torch.arange(length, device=reference.device, dtype=torch.float32)[:, None]
     embedding = torch.cat(
         ((angle * frequency).cos(), (angle * frequency).sin()), dim=-1
@@ -130,6 +132,19 @@ class AcousticDiT(nn.Module):
             raise ValueError("REPA dimension must be positive and layer must exist")
 
         self.latent_dim = latent_dim
+        half = hidden_dim // 2
+        self.position_frequency = nn.Buffer(
+            torch.exp(
+                -math.log(10_000)
+                * torch.arange(half, dtype=torch.float32)
+                / max(half - 1, 1)
+            ),
+            persistent=False,
+        )
+        self.position_embedding = nn.Buffer(
+            torch.empty(0, hidden_dim),
+            persistent=False,
+        )
         self.input = nn.Linear(latent_dim, hidden_dim)
         self.time = TimeEmbedding(hidden_dim)
         self.condition = nn.Linear(condition_dim, hidden_dim)
@@ -196,7 +211,7 @@ class AcousticDiT(nn.Module):
             )
 
         hidden = self.input(x_t)
-        hidden = hidden + _position(hidden.size(1), hidden.size(2), hidden)[None]
+        hidden = hidden + self._position(hidden)[None]
         hidden = hidden.masked_fill(~mask[..., None], 0)
         film = self.condition(condition) + self.time(t)[:, None]
         representation = hidden
@@ -207,3 +222,15 @@ class AcousticDiT(nn.Module):
         velocity = self.output(self.output_norm(hidden))
         velocity = velocity.masked_fill(~mask[..., None], 0)
         return velocity, representation
+
+    def _position(self, reference: Tensor) -> Tensor:
+        length = reference.size(1)
+        cached = self.position_embedding
+        if cached.size(0) < length or cached.dtype != reference.dtype:
+            self.position_embedding = _position(
+                length,
+                reference.size(2),
+                reference,
+                self.position_frequency,
+            )
+        return self.position_embedding[:length]

@@ -12,6 +12,22 @@ from speech_to_speech.model.acoustic import AcousticDiT
 
 
 class AcousticDiTTest(unittest.TestCase):
+    def test_position_embedding_is_reused_and_grows_on_demand(self):
+        model = AcousticDiT(6, 4, hidden_dim=8, layers=2, heads=2)
+        condition = torch.randn(1, 3, 6)
+        model(torch.randn(1, 3, 4), torch.rand(1), condition=condition)
+        cached = model.position_embedding
+
+        model(torch.randn(1, 3, 4), torch.rand(1), condition=condition)
+        self.assertIs(model.position_embedding, cached)
+
+        model(
+            torch.randn(1, 5, 4),
+            torch.rand(1),
+            condition=torch.randn(1, 5, 6),
+        )
+        self.assertEqual(model.position_embedding.size(0), 5)
+
     def setUp(self) -> None:
         torch.manual_seed(0)
         self.model = AcousticDiT(

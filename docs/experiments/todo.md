@@ -15,15 +15,15 @@
   smoke 已完成，结果见 `results/006-real-callback-repa-smoke.md`；8 层 Qwen RVQ decoder、
   离散 acoustic objective、Lightning 训练组合和 generation service 已接入并有 contract tests，
   真实训练与 generation/decode 尚未验收。
-- P3：独立 request/result、单样本 KV cache、在线 acoustic condition、一次性 generation/decode、SampleLogger 复用及真实 Qwen3/LongCat cached smoke 已完成；标准变长 batch generation 未完成。
-- 测试现状：72 个纯本地测试覆盖 audio tokenizer、P0 数据/ID 契约、
+- P3：独立 request/result、变长 batch KV cache、逐行 stop state、在线 acoustic
+  condition/frame mask、一次性 generation/decode、SampleLogger 复用及真实
+  Qwen3/LongCat cached smoke 已完成；真实变长 batch 4 在 float32 下完成与逐请求
+  的 token parity 及 waveform decode，短生成吞吐为逐请求的 1.78x，结果见
+  `results/008-real-batch-generation-benchmark.md`。
+- 测试现状：76 个纯本地测试覆盖 audio tokenizer、P0 数据/ID 契约、
   模块所有权、HF backbone 加载与 vocabulary 边界、condition 对齐、全任务 semantic/flow
   objective 路由、fake P1 closure、cached generation、张量化 acoustic merge、stage resume、
   codec oracle 与 text retention contract。
-
-## Generation
-
-- padding + attention mask + 每行独立 EOS/EOA；frame mask 贯穿 acoustic sampling 和 decode。
 
 ## 真实资源验收
 

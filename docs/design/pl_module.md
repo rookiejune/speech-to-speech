@@ -64,6 +64,7 @@ TextRetentionLogger(
   的 task 携带该结构时在入口显式报错。
 - total loss 由 `SpeechToSpeech.training_step()` 记录一次；`OutputsLogger` 只负责按
   task/objective 展开 `LossItem`，不重复记录 total loss。
-- generation service 当前按 request 调用单样本路径，标准批量自回归是目标契约（总览 §6），欠账见 todo。
+- generation service 按 target modality 和 acoustic prompt 执行签名分组，每组使用变长
+  prompt batch，并把结果恢复为请求顺序。
 - pl_module 不实现对齐或 loss 逻辑，只组合 model 与 loss 的公开接口。
 - callback 只依赖 `Outputs`/`LossItem`、datamodule 和 pl_module 公开入口，不触碰模型内部结构。

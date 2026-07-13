@@ -19,7 +19,7 @@ class GradLogger(Callback):
         self,
         loss_pair: tuple[str, str],
         parameter_name: str,
-        every_n_steps: int = 100,
+        every_n_steps: int = 5_000,
         eps: float = 1e-12,
     ) -> None:
         super().__init__()

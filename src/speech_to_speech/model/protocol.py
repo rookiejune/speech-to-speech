@@ -131,6 +131,9 @@ class GenerationRuntime(Protocol):
 
     def is_codec_audio_id(self, token_id: int) -> bool: ...
 
+    @property
+    def pad_token_id(self) -> int: ...
+
 
 class ModelRuntime(GenerationRuntime, Protocol):
     @property
@@ -157,6 +160,7 @@ class SemanticGeneration(BaseModel, Protocol):
         acoustic_input_ids: Tensor | None = None,
         acoustic_input_positions: Tensor | None = None,
         acoustic_input_mask: Tensor | None = None,
+        prompt_attention_mask: Tensor | None = None,
         stop_token_id: int | None = None,
         allowed_token_ids: Sequence[int] | Tensor | None = None,
         do_sample: bool = True,
@@ -176,6 +180,7 @@ class AcousticGeneration(SemanticGeneration, Protocol):
         acoustic_input_ids: Tensor | None = None,
         acoustic_input_positions: Tensor | None = None,
         acoustic_input_mask: Tensor | None = None,
+        prompt_attention_mask: Tensor | None = None,
         do_sample: bool = True,
         use_cache: bool = True,
     ) -> tuple[Tensor, Tensor]: ...

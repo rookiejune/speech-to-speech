@@ -57,6 +57,7 @@ class _Runtime:
         self.audio_tokenizer = NativeAudioTokenizer(vocab_size=2)
         self.codec = _Codec()
         self.eos_token_id = 3
+        self.pad_token_id = 0
         self.boa_token_id = 6
         self.eoa_token_id = 7
 
@@ -126,7 +127,7 @@ class _GenerationModel(SpeechToSpeechFlowModel):
         self.backbone = SimpleNamespace(
             get_input_embeddings=lambda: SimpleNamespace(weight=torch.empty(0))
         )
-        self.calls: list[tuple[int, bool, int]] = []
+        self.calls: list[tuple[int, bool, int, int]] = []
         self.condition: Tensor | None = None
         self.sample_calls = 0
 
@@ -151,7 +152,9 @@ class _GenerationModel(SpeechToSpeechFlowModel):
             else past_key_values.source
         )
         length = cached_length + input_ids.size(1)
-        self.calls.append((input_ids.size(1), acoustic_input_ids is not None, source))
+        self.calls.append(
+            (input_ids.size(1), acoustic_input_ids is not None, source, input_ids.size(0))
+        )
 
         next_id = {2: 4, 3: 5}.get(length, self.runtime.eoa_token_id)
         logits = torch.full(
@@ -169,7 +172,10 @@ class _GenerationModel(SpeechToSpeechFlowModel):
             hidden_states=(hidden,) if output_hidden_states else None,
         )
 
-    def sample_acoustic(self, condition: Tensor) -> Tensor:
+    def sample_acoustic(
+        self, condition: Tensor, mask: Tensor | None = None
+    ) -> Tensor:
+        del mask
         self.sample_calls += 1
         self.condition = condition.clone()
         return torch.zeros_like(condition)
@@ -179,6 +185,37 @@ class _UnifiedGenerationModel(_GenerationModel):
     def __init__(self) -> None:
         super().__init__()
         self.runtime.codec = _UnifiedCodec()
+
+
+class _VariableStopModel(_UnifiedGenerationModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.step = 0
+
+    def forward(self, input_ids: Tensor, **kwargs) -> CausalLMOutputWithPast:
+        generation_token_ids = kwargs["_generation_token_ids"]
+        use_cache = kwargs["use_cache"]
+        token_ids = (
+            torch.tensor([self.runtime.eos_token_id, 1], device=input_ids.device)
+            if self.step == 0
+            else torch.full(
+                (input_ids.size(0),),
+                self.runtime.eos_token_id,
+                device=input_ids.device,
+            )
+        )
+        self.step += 1
+        local = torch.stack(
+            [(generation_token_ids == token_id).nonzero()[0, 0] for token_id in token_ids]
+        )
+        logits = torch.full(
+            (input_ids.size(0), 1, generation_token_ids.numel()),
+            float("-inf"),
+            device=input_ids.device,
+        )
+        logits[torch.arange(input_ids.size(0)), 0, local] = 0
+        cache = SimpleNamespace(length=self.step, source=0) if use_cache else None
+        return CausalLMOutputWithPast(logits=logits, past_key_values=cache)
 
 
 class GenerationTest(unittest.TestCase):
@@ -360,6 +397,35 @@ class GenerationTest(unittest.TestCase):
         self.assertIsNone(result["audio"]["features"])
         self.assertEqual(model.sample_calls, 0)
         self.assertEqual(model.runtime.codec.decode_calls, 1)
+
+    def test_generation_batches_variable_length_requests(self):
+        model = _UnifiedGenerationModel()
+        second = _request()
+        second["prompt_ids"] = torch.tensor([2, 1, 6])
+        second["acoustic_prompt"] = {
+            "ids": torch.tensor([[2], [1]]),
+            "positions": torch.tensor([0, 1]),
+        }
+
+        results = generate(
+            [_request(), second], model, max_new_tokens=3, do_sample=False
+        )
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual([call[3] for call in model.calls], [2, 2])
+        self.assertEqual(model.runtime.codec.decode_calls, 2)
+
+    def test_batch_generation_tracks_stop_per_row(self):
+        model = _VariableStopModel()
+        requests = [
+            Request(prompt_ids=torch.tensor([1]), task=Task.T2TT, acoustic_prompt=None),
+            Request(prompt_ids=torch.tensor([2, 1]), task=Task.T2TT, acoustic_prompt=None),
+        ]
+
+        results = generate(requests, model, max_new_tokens=3, do_sample=False)
+
+        self.assertEqual(results[0]["token_ids"].numel(), 0)
+        self.assertTrue(torch.equal(results[1]["token_ids"], torch.tensor([1])))
 
     def test_cache_preserves_source_condition_and_collects_hidden_online(self):
         model = _GenerationModel()

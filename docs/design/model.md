@@ -40,7 +40,8 @@ def forward(
   output weight 中选择该 ID 子集，只为最后一个 token 返回子集 logits；这条私有优化不改变
   公开 `forward()` 的 global logits 契约。
 - text 输入和输出分别通过 HF 的 `get_input_embeddings()` / `get_output_embeddings()` 获取；当模型 embedding 行数大于 tokenizer vocabulary 时，text logits 只覆盖 layout 的 text block。
-- acoustic decoder 需要 backbone 表示时传 `output_hidden_states=True` 并使用 `output.hidden_states[-1]`。
+- acoustic decoder 需要 backbone 表示时传 `output_hidden_states=True` 并使用
+  `output.hidden_states[-1]`；该开关只公开最后一层，不要求 backbone 保留所有中间层。
 - condition 接口 `target_frame_condition()` / `target_frame_label_condition()` 统一消费 token
   自身位置 `p`；causal shift `p - 1` 只在 model 内部处理（见总览 §2.4）。前者属于
   acoustic objective 训练协议，后者是具体模型提供的 teacher-forced/oracle 能力。
@@ -116,6 +117,7 @@ class AcousticDecoder(Protocol):
   内以 `[condition + BOS_q, condition + embedding(code_{q-1})]` 构造 codebook causal
   序列；Qwen 自带 token embedding 不参与计算，各 codebook 保持独立 embedding 和 output
   head。teacher forcing 返回每个 codebook 的 logits，sampling 按 codebook 顺序生成。
+  sampling 在 codebook 轴复用 Qwen KV cache，每个 codebook 只输入一个新 token。
 - flow DiT 与 RVQ Qwen decoder 共享 `acoustic_decoder_dim/layers/heads/ffn_ratio` 配置，默认
   都是 8 层；两者共享 semantic backbone 和 frame condition，但 acoustic objective 与
   codec output representation 不同。
@@ -123,7 +125,9 @@ class AcousticDecoder(Protocol):
 ## 边界
 
 - 模型构造接收 runtime snapshot（`runtime_snapshot` 参数），内部不反复依赖全局 singleton，以便用 fake codec、fake tokenizer 和 tiny backbone 做 contract test。
-- semantic generation 使用 backbone KV cache：首步编码完整多模态 prompt，后续只输入新 token。cache 不保存在 model 实例上，也不通过公开 API 暴露具体 backbone 类型。
+- semantic generation 使用 backbone KV cache：首步编码左 padding 的变长多模态
+  prompt batch，后续只输入新 token 并逐行跟踪 stop state。cache 不保存在 model
+  实例上，也不通过公开 API 暴露具体 backbone 类型。
 - audio generation 在每个 semantic token 被采样时在线收集预测该 token 的 hidden，并按 BPE span 展开 frame condition；不在生成完成后追加一次全序列 forward。
 - source acoustic prompt 在首步进入 KV cache，因此在整个生成过程中持续有效。
-- batch acoustic generation 的目标契约见总览 §6；当前 model generation 原语只接收单个无 padding prompt，由上层 service 逐 request 调用，属于实现欠账。
+- batch acoustic generation 的 padding、frame mask 和逐行 decode 裁剪契约见总览 §6。

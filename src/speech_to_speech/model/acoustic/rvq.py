@@ -198,20 +198,25 @@ class AcousticRVQDecoder(nn.Module):
 
         condition_hidden = self.condition(condition)
         output: list[Tensor] = []
+        past_key_values = None
         for codebook in range(self.codebooks):
-            inputs = [condition_hidden + self.codebook_bos[0]]
-            for index, value in enumerate(output):
-                inputs.append(
-                    condition_hidden
-                    + self.codebook_bos[index + 1]
-                    + self._embedding(index, value)
+            decoder_input = condition_hidden + self.codebook_bos[codebook]
+            if output:
+                decoder_input = decoder_input + self._embedding(
+                    codebook - 1, output[-1]
                 )
-            decoder_input = torch.stack(inputs, dim=2).flatten(0, 1)
-            state = self.decoder(
-                inputs_embeds=decoder_input,
-                use_cache=False,
+            state_output = self.decoder(
+                inputs_embeds=decoder_input.flatten(0, 1)[:, None],
+                past_key_values=past_key_values,
+                use_cache=True,
                 return_dict=True,
-            ).last_hidden_state[:, -1].unflatten(0, condition.shape[:2])
+            )
+            past_key_values = state_output.past_key_values
+            if past_key_values is None:
+                raise RuntimeError("RVQ decoder did not return a generation cache.")
+            state = state_output.last_hidden_state[:, -1].unflatten(
+                0, condition.shape[:2]
+            )
             head = cast(nn.Linear, cast(object, self.heads[codebook]))
             logits = head(state) / temperature
             if top_p < 1.0:
@@ -269,6 +274,7 @@ class SpeechToSpeechRVQModel(SemanticModel):
         acoustic_input_ids: Tensor | None = None,
         acoustic_input_positions: Tensor | None = None,
         acoustic_input_mask: Tensor | None = None,
+        prompt_attention_mask: Tensor | None = None,
         do_sample: bool = True,
         use_cache: bool = True,
     ) -> tuple[Tensor, Tensor]:
@@ -280,6 +286,7 @@ class SpeechToSpeechRVQModel(SemanticModel):
             acoustic_input_ids=acoustic_input_ids,
             acoustic_input_positions=acoustic_input_positions,
             acoustic_input_mask=acoustic_input_mask,
+            prompt_attention_mask=prompt_attention_mask,
             stop_token_id=self.runtime.eoa_token_id,
             allowed_token_ids=self.runtime.audio_generation_allowed_ids,
             do_sample=do_sample,

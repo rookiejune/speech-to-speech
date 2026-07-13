@@ -44,6 +44,7 @@ class AcousticFlow(nn.Module):
         self,
         condition: Tensor,
         *,
+        mask: Tensor | None = None,
         generator: torch.Generator | None = None,
     ) -> Tensor:
         latent = torch.randn(
@@ -56,6 +57,7 @@ class AcousticFlow(nn.Module):
             self.decoder,
             latent,
             condition=condition,
+            mask=mask,
         ).final
 
 
@@ -89,8 +91,10 @@ class SpeechToSpeechFlowModel(SemanticModel):
         return features.masked_fill((acoustic_labels < 0).all(dim=-1)[..., None], 0)
 
     @torch.no_grad()
-    def sample_acoustic(self, condition: Tensor) -> Tensor:
-        return self.acoustic_flow.sample(condition)
+    def sample_acoustic(
+        self, condition: Tensor, mask: Tensor | None = None
+    ) -> Tensor:
+        return self.acoustic_flow.sample(condition, mask=mask)
 
     @torch.no_grad()
     def generate_audio(
@@ -103,6 +107,7 @@ class SpeechToSpeechFlowModel(SemanticModel):
         acoustic_input_ids: Tensor | None = None,
         acoustic_input_positions: Tensor | None = None,
         acoustic_input_mask: Tensor | None = None,
+        prompt_attention_mask: Tensor | None = None,
         do_sample: bool = True,
         use_cache: bool = True,
     ) -> tuple[Tensor, Tensor]:
@@ -114,6 +119,7 @@ class SpeechToSpeechFlowModel(SemanticModel):
             acoustic_input_ids=acoustic_input_ids,
             acoustic_input_positions=acoustic_input_positions,
             acoustic_input_mask=acoustic_input_mask,
+            prompt_attention_mask=prompt_attention_mask,
             stop_token_id=self.runtime.eoa_token_id,
             allowed_token_ids=self.runtime.audio_generation_allowed_ids,
             do_sample=do_sample,
@@ -124,4 +130,9 @@ class SpeechToSpeechFlowModel(SemanticModel):
             raise ValueError(
                 "semantic generation produced no codec-decodable audio tokens."
             )
-        return generated, self.sample_acoustic(condition)
+        frame_count = spans.sum(dim=1)
+        frame_mask = (
+            torch.arange(condition.size(1), device=condition.device)[None]
+            < frame_count[:, None]
+        )
+        return generated, self.sample_acoustic(condition, frame_mask)

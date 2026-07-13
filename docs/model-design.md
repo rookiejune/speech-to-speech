@@ -232,9 +232,10 @@ Model 提供 semantic generation 与可选 acoustic sampling 原语；上层 gen
 representation 时采样 features；unified-token codec 直接 decode semantic codes，并返回
 `AudioOutput(features=None, waveform, sample_rate)`。采样率由生成所用 codec 提供。
 
-batch generation 的目标契约是标准批量自回归：变长响应通过 padding 和 attention mask 处理，每行独立跟踪 eoa；frame 轴同样以 padding + frame mask 贯穿 flow sampling 和 `decode_features()`，不要求 batch 内各行 frame 数相等。
-
-当前实现是过渡状态：`pl_module` 的 generation service 按 request 调用单样本 cached 路径，model generation 原语不接收 padded batch；这些限制属于实现欠账（见 todo），不属于契约。
+batch generation 使用标准批量自回归：变长 prompt 左 padding 并使用 attention
+mask，每行独立跟踪 EOS/EOA；frame 轴以 padding + frame mask 贯穿 acoustic
+sampling，decode 前按每行实际 frame 数裁剪。generation service 按 target modality
+和 acoustic prompt 执行签名分组，保留请求的原始返回顺序。
 
 ## 7. 数据与阶段配置
 

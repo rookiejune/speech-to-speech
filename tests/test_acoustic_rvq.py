@@ -61,6 +61,22 @@ class AcousticRVQTest(unittest.TestCase):
 
         self.assertEqual(len(model.decoder.layers), 8)
 
+    def test_generation_uses_one_cached_token_per_codebook(self):
+        lengths = []
+        handle = self.model.decoder.register_forward_pre_hook(
+            lambda _module, args, kwargs: lengths.append(
+                kwargs["inputs_embeds"].size(1)
+            ),
+            with_kwargs=True,
+        )
+        try:
+            output = self.model.generate(torch.randn(2, 4, 6))
+        finally:
+            handle.remove()
+
+        self.assertEqual(output.shape, (2, 4, 3))
+        self.assertEqual(lengths, [1, 1, 1])
+
     def test_causal_loss_ignores_padding_frames(self):
         labels = torch.tensor([[[1, 2], [2, 1], [-1, -1]]])
         mask = torch.tensor([[True, True, False]])

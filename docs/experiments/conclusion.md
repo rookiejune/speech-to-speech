@@ -14,3 +14,7 @@
   但 feature MSE 与 spectral convergence 恶化，且中间 checkpoints 的相对方向不一致；
   当前没有稳定的非训练指标增益，REPA 不设为默认
   （[007 result, lines 58-85](results/007-flow-repa-comparison.md#L58-L85)）。
+- 真实 Qwen3/LongCat 变长 batch 4 的 prompt、source acoustic frames、KV cache 和
+  waveform decode 在 float32 下完成逐请求 token parity；该短生成 probe 的吞吐为
+  serial 的 1.78x，peak allocated 只增加约 22 MB
+  （[008 result, lines 27-46](results/008-real-batch-generation-benchmark.md#L27-L46)）。
