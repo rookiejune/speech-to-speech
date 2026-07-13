@@ -4,10 +4,13 @@
 
 ## 对外能力
 
-- `Loss`：objective 组合入口。`forward(batch, model)` 返回 `Outputs`，其中 `loss` 是标量总损失，直接满足 Lightning 训练契约；分项以 `LossItem` 形式携带 per-sample loss 和 details，供 `OutputsLogger` 按 task 聚合。
+- `Loss`：flow objective 组合入口；`RVQLoss`：离散 acoustic objective 组合入口。两者的
+  `forward(batch, model)` 都返回含标量总损失的 `Outputs`，直接满足 Lightning 训练契约。
 - `SemanticLoss`：按 layout 对 text/audio token 分别统计 CE，`-100` 不参与计算；shift 在此完成（`logits[:, :-1]` 对 `labels[:, 1:]`）。
 - `AcousticFlowLoss`：frame-mask 的 velocity objective，只在有效 acoustic frame 上计算；
   启用 REPA 时通过 `forward_with_features()` 复用同一次 DiT 前向。
+- `CausalAcousticLoss`：对每个 RVQ codebook 计算 masked CE，再在 codebook 维等权平均；
+  acoustic padding ID 不进入 decoder embedding 或 loss。
 - `WavLMTeacher`：在线解码完整 target codec codes，以 16 kHz waveform 运行冻结的
   `microsoft/wavlm-base`，取 `hidden_states[9]` 并插值到有效 acoustic frame 轴。
 - `RepaLoss`：把 DiT 第 4 个 block 的逐帧表示投影到 WavLM hidden dimension，与
@@ -37,10 +40,10 @@ def forward(self, batch: ModelBatch, model) -> Outputs:
 
 正常训练的 objective 组合固定为：所有 batch 计算 semantic CE；audio-target batch 额外计算模型对应的 acoustic objective。Loss 根据已验证的 task target modality 选择路径，不通过布尔开关表达非法组合。
 
-当前正式 `Loss` 默认只组合 flow acoustic objective；同时传入正数 `repa_weight` 和
-`repa_teacher` 时显式加入 REPA。teacher 通过结构化接口注入，dataset 不绑定 WavLM 型号
-或层号。RVQ decoder/model 原语虽然已经存在，离散 acoustic objective 和对应的
-Lightning 训练组合仍未实现。
+`Loss` 固定组合 semantic CE 与 flow matching；传入包含正数 `weight` 和 `teacher` 的
+`RepaConfig` 时显式加入 REPA。`RVQLoss` 固定组合 semantic CE 与 codebook causal CE。
+训练入口显式选择 model/loss 对，不在 loss 内按具体模型类型猜 objective。REPA 只属于
+flow 组合；teacher 通过结构化接口注入，dataset 不绑定 WavLM 型号或层号。
 
 oracle 等 diagnostic 使用独立 objective/入口。REPA 通过数值权重表达目标组合，不新增
 模式布尔开关；未传权重时不计算。audio-target batch 必须携带完整 acoustic target 字段；
@@ -51,6 +54,6 @@ oracle 等 diagnostic 使用独立 objective/入口。REPA 通过数值权重表
 - `Loss` 不实现模型内部逻辑，只通过结构化 Protocol 的 `layout`、`target_frame_condition()`、`acoustic_decoder` 等公开能力读取监督所需表示，不依赖具体模型类。
 - flow runtime 等 objective 资源在 Loss 构造时显式传入，不通过 `model.runtime` 向下读取。
 - 子 objective 在 `__init__` 中构造完毕，forward 不挂载新 submodule。
-- `causal_lm.py` 是 RVQ 离散 acoustic objective 的占位入口，未实现前不暴露正式配置开关。
+- `causal_lm.py` 只实现离散 acoustic objective，不读取 model/runtime 或重复 condition 对齐。
 - REPA teacher 始终保持 eval/frozen；teacher feature detach，梯度只进入 DiT 与 student
   projector。

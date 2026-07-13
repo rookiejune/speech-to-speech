@@ -3,6 +3,8 @@ defaults:
   - /codec: longcat
   - /data: wmt19_tts
   - /init: codec
+  - /optimizer: oracle
+  - /flow: default
   - /train: overfit
   - /trainer: default
   - /logging: tensorboard

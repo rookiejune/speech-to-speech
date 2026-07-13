@@ -5,12 +5,14 @@ from .acoustic import (
     SpeechToSpeechFlowModel,
     SpeechToSpeechRVQModel,
 )
+from .adapter import AdapterType
 from .base import Config, SemanticModel
 
 __all__ = [
     "AcousticFlowDecoder",
     "AcousticDiT",
     "AcousticRVQDecoder",
+    "AdapterType",
     "Config",
     "SemanticModel",
     "SpeechToSpeechFlowModel",

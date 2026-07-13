@@ -74,6 +74,21 @@ class FlowMatching(BaseModel, Protocol):
     def acoustic_target_latent(self, acoustic_labels: Tensor) -> Tensor: ...
 
 
+class RVQMatching(BaseModel, Protocol):
+    def target_frame_condition(
+        self,
+        hidden_states: Tensor,
+        target_positions: Tensor,
+    ) -> Tensor: ...
+
+    def acoustic_logits(
+        self,
+        hidden_states: Tensor,
+        target_positions: Tensor,
+        acoustic_labels: Tensor | None = None,
+    ) -> tuple[Tensor, ...]: ...
+
+
 class FlowSample(Protocol):
     final: Tensor
 
@@ -149,7 +164,7 @@ class SemanticGeneration(BaseModel, Protocol):
     ) -> Tensor: ...
 
 
-class FlowGeneration(SemanticGeneration, Protocol):
+class AcousticGeneration(SemanticGeneration, Protocol):
 
     def generate_audio(
         self,
@@ -163,10 +178,17 @@ class FlowGeneration(SemanticGeneration, Protocol):
         acoustic_input_mask: Tensor | None = None,
         do_sample: bool = True,
         use_cache: bool = True,
-    ) -> tuple[Tensor, Tensor, Tensor]: ...
+    ) -> tuple[Tensor, Tensor]: ...
 
 
-class FlowModel(FlowMatching, FlowGeneration, Protocol):
+class FlowModel(FlowMatching, AcousticGeneration, Protocol):
+    pass
+
+
+FlowGeneration = AcousticGeneration
+
+
+class RVQModel(RVQMatching, AcousticGeneration, Protocol):
     pass
 
 

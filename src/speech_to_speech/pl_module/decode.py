@@ -9,20 +9,13 @@ from ..runtime.types import AudioTokenizer, Codec
 
 def decode_generated_audio(
     audio_token_ids: Tensor,
-    acoustic_features: Tensor | None = None,
+    acoustic_features: Tensor,
     *,
-    acoustic_codes: Tensor | None = None,
     codec: Codec,
     audio_tokenizer: AudioTokenizer,
     audio_token_range: tuple[int, int],
 ) -> Tensor:
-    """Decode generated audio tokens and acoustic output into waveforms."""
-    if (acoustic_features is None) == (acoustic_codes is None):
-        raise ValueError("provide exactly one of acoustic_features or acoustic_codes.")
-    if acoustic_codes is not None:
-        acoustic_features = codec.acoustic_codes_to_features(acoustic_codes)
-    if acoustic_features is None:
-        raise RuntimeError("acoustic features were not created.")
+    """Decode generated audio tokens and acoustic features into waveforms."""
 
     local_start, local_end = audio_token_range
     if bool((audio_token_ids < local_start).any()) or bool(
@@ -44,3 +37,21 @@ def decode_generated_audio(
             "semantic ids and acoustic features must align on [batch, frame]."
         )
     return codec.decode_features(semantic_ids, acoustic_features)
+
+
+def decode_generated_codes(
+    audio_token_ids: Tensor,
+    acoustic_codes: Tensor,
+    *,
+    codec: Codec,
+    audio_tokenizer: AudioTokenizer,
+    audio_token_range: tuple[int, int],
+) -> Tensor:
+    """Decode generated audio tokens and acoustic codes into waveforms."""
+    return decode_generated_audio(
+        audio_token_ids,
+        codec.acoustic_codes_to_features(acoustic_codes),
+        codec=codec,
+        audio_tokenizer=audio_tokenizer,
+        audio_token_range=audio_token_range,
+    )

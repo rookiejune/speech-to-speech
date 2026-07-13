@@ -141,8 +141,12 @@ class ContractTest(unittest.TestCase):
         )
         self.assertEqual(tokenizer.encoded, ("target text", False))
 
+    @patch(
+        "speech_to_speech.datamodule.module.runtime",
+        return_value=SimpleNamespace(config=SimpleNamespace(codec="longcat")),
+    )
     @patch("zhuyin.datasets.wmt19_tts.wmt19_tts_codec")
-    def test_datamodule_setup_loads_dataset_once(self, load_dataset):
+    def test_datamodule_setup_loads_dataset_once(self, load_dataset, _runtime):
         load_dataset.return_value = []
         datamodule = DataModule(
             DataConfig(
@@ -156,6 +160,22 @@ class ContractTest(unittest.TestCase):
         datamodule.setup()
 
         load_dataset.assert_called_once_with(codec="longcat")
+
+    @patch(
+        "speech_to_speech.datamodule.module.runtime",
+        return_value=SimpleNamespace(config=SimpleNamespace(codec="longcat")),
+    )
+    def test_datamodule_rejects_runtime_codec_mismatch(self, _runtime):
+        datamodule = DataModule(
+            DataConfig(
+                codec="unicodec",
+                dataloader={"batch_size": 1, "num_workers": 0},
+            ),
+            {Task.TTS: 1.0},
+        )
+
+        with self.assertRaisesRegex(ValueError, "same codec"):
+            datamodule.setup()
 
     @patch("zhuyin.datasets.wmt19_tts.wmt19_tts_codec")
     def test_overfit_datamodule_repeats_only_the_selected_sample(self, load_dataset):

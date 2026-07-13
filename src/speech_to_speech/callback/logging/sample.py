@@ -18,14 +18,12 @@ class SampleLogger(Callback):
         self,
         indices: list[int],
         every_n_steps: int,
-        sample_rate: int = 24_000,
     ) -> None:
         super().__init__()
         if every_n_steps < 1:
             raise ValueError("every_n_steps must be positive.")
         self.indices = indices
         self.every_n_steps = every_n_steps
-        self.sample_rate = sample_rate
         self.samples: list[Sample] = []
 
     def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
@@ -58,7 +56,7 @@ class SampleLogger(Callback):
                     f"sample/{index}",
                     audio["waveform"].detach().cpu(),
                     trainer.global_step,
-                    sample_rate=self.sample_rate,
+                    sample_rate=audio["sample_rate"],
                 )
             elif text_writer is not None:
                 text_writer.add_text(

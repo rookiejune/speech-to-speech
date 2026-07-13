@@ -2,6 +2,13 @@ from __future__ import annotations
 
 from torch import Tensor, nn
 
+from .._compat import StrEnum, auto
+
+
+class AdapterType(StrEnum):
+    LINEAR = auto()
+    MLP = auto()
+
 
 class MLPAdapter(nn.Module):
     def __init__(self, in_features: int, out_features: int) -> None:
@@ -15,19 +22,18 @@ class MLPAdapter(nn.Module):
         self.act_fn = nn.SiLU()
 
     def forward(self, x: Tensor) -> Tensor:
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        return down_proj
+        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
 def create_adapter(
-    adapter_type: str | None, in_features: int, out_features: int
+    adapter_type: AdapterType | None, in_features: int, out_features: int
 ) -> nn.Module:
     if adapter_type is None:
         if in_features != out_features:
             raise ValueError("identity adapter requires matching feature dimensions.")
         return nn.Identity()
-    if adapter_type == "linear":
+    if adapter_type is AdapterType.LINEAR:
         return nn.Linear(in_features=in_features, out_features=out_features)
-    if adapter_type == "mlp":
+    if adapter_type is AdapterType.MLP:
         return MLPAdapter(in_features=in_features, out_features=out_features)
-    raise ValueError(f"Unknown adapter type: {adapter_type}")
+    raise AssertionError(f"unsupported adapter type: {adapter_type}")

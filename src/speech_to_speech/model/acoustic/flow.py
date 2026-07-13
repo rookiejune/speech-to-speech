@@ -59,7 +59,7 @@ class SpeechToSpeechFlowModel(SemanticModel):
         acoustic_input_mask: Tensor | None = None,
         do_sample: bool = True,
         use_cache: bool = True,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         generated, condition, spans = self._generate(
             prompt_ids,
             max_new_tokens=max_new_tokens,
@@ -78,4 +78,4 @@ class SpeechToSpeechFlowModel(SemanticModel):
             raise ValueError(
                 "semantic generation produced no codec-decodable audio tokens."
             )
-        return generated, self.sample_acoustic(condition), spans
+        return generated, self.sample_acoustic(condition)

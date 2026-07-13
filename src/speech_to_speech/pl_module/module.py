@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 import torch
 from anytrain.optim.llm import create_optimizer
@@ -10,9 +10,9 @@ from lightning.pytorch import LightningModule
 from torch import nn
 
 from ..datamodule.types import ModelBatch
-from ..loss.module import Loss
+from ..loss.module import Loss, RVQLoss
 from ..loss.types import Outputs
-from ..model.protocol import FlowModel
+from ..model.protocol import FlowModel, RVQModel
 from .generation import Request, Result, generate
 from .text import TextProbe, TextProbeResult, evaluate_text
 
@@ -28,8 +28,8 @@ class SpeechToSpeech(LightningModule):
         self,
         config: Config,
         *,
-        model: FlowModel,
-        loss: Loss,
+        model: FlowModel | RVQModel,
+        loss: Loss | RVQLoss,
     ) -> None:
         super().__init__()
 
@@ -41,7 +41,7 @@ class SpeechToSpeech(LightningModule):
 
     def training_step(self, batch: ModelBatch, batch_idx: int = 0):
         del batch_idx
-        outputs = self.loss.forward(batch, self.model)
+        outputs = cast(Any, self.loss).forward(batch, self.model)
         self._current_loss_outputs = outputs
         self.log("train/loss", outputs["loss"], prog_bar=True, on_step=True)
         return outputs

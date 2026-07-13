@@ -22,7 +22,7 @@ class Collator:
     def tasks(self) -> list[Task]:
         return list(self._strategy)
 
-    def task_samples(self, samples: list[SpeechPair]) -> list[Sample]:
+    def _samples(self, samples: list[SpeechPair]) -> list[Sample]:
         available = self.tasks
         weights = [self._strategy[task] for task in available]
         tasks = random.choices(available, weights=weights, k=len(samples))
@@ -30,7 +30,7 @@ class Collator:
 
     def __call__(self, samples: list[RawSample]) -> ModelBatch:
         return ModelBatch.from_samples(
-            self.task_samples([SpeechPair.from_raw(sample) for sample in samples])
+            self._samples([SpeechPair.from_raw(sample) for sample in samples])
         )
 
 

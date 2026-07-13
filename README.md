@@ -1,25 +1,43 @@
 # speech-to-speech
 
-Minimal speech-to-speech training components for semantic speech modeling and
-acoustic decoding experiments.
+Training and generation components for semantic speech modeling and acoustic
+decoding experiments.
 
-## Layout
+The main training path is:
 
-- `src/speech_to_speech/datamodule/`: raw sample parsing, task sampling, and
-  `ModelBatch` construction.
-- `src/speech_to_speech/model/`: semantic backbone wrappers, audio embedding,
-  and acoustic decoder compositions.
-- `src/speech_to_speech/loss/`: semantic CE and acoustic flow matching losses.
-- `src/speech_to_speech/pl_module/`: Lightning module plus generation and decode
-  helpers.
-- `src/speech_to_speech/runtime/`: tokenizer, codec, backbone, layout, and flow
-  runtime loading.
-- `src/speech_to_speech/codec_oracle/`: codec oracle models and prepared-code
-  data path used by screening experiments.
-- `src/speech_to_speech/reporting.py`: shared experiment summary helpers.
-- `docs/model-design.md`: cross-module contracts.
-- `docs/design/`: module capabilities and boundaries.
-- `docs/experiments/todo.md`: implementation stages and validation status.
+```text
+raw sample -> datamodule -> ModelBatch -> model -> Loss -> Lightning module
+```
+
+`runtime` supplies the shared tokenizer, codec, backbone, vocabulary layout,
+and flow runtime used along that path. Real inference uses an independent
+`Request -> Result` generation interface instead of an incomplete
+`ModelBatch`.
+
+## Entry Points
+
+- `scripts/overfit.py`: fixed-sample TTS/S2ST overfit and callback smoke tests.
+- `scripts/generation_smoke.py`: cached versus full-recompute S2ST generation
+  check.
+- `scripts/codec_oracle.py`: Hydra entry point for codec oracle experiments;
+  configuration starts at `configs/config.yaml`.
+- `jobs/`: machine-aware wrappers for formal experiment runs. Each wrapper
+  invokes one of the Python entry points directly and forwards extra arguments.
+
+## Documentation
+
+- [`docs/model-design.md`](docs/model-design.md): stable cross-module data,
+  ownership, training, and generation contracts.
+- [`docs/design/`](docs/design/): public capabilities and boundaries of each
+  module.
+- [`docs/experiments/todo.md`](docs/experiments/todo.md): current implementation
+  status and remaining validation work.
+- [`docs/experiments/schedules/`](docs/experiments/schedules/): experiment plans.
+- [`docs/experiments/results/`](docs/experiments/results/): results corresponding
+  to those plans.
+
+Read the contracts before changing a cross-module interface. Treat the Python
+entry points and their arguments as the source of truth for execution.
 
 ## Local Checks
 
@@ -31,9 +49,3 @@ PYTHONPATH=speech-to-speech/src:workspace/src basedpyright --project speech-to-s
 PYTHONPATH=speech-to-speech:speech-to-speech/src:workspace/src python -m unittest discover -s speech-to-speech/tests -v
 PYTHONPATH=speech-to-speech/src:workspace/src python -m compileall -q speech-to-speech/src speech-to-speech/scripts speech-to-speech/tests
 ```
-
-## Docs
-
-- `docs/model-design.md`: stable cross-module contracts.
-- `docs/design/`: datamodule, runtime, model, loss, and Lightning boundaries.
-- `docs/experiments/todo.md`: implementation work and validation order.

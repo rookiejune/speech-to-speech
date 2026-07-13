@@ -11,10 +11,12 @@
 - P1-overfit：原 002 入口未实际固定训练样本；入口已修正，真实单 batch
   TTS/S2ST 的 semantic 与 flow objective 优化结论待重新验证。
 - P2：FiLM-conditioned acoustic DiT、Flow condition/objective 与在线 WavLM-base layer-9
-  到 DiT layer-4 的可选 REPA 已接入并有 contract tests；RVQ decoder/model
-  原语已存在，离散 acoustic objective、Lightning 训练组合和 generation service 未完成。
+  到 DiT layer-4 的可选 REPA 已接入并有 contract tests，121 真实训练与全部 callback
+  smoke 已完成，结果见 `results/006-real-callback-repa-smoke.md`；8 层 Qwen RVQ decoder、
+  离散 acoustic objective、Lightning 训练组合和 generation service 已接入并有 contract tests，
+  真实训练与 generation/decode 尚未验收。
 - P3：独立 request/result、单样本 KV cache、在线 acoustic condition、一次性 generation/decode、SampleLogger 复用及真实 Qwen3/LongCat cached smoke 已完成；标准变长 batch generation 未完成。
-- 测试现状：纯本地测试覆盖 audio tokenizer、P0 数据/ID 契约、
+- 测试现状：64 个纯本地测试覆盖 audio tokenizer、P0 数据/ID 契约、
   模块所有权、HF backbone 加载与 vocabulary 边界、condition 对齐、全任务 semantic/flow
   objective 路由、fake P1 closure、cached generation、张量化 acoustic merge、stage resume、
   codec oracle 与 text retention contract。
@@ -32,8 +34,10 @@
   overfit；121 smoke 已完成，结果见 `results/005-acoustic-oracle-codec-screening.md`。
 - 在相同数据、初始化和训练预算下对比 DiT flow 与 DiT flow + REPA，验证 REPA 对 flow
   objective、重建质量和音频指标的增益后再确定默认权重。
+- 对 8 层 DiT flow 与 8 层 Qwen RVQ 分别完成相同固定样本、数据顺序、optimizer 和训练
+  step 的 overfit；分别报告 decoder 参数量、waveform 指标和生成 RTF，不横向比较 flow
+  loss 与 token CE 的数值。
 
 ## 其他工程欠账
 
-- `loss/causal_lm.py`：实现 RVQ 离散 acoustic objective 后再暴露正式入口。
 - 第一版 DDP 使用 `find_unused_parameters=True`；路径稳定后评估冻结策略或 DDP 优化。

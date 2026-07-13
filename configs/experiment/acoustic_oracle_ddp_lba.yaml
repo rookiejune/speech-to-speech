@@ -3,6 +3,8 @@ defaults:
   - /codec: longcat
   - /data: wmt19_tts_lba
   - /init: codec
+  - /optimizer: oracle
+  - /flow: smoke
   - /train: smoke
   - /trainer: ddp
   - /logging: tensorboard

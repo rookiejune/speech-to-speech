@@ -13,11 +13,14 @@ Lightning 训练循环、生成路径和日志。生成契约的权威定义见 
 - `generation.Request`：无 padding 的 semantic prompt、task 和可选 `AcousticPrompt`；
   `AcousticPrompt` 把 source acoustic IDs/positions 组织成不可拆分的结构，不携带 target labels。
 - `generation.Result`：裁掉 BOA/EOA 后的 token 和可选 `AudioOutput`；`AudioOutput` 将
-  acoustic features/waveform 组成不可拆分的结构，三个输出来自同一次生成。
+  acoustic features、waveform 和 codec sample rate 组成不可拆分的结构，所有输出来自
+  同一次生成。
 - `generation.requests_from_batch()`：仅供 teacher-forcing 样本日志使用的 adapter，不是真实推理入口。
-- `decode_generated_audio()`：`semantic ids [B, T, K_semantic]` 与 acoustic features 或
-  codes → waveform，只要求 frame 轴对齐。helper 已支持 codes dequantize，但当前正式
-  generation service 只组合 flow model。
+- `decode_generated_audio()`：`semantic ids [B, T, K_semantic]` 与 acoustic features →
+  waveform，只要求 frame 轴对齐。
+- `decode_generated_codes()`：对应的离散 codes 解码入口，先通过 codec 转换为 features。
+  flow 与 RVQ model 的 `generate_audio()` 都向 service 返回 codec features，因此上层状态机
+  和 waveform decode 不按 acoustic objective 分叉。
 
 ## callback 对外能力
 

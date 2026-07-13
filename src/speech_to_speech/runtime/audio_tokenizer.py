@@ -41,7 +41,7 @@ class NativeAudioTokenizer:
     ) -> list[int] | Tensor:
         if not isinstance(token_ids, Tensor):
             return [1] * len(token_ids)
-        _check_ids(token_ids, "token ids")
+        _validate_ids(token_ids, "token ids")
         if token_ids.dim() != 1:
             raise ValueError("token id tensor must have shape [tokens].")
         return torch.ones_like(token_ids, dtype=torch.long)
@@ -145,7 +145,7 @@ def _single_code(frame: Sequence[int]) -> int:
 
 
 def _frames(frames: Tensor, codebook_sizes: Sequence[int]) -> list[list[int]]:
-    _check_ids(frames, "frames")
+    _validate_ids(frames, "frames")
     if frames.dim() == 1:
         if len(codebook_sizes) != 1:
             raise ValueError(
@@ -160,13 +160,13 @@ def _frames(frames: Tensor, codebook_sizes: Sequence[int]) -> list[list[int]]:
 
 
 def _ids(ids: Tensor) -> list[int]:
-    _check_ids(ids, "token ids")
+    _validate_ids(ids, "token ids")
     if ids.dim() != 1:
         raise ValueError("token id tensor must have shape [tokens].")
     return ids.detach().cpu().tolist()
 
 
-def _check_ids(ids: Tensor, name: str) -> None:
+def _validate_ids(ids: Tensor, name: str) -> None:
     if ids.dtype == torch.bool or torch.is_floating_point(ids) or torch.is_complex(ids):
         raise TypeError(f"{name} must contain integer ids.")
 

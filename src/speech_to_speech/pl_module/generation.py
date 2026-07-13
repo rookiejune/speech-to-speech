@@ -8,7 +8,7 @@ from anydataset.types import Modality
 from torch import Tensor
 
 from ..datamodule.types import ModelBatch, Task
-from ..model.protocol import FlowGeneration
+from ..model.protocol import AcousticGeneration
 from .decode import decode_generated_audio
 
 
@@ -26,6 +26,7 @@ class Request(TypedDict):
 class AudioOutput(TypedDict):
     features: Tensor
     waveform: Tensor
+    sample_rate: int
 
 
 class Result(TypedDict):
@@ -66,7 +67,7 @@ def requests_from_batch(batch: ModelBatch) -> list[Request]:
 @torch.no_grad()
 def generate(
     requests: Sequence[Request],
-    model: FlowGeneration,
+    model: AcousticGeneration,
     *,
     max_new_tokens: int = 256,
     temperature: float = 1.0,
@@ -99,7 +100,7 @@ def generate(
             else acoustic_prompt["positions"].to(device=device)[None]
         )
         if task.target_modality is Modality.AUDIO:
-            sequence, features, _ = model.generate_audio(
+            sequence, features = model.generate_audio(
                 prompt,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
@@ -125,6 +126,7 @@ def generate(
                     audio=AudioOutput(
                         features=features[0],
                         waveform=waveform,
+                        sample_rate=model.runtime.codec.sample_rate,
                     ),
                 )
             )

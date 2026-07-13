@@ -6,6 +6,7 @@ from anydataset.types import Sample as RawSample
 from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader
 
+from ..runtime import runtime
 from .collator import Collator
 from .types import ModelBatch, Task
 
@@ -33,6 +34,12 @@ class DataModule(LightningDataModule):
         del stage
         if self._train_dataset is not None:
             return
+        runtime_codec = runtime().config.codec
+        if self.config.codec != runtime_codec:
+            raise ValueError(
+                "datamodule and runtime must use the same codec: "
+                f"{self.config.codec!r} != {runtime_codec!r}."
+            )
         from zhuyin.datasets.wmt19_tts import wmt19_tts_codec
 
         self._train_dataset = wmt19_tts_codec(codec=self.config.codec)

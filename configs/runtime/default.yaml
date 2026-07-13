@@ -1,0 +1,5 @@
+backbone: Qwen/Qwen3-0.6B
+audio_tokenizer: ${oc.env:SPEECH_TO_SPEECH_AUDIO_TOKENIZER}
+device: cuda
+dtype: bfloat16
+attn_implementation: flash_attention_2

@@ -6,7 +6,7 @@ import torch
 from torch import Tensor, nn
 
 from ...runtime.types import AudioTokenizer, Backbone, Codec
-from ..adapter import create_adapter
+from ..adapter import AdapterType, create_adapter
 
 _ROPE_THETA = 10000.0
 
@@ -22,8 +22,8 @@ class _Runtime(Protocol):
     def codec(self) -> Codec: ...
 
 
-def create_semantic_audio_embedding(
-    adapter_type: str | None,
+def create_semantic_audio_modules(
+    adapter_type: AdapterType | None,
     runtime: _Runtime,
 ) -> tuple[nn.Embedding, nn.Module]:
     backbone_weight = runtime.backbone.get_input_embeddings().weight

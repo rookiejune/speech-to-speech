@@ -1,4 +1,4 @@
-from .decode import decode_generated_audio
+from .decode import decode_generated_audio, decode_generated_codes
 from .generation import (
     AcousticPrompt,
     AudioOutput,
@@ -20,6 +20,7 @@ __all__ = [
     "TextProbe",
     "TextProbeResult",
     "decode_generated_audio",
+    "decode_generated_codes",
     "generate",
     "evaluate_text",
     "requests_from_batch",

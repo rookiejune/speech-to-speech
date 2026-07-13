@@ -22,7 +22,10 @@ from speech_to_speech.datamodule.types import Task
 from speech_to_speech.loss import Loss
 from speech_to_speech.model.acoustic import SpeechToSpeechFlowModel
 from speech_to_speech.model.base import Config as ModelConfig
-from speech_to_speech.pl_module.decode import decode_generated_audio
+from speech_to_speech.pl_module.decode import (
+    decode_generated_audio,
+    decode_generated_codes,
+)
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
 
 
@@ -254,6 +257,14 @@ class FakeClosureTest(unittest.TestCase):
 
             self.assertEqual(waveform.shape, (1, 3))
             self.assertTrue(torch.isfinite(waveform).all())
+            decoded_codes = decode_generated_codes(
+                semantic,
+                batch.acoustic_labels,
+                codec=rt.codec,
+                audio_tokenizer=rt.audio_tokenizer,
+                audio_token_range=rt.codec_audio_range,
+            )
+            self.assertTrue(torch.equal(decoded_codes, waveform))
 
 
 def _runtime(rt: _Runtime):

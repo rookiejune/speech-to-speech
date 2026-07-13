@@ -11,17 +11,17 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from ..runtime import Runtime, runtime
 from ._sampling import top_p_filter
-from .adapter import create_adapter
-from .embedding import create_semantic_audio_embedding
+from .adapter import AdapterType, create_adapter
+from .embedding import create_semantic_audio_modules
 from .embedding.audio import merge_by_positions
 from .protocol import ModelRuntime
 
 
 @dataclass
 class Config:
-    semantic_audio_adapter: str | None = "linear"
-    semantic_audio_output_adapter: str | None = "linear"
-    acoustic_prompt_adapter: str | None = "linear"
+    semantic_audio_adapter: AdapterType | None = AdapterType.LINEAR
+    semantic_audio_output_adapter: AdapterType | None = AdapterType.LINEAR
+    acoustic_prompt_adapter: AdapterType | None = AdapterType.LINEAR
     acoustic_decoder_dim: int | None = None
     acoustic_decoder_layers: int = 8
     acoustic_decoder_heads: int = 8
@@ -50,7 +50,7 @@ class SemanticModel(nn.Module):
         (
             self.semantic_audio_embedding,
             self.semantic_audio_adapter,
-        ) = create_semantic_audio_embedding(
+        ) = create_semantic_audio_modules(
             self.config.semantic_audio_adapter, self.runtime
         )
         self.backbone = self.runtime.backbone
@@ -165,7 +165,7 @@ class SemanticModel(nn.Module):
     ) -> CausalLMOutputWithPast:
         if input_ids.dim() != 2:
             raise ValueError("input_ids must have shape [batch, sequence].")
-        inputs_embeds = self._semantic_embedding(input_ids)
+        inputs_embeds = self._input_embedding(input_ids)
         if acoustic_input_ids is not None:
             if acoustic_input_positions is None:
                 raise ValueError(
@@ -384,10 +384,10 @@ class SemanticModel(nn.Module):
         safe_labels = labels.gather(1, safe_positions)
         valid = valid & safe_labels.ne(-100)
         safe_labels = safe_labels.masked_fill(~valid, 0)
-        condition = self._semantic_embedding(safe_labels)
+        condition = self._input_embedding(safe_labels)
         return condition.masked_fill(~valid[..., None], 0)
 
-    def _semantic_embedding(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def _input_embedding(self, input_ids: torch.Tensor) -> torch.Tensor:
         text_start, text_end = self.layout.blocks["text"]
         audio_start, audio_end = self.layout.blocks["audio"]
         text_mask = input_ids.ge(text_start) & input_ids.lt(text_end)

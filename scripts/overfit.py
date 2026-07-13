@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-import argparse
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
+import hydra
 from anydataset.types import Sample as RawSample
 from lightning import pytorch as pl
 from lightning.pytorch import LightningDataModule
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.loggers import TensorBoardLogger
+from omegaconf import DictConfig, OmegaConf
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset, Subset
 
@@ -24,9 +25,9 @@ from speech_to_speech.callback.logging import (
     TextRetentionLogger,
 )
 from speech_to_speech.datamodule import Collator, ModelBatch, Task
-from speech_to_speech.loss import Loss, Outputs, WavLMTeacher, loss_items
+from speech_to_speech.loss import Loss, Outputs, RVQLoss, WavLMTeacher, loss_items
 from speech_to_speech.model import Config as ModelConfig
-from speech_to_speech.model import SpeechToSpeechFlowModel
+from speech_to_speech.model import SpeechToSpeechFlowModel, SpeechToSpeechRVQModel
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.pl_module import SpeechToSpeech
 from speech_to_speech.reporting import window_summary
@@ -113,35 +114,42 @@ class FixedDataModule(LightningDataModule):
         )
 
 
-def main(argv: Sequence[str] | None = None) -> None:
-    args = parser().parse_args(argv)
-    output_dir = Path(args.output_dir).expanduser()
+@hydra.main(version_base=None, config_path="../configs", config_name="config")
+def main(config: DictConfig) -> None:
+    run(config)
+
+
+def run(config: DictConfig) -> None:
+    OmegaConf.resolve(config)
+    output_dir = Path(str(config.output_dir)).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    pl.seed_everything(args.seed, workers=True)
+    pl.seed_everything(int(config.train.seed), workers=True)
     rt = init_runtime(
         RuntimeConfig(
-            codec=args.codec,
-            backbone=args.backbone,
-            audio_tokenizer=args.audio_tokenizer,
-            device=args.device,
-            dtype=args.dtype,
-            attn_implementation=args.attn_implementation,
+            codec=str(config.codec.name),
+            backbone=str(config.runtime.backbone),
+            audio_tokenizer=str(config.runtime.audio_tokenizer),
+            device=str(config.runtime.device),
+            dtype=str(config.runtime.dtype),
+            attn_implementation=str(config.runtime.attn_implementation),
         )
     )
-    task = Task(args.task)
+    task = Task(str(config.task))
     datamodule = FixedDataModule(
-        args.codec,
+        str(config.codec.name),
         {task: 1.0},
-        args.sample_index,
+        int(config.data.sample_index),
     )
 
     repa_teacher = None
-    if args.repa_weight is not None:
+    if config.objective == "rvq" and config.repa.weight is not None:
+        raise ValueError("REPA is only defined for the flow objective.")
+    if config.repa.weight is not None:
         repa_teacher = WavLMTeacher(
             rt.codec,
-            checkpoint=args.repa_teacher,
-            layer=args.repa_layer,
+            checkpoint=str(config.repa.teacher),
+            layer=int(config.repa.layer),
             device=rt.backbone.get_input_embeddings().weight.device,
         )
     model_config = (
@@ -149,31 +157,51 @@ def main(argv: Sequence[str] | None = None) -> None:
         if repa_teacher is None
         else ModelConfig(acoustic_repa_dim=repa_teacher.feature_dim)
     )
-    model = SpeechToSpeechFlowModel(model_config, runtime_snapshot=rt)
-    module = SpeechToSpeech(
-        ModuleConfig(
-            learning_rate=args.learning_rate,
-            weight_decay=args.weight_decay,
-        ),
-        model=model,
-        loss=Loss(
+    model = (
+        SpeechToSpeechFlowModel(model_config, runtime_snapshot=rt)
+        if config.objective == "flow"
+        else SpeechToSpeechRVQModel(model_config, runtime_snapshot=rt)
+    )
+    loss = (
+        Loss(
             rt.layout,
             rt.flow_matching,
-            repa_weight=args.repa_weight,
-            repa_teacher=repa_teacher,
+            repa=(
+                None
+                if config.repa.weight is None or repa_teacher is None
+                else {"weight": float(config.repa.weight), "teacher": repa_teacher}
+            ),
+        )
+        if config.objective == "flow"
+        else RVQLoss(rt.layout)
+    )
+    module = SpeechToSpeech(
+        ModuleConfig(
+            learning_rate=float(config.optimizer.learning_rate),
+            weight_decay=float(config.optimizer.weight_decay),
         ),
+        model=model,
+        loss=loss,
     )
     summary = LossSummary()
-    callbacks: list[Callback] = [
+    loss_pair = (
+        ("flow_matching", "repa")
+        if config.repa.weight is not None
+        else ("semantic", "flow_matching")
+        if config.objective == "flow"
+        else ("semantic", "causal_lm")
+    )
+    callbacks = cast(list[Callback], [
         OutputsLogger(),
-        FlowMatchingLogger(rt.flow_matching, every_n_steps=1),
         GradLogger(
-            ("flow_matching", "repa"),
-            "model.acoustic_decoder.input.weight",
+            loss_pair,
+            "model.acoustic_decoder.input.weight"
+            if config.objective == "flow"
+            else "model.acoustic_decoder.decoder.layers.0.self_attn.q_proj.weight",
             every_n_steps=1,
         ),
         GradNormLogger(),
-        SampleLogger([args.sample_index], every_n_steps=1),
+        SampleLogger([int(config.data.sample_index)], every_n_steps=1),
         TextRetentionLogger(
             {
                 "zh_en": {
@@ -186,51 +214,30 @@ def main(argv: Sequence[str] | None = None) -> None:
         ),
         StageSwitcher(StageConfig(strategies=[{task: 1.0}], milestones=[])),
         summary,
-    ]
+    ])
+    if config.objective == "flow":
+        callbacks.insert(1, FlowMatchingLogger(rt.flow_matching, every_n_steps=1))
     trainer = pl.Trainer(
-        accelerator="gpu",
-        devices=1,
-        precision="bf16-mixed",
-        max_steps=args.max_steps,
+        accelerator=str(config.trainer.accelerator),
+        devices=config.trainer.devices,
+        precision=cast(Any, str(config.trainer.precision)),
+        max_steps=int(config.train.max_steps),
         default_root_dir=str(output_dir),
         logger=TensorBoardLogger(save_dir=str(output_dir), name="tensorboard"),
         callbacks=callbacks,
-        log_every_n_steps=1,
-        enable_checkpointing=False,
+        log_every_n_steps=int(config.trainer.log_every_n_steps),
+        enable_checkpointing=bool(config.trainer.enable_checkpointing),
     )
     trainer.fit(module, datamodule=datamodule)
 
     result = {
         "task": task.value,
-        "sample_index": args.sample_index,
-        "max_steps": args.max_steps,
+        "sample_index": int(config.data.sample_index),
+        "max_steps": int(config.train.max_steps),
         "metrics": summary.report(),
     }
     result_path = output_dir / "metrics.json"
     result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps(result, sort_keys=True))
-
-
-def parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--task", required=True, choices=[task.value for task in Task])
-    parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--audio-tokenizer", required=True)
-    parser.add_argument("--sample-index", type=int, default=0)
-    parser.add_argument("--max-steps", type=int, default=100)
-    parser.add_argument("--learning-rate", type=float, default=2e-5)
-    parser.add_argument("--weight-decay", type=float, default=0.01)
-    parser.add_argument("--repa-weight", type=float)
-    parser.add_argument("--repa-teacher", default="microsoft/wavlm-base")
-    parser.add_argument("--repa-layer", type=int, default=9)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--codec", default="longcat")
-    parser.add_argument("--backbone", default="Qwen/Qwen3-0.6B")
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--dtype", default="bfloat16")
-    parser.add_argument("--attn-implementation", default="flash_attention_2")
-    return parser
-
-
 if __name__ == "__main__":
     main()

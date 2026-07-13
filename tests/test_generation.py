@@ -15,6 +15,7 @@ from speech_to_speech.callback.logging.sample import SampleLogger
 from speech_to_speech.datamodule.module import Config as DataConfig
 from speech_to_speech.datamodule.module import DataModule
 from speech_to_speech.datamodule.types import ACOUSTIC_PAD_ID, ModelBatch, Task
+from speech_to_speech.model import AdapterType
 from speech_to_speech.model.acoustic import SpeechToSpeechFlowModel
 from speech_to_speech.model.base import Config as ModelConfig
 from speech_to_speech.model.base import SemanticModel
@@ -29,6 +30,7 @@ from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
 
 class _Codec:
     acoustic_feature_dim = 2
+    sample_rate = 16_000
 
     def __init__(self) -> None:
         self.decode_calls = 0
@@ -244,7 +246,7 @@ class GenerationTest(unittest.TestCase):
             ModelConfig(
                 semantic_audio_adapter=None,
                 semantic_audio_output_adapter=None,
-                acoustic_prompt_adapter="linear",
+                acoustic_prompt_adapter=AdapterType.LINEAR,
             ),
             runtime_snapshot=rt,
         ).eval()
@@ -390,6 +392,7 @@ class GenerationTest(unittest.TestCase):
             audio={
                 "features": torch.zeros(1, 2),
                 "waveform": torch.zeros(1, 8),
+                "sample_rate": 16_000,
             },
         )
         module = SimpleNamespace(generate=Mock(return_value=[result]))
@@ -408,6 +411,13 @@ class GenerationTest(unittest.TestCase):
 
         module.generate.assert_called_once()
         experiment.add_audio.assert_called_once()
+        audio_call = experiment.add_audio.call_args
+        self.assertEqual(audio_call.args[0], "sample/0")
+        self.assertTrue(
+            torch.equal(audio_call.args[1], result["audio"]["waveform"])
+        )
+        self.assertEqual(audio_call.args[2], 0)
+        self.assertEqual(audio_call.kwargs, {"sample_rate": 16_000})
 
     def test_sample_logger_loads_samples_from_real_datamodule(self):
         samples = [Mock(), Mock()]
@@ -417,8 +427,10 @@ class GenerationTest(unittest.TestCase):
         )
         datamodule = DataModule(config, {Task.TTS: 1.0})
         with patch(
-            "zhuyin.datasets.wmt19_tts.wmt19_tts_codec",
-            return_value=samples,
+            "speech_to_speech.datamodule.module.runtime",
+            return_value=SimpleNamespace(config=SimpleNamespace(codec="longcat")),
+        ), patch(
+            "zhuyin.datasets.wmt19_tts.wmt19_tts_codec", return_value=samples
         ):
             datamodule.setup()
         trainer = SimpleNamespace(is_global_zero=True, datamodule=datamodule)

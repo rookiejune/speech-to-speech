@@ -9,7 +9,7 @@ from torch import Tensor, nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from speech_to_speech.datamodule.types import ModelBatch, Task
-from speech_to_speech.loss import Loss
+from speech_to_speech.loss import Loss, RVQLoss
 from speech_to_speech.model.base import Config, SemanticModel
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
 
@@ -18,7 +18,7 @@ class _ConditionModel(SemanticModel):
     def __init__(self) -> None:
         nn.Module.__init__(self)
 
-    def _semantic_embedding(self, input_ids: Tensor) -> Tensor:
+    def _input_embedding(self, input_ids: Tensor) -> Tensor:
         return input_ids[..., None].to(dtype=torch.float32)
 
 
@@ -116,6 +116,18 @@ class _FlowModel:
 
     def acoustic_target_latent(self, acoustic_labels: Tensor) -> Tensor:
         return acoustic_labels.to(dtype=torch.float32)
+
+
+class _RVQModel(_FlowModel):
+    def acoustic_logits(
+        self,
+        hidden_states: Tensor,
+        target_positions: Tensor,
+        acoustic_labels: Tensor | None = None,
+    ) -> tuple[Tensor, ...]:
+        del acoustic_labels
+        condition = self.target_frame_condition(hidden_states, target_positions)
+        return (torch.zeros(*condition.shape[:2], 3),)
 
 
 class ModelLossContractTest(unittest.TestCase):
@@ -226,6 +238,7 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertIn("flow_matching", outputs)
         self.assertTrue(model.requested_hidden_states)
         self.assertTrue(torch.equal(model.positions, positions))
+        self.assertEqual(outputs["loss"].shape, ())
         self.assertTrue(torch.isfinite(outputs["loss"]))
 
     def test_repa_is_an_explicit_audio_objective(self):
@@ -234,8 +247,7 @@ class ModelLossContractTest(unittest.TestCase):
         loss = Loss(
             layout,
             _FlowRuntime(),
-            repa_weight=0.1,
-            repa_teacher=_Teacher(),
+            repa={"weight": 0.1, "teacher": _Teacher()},
         )
         batch = _batch(
             Task.TTS,
@@ -247,6 +259,25 @@ class ModelLossContractTest(unittest.TestCase):
         outputs = loss(batch, model)
 
         self.assertIn("repa", outputs)
+        self.assertTrue(torch.isfinite(outputs["loss"]))
+
+    def test_audio_target_automatically_adds_rvq_objective(self):
+        layout = Layout(text=(0, 4), audio=(4, 7))
+        model = _RVQModel(layout)
+        positions = torch.tensor([[1]])
+        batch = _batch(
+            Task.TTS,
+            labels=torch.tensor([[-100, 4]]),
+            acoustic_labels=torch.tensor([[[2]]]),
+            acoustic_label_positions=positions,
+        )
+
+        outputs = RVQLoss(layout)(batch, model)
+
+        self.assertIn("causal_lm", outputs)
+        self.assertTrue(model.requested_hidden_states)
+        self.assertTrue(torch.equal(model.positions, positions))
+        self.assertEqual(outputs["loss"].shape, ())
         self.assertTrue(torch.isfinite(outputs["loss"]))
 
 

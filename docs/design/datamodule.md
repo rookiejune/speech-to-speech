@@ -36,6 +36,8 @@
 - `ModelBatch` 只表达训练或 teacher-forcing evaluation，不表达缺少 target 的真实推理请求。
 - `Collator` 的策略校验要求同一策略内所有任务的 source/target modality 一致，保证 DDP 中不同 rank 走相同模型路径。
 - DataModule 构造时必须提供初始 strategy；stage callback 只在 epoch 边界更新同一个 collator，阶段切换不依赖 Trainer 重建 DataLoader。
+- `DataModule.setup()` 在加载数据前校验 datamodule 与 runtime 的 codec 身份一致；不允许
+  prepared codec view 和模型 codec 使用不同配置。
 - `DataModule.train_samples()` 是 callback 按索引读取已 setup 训练样本的公开边界；callback
   通过 `trainer.datamodule` 使用它，不读取私有 dataset 字段。
 - `Speech.bpe_spans` 通过 audio tokenizer 的 `frame_spans()` 取得，并校验 spans 与 semantic

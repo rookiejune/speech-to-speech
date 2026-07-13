@@ -1,5 +1,8 @@
 # 002 Single Batch Overfit
 
+配置从公共 Hydra 根组合，正式入口为 `experiment=overfit`。job 后追加参数使用 Hydra
+override，例如 `train.max_steps=10 optimizer.learning_rate=2e-5`。
+
 ## 目标
 
 在 121 的真实 WMT19/LongCat/Qwen3 环境中固定同一条 raw sample，验证 semantic CE
@@ -9,7 +12,7 @@
 
 1. TTS 固定首条样本训练 100 steps，隔离 target semantic/acoustic 学习路径。
 2. TTS 曲线正常后，以相同配置运行 S2ST，加入 source semantic/acoustic condition。
-3. 100 steps 不能判断趋势时只增加 `--max-steps`，不同时修改学习率或样本。
+3. 100 steps 不能判断趋势时只增加 `train.max_steps`，不同时修改学习率或样本。
 
 ## 记录
 

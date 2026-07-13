@@ -228,9 +228,9 @@ def build_flow(
     codebook = codec.semantic_codebook.detach().float()
     flow = ContinuousFlowRuntime(
         sampler=ODESampler(
-            method=str(config.train.flow.method),
-            nfe=int(config.train.flow.nfe),
-            num_steps=int(config.train.flow.num_steps),
+            method=str(config.flow.method),
+            nfe=int(config.flow.nfe),
+            num_steps=int(config.flow.num_steps),
             return_intermediates=False,
         )
     )
@@ -241,8 +241,8 @@ def build_flow(
         seed=int(config.train.seed),
         dequantize=codec.acoustic_codes_to_features,
         flow_runtime=flow,
-        learning_rate=float(config.train.learning_rate),
-        weight_decay=float(config.train.weight_decay),
+        learning_rate=float(config.optimizer.learning_rate),
+        weight_decay=float(config.optimizer.weight_decay),
         target_mean=mean.cpu(),
         target_std=std.cpu(),
     )
@@ -277,8 +277,8 @@ def build_token(
         heads=int(config.token.heads),
         feedforward_dim=int(config.token.feedforward_dim),
         dropout=float(config.token.dropout),
-        learning_rate=float(config.train.learning_rate),
-        weight_decay=float(config.train.weight_decay),
+        learning_rate=float(config.optimizer.learning_rate),
+        weight_decay=float(config.optimizer.weight_decay),
     )
     return module, common_metadata(config, codes, codebook)
 

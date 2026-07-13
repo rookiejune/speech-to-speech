@@ -1,0 +1,19 @@
+# @package _global_
+defaults:
+  - /codec: longcat
+  - /data: wmt19_tts
+  - /runtime: default
+  - /optimizer: sft
+  - /train: single_batch
+  - /trainer: overfit
+  - /logging: tensorboard
+  - _self_
+
+task: tts
+objective: flow
+output_dir: ${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech/002-single-batch-overfit/${task}
+
+repa:
+  weight:
+  teacher: microsoft/wavlm-base
+  layer: 9

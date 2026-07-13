@@ -55,7 +55,7 @@ class AcousticFlowLoss(nn.Module):
         mask: Tensor,
         runtime: FlowRuntime,
     ) -> LossItem:
-        self._check(condition, target, mask)
+        self._validate_inputs(condition, target, mask)
         sample = runtime.training_sample(target)
         prediction = decoder(sample.x_t, sample.t, condition=condition, mask=mask)
         return self._loss(prediction, sample, target, mask)
@@ -68,7 +68,7 @@ class AcousticFlowLoss(nn.Module):
         mask: Tensor,
         runtime: FlowRuntime,
     ) -> tuple[LossItem, Tensor]:
-        self._check(condition, target, mask)
+        self._validate_inputs(condition, target, mask)
         sample = runtime.training_sample(target)
         prediction, representation = decoder.forward_with_features(
             sample.x_t,
@@ -78,7 +78,9 @@ class AcousticFlowLoss(nn.Module):
         )
         return self._loss(prediction, sample, target, mask), representation
 
-    def _check(self, condition: Tensor, target: Tensor, mask: Tensor) -> None:
+    def _validate_inputs(
+        self, condition: Tensor, target: Tensor, mask: Tensor
+    ) -> None:
         if condition.dim() != 3 or target.dim() != 3 or mask.dim() != 2:
             raise ValueError(
                 "condition, target, and mask must have shapes [B, F, H], [B, F, D], and [B, F]."
