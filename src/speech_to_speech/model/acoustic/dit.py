@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from typing import cast
 
 import torch
 from torch import Tensor, nn
@@ -36,7 +37,8 @@ class TimeEmbedding(nn.Module):
         embedding = torch.cat((angle.cos(), angle.sin()), dim=-1)
         if self.hidden_dim % 2:
             embedding = torch.nn.functional.pad(embedding, (0, 1))
-        return self.projection(embedding.to(dtype=self.projection[0].weight.dtype))
+        projection = cast(nn.Linear, self.projection[0])
+        return self.projection(embedding.to(dtype=projection.weight.dtype))
 
 
 def _position(length: int, hidden_dim: int, reference: Tensor) -> Tensor:

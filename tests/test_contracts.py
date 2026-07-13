@@ -33,6 +33,7 @@ from speech_to_speech.callback.stage import StageSwitcher
 from speech_to_speech.runtime.singleton import Config, Runtime
 from speech_to_speech.runtime.singleton import _audio_tokenizer, _dtype
 from speech_to_speech.runtime.audio_tokenizer import TorchCodecBPE
+from scripts.overfit import FixedDataModule
 
 
 class _Tokenizer:
@@ -155,6 +156,21 @@ class ContractTest(unittest.TestCase):
         datamodule.setup()
 
         load_dataset.assert_called_once_with(codec="longcat")
+
+    @patch("zhuyin.datasets.wmt19_tts.wmt19_tts_codec")
+    def test_overfit_datamodule_repeats_only_the_selected_sample(self, load_dataset):
+        samples = [object(), object()]
+        load_dataset.return_value = samples
+        datamodule = FixedDataModule("longcat", {Task.TTS: 1.0}, sample_index=1)
+        datamodule.collator = Mock(side_effect=lambda batch: batch)
+
+        datamodule.setup()
+        first_epoch = list(datamodule.train_dataloader())
+        second_epoch = list(datamodule.train_dataloader())
+
+        load_dataset.assert_called_once_with(codec="longcat", split="train")
+        self.assertEqual(first_epoch, [[samples[1]]])
+        self.assertEqual(second_epoch, [[samples[1]]])
 
     @patch(
         "speech_to_speech.datamodule.types.runtime",

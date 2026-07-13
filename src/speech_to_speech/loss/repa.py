@@ -46,7 +46,7 @@ class WavLMTeacher(nn.Module):
         self.model.requires_grad_(False)
         self.model.eval()
         if device is not None:
-            self.model.to(device)
+            cast(nn.Module, self.model).to(device)
 
     @property
     def feature_dim(self) -> int:

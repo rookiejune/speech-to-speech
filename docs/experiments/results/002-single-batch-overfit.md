@@ -1,5 +1,9 @@
 # 002 Single Batch Overfit Result
 
+> 状态：待重新验证。原入口的 `sample_index` 只用于日志样本，训练 DataLoader
+> 实际遍历了完整数据集。以下数值保留为历史运行记录，不支撑单 batch overfit
+> 结论；修正后的入口需重跑 TTS 与 S2ST。
+
 ## 环境
 
 - 日期：2026-07-13。
@@ -46,7 +50,7 @@ seed=0
 TensorBoard 同时包含按 task 划分的 semantic text/audio loss、token count、flow loss、
 frame count 和 flow time。
 
-## 结论
+## 原结论（已失效）
 
 - TTS 与 S2ST 的 semantic objective 都能在 100 steps 内接近记忆固定样本。
 - 加入 source semantic/acoustic condition 后，S2ST 与 TTS 一样保持可优化。

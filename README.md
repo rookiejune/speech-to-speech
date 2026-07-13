@@ -23,13 +23,13 @@ acoustic decoding experiments.
 
 ## Local Checks
 
-Use the workspace's documented `py312` Torch environment and run from the
-repository collection root:
+Activate the workspace's documented `py312` Torch environment, then run from
+the repository collection root:
 
 ```bash
-PYTHONPATH=speech-to-speech/src:workspace/src /Users/zhuyin/miniconda3/envs/py312/bin/basedpyright --project speech-to-speech/pyrightconfig.json --pythonpath /Users/zhuyin/miniconda3/envs/py312/bin/python
-PYTHONPATH=speech-to-speech:speech-to-speech/src:workspace/src /Users/zhuyin/miniconda3/envs/py312/bin/python -m unittest discover -s speech-to-speech/tests -v
-PYTHONPATH=speech-to-speech/src:workspace/src /Users/zhuyin/miniconda3/envs/py312/bin/python -m compileall -q speech-to-speech/src speech-to-speech/scripts speech-to-speech/tests
+PYTHONPATH=speech-to-speech/src:workspace/src basedpyright --project speech-to-speech/pyrightconfig.json --pythonpath "$(command -v python)"
+PYTHONPATH=speech-to-speech:speech-to-speech/src:workspace/src python -m unittest discover -s speech-to-speech/tests -v
+PYTHONPATH=speech-to-speech/src:workspace/src python -m compileall -q speech-to-speech/src speech-to-speech/scripts speech-to-speech/tests
 ```
 
 ## Docs

@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
+from anydataset.types import Sample as RawSample
 from lightning import pytorch as pl
+from lightning.pytorch import LightningDataModule
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.loggers import TensorBoardLogger
 from torch import Tensor
+from torch.utils.data import DataLoader, Dataset, Subset
 
 from speech_to_speech.callback import StageConfig, StageSwitcher
 from speech_to_speech.callback.logging import (
@@ -20,8 +23,7 @@ from speech_to_speech.callback.logging import (
     SampleLogger,
     TextRetentionLogger,
 )
-from speech_to_speech.datamodule import Config as DataConfig
-from speech_to_speech.datamodule import DataModule, Task
+from speech_to_speech.datamodule import Collator, ModelBatch, Task
 from speech_to_speech.loss import Loss, Outputs, WavLMTeacher, loss_items
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model import SpeechToSpeechFlowModel
@@ -66,6 +68,51 @@ class LossSummary(Callback):
         self.values.setdefault(name, []).append(float(value.detach().float().mean()))
 
 
+class FixedDataModule(LightningDataModule):
+    def __init__(
+        self,
+        codec: str,
+        strategy: Mapping[Task, float],
+        sample_index: int,
+    ) -> None:
+        super().__init__()
+        self.codec = codec
+        self.collator = Collator(strategy)
+        self.sample_index = sample_index
+        self._dataset: Dataset[RawSample] | None = None
+        self._training: Subset[RawSample] | None = None
+
+    def setup(self, stage: str | None = None) -> None:
+        del stage
+        if self._dataset is not None:
+            return
+        from zhuyin.datasets.wmt19_tts import wmt19_tts_codec
+
+        self._dataset = cast(
+            Dataset[RawSample],
+            cast(object, wmt19_tts_codec(codec=self.codec, split="train")),
+        )
+        self._training = Subset(self._dataset, [self.sample_index])
+
+    def set_strategy(self, strategy: Mapping[Task, float]) -> None:
+        self.collator.set_strategy(strategy)
+
+    def train_samples(self, indices: Sequence[int]) -> list[RawSample]:
+        if self._dataset is None:
+            raise RuntimeError("FixedDataModule.setup() must run before reading samples.")
+        return [self._dataset[index] for index in indices]
+
+    def train_dataloader(self) -> Iterable[ModelBatch]:
+        if self._training is None:
+            raise RuntimeError("FixedDataModule.setup() must run before training.")
+        return DataLoader(
+            self._training,
+            batch_size=1,
+            num_workers=0,
+            collate_fn=self.collator,
+        )
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     args = parser().parse_args(argv)
     output_dir = Path(args.output_dir).expanduser()
@@ -83,9 +130,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
     )
     task = Task(args.task)
-    datamodule = DataModule(
-        DataConfig(codec=args.codec, dataloader={"batch_size": 1, "num_workers": 0}),
+    datamodule = FixedDataModule(
+        args.codec,
         {task: 1.0},
+        args.sample_index,
     )
 
     repa_teacher = None
@@ -169,7 +217,6 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--audio-tokenizer", required=True)
     parser.add_argument("--sample-index", type=int, default=0)
-    parser.add_argument("--split", default="train")
     parser.add_argument("--max-steps", type=int, default=100)
     parser.add_argument("--learning-rate", type=float, default=2e-5)
     parser.add_argument("--weight-decay", type=float, default=0.01)

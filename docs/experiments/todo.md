@@ -8,12 +8,13 @@
 - P1-core：native audio tokenizer、semantic embedding、acoustic prompt、semantic CE、flow objective 和 waveform decode 已按冻结契约对齐。
 - P1-closure：8 个任务的 fake raw sample、collator、forward/backward、optimizer step 与 waveform decode 闭环已完成。
 - P1-real：121 上真实 WMT19/LongCat/Qwen3 TTS 与 S2ST 训练闭环及短 S2ST generation/decode smoke 已完成，结果见 `results/001-real-resource-smoke.md`。
-- P1-overfit：真实单 batch TTS/S2ST 的 semantic 与 flow objective 均可优化，结果见 `results/002-single-batch-overfit.md`。
+- P1-overfit：原 002 入口未实际固定训练样本；入口已修正，真实单 batch
+  TTS/S2ST 的 semantic 与 flow objective 优化结论待重新验证。
 - P2：FiLM-conditioned acoustic DiT、Flow condition/objective 与在线 WavLM-base layer-9
   到 DiT layer-4 的可选 REPA 已接入并有 contract tests；RVQ decoder/model
   原语已存在，离散 acoustic objective、Lightning 训练组合和 generation service 未完成。
 - P3：独立 request/result、单样本 KV cache、在线 acoustic condition、一次性 generation/decode、SampleLogger 复用及真实 Qwen3/LongCat cached smoke 已完成；标准变长 batch generation 未完成。
-- 测试现状：50 个纯本地测试和 16 个任务子测试覆盖 audio tokenizer、P0 数据/ID 契约、
+- 测试现状：纯本地测试覆盖 audio tokenizer、P0 数据/ID 契约、
   模块所有权、HF backbone 加载与 vocabulary 边界、condition 对齐、全任务 semantic/flow
   objective 路由、fake P1 closure、cached generation、张量化 acoustic merge、stage resume、
   codec oracle 与 text retention contract。
