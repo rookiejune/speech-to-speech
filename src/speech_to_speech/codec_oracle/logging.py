@@ -25,18 +25,12 @@ from .trace import event, timed
 from .types import Objective
 
 
-class _FlowOracle(Protocol):
+class _AcousticFlowScreening(Protocol):
     device: torch.device
 
     def sample(self, semantic_codes: Tensor, *, seed: int) -> Tensor: ...
 
     def features(self, acoustic_codes: Tensor) -> Tensor: ...
-
-
-class _TokenOracle(Protocol):
-    device: torch.device
-
-    def teacher_forced_ids(self, codes: Tensor) -> Tensor: ...
 
 
 class Logger(Callback):
@@ -139,17 +133,11 @@ class Logger(Callback):
             step=trainer.global_step,
         ):
             if self.objective is Objective.FLOW:
-                flow_oracle = cast(_FlowOracle, cast(object, module))
-                value, waveform = self._flow_sample(flow_oracle)
+                flow_module = cast(_AcousticFlowScreening, cast(object, module))
+                value, waveform = self._flow_sample(flow_module)
                 tag = "oracle/sample_feature_mse"
                 audio_tag = "oracle/sample"
                 filename = f"sample-step-{trainer.global_step:06d}.wav"
-            elif self.objective is Objective.TOKEN:
-                token_oracle = cast(_TokenOracle, cast(object, module))
-                value, waveform = self._token_probe(token_oracle)
-                tag = "oracle/teacher_forced_accuracy"
-                audio_tag = "oracle/teacher_forced"
-                filename = f"teacher-forced-step-{trainer.global_step:06d}.wav"
             else:
                 raise AssertionError(f"unsupported objective: {self.objective}")
         self.samples.append({"step": trainer.global_step, "value": value})
@@ -160,7 +148,7 @@ class Logger(Callback):
         if self.save_audio:
             self._save(waveform, filename)
 
-    def _flow_sample(self, module: _FlowOracle) -> tuple[float, Tensor]:
+    def _flow_sample(self, module: _AcousticFlowScreening) -> tuple[float, Tensor]:
         codes = self.codes.unsqueeze(0).to(module.device)
         semantic_codes = codes[..., 0]
         acoustic_codes = codes[..., 1:]
@@ -174,27 +162,16 @@ class Logger(Callback):
             )
         return value, waveform
 
-    def _token_probe(self, module: _TokenOracle) -> tuple[float, Tensor]:
-        codes = self.codes[:, 0].unsqueeze(0).to(module.device)
-        predicted = module.teacher_forced_ids(codes)
-        value = float(predicted.eq(codes).float().mean())
-        with timed("callback.waveform_decode", objective=self.objective):
-            waveform = self.codec.decode(predicted.unsqueeze(-1))
-        return value, waveform
-
     def _oracle_waveform(self, module: LightningModule) -> Tensor:
         codes = self.codes.unsqueeze(0).to(module.device)
         if self.objective is Objective.FLOW:
             semantic_codes = codes[..., :1]
             acoustic_codes = codes[..., 1:]
             with timed("callback.dequantize", objective=self.objective):
-                flow_oracle = cast(_FlowOracle, cast(object, module))
-                features = flow_oracle.features(acoustic_codes)
+                flow_module = cast(_AcousticFlowScreening, cast(object, module))
+                features = flow_module.features(acoustic_codes)
             with timed("callback.waveform_decode", objective=self.objective):
                 return self.codec.decode_features(semantic_codes, features)
-        if self.objective is Objective.TOKEN:
-            with timed("callback.waveform_decode", objective=self.objective):
-                return self.codec.decode(codes)
         raise AssertionError(f"unsupported objective: {self.objective}")
 
     def _audio(

@@ -51,11 +51,10 @@ def build_sample(speech_pair: SpeechPair, task: Task) -> Sample:
     target_acoustic_positions = None
 
     if target_modality is Modality.AUDIO:
-        if target.acoustic_ids is None:
-            raise ValueError(f"{task.value} requires target acoustic codes.")
         response_ids = _boa_eoa(response_ids)
-        target_semantic_frame_labels = target.semantic_ids
-        target_acoustic_labels = target.acoustic_ids
+        if target.acoustic_ids is not None:
+            target_semantic_frame_labels = target.semantic_ids
+            target_acoustic_labels = target.acoustic_ids
     else:
         response_ids = _append_eos(response_ids)
 

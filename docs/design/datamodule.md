@@ -29,7 +29,8 @@
 - chat template 先渲染为字符串并在字符串层切分 source placeholder，再分别 tokenize
   prefix/suffix；不能在 token IDs 中搜索单独编码的 placeholder，因为 BPE 分词受相邻文本影响。
 - target 为 audio 时，boa 是结构性前缀不参与监督：`labels[len(input_ids) + 1:] = response_ids[1:]`，即只监督 semantic BPE tokens 和 eoa。
-- 所有 audio-target task 都必须同时提供 semantic audio target 与 acoustic target；缺失时在 task 构造 `Sample` 时立即报错。text-target task 不允许 acoustic target。
+- audio-target task 必须提供 semantic audio target；acoustic target 由 codec/profile 决定。
+  unified-token codec 使用 `acoustic_ids=None`，text-target task 仍不允许 acoustic target。
 - `semantic_frame_labels` 保存 codec-native target semantic codebooks，与 `acoustic_labels`
   共享 frame 轴；它只表达完整 codec target，不包含或预计算任何 REPA teacher feature。
 - `ModelBatch.from_samples()` 负责检查 acoustic IDs/positions 成对存在、所有 batch/frame 轴对齐以及 task 执行签名一致；不把错误推迟到 model/loss。

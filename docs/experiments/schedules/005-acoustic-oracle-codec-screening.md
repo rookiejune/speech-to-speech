@@ -23,31 +23,29 @@ DAC 暂不纳入本轮。
 
 ### LongCat Acoustic Flow Oracle
 
-- condition ID：LongCat 第 0 个 semantic codebook。
+- model：完整加载正式 `SpeechToSpeechFlowModel`，不单独构造 flow oracle model。
+- condition ID：LongCat 第 0 个 semantic codebook，经正式 semantic audio embedding、adapter
+  与 `target_frame_label_condition()` 生成 frame condition，不执行 Qwen forward。
 - audio embedding：可训练，分别使用 LongCat semantic codebook 或同均值、同标准差的随机
   权重初始化。
 - acoustic target：其余 3 个 codebooks 在训练 step 中冻结 dequantize 得到的 decoder
   features。
-- optimizer：audio embedding 与 `AcousticFlowDecoder`。
+- optimizer：正式模型的 semantic audio embedding、adapter 与 `AcousticFlow`；Qwen backbone
+  和无关 semantic head 不进入 optimizer。
 
-### UniCodec Unified-Token Oracle
+### UniCodec Unified-Token Formal Path
 
-- token ID：UniCodec 唯一的 unified codebook。
-- audio embedding：可训练，分别使用 `codes_to_features()` 得到的完整 codebook table 或
-  matched-random 权重初始化。
-- objective：native frame token 的 causal next-token cross entropy，不构造不存在的 residual
-  acoustic flow target。
-- optimizer：audio embedding、causal token backbone 和输出 head。
-
-随机初始化使用独立 generator，不改变其余模块的初始化状态。
+- UniCodec 唯一 codebook 作为 `Speech.semantic_ids`，`acoustic_ids=None`。
+- 复用正式 native audio tokenizer、DataModule、semantic backbone/head 与 `SemanticLoss`。
+- audio target 不触发 flow/RVQ objective；generation 后将 semantic codes 直接交给 codec
+  decode。
+- 不再维护独立 causal Transformer、prepared-code collator 或 teacher-forced probe。
 
 ## 运行顺序
 
-1. 对两个 codec 的两种初始化各运行 2-step smoke，验收 store 读取、权重加载、首次
-   dequantize、objective、callback decode、日志和 checkpoint。
-2. 对四个 smoke 各运行 500-step single-batch overfit。
-3. LongCat 比较首末 flow loss 和 sampled feature MSE；UniCodec 比较首末 token loss 和
-   teacher-forced token accuracy。不同 objective 的数值不互相排名。
+1. LongCat acoustic-only screening 验收 flow target 与 sample decode。
+2. UniCodec 使用正常 TTS overfit 入口验收 semantic CE 与 direct decode。
+3. 两条路径目标不同，数值不互相排名。
 
 ## DDP 与 LBA
 
@@ -82,14 +80,13 @@ jobs/005/05_unicodec_ddp_lba.sh init=codec
 ```bash
 jobs/005/01_longcat.sh train=smoke init=codec
 jobs/005/01_longcat.sh train=smoke init=random
-jobs/005/02_unicodec.sh train=smoke init=codec
-jobs/005/02_unicodec.sh train=smoke init=random
+jobs/005/02_unicodec.sh train.max_steps=2
 ```
 
 所有 wrapper 保留 Hydra overrides，例如：
 
 ```bash
-jobs/005/02_unicodec.sh train=smoke init=codec data.max_seconds=1 logging.sample_every_n_steps=1
+jobs/005/02_unicodec.sh train.max_steps=2 data.sample_index=0
 ```
 
 UniCodec 的 `fairseq==0.12.2` 与主 `py312` 不兼容；它使用 codec 专用 Python，通过

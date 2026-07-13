@@ -67,10 +67,14 @@ class SemanticModel(nn.Module):
                 "backbone output embedding does not cover the text layout vocabulary."
             )
         backbone_weight = input_embedding.weight
-        self.acoustic_prompt_adapter = create_adapter(
-            self.config.acoustic_prompt_adapter,
-            self.runtime.codec.acoustic_feature_dim,
-            hidden_size,
+        self.acoustic_prompt_adapter = (
+            create_adapter(
+                self.config.acoustic_prompt_adapter,
+                self.runtime.codec.acoustic_feature_dim,
+                hidden_size,
+            )
+            if self.runtime.codec.acoustic_codebook_sizes
+            else nn.Identity()
         ).to(device=backbone_weight.device, dtype=backbone_weight.dtype)
         self.acoustic_prompt_gate = nn.Parameter(
             torch.zeros(

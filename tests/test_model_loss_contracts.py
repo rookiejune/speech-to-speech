@@ -9,7 +9,7 @@ from torch import Tensor, nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from speech_to_speech.datamodule.types import ModelBatch, Task
-from speech_to_speech.loss import Loss, RVQLoss
+from speech_to_speech.loss import Loss, RVQLoss, SemanticObjective
 from speech_to_speech.model.base import Config, SemanticModel
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
 
@@ -39,6 +39,7 @@ class _Backbone(nn.Module):
 
 class _Codec:
     acoustic_feature_dim = 2
+    acoustic_codebook_sizes = (3,)
     semantic_codebook = torch.randn(3, 2)
 
 
@@ -116,6 +117,22 @@ class _FlowModel:
 
     def acoustic_target_latent(self, acoustic_labels: Tensor) -> Tensor:
         return acoustic_labels.to(dtype=torch.float32)
+
+
+class _SemanticForwardModel:
+    def __init__(self, layout: Layout) -> None:
+        self.layout = layout
+        self.requested_hidden_states = False
+
+    def __call__(self, input_ids: Tensor, **kwargs) -> CausalLMOutputWithPast:
+        self.requested_hidden_states = kwargs["output_hidden_states"]
+        return CausalLMOutputWithPast(
+            logits=torch.zeros(
+                *input_ids.shape,
+                self.layout.vocab_size,
+                dtype=torch.float32,
+            )
+        )
 
 
 class _RVQModel(_FlowModel):
@@ -221,6 +238,17 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertNotIn("flow_matching", outputs)
         self.assertFalse(model.requested_hidden_states)
 
+    def test_semantic_objective_does_not_require_acoustic_model(self):
+        layout = Layout(text=(0, 4), audio=(4, 7))
+        model = _SemanticForwardModel(layout)
+        batch = _batch(Task.ASR, labels=torch.tensor([[-100, 1]]))
+
+        outputs = SemanticObjective(layout)(batch, model)
+
+        self.assertIn("semantic", outputs)
+        self.assertNotIn("flow_matching", outputs)
+        self.assertFalse(model.requested_hidden_states)
+
     def test_audio_target_automatically_adds_flow_objective(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
         model = _FlowModel(layout)
@@ -240,6 +268,18 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertTrue(torch.equal(model.positions, positions))
         self.assertEqual(outputs["loss"].shape, ())
         self.assertTrue(torch.isfinite(outputs["loss"]))
+
+    def test_unified_audio_target_uses_semantic_objective_only(self):
+        layout = Layout(text=(0, 4), audio=(4, 7))
+        model = _FlowModel(layout)
+        loss = Loss(layout, _FlowRuntime())
+        batch = _batch(Task.TTS, labels=torch.tensor([[-100, 4]]))
+
+        outputs = loss(batch, model)
+
+        self.assertIn("semantic", outputs)
+        self.assertNotIn("flow_matching", outputs)
+        self.assertFalse(model.requested_hidden_states)
 
     def test_repa_is_an_explicit_audio_objective(self):
         layout = Layout(text=(0, 4), audio=(4, 7))

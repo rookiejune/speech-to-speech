@@ -131,8 +131,9 @@ class SpeechPair:
 
 
 def _parse_audio_item(audio_item: types.AudioItem) -> tuple[Tensor, Tensor | None]:
-    if runtime().config.audio_view == types.AudioView.LONGCAT:
-        codes = audio_item.views[types.AudioView.LONGCAT]
+    view = runtime().config.audio_view
+    if view is types.AudioView.LONGCAT:
+        codes = audio_item.views[view]
         if not isinstance(codes, Tensor):
             raise TypeError("LongCat view must be a [frame, codebook] Tensor.")
         if codes.dim() != 2 or codes.size(1) < 2:
@@ -142,9 +143,11 @@ def _parse_audio_item(audio_item: types.AudioItem) -> tuple[Tensor, Tensor | Non
         semantic_ids = codes[:, :1]
         acoustic_ids = codes[:, 1:]
     else:
-        raise NotImplementedError(
-            f"unsupported audio view: {runtime().config.audio_view.value}"
-        )
+        codes = audio_item.views[view]
+        if not isinstance(codes, Tensor) or codes.dim() != 2:
+            raise ValueError("unified codec view must have shape [frame, codebook].")
+        semantic_ids = codes
+        acoustic_ids = None
     return semantic_ids, acoustic_ids
 
 
@@ -307,8 +310,6 @@ def _validate_sample(sample: Sample) -> None:
         raise ValueError(
             "semantic frame labels and acoustic labels must share the frame axis."
         )
-    if sample.task.target_modality is Modality.AUDIO and not has_target:
-        raise ValueError("audio-target tasks require acoustic target fields.")
     if sample.task.target_modality is Modality.TEXT and has_target:
         raise ValueError("text-target tasks must not provide acoustic target fields.")
     if sample.acoustic_label_positions is not None:

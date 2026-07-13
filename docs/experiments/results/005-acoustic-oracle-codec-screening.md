@@ -1,5 +1,33 @@
 # 005 Codec Oracle Screening
 
+> 注：以下 LongCat 结果产生于独立 flow model 实现。当前入口已改为完整加载并复用
+> `SpeechToSpeechFlowModel`，因此这些数值只保留为历史运行记录，不验证当前 LongCat 路径；
+> 原独立 UniCodec unified-token screening 已删除；当前 UniCodec 作为 semantic-only codec
+> 进入正式 DataModule、semantic model/loss 与 direct decode 路径，因此旧数值也只保留为
+> 历史记录。
+
+## UniCodec Formal-Path Smoke
+
+2026-07-13 在 144 的 RTX 4090 GPU 1 上完成 2-step TTS smoke。输入使用正式 WMT19
+UniCodec store 与 DataModule；模型组合为 `SemanticModel + SemanticObjective`，没有 acoustic
+decoder，generation callback 将 semantic codes 直接交给 UniCodec decode。
+
+| item | value |
+| --- | --- |
+| steps | `2` |
+| semantic loss | `81.5 -> 84.0` |
+| model parameters | `605M` |
+| peak observed GPU memory | about `7.3 GiB` |
+| exit | `max_steps=2` reached |
+
+本次只验证正式 unified-token 数据、forward/backward、optimizer step、TensorBoard 与 direct
+decode 闭环，不支持收敛性结论。产物位于
+`/mnt/pami202/zhuyin/dynamic/debug/speech-to-speech/unicodec-formal-smoke`。
+
+远程专用 Python 原缺 `fairseq`。本次从本地下载 fairseq v0.12.2 完整 tag tarball，在 144
+的 `/tmp/s2s-unicodec-deps` 隔离构建；PyPI sdist 缺少
+`fairseq/clib/libbase/balanced_assignment.cpp`，不能直接构建。
+
 对应计划：[`schedules/005-acoustic-oracle-codec-screening.md`](../schedules/005-acoustic-oracle-codec-screening.md)。
 
 ## 121 Codes-Only Smoke

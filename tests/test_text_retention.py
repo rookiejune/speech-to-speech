@@ -12,6 +12,7 @@ from torch import Tensor, nn
 
 from speech_to_speech.callback.logging import TextRetentionLogger
 from speech_to_speech.datamodule.types import Task
+from speech_to_speech.loss import SemanticObjective
 from speech_to_speech.pl_module import Config, SpeechToSpeech
 from speech_to_speech.pl_module.generation import Result
 
@@ -69,6 +70,14 @@ PROBES = {
 
 
 class TextRetentionTest(unittest.TestCase):
+    def test_objective_is_registered_as_a_child_module(self):
+        model = _Model()
+        objective = SemanticObjective(model.runtime.layout)
+
+        module = SpeechToSpeech(Config(), model=model, objective=objective)
+
+        self.assertIs(dict(module.named_children())["objective"], objective)
+
     def test_t2tt_is_paired_text_to_text(self):
         self.assertIs(Task.T2TT.source_modality, Modality.TEXT)
         self.assertIs(Task.T2TT.target_modality, Modality.TEXT)
@@ -83,7 +92,7 @@ class TextRetentionTest(unittest.TestCase):
             )
             for _ in PROBES
         ]
-        module = SpeechToSpeech(Config(), model=_Model(), loss=Mock())
+        module = SpeechToSpeech(Config(), model=_Model(), objective=Mock())
 
         results = module.evaluate_text(PROBES, max_new_tokens=16)
 

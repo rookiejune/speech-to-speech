@@ -14,6 +14,8 @@
 - audio ID 能力：完整 audio head block、generation allowed IDs（semantic + eoa）和 codec-decodable IDs（仅 semantic）是三个不同集合。
 - special ids：`pad/bos/eos_token_id`（text）与 `boa/eoa_token_id`（audio block 末两位）。
 - `flow_matching`：anytrain 的 `ContinuousFlowRuntime`，统一持有训练时间分布和 acoustic generation sampler 配置。
+  正式训练入口从公共 `flow/` Hydra config group 显式传入 method、NFE 和 step 数；Runtime
+  不另选实验级 sampler preset。
 
 入口：
 

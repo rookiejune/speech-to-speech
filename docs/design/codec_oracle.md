@@ -7,14 +7,17 @@
 
 - `Objective` / `Initialization`：使用字符串枚举固定 objective 与 embedding initialization
   模式，并由枚举自身处理对应的 code selection 与初始化规则。
-- `FlowOracle`：以 semantic codebook embedding 为条件，训练 acoustic feature flow。
-- `TokenOracle`：对 unified codec token 做 causal token prediction；
-  `teacher_forced_ids()` 明确返回使用真实前缀的逐位置 argmax，不表达自回归 sampling。
-- `DataModule`：加载 prepared codec view，支持显式 distributed sampler 和 LBA。
+- `AcousticFlowScreening`：持有完整的 `SpeechToSpeechFlowModel`，prepared semantic codes 通过正式
+  global ID、semantic audio embedding/adapter、target latent 与 acoustic flow 路径；wrapper
+  只负责 acoustic-only objective、optimizer selection 与实验日志。
+- unified-token codec 不使用独立 screening model；其 codes 作为 semantic audio tokens，
+  `acoustic_ids=None`，复用正式 DataModule、semantic model、loss 与 generation/decode。
+- `DataModule`：仅供 LongCat acoustic-only screening 加载 prepared codec view，支持显式
+  distributed sampler 和 LBA；unified-token codec 不使用该入口。
 - `codes()` / `collate()` / `single_batch_loader()`：单样本裁剪、变长 padding 与
   single-batch overfit 数据入口。
-- `embedding_weight()` / `feature_stats()`：codec/random initialization 和 flow target
-  normalization statistics。
+- `Initialization` 自身负责 codec/random embedding initialization；flow target normalization
+  statistics 是运行入口的实验准备逻辑，不作为模块能力公开。
 - `Logger`：对固定 codes 聚合 loss/probe metric；flow 记录 sampled waveform，token objective
   记录 teacher-forced prediction waveform。
 - `WorldSizeContract` / `SamplerEpochSetter`：分别校验 world size 和推进显式 sampler epoch。

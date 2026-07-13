@@ -30,6 +30,7 @@ from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
 
 class _Codec:
     acoustic_feature_dim = 2
+    acoustic_codebook_sizes = (8,)
     sample_rate = 16_000
 
     def __init__(self) -> None:
@@ -40,6 +41,14 @@ class _Codec:
     ) -> Tensor:
         self.decode_calls += 1
         return semantic_codes[..., 0].to(acoustic_features) + acoustic_features[..., 0]
+
+
+class _UnifiedCodec(_Codec):
+    acoustic_codebook_sizes = ()
+
+    def decode(self, codes: Tensor) -> Tensor:
+        self.decode_calls += 1
+        return codes[..., 0].float()
 
 
 class _Runtime:
@@ -71,6 +80,7 @@ class _Runtime:
 
 class _TinyCodec:
     acoustic_feature_dim = 8
+    acoustic_codebook_sizes = (8,)
     semantic_codebook = torch.randn(2, 8)
 
     def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor:
@@ -163,6 +173,12 @@ class _GenerationModel(SpeechToSpeechFlowModel):
         self.sample_calls += 1
         self.condition = condition.clone()
         return torch.zeros_like(condition)
+
+
+class _UnifiedGenerationModel(_GenerationModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.runtime.codec = _UnifiedCodec()
 
 
 class GenerationTest(unittest.TestCase):
@@ -327,6 +343,23 @@ class GenerationTest(unittest.TestCase):
         )
         self.assertEqual([call[0] for call in cached_model.calls], [2, 1, 1])
         self.assertEqual([call[0] for call in full_model.calls], [2, 3, 4])
+
+    def test_unified_audio_generation_decodes_semantic_tokens_directly(self):
+        model = _UnifiedGenerationModel()
+
+        result = generate(
+            [_request()],
+            model,
+            max_new_tokens=3,
+            do_sample=False,
+            use_cache=True,
+        )[0]
+
+        self.assertTrue(torch.equal(result["token_ids"], torch.tensor([4, 5])))
+        self.assertIsNotNone(result["audio"])
+        self.assertIsNone(result["audio"]["features"])
+        self.assertEqual(model.sample_calls, 0)
+        self.assertEqual(model.runtime.codec.decode_calls, 1)
 
     def test_cache_preserves_source_condition_and_collects_hidden_online(self):
         model = _GenerationModel()

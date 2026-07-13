@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from anydataset.types import AudioView, Modality
@@ -28,12 +28,16 @@ class Config:
     device: str | None = None
     dtype: str | None = None
     attn_implementation: str | None = None
+    flow_method: str = "midpoint"
+    flow_nfe: int = 20
+    flow_num_steps: int = 10
 
     @property
     def audio_view(self) -> AudioView:
-        if self.codec == "longcat":
-            return AudioView.LONGCAT
-        raise ValueError(f"unsupported codec: {self.codec}")
+        try:
+            return AudioView(self.codec)
+        except ValueError as error:
+            raise ValueError(f"unsupported codec: {self.codec}") from error
 
 
 class _CodecContract:
@@ -80,6 +84,46 @@ class _CodecContract:
         return self._codec.decode_features(semantic_codes, acoustic_features)
 
 
+class _UnifiedCodecContract:
+    def __init__(self, codec: Any) -> None:
+        self._codec = codec
+        vocab_size = int(codec.codebook_sizes[0])
+        ids = torch.arange(vocab_size, device=codec.device).view(1, vocab_size, 1)
+        self._semantic_codebook = codec.codes_to_features(ids)[0].detach()
+
+    @property
+    def sample_rate(self) -> int:
+        return int(self._codec.sample_rate)
+
+    @property
+    def acoustic_feature_dim(self) -> int:
+        raise RuntimeError("unified-token codec has no acoustic feature representation.")
+
+    @property
+    def semantic_codebook(self) -> Tensor:
+        return self._semantic_codebook
+
+    @property
+    def acoustic_codebook_sizes(self) -> tuple[int, ...]:
+        return ()
+
+    def encode(self, audio: Tensor, sample_rate: int) -> Tensor:
+        return self._codec.encode(audio, sample_rate)
+
+    def decode(self, codes: Tensor) -> Tensor:
+        return self._codec.decode(codes)
+
+    def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor:
+        raise RuntimeError("unified-token codec has no acoustic codes.")
+
+    def decode_features(
+        self,
+        semantic_codes: Tensor,
+        acoustic_features: Tensor,
+    ) -> Tensor:
+        raise RuntimeError("unified-token codec has no acoustic features.")
+
+
 @dataclass(frozen=True)
 class Runtime:
     config: Config
@@ -106,11 +150,17 @@ class Runtime:
 
     @cached_property
     def codec(self) -> Codec:
-        if self.config.codec != "longcat":
-            raise NotImplementedError(f"unsupported codec: {self.config.codec}")
-        return cast(
-            Codec, _CodecContract(LongCat.from_pretrained(device=self.config.device))
-        )
+        if self.config.codec == "longcat":
+            return cast(
+                Codec,
+                _CodecContract(LongCat.from_pretrained(device=self.config.device)),
+            )
+        if self.config.codec == "unicodec":
+            from anytrain.codec.unicodec import UniCodec
+
+            codec = UniCodec.from_pretrained(device=self.config.device)
+            return cast(Codec, _UnifiedCodecContract(codec))
+        raise NotImplementedError(f"unsupported codec: {self.config.codec}")
 
     @cached_property
     def audio_tokenizer(self) -> AudioTokenizer:
@@ -134,7 +184,12 @@ class Runtime:
         from anytrain.framework.flow_matching import ContinuousFlowRuntime, ODESampler
 
         return ContinuousFlowRuntime(
-            sampler=ODESampler(return_intermediates=False),
+            sampler=ODESampler(
+                method=self.config.flow_method,
+                nfe=self.config.flow_nfe,
+                num_steps=self.config.flow_num_steps,
+                return_intermediates=False,
+            ),
         )
 
     def _text_special_id(self, token: Qwen3SpecialToken) -> int:

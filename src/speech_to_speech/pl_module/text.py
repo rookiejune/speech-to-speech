@@ -9,7 +9,7 @@ from anydataset.types import Modality
 from torch import Tensor
 
 from ..datamodule.types import Task
-from ..model.protocol import FlowGeneration, GenerationRuntime, SemanticGeneration
+from ..model.protocol import GenerationRuntime, SemanticGeneration
 from .generation import Request, generate
 
 
@@ -26,7 +26,7 @@ class TextProbeResult(TypedDict):
 @torch.no_grad()
 def evaluate_text(
     probes: Mapping[str, TextProbe],
-    model: FlowGeneration,
+    model: SemanticGeneration,
     *,
     max_new_tokens: int,
 ) -> dict[str, TextProbeResult]:

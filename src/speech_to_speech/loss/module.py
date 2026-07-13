@@ -1,13 +1,21 @@
+from __future__ import annotations
+
 from typing import TypedDict
 
-from anydataset.types import Modality
 from anytrain.idspace import Layout
 from torch import nn
 
 from ..datamodule.types import ModelBatch
-from ..model.protocol import FlowMatching, RVQMatching
+from ..model.protocol import (
+    BaseModel,
+    FlowMatching,
+    FlowModel,
+    RVQMatching,
+    RVQModel,
+)
 from .causal_lm import CausalAcousticLoss
 from .flow_matching import AcousticFlowLoss, FlowRuntime
+from .objective import Objective
 from .repa import RepaLoss, Teacher
 from .semantic import SemanticLoss
 from .types import Outputs
@@ -18,7 +26,28 @@ class RepaConfig(TypedDict):
     teacher: Teacher
 
 
-class Loss(nn.Module):
+class SemanticObjective(Objective[BaseModel]):
+    def __init__(self, layout: Layout) -> None:
+        super().__init__()
+        self.layout = layout
+        self.semantic = SemanticLoss(layout)
+
+    def forward(self, batch: ModelBatch, model: BaseModel) -> Outputs:
+        if model.layout.blocks != self.layout.blocks:
+            raise ValueError("model and loss must use the same runtime layout.")
+        output = model(
+            batch.input_ids,
+            attention_mask=batch.attention_mask,
+            acoustic_input_ids=batch.acoustic_input_ids,
+            acoustic_input_positions=batch.acoustic_input_positions,
+            acoustic_input_mask=batch.acoustic_input_mask,
+            output_hidden_states=False,
+        )
+        semantic = self.semantic(output.logits, batch.labels)
+        return {"loss": semantic.loss.mean(), "semantic": semantic}
+
+
+class Loss(Objective[FlowModel]):
     def __init__(
         self,
         layout: Layout,
@@ -40,21 +69,21 @@ class Loss(nn.Module):
     def forward(self, batch: ModelBatch, model: FlowMatching) -> Outputs:
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
-        audio_target = batch.tasks[0].target_modality is Modality.AUDIO
+        acoustic_target = batch.acoustic_labels is not None
         output = model(
             batch.input_ids,
             attention_mask=batch.attention_mask,
             acoustic_input_ids=batch.acoustic_input_ids,
             acoustic_input_positions=batch.acoustic_input_positions,
             acoustic_input_mask=batch.acoustic_input_mask,
-            output_hidden_states=audio_target,
+            output_hidden_states=acoustic_target,
         )
         semantic = self.semantic(output.logits, batch.labels)
         result: Outputs = {"loss": semantic.loss.mean(), "semantic": semantic}
 
-        if audio_target:
+        if acoustic_target:
             if batch.acoustic_labels is None or batch.acoustic_label_positions is None:
-                raise ValueError("audio-target tasks require acoustic target fields.")
+                raise RuntimeError("acoustic target fields are incomplete.")
             if batch.acoustic_target_mask is None:
                 raise RuntimeError(
                     "model batch did not produce an acoustic target mask."
@@ -102,7 +131,7 @@ class Loss(nn.Module):
         return result
 
 
-class RVQLoss(nn.Module):
+class RVQLoss(Objective[RVQModel]):
     def __init__(self, layout: Layout) -> None:
         super().__init__()
         self.layout = layout
@@ -112,21 +141,21 @@ class RVQLoss(nn.Module):
     def forward(self, batch: ModelBatch, model: RVQMatching) -> Outputs:
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
-        audio_target = batch.tasks[0].target_modality is Modality.AUDIO
+        acoustic_target = batch.acoustic_labels is not None
         output = model(
             batch.input_ids,
             attention_mask=batch.attention_mask,
             acoustic_input_ids=batch.acoustic_input_ids,
             acoustic_input_positions=batch.acoustic_input_positions,
             acoustic_input_mask=batch.acoustic_input_mask,
-            output_hidden_states=audio_target,
+            output_hidden_states=acoustic_target,
         )
         semantic = self.semantic(output.logits, batch.labels)
         result: Outputs = {"loss": semantic.loss.mean(), "semantic": semantic}
 
-        if audio_target:
+        if acoustic_target:
             if batch.acoustic_labels is None or batch.acoustic_label_positions is None:
-                raise ValueError("audio-target tasks require acoustic target fields.")
+                raise RuntimeError("acoustic target fields are incomplete.")
             if batch.acoustic_target_mask is None:
                 raise RuntimeError("model batch did not produce an acoustic target mask.")
             if output.hidden_states is None:

@@ -14,9 +14,6 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset, DistributedSampler, Subset
 from zhuyin.datasets.wmt19_tts import wmt19_tts_codec
 
-from .types import Objective
-
-
 class DataModule(pl.LightningDataModule):
     def __init__(
         self,
@@ -138,19 +135,15 @@ def collate(
     values = [codes(sample, codec=codec, data=data) for sample in samples]
     padded = pad_sequence(values, batch_first=True, padding_value=-1)
     mask = (padded >= 0).all(dim=-1)
-    selected = Objective(str(codec.objective)).select_codes(padded)
-    return {"codes": selected, "mask": mask}
+    return {"codes": padded, "mask": mask}
 
 
 def single_batch_loader(
     codes: Tensor,
-    *,
-    objective: Objective,
 ) -> DataLoader[dict[str, Tensor]]:
-    value = objective.select_codes(codes)
     sample = {
-        "codes": value,
-        "mask": torch.ones(value.size(0), dtype=torch.bool),
+        "codes": codes,
+        "mask": torch.ones(codes.size(0), dtype=torch.bool),
     }
     dataset = cast(Dataset[dict[str, Tensor]], cast(object, [sample]))
     return DataLoader(dataset, batch_size=1, num_workers=0)

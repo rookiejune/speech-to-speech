@@ -4,6 +4,7 @@ defaults:
   - /data: wmt19_tts
   - /runtime: default
   - /optimizer: sft
+  - /flow: default
   - /train: single_batch
   - /trainer: overfit
   - /logging: tensorboard

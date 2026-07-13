@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from bisect import bisect_right
 from dataclasses import dataclass
 from typing import cast

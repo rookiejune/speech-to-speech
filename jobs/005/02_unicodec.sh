@@ -9,7 +9,10 @@ export PYTHONUNBUFFERED=1
 
 cd "${SPEECH_TO_SPEECH_ROOT}"
 echo '{"event":"job.launch","codec":"unicodec"}'
-"${SPEECH_TO_SPEECH_UNICODEC_PYTHON}" scripts/codec_oracle.py \
+"${SPEECH_TO_SPEECH_UNICODEC_PYTHON}" scripts/overfit.py \
+  experiment=overfit \
   codec=unicodec \
-  output_dir="${SPEECH_TO_SPEECH_TRAIN_ROOT}/005-codec-oracle/unicodec/\${init.name}" \
+  runtime=native \
+  task=tts \
+  output_dir="${SPEECH_TO_SPEECH_TRAIN_ROOT}/005-codec-screening/unicodec/formal" \
   "$@"

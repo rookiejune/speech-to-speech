@@ -6,7 +6,6 @@ from typing import Any, Literal, cast
 
 import hydra
 import torch
-from anytrain.framework.flow_matching import ContinuousFlowRuntime, ODESampler
 from anytrain.lightning import DebugCallback
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback, ModelCheckpoint
@@ -20,19 +19,20 @@ from speech_to_speech.codec_oracle import (
     DataModule as OracleDataModule,
 )
 from speech_to_speech.codec_oracle import (
-    FlowOracle,
+    AcousticFlowScreening,
     Initialization,
     Logger as OracleLogger,
     Objective,
     SamplerEpochSetter,
-    TokenOracle,
     WorldSizeContract,
     codes as sample_codes,
     event,
-    feature_stats,
     single_batch_loader,
     timed,
 )
+from speech_to_speech.model import SpeechToSpeechFlowModel
+from speech_to_speech.runtime import Config as RuntimeConfig
+from speech_to_speech.runtime import Runtime
 
 TrainerPrecision = Literal[
     64,
@@ -75,13 +75,10 @@ def run(config: DictConfig) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     codes = load_codes(config.data, config.codec)
-    codec = build_codec(config.codec, device=device)
     if objective is Objective.FLOW:
-        module, metadata = build_flow(config, codec, codes, initialization)
-    elif objective is Objective.TOKEN:
-        module, metadata = build_token(config, codec, codes, initialization)
+        module, metadata, codec = build_flow(config, codes, initialization, device)
     else:
-        raise AssertionError(f"unsupported objective: {objective}")
+        raise ValueError("codec screening entry only supports acoustic flow.")
 
     callback = OracleLogger(
         objective=objective,
@@ -145,7 +142,6 @@ def run(config: DictConfig) -> None:
                 module,
                 train_dataloaders=single_batch_loader(
                     codes,
-                    objective=objective,
                 ),
             )
 
@@ -175,42 +171,30 @@ def load_codes(data: DictConfig, codec: DictConfig) -> Tensor:
     return codes
 
 
-def build_codec(config: DictConfig, *, device: torch.device) -> Any:
-    name = str(config.name)
-    with timed("codec.load", codec=name):
-        if name == "longcat":
-            from anytrain.codec.longcat import LongCat, LongCatDecoderName
-
-            codec = LongCat.from_pretrained(
-                cache_dir=path(config.cache_dir),
-                decoder=cast(LongCatDecoderName, str(config.decoder)),
-                device=device,
-                local_files_only=bool(config.local_files_only),
-            )
-        elif name == "unicodec":
-            from anytrain.codec.unicodec import UniCodec
-
-            codec = UniCodec.from_pretrained(
-                cache_dir=path(config.cache_dir),
-                device=device,
-                domain=str(config.domain),
-                bandwidth_id=int(config.bandwidth_id),
-                local_files_only=bool(config.local_files_only),
-            )
-        else:
-            raise ValueError(f"unsupported codec oracle codec: {name}")
-    return codec
-
-
 @torch.no_grad()
 def build_flow(
     config: DictConfig,
-    codec: Any,
     codes: Tensor,
     initialization: Initialization,
-) -> tuple[FlowOracle, dict[str, Any]]:
+    device: torch.device,
+) -> tuple[AcousticFlowScreening, dict[str, Any], Any]:
     if codes.size(-1) < 2:
-        raise ValueError("flow oracle requires semantic and acoustic codebooks.")
+        raise ValueError("flow screening requires semantic and acoustic codebooks.")
+    runtime = Runtime(
+        RuntimeConfig(
+            codec=str(config.codec.name),
+            backbone=str(config.runtime.backbone),
+            audio_tokenizer=None,
+            device=str(device),
+            dtype=str(config.runtime.dtype),
+            attn_implementation=str(config.runtime.attn_implementation),
+            flow_method=str(config.flow.method),
+            flow_nfe=int(config.flow.nfe),
+            flow_num_steps=int(config.flow.num_steps),
+        )
+    )
+    model = SpeechToSpeechFlowModel(runtime_snapshot=runtime)
+    codec = runtime.codec
     semantic_codes = codes[:, 0]
     acoustic_codes = codes[:, 1:]
     with timed(
@@ -219,28 +203,18 @@ def build_flow(
         code_shape=list(acoustic_codes.shape),
     ):
         target = codec.acoustic_codes_to_features(
-            acoustic_codes.unsqueeze(0).to(codec.device)
+            acoustic_codes.unsqueeze(0).to(device)
         ).float()
-    mean, std = feature_stats(
+    mean, std = _feature_stats(
         target,
         enabled=bool(config.train.normalize_features),
     )
     codebook = codec.semantic_codebook.detach().float()
-    flow = ContinuousFlowRuntime(
-        sampler=ODESampler(
-            method=str(config.flow.method),
-            nfe=int(config.flow.nfe),
-            num_steps=int(config.flow.num_steps),
-            return_intermediates=False,
-        )
-    )
-    module = FlowOracle(
-        codebook.cpu(),
-        target.size(-1),
+    module = AcousticFlowScreening(
+        model,
         initialization=initialization,
         seed=int(config.train.seed),
-        dequantize=codec.acoustic_codes_to_features,
-        flow_runtime=flow,
+        flow_runtime=runtime.flow_matching,
         learning_rate=float(config.optimizer.learning_rate),
         weight_decay=float(config.optimizer.weight_decay),
         target_mean=mean.cpu(),
@@ -252,35 +226,7 @@ def build_flow(
         "feature_mean": float(target.mean()),
         "feature_std": float(target.std(correction=0)),
     }
-    return module, metadata
-
-
-@torch.no_grad()
-def build_token(
-    config: DictConfig,
-    codec: Any,
-    codes: Tensor,
-    initialization: Initialization,
-) -> tuple[TokenOracle, dict[str, Any]]:
-    if codes.size(-1) != 1:
-        raise ValueError("unified token oracle requires exactly one codebook.")
-    vocab_size = int(codec.codebook_sizes[0])
-    ids = torch.arange(vocab_size, device=codec.device).view(1, vocab_size, 1)
-    with timed("codec.codebook_extract", codec=str(config.codec.name), rows=vocab_size):
-        codebook = codec.codes_to_features(ids)[0].detach().float()
-    module = TokenOracle(
-        codebook.cpu(),
-        round(float(config.data.max_seconds) * float(config.codec.frame_rate)),
-        initialization=initialization,
-        seed=int(config.train.seed),
-        layers=int(config.token.layers),
-        heads=int(config.token.heads),
-        feedforward_dim=int(config.token.feedforward_dim),
-        dropout=float(config.token.dropout),
-        learning_rate=float(config.optimizer.learning_rate),
-        weight_decay=float(config.optimizer.weight_decay),
-    )
-    return module, common_metadata(config, codes, codebook)
+    return module, metadata, codec
 
 
 def common_metadata(
@@ -299,6 +245,15 @@ def common_metadata(
         "frame_rate": float(config.codec.frame_rate),
         "max_seconds": float(config.data.max_seconds),
     }
+
+
+def _feature_stats(target: Tensor, *, enabled: bool) -> tuple[Tensor, Tensor]:
+    if not enabled:
+        shape = (1, 1, target.size(-1))
+        return target.new_zeros(shape), target.new_ones(shape)
+    mean = target.mean(dim=(0, 1), keepdim=True)
+    std = target.std(dim=(0, 1), correction=0, keepdim=True).clamp_min(1e-5)
+    return mean, std
 
 
 def build_logger(config: DictConfig, output_dir: Path):

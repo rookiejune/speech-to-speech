@@ -25,9 +25,20 @@ from speech_to_speech.callback.logging import (
     TextRetentionLogger,
 )
 from speech_to_speech.datamodule import Collator, ModelBatch, Task
-from speech_to_speech.loss import Loss, Outputs, RVQLoss, WavLMTeacher, loss_items
+from speech_to_speech.loss import (
+    Loss,
+    Outputs,
+    RVQLoss,
+    SemanticObjective,
+    WavLMTeacher,
+    loss_items,
+)
 from speech_to_speech.model import Config as ModelConfig
-from speech_to_speech.model import SpeechToSpeechFlowModel, SpeechToSpeechRVQModel
+from speech_to_speech.model import (
+    SemanticModel,
+    SpeechToSpeechFlowModel,
+    SpeechToSpeechRVQModel,
+)
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.pl_module import SpeechToSpeech
 from speech_to_speech.reporting import window_summary
@@ -125,16 +136,7 @@ def run(config: DictConfig) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     pl.seed_everything(int(config.train.seed), workers=True)
-    rt = init_runtime(
-        RuntimeConfig(
-            codec=str(config.codec.name),
-            backbone=str(config.runtime.backbone),
-            audio_tokenizer=str(config.runtime.audio_tokenizer),
-            device=str(config.runtime.device),
-            dtype=str(config.runtime.dtype),
-            attn_implementation=str(config.runtime.attn_implementation),
-        )
-    )
+    rt = init_runtime(runtime_config(config))
     task = Task(str(config.task))
     datamodule = FixedDataModule(
         str(config.codec.name),
@@ -157,13 +159,18 @@ def run(config: DictConfig) -> None:
         if repa_teacher is None
         else ModelConfig(acoustic_repa_dim=repa_teacher.feature_dim)
     )
-    model = (
-        SpeechToSpeechFlowModel(model_config, runtime_snapshot=rt)
-        if config.objective == "flow"
-        else SpeechToSpeechRVQModel(model_config, runtime_snapshot=rt)
+    has_acoustic = bool(rt.codec.acoustic_codebook_sizes)
+    module_config = ModuleConfig(
+        learning_rate=float(config.optimizer.learning_rate),
+        weight_decay=float(config.optimizer.weight_decay),
     )
-    loss = (
-        Loss(
+    if not has_acoustic:
+        model = SemanticModel(model_config, runtime_snapshot=rt)
+        objective = SemanticObjective(rt.layout)
+        module = SpeechToSpeech(module_config, model=model, objective=objective)
+    elif config.objective == "flow":
+        model = SpeechToSpeechFlowModel(model_config, runtime_snapshot=rt)
+        objective = Loss(
             rt.layout,
             rt.flow_matching,
             repa=(
@@ -172,17 +179,11 @@ def run(config: DictConfig) -> None:
                 else {"weight": float(config.repa.weight), "teacher": repa_teacher}
             ),
         )
-        if config.objective == "flow"
-        else RVQLoss(rt.layout)
-    )
-    module = SpeechToSpeech(
-        ModuleConfig(
-            learning_rate=float(config.optimizer.learning_rate),
-            weight_decay=float(config.optimizer.weight_decay),
-        ),
-        model=model,
-        loss=loss,
-    )
+        module = SpeechToSpeech(module_config, model=model, objective=objective)
+    else:
+        model = SpeechToSpeechRVQModel(model_config, runtime_snapshot=rt)
+        objective = RVQLoss(rt.layout)
+        module = SpeechToSpeech(module_config, model=model, objective=objective)
     summary = LossSummary()
     loss_pair = (
         ("flow_matching", "repa")
@@ -193,13 +194,6 @@ def run(config: DictConfig) -> None:
     )
     callbacks = cast(list[Callback], [
         OutputsLogger(),
-        GradLogger(
-            loss_pair,
-            "model.acoustic_decoder.input.weight"
-            if config.objective == "flow"
-            else "model.acoustic_decoder.decoder.layers.0.self_attn.q_proj.weight",
-            every_n_steps=1,
-        ),
         GradNormLogger(),
         SampleLogger([int(config.data.sample_index)], every_n_steps=1),
         TextRetentionLogger(
@@ -215,7 +209,18 @@ def run(config: DictConfig) -> None:
         StageSwitcher(StageConfig(strategies=[{task: 1.0}], milestones=[])),
         summary,
     ])
-    if config.objective == "flow":
+    if has_acoustic:
+        callbacks.insert(
+            1,
+            GradLogger(
+                loss_pair,
+                "model.acoustic_flow.decoder.input.weight"
+                if config.objective == "flow"
+                else "model.acoustic_decoder.decoder.layers.0.self_attn.q_proj.weight",
+                every_n_steps=1,
+            ),
+        )
+    if has_acoustic and config.objective == "flow":
         callbacks.insert(1, FlowMatchingLogger(rt.flow_matching, every_n_steps=1))
     trainer = pl.Trainer(
         accelerator=str(config.trainer.accelerator),
@@ -239,5 +244,24 @@ def run(config: DictConfig) -> None:
     result_path = output_dir / "metrics.json"
     result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps(result, sort_keys=True))
+
+
+def runtime_config(config: DictConfig) -> RuntimeConfig:
+    audio_tokenizer = config.runtime.audio_tokenizer
+    return RuntimeConfig(
+        codec=str(config.codec.name),
+        backbone=str(config.runtime.backbone),
+        audio_tokenizer=(
+            None if audio_tokenizer is None else str(audio_tokenizer)
+        ),
+        device=str(config.runtime.device),
+        dtype=str(config.runtime.dtype),
+        attn_implementation=str(config.runtime.attn_implementation),
+        flow_method=str(config.flow.method),
+        flow_nfe=int(config.flow.nfe),
+        flow_num_steps=int(config.flow.num_steps),
+    )
+
+
 if __name__ == "__main__":
     main()

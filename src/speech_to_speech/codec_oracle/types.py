@@ -10,14 +10,6 @@ from .._compat import StrEnum
 
 class Objective(StrEnum):
     FLOW = auto()
-    TOKEN = auto()
-
-    def select_codes(self, codes: Tensor) -> Tensor:
-        if self is Objective.FLOW:
-            return codes
-        if codes.size(-1) != 1:
-            raise ValueError("token objective requires exactly one codebook.")
-        return codes[..., 0]
 
 
 class Initialization(StrEnum):
@@ -25,6 +17,10 @@ class Initialization(StrEnum):
     RANDOM = auto()
 
     def weight(self, codebook: Tensor, *, seed: int) -> Tensor:
+        if codebook.dim() != 2 or not torch.is_floating_point(codebook):
+            raise ValueError(
+                "codec codebook must have shape [vocab, dim] and floating dtype."
+            )
         if self is Initialization.CODEC:
             return codebook.clone()
         return matched_random_weight(codebook, seed=seed)

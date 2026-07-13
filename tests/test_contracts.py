@@ -17,6 +17,7 @@ from anydataset.types import (
     TextMeta,
     TextView,
 )
+from omegaconf import OmegaConf
 
 from speech_to_speech.datamodule.collator import Collator
 from speech_to_speech.datamodule.module import Config as DataConfig
@@ -27,13 +28,14 @@ from speech_to_speech.datamodule.types import (
     Sample,
     SpeechPair,
     Task,
+    _parse_audio_item,
 )
 from speech_to_speech.callback.stage import Config as StageConfig
 from speech_to_speech.callback.stage import StageSwitcher
 from speech_to_speech.runtime.singleton import Config, Runtime
 from speech_to_speech.runtime.singleton import _audio_tokenizer, _dtype
 from speech_to_speech.runtime.audio_tokenizer import TorchCodecBPE
-from scripts.overfit import FixedDataModule
+from scripts.overfit import FixedDataModule, runtime_config
 
 
 class _Tokenizer:
@@ -69,6 +71,21 @@ class ContractTest(unittest.TestCase):
         self.assertTrue(rt.is_codec_audio_id(12))
         self.assertFalse(rt.is_codec_audio_id(rt.eoa_token_id))
 
+    def test_unified_codec_uses_semantic_codes_without_acoustic_side_channel(self):
+        item = AudioItem(
+            views={AudioView.UNICODEC: torch.tensor([[1], [2], [3]])}
+        )
+        with patch(
+            "speech_to_speech.datamodule.types.runtime",
+            return_value=SimpleNamespace(
+                config=SimpleNamespace(audio_view=AudioView.UNICODEC)
+            ),
+        ):
+            semantic, acoustic = _parse_audio_item(item)
+
+        self.assertTrue(torch.equal(semantic, torch.tensor([[1], [2], [3]])))
+        self.assertIsNone(acoustic)
+
     @patch("speech_to_speech.runtime.singleton.AutoModelForCausalLM.from_pretrained")
     def test_backbone_loading_forwards_runtime_configuration(self, from_pretrained):
         backbone = Mock()
@@ -98,6 +115,46 @@ class ContractTest(unittest.TestCase):
         self.assertIs(_dtype("float16"), torch.float16)
         with self.assertRaisesRegex(ValueError, "unknown torch dtype"):
             _dtype("not_a_dtype")
+
+    def test_overfit_runtime_config_preserves_native_audio_tokenizer(self):
+        config = OmegaConf.create(
+            {
+                "codec": {"name": "unicodec"},
+                "runtime": {
+                    "backbone": "fake/backbone",
+                    "audio_tokenizer": None,
+                    "device": "cuda",
+                    "dtype": "bfloat16",
+                    "attn_implementation": "flash_attention_2",
+                },
+                "flow": {"method": "midpoint", "nfe": 20, "num_steps": 10},
+            }
+        )
+
+        result = runtime_config(config)
+
+        self.assertEqual(result.codec, "unicodec")
+        self.assertIsNone(result.audio_tokenizer)
+
+    @patch("anytrain.framework.flow_matching.ContinuousFlowRuntime")
+    @patch("anytrain.framework.flow_matching.ODESampler")
+    def test_runtime_forwards_flow_configuration(self, sampler, flow_runtime):
+        configured_sampler = Mock()
+        sampler.return_value = configured_sampler
+        rt = Runtime(
+            Config(flow_method="euler", flow_nfe=7, flow_num_steps=6)
+        )
+
+        loaded = rt.flow_matching
+
+        sampler.assert_called_once_with(
+            method="euler",
+            nfe=7,
+            num_steps=6,
+            return_intermediates=False,
+        )
+        flow_runtime.assert_called_once_with(sampler=configured_sampler)
+        self.assertIs(loaded, flow_runtime.return_value)
 
     def test_audio_tokenizer_loads_an_explicit_artifact_path(self):
         tokenizer = SimpleNamespace()
@@ -208,9 +265,11 @@ class ContractTest(unittest.TestCase):
         "speech_to_speech.datamodule.types.runtime",
         return_value=SimpleNamespace(pad_token_id=99),
     )
-    def test_model_batch_rejects_missing_audio_target(self, _runtime):
-        with self.assertRaisesRegex(ValueError, "require acoustic target"):
-            ModelBatch.from_samples([_sample(Task.TTS)])
+    def test_model_batch_accepts_unified_audio_target(self, _runtime):
+        batch = ModelBatch.from_samples([_sample(Task.TTS)])
+
+        self.assertIsNone(batch.acoustic_labels)
+        self.assertIsNone(batch.acoustic_label_positions)
 
     def test_collator_updates_the_existing_strategy(self):
         collator = Collator({Task.TTS: 1.0, Task.T2ST: 1.0})

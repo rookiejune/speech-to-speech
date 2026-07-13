@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Generic, TypeVar, cast
 
 import torch
 from anytrain.optim.llm import create_optimizer
@@ -10,9 +10,9 @@ from lightning.pytorch import LightningModule
 from torch import nn
 
 from ..datamodule.types import ModelBatch
-from ..loss.module import Loss, RVQLoss
+from ..loss.objective import Objective
 from ..loss.types import Outputs
-from ..model.protocol import FlowModel, RVQModel
+from ..model.protocol import SemanticGeneration
 from .generation import Request, Result, generate
 from .text import TextProbe, TextProbeResult, evaluate_text
 
@@ -23,25 +23,28 @@ class Config:
     weight_decay: float = 0.01
 
 
-class SpeechToSpeech(LightningModule):
+ModelT = TypeVar("ModelT", bound=SemanticGeneration)
+
+
+class SpeechToSpeech(LightningModule, Generic[ModelT]):
     def __init__(
         self,
         config: Config,
         *,
-        model: FlowModel | RVQModel,
-        loss: Loss | RVQLoss,
+        model: ModelT,
+        objective: Objective[ModelT],
     ) -> None:
         super().__init__()
 
         self.config = config
 
         self.model = model
-        self.loss = loss
+        self.objective = objective
         self._current_loss_outputs: Outputs | None = None
 
     def training_step(self, batch: ModelBatch, batch_idx: int = 0):
         del batch_idx
-        outputs = cast(Any, self.loss).forward(batch, self.model)
+        outputs = self.objective.forward(batch, self.model)
         self._current_loss_outputs = outputs
         self.log("train/loss", outputs["loss"], prog_bar=True, on_step=True)
         return outputs

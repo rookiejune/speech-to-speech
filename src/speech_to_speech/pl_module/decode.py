@@ -39,6 +39,28 @@ def decode_generated_audio(
     return codec.decode_features(semantic_ids, acoustic_features)
 
 
+def decode_generated_semantic(
+    audio_token_ids: Tensor,
+    *,
+    codec: Codec,
+    audio_tokenizer: AudioTokenizer,
+    audio_token_range: tuple[int, int],
+) -> Tensor:
+    """Decode semantic-only codec tokens directly into waveforms."""
+    local_start, local_end = audio_token_range
+    if bool((audio_token_ids < local_start).any()) or bool(
+        (audio_token_ids >= local_end).any()
+    ):
+        raise ValueError("audio token ids must be codec-decodable global audio ids.")
+    semantic_ids = torch.stack(
+        [
+            semantic_ids_from_audio_tokens(audio_tokenizer, row)
+            for row in audio_token_ids - local_start
+        ]
+    )
+    return codec.decode(semantic_ids)
+
+
 def decode_generated_codes(
     audio_token_ids: Tensor,
     acoustic_codes: Tensor,

@@ -296,6 +296,8 @@ def summary(run_output: dict[str, Any]) -> dict[str, Any]:
     audio = audio_output(result, "generation result")
     features = audio["features"]
     waveform = audio["waveform"]
+    if features is None:
+        raise RuntimeError("generation smoke requires acoustic features.")
     return {
         "token_ids": result["token_ids"].detach().cpu().tolist(),
         "acoustic_shape": list(features.shape),
@@ -324,6 +326,8 @@ def compare(cached_run: dict[str, Any], full_run: dict[str, Any]) -> dict[str, A
     full_waveform = full_audio["waveform"]
     cached_tokens = cached["token_ids"]
     full_tokens = full["token_ids"]
+    if cached_features is None or full_features is None:
+        raise RuntimeError("generation smoke requires acoustic features.")
     return {
         "tokens_equal": bool(torch.equal(cached["token_ids"], full["token_ids"])),
         "first_token_difference": first_difference(cached_tokens, full_tokens),

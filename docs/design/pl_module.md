@@ -4,17 +4,20 @@ Lightning 训练循环、生成路径和日志。生成契约的权威定义见 
 
 ## pl_module 对外能力
 
-- `SpeechToSpeech`（LightningModule）：
-  - `training_step()`：调用 `Loss.forward(batch, model)`，返回的 mapping 直接满足 Lightning 契约；loss outputs 保留到 backward 结束，供 `GradLogger` 读取分项梯度。
-  - generation service：接收独立的真实推理输入，按 task 组织 text/audio 状态机、allowed tokens、变长裁剪、acoustic sampling 和 decode；不通过 `ModelBatch.acoustic_labels is None` 判断推理模式。
+- `SpeechToSpeech[ModelT]`（LightningModule）：
+  - 构造时通过 `Objective[ModelT]` 检查 model/objective 合法配对。
+  - `training_step()`：调用 objective 的 `forward(batch, model)`，返回的 mapping 直接满足 Lightning 契约；loss outputs 保留到 backward 结束，供 `GradLogger` 读取分项梯度。
+  - generation service：接收独立的真实推理输入，按 task 组织 text/audio 状态机、allowed
+    tokens 与变长裁剪；具有 acoustic representation 时执行 acoustic sampling，unified-token
+    codec 直接 decode semantic codes。
   - `evaluate_text()`：对固定的 text probes 执行 greedy generation 和 reference teacher-forced NLL，恢复调用前的 module mode，并向 callback 返回结构化结果。
   - teacher-forcing evaluation：消费完整 `ModelBatch`，condition 接口传 token 自身位置 `p`。
   - `configure_optimizers()`：委托 anytrain 的 optimizer preset。
 - `generation.Request`：无 padding 的 semantic prompt、task 和可选 `AcousticPrompt`；
   `AcousticPrompt` 把 source acoustic IDs/positions 组织成不可拆分的结构，不携带 target labels。
-- `generation.Result`：裁掉 BOA/EOA 后的 token 和可选 `AudioOutput`；`AudioOutput` 将
-  acoustic features、waveform 和 codec sample rate 组成不可拆分的结构，所有输出来自
-  同一次生成。
+- `generation.Result`：裁掉 BOA/EOA 后的 token 和可选 `AudioOutput`；`AudioOutput` 将可选
+  acoustic features、waveform 和 codec sample rate 组成结构。unified-token codec 的
+  `features=None`，waveform 由 semantic codes 直接 decode。
 - `generation.requests_from_batch()`：仅供 teacher-forcing 样本日志使用的 adapter，不是真实推理入口。
 - `decode_generated_audio()`：`semantic ids [B, T, K_semantic]` 与 acoustic features →
   waveform，只要求 frame 轴对齐。

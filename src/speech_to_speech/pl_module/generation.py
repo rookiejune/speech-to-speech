@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TypedDict
+from typing import TypedDict, cast
 
 import torch
 from anydataset.types import Modality
 from torch import Tensor
 
 from ..datamodule.types import ModelBatch, Task
-from ..model.protocol import AcousticGeneration
-from .decode import decode_generated_audio
+from ..model.protocol import AcousticGeneration, SemanticGeneration
+from .decode import decode_generated_audio, decode_generated_semantic
 
 
 class AcousticPrompt(TypedDict):
@@ -24,7 +24,7 @@ class Request(TypedDict):
 
 
 class AudioOutput(TypedDict):
-    features: Tensor
+    features: Tensor | None
     waveform: Tensor
     sample_rate: int
 
@@ -67,7 +67,7 @@ def requests_from_batch(batch: ModelBatch) -> list[Request]:
 @torch.no_grad()
 def generate(
     requests: Sequence[Request],
-    model: AcousticGeneration,
+    model: SemanticGeneration,
     *,
     max_new_tokens: int = 256,
     temperature: float = 1.0,
@@ -100,7 +100,42 @@ def generate(
             else acoustic_prompt["positions"].to(device=device)[None]
         )
         if task.target_modality is Modality.AUDIO:
-            sequence, features = model.generate_audio(
+            if not model.runtime.codec.acoustic_codebook_sizes:
+                sequence = model.generate_semantic(
+                    prompt,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    acoustic_input_ids=acoustic_ids,
+                    acoustic_input_positions=acoustic_positions,
+                    stop_token_id=model.runtime.eoa_token_id,
+                    allowed_token_ids=model.runtime.audio_generation_allowed_ids,
+                    do_sample=do_sample,
+                    use_cache=use_cache,
+                )
+                token_ids = _response(
+                    sequence[0], prompt.size(1), model.runtime.eoa_token_id
+                )
+                waveform = decode_generated_semantic(
+                    token_ids[None],
+                    codec=model.runtime.codec,
+                    audio_tokenizer=model.runtime.audio_tokenizer,
+                    audio_token_range=model.runtime.codec_audio_range,
+                )[0]
+                results.append(
+                    Result(
+                        token_ids=token_ids,
+                        audio=AudioOutput(
+                            features=None,
+                            waveform=waveform,
+                            sample_rate=model.runtime.codec.sample_rate,
+                        ),
+                    )
+                )
+                continue
+
+            acoustic_model = cast(AcousticGeneration, model)
+            sequence, features = acoustic_model.generate_audio(
                 prompt,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
