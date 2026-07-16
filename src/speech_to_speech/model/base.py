@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any, Optional, cast
 
 import torch
 import torch.nn.functional as F
@@ -20,15 +20,15 @@ from .protocol import ModelRuntime
 
 @dataclass
 class Config:
-    semantic_audio_adapter: AdapterType | None = AdapterType.LINEAR
-    semantic_audio_output_adapter: AdapterType | None = AdapterType.LINEAR
-    acoustic_prompt_adapter: AdapterType | None = AdapterType.LINEAR
-    acoustic_decoder_dim: int | None = None
+    semantic_audio_adapter: Optional[AdapterType] = AdapterType.LINEAR
+    semantic_audio_output_adapter: Optional[AdapterType] = AdapterType.LINEAR
+    acoustic_prompt_adapter: Optional[AdapterType] = AdapterType.LINEAR
+    acoustic_decoder_dim: Optional[int] = None
     acoustic_decoder_layers: int = 8
     acoustic_decoder_heads: int = 8
     acoustic_decoder_ffn_ratio: int = 4
     acoustic_repa_dim: int = 768
-    acoustic_repa_layer: int | None = None
+    acoustic_repa_layer: Optional[int] = None
 
 
 class SemanticModel(nn.Module):

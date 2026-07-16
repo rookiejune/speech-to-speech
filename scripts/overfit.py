@@ -4,7 +4,7 @@ import json
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Union, cast
 
 import hydra
 import torch
@@ -286,7 +286,10 @@ def run(config: DictConfig) -> None:
         datamodule.setup("fit")
         batch = next(iter(datamodule.train_dataloader()))
         evaluation = AcousticEvaluation(
-            cast(SpeechToSpeechFlowModel | SpeechToSpeechRVQModel, model),
+            cast(
+                Union[SpeechToSpeechFlowModel, SpeechToSpeechRVQModel],
+                model,
+            ),
             batch,
             codec,
             output_dir,

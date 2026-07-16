@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 import torch
 from anydataset.types import AudioView, Modality
@@ -24,10 +24,10 @@ if TYPE_CHECKING:
 class Config:
     codec: str = "longcat"
     backbone: str = "Qwen/Qwen3-0.6B"
-    audio_tokenizer: str | Path | None = None
-    device: str | None = None
-    dtype: str | None = None
-    attn_implementation: str | None = None
+    audio_tokenizer: Optional[Union[str, Path]] = None
+    device: Optional[str] = None
+    dtype: Optional[str] = None
+    attn_implementation: Optional[str] = None
     flow_method: str = "midpoint"
     flow_nfe: int = 20
     flow_num_steps: int = 10

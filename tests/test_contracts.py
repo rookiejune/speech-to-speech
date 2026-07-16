@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 from types import ModuleType
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -32,10 +33,12 @@ from speech_to_speech.datamodule.types import (
 )
 from speech_to_speech.callback.stage import Config as StageConfig
 from speech_to_speech.callback.stage import StageSwitcher
+from speech_to_speech.model import Config as ModelConfig
+from speech_to_speech.model import SpeechToSpeechFlowModel
 from speech_to_speech.runtime.singleton import Config, Runtime
 from speech_to_speech.runtime.singleton import _audio_tokenizer, _dtype
 from speech_to_speech.runtime.audio_tokenizer import TorchCodecBPE
-from scripts.overfit import FixedDataModule, runtime_config
+from scripts.overfit import FixedDataModule, run, runtime_config
 
 
 class _Tokenizer:
@@ -51,6 +54,69 @@ class _Tokenizer:
 
 
 class ContractTest(unittest.TestCase):
+    def test_public_configs_support_omegaconf_structured(self):
+        runtime_config = OmegaConf.structured(Config)
+        model_config = OmegaConf.structured(ModelConfig)
+
+        self.assertIsNone(runtime_config.audio_tokenizer)
+        self.assertIsNone(runtime_config.device)
+        self.assertEqual(model_config.semantic_audio_adapter, "linear")
+        self.assertIsNone(model_config.acoustic_decoder_dim)
+
+    def test_overfit_acoustic_branch_constructs_evaluation_on_py39(self):
+        class EvaluationReached(Exception):
+            pass
+
+        runtime = SimpleNamespace(
+            layout=Mock(),
+            codec=SimpleNamespace(acoustic_codebook_sizes=(1024,)),
+            backbone=Mock(),
+            flow_matching=Mock(),
+        )
+        datamodule = Mock()
+        datamodule.train_dataloader.return_value = [Mock()]
+        with TemporaryDirectory() as output_dir:
+            config = OmegaConf.create(
+                {
+                    "output_dir": output_dir,
+                    "task": "tts",
+                    "codec": {"name": "longcat"},
+                    "data": {"sample_index": 0},
+                    "train": {"seed": 0, "max_steps": 1},
+                    "optimizer": {
+                        "learning_rate": 2e-5,
+                        "weight_decay": 0.01,
+                    },
+                    "acoustic": {
+                        "objective": "flow",
+                        "decoder": {
+                            "dim": None,
+                            "layers": 1,
+                            "heads": 1,
+                            "ffn_ratio": 1,
+                        },
+                        "repa": {"weight": None},
+                    },
+                }
+            )
+            with patch("scripts.overfit.pl.seed_everything"), patch(
+                "scripts.overfit.runtime_config", return_value=Mock()
+            ), patch(
+                "scripts.overfit.init_runtime", return_value=runtime
+            ), patch(
+                "scripts.overfit.FixedDataModule", return_value=datamodule
+            ), patch.object(
+                SpeechToSpeechFlowModel, "__init__", return_value=None
+            ), patch(
+                "scripts.overfit.Loss"
+            ), patch(
+                "scripts.overfit.SpeechToSpeech"
+            ), patch(
+                "scripts.overfit.AcousticEvaluation", side_effect=EvaluationReached
+            ):
+                with self.assertRaises(EvaluationReached):
+                    run(config)
+
     def test_task_is_the_modality_source_of_truth(self):
         self.assertIs(Task.S2ST.source_modality, Modality.AUDIO)
         self.assertIs(Task.S2ST.target_modality, Modality.AUDIO)

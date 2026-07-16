@@ -22,15 +22,18 @@
   Qwen3/LongCat cached smoke 已完成；真实变长 batch 4 在 float32 下完成与逐请求
   的 token parity 及 waveform decode，短生成吞吐为逐请求的 1.78x，结果见
   `results/008-real-batch-generation-benchmark.md`。
-- 测试现状：76 个纯本地测试覆盖 audio tokenizer、P0 数据/ID 契约、
+- 测试现状：78 个纯本地测试覆盖 audio tokenizer、P0 数据/ID 契约、
   模块所有权、HF backbone 加载与 vocabulary 边界、condition 对齐、全任务 semantic/flow
   objective 路由、fake P1 closure、cached generation、张量化 acoustic merge、stage resume、
-  codec oracle 与 text retention contract。
+  codec oracle、text retention 与 Python 3.9 config/acoustic entry contract。
 
 ## 真实资源验收
 
 - 长时间完整训练使用 TensorBoard 记录监督曲线。
 - 用真实 Qwen checkpoint 验收中英双向 `TextRetentionLogger`，确认训练前 wrapper 与 backbone 的文本输出一致，并观察语音训练期间的 NLL 漂移。
+- 在 Python 3.9 / PyTorch 2.8 环境用官方 LongCat checkpoint 验收
+  `LongCat.from_pretrained()`、短音频 encode/decode 和一步 acoustic
+  forward/backward/optimizer step；本地 synthetic checkpoint 只覆盖 loader 契约。
 
 ## 其他工程欠账
 

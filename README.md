@@ -41,8 +41,10 @@ entry points and their arguments as the source of truth for execution.
 
 ## Local Checks
 
-Activate the workspace's documented `py312` Torch environment, then run from
-the repository collection root:
+Python 3.9 is the minimum supported version. Run the checks below in the
+workspace's documented `py39` environment; `py312` remains the primary
+environment for full-model training and audio experiments. Run from the
+repository collection root:
 
 ```bash
 PYTHONPATH=speech-to-speech/src:workspace/src basedpyright --project speech-to-speech/pyrightconfig.json --pythonpath "$(command -v python)"

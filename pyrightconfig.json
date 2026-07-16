@@ -8,6 +8,6 @@
     "../third_party/anytrain/src",
     "../third_party/length-based-batching-adapter/src"
   ],
-  "pythonVersion": "3.12",
+  "pythonVersion": "3.9",
   "typeCheckingMode": "standard"
 }
