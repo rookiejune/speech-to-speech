@@ -89,34 +89,29 @@ text generation 使用 text head，屏蔽 PAD/BOS 并保留 EOS。集合与 rang
 class ModelBatch:
     input_ids: Tensor
     token_labels: Tensor
-    acoustic_prompt_codes: Tensor | None
-    acoustic_prompt_positions: Tensor | None
-    target_semantic_codes: Tensor | None
-    target_acoustic_codes: Tensor | None
-    target_audio_token_positions: Tensor | None
+    acoustic_prompt: AcousticPrompt | None
+    acoustic_target: AcousticTarget | None
     tasks: list[Task]
     pad_token_id: int
 ```
 
 字段职责：
 
-- `acoustic_prompt_*`：source audio 已经出现在 prompt 中的 acoustic condition。
-- `target_semantic_codes`：target codec semantic codebooks，用于完整 codec decode 和 REPA teacher。
-- `target_acoustic_codes`：acoustic decoder 的 codec-local target。
-- `target_audio_token_positions`：每个 target frame 所属的全局 audio token 位置。
+- `acoustic_prompt`：`codes` 与 `token_positions` 共同表示 source acoustic condition。
+- `acoustic_target`：`semantic_codes`、`codes` 与 `token_positions` 共同表示 decoder target、
+  codec/REPA 输入和逐帧全局 audio token 位置。
 
 padding 与 mask：
 
 - `input_ids` 使用 batch 自带的 `pad_token_id`；`token_labels` 使用 `-100`，shift 由 token loss 完成。
 - codec codes 与 frame positions 使用 `ACOUSTIC_PAD_ID=-1`。
-- attention、prompt 和 target mask 由 padding 值派生并缓存。
+- `attention_mask`、`acoustic_prompt_mask` 和 `acoustic_target_mask` 由 padding 值派生并缓存。
 - codec 接口只接收合法 code；调用前把 padding 替换为安全值，得到 feature 后重新应用 mask。
 
 `ModelBatch.from_samples(samples, pad_token_id=...)` 是跨字段校验边界：
 
 - input 与 token label 必须是对齐的一维序列。
-- prompt codes/positions、target codes/positions 必须成对存在。
-- target semantic/acoustic codes 共用 frame 轴。
+- acoustic prompt/target 以完整结构出现，内部 tensor 共用 frame 轴。
 - position 必须指向序列内非 padding token。
 - 同一 batch 的 task 必须具有相同 source/target modality 执行签名。
 
@@ -126,8 +121,8 @@ padding 与 mask：
 
 设 target audio token 在完整序列中的位置为 `p`，则 `token_labels[p]` 是该 token，label 未移位。
 
-- `acoustic_prompt_positions` 指向 source frame 所属的可见 prompt token。
-- `target_audio_token_positions` 记录 target frame 所属 token 自身的位置 `p`。
+- `acoustic_prompt["token_positions"]` 指向 source frame 所属的可见 prompt token。
+- `acoustic_target["token_positions"]` 记录 target frame 所属 token 自身的位置 `p`。
 
 所有调用方统一传 token 自身位置：
 
@@ -199,11 +194,13 @@ model 的训练能力是：
 
 model 对外提供：
 
+- `generation_step()`：供私有自回归循环使用的单步、目标 head 前向契约。
 - `generate_tokens()`：text 或 semantic-audio token generation。
 - `generate_audio_condition()`：生成 audio tokens 及 frame-aligned condition。
 - `generate_audio_features()`：flow/RVQ 组合返回 sequence 与 codec acoustic features。
 
-通用自回归循环位于私有 `model/_generation.py`，具体模型不跨文件调用基类私有方法。循环首步编码完整多模态 prompt，后续复用 KV cache；cache 只属于单次调用。
+通用 `generate_sequence()` 自回归循环位于私有 `model/_generation.py`，具体模型不跨文件调用
+基类私有方法。循环首步编码完整多模态 prompt，后续复用 KV cache；cache 只属于单次调用。
 
 `AcousticPrompt` 使用 `codes` 与 `token_positions`，只允许出现在 audio-source task。service 按 target modality 和是否存在 acoustic prompt 分组，左 padding 变长 prompt，逐行追踪 EOS/EOA，并恢复原请求顺序。
 

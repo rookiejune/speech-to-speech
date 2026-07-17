@@ -32,11 +32,12 @@ class TokenObjective(Objective[TokenObjectiveModel]):
     def forward(self, batch: ModelBatch, model: TokenObjectiveModel) -> Outputs:
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
+        prompt = batch.acoustic_prompt
         hidden_states = model.token_hidden_states(
             batch.input_ids,
             attention_mask=batch.attention_mask,
-            acoustic_prompt_codes=batch.acoustic_prompt_codes,
-            acoustic_prompt_positions=batch.acoustic_prompt_positions,
+            acoustic_prompt_codes=None if prompt is None else prompt["codes"],
+            acoustic_prompt_positions=None if prompt is None else prompt["token_positions"],
             acoustic_prompt_mask=batch.acoustic_prompt_mask,
         )
         token = self.token(hidden_states, batch.token_labels, model.token_logits)
@@ -65,38 +66,37 @@ class FlowObjective(Objective[FlowObjectiveModel]):
     def forward(self, batch: ModelBatch, model: FlowObjectiveModel) -> Outputs:
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
-        acoustic_target = batch.target_acoustic_codes is not None
+        prompt = batch.acoustic_prompt
+        target_data = batch.acoustic_target
         hidden_states = model.token_hidden_states(
             batch.input_ids,
             attention_mask=batch.attention_mask,
-            acoustic_prompt_codes=batch.acoustic_prompt_codes,
-            acoustic_prompt_positions=batch.acoustic_prompt_positions,
+            acoustic_prompt_codes=None if prompt is None else prompt["codes"],
+            acoustic_prompt_positions=None if prompt is None else prompt["token_positions"],
             acoustic_prompt_mask=batch.acoustic_prompt_mask,
         )
         token = self.token(hidden_states, batch.token_labels, model.token_logits)
         result: Outputs = {"loss": token.loss.mean(), "token": token}
 
-        if acoustic_target:
-            if batch.target_acoustic_codes is None or batch.target_audio_token_positions is None:
-                raise RuntimeError("acoustic target fields are incomplete.")
-            if batch.target_acoustic_mask is None:
+        if target_data is not None:
+            if batch.acoustic_target_mask is None:
                 raise RuntimeError(
                     "model batch did not produce an acoustic target mask."
                 )
             condition = model.target_frame_condition(
-                hidden_states, batch.target_audio_token_positions
+                hidden_states, target_data["token_positions"]
             )
-            target = model.acoustic_target_latent(batch.target_acoustic_codes)
+            target = model.acoustic_target_latent(target_data["codes"])
             if self.repa_weight is None:
                 acoustic = self.flow_matching(
                     model.acoustic_decoder,
                     condition,
                     target,
-                    batch.target_acoustic_mask,
+                    batch.acoustic_target_mask,
                     self.flow_runtime,
                 )
             else:
-                if self.repa_teacher is None or batch.target_semantic_codes is None:
+                if self.repa_teacher is None:
                     raise RuntimeError(
                         "REPA requires a teacher and target semantic codes"
                     )
@@ -104,18 +104,18 @@ class FlowObjective(Objective[FlowObjectiveModel]):
                     model.acoustic_decoder,
                     condition,
                     target,
-                    batch.target_acoustic_mask,
+                    batch.acoustic_target_mask,
                     self.flow_runtime,
                 )
                 teacher = self.repa_teacher(
-                    batch.target_semantic_codes,
-                    batch.target_acoustic_codes,
-                    batch.target_acoustic_mask,
+                    target_data["semantic_codes"],
+                    target_data["codes"],
+                    batch.acoustic_target_mask,
                 )
                 repa = self.repa_loss(
                     representation,
                     teacher,
-                    batch.target_acoustic_mask,
+                    batch.acoustic_target_mask,
                 )
                 result["repa"] = repa
                 result["loss"] = result["loss"] + self.repa_weight * repa.loss.mean()
@@ -134,32 +134,31 @@ class RVQObjective(Objective[RVQObjectiveModel]):
     def forward(self, batch: ModelBatch, model: RVQObjectiveModel) -> Outputs:
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
-        acoustic_target = batch.target_acoustic_codes is not None
+        prompt = batch.acoustic_prompt
+        target_data = batch.acoustic_target
         hidden_states = model.token_hidden_states(
             batch.input_ids,
             attention_mask=batch.attention_mask,
-            acoustic_prompt_codes=batch.acoustic_prompt_codes,
-            acoustic_prompt_positions=batch.acoustic_prompt_positions,
+            acoustic_prompt_codes=None if prompt is None else prompt["codes"],
+            acoustic_prompt_positions=None if prompt is None else prompt["token_positions"],
             acoustic_prompt_mask=batch.acoustic_prompt_mask,
         )
         token = self.token(hidden_states, batch.token_labels, model.token_logits)
         result: Outputs = {"loss": token.loss.mean(), "token": token}
 
-        if acoustic_target:
-            if batch.target_acoustic_codes is None or batch.target_audio_token_positions is None:
-                raise RuntimeError("acoustic target fields are incomplete.")
-            if batch.target_acoustic_mask is None:
+        if target_data is not None:
+            if batch.acoustic_target_mask is None:
                 raise RuntimeError("model batch did not produce an acoustic target mask.")
-            labels = batch.target_acoustic_codes
+            labels = target_data["codes"]
             logits = model.acoustic_logits(
                 hidden_states,
-                batch.target_audio_token_positions,
-                labels.masked_fill(~batch.target_acoustic_mask[..., None], 0),
+                target_data["token_positions"],
+                labels.masked_fill(~batch.acoustic_target_mask[..., None], 0),
             )
             acoustic = self.rvq(
                 logits,
                 labels,
-                batch.target_acoustic_mask,
+                batch.acoustic_target_mask,
             )
             result["rvq"] = acoustic
             result["loss"] = result["loss"] + acoustic.loss.mean()

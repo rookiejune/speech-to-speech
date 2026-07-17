@@ -14,7 +14,7 @@ from speech_to_speech.callback.logging import TextRetentionLogger
 from speech_to_speech.task import Task
 from speech_to_speech.loss import TokenObjective
 from speech_to_speech.generation import Result
-from speech_to_speech.pl_module import Config, SpeechToSpeech
+from speech_to_speech.pl_module import Config, SpeechToSpeechModule
 
 
 class _Tokenizer:
@@ -81,7 +81,7 @@ class TextRetentionTest(unittest.TestCase):
         model = _Model()
         objective = TokenObjective(model.runtime.layout)
 
-        module = SpeechToSpeech(Config(), model=model, objective=objective)
+        module = SpeechToSpeechModule(Config(), model=model, objective=objective)
 
         self.assertIs(dict(module.named_children())["objective"], objective)
 
@@ -90,24 +90,24 @@ class TextRetentionTest(unittest.TestCase):
         self.assertIs(Task.T2TT.target_modality, Modality.TEXT)
         self.assertTrue(Task.T2TT.uses_source_role)
 
-    @patch("speech_to_speech.generation.text.generate")
-    def test_module_evaluates_greedy_generation_and_text_only_nll(self, generate):
-        generate.return_value = [
+    @patch("speech_to_speech.generation.text.generate_responses")
+    def test_module_evaluates_greedy_generation_and_text_only_nll(self, generate_responses):
+        generate_responses.return_value = [
             Result(
                 response_ids=torch.tensor([5, 6]),
                 audio=None,
             )
             for _ in PROBES
         ]
-        module = SpeechToSpeech(Config(), model=_Model(), objective=Mock())
+        module = SpeechToSpeechModule(Config(), model=_Model(), objective=Mock())
 
         results = module.evaluate_text(PROBES, max_new_tokens=16)
 
         self.assertTrue(module.training)
-        requests = generate.call_args.args[0]
+        requests = generate_responses.call_args.args[0]
         self.assertEqual([request["task"] for request in requests], [Task.T2TT] * 2)
-        self.assertEqual(generate.call_args.kwargs["max_new_tokens"], 16)
-        self.assertFalse(generate.call_args.kwargs["do_sample"])
+        self.assertEqual(generate_responses.call_args.kwargs["max_new_tokens"], 16)
+        self.assertFalse(generate_responses.call_args.kwargs["do_sample"])
         self.assertEqual(results["zh_en"]["generated"], "5 6")
         self.assertAlmostEqual(results["zh_en"]["nll"], math.log(8), places=6)
 

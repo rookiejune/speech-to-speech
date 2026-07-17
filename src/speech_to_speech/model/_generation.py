@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Protocol
+from typing import Protocol
 
 import torch
 from anydataset.types import Modality
@@ -9,6 +9,7 @@ from anytrain.idspace import Layout
 from torch import Tensor, nn
 from torch.nn.utils.rnn import pad_sequence
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.cache_utils import Cache
 
 from ._sampling import top_p_filter
 from .protocol import TokenModelRuntime
@@ -19,7 +20,7 @@ class GenerationStepModel(Protocol):
     runtime: TokenModelRuntime
     audio_token_frame_spans: nn.Buffer
 
-    def __call__(
+    def generation_step(
         self,
         input_ids: Tensor,
         *,
@@ -28,14 +29,14 @@ class GenerationStepModel(Protocol):
         acoustic_prompt_positions: Tensor | None,
         acoustic_prompt_mask: Tensor | None,
         output_hidden_states: bool,
-        _generation_token_ids: Tensor | None,
-        _generation_modality: Modality | None,
-        past_key_values: Any,
+        token_ids: Tensor | None,
+        modality: Modality | None,
+        past_key_values: Cache | None,
         use_cache: bool,
     ) -> CausalLMOutputWithPast: ...
 
 
-def generate(
+def generate_sequence(
     model: GenerationStepModel,
     prompt_ids: Tensor,
     *,
@@ -88,7 +89,7 @@ def generate(
     attention_mask[:, :prompt_width] = prompt_attention_mask
     length = prompt_width
     input_ids = generated[:, :length]
-    past_key_values: Any = None
+    past_key_values: Cache | None = None
     condition_steps: list[Tensor] = []
     span_steps: list[Tensor] = []
     finished = torch.zeros(
@@ -96,7 +97,7 @@ def generate(
     )
     for _ in range(max_new_tokens):
         inject_acoustic = past_key_values is None
-        output = model(
+        output = model.generation_step(
             input_ids,
             attention_mask=attention_mask[:, :length],
             acoustic_prompt_codes=acoustic_prompt_codes if inject_acoustic else None,
@@ -105,8 +106,8 @@ def generate(
             ),
             acoustic_prompt_mask=acoustic_prompt_mask if inject_acoustic else None,
             output_hidden_states=collect_audio_condition,
-            _generation_token_ids=generation_token_ids,
-            _generation_modality=generation_modality,
+            token_ids=generation_token_ids,
+            modality=generation_modality,
             past_key_values=past_key_values,
             use_cache=use_cache,
         )

@@ -2,19 +2,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Sequence
-from typing import Any, Optional
+from typing import Optional
 
 import torch
-import torch.nn.functional as F
 from anydataset.types import Modality
 from torch import nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.cache_utils import Cache
 
-from ._generation import generate
+from ._generation import generate_sequence
+from ._head import VocabularyHeadMixin
 from .adapter import AdapterType, create_adapter
 from .embedding import create_semantic_audio_modules
 from .embedding.audio import merge_by_positions
 from .protocol import TokenModelRuntime
+from ..runtime.types import BackboneOutput
 
 
 @dataclass
@@ -24,7 +26,7 @@ class Config:
     acoustic_prompt_adapter: Optional[AdapterType] = AdapterType.LINEAR
 
 
-class TokenModel(nn.Module):
+class TokenModel(VocabularyHeadMixin, nn.Module):
     """Shared token modeling and acoustic-prompt logic."""
 
     def __init__(
@@ -81,92 +83,11 @@ class TokenModel(nn.Module):
             else nn.Buffer(acoustic_prompt_gate, persistent=False)
         )
         semantic_audio_weight = self.semantic_audio_embedding.weight
-        self._semantic_audio_output_adapter = create_adapter(
+        self.semantic_audio_output_adapter = create_adapter(
             self.config.semantic_audio_output_adapter,
             hidden_size,
             semantic_audio_weight.size(1),
         ).to(device=backbone_weight.device, dtype=backbone_weight.dtype)
-
-    def text_logits(
-        self,
-        hidden_state: torch.Tensor,
-        local_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Return logits in the local text vocabulary."""
-        text_start, text_end = self.layout.blocks["text"]
-        text_vocab_size = text_end - text_start
-        output = self.backbone.get_output_embeddings()
-        weight = output.weight[:text_vocab_size]
-        output_bias = getattr(output, "bias", None)
-        bias = None if output_bias is None else output_bias[:text_vocab_size]
-        if local_ids is not None:
-            weight = weight.index_select(0, local_ids)
-            bias = None if bias is None else bias.index_select(0, local_ids)
-        return F.linear(hidden_state, weight, bias)
-
-    def semantic_audio_logits(
-        self,
-        hidden_state: torch.Tensor,
-        local_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Return logits in the local audio-tokenizer vocabulary."""
-        projected = self._semantic_audio_output_adapter(hidden_state)
-        weight = self.semantic_audio_embedding.weight
-        if local_ids is not None:
-            weight = weight.index_select(0, local_ids)
-        return F.linear(projected, weight)
-
-    def token_logits(self, hidden_state: torch.Tensor) -> torch.Tensor:
-        """Return logits in the complete global vocabulary."""
-        logits = hidden_state.new_full(
-            (*hidden_state.shape[:-1], self.runtime.layout.vocab_size),
-            float("-inf"),
-        )
-        text_start, text_end = self.runtime.layout.blocks["text"]
-        audio_start, audio_end = self.runtime.layout.blocks["audio"]
-        logits[..., text_start:text_end] = self.text_logits(hidden_state)
-        logits[..., audio_start:audio_end] = self.semantic_audio_logits(hidden_state)
-        return logits
-
-    def _modality_logits(
-        self,
-        hidden_state: torch.Tensor,
-        modality: Modality,
-    ) -> tuple[torch.Tensor, int]:
-        if modality is Modality.TEXT:
-            start, _ = self.layout.blocks[Modality.TEXT.value]
-            logits = self.text_logits(hidden_state)
-            for token_id in (self.runtime.pad_token_id, self.runtime.bos_token_id):
-                logits[..., token_id - start] = float("-inf")
-            return logits, start
-        if modality is Modality.AUDIO:
-            start, _ = self.layout.blocks[Modality.AUDIO.value]
-            logits = self.semantic_audio_logits(hidden_state)
-            logits[..., self.runtime.boa_token_id - start] = float("-inf")
-            return logits, start
-        raise ValueError(f"unsupported generation modality: {modality.value}")
-
-    def _selected_logits(
-        self,
-        hidden_state: torch.Tensor,
-        token_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        logits = hidden_state.new_empty(*hidden_state.shape[:-1], token_ids.numel())
-        text_start, text_end = self.runtime.layout.blocks["text"]
-        audio_start, audio_end = self.runtime.layout.blocks["audio"]
-        text_mask = token_ids.ge(text_start) & token_ids.lt(text_end)
-        audio_mask = token_ids.ge(audio_start) & token_ids.lt(audio_end)
-        if not bool((text_mask | audio_mask).all()):
-            raise ValueError("selected token ids contain an invalid vocabulary id.")
-        if bool(text_mask.any()):
-            text_token_ids = token_ids[text_mask] - text_start
-            logits[..., text_mask] = self.text_logits(hidden_state, text_token_ids)
-        if bool(audio_mask.any()):
-            audio_token_ids = token_ids[audio_mask] - audio_start
-            logits[..., audio_mask] = self.semantic_audio_logits(
-                hidden_state, audio_token_ids
-            )
-        return logits
 
     def forward(
         self,
@@ -177,11 +98,42 @@ class TokenModel(nn.Module):
         acoustic_prompt_positions: torch.Tensor | None = None,
         acoustic_prompt_mask: torch.Tensor | None = None,
         output_hidden_states: bool = False,
-        _generation_token_ids: torch.Tensor | None = None,
-        _generation_modality: Modality | None = None,
-        **kwargs: Any,
+        past_key_values: Cache | None = None,
+        use_cache: bool = False,
+        position_ids: torch.Tensor | None = None,
+        cache_position: torch.Tensor | None = None,
     ) -> CausalLMOutputWithPast:
-        if _generation_token_ids is not None and _generation_modality is not None:
+        backbone_output = self._backbone_output(
+            input_ids,
+            attention_mask=attention_mask,
+            acoustic_prompt_codes=acoustic_prompt_codes,
+            acoustic_prompt_positions=acoustic_prompt_positions,
+            acoustic_prompt_mask=acoustic_prompt_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            position_ids=position_ids,
+            cache_position=cache_position,
+        )
+        hidden_states = backbone_output.last_hidden_state
+        logits = self.token_logits(hidden_states)
+        return self._output(backbone_output, hidden_states, logits, output_hidden_states)
+
+    def generation_step(
+        self,
+        input_ids: torch.Tensor,
+        *,
+        attention_mask: torch.Tensor,
+        acoustic_prompt_codes: torch.Tensor | None,
+        acoustic_prompt_positions: torch.Tensor | None,
+        acoustic_prompt_mask: torch.Tensor | None,
+        output_hidden_states: bool,
+        token_ids: torch.Tensor | None,
+        modality: Modality | None,
+        past_key_values: Cache | None,
+        use_cache: bool,
+    ) -> CausalLMOutputWithPast:
+        """Run one autoregressive step with an explicit output-head selection."""
+        if token_ids is not None and modality is not None:
             raise ValueError("generation token ids and modality cannot both be provided.")
         backbone_output = self._backbone_output(
             input_ids,
@@ -189,20 +141,26 @@ class TokenModel(nn.Module):
             acoustic_prompt_codes=acoustic_prompt_codes,
             acoustic_prompt_positions=acoustic_prompt_positions,
             acoustic_prompt_mask=acoustic_prompt_mask,
-            **kwargs,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
         )
         hidden_states = backbone_output.last_hidden_state
-        generation = _generation_token_ids is not None or _generation_modality is not None
-        logit_hidden_states = hidden_states[:, -1:] if generation else hidden_states
-        if _generation_modality is not None:
-            logits, _ = self._modality_logits(
-                logit_hidden_states,
-                _generation_modality,
-            )
-        elif _generation_token_ids is not None:
-            logits = self._selected_logits(logit_hidden_states, _generation_token_ids)
+        last_hidden_state = hidden_states[:, -1:]
+        if modality is not None:
+            logits = self.modality_logits(last_hidden_state, modality)
+        elif token_ids is not None:
+            logits = self.selected_logits(last_hidden_state, token_ids)
         else:
-            logits = self.token_logits(logit_hidden_states)
+            logits = self.token_logits(last_hidden_state)
+        return self._output(backbone_output, hidden_states, logits, output_hidden_states)
+
+    @staticmethod
+    def _output(
+        backbone_output: BackboneOutput,
+        hidden_states: torch.Tensor,
+        logits: torch.Tensor,
+        output_hidden_states: bool,
+    ) -> CausalLMOutputWithPast:
         return CausalLMOutputWithPast(
             loss=None,
             logits=logits,  # pyright: ignore[reportArgumentType]
@@ -240,8 +198,11 @@ class TokenModel(nn.Module):
         acoustic_prompt_codes: torch.Tensor | None,
         acoustic_prompt_positions: torch.Tensor | None,
         acoustic_prompt_mask: torch.Tensor | None,
-        **kwargs: Any,
-    ) -> Any:
+        past_key_values: Cache | None = None,
+        use_cache: bool = False,
+        position_ids: torch.Tensor | None = None,
+        cache_position: torch.Tensor | None = None,
+    ) -> BackboneOutput:
         if input_ids.dim() != 2:
             raise ValueError("input_ids must have shape [batch, sequence].")
         inputs_embeds = self._input_embedding(input_ids)
@@ -262,7 +223,10 @@ class TokenModel(nn.Module):
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             output_hidden_states=False,
-            **kwargs,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            position_ids=position_ids,
+            cache_position=cache_position,
         )
 
     def generate_tokens(
@@ -282,7 +246,7 @@ class TokenModel(nn.Module):
         do_sample: bool = True,
         use_cache: bool = True,
     ) -> torch.Tensor:
-        generated, _, _ = generate(
+        generated, _, _ = generate_sequence(
             self,
             prompt_ids,
             max_new_tokens=max_new_tokens,
@@ -316,7 +280,7 @@ class TokenModel(nn.Module):
         use_cache: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Generate audio tokens and their frame-aligned acoustic condition."""
-        generated, condition, frame_spans = generate(
+        generated, condition, frame_spans = generate_sequence(
             self,
             prompt_ids,
             max_new_tokens=max_new_tokens,

@@ -22,12 +22,12 @@ from speech_to_speech.model.base import TokenModel
 from speech_to_speech.generation import (
     Request,
     Result,
-    generate,
+    generate_responses,
 )
 from speech_to_speech.generation.batch import requests_from_batch
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
-from speech_to_speech.runtime.singleton import Config as RuntimeConfig
-from speech_to_speech.runtime.singleton import Runtime
+from speech_to_speech.runtime import Config as RuntimeConfig
+from speech_to_speech.runtime import Runtime
 from speech_to_speech.task import Task
 
 
@@ -137,7 +137,7 @@ class _GenerationModel(SpeechToSpeechFlowModel):
         self.condition: Tensor | None = None
         self.sample_calls = 0
 
-    def forward(
+    def generation_step(
         self,
         input_ids: Tensor,
         *,
@@ -145,10 +145,10 @@ class _GenerationModel(SpeechToSpeechFlowModel):
         output_hidden_states: bool = False,
         past_key_values=None,
         use_cache: bool = False,
+        token_ids: Tensor | None = None,
+        modality: Modality | None = None,
         **kwargs,
     ) -> CausalLMOutputWithPast:
-        generation_token_ids = kwargs.pop("_generation_token_ids", None)
-        generation_modality = kwargs.pop("_generation_modality", None)
         del kwargs
         cached_length = 0 if past_key_values is None else past_key_values.length
         source = (
@@ -168,10 +168,10 @@ class _GenerationModel(SpeechToSpeechFlowModel):
             (*input_ids.shape, self.runtime.layout.vocab_size), float("-inf")
         )
         logits[:, -1, next_id] = 0
-        if generation_token_ids is not None:
-            logits = logits.index_select(-1, generation_token_ids)
-        elif generation_modality is not None:
-            start, end = self.layout.blocks[generation_modality.value]
+        if token_ids is not None:
+            logits = logits.index_select(-1, token_ids)
+        elif modality is not None:
+            start, end = self.layout.blocks[modality.value]
             logits = logits[..., start:end]
         hidden = torch.zeros(*input_ids.shape, 2)
         hidden[:, -1] = torch.tensor([source, length])
@@ -206,9 +206,9 @@ class _VariableStopModel(_UnifiedGenerationModel):
         super().__init__()
         self.step = 0
 
-    def forward(self, input_ids: Tensor, **kwargs) -> CausalLMOutputWithPast:
-        generation_token_ids = kwargs.get("_generation_token_ids")
-        generation_modality = kwargs.get("_generation_modality")
+    def generation_step(self, input_ids: Tensor, **kwargs) -> CausalLMOutputWithPast:
+        generation_token_ids = kwargs.get("token_ids")
+        generation_modality = kwargs.get("modality")
         use_cache = kwargs["use_cache"]
         token_ids = (
             torch.tensor([self.runtime.eos_token_id, 1], device=input_ids.device)
@@ -393,7 +393,7 @@ class GenerationTest(unittest.TestCase):
         request = _request()
         request["task"] = Task.T2TT
         with self.assertRaisesRegex(ValueError, "source acoustic prompt"):
-            generate([request], _GenerationModel(), max_new_tokens=1)
+            generate_responses([request], _GenerationModel(), max_new_tokens=1)
 
     def test_audio_generation_requires_an_audio_model(self):
         model = TokenModel(
@@ -411,7 +411,7 @@ class GenerationTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(TypeError, "AcousticFeatureGenerator"):
-            generate([request], model, max_new_tokens=1)
+            generate_responses([request], model, max_new_tokens=1)
 
     def test_acoustic_prompt_adapter_bias_only_affects_prompt_positions(self):
         rt = _TinyRuntime()
@@ -470,7 +470,7 @@ class GenerationTest(unittest.TestCase):
 
     def test_cached_audio_generation_matches_full_recompute(self):
         cached_model = _GenerationModel()
-        cached = generate(
+        cached = generate_responses(
             [_request()],
             cached_model,
             max_new_tokens=3,
@@ -478,7 +478,7 @@ class GenerationTest(unittest.TestCase):
             use_cache=True,
         )[0]
         full_model = _GenerationModel()
-        full = generate(
+        full = generate_responses(
             [_request()],
             full_model,
             max_new_tokens=3,
@@ -504,7 +504,7 @@ class GenerationTest(unittest.TestCase):
     def test_unified_audio_generation_decodes_semantic_tokens_directly(self):
         model = _UnifiedGenerationModel()
 
-        result = generate(
+        result = generate_responses(
             [_request()],
             model,
             max_new_tokens=3,
@@ -527,7 +527,7 @@ class GenerationTest(unittest.TestCase):
             "token_positions": torch.tensor([0, 1]),
         }
 
-        results = generate(
+        results = generate_responses(
             [_request(), second], model, max_new_tokens=3, do_sample=False
         )
 
@@ -542,7 +542,7 @@ class GenerationTest(unittest.TestCase):
             Request(prompt_ids=torch.tensor([2, 1]), task=Task.T2TT, acoustic_prompt=None),
         ]
 
-        results = generate(requests, model, max_new_tokens=3, do_sample=False)
+        results = generate_responses(requests, model, max_new_tokens=3, do_sample=False)
 
         self.assertEqual(results[0]["response_ids"].numel(), 0)
         self.assertTrue(torch.equal(results[1]["response_ids"], torch.tensor([1])))
@@ -550,7 +550,7 @@ class GenerationTest(unittest.TestCase):
     def test_cache_preserves_source_condition_and_collects_hidden_online(self):
         model = _GenerationModel()
 
-        result = generate(
+        result = generate_responses(
             [_request()],
             model,
             max_new_tokens=3,
@@ -575,11 +575,11 @@ class GenerationTest(unittest.TestCase):
             token_labels=torch.tensor(
                 [[-100, -100, 4, 7], [-100, -100, 5, 7]]
             ),
-            acoustic_prompt_codes=torch.tensor([[[3], [ACOUSTIC_PAD_ID]], [[2], [1]]]),
-            acoustic_prompt_positions=torch.tensor([[0, ACOUSTIC_PAD_ID], [0, 1]]),
-            target_semantic_codes=None,
-            target_acoustic_codes=None,
-            target_audio_token_positions=None,
+            acoustic_prompt={
+                "codes": torch.tensor([[[3], [ACOUSTIC_PAD_ID]], [[2], [1]]]),
+                "token_positions": torch.tensor([[0, ACOUSTIC_PAD_ID], [0, 1]]),
+            },
+            acoustic_target=None,
             tasks=[Task.S2ST, Task.S2ST],
             pad_token_id=0,
         )
@@ -602,11 +602,8 @@ class GenerationTest(unittest.TestCase):
         batch = ModelBatch(
             input_ids=torch.tensor([[1, 6, 4, 7]]),
             token_labels=torch.tensor([[-100, -100, 4, 7]]),
-            acoustic_prompt_codes=None,
-            acoustic_prompt_positions=None,
-            target_semantic_codes=None,
-            target_acoustic_codes=None,
-            target_audio_token_positions=None,
+            acoustic_prompt=None,
+            acoustic_target=None,
             tasks=[Task.TTS],
             pad_token_id=0,
         )

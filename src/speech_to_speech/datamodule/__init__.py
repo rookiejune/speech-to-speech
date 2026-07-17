@@ -3,6 +3,8 @@ from .module import Config, DataLoaderConfig, DataModule
 from .protocol import DataRuntime
 from .types import (
     ACOUSTIC_PAD_ID,
+    AcousticPrompt,
+    AcousticTarget,
     Language,
     ModelBatch,
     ModelSample,
@@ -12,6 +14,8 @@ from .types import (
 
 __all__ = [
     "ACOUSTIC_PAD_ID",
+    "AcousticPrompt",
+    "AcousticTarget",
     "Collator",
     "Config",
     "DataLoaderConfig",

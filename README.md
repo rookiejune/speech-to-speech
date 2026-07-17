@@ -16,12 +16,16 @@ compositions. `generation` owns the independent `Request -> Result` inference
 interface, batching, text evaluation, and waveform decode instead of treating
 an incomplete `ModelBatch` as a request.
 
+The public response service is `generation.generate_responses()`; Lightning
+integration is provided by `SpeechToSpeechModule`.
+
 ## Entry Points
 
 - `scripts/overfit.py`: fixed-sample TTS/S2ST overfit and callback smoke tests;
   its Hydra root is `configs/overfit.yaml`.
 - `scripts/generation_smoke.py`: cached versus full-recompute S2ST generation
-  and variable-batch generation checks using the public `generation` package.
+  and variable-batch generation checks using the public `generation` package;
+  cache probes, benchmarks, and reporting live in separate private script modules.
 - `scripts/codec_oracle.py`: Hydra entry point for codec oracle experiments;
   its Hydra root is `configs/codec_oracle.yaml`.
 - `jobs/`: machine-aware wrappers for formal experiment runs. Each wrapper

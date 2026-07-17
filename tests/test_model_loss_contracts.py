@@ -428,13 +428,16 @@ def _batch(
     batch = ModelBatch(
         input_ids=token_labels.masked_fill(token_labels.eq(-100), 0),
         token_labels=token_labels,
-        acoustic_prompt_codes=None,
-        acoustic_prompt_positions=None,
-        target_semantic_codes=(
-            None if target_acoustic_codes is None else target_acoustic_codes
+        acoustic_prompt=None,
+        acoustic_target=(
+            None
+            if target_acoustic_codes is None or target_audio_token_positions is None
+            else {
+                "semantic_codes": target_acoustic_codes,
+                "codes": target_acoustic_codes,
+                "token_positions": target_audio_token_positions,
+            }
         ),
-        target_acoustic_codes=target_acoustic_codes,
-        target_audio_token_positions=target_audio_token_positions,
         tasks=[task],
         pad_token_id=99,
     )

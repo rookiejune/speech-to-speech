@@ -36,8 +36,8 @@ from speech_to_speech.callback.stage import Config as StageConfig
 from speech_to_speech.callback.stage import StageSwitcher
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model import SpeechToSpeechFlowModel
-from speech_to_speech.runtime.singleton import Config, Runtime
-from speech_to_speech.runtime.singleton import _audio_tokenizer, _dtype
+from speech_to_speech.runtime import Config, Runtime
+from speech_to_speech.runtime.runtime import audio_tokenizer, dtype
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer, TorchCodecBPE
 from speech_to_speech.task import Task
 from scripts.overfit import FixedDataModule, build_trainer, run, runtime_config
@@ -181,12 +181,8 @@ class ContractTest(unittest.TestCase):
                 "scripts.overfit.init_runtime", return_value=runtime
             ), patch(
                 "scripts.overfit.FixedDataModule", return_value=datamodule
-            ), patch.object(
-                SpeechToSpeechFlowModel, "__init__", return_value=None
             ), patch(
-                "scripts.overfit.FlowObjective"
-            ), patch(
-                "scripts.overfit.SpeechToSpeech"
+                "scripts.overfit.flow", return_value=(Mock(), Mock(), None)
             ), patch(
                 "scripts.overfit.AcousticEvaluation", side_effect=EvaluationReached
             ):
@@ -231,7 +227,7 @@ class ContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported codec audio view"):
             _parse_audio_item(item, AudioView.WAVEFORM)
 
-    @patch("speech_to_speech.runtime.singleton.AutoModelForCausalLM.from_pretrained")
+    @patch("speech_to_speech.runtime.runtime.AutoModelForCausalLM.from_pretrained")
     def test_backbone_loading_forwards_runtime_configuration(self, from_pretrained):
         backbone = Mock()
         moved = Mock()
@@ -257,9 +253,9 @@ class ContractTest(unittest.TestCase):
         self.assertIs(loaded, moved)
 
     def test_runtime_dtype_is_explicit(self):
-        self.assertIs(_dtype("float16"), torch.float16)
+        self.assertIs(dtype("float16"), torch.float16)
         with self.assertRaisesRegex(ValueError, "unknown torch dtype"):
-            _dtype("not_a_dtype")
+            dtype("not_a_dtype")
 
     def test_overfit_runtime_config_preserves_native_audio_tokenizer(self):
         config = OmegaConf.create(
@@ -317,7 +313,7 @@ class ContractTest(unittest.TestCase):
         with patch.dict(sys.modules, modules), patch.object(
             TorchCodecBPE, "wrap", return_value=wrapped
         ) as wrap:
-            loaded = _audio_tokenizer("~/bpe/longcat/vocab_100k")
+            loaded = audio_tokenizer("~/bpe/longcat/vocab_100k")
 
         codec_bpe.assert_called_once_with(
             Path("~/bpe/longcat/vocab_100k").expanduser()
@@ -423,8 +419,7 @@ class ContractTest(unittest.TestCase):
     def test_model_batch_accepts_unified_audio_target(self):
         batch = ModelBatch.from_samples([_sample(Task.TTS)], pad_token_id=99)
 
-        self.assertIsNone(batch.target_acoustic_codes)
-        self.assertIsNone(batch.target_audio_token_positions)
+        self.assertIsNone(batch.acoustic_target)
 
     def test_collator_updates_the_existing_task_weights(self):
         collator = Collator(Mock(), {Task.TTS: 1.0, Task.T2ST: 1.0})
@@ -457,11 +452,8 @@ def _sample(task: Task) -> ModelSample:
     return ModelSample(
         input_ids=torch.tensor([1, 2]),
         token_labels=torch.tensor([-100, 2]),
-        acoustic_prompt_codes=None,
-        acoustic_prompt_positions=None,
-        target_semantic_codes=None,
-        target_acoustic_codes=None,
-        target_audio_token_positions=None,
+        acoustic_prompt=None,
+        acoustic_target=None,
         task=task,
     )
 

@@ -9,7 +9,7 @@ from torch import Tensor
 from ..task import Task
 from ._tokenization import token_ids
 from .protocol import DataRuntime
-from .types import ModelSample, Speech, SpeechPair
+from .types import AcousticPrompt, AcousticTarget, ModelSample, Speech, SpeechPair
 
 _PLACEHOLDER = "$$$PLACEHOLDER$$$"
 
@@ -83,14 +83,28 @@ def build_sample(
         if target_audio_token_positions.numel() != target_acoustic_codes.size(0):
             raise ValueError("target acoustic frames and audio tokens must align.")
 
+    acoustic_prompt = (
+        None
+        if source_acoustic_codes is None or source_audio_token_positions is None
+        else AcousticPrompt(
+            codes=source_acoustic_codes,
+            token_positions=source_audio_token_positions,
+        )
+    )
+    acoustic_target = (
+        None
+        if target_acoustic_codes is None or target_audio_token_positions is None
+        else AcousticTarget(
+            semantic_codes=cast(Tensor, target_semantic_codes),
+            codes=target_acoustic_codes,
+            token_positions=target_audio_token_positions,
+        )
+    )
     return ModelSample(
         input_ids=full_ids,
         token_labels=token_labels,
-        acoustic_prompt_codes=source_acoustic_codes,
-        acoustic_prompt_positions=source_audio_token_positions,
-        target_semantic_codes=target_semantic_codes,
-        target_acoustic_codes=target_acoustic_codes,
-        target_audio_token_positions=target_audio_token_positions,
+        acoustic_prompt=acoustic_prompt,
+        acoustic_target=acoustic_target,
         task=task,
     )
 

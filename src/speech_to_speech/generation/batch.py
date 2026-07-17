@@ -15,13 +15,13 @@ def requests_from_batch(batch: ModelBatch) -> list[Request]:
         prompt_end = int(target_positions[0].item())
 
         acoustic_prompt = None
-        if batch.acoustic_prompt_codes is not None:
-            if batch.acoustic_prompt_positions is None or acoustic_mask is None:
-                raise RuntimeError("acoustic prompt fields are incomplete.")
+        if batch.acoustic_prompt is not None:
+            if acoustic_mask is None:
+                raise RuntimeError("acoustic prompt mask is unavailable.")
             row_mask = acoustic_mask[index]
             acoustic_prompt = AcousticPrompt(
-                codes=batch.acoustic_prompt_codes[index][row_mask],
-                token_positions=batch.acoustic_prompt_positions[index][row_mask],
+                codes=batch.acoustic_prompt["codes"][index][row_mask],
+                token_positions=batch.acoustic_prompt["token_positions"][index][row_mask],
             )
 
         requests.append(

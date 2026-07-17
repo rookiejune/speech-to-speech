@@ -262,11 +262,11 @@ class FakeClosureTest(unittest.TestCase):
                 self.assertEqual(batch.tasks, [task, task])
                 self.assertEqual(batch.input_ids.shape, batch.token_labels.shape)
                 self.assertEqual(
-                    batch.acoustic_prompt_codes is not None,
+                    batch.acoustic_prompt is not None,
                     task.source_modality is Modality.AUDIO,
                 )
                 self.assertEqual(
-                    batch.target_acoustic_codes is not None,
+                    batch.acoustic_target is not None,
                     task.target_modality is Modality.AUDIO,
                 )
                 if task.target_modality is Modality.AUDIO:
@@ -332,8 +332,8 @@ class FakeClosureTest(unittest.TestCase):
         labels = batch.token_labels[0]
         start, end = rt.codec_audio_range
         semantic = labels[labels.ge(start) & labels.lt(end)][None]
-        assert batch.target_acoustic_codes is not None
-        features = model.acoustic_target_latent(batch.target_acoustic_codes)
+        assert batch.acoustic_target is not None
+        features = model.acoustic_target_latent(batch.acoustic_target["codes"])
         self.assertEqual(
             features.dtype,
             rt.backbone.get_input_embeddings().weight.dtype,
@@ -351,7 +351,7 @@ class FakeClosureTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(waveform).all())
         decoded_codes = decode_generated_codes(
             semantic,
-            batch.target_acoustic_codes,
+            batch.acoustic_target["codes"],
             codec=rt.codec,
             audio_tokenizer=rt.audio_tokenizer,
             audio_token_range=rt.codec_audio_range,

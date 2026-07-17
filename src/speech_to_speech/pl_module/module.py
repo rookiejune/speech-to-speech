@@ -10,7 +10,7 @@ from lightning.pytorch import LightningModule
 from torch import nn
 
 from ..datamodule.types import ModelBatch
-from ..generation.service import generate
+from ..generation.service import generate_responses
 from ..generation.text import TextProbe, TextProbeResult, evaluate_text
 from ..generation.types import Request, Result
 from ..loss.objective import Objective
@@ -27,7 +27,7 @@ class Config:
 ModelT = TypeVar("ModelT", bound=TextEvaluationModel)
 
 
-class SpeechToSpeech(LightningModule, Generic[ModelT]):
+class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
     def __init__(
         self,
         config: Config,
@@ -73,7 +73,7 @@ class SpeechToSpeech(LightningModule, Generic[ModelT]):
         was_training = self.training
         self.eval()
         try:
-            return generate(
+            return generate_responses(
                 requests,
                 self.model,
                 max_new_tokens=max_new_tokens,

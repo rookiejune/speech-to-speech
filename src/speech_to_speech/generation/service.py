@@ -14,7 +14,7 @@ from .types import AcousticPrompt, AudioOutput, Request, Result
 
 
 @torch.no_grad()
-def generate(
+def generate_responses(
     requests: Sequence[Request],
     model: TokenGenerator,
     *,

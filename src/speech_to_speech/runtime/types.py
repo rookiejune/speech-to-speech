@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Protocol
+from typing import Protocol
 
 from torch import Tensor, nn
+from transformers.cache_utils import Cache
 
 
 class Codec(Protocol):
@@ -88,13 +89,23 @@ class BackboneConfig(Protocol):
 
 class BackboneOutput(Protocol):
     last_hidden_state: Tensor
-    past_key_values: Any
+    past_key_values: Cache | None
     hidden_states: tuple[Tensor, ...] | None
     attentions: tuple[Tensor, ...] | None
 
 
 class BackboneBody(Protocol):
-    def __call__(self, **kwargs: Any) -> BackboneOutput: ...
+    def __call__(
+        self,
+        *,
+        inputs_embeds: Tensor,
+        attention_mask: Tensor | None,
+        output_hidden_states: bool,
+        past_key_values: Cache | None,
+        use_cache: bool,
+        position_ids: Tensor | None,
+        cache_position: Tensor | None,
+    ) -> BackboneOutput: ...
 
 
 class Backbone(Protocol):
@@ -107,5 +118,3 @@ class Backbone(Protocol):
 
     @property
     def base_model(self) -> BackboneBody: ...
-
-    def __call__(self, **kwargs: Any) -> Any: ...

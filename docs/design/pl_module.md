@@ -5,7 +5,7 @@ Lightning 训练集成、独立推理 service 和日志边界。生成契约见
 
 ## pl_module
 
-`SpeechToSpeech[ModelT]` 是薄 Lightning wrapper：
+`SpeechToSpeechModule[ModelT]` 是薄 Lightning wrapper：
 
 - 构造时通过 `Objective[ModelT]` 保留 model/objective 类型配对。
 - `training_step()` 调用 objective，记录一次 total loss，并保留分项到 backward 完成。
@@ -13,7 +13,7 @@ Lightning 训练集成、独立推理 service 和日志边界。生成契约见
 - `generate()` / `evaluate_text()` 只负责切换 eval mode、调用 generation 包并恢复原 mode。
 
 `pl_module` 不实现 task 状态机、decode、文本 NLL、对齐或 loss；包级 API 只导出
-`Config` 与 `SpeechToSpeech`。
+`Config` 与 `SpeechToSpeechModule`。
 
 ## generation
 
@@ -23,7 +23,7 @@ Lightning 训练集成、独立推理 service 和日志边界。生成契约见
 - `AcousticPrompt(codes, token_positions)`：source codec-local acoustic codes 及其 prompt token
   位置；不携带 target。
 - `Result(response_ids, audio)`：裁掉 stop token 的响应与可选 `AudioOutput`。
-- `generate()`：按 target modality 和 acoustic prompt signature 分组、batch generation、逐行
+- `generate_responses()`：按 target modality 和 acoustic prompt signature 分组、batch generation、逐行
   stop、顺序恢复与 decode。
 - `generation.batch.requests_from_batch()`：仅供 teacher-forcing 日志把完整 `ModelBatch`
   转为 request；基础 generation 包不依赖训练 batch 或 Lightning。

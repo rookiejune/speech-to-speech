@@ -43,15 +43,15 @@ raw Sample
 ```python
 input_ids: Tensor
 token_labels: Tensor
-acoustic_prompt_codes: Tensor | None
-acoustic_prompt_positions: Tensor | None
-target_semantic_codes: Tensor | None
-target_acoustic_codes: Tensor | None
-target_audio_token_positions: Tensor | None
+acoustic_prompt: AcousticPrompt | None
+acoustic_target: AcousticTarget | None
 ```
 
+`AcousticPrompt` 包含 `codes`、`token_positions`；`AcousticTarget` 包含
+`semantic_codes`、`codes`、`token_positions`。分组使必须共同存在的 tensor 不能形成半完整状态。
+
 `ModelBatch` 额外保存 `tasks: list[Task]` 和 `pad_token_id`，并公开
-`attention_mask`、`acoustic_prompt_mask` 与 `target_acoustic_mask`。
+`attention_mask`、`acoustic_prompt_mask` 与 `acoustic_target_mask`。
 
 ## 边界
 
@@ -69,14 +69,13 @@ target_audio_token_positions: Tensor | None
   影响。
 - target 为 audio 时，BOA 是结构性 response prefix，不参与监督：
   `token_labels[len(input_ids) + 1:] = response_ids[1:]`，只监督 audio tokens 和 EOA。
-- `acoustic_prompt_codes` 与 `acoustic_prompt_positions` 必须成对存在，表示 source acoustic
-  frames 及其在 token sequence 中的注入位置。
-- `target_semantic_codes` 与 `target_acoustic_codes` 必须成对存在并共享 frame 轴；
-  `target_audio_token_positions` 将每个 acoustic frame 对齐到 target audio token。它们只表达
+- `acoustic_prompt` 整体表示 source acoustic frames 及其 token sequence 注入位置。
+- `acoustic_target` 内各 tensor 共享 frame 轴；`token_positions` 将每个 acoustic frame
+  对齐到 target audio token。它只表达
   codec target，不保存或预计算 REPA teacher features。unified-token codec 没有独立
   acoustic side channel，因此这些 target code 字段为 `None`。
-- `ModelBatch.from_samples()` 显式接收 `pad_token_id`，检查 prompt/target code-position 配对、
-  batch/frame 轴和 task execution signature；错误不推迟到 model/loss。
+- `ModelBatch.from_samples()` 显式接收 `pad_token_id`，检查 prompt/target 内部 frame 轴和
+  task execution signature；错误不推迟到 model/loss。
 - `ModelBatch` 只表达训练或 teacher-forcing evaluation，不表达缺少 target 的真实推理请求。
 - 同一 `task_weights` 中的任务必须具有相同 source/target modality，保证 DDP 各 rank 走相同
   模型路径。DataModule 构造时必须提供初始权重；stage callback 只在 epoch 边界调用

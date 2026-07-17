@@ -20,12 +20,8 @@ def evaluate(
     seeds: Sequence[int],
 ) -> dict[str, float]:
     batch = device_batch(batch, next(model.parameters()).device)
-    if (
-        batch.target_acoustic_codes is None
-        or batch.target_audio_token_positions is None
-        or batch.target_semantic_codes is None
-        or batch.target_acoustic_mask is None
-    ):
+    target_data = batch.acoustic_target
+    if target_data is None or batch.acoustic_target_mask is None:
         raise RuntimeError("acoustic evaluation requires complete target fields")
     if batch.input_ids.size(0) != 1:
         raise ValueError("acoustic evaluation currently requires batch size 1")
@@ -33,21 +29,22 @@ def evaluate(
     was_training = model.training
     model.eval()
     try:
+        prompt = batch.acoustic_prompt
         hidden_states = model.token_hidden_states(
             batch.input_ids,
             attention_mask=batch.attention_mask,
-            acoustic_prompt_codes=batch.acoustic_prompt_codes,
-            acoustic_prompt_positions=batch.acoustic_prompt_positions,
+            acoustic_prompt_codes=None if prompt is None else prompt["codes"],
+            acoustic_prompt_positions=None if prompt is None else prompt["token_positions"],
             acoustic_prompt_mask=batch.acoustic_prompt_mask,
         )
         condition = model.target_frame_condition(
-            hidden_states, batch.target_audio_token_positions
+            hidden_states, target_data["token_positions"]
         )
-        safe_codes = batch.target_acoustic_codes.clamp_min(0)
+        safe_codes = target_data["codes"].clamp_min(0)
         target = codec.acoustic_codes_to_features(safe_codes)
-        mask = batch.target_acoustic_mask
+        mask = batch.acoustic_target_mask
         valid = mask[0]
-        semantic = batch.target_semantic_codes[0, valid].unsqueeze(0)
+        semantic = target_data["semantic_codes"][0, valid].unsqueeze(0)
         target = target[0, valid].unsqueeze(0)
         reference = mono(codec.decode_features(semantic, target))
 
@@ -88,14 +85,28 @@ def device_batch(batch: ModelBatch, device: torch.device) -> ModelBatch:
     def move(value: Tensor | None) -> Tensor | None:
         return None if value is None else value.to(device)
 
+    prompt = batch.acoustic_prompt
+    target = batch.acoustic_target
     return ModelBatch(
         input_ids=cast_tensor(move(batch.input_ids)),
         token_labels=cast_tensor(move(batch.token_labels)),
-        acoustic_prompt_codes=move(batch.acoustic_prompt_codes),
-        acoustic_prompt_positions=move(batch.acoustic_prompt_positions),
-        target_semantic_codes=move(batch.target_semantic_codes),
-        target_acoustic_codes=move(batch.target_acoustic_codes),
-        target_audio_token_positions=move(batch.target_audio_token_positions),
+        acoustic_prompt=(
+            None
+            if prompt is None
+            else {
+                "codes": cast_tensor(move(prompt["codes"])),
+                "token_positions": cast_tensor(move(prompt["token_positions"])),
+            }
+        ),
+        acoustic_target=(
+            None
+            if target is None
+            else {
+                "semantic_codes": cast_tensor(move(target["semantic_codes"])),
+                "codes": cast_tensor(move(target["codes"])),
+                "token_positions": cast_tensor(move(target["token_positions"])),
+            }
+        ),
         tasks=batch.tasks,
         pad_token_id=batch.pad_token_id,
     )

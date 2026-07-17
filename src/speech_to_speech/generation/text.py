@@ -10,7 +10,7 @@ from torch import Tensor
 
 from ..task import Task
 from .protocol import GenerationRuntime, TextEvaluationModel
-from .service import generate
+from .service import generate_responses
 from .types import Request
 
 
@@ -44,7 +44,7 @@ def evaluate_text(
         )
         for name in probes
     ]
-    generations = generate(
+    generations = generate_responses(
         requests,
         model,
         max_new_tokens=max_new_tokens,

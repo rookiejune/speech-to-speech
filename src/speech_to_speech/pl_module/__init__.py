@@ -1,6 +1,6 @@
-from .module import Config, SpeechToSpeech
+from .module import Config, SpeechToSpeechModule
 
 __all__ = [
     "Config",
-    "SpeechToSpeech",
+    "SpeechToSpeechModule",
 ]
