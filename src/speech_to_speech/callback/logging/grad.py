@@ -93,9 +93,16 @@ class GradLogger(Callback):
 
 
 class GradNormLogger(Callback):
-    def __init__(self, tag: str = "train/grad_norm") -> None:
+    def __init__(
+        self,
+        tag: str = "train/grad_norm",
+        every_n_steps: int = 100,
+    ) -> None:
         super().__init__()
+        if every_n_steps < 1:
+            raise ValueError("every_n_steps must be positive")
         self.tag = tag
+        self.every_n_steps = every_n_steps
 
     def on_before_optimizer_step(
         self,
@@ -103,7 +110,9 @@ class GradNormLogger(Callback):
         pl_module: LightningModule,
         optimizer: torch.optim.Optimizer,
     ) -> None:
-        del trainer, optimizer
+        del optimizer
+        if trainer.global_step % self.every_n_steps != 0:
+            return
         gradients = [
             parameter.grad.detach().norm(2)
             for parameter in pl_module.parameters()

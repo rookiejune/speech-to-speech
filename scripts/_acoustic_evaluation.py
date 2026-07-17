@@ -33,18 +33,15 @@ def evaluate(
     was_training = model.training
     model.eval()
     try:
-        output = model(
+        hidden_states = model.semantic_hidden(
             batch.input_ids,
             attention_mask=batch.attention_mask,
             acoustic_input_ids=batch.acoustic_input_ids,
             acoustic_input_positions=batch.acoustic_input_positions,
             acoustic_input_mask=batch.acoustic_input_mask,
-            output_hidden_states=True,
         )
-        if output.hidden_states is None:
-            raise RuntimeError("model did not return acoustic condition states")
         condition = model.target_frame_condition(
-            output.hidden_states[-1], batch.acoustic_label_positions
+            hidden_states, batch.acoustic_label_positions
         )
         safe_labels = batch.acoustic_labels.clamp_min(0)
         target = codec.acoustic_codes_to_features(safe_labels)
@@ -56,16 +53,14 @@ def evaluate(
 
         values: dict[str, list[float]] = {}
         for seed in seeds:
-            torch.manual_seed(seed)
-            torch.cuda.manual_seed_all(seed)
+            generator = torch.Generator(device=condition.device).manual_seed(seed)
             if condition.is_cuda:
                 torch.cuda.synchronize(condition.device)
             started = time.perf_counter()
             if isinstance(model, SpeechToSpeechFlowModel):
-                generator = torch.Generator(device=condition.device).manual_seed(seed)
                 sampled = model.acoustic_flow.sample(condition, generator=generator)
             else:
-                codes = model.sample_acoustic(condition)
+                codes = model.sample_acoustic(condition, generator=generator)
                 sampled = codec.acoustic_codes_to_features(codes)
             if condition.is_cuda:
                 torch.cuda.synchronize(condition.device)

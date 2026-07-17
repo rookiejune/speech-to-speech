@@ -30,18 +30,28 @@ def forward(
     acoustic_input_mask: Tensor | None = None,
     output_hidden_states: bool = False,
 ) -> CausalLMOutputWithPast: ...
+
+def semantic_hidden(...) -> Tensor: ...
+def semantic_logits(hidden_state: Tensor) -> Tensor: ...
 ```
 
-- 模型只返回 logits 和可选 hidden states，不接收 labels，也不计算 loss；objective 由外部 `Loss` 组合。
+- 公开 `forward()` 只返回 logits 和可选最后一层 hidden states，不接收 labels，也不计算 loss；
+  `semantic_hidden()` 单独返回训练所需表示，objective 由外部 `Loss` 组合。
 - `logits` 是拼接后的 global token 分布；内部保留 text/semantic-audio 两个 output head，但对外只承诺 global `logits`。
+- 正常训练通过 `semantic_hidden()` 取得完整 backbone 表示，再由 loss 只选取非 `-100` target
+  的 predictor hidden 调用 `semantic_logits()`；global text+audio softmax 语义不变，但 prompt
+  和 padding position 不构造 vocabulary logits。公开 `forward()` 继续保留完整 global logits。
 - semantic forward 直接调用 HF causal LM 的 `base_model` 取得 hidden states 与 cache，
   不执行并丢弃 backbone 自带的 text LM head；text/audio logits 只由本模块计算一次。
-- generation 已知 allowed token IDs 时，内部只计算对应 modality 的 output head，并从
-  output weight 中选择该 ID 子集，只为最后一个 token 返回子集 logits；这条私有优化不改变
-  公开 `forward()` 的 global logits 契约。
-- text 输入和输出分别通过 HF 的 `get_input_embeddings()` / `get_output_embeddings()` 获取；当模型 embedding 行数大于 tokenizer vocabulary 时，text logits 只覆盖 layout 的 text block。
-- acoustic decoder 需要 backbone 表示时传 `output_hidden_states=True` 并使用
-  `output.hidden_states[-1]`；该开关只公开最后一层，不要求 backbone 保留所有中间层。
+- 正式 generation 直接按 target modality 选择 output head，只为最后一个 token 计算 local
+  logits，再用 block offset 恢复 global ID；text 路径屏蔽 PAD/BOS，audio 路径屏蔽 BOA。
+  显式 `allowed_token_ids` 仍作为自定义约束入口保留，不用于正常 modality 状态机。
+- text 输入和输出分别通过 HF 的 `get_input_embeddings()` / `get_output_embeddings()` 获取；
+  backbone 始终使用本地 `[0, text_vocab_size)` 行，layout offset 只用于 global ID 映射。当模型
+  embedding 行数大于 tokenizer vocabulary 时，text logits 仍只覆盖 layout 的 text block。
+- acoustic objective 复用 `semantic_hidden()` 返回的 backbone 表示；generation 需要在线收集
+  condition 时传 `output_hidden_states=True` 并使用 `output.hidden_states[-1]`。该开关只公开
+  最后一层，不要求 backbone 保留所有中间层。
 - condition 接口 `target_frame_condition()` / `target_frame_label_condition()` 统一消费 token
   自身位置 `p`；causal shift `p - 1` 只在 model 内部处理（见总览 §2.4）。前者属于
   acoustic objective 训练协议，后者是具体模型提供的 teacher-forced/oracle 能力。
@@ -56,7 +66,7 @@ text ids
     └── backbone text embedding
 
 semantic audio ids
-    ├── codec semantic codebook 初始化的 embedding（RoPE + mean-pool merge）
+    ├── codec semantic codebook 初始化的 embedding（分块 decode + RoPE + segment mean）
     └── semantic audio adapter
 
 acoustic prompt
@@ -106,10 +116,9 @@ class AcousticDecoder(Protocol):
     ) -> Tensor: ...
 ```
 
-- `forward_with_features()` 在一次 DiT 前向中同时返回 velocity 与指定 block 的 frame
-  representation；8 层默认取第 4 个 block，经 student projector 映射到 WavLM-base 的
-  768 维 hidden。该入口只供 flow + REPA 训练组合使用；sampling 继续消费普通 velocity
-  接口且不执行 projector。
+- 启用 REPA 时，`forward_with_features()` 在一次 DiT 前向中同时返回 velocity 与指定 block
+  的 frame representation；8 层默认取第 4 个 block，经 student projector 映射到 teacher
+  hidden。未启用 REPA 时不注册 projector；sampling 继续消费普通 velocity 接口。
 
 - acoustic representation 由 Runtime codec 固定，不属于 batch 或 model 的任意切片配置。batch 保存完整离散 acoustic codes，`acoustic_codes_to_features()` 的输入、latent feature dimension 和 `decode_features()` 必须属于同一 codec contract。
 - target 对齐：target BPE hidden 按 `bpe_spans` repeat_interleave 得到 frame condition `[B, F, H]`；target 完整、有序 acoustic codebooks 经 codec 得到 latent `[B, F, D]`。
@@ -129,5 +138,8 @@ class AcousticDecoder(Protocol):
   prompt batch，后续只输入新 token 并逐行跟踪 stop state。cache 不保存在 model
   实例上，也不通过公开 API 暴露具体 backbone 类型。
 - audio generation 在每个 semantic token 被采样时在线收集预测该 token 的 hidden，并按 BPE span 展开 frame condition；不在生成完成后追加一次全序列 forward。
+- audio token 的 frame span 在 model 构造时形成非持久 buffer；生成循环只累计设备侧 hidden
+  与 span tensor，结束后一次展开，不逐 token 转到 CPU。sequence 与 attention mask 使用预分配
+  buffer，避免每步拼接历史序列。
 - source acoustic prompt 在首步进入 KV cache，因此在整个生成过程中持续有效。
 - batch acoustic generation 的 padding、frame mask 和逐行 decode 裁剪契约见总览 §6。

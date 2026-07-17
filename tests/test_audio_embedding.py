@@ -4,10 +4,43 @@ import unittest
 
 import torch
 
-from speech_to_speech.model.embedding.audio import merge_by_positions
+from speech_to_speech.model.embedding.audio import base_weight, merge_by_positions
 
 
 class AudioEmbeddingTest(unittest.TestCase):
+    def test_base_weight_chunks_large_vocabularies(self):
+        codebook = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+        tokenizer = _Tokenizer(
+            [[(token_id % 3,)] for token_id in range(2_049)]
+        )
+
+        weight = base_weight(_Codec(codebook), tokenizer)
+
+        self.assertEqual(tokenizer.decode_batch_sizes, [2_048, 1])
+        self.assertEqual(tokenizer.span_batch_sizes, [2_048, 1])
+        torch.testing.assert_close(weight[0], codebook[0])
+        torch.testing.assert_close(weight[-1], codebook[2])
+
+    def test_base_weight_batches_variable_span_tokens(self):
+        codebook = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+        tokenizer = _Tokenizer(
+            [
+                [(0,), (1,)],
+                [(2,)],
+                [(1,), (2,), (0,)],
+            ]
+        )
+
+        weight = base_weight(_Codec(codebook), tokenizer)
+
+        expected = torch.stack(
+            [
+                _reference_merge(codebook[torch.tensor([frame[0] for frame in token])])
+                for token in tokenizer.tokens
+            ]
+        )
+        torch.testing.assert_close(weight, expected)
+
     def test_merge_by_positions_matches_grouped_rope_mean(self):
         features = torch.arange(40, dtype=torch.float32).reshape(2, 5, 4)
         features.requires_grad_()
@@ -47,6 +80,30 @@ def _reference_merge(embeddings: torch.Tensor) -> torch.Tensor:
         dim=-1,
     )
     return rotated.flatten(-2).mean(0)
+
+
+class _Codec:
+    def __init__(self, semantic_codebook: torch.Tensor) -> None:
+        self.semantic_codebook = semantic_codebook
+
+
+class _Tokenizer:
+    def __init__(self, tokens: list[list[tuple[int, ...]]]) -> None:
+        self.tokens = tokens
+        self.decode_batch_sizes: list[int] = []
+        self.span_batch_sizes: list[int] = []
+
+    @property
+    def vocab_size(self) -> int:
+        return len(self.tokens)
+
+    def decode(self, token_ids):
+        self.decode_batch_sizes.append(len(token_ids))
+        return [frame for token_id in token_ids for frame in self.tokens[token_id]]
+
+    def frame_spans(self, token_ids):
+        self.span_batch_sizes.append(len(token_ids))
+        return [len(self.tokens[token_id]) for token_id in token_ids]
 
 
 if __name__ == "__main__":

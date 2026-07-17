@@ -126,10 +126,13 @@ class AcousticDiT(nn.Module):
         hidden_dim = condition_dim if hidden_dim is None else hidden_dim
         if hidden_dim <= 0:
             raise ValueError("DiT hidden dimension must be positive")
-        repa_dim = condition_dim if repa_dim is None else repa_dim
-        repa_layer = (layers + 1) // 2 if repa_layer is None else repa_layer
-        if repa_dim <= 0 or not 1 <= repa_layer <= layers:
-            raise ValueError("REPA dimension must be positive and layer must exist")
+        if repa_dim is None:
+            if repa_layer is not None:
+                raise ValueError("REPA layer requires a REPA projection dimension")
+        else:
+            repa_layer = (layers + 1) // 2 if repa_layer is None else repa_layer
+            if repa_dim <= 0 or not 1 <= repa_layer <= layers:
+                raise ValueError("REPA dimension must be positive and layer must exist")
 
         self.latent_dim = latent_dim
         half = hidden_dim // 2
@@ -154,7 +157,7 @@ class AcousticDiT(nn.Module):
         )
         self.output_norm = nn.LayerNorm(hidden_dim)
         self.output = nn.Linear(hidden_dim, latent_dim)
-        self.repa = nn.Linear(hidden_dim, repa_dim)
+        self.repa = None if repa_dim is None else nn.Linear(hidden_dim, repa_dim)
         self.repa_layer = repa_layer
 
     def forward(
@@ -181,6 +184,8 @@ class AcousticDiT(nn.Module):
         condition: Tensor,
         mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
+        if self.repa is None:
+            raise RuntimeError("REPA projection is not configured")
         velocity, representation = self._forward(
             x_t,
             t,

@@ -22,10 +22,11 @@
   Qwen3/LongCat cached smoke 已完成；真实变长 batch 4 在 float32 下完成与逐请求
   的 token parity 及 waveform decode，短生成吞吐为逐请求的 1.78x，结果见
   `results/008-real-batch-generation-benchmark.md`。
-- 测试现状：78 个纯本地测试覆盖 audio tokenizer、P0 数据/ID 契约、
+- 测试现状：93 个纯本地测试覆盖 audio tokenizer、P0 数据/ID 契约、
   模块所有权、HF backbone 加载与 vocabulary 边界、condition 对齐、全任务 semantic/flow
-  objective 路由、fake P1 closure、cached generation、张量化 acoustic merge、stage resume、
-  codec oracle、text retention 与 Python 3.9 config/acoustic entry contract。
+  objective 路由、有效监督位置 logits、fake P1 closure、cached modality generation、设备侧
+  span、张量化 acoustic merge、callback RNG、DDP config composition、stage resume、codec
+  oracle、text retention 与 Python 3.9 entry contract；无 CUDA 的本地环境跳过 1 个 CUDA RNG 用例。
 
 ## 真实资源验收
 
@@ -34,7 +35,12 @@
 - 在 Python 3.9 / PyTorch 2.8 环境用官方 LongCat checkpoint 验收
   `LongCat.from_pretrained()`、短音频 encode/decode 和一步 acoustic
   forward/backward/optimizer step；本地 synthetic checkpoint 只覆盖 loader 契约。
+- 用真实 100k LongCat BPE 与 Qwen checkpoint 对比优化前后的 model 初始化耗时、单步训练
+  峰值显存和 cached generation 吞吐，确认分块 embedding 与稀疏监督 logits 的生产收益。
+- 在本轮冻结、strategy 与 device 改动后，用两张 GPU 分别重新运行 LongCat oracle 与 UniCodec
+  fixed-sample wrapper 至少 2 steps，验收静态 `ddp`、多任务 `find_unused_parameters=True` 和
+  per-rank runtime device。
 
 ## 其他工程欠账
 
-- 第一版 DDP 使用 `find_unused_parameters=True`；路径稳定后评估冻结策略或 DDP 优化。
+- 正式多任务 DDP 使用 `find_unused_parameters=True`；路径稳定后评估冻结策略或 DDP 优化。

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from anydataset.types import Modality
 
 from speech_to_speech.datamodule import Collator, Task
 from speech_to_speech.model import SpeechToSpeechFlowModel
@@ -230,9 +231,13 @@ def run(
             dtype=torch.long,
         )
         requested_ids = kwargs.get("_generation_token_ids")
+        generation_modality = kwargs.get("_generation_modality")
         values = output.logits[0, -1]
         if requested_ids is None:
-            values = values.index_select(0, ids)
+            if generation_modality is not Modality.AUDIO:
+                raise RuntimeError("generation smoke expected the audio output head.")
+            audio_start, _ = module.layout.blocks[Modality.AUDIO.value]
+            values = values.index_select(0, ids - audio_start)
         elif not torch.equal(requested_ids, ids):
             raise RuntimeError("generation used unexpected allowed token ids.")
         allowed_logits.append(

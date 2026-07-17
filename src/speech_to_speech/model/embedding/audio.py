@@ -9,6 +9,7 @@ from ...runtime.types import AudioTokenizer, Backbone, Codec
 from ..adapter import AdapterType, create_adapter
 
 _ROPE_THETA = 10000.0
+_EMBEDDING_CHUNK_SIZE = 2_048
 
 
 class _Runtime(Protocol):
@@ -142,24 +143,40 @@ def merge_by_positions(
 
 def base_weight(codec: Codec, tokenizer: AudioTokenizer) -> Tensor:
     """Create one fixed feature vector for every audio-tokenizer ID."""
-    codebook = codec.semantic_codebook
+    codebook = codec.semantic_codebook.detach()
     if codebook.dim() not in {2, 3}:
         raise ValueError(
             "codec semantic_codebook must have shape [vocab, dim] or "
             "[codebooks, vocab, dim]."
         )
 
-    rows = []
-    for token_id in range(tokenizer.vocab_size):
-        units = tokenizer.decode([token_id])
-        unit_ids = _unit_ids(units, codebook)
-        if unit_ids.size(0) == 0:
-            raise ValueError(
-                f"audio tokenizer token {token_id} decodes to no codec units."
-            )
-        rows.append(_merge(_unit_embeddings(codebook, unit_ids)))
+    output = codebook.new_empty(tokenizer.vocab_size, codebook.size(-1))
+    for start in range(0, tokenizer.vocab_size, _EMBEDDING_CHUNK_SIZE):
+        end = min(start + _EMBEDDING_CHUNK_SIZE, tokenizer.vocab_size)
+        token_ids = list(range(start, end))
+        unit_ids = _unit_ids(tokenizer.decode(token_ids), codebook)
+        spans = torch.as_tensor(
+            tokenizer.frame_spans(token_ids),
+            dtype=torch.long,
+        )
+        if spans.shape != (end - start,) or bool((spans <= 0).any()):
+            raise ValueError("audio tokenizer tokens must have positive frame spans.")
+        if int(spans.sum()) != unit_ids.size(0):
+            raise ValueError("audio tokenizer spans must align with decoded codec units.")
+        spans = spans.to(device=codebook.device)
 
-    return torch.stack(rows)
+        groups = torch.repeat_interleave(
+            torch.arange(end - start, device=codebook.device),
+            spans,
+        )
+        starts = torch.repeat_interleave(spans.cumsum(0) - spans, spans)
+        positions = torch.arange(unit_ids.size(0), device=codebook.device) - starts
+        values = _rotate(_unit_embeddings(codebook, unit_ids), positions)
+        rows = values.new_zeros(end - start, values.size(-1))
+        rows.index_add_(0, groups, values)
+        output[start:end] = rows / spans[:, None]
+
+    return output
 
 
 def _unit_ids(units: list[tuple[int, ...]] | Tensor, codebook: Tensor) -> Tensor:

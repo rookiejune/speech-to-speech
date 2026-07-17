@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+from anydataset.types import Modality
 from torch import Tensor, nn
 
 from ..base import SemanticModel
@@ -121,7 +122,8 @@ class SpeechToSpeechFlowModel(SemanticModel):
             acoustic_input_mask=acoustic_input_mask,
             prompt_attention_mask=prompt_attention_mask,
             stop_token_id=self.runtime.eoa_token_id,
-            allowed_token_ids=self.runtime.audio_generation_allowed_ids,
+            generation_modality=Modality.AUDIO,
+            allowed_token_ids=None,
             do_sample=do_sample,
             use_cache=use_cache,
             collect_audio_condition=True,

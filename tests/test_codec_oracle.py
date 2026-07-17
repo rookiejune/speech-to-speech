@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import torch
 from anydataset.types import AudioItem, AudioView, Modality, Role
 from anytrain.idspace import Layout
-from lightning.pytorch.callbacks import Callback
+from lightning.pytorch.callbacks import Callback, ModelCheckpoint
 from omegaconf import OmegaConf
 from torch import nn
 
@@ -33,10 +33,17 @@ class CodecOracleTest(unittest.TestCase):
         config = OmegaConf.create(
             {
                 "data": {"lba": {"enabled": False}},
-                "trainer": {"expected_world_size": 1},
+                "trainer": {
+                    "expected_world_size": 1,
+                    "enable_checkpointing": False,
+                },
                 "callbacks": {
                     "grad_norm": {"enabled": False},
-                    "checkpoint": {"enabled": False},
+                    "checkpoint": {
+                        "filename": "step-{step}",
+                        "save_last": True,
+                        "save_top_k": 0,
+                    },
                     "nonfinite": {"enabled": False},
                 },
             }
@@ -48,6 +55,11 @@ class CodecOracleTest(unittest.TestCase):
         config.data.lba.enabled = True
         callbacks = training_callbacks(config, Callback(), Path(self.id()))
         self.assertTrue(any(isinstance(x, SamplerEpochSetter) for x in callbacks))
+        self.assertFalse(any(isinstance(x, ModelCheckpoint) for x in callbacks))
+
+        config.trainer.enable_checkpointing = True
+        callbacks = training_callbacks(config, Callback(), Path(self.id()))
+        self.assertTrue(any(isinstance(x, ModelCheckpoint) for x in callbacks))
 
     def test_collate_pads_variable_length_codec_sequences(self):
         codec = OmegaConf.create({"view": "longcat", "objective": "flow"})
@@ -121,6 +133,16 @@ class CodecOracleTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertTrue(torch.equal(calls[0], batch["codes"][..., 1:]))
         self.assertIsNotNone(module.model.semantic_audio_embedding.weight.grad)
+        self.assertFalse(module.model.unused.weight.requires_grad)
+        optimized = {
+            id(parameter)
+            for group in module.configure_optimizers().param_groups
+            for parameter in group["params"]
+        }
+        trainable = {
+            id(parameter) for parameter in module.parameters() if parameter.requires_grad
+        }
+        self.assertEqual(optimized, trainable)
 
     def test_acoustic_flow_screening_replaces_padding_before_target_latent(self):
         calls: list[torch.Tensor] = []
@@ -174,6 +196,7 @@ class _OracleModel(nn.Module):
         )
         self.semantic_audio_adapter = nn.Identity()
         self.acoustic_flow = AcousticFlow(4, 1, _Flow())
+        self.unused = nn.Linear(4, 4)
         self.dequantize = dequantize
 
     @property

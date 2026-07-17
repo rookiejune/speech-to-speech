@@ -18,9 +18,12 @@ from anydataset.types import (
     TextMeta,
     TextView,
 )
-from omegaconf import OmegaConf
+from hydra import compose, initialize_config_dir
+from lightning.pytorch.callbacks import Callback
+from omegaconf import DictConfig, OmegaConf
 
 from speech_to_speech.datamodule.collator import Collator
+from speech_to_speech.callback import WorldSizeContract
 from speech_to_speech.datamodule.module import Config as DataConfig
 from speech_to_speech.datamodule.module import DataModule
 from speech_to_speech.datamodule.types import (
@@ -38,7 +41,7 @@ from speech_to_speech.model import SpeechToSpeechFlowModel
 from speech_to_speech.runtime.singleton import Config, Runtime
 from speech_to_speech.runtime.singleton import _audio_tokenizer, _dtype
 from speech_to_speech.runtime.audio_tokenizer import TorchCodecBPE
-from scripts.overfit import FixedDataModule, run, runtime_config
+from scripts.overfit import FixedDataModule, build_trainer, run, runtime_config
 
 
 class _Tokenizer:
@@ -54,6 +57,67 @@ class _Tokenizer:
 
 
 class ContractTest(unittest.TestCase):
+    def test_trainer_presets_have_one_composable_schema(self):
+        configs = [
+            _compose("experiment=acoustic_oracle"),
+            _compose("experiment=overfit"),
+            _compose("experiment=overfit", "trainer=ddp"),
+            _compose("experiment=acoustic_oracle_ddp_lba"),
+        ]
+        expected = {
+            "accelerator",
+            "devices",
+            "strategy",
+            "expected_world_size",
+            "use_distributed_sampler",
+            "precision",
+            "max_epochs",
+            "log_every_n_steps",
+            "enable_checkpointing",
+            "gradient_clip_val",
+        }
+
+        for config in configs:
+            self.assertEqual(set(config.trainer), expected)
+
+        self.assertEqual(
+            configs[2].trainer.strategy,
+            "ddp_find_unused_parameters_true",
+        )
+        self.assertEqual(configs[3].trainer.strategy, "ddp")
+        self.assertEqual(configs[3].trainer.precision, "bf16-mixed")
+
+    @patch("scripts.overfit.pl.Trainer")
+    @patch("scripts.overfit.build_logger")
+    def test_overfit_trainer_consumes_the_composed_ddp_contract(
+        self,
+        logger,
+        trainer,
+    ):
+        config = _compose(
+            "experiment=overfit",
+            "trainer=ddp",
+            "trainer.max_epochs=-1",
+            "trainer.precision=bf16-mixed",
+        )
+        callbacks = [Callback()]
+        output_dir = Path(self.id())
+
+        built = build_trainer(config, output_dir, callbacks)
+
+        self.assertIs(built, trainer.return_value)
+        kwargs = trainer.call_args.kwargs
+        self.assertEqual(kwargs["strategy"], "ddp_find_unused_parameters_true")
+        self.assertEqual(kwargs["max_epochs"], -1)
+        self.assertEqual(kwargs["precision"], "bf16-mixed")
+        self.assertFalse(kwargs["use_distributed_sampler"])
+        self.assertEqual(kwargs["gradient_clip_val"], 1.0)
+        self.assertTrue(kwargs["enable_checkpointing"])
+        self.assertIs(kwargs["logger"], logger.return_value)
+        self.assertIsInstance(kwargs["callbacks"][0], WorldSizeContract)
+        self.assertEqual(kwargs["callbacks"][0].expected, 2)
+        self.assertEqual(kwargs["callbacks"][1:], callbacks)
+
     def test_public_configs_support_omegaconf_structured(self):
         runtime_config = OmegaConf.structured(Config)
         model_config = OmegaConf.structured(ModelConfig)
@@ -197,10 +261,12 @@ class ContractTest(unittest.TestCase):
             }
         )
 
-        result = runtime_config(config)
+        with patch.dict("os.environ", {"LOCAL_RANK": "1"}):
+            result = runtime_config(config)
 
         self.assertEqual(result.codec, "unicodec")
         self.assertIsNone(result.audio_tokenizer)
+        self.assertEqual(result.device, "cuda:1")
 
     @patch("anytrain.framework.flow_matching.ContinuousFlowRuntime")
     @patch("anytrain.framework.flow_matching.ODESampler")
@@ -373,6 +439,15 @@ def _sample(task: Task) -> Sample:
         acoustic_label_positions=None,
         task=task,
     )
+
+
+def _compose(*overrides: str) -> DictConfig:
+    root = Path(__file__).parents[1]
+    with initialize_config_dir(
+        version_base=None,
+        config_dir=str(root / "configs"),
+    ):
+        return compose(config_name="config", overrides=list(overrides))
 
 
 def _raw_sample():

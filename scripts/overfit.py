@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -17,7 +18,7 @@ from omegaconf import DictConfig, OmegaConf
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset, Subset
 
-from speech_to_speech.callback import StageConfig, StageSwitcher
+from speech_to_speech.callback import StageConfig, StageSwitcher, WorldSizeContract
 from speech_to_speech.callback.logging import (
     FlowMatchingLogger,
     GradLogger,
@@ -248,7 +249,7 @@ def run(config: DictConfig) -> None:
         acoustic_decoder_heads=int(config.acoustic.decoder.heads),
         acoustic_decoder_ffn_ratio=int(config.acoustic.decoder.ffn_ratio),
         acoustic_repa_dim=(
-            768 if repa_teacher is None else repa_teacher.feature_dim
+            None if repa_teacher is None else repa_teacher.feature_dim
         ),
     )
     has_acoustic = bool(codec.acoustic_codebook_sizes)
@@ -343,18 +344,11 @@ def run(config: DictConfig) -> None:
         )
     if has_acoustic and config.acoustic.objective == "flow":
         callbacks.insert(1, FlowMatchingLogger(flow_matching, every_n_steps=1))
-    trainer = pl.Trainer(
-        accelerator=str(config.trainer.accelerator),
-        devices=config.trainer.devices,
-        precision=cast(Any, str(config.trainer.precision)),
-        max_steps=int(config.train.max_steps),
-        default_root_dir=str(output_dir),
-        logger=build_logger(config.logging, output_dir),
-        callbacks=callbacks,
-        log_every_n_steps=int(config.trainer.log_every_n_steps),
-        enable_checkpointing=bool(config.trainer.enable_checkpointing),
-    )
+    trainer = build_trainer(config, output_dir, callbacks)
     trainer.fit(module, datamodule=datamodule)
+
+    if not trainer.is_global_zero:
+        return
 
     if has_acoustic:
         if evaluation is None:
@@ -389,6 +383,32 @@ def run(config: DictConfig) -> None:
     result_path = output_dir / "metrics.json"
     result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps(result, sort_keys=True))
+
+
+def build_trainer(
+    config: DictConfig,
+    output_dir: Path,
+    callbacks: list[Callback],
+) -> pl.Trainer:
+    callbacks = [
+        WorldSizeContract(int(config.trainer.expected_world_size)),
+        *callbacks,
+    ]
+    return pl.Trainer(
+        accelerator=str(config.trainer.accelerator),
+        devices=config.trainer.devices,
+        precision=cast(Any, str(config.trainer.precision)),
+        max_steps=int(config.train.max_steps),
+        max_epochs=int(config.trainer.max_epochs),
+        default_root_dir=str(output_dir),
+        logger=build_logger(config.logging, output_dir),
+        callbacks=callbacks,
+        log_every_n_steps=int(config.trainer.log_every_n_steps),
+        enable_checkpointing=bool(config.trainer.enable_checkpointing),
+        gradient_clip_val=float(config.trainer.gradient_clip_val),
+        strategy=str(config.trainer.strategy),
+        use_distributed_sampler=bool(config.trainer.use_distributed_sampler),
+    )
 
 
 @torch.no_grad()
@@ -432,13 +452,16 @@ def evaluate_generation(
 
 def runtime_config(config: DictConfig) -> RuntimeConfig:
     audio_tokenizer = config.runtime.audio_tokenizer
+    device = torch.device(str(config.runtime.device))
+    if device.type == "cuda" and device.index is None:
+        device = torch.device("cuda", int(os.environ.get("LOCAL_RANK", "0")))
     return RuntimeConfig(
         codec=str(config.codec.name),
         backbone=str(config.runtime.backbone),
         audio_tokenizer=(
             None if audio_tokenizer is None else str(audio_tokenizer)
         ),
-        device=str(config.runtime.device),
+        device=str(device),
         dtype=str(config.runtime.dtype),
         attn_implementation=str(config.runtime.attn_implementation),
         flow_method=str(config.flow.method),

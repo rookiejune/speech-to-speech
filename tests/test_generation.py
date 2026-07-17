@@ -26,6 +26,8 @@ from speech_to_speech.pl_module.generation import (
     requests_from_batch,
 )
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
+from speech_to_speech.runtime.singleton import Config as RuntimeConfig
+from speech_to_speech.runtime.singleton import Runtime
 
 
 class _Codec:
@@ -58,6 +60,7 @@ class _Runtime:
         self.codec = _Codec()
         self.eos_token_id = 3
         self.pad_token_id = 0
+        self.bos_token_id = 1
         self.boa_token_id = 6
         self.eoa_token_id = 7
 
@@ -124,6 +127,8 @@ class _GenerationModel(SpeechToSpeechFlowModel):
     def __init__(self) -> None:
         nn.Module.__init__(self)
         self.runtime = _Runtime()
+        self.layout = self.runtime.layout
+        self.audio_token_frame_spans = torch.tensor([1, 1])
         self.backbone = SimpleNamespace(
             get_input_embeddings=lambda: SimpleNamespace(weight=torch.empty(0))
         )
@@ -142,6 +147,7 @@ class _GenerationModel(SpeechToSpeechFlowModel):
         **kwargs,
     ) -> CausalLMOutputWithPast:
         generation_token_ids = kwargs.pop("_generation_token_ids", None)
+        generation_modality = kwargs.pop("_generation_modality", None)
         del kwargs
         cached_length = 0 if past_key_values is None else past_key_values.length
         source = (
@@ -163,6 +169,9 @@ class _GenerationModel(SpeechToSpeechFlowModel):
         logits[:, -1, next_id] = 0
         if generation_token_ids is not None:
             logits = logits.index_select(-1, generation_token_ids)
+        elif generation_modality is not None:
+            start, end = self.layout.blocks[generation_modality.value]
+            logits = logits[..., start:end]
         hidden = torch.zeros(*input_ids.shape, 2)
         hidden[:, -1] = torch.tensor([source, length])
         cache = SimpleNamespace(length=length, source=source) if use_cache else None
@@ -193,7 +202,8 @@ class _VariableStopModel(_UnifiedGenerationModel):
         self.step = 0
 
     def forward(self, input_ids: Tensor, **kwargs) -> CausalLMOutputWithPast:
-        generation_token_ids = kwargs["_generation_token_ids"]
+        generation_token_ids = kwargs.get("_generation_token_ids")
+        generation_modality = kwargs.get("_generation_modality")
         use_cache = kwargs["use_cache"]
         token_ids = (
             torch.tensor([self.runtime.eos_token_id, 1], device=input_ids.device)
@@ -205,11 +215,20 @@ class _VariableStopModel(_UnifiedGenerationModel):
             )
         )
         self.step += 1
-        local = torch.stack(
-            [(generation_token_ids == token_id).nonzero()[0, 0] for token_id in token_ids]
-        )
+        if generation_token_ids is not None:
+            local = torch.stack(
+                [
+                    (generation_token_ids == token_id).nonzero()[0, 0]
+                    for token_id in token_ids
+                ]
+            )
+            output_size = generation_token_ids.numel()
+        else:
+            start, end = self.layout.blocks[generation_modality.value]
+            local = token_ids - start
+            output_size = end - start
         logits = torch.full(
-            (input_ids.size(0), 1, generation_token_ids.numel()),
+            (input_ids.size(0), 1, output_size),
             float("-inf"),
             device=input_ids.device,
         )
@@ -219,6 +238,77 @@ class _VariableStopModel(_UnifiedGenerationModel):
 
 
 class GenerationTest(unittest.TestCase):
+    def test_frame_span_buffer_follows_the_backbone_device(self):
+        runtime = _TinyRuntime()
+        runtime.backbone.to(device="meta")
+
+        model = SemanticModel(
+            ModelConfig(
+                semantic_audio_adapter=None,
+                semantic_audio_output_adapter=None,
+                acoustic_prompt_adapter=None,
+            ),
+            runtime_snapshot=runtime,
+        )
+
+        self.assertEqual(model.audio_token_frame_spans.device.type, "meta")
+        self.assertNotIn("audio_token_frame_spans", model.state_dict())
+
+    def test_text_generation_excludes_padding_and_bos(self):
+        rt = Runtime(RuntimeConfig())
+        rt.__dict__["layout"] = Layout(text=(0, 4), audio=(4, 8))
+        rt.__dict__["pad_token_id"] = 0
+        rt.__dict__["bos_token_id"] = 1
+
+        allowed = rt.generation_allowed_ids(Modality.TEXT)
+
+        self.assertEqual(allowed, (2, 3))
+
+    def test_modality_generation_masks_special_tokens(self):
+        model = SemanticModel(
+            ModelConfig(
+                semantic_audio_adapter=None,
+                semantic_audio_output_adapter=None,
+                acoustic_prompt_adapter=None,
+            ),
+            runtime_snapshot=_TinyRuntime(),
+        ).eval()
+
+        def text_logits(hidden_state: Tensor, local_ids=None) -> Tensor:
+            self.assertIsNone(local_ids)
+            logits = hidden_state.new_zeros(*hidden_state.shape[:-1], 8)
+            logits[..., 0] = 100
+            logits[..., 1] = 90
+            logits[..., 2] = 80
+            return logits
+
+        def audio_logits(hidden_state: Tensor, local_ids=None) -> Tensor:
+            self.assertIsNone(local_ids)
+            logits = hidden_state.new_zeros(*hidden_state.shape[:-1], 4)
+            logits[..., 2] = 100
+            logits[..., 0] = 90
+            return logits
+
+        with patch.object(model, "text_logits", side_effect=text_logits):
+            text = model.generate_semantic(
+                torch.tensor([[2, 3]]),
+                max_new_tokens=1,
+                generation_modality=Modality.TEXT,
+                do_sample=False,
+                use_cache=False,
+            )
+        with patch.object(model, "semantic_audio_logits", side_effect=audio_logits):
+            audio = model.generate_semantic(
+                torch.tensor([[2, 3]]),
+                max_new_tokens=1,
+                generation_modality=Modality.AUDIO,
+                do_sample=False,
+                use_cache=False,
+            )
+
+        self.assertEqual(int(text[0, -1]), 2)
+        self.assertEqual(int(audio[0, -1]), 8)
+
     def test_forward_skips_the_backbone_lm_head(self):
         model = SemanticModel(
             ModelConfig(
@@ -263,7 +353,7 @@ class GenerationTest(unittest.TestCase):
             generated = model.generate_semantic(
                 torch.tensor([[1, 2]]),
                 max_new_tokens=1,
-                allowed_token_ids=model.runtime.audio_generation_allowed_ids,
+                generation_modality=Modality.AUDIO,
                 do_sample=False,
                 use_cache=False,
             )
@@ -286,6 +376,13 @@ class GenerationTest(unittest.TestCase):
                 torch.tensor([[1, 2]]),
                 max_new_tokens=1,
                 allowed_token_ids=(8, 8, 11),
+            )
+
+        with self.assertRaisesRegex(ValueError, "unsupported generation modality"):
+            model.generate_semantic(
+                torch.tensor([[1, 2]]),
+                max_new_tokens=0,
+                generation_modality=Modality.IMAGE,
             )
 
         request = _request()

@@ -1,5 +1,7 @@
 from typing import Any, Protocol, cast
 
+import torch
+
 from anydataset.types import Sample
 from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
@@ -48,7 +50,9 @@ class SampleLogger(Callback):
         module = cast(_Module, cast(object, pl_module))
         datamodule = cast(DataModule, attached_datamodule(trainer))
         sample_batch = datamodule.collator(self.samples)
-        results = module.generate(requests_from_batch(sample_batch))
+        cuda_devices = [torch.cuda.current_device()] if torch.cuda.is_available() else []
+        with torch.random.fork_rng(devices=cuda_devices):
+            results = module.generate(requests_from_batch(sample_batch))
         for index, result in enumerate(results):
             audio = result["audio"]
             if audio is not None and audio_writer is not None:

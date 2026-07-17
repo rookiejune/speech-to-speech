@@ -26,3 +26,7 @@ acoustic:
 
 runtime:
   audio_tokenizer:
+
+trainer:
+  strategy: ddp
+  precision: bf16-mixed

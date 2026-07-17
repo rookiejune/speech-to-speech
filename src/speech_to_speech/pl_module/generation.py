@@ -128,7 +128,7 @@ def generate(
                 acoustic_input_mask=acoustic_mask,
                 prompt_attention_mask=prompt_mask,
                 stop_token_id=stop_token_id,
-                allowed_token_ids=model.runtime.generation_allowed_ids(modality),
+                generation_modality=modality,
                 do_sample=do_sample,
                 use_cache=use_cache,
             )

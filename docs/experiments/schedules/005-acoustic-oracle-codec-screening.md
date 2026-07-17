@@ -47,33 +47,40 @@ DAC 暂不纳入本轮。
 2. UniCodec 使用正常 TTS overfit 入口验收 semantic CE 与 direct decode。
 3. 两条路径目标不同，数值不互相排名。
 
-## DDP 与 LBA
+## DDP 与 LongCat LBA
 
 - 多样本训练从 prepared codec store 读取完整 code sequence；LBA 的长度单位是 codec
   frames，显式 budget 为 `max_batch_seconds * codec.frame_rate`。
 - map-style source loader 在每个 rank 使用显式 `DistributedSampler`；Trainer 关闭自动
   sampler 注入，避免无法穿透 LBA wrapper 的隐式替换。
 - codes 用 `-1` padding。LongCat 在 dequantize 前替换为合法 ID 并用 frame mask 计算 flow
-  loss；UniCodec 使用 Transformer key-padding mask 和 `ignore_index=-100` CE。
-- DDP contract callback 在 fit start 校验实际 world size；121 wrapper 默认使用物理 GPU
+  loss。
+- UniCodec 的 DDP wrapper 复用正式固定样本 overfit 入口，各 rank 训练同一个样本以验证
+  semantic 路径的分布式契约；它不使用 prepared-code LBA，也不作为数据吞吐实验。wrapper
+  关闭 epoch 上限，以 `train.max_steps` 作为终止条件，并保持正式 overfit 的
+  `bf16-mixed` precision。
+- 正式多任务路径使用 `find_unused_parameters=True`；LongCat oracle 只解冻静态 acoustic
+  子路径，使用 `find_unused_parameters=False`。两条路径均由对应 trainer precision 控制计算
+  dtype，oracle 与 runtime 的 bfloat16 契约保持一致。
+- 两条 DDP 路径都在 fit start 校验实际 world size；两个 121 wrapper 均默认使用物理 GPU
   2、3。
 
 ```bash
 jobs/005/04_longcat_ddp_lba.sh init=codec
-jobs/005/05_unicodec_ddp_lba.sh init=codec
+jobs/005/05_unicodec_ddp.sh
 ```
 
 ## 日志
 
-- stdout JSON stage：dataset load、codec load、codebook extraction/dequantize probe、logger
-  build、`Trainer.fit`、首次训练 dequantize、callback sample 和 waveform decode 均记录
-  start/done/error 与耗时，用于定位远程卡点。
-- TensorBoard：公共 `train/grad_norm`；LongCat 记录 `train/flow_loss`、`flow/time`、
-  `oracle/sample_feature_mse`；UniCodec 记录 `train/token_loss`、`train/token_accuracy`、
-  `oracle/teacher_forced_accuracy`；LongCat 记录 sampled waveform，UniCodec 记录
-  teacher-forced prediction waveform。
-- `metrics.json`：codec、objective、初始化、shape/scale 元数据、首末 loss 窗口和采样指标。
-- non-finite callback：参数或梯度第一次出现非有限值时立即中止并暴露位置。
+- LongCat oracle 的 stdout JSON stage 覆盖 dataset/codec load、dequantize probe、logger build、
+  `Trainer.fit`、首次训练 dequantize、callback sample 和 waveform decode；TensorBoard 记录
+  `train/grad_norm`、`train/flow_loss`、`flow/time`、`oracle/sample_feature_mse` 与 sampled waveform，
+  `metrics.json` 保存 codec/objective/shape/scale、loss 窗口和采样指标。non-finite callback 在
+  参数或梯度第一次出现非有限值时中止。
+- UniCodec wrapper 走正式 overfit 入口，不产生 oracle stage/accuracy。TensorBoard 记录
+  semantic loss/details、`train/grad_norm`、text retention 与同一次 generation 的 sample audio；
+  `metrics.json` 保存 task、参数量和 loss 窗口。shell 记录 `job.launch`，Python 入口在 global zero
+  输出最终 metrics JSON。
 
 ## 入口
 

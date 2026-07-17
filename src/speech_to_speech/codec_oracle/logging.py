@@ -12,6 +12,7 @@ from lightning.pytorch.callbacks import Callback
 from torch import Tensor
 from torch.utils.data import DistributedSampler
 
+from ..callback import WorldSizeContract as BaseWorldSizeContract
 from ..callback._lightning import (
     attached_datamodule,
     audio_experiment,
@@ -211,17 +212,9 @@ class Logger(Callback):
         )
 
 
-class WorldSizeContract(Callback):
-    def __init__(self, expected: int) -> None:
-        super().__init__()
-        self.expected = expected
-
+class WorldSizeContract(BaseWorldSizeContract):
     def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        del pl_module
-        if trainer.world_size != self.expected:
-            raise RuntimeError(
-                f"expected DDP world size {self.expected}, got {trainer.world_size}."
-            )
+        super().on_fit_start(trainer, pl_module)
         if trainer.is_global_zero:
             event(
                 "distributed.contract",

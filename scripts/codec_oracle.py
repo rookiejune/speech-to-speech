@@ -126,8 +126,12 @@ def training_callbacks(
     if bool(config.data.lba.enabled):
         callbacks.append(SamplerEpochSetter())
     if bool(config.callbacks.grad_norm.enabled):
-        callbacks.append(GradNormLogger())
-    if bool(config.callbacks.checkpoint.enabled):
+        callbacks.append(
+            GradNormLogger(
+                every_n_steps=int(config.callbacks.grad_norm.every_n_steps),
+            )
+        )
+    if bool(config.trainer.enable_checkpointing):
         callbacks.append(
             ModelCheckpoint(
                 dirpath=output_dir / "checkpoints",
@@ -162,7 +166,7 @@ def fit(
         max_steps=int(config.train.max_steps),
         max_epochs=int(config.trainer.max_epochs),
         log_every_n_steps=int(config.trainer.log_every_n_steps),
-        enable_checkpointing=bool(config.callbacks.checkpoint.enabled),
+        enable_checkpointing=bool(config.trainer.enable_checkpointing),
         gradient_clip_val=float(config.trainer.gradient_clip_val),
         default_root_dir=str(output_dir),
         logger=logger,

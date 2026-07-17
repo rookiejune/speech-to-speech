@@ -1,0 +1,178 @@
+from __future__ import annotations
+
+import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import torch
+from torch import Tensor
+
+from scripts._acoustic_evaluation import evaluate
+from speech_to_speech.callback.logging.sample import SampleLogger
+from speech_to_speech.datamodule import ModelBatch, Task
+from speech_to_speech.model.acoustic import AcousticRVQDecoder
+from speech_to_speech.pl_module.generation import Result
+
+
+class _RandomGenerationModule:
+    def __init__(self, *, use_cuda: bool = False) -> None:
+        self.use_cuda = use_cuda
+
+    def generate(self, requests: object) -> list[Result]:
+        del requests
+        torch.rand(4)
+        if self.use_cuda:
+            torch.rand(4, device=torch.device("cuda", torch.cuda.current_device()))
+        return [Result(token_ids=torch.tensor([1]), audio=None)]
+
+
+class _EvaluationModel:
+    def __init__(self) -> None:
+        self.training = True
+        self.parameter = torch.nn.Parameter(torch.zeros(()))
+        self.generator_seeds: list[int] = []
+
+    def parameters(self):
+        yield self.parameter
+
+    def eval(self) -> _EvaluationModel:
+        self.training = False
+        return self
+
+    def train(self, mode: bool = True) -> _EvaluationModel:
+        self.training = mode
+        return self
+
+    def semantic_hidden(self, input_ids: Tensor, **kwargs: object) -> Tensor:
+        del input_ids, kwargs
+        return torch.zeros(1, 2, 3)
+
+    def target_frame_condition(
+        self, hidden_states: Tensor, target_positions: Tensor
+    ) -> Tensor:
+        del hidden_states, target_positions
+        return torch.zeros(1, 2, 3)
+
+    def sample_acoustic(
+        self, condition: Tensor, *, generator: torch.Generator
+    ) -> Tensor:
+        self.generator_seeds.append(generator.initial_seed())
+        return torch.rand(
+            (*condition.shape[:2], 1),
+            device=condition.device,
+            generator=generator,
+        )
+
+
+class _Codec:
+    sample_rate = 16_000
+
+    def acoustic_codes_to_features(self, codes: Tensor) -> Tensor:
+        return codes.float()
+
+    def decode_features(self, semantic: Tensor, acoustic: Tensor) -> Tensor:
+        del semantic
+        return acoustic.float().mean().expand(4096).clone()
+
+
+class RNGCallbackTest(unittest.TestCase):
+    def test_sample_logger_preserves_cpu_rng(self):
+        self.addCleanup(torch.random.set_rng_state, torch.random.get_rng_state())
+        logger, trainer = sample_logger_fixture()
+        module = _RandomGenerationModule()
+        torch.manual_seed(123)
+        before = torch.random.get_rng_state().clone()
+
+        logger.on_train_batch_start(trainer, module, None, 0)
+
+        self.assertTrue(torch.equal(torch.random.get_rng_state(), before))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
+    def test_sample_logger_preserves_current_cuda_rng(self):
+        self.addCleanup(torch.cuda.set_rng_state, torch.cuda.get_rng_state())
+        logger, trainer = sample_logger_fixture()
+        module = _RandomGenerationModule(use_cuda=True)
+        torch.cuda.manual_seed(123)
+        before = torch.cuda.get_rng_state().clone()
+
+        logger.on_train_batch_start(trainer, module, None, 0)
+
+        self.assertTrue(torch.equal(torch.cuda.get_rng_state(), before))
+
+    def test_acoustic_evaluation_uses_local_generators(self):
+        self.addCleanup(torch.random.set_rng_state, torch.random.get_rng_state())
+        model = _EvaluationModel()
+        batch = SimpleNamespace(
+            input_ids=torch.ones(1, 2, dtype=torch.long),
+            attention_mask=torch.ones(1, 2, dtype=torch.bool),
+            acoustic_input_ids=None,
+            acoustic_input_positions=None,
+            acoustic_input_mask=None,
+            acoustic_labels=torch.zeros(1, 2, 1, dtype=torch.long),
+            acoustic_label_positions=torch.zeros(1, 2, dtype=torch.long),
+            semantic_frame_labels=torch.zeros(1, 2, 1, dtype=torch.long),
+            acoustic_target_mask=torch.ones(1, 2, dtype=torch.bool),
+        )
+        torch.manual_seed(123)
+        before = torch.random.get_rng_state().clone()
+
+        with patch(
+            "scripts._acoustic_evaluation.device_batch", return_value=batch
+        ):
+            evaluate(model, batch, _Codec(), seeds=(5, 7))
+
+        self.assertTrue(torch.equal(torch.random.get_rng_state(), before))
+        self.assertEqual(model.generator_seeds, [5, 7])
+        self.assertTrue(model.training)
+
+    def test_rvq_generator_is_reproducible_without_global_rng_use(self):
+        self.addCleanup(torch.random.set_rng_state, torch.random.get_rng_state())
+        decoder = AcousticRVQDecoder(
+            condition_dim=4,
+            codebooks=3,
+            codebook_size=8,
+            hidden_dim=4,
+            layers=1,
+            heads=1,
+            ffn_ratio=2,
+        ).eval()
+        condition = torch.zeros(1, 4, 4)
+        torch.manual_seed(123)
+        before = torch.random.get_rng_state().clone()
+
+        first = decoder.generate(
+            condition, generator=torch.Generator().manual_seed(9)
+        )
+        second = decoder.generate(
+            condition, generator=torch.Generator().manual_seed(9)
+        )
+
+        self.assertTrue(torch.equal(first, second))
+        self.assertTrue(torch.equal(torch.random.get_rng_state(), before))
+
+
+def sample_logger_fixture() -> tuple[SampleLogger, object]:
+    batch = ModelBatch(
+        input_ids=torch.tensor([[1, 2]]),
+        labels=torch.tensor([[-100, 2]]),
+        acoustic_input_ids=None,
+        acoustic_input_positions=None,
+        semantic_frame_labels=None,
+        acoustic_labels=None,
+        acoustic_label_positions=None,
+        tasks=[Task.T2TT],
+    )
+    experiment = SimpleNamespace(add_text=Mock())
+    trainer = SimpleNamespace(
+        global_step=0,
+        is_global_zero=True,
+        logger=SimpleNamespace(experiment=experiment),
+        datamodule=SimpleNamespace(collator=Mock(return_value=batch)),
+    )
+    logger = SampleLogger([0], every_n_steps=1)
+    logger.samples = [Mock()]
+    return logger, trainer
+
+
+if __name__ == "__main__":
+    unittest.main()

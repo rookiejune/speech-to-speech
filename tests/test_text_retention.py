@@ -56,6 +56,13 @@ class _Model(nn.Module):
             logits=torch.zeros(*input_ids.shape, 10, device=input_ids.device)
         )
 
+    def semantic_hidden(self, input_ids: Tensor, **kwargs) -> Tensor:
+        del kwargs
+        return torch.zeros(*input_ids.shape, 4, device=input_ids.device)
+
+    def semantic_logits(self, hidden_states: Tensor) -> Tensor:
+        return torch.zeros(hidden_states.size(0), 10, device=hidden_states.device)
+
 
 PROBES = {
     "zh_en": {

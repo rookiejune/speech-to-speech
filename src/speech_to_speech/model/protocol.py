@@ -40,6 +40,18 @@ class BaseModel(Protocol):
         **kwargs: Any,
     ) -> CausalLMOutputWithPast: ...
 
+    def semantic_hidden(
+        self,
+        input_ids: Tensor,
+        *,
+        attention_mask: Tensor | None = None,
+        acoustic_input_ids: Tensor | None = None,
+        acoustic_input_positions: Tensor | None = None,
+        acoustic_input_mask: Tensor | None = None,
+    ) -> Tensor: ...
+
+    def semantic_logits(self, hidden_state: Tensor) -> Tensor: ...
+
 
 class AcousticDecoder(Protocol):
     def __call__(
@@ -119,7 +131,13 @@ class GenerationRuntime(Protocol):
     def eos_token_id(self) -> int: ...
 
     @property
+    def bos_token_id(self) -> int: ...
+
+    @property
     def eoa_token_id(self) -> int: ...
+
+    @property
+    def boa_token_id(self) -> int: ...
 
     @property
     def codec_audio_range(self) -> tuple[int, int]: ...
@@ -162,6 +180,7 @@ class SemanticGeneration(BaseModel, Protocol):
         acoustic_input_mask: Tensor | None = None,
         prompt_attention_mask: Tensor | None = None,
         stop_token_id: int | None = None,
+        generation_modality: Modality | None = None,
         allowed_token_ids: Sequence[int] | Tensor | None = None,
         do_sample: bool = True,
         use_cache: bool = True,

@@ -7,8 +7,8 @@ Lightning 训练循环、生成路径和日志。生成契约的权威定义见 
 - `SpeechToSpeech[ModelT]`（LightningModule）：
   - 构造时通过 `Objective[ModelT]` 检查 model/objective 合法配对。
   - `training_step()`：调用 objective 的 `forward(batch, model)`，返回的 mapping 直接满足 Lightning 契约；loss outputs 保留到 backward 结束，供 `GradLogger` 读取分项梯度。
-  - generation service：接收独立的真实推理输入，按 task 组织 text/audio 状态机、allowed
-    tokens 与变长裁剪；具有 acoustic representation 时执行 acoustic sampling，unified-token
+  - generation service：接收独立的真实推理输入，按 task 组织 text/audio modality head、stop
+    token 与变长裁剪；具有 acoustic representation 时执行 acoustic sampling，unified-token
     codec 直接 decode semantic codes。
   - `evaluate_text()`：对固定的 text probes 执行 greedy generation 和 reference teacher-forced NLL，恢复调用前的 module mode，并向 callback 返回结构化结果。
   - teacher-forcing evaluation：消费完整 `ModelBatch`，condition 接口传 token 自身位置 `p`。
@@ -27,16 +27,20 @@ Lightning 训练循环、生成路径和日志。生成契约的权威定义见 
 
 ## callback 对外能力
 
+- `WorldSizeContract`：fit start 校验实际 world size 与 trainer contract 一致；oracle 在此基础上
+  追加结构化 ready event。
 - `StageSwitcher`：按 epoch milestone 切换 datamodule 的任务权重策略；fit start 根据
   `current_epoch` 恢复对应阶段，不依赖 callback 私有状态续训。
 - `logging.OutputsLogger`：只消费 `Outputs` 中的 `LossItem`，按 task 聚合记录，不依赖模型内部 head；不同 rank 的 task 列表可能不同，不做同步。
 - `logging.GradLogger`：对指定参数比较两个 loss 分项的梯度范数。
-- `logging.GradNormLogger`：记录 module 全部有效参数梯度的全局 L2 norm。
+- `logging.GradNormLogger`：按独立间隔记录全部有效参数梯度的全局 L2 norm，兼容项目使用的
+  PyTorch 2.4 与 2.8 环境。
 - `logging.FlowMatchingLogger`：构造时显式接收 flow runtime，记录其 time sampler 配置和
   训练采样时间，不向下读取 Lightning module 的 model/runtime。
 - `logging.SampleLogger`：按 `every_n_steps` 在 global zero 对固定样本生成；token、
   acoustic output 与 waveform 必须复用同一次生成结果；它通过 `trainer.datamodule` 的公开
   `train_samples()`/`collator` 能力准备输入，其他 rank 不准备样本或执行推理。
+  诊断生成在隔离的 RNG context 内执行，不改变后续训练的 CPU/当前 CUDA random state。
 - `logging.TextRetentionLogger`：只在 global zero 上于 fit 开始和固定 step 对用户提供的纯文本
   probes 做 greedy generation，并记录 reference teacher-forced NLL、相对初始 NLL 变化和
   解码文本；不接入训练 loss。

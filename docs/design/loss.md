@@ -9,7 +9,8 @@
 - `SemanticObjective`：semantic-only 组合入口；`Loss`：flow objective 组合入口；
   `RVQLoss`：离散 acoustic objective 组合入口。三者的 `forward(batch, model)` 都返回含标量
   总损失的 `Outputs`，直接满足 Lightning 训练契约。
-- `SemanticLoss`：按 layout 对 text/audio token 分别统计 CE，`-100` 不参与计算；shift 在此完成（`logits[:, :-1]` 对 `labels[:, 1:]`）。
+- `SemanticLoss`：按 layout 对 text/audio token 分别统计 CE，`-100` 不参与计算；shift 在此完成，
+  并只把有效 `hidden[:, :-1]` 交给 model 的 global-logits 能力。
 - `AcousticFlowLoss`：frame-mask 的 velocity objective，只在有效 acoustic frame 上计算；
   启用 REPA 时通过 `forward_with_features()` 复用同一次 DiT 前向。
 - `CausalAcousticLoss`：对每个 RVQ codebook 计算 masked CE，再在 codebook 维等权平均；
@@ -26,18 +27,17 @@
 
 ```python
 def forward(self, batch: ModelBatch, model) -> Outputs:
-    output = model(
+    hidden_states = model.semantic_hidden(
         batch.input_ids,
         attention_mask=batch.attention_mask,
         acoustic_input_ids=batch.acoustic_input_ids,
         acoustic_input_positions=batch.acoustic_input_positions,
         acoustic_input_mask=batch.acoustic_input_mask,
-        output_hidden_states=need_acoustic,
     )
-    semantic = self.semantic(output.logits, batch.labels)
+    semantic = self.semantic(hidden_states, batch.labels, model.semantic_logits)
     # 存在 acoustic target fields 的 batch：
     #   condition = model.target_frame_condition(
-    #       output.hidden_states[-1], batch.acoustic_label_positions)
+    #       hidden_states, batch.acoustic_label_positions)
     #   model 内部把 token 位置 p 转为 predictor 位置 p - 1。
 ```
 
@@ -57,7 +57,9 @@ oracle 等 diagnostic 使用独立 objective/入口。REPA 通过数值权重表
 
 ## 边界
 
-- `Loss` 不实现模型内部逻辑，只通过结构化 Protocol 的 `layout`、`target_frame_condition()`、`acoustic_decoder` 等公开能力读取监督所需表示，不依赖具体模型类。
+- `Loss` 不实现模型内部逻辑，只通过结构化 Protocol 的 `layout`、`semantic_hidden()`、
+  `semantic_logits()`、`target_frame_condition()`、`acoustic_decoder` 等公开能力读取监督所需表示，
+  不依赖具体模型类。
 - `SpeechToSpeech` 通过泛型 `Objective` 保留 model/objective 的配对类型，不在训练循环中 cast。
 - flow runtime 等 objective 资源在 Loss 构造时显式传入，不通过 `model.runtime` 向下读取。
 - 子 objective 在 `__init__` 中构造完毕，forward 不挂载新 submodule。

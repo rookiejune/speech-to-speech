@@ -12,7 +12,8 @@
   还从已加载 codec 推导 prepared-code frame rate，配置不重复声明该资源属性。
 - `backbone`：当前只承诺 Qwen3-compatible 的 HF causal LM。
 - `layout`：text/audio 两个 global id block；audio block 末尾预留 boa/eoa 两个位置。
-- audio ID 能力：完整 audio head block、generation allowed IDs（semantic + eoa）和 codec-decodable IDs（仅 semantic）是三个不同集合。
+- ID 能力：audio head block、audio generation IDs（semantic + eoa）和 codec-decodable IDs
+  （仅 semantic）是三个不同集合；text generation IDs 覆盖 text block 但排除 PAD/BOS。
 - special ids：`pad/bos/eos_token_id`（text）与 `boa/eoa_token_id`（audio block 末两位）。
 - `flow_matching`：anytrain 的 `ContinuousFlowRuntime`，统一持有训练时间分布和 acoustic generation sampler 配置。
   正式训练入口从公共 `flow/` Hydra config group 显式传入 method、NFE 和 step 数；Runtime

@@ -9,7 +9,9 @@
   模式，并由枚举自身处理对应的 code selection 与初始化规则。
 - `AcousticFlowScreening`：持有完整的 `SpeechToSpeechFlowModel`，prepared semantic codes 通过正式
   global ID、semantic audio embedding/adapter、target latent 与 acoustic flow 路径；wrapper
-  只负责 acoustic-only objective、optimizer selection 与实验日志。
+  只负责 acoustic-only objective、optimizer selection 与实验日志。构造时冻结完整正式模型，
+  只解冻 optimizer 持有的 semantic audio embedding、adapter 与 acoustic flow，使静态路径可用
+  `find_unused_parameters=False` 的 DDP。
 - unified-token codec 不使用独立 screening model；其 codes 作为 semantic audio tokens，
   `acoustic_ids=None`，复用正式 DataModule、semantic model、loss 与 generation/decode。
 - `DataModule`：仅供 LongCat acoustic-only screening 加载 prepared codec view，支持显式

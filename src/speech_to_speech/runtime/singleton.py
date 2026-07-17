@@ -242,12 +242,17 @@ class Runtime:
         start, end = self.codec_audio_range
         return (*range(start, end), self.eoa_token_id)
 
+    @cached_property
+    def text_generation_allowed_ids(self) -> tuple[int, ...]:
+        start, end = self.layout.blocks[Modality.TEXT.value]
+        blocked = {self.pad_token_id, self.bos_token_id}
+        return tuple(token_id for token_id in range(start, end) if token_id not in blocked)
+
     def generation_allowed_ids(self, modality: Modality) -> tuple[int, ...]:
         if modality is Modality.AUDIO:
             return self.audio_generation_allowed_ids
         if modality is Modality.TEXT:
-            start, end = self.layout.blocks[Modality.TEXT.value]
-            return tuple(range(start, end))
+            return self.text_generation_allowed_ids
         raise ValueError(f"unsupported generation modality: {modality.value}")
 
     def is_codec_audio_id(self, token_id: int) -> bool:

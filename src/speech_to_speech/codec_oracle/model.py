@@ -29,6 +29,10 @@ class AcousticFlowScreening(pl.LightningModule):
     ) -> None:
         super().__init__()
         self.model = model
+        self.model.requires_grad_(False)
+        self.model.semantic_audio_embedding.requires_grad_(True)
+        self.model.semantic_audio_adapter.requires_grad_(True)
+        self.model.acoustic_flow.requires_grad_(True)
         weight = initialization.weight(
             self.model.semantic_audio_embedding.weight.detach(),
             seed=seed,

@@ -12,6 +12,17 @@ from speech_to_speech.model.acoustic import AcousticDiT
 
 
 class AcousticDiTTest(unittest.TestCase):
+    def test_repa_projection_is_only_registered_when_configured(self):
+        model = AcousticDiT(6, 4, hidden_dim=8, layers=2, heads=2)
+
+        self.assertIsNone(model.repa)
+        with self.assertRaisesRegex(RuntimeError, "not configured"):
+            model.forward_with_features(
+                torch.randn(1, 2, 4),
+                torch.rand(1),
+                condition=torch.randn(1, 2, 6),
+            )
+
     def test_position_embedding_is_reused_and_grows_on_demand(self):
         model = AcousticDiT(6, 4, hidden_dim=8, layers=2, heads=2)
         condition = torch.randn(1, 3, 6)
@@ -37,6 +48,7 @@ class AcousticDiTTest(unittest.TestCase):
             layers=2,
             heads=2,
             ffn_ratio=2,
+            repa_dim=6,
         )
 
     def test_shapes_and_backward(self):

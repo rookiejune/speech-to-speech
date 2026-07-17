@@ -88,12 +88,12 @@ def _reference_nll(
     )
     device = model.backbone.get_input_embeddings().weight.device
     input_ids = torch.cat((prompt_ids, response_ids)).to(device=device)[None]
-    output = model(input_ids, attention_mask=torch.ones_like(input_ids, dtype=torch.bool))
-    if output.logits is None:
-        raise RuntimeError("model did not return text logits.")
-    prediction = output.logits[
-        0, prompt_ids.numel() - 1 : -1, text_start:text_end
-    ].float()
+    hidden_states = model.semantic_hidden(
+        input_ids,
+        attention_mask=torch.ones_like(input_ids, dtype=torch.bool),
+    )
+    predictors = hidden_states[0, prompt_ids.numel() - 1 : -1]
+    prediction = model.semantic_logits(predictors)[..., text_start:text_end].float()
     target = input_ids[0, prompt_ids.numel() :] - text_start
     return float(F.cross_entropy(prediction, target).detach().cpu())
 

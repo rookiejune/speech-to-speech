@@ -35,15 +35,14 @@ class SemanticObjective(Objective[BaseModel]):
     def forward(self, batch: ModelBatch, model: BaseModel) -> Outputs:
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
-        output = model(
+        hidden_states = model.semantic_hidden(
             batch.input_ids,
             attention_mask=batch.attention_mask,
             acoustic_input_ids=batch.acoustic_input_ids,
             acoustic_input_positions=batch.acoustic_input_positions,
             acoustic_input_mask=batch.acoustic_input_mask,
-            output_hidden_states=False,
         )
-        semantic = self.semantic(output.logits, batch.labels)
+        semantic = self.semantic(hidden_states, batch.labels, model.semantic_logits)
         return {"loss": semantic.loss.mean(), "semantic": semantic}
 
 
@@ -70,15 +69,14 @@ class Loss(Objective[FlowModel]):
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
         acoustic_target = batch.acoustic_labels is not None
-        output = model(
+        hidden_states = model.semantic_hidden(
             batch.input_ids,
             attention_mask=batch.attention_mask,
             acoustic_input_ids=batch.acoustic_input_ids,
             acoustic_input_positions=batch.acoustic_input_positions,
             acoustic_input_mask=batch.acoustic_input_mask,
-            output_hidden_states=acoustic_target,
         )
-        semantic = self.semantic(output.logits, batch.labels)
+        semantic = self.semantic(hidden_states, batch.labels, model.semantic_logits)
         result: Outputs = {"loss": semantic.loss.mean(), "semantic": semantic}
 
         if acoustic_target:
@@ -88,10 +86,8 @@ class Loss(Objective[FlowModel]):
                 raise RuntimeError(
                     "model batch did not produce an acoustic target mask."
                 )
-            if output.hidden_states is None:
-                raise RuntimeError("model did not return acoustic condition states.")
             condition = model.target_frame_condition(
-                output.hidden_states[-1], batch.acoustic_label_positions
+                hidden_states, batch.acoustic_label_positions
             )
             target = model.acoustic_target_latent(batch.acoustic_labels)
             if self.repa_weight is None:
@@ -142,15 +138,14 @@ class RVQLoss(Objective[RVQModel]):
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
         acoustic_target = batch.acoustic_labels is not None
-        output = model(
+        hidden_states = model.semantic_hidden(
             batch.input_ids,
             attention_mask=batch.attention_mask,
             acoustic_input_ids=batch.acoustic_input_ids,
             acoustic_input_positions=batch.acoustic_input_positions,
             acoustic_input_mask=batch.acoustic_input_mask,
-            output_hidden_states=acoustic_target,
         )
-        semantic = self.semantic(output.logits, batch.labels)
+        semantic = self.semantic(hidden_states, batch.labels, model.semantic_logits)
         result: Outputs = {"loss": semantic.loss.mean(), "semantic": semantic}
 
         if acoustic_target:
@@ -158,11 +153,9 @@ class RVQLoss(Objective[RVQModel]):
                 raise RuntimeError("acoustic target fields are incomplete.")
             if batch.acoustic_target_mask is None:
                 raise RuntimeError("model batch did not produce an acoustic target mask.")
-            if output.hidden_states is None:
-                raise RuntimeError("model did not return acoustic condition states.")
             labels = batch.acoustic_labels
             logits = model.acoustic_logits(
-                output.hidden_states[-1],
+                hidden_states,
                 batch.acoustic_label_positions,
                 labels.masked_fill(~batch.acoustic_target_mask[..., None], 0),
             )

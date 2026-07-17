@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from typing import cast
 
 import torch
+from anydataset.types import Modality
 from torch import Tensor, nn
 from transformers import Qwen3Config, Qwen3Model
 
@@ -188,6 +189,7 @@ class AcousticRVQDecoder(nn.Module):
         *,
         temperature: float = 1.0,
         top_p: float = 1.0,
+        generator: torch.Generator | None = None,
     ) -> Tensor:
         """Sample codebooks autoregressively while keeping frames parallel."""
         self._validate_condition(condition)
@@ -221,7 +223,11 @@ class AcousticRVQDecoder(nn.Module):
             logits = head(state) / temperature
             if top_p < 1.0:
                 logits = top_p_filter(logits, top_p)
-            value = torch.distributions.Categorical(logits=logits).sample()
+            value = torch.multinomial(
+                logits.softmax(dim=-1).flatten(0, -2),
+                1,
+                generator=generator,
+            ).view(condition.shape[:2])
             output.append(value)
         return torch.stack(output, dim=-1)
 
@@ -260,8 +266,20 @@ class SpeechToSpeechRVQModel(SemanticModel):
         return self.acoustic_decoder(condition, acoustic_labels)
 
     @torch.no_grad()
-    def sample_acoustic(self, condition: Tensor, **kwargs: float) -> Tensor:
-        return self.acoustic_decoder.generate(condition, **kwargs)
+    def sample_acoustic(
+        self,
+        condition: Tensor,
+        *,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        generator: torch.Generator | None = None,
+    ) -> Tensor:
+        return self.acoustic_decoder.generate(
+            condition,
+            temperature=temperature,
+            top_p=top_p,
+            generator=generator,
+        )
 
     @torch.no_grad()
     def generate_audio(
@@ -288,7 +306,8 @@ class SpeechToSpeechRVQModel(SemanticModel):
             acoustic_input_mask=acoustic_input_mask,
             prompt_attention_mask=prompt_attention_mask,
             stop_token_id=self.runtime.eoa_token_id,
-            allowed_token_ids=self.runtime.audio_generation_allowed_ids,
+            generation_modality=Modality.AUDIO,
+            allowed_token_ids=None,
             do_sample=do_sample,
             use_cache=use_cache,
             collect_audio_condition=True,
