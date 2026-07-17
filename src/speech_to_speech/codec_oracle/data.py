@@ -117,7 +117,7 @@ def codes(
     item = sample[(Role.TARGET, Modality.AUDIO)]
     if not isinstance(item, AudioItem):
         raise TypeError("WMT19 target audio must be an AudioItem.")
-    codes = item.views[AudioView(str(codec.view))]
+    codes = item.views[AudioView(str(codec.name))]
     if not isinstance(codes, Tensor) or codes.dim() != 2:
         raise ValueError("prepared codec codes must have shape [frame, codebook].")
     frames = min(

@@ -1,74 +1,22 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TypedDict, cast
+from typing import cast
 
 import torch
 from anydataset.types import Modality
 from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
 
-from ..datamodule.types import ModelBatch, Task
-from ..model.protocol import AcousticGeneration, SemanticGeneration
 from .decode import decode_generated_audio, decode_generated_semantic
-
-
-class AcousticPrompt(TypedDict):
-    ids: Tensor
-    positions: Tensor
-
-
-class Request(TypedDict):
-    prompt_ids: Tensor
-    task: Task
-    acoustic_prompt: AcousticPrompt | None
-
-
-class AudioOutput(TypedDict):
-    features: Tensor | None
-    waveform: Tensor
-    sample_rate: int
-
-
-class Result(TypedDict):
-    token_ids: Tensor
-    audio: AudioOutput | None
-
-
-def requests_from_batch(batch: ModelBatch) -> list[Request]:
-    """Build unpadded inference requests from teacher-forcing samples."""
-    requests: list[Request] = []
-    acoustic_mask = batch.acoustic_input_mask
-    for index, task in enumerate(batch.tasks):
-        target_positions = (batch.labels[index] != -100).nonzero()
-        if target_positions.numel() == 0:
-            raise ValueError("teacher-forcing batch row has no target tokens.")
-        prompt_end = int(target_positions[0].item())
-
-        acoustic_prompt = None
-        if batch.acoustic_input_ids is not None:
-            if batch.acoustic_input_positions is None or acoustic_mask is None:
-                raise RuntimeError("acoustic input fields are incomplete.")
-            row_mask = acoustic_mask[index]
-            acoustic_prompt = AcousticPrompt(
-                ids=batch.acoustic_input_ids[index][row_mask],
-                positions=batch.acoustic_input_positions[index][row_mask],
-            )
-
-        requests.append(
-            Request(
-                prompt_ids=batch.input_ids[index, :prompt_end],
-                task=task,
-                acoustic_prompt=acoustic_prompt,
-            )
-        )
-    return requests
+from .protocol import AcousticFeatureGenerator, TokenGenerator
+from .types import AcousticPrompt, AudioOutput, Request, Result
 
 
 @torch.no_grad()
 def generate(
     requests: Sequence[Request],
-    model: SemanticGeneration,
+    model: TokenGenerator,
     *,
     max_new_tokens: int = 256,
     temperature: float = 1.0,
@@ -94,7 +42,7 @@ def generate(
         groups.setdefault(key, []).append((index, request))
 
     for (modality, _), group in groups.items():
-        prompt, prompt_mask, acoustic_ids, acoustic_positions, acoustic_mask = _inputs(
+        prompt, prompt_mask, acoustic_codes, token_positions, acoustic_mask = _inputs(
             [request for _, request in group], model, device
         )
         stop_token_id = (
@@ -104,28 +52,32 @@ def generate(
         )
         features = None
         if modality is Modality.AUDIO and model.runtime.codec.acoustic_codebook_sizes:
-            acoustic_model = cast(AcousticGeneration, model)
-            sequence, features = acoustic_model.generate_audio(
+            if not isinstance(model, AcousticFeatureGenerator):
+                raise TypeError(
+                    "a codec with acoustic codebooks requires an "
+                    "AcousticFeatureGenerator."
+                )
+            sequence, features = model.generate_audio_features(
                 prompt,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_p=top_p,
-                acoustic_input_ids=acoustic_ids,
-                acoustic_input_positions=acoustic_positions,
-                acoustic_input_mask=acoustic_mask,
+                acoustic_prompt_codes=acoustic_codes,
+                acoustic_prompt_positions=token_positions,
+                acoustic_prompt_mask=acoustic_mask,
                 prompt_attention_mask=prompt_mask,
                 do_sample=do_sample,
                 use_cache=use_cache,
             )
         else:
-            sequence = model.generate_semantic(
+            sequence = model.generate_tokens(
                 prompt,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_p=top_p,
-                acoustic_input_ids=acoustic_ids,
-                acoustic_input_positions=acoustic_positions,
-                acoustic_input_mask=acoustic_mask,
+                acoustic_prompt_codes=acoustic_codes,
+                acoustic_prompt_positions=token_positions,
+                acoustic_prompt_mask=acoustic_mask,
                 prompt_attention_mask=prompt_mask,
                 stop_token_id=stop_token_id,
                 generation_modality=modality,
@@ -136,7 +88,7 @@ def generate(
         for row, (result_index, _) in enumerate(group):
             token_ids = _response(sequence[row], prompt.size(1), stop_token_id)
             if modality is Modality.TEXT:
-                results[result_index] = Result(token_ids=token_ids, audio=None)
+                results[result_index] = Result(response_ids=token_ids, audio=None)
                 continue
             row_features = None if features is None else features[row]
             if row_features is None:
@@ -156,7 +108,7 @@ def generate(
                     audio_token_range=model.runtime.codec_audio_range,
                 )[0]
             results[result_index] = Result(
-                token_ids=token_ids,
+                response_ids=token_ids,
                 audio=AudioOutput(
                     features=row_features,
                     waveform=waveform,
@@ -179,7 +131,7 @@ def _response(sequence: Tensor, prompt_length: int, stop_token_id: int) -> Tenso
 
 def _inputs(
     requests: list[Request],
-    model: SemanticGeneration,
+    model: TokenGenerator,
     device: torch.device,
 ) -> tuple[Tensor, Tensor, Tensor | None, Tensor | None, Tensor | None]:
     prompts = [request["prompt_ids"].to(device=device) for request in requests]
@@ -201,22 +153,24 @@ def _inputs(
     if any(value is None for value in acoustic):
         raise ValueError("a generation batch must use one source modality.")
     values = cast(list[AcousticPrompt], acoustic)
-    ids = pad_sequence(
-        [value["ids"].to(device=device) for value in values], batch_first=True
+    codes = pad_sequence(
+        [value["codes"].to(device=device) for value in values], batch_first=True
     )
-    positions = pad_sequence(
+    token_positions = pad_sequence(
         [
-            value["positions"].to(device=device) + width - prompts[row].numel()
+            value["token_positions"].to(device=device)
+            + width
+            - prompts[row].numel()
             for row, value in enumerate(values)
         ],
         batch_first=True,
         padding_value=-1,
     )
-    mask = positions.ge(0)
-    return prompt, prompt_mask, ids, positions, mask
+    mask = token_positions.ge(0)
+    return prompt, prompt_mask, codes, token_positions, mask
 
 
-def _frame_count(token_ids: Tensor, model: SemanticGeneration) -> int:
+def _frame_count(token_ids: Tensor, model: TokenGenerator) -> int:
     local = token_ids - model.runtime.codec_audio_range[0]
     spans = model.runtime.audio_tokenizer.frame_spans(local)
     return int(torch.as_tensor(spans).sum().item())

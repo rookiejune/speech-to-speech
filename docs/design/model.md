@@ -1,145 +1,103 @@
 # model
 
-semantic backbone、embedding 注入和 acoustic decoder 的组装。position 语义与 condition 契约的权威定义见 [总览 §2.4](../model-design.md)。
+组装 token backbone、multimodal embedding 与 acoustic decoder。position 语义见
+[总览 §2.4](../model-design.md)。
 
 ## 对外能力
 
-- `AcousticFlow`：组合 `AcousticFlowDecoder` 与 flow runtime，统一正常训练和 codec oracle
-  的 acoustic sampling；condition 与 target 的来源由上层组合决定。
+- `base.TokenModel`：接收显式 runtime，提供 text/semantic-audio embedding、token
+  logits、acoustic prompt 注入、frame condition 对齐与 token generation 原语。
+- `acoustic.SpeechToSpeechFlowModel`：在基础模型上组合 `AcousticFlow`/`AcousticDiT`，提供
+  flow target、sampling 和 `generate_audio_features()`。
+- `acoustic.SpeechToSpeechRVQModel`：组合 `AcousticRVQDecoder`，提供 teacher-forced
+  codebook logits、sampling 和 `generate_audio_features()`。
+- `loss.protocol.TokenObjectiveModel` / `FlowObjectiveModel` / `RVQObjectiveModel`：objective
+  所依赖的训练能力。
+- `generation.protocol.TokenGenerator` / `AcousticFeatureGenerator`：generation service
+  所依赖的推理能力；`TextEvaluationModel` 组合 token generation 与 reference scoring。
+- `model.protocol.TokenModelRuntime` / `FlowModelRuntime`：token 与 flow model 各自消费的
+  runtime 资源边界。
+- `AcousticType`、`DecoderConfig`、`FlowRepaConfig`：组合入口的严格配置结构。
 
-- `base.SemanticModel`：公共层，负责 runtime/backbone/embedding 加载、semantic forward/logits、semantic generation、acoustic prompt 注入和 frame hidden 对齐。
-- `acoustic.SpeechToSpeechFlowModel`：flow matching 组合入口，附加 `acoustic_target_latent()`、`sample_acoustic()`、`generate_audio()`。
-- `acoustic.SpeechToSpeechRVQModel`：RVQ 组合入口，附加 `acoustic_logits()`、codebook 自回归的 `sample_acoustic()` 与 `generate_audio()`。
-- `protocol.FlowMatching` / `protocol.RVQMatching`：对应 loss 依赖的训练能力；
-  `protocol.AcousticGeneration`：两个 acoustic decoder 共享的推理能力；`protocol.FlowModel` /
-  `protocol.RVQModel` 组合 Lightning module 所需的训练与推理契约。
-
-## 模型接口
-
-`AdapterType` 是 embedding、output 和 acoustic prompt adapter 配置的字符串枚举；当前
-支持 `LINEAR` 和 `MLP`，`None` 表示 identity 且要求输入输出维度一致。
+## Token 接口
 
 ```python
 def forward(
-    self,
     input_ids: Tensor,
     *,
     attention_mask: Tensor | None = None,
-    acoustic_input_ids: Tensor | None = None,
-    acoustic_input_positions: Tensor | None = None,
-    acoustic_input_mask: Tensor | None = None,
+    acoustic_prompt_codes: Tensor | None = None,
+    acoustic_prompt_positions: Tensor | None = None,
+    acoustic_prompt_mask: Tensor | None = None,
     output_hidden_states: bool = False,
 ) -> CausalLMOutputWithPast: ...
 
-def semantic_hidden(...) -> Tensor: ...
-def semantic_logits(hidden_state: Tensor) -> Tensor: ...
+def token_hidden_states(...) -> Tensor: ...
+def token_logits(hidden_state: Tensor) -> Tensor: ...
+def generate_tokens(...) -> Tensor: ...
 ```
 
-- 公开 `forward()` 只返回 logits 和可选最后一层 hidden states，不接收 labels，也不计算 loss；
-  `semantic_hidden()` 单独返回训练所需表示，objective 由外部 `Loss` 组合。
-- `logits` 是拼接后的 global token 分布；内部保留 text/semantic-audio 两个 output head，但对外只承诺 global `logits`。
-- 正常训练通过 `semantic_hidden()` 取得完整 backbone 表示，再由 loss 只选取非 `-100` target
-  的 predictor hidden 调用 `semantic_logits()`；global text+audio softmax 语义不变，但 prompt
-  和 padding position 不构造 vocabulary logits。公开 `forward()` 继续保留完整 global logits。
-- semantic forward 直接调用 HF causal LM 的 `base_model` 取得 hidden states 与 cache，
-  不执行并丢弃 backbone 自带的 text LM head；text/audio logits 只由本模块计算一次。
-- 正式 generation 直接按 target modality 选择 output head，只为最后一个 token 计算 local
-  logits，再用 block offset 恢复 global ID；text 路径屏蔽 PAD/BOS，audio 路径屏蔽 BOA。
-  显式 `allowed_token_ids` 仍作为自定义约束入口保留，不用于正常 modality 状态机。
-- text 输入和输出分别通过 HF 的 `get_input_embeddings()` / `get_output_embeddings()` 获取；
-  backbone 始终使用本地 `[0, text_vocab_size)` 行，layout offset 只用于 global ID 映射。当模型
-  embedding 行数大于 tokenizer vocabulary 时，text logits 仍只覆盖 layout 的 text block。
-- acoustic objective 复用 `semantic_hidden()` 返回的 backbone 表示；generation 需要在线收集
-  condition 时传 `output_hidden_states=True` 并使用 `output.hidden_states[-1]`。该开关只公开
-  最后一层，不要求 backbone 保留所有中间层。
-- condition 接口 `target_frame_condition()` / `target_frame_label_condition()` 统一消费 token
-  自身位置 `p`；causal shift `p - 1` 只在 model 内部处理（见总览 §2.4）。前者属于
-  acoustic objective 训练协议，后者是具体模型提供的 teacher-forced/oracle 能力。
-- acoustic decoder 的 condition 形态、采样结果和 codec 衔接取决于具体 decoder，不统一其 output 类型。公开接口不暴露具体 Qwen layer、codec adapter 或 decoder layer。
+- `forward()` 返回 global text+audio logits，不接收 labels 或计算 loss。
+- 训练先用 `token_hidden_states()` 取得完整表示，再由 objective 只选有效 predictor rows 调用
+  `token_logits()`，避免为 prompt/padding 构造大词表 logits。
+- backbone 直接调用 HF causal LM 的 `base_model`；自带 text LM head 不会先计算再丢弃。
+- text/audio output head 分别产生 local logits，layout offset 只负责恢复 global token ID。
+- generation 按 modality 只计算最后一个位置的目标 head；text 屏蔽 PAD/BOS，audio 屏蔽 BOA。
+- `target_frame_condition()` 与 `target_frame_label_condition()` 都接收 token 自身位置 `p`；
+  causal shift `p - 1` 只在 model 内部发生。
 
-## Embedding 和条件注入
+## 配置边界
 
-输入分成三路：
+`model.Config` 只包含基础模型真正消费的 adapter：
+
+- `semantic_audio_adapter`
+- `semantic_audio_output_adapter`
+- `acoustic_prompt_adapter`
+
+decoder 使用独立 `DecoderConfig(hidden_dim, layers, heads, ffn_ratio)`。flow 可额外接收
+`FlowRepaConfig(feature_dim, student_layer)`；RVQ 构造函数没有 REPA 参数。Hydra 使用
+`acoustic.type=flow|rvq`，flow preset 独占 `teacher_checkpoint`、`teacher_layer` 与
+`student_layer`。
+
+## Embedding
 
 ```text
-text ids
-    └── backbone text embedding
+text_token_ids
+    -> backbone text embedding
 
-semantic audio ids
-    ├── codec semantic codebook 初始化的 embedding（分块 decode + RoPE + segment mean）
-    └── semantic audio adapter
+semantic-audio token IDs
+    -> semantic codec codebook initialized embedding
+    -> semantic audio adapter
 
-acoustic prompt
-    └── codec.acoustic_codes_to_features()
-        └── acoustic prompt adapter
+acoustic_prompt_codes
+    -> codec.acoustic_codes_to_features()
+    -> grouped frame-to-token merge at acoustic_prompt_positions
+    -> acoustic prompt adapter + zero-initialized gate
 ```
 
-注入形式：
-
-```python
-semantic_feature = semantic_base + semantic_gate * semantic_shift
-acoustic_feature = acoustic_prompt_gate * acoustic_feature
-inputs_embeds = semantic_feature + acoustic_feature
-```
-
-gate 初始化为 0，避免在训练初期破坏原始 backbone。实现状态：acoustic 路径的 gate
-已实现（`base.py` 的 `acoustic_prompt_gate`）；semantic 路径的
-`semantic_gate * semantic_shift` 在 anytrain 的 `Embedding` 中没有实现，目前 semantic
-embedding 直接输出 `semantic_base`，该项作为待实现的注入形式保留。
-
-acoustic ids 先经过 codec 得到 frame-level feature，再按 `acoustic_input_positions` 使用
-`embedding/audio.py` 的张量化 RoPE + grouped mean 规则合成为 BPE-level feature，同时返回
-occupied token mask；adapter 后使用该 mask 清除未占用位置的 bias，再加到对应 input
-embedding 上。
-codec feature 进入模型时统一转换到 backbone embedding 的 device/dtype；codec wrapper
-不绑定训练模型的精度或设备策略。source acoustic prompt 与 flow target 共用这条边界。
+codec features 在模型边界转换到 backbone embedding 的 device/dtype。frame mask 在进入 codec
+前把 `-1` code padding 替换为安全值，adapter 后再清除无效位置。source acoustic prompt 与
+flow target 复用 `acoustic_code_features()`，子类不调用基类私有转换函数。
 
 ## Acoustic decoder
 
-- flow decoder 是沿 acoustic frame 轴做 self-attention 的 DiT。Qwen frame condition 不作为
-  cross-attention 序列，而是在每个 block 中与 timestep embedding 相加后生成逐帧 FiLM
-  scale、shift 和 residual gate。正弦 frame position embedding 提供顺序信息；frame mask
-  同时屏蔽 attention key 和 padding 输出。
-- decoder 遵循 velocity-model 协议，模型只冻结其输入输出：
+- flow decoder 沿 frame 轴做 self-attention；condition 与 timestep embedding 产生逐层 FiLM
+  scale、shift 和 residual gate。frame mask 同时约束 attention 与输出。
+- REPA 启用时，`repa_projection` 把 `repa_student_layer` 的表示映射到 teacher feature 维度；
+  未启用时不注册 projector。
+- RVQ decoder 在 frame 间并行、在 codebook 轴自回归。各 codebook 有独立 embedding/head，
+  sampling 在 codebook 轴复用 Qwen KV cache。flow/RVQ model 都以
+  `sample_acoustic_features()` 向评估入口返回 codec acoustic features；RVQ 的离散采样单独由
+  `sample_acoustic_codes()` 表达。
+- Runtime codec 固定 codebook 输入、feature dimension 与 waveform decode；model 不任意切取
+  codebooks。
 
-```python
-class AcousticDecoder(Protocol):
-    latent_dim: int
+## Generation 边界
 
-    def __call__(
-        self,
-        x_t: Tensor,
-        t: Tensor,
-        *,
-        condition: Tensor,
-        mask: Tensor | None = None,
-    ) -> Tensor: ...
-```
+`generate_tokens()` 与 `generate_audio_condition()` 是 `TokenModel` 的公开原语；flow/RVQ 的
+`generate_audio_features()` 在其上采样对应 acoustic representation。通用 cache、stop state、
+allowed IDs 和 frame condition 循环位于私有 `model/_generation.py`。
 
-- 启用 REPA 时，`forward_with_features()` 在一次 DiT 前向中同时返回 velocity 与指定 block
-  的 frame representation；8 层默认取第 4 个 block，经 student projector 映射到 teacher
-  hidden。未启用 REPA 时不注册 projector；sampling 继续消费普通 velocity 接口。
-
-- acoustic representation 由 Runtime codec 固定，不属于 batch 或 model 的任意切片配置。batch 保存完整离散 acoustic codes，`acoustic_codes_to_features()` 的输入、latent feature dimension 和 `decode_features()` 必须属于同一 codec contract。
-- target 对齐：target BPE hidden 按 `bpe_spans` repeat_interleave 得到 frame condition `[B, F, H]`；target 完整、有序 acoustic codebooks 经 codec 得到 latent `[B, F, D]`。
-- RVQ decoder 是独立、随机初始化的 8 层 Qwen3 decoder。frame 之间并行，每个 frame
-  内以 `[condition + BOS_q, condition + embedding(code_{q-1})]` 构造 codebook causal
-  序列；Qwen 自带 token embedding 不参与计算，各 codebook 保持独立 embedding 和 output
-  head。teacher forcing 返回每个 codebook 的 logits，sampling 按 codebook 顺序生成。
-  sampling 在 codebook 轴复用 Qwen KV cache，每个 codebook 只输入一个新 token。
-- flow DiT 与 RVQ Qwen decoder 共享 `acoustic_decoder_dim/layers/heads/ffn_ratio` 配置，默认
-  都是 8 层；两者共享 semantic backbone 和 frame condition，但 acoustic objective 与
-  codec output representation 不同。
-
-## 边界
-
-- 模型构造接收 runtime snapshot（`runtime_snapshot` 参数），内部不反复依赖全局 singleton，以便用 fake codec、fake tokenizer 和 tiny backbone 做 contract test。
-- semantic generation 使用 backbone KV cache：首步编码左 padding 的变长多模态
-  prompt batch，后续只输入新 token 并逐行跟踪 stop state。cache 不保存在 model
-  实例上，也不通过公开 API 暴露具体 backbone 类型。
-- audio generation 在每个 semantic token 被采样时在线收集预测该 token 的 hidden，并按 BPE span 展开 frame condition；不在生成完成后追加一次全序列 forward。
-- audio token 的 frame span 在 model 构造时形成非持久 buffer；生成循环只累计设备侧 hidden
-  与 span tensor，结束后一次展开，不逐 token 转到 CPU。sequence 与 attention mask 使用预分配
-  buffer，避免每步拼接历史序列。
-- source acoustic prompt 在首步进入 KV cache，因此在整个生成过程中持续有效。
-- batch acoustic generation 的 padding、frame mask 和逐行 decode 裁剪契约见总览 §6。
+具体模型不跨文件调用 `_generate()` 或 `_acoustic_features()`。KV cache 只属于一次调用；
+首步注入 source acoustic prompt，后续只输入新 token。frame span lookup 是非持久 buffer，
+condition 在设备侧累计并一次展开。

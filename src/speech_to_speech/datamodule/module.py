@@ -8,9 +8,10 @@ from anydataset.types import Sample as RawSample
 from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader
 
-from ..runtime import runtime
 from .collator import Collator
-from .types import ModelBatch, Task
+from .protocol import DataRuntime
+from ..task import Task
+from .types import ModelBatch
 
 
 class DataLoaderConfig(TypedDict):
@@ -25,18 +26,24 @@ class Config:
 
 
 class DataModule(LightningDataModule):
-    def __init__(self, config: Config, strategy: Mapping[Task, float]) -> None:
+    def __init__(
+        self,
+        config: Config,
+        runtime: DataRuntime,
+        task_weights: Mapping[Task, float],
+    ) -> None:
         super().__init__()
 
         self.config = config
-        self.collator = Collator(strategy)
+        self.runtime = runtime
+        self.collator = Collator(runtime, task_weights)
         self._train_dataset = None
 
     def setup(self, stage: str | None = None) -> None:
         del stage
         if self._train_dataset is not None:
             return
-        runtime_codec = runtime().config.codec
+        runtime_codec = self.runtime.codec_name
         if self.config.codec != runtime_codec:
             raise ValueError(
                 "datamodule and runtime must use the same codec: "
@@ -46,8 +53,8 @@ class DataModule(LightningDataModule):
 
         self._train_dataset = wmt19_tts_codec(codec=self.config.codec)
 
-    def set_strategy(self, strategy: Mapping[Task, float]) -> None:
-        self.collator.set_strategy(strategy)
+    def set_task_weights(self, task_weights: Mapping[Task, float]) -> None:
+        self.collator.set_task_weights(task_weights)
 
     def train_samples(self, indices: Sequence[int]) -> list[RawSample]:
         if self._train_dataset is None:

@@ -115,8 +115,8 @@ class AcousticDiT(nn.Module):
         layers: int = 8,
         heads: int = 8,
         ffn_ratio: int = 4,
-        repa_dim: int | None = None,
-        repa_layer: int | None = None,
+        repa_feature_dim: int | None = None,
+        repa_student_layer: int | None = None,
     ) -> None:
         super().__init__()
         if condition_dim <= 0 or latent_dim <= 0:
@@ -126,12 +126,16 @@ class AcousticDiT(nn.Module):
         hidden_dim = condition_dim if hidden_dim is None else hidden_dim
         if hidden_dim <= 0:
             raise ValueError("DiT hidden dimension must be positive")
-        if repa_dim is None:
-            if repa_layer is not None:
+        if repa_feature_dim is None:
+            if repa_student_layer is not None:
                 raise ValueError("REPA layer requires a REPA projection dimension")
         else:
-            repa_layer = (layers + 1) // 2 if repa_layer is None else repa_layer
-            if repa_dim <= 0 or not 1 <= repa_layer <= layers:
+            repa_student_layer = (
+                (layers + 1) // 2
+                if repa_student_layer is None
+                else repa_student_layer
+            )
+            if repa_feature_dim <= 0 or not 1 <= repa_student_layer <= layers:
                 raise ValueError("REPA dimension must be positive and layer must exist")
 
         self.latent_dim = latent_dim
@@ -157,8 +161,12 @@ class AcousticDiT(nn.Module):
         )
         self.output_norm = nn.LayerNorm(hidden_dim)
         self.output = nn.Linear(hidden_dim, latent_dim)
-        self.repa = None if repa_dim is None else nn.Linear(hidden_dim, repa_dim)
-        self.repa_layer = repa_layer
+        self.repa_projection = (
+            None
+            if repa_feature_dim is None
+            else nn.Linear(hidden_dim, repa_feature_dim)
+        )
+        self.repa_student_layer = repa_student_layer
 
     def forward(
         self,
@@ -184,7 +192,7 @@ class AcousticDiT(nn.Module):
         condition: Tensor,
         mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
-        if self.repa is None:
+        if self.repa_projection is None:
             raise RuntimeError("REPA projection is not configured")
         velocity, representation = self._forward(
             x_t,
@@ -192,7 +200,7 @@ class AcousticDiT(nn.Module):
             condition=condition,
             mask=mask,
         )
-        return velocity, self.repa(representation)
+        return velocity, self.repa_projection(representation)
 
     def _forward(
         self,
@@ -222,7 +230,7 @@ class AcousticDiT(nn.Module):
         representation = hidden
         for index, block in enumerate(self.blocks):
             hidden = block(hidden, film, mask)
-            if index + 1 == self.repa_layer:
+            if index + 1 == self.repa_student_layer:
                 representation = hidden
         velocity = self.output(self.output_norm(hidden))
         velocity = velocity.masked_fill(~mask[..., None], 0)

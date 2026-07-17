@@ -62,7 +62,7 @@ class CodecOracleTest(unittest.TestCase):
         self.assertTrue(any(isinstance(x, ModelCheckpoint) for x in callbacks))
 
     def test_collate_pads_variable_length_codec_sequences(self):
-        codec = OmegaConf.create({"view": "longcat", "objective": "flow"})
+        codec = OmegaConf.create({"name": "longcat"})
         data = OmegaConf.create({"max_seconds": 2.0})
         batch = collate(
             [_sample(3), _sample(1)],
@@ -203,8 +203,8 @@ class _OracleModel(nn.Module):
     def acoustic_decoder(self):
         return self.acoustic_flow.decoder
 
-    def target_frame_label_condition(self, labels, positions):
-        return self.semantic_audio_embedding(labels - 4)
+    def target_frame_label_condition(self, token_labels, positions):
+        return self.semantic_audio_embedding(token_labels - 4)
 
     def acoustic_target_latent(self, labels):
         return self.dequantize(labels)

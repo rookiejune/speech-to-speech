@@ -10,11 +10,12 @@ from lightning.pytorch import LightningModule
 from torch import nn
 
 from ..datamodule.types import ModelBatch
+from ..generation.service import generate
+from ..generation.text import TextProbe, TextProbeResult, evaluate_text
+from ..generation.types import Request, Result
 from ..loss.objective import Objective
 from ..loss.types import Outputs
-from ..model.protocol import SemanticGeneration
-from .generation import Request, Result, generate
-from .text import TextProbe, TextProbeResult, evaluate_text
+from ..generation.protocol import TextEvaluationModel
 
 
 @dataclass(frozen=True)
@@ -23,7 +24,7 @@ class Config:
     weight_decay: float = 0.01
 
 
-ModelT = TypeVar("ModelT", bound=SemanticGeneration)
+ModelT = TypeVar("ModelT", bound=TextEvaluationModel)
 
 
 class SpeechToSpeech(LightningModule, Generic[ModelT]):

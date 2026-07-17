@@ -24,18 +24,18 @@ class LossItem:
 
 class Outputs(TypedDict):
     loss: Tensor
-    semantic: NotRequired[LossItem]
+    token: NotRequired[LossItem]
     flow_matching: NotRequired[LossItem]
     repa: NotRequired[LossItem]
-    causal_lm: NotRequired[LossItem]
+    rvq: NotRequired[LossItem]
 
 
 def loss_items(outputs: Outputs) -> Iterator[tuple[str, LossItem]]:
     for name, item in (
-        ("semantic", outputs.get("semantic")),
+        ("token", outputs.get("token")),
         ("flow_matching", outputs.get("flow_matching")),
         ("repa", outputs.get("repa")),
-        ("causal_lm", outputs.get("causal_lm")),
+        ("rvq", outputs.get("rvq")),
     ):
         if item is not None:
             yield name, item

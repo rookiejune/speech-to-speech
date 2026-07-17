@@ -6,11 +6,13 @@ from typing import Generic, TypeVar
 from torch import nn
 
 from ..datamodule.types import ModelBatch
-from ..model.protocol import BaseModel
+from .protocol import TokenObjectiveModel
 from .types import Outputs
 
 
-ModelT_contra = TypeVar("ModelT_contra", bound=BaseModel, contravariant=True)
+ModelT_contra = TypeVar(
+    "ModelT_contra", bound=TokenObjectiveModel, contravariant=True
+)
 
 
 class Objective(nn.Module, Generic[ModelT_contra], ABC):

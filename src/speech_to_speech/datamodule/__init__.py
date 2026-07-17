@@ -1,13 +1,13 @@
 from .collator import Collator
 from .module import Config, DataLoaderConfig, DataModule
+from .protocol import DataRuntime
 from .types import (
     ACOUSTIC_PAD_ID,
     Language,
     ModelBatch,
-    Sample,
+    ModelSample,
     Speech,
     SpeechPair,
-    Task,
 )
 
 __all__ = [
@@ -16,10 +16,10 @@ __all__ = [
     "Config",
     "DataLoaderConfig",
     "DataModule",
+    "DataRuntime",
     "Language",
     "ModelBatch",
-    "Sample",
+    "ModelSample",
     "Speech",
     "SpeechPair",
-    "Task",
 ]

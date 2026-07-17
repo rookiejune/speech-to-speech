@@ -13,7 +13,7 @@
   只解冻 optimizer 持有的 semantic audio embedding、adapter 与 acoustic flow，使静态路径可用
   `find_unused_parameters=False` 的 DDP。
 - unified-token codec 不使用独立 screening model；其 codes 作为 semantic audio tokens，
-  `acoustic_ids=None`，复用正式 DataModule、semantic model、loss 与 generation/decode。
+  `acoustic_codes=None`，复用正式 DataModule、token model、objective 与 generation/decode。
 - `DataModule`：仅供 LongCat acoustic-only screening 加载 prepared codec view，支持显式
   distributed sampler 和 LBA；unified-token codec 不使用该入口。
 - `codes()` / `collate()` / `single_batch_loader()`：单样本裁剪、变长 padding 与
@@ -33,7 +33,7 @@
   dequantize callable 和 flow runtime。
 - prepared-code 裁剪和 LBA budget 使用 runtime codec 暴露的 frame rate；codec config
   只选择资源和 dataset view，不重复保存时间尺度。
-- codec config 只选择资源和 dataset view；acoustic config 选择 objective、decoder 结构与
+- `codec.name` 同时选择资源和 dataset view；`acoustic.type` 选择 objective 组合，flow preset 提供 decoder 结构与
   flow target normalization。optimizer、flow、trainer 和 logging 继续与正式训练共用。
 - oracle logger、grad norm、non-finite check 与 checkpoint 分属独立 callback config；入口
   显式注入 codec、codes、metadata 和 output directory 等运行时依赖。

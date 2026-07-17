@@ -8,14 +8,15 @@ from anytrain.idspace import Layout
 from torch import Tensor, nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from speech_to_speech.datamodule.types import ModelBatch, Task
-from speech_to_speech.loss import Loss, RVQLoss, SemanticObjective
-from speech_to_speech.loss.semantic import SemanticLoss
-from speech_to_speech.model.base import Config, SemanticModel
+from speech_to_speech.datamodule.types import ModelBatch
+from speech_to_speech.loss import FlowObjective, RVQObjective, TokenObjective
+from speech_to_speech.loss.token import TokenLoss
+from speech_to_speech.model.base import Config, TokenModel
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
+from speech_to_speech.task import Task
 
 
-class _ConditionModel(SemanticModel):
+class _ConditionModel(TokenModel):
     def __init__(self) -> None:
         nn.Module.__init__(self)
 
@@ -82,11 +83,11 @@ class _Teacher:
 
     def __call__(
         self,
-        semantic_ids: Tensor,
-        acoustic_ids: Tensor,
+        semantic_codes: Tensor,
+        acoustic_codes: Tensor,
         mask: Tensor,
     ) -> Tensor:
-        del semantic_ids, acoustic_ids
+        del semantic_codes, acoustic_codes
         return torch.ones(mask.shape + (self.feature_dim,))
 
 
@@ -95,7 +96,7 @@ class _FlowModel:
         self.layout = layout
         self.acoustic_decoder = _Decoder()
         self.positions: Tensor | None = None
-        self.semantic_hidden_calls = 0
+        self.token_hidden_calls = 0
         self.logit_rows = 0
 
     def __call__(self, input_ids: Tensor, **kwargs) -> CausalLMOutputWithPast:
@@ -108,12 +109,12 @@ class _FlowModel:
             logits=logits,
         )
 
-    def semantic_hidden(self, input_ids: Tensor, **kwargs) -> Tensor:
+    def token_hidden_states(self, input_ids: Tensor, **kwargs) -> Tensor:
         del kwargs
-        self.semantic_hidden_calls += 1
+        self.token_hidden_calls += 1
         return torch.zeros(*input_ids.shape, 2)
 
-    def semantic_logits(self, hidden_states: Tensor) -> Tensor:
+    def token_logits(self, hidden_states: Tensor) -> Tensor:
         self.logit_rows += hidden_states.size(0)
         return torch.zeros(hidden_states.size(0), self.layout.vocab_size)
 
@@ -123,14 +124,14 @@ class _FlowModel:
         self.positions = target_positions.clone()
         return torch.zeros(target_positions.shape + (2,))
 
-    def acoustic_target_latent(self, acoustic_labels: Tensor) -> Tensor:
-        return acoustic_labels.to(dtype=torch.float32)
+    def acoustic_target_latent(self, target_acoustic_codes: Tensor) -> Tensor:
+        return target_acoustic_codes.to(dtype=torch.float32)
 
 
-class _SemanticForwardModel:
+class _TokenForwardModel:
     def __init__(self, layout: Layout) -> None:
         self.layout = layout
-        self.semantic_hidden_calls = 0
+        self.token_hidden_calls = 0
         self.logit_rows = 0
 
     def __call__(self, input_ids: Tensor, **kwargs) -> CausalLMOutputWithPast:
@@ -142,12 +143,12 @@ class _SemanticForwardModel:
             )
         )
 
-    def semantic_hidden(self, input_ids: Tensor, **kwargs) -> Tensor:
+    def token_hidden_states(self, input_ids: Tensor, **kwargs) -> Tensor:
         del kwargs
-        self.semantic_hidden_calls += 1
+        self.token_hidden_calls += 1
         return torch.zeros(*input_ids.shape, 2)
 
-    def semantic_logits(self, hidden_states: Tensor) -> Tensor:
+    def token_logits(self, hidden_states: Tensor) -> Tensor:
         self.logit_rows += hidden_states.size(0)
         return torch.zeros(hidden_states.size(0), self.layout.vocab_size)
 
@@ -157,15 +158,15 @@ class _RVQModel(_FlowModel):
         self,
         hidden_states: Tensor,
         target_positions: Tensor,
-        acoustic_labels: Tensor | None = None,
+        target_acoustic_codes: Tensor | None = None,
     ) -> tuple[Tensor, ...]:
-        del acoustic_labels
+        del target_acoustic_codes
         condition = self.target_frame_condition(hidden_states, target_positions)
         return (torch.zeros(*condition.shape[:2], 3),)
 
 
 class ModelLossContractTest(unittest.TestCase):
-    def test_sparse_semantic_logits_match_dense_cross_entropy(self):
+    def test_sparse_token_logits_match_dense_cross_entropy(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
         labels = torch.tensor(
             [
@@ -180,7 +181,7 @@ class ModelLossContractTest(unittest.TestCase):
         dense_hidden = hidden_values.clone().requires_grad_()
         dense_weight = weight_values.clone().requires_grad_()
 
-        item = SemanticLoss(layout)(
+        item = TokenLoss(layout)(
             sparse_hidden,
             labels,
             lambda selected: nn.functional.linear(selected, sparse_weight),
@@ -221,9 +222,9 @@ class ModelLossContractTest(unittest.TestCase):
         item.loss.mean().backward()
         ((token_loss * valid).sum(dim=1) / total_count).mean().backward()
         if sparse_hidden.grad is None or dense_hidden.grad is None:
-            self.fail("semantic hidden gradients are unavailable")
+            self.fail("token hidden gradients are unavailable")
         if sparse_weight.grad is None or dense_weight.grad is None:
-            self.fail("semantic head gradients are unavailable")
+            self.fail("token head gradients are unavailable")
         torch.testing.assert_close(sparse_hidden.grad, dense_hidden.grad)
         torch.testing.assert_close(sparse_weight.grad, dense_weight.grad)
 
@@ -235,13 +236,13 @@ class ModelLossContractTest(unittest.TestCase):
             codec=_Codec(),
             audio_tokenizer=NativeAudioTokenizer(vocab_size=3),
         )
-        model = SemanticModel(
+        model = TokenModel(
             Config(
                 semantic_audio_adapter=None,
                 semantic_audio_output_adapter=None,
                 acoustic_prompt_adapter=None,
             ),
-            runtime_snapshot=rt,
+            runtime=rt,
         )
 
         paths = [
@@ -260,13 +261,13 @@ class ModelLossContractTest(unittest.TestCase):
             codec=_Codec(),
             audio_tokenizer=NativeAudioTokenizer(vocab_size=3),
         )
-        model = SemanticModel(
+        model = TokenModel(
             Config(
                 semantic_audio_adapter=None,
                 semantic_audio_output_adapter=None,
                 acoustic_prompt_adapter=None,
             ),
-            runtime_snapshot=rt,
+            runtime=rt,
         )
         with torch.no_grad():
             backbone.output_embeddings.weight.copy_(
@@ -288,13 +289,13 @@ class ModelLossContractTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "input embedding"):
-            SemanticModel(
+            TokenModel(
                 Config(
                     semantic_audio_adapter=None,
                     semantic_audio_output_adapter=None,
                     acoustic_prompt_adapter=None,
                 ),
-                runtime_snapshot=rt,
+                runtime=rt,
             )
 
     def test_condition_methods_own_the_causal_shift(self):
@@ -310,83 +311,86 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertTrue(torch.equal(condition, torch.tensor([[[10.0], [20.0], [0.0]]])))
         self.assertTrue(torch.equal(oracle, torch.tensor([[[4.0], [5.0], [0.0]]])))
 
-    def test_text_target_uses_semantic_objective_only(self):
+    def test_text_target_uses_token_objective_only(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
         model = _FlowModel(layout)
-        loss = Loss(layout, _FlowRuntime())
-        batch = _batch(Task.ASR, labels=torch.tensor([[-100, 1]]))
+        loss = FlowObjective(layout, _FlowRuntime())
+        batch = _batch(Task.ASR, token_labels=torch.tensor([[-100, 1]]))
 
         outputs = loss(batch, model)
 
-        self.assertIn("semantic", outputs)
+        self.assertIn("token", outputs)
         self.assertNotIn("flow_matching", outputs)
-        self.assertEqual(model.semantic_hidden_calls, 1)
+        self.assertEqual(model.token_hidden_calls, 1)
 
-    def test_semantic_objective_does_not_require_acoustic_model(self):
+    def test_token_objective_does_not_require_acoustic_model(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
-        model = _SemanticForwardModel(layout)
-        batch = _batch(Task.ASR, labels=torch.tensor([[-100, 1]]))
+        model = _TokenForwardModel(layout)
+        batch = _batch(Task.ASR, token_labels=torch.tensor([[-100, 1]]))
 
-        outputs = SemanticObjective(layout)(batch, model)
+        outputs = TokenObjective(layout)(batch, model)
 
-        self.assertIn("semantic", outputs)
+        self.assertIn("token", outputs)
         self.assertNotIn("flow_matching", outputs)
-        self.assertEqual(model.semantic_hidden_calls, 1)
+        self.assertEqual(model.token_hidden_calls, 1)
 
-    def test_semantic_objective_projects_only_supervised_positions(self):
+    def test_token_objective_projects_only_supervised_positions(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
-        model = _SemanticForwardModel(layout)
-        batch = _batch(Task.ASR, labels=torch.tensor([[-100, -100, 1, 2]]))
+        model = _TokenForwardModel(layout)
+        batch = _batch(
+            Task.ASR,
+            token_labels=torch.tensor([[-100, -100, 1, 2]]),
+        )
 
-        SemanticObjective(layout)(batch, model)
+        TokenObjective(layout)(batch, model)
 
         self.assertEqual(model.logit_rows, 2)
 
     def test_audio_target_automatically_adds_flow_objective(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
         model = _FlowModel(layout)
-        loss = Loss(layout, _FlowRuntime())
+        loss = FlowObjective(layout, _FlowRuntime())
         positions = torch.tensor([[1]])
         batch = _batch(
             Task.TTS,
-            labels=torch.tensor([[-100, 4]]),
-            acoustic_labels=torch.tensor([[[2]]]),
-            acoustic_label_positions=positions,
+            token_labels=torch.tensor([[-100, 4]]),
+            target_acoustic_codes=torch.tensor([[[2]]]),
+            target_audio_token_positions=positions,
         )
 
         outputs = loss(batch, model)
 
         self.assertIn("flow_matching", outputs)
-        self.assertEqual(model.semantic_hidden_calls, 1)
+        self.assertEqual(model.token_hidden_calls, 1)
         self.assertTrue(torch.equal(model.positions, positions))
         self.assertEqual(outputs["loss"].shape, ())
         self.assertTrue(torch.isfinite(outputs["loss"]))
 
-    def test_unified_audio_target_uses_semantic_objective_only(self):
+    def test_unified_audio_target_uses_token_objective_only(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
         model = _FlowModel(layout)
-        loss = Loss(layout, _FlowRuntime())
-        batch = _batch(Task.TTS, labels=torch.tensor([[-100, 4]]))
+        loss = FlowObjective(layout, _FlowRuntime())
+        batch = _batch(Task.TTS, token_labels=torch.tensor([[-100, 4]]))
 
         outputs = loss(batch, model)
 
-        self.assertIn("semantic", outputs)
+        self.assertIn("token", outputs)
         self.assertNotIn("flow_matching", outputs)
-        self.assertEqual(model.semantic_hidden_calls, 1)
+        self.assertEqual(model.token_hidden_calls, 1)
 
     def test_repa_is_an_explicit_audio_objective(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
         model = _FlowModel(layout)
-        loss = Loss(
+        loss = FlowObjective(
             layout,
             _FlowRuntime(),
             repa={"weight": 0.1, "teacher": _Teacher()},
         )
         batch = _batch(
             Task.TTS,
-            labels=torch.tensor([[-100, 4]]),
-            acoustic_labels=torch.tensor([[[2]]]),
-            acoustic_label_positions=torch.tensor([[1]]),
+            token_labels=torch.tensor([[-100, 4]]),
+            target_acoustic_codes=torch.tensor([[[2]]]),
+            target_audio_token_positions=torch.tensor([[1]]),
         )
 
         outputs = loss(batch, model)
@@ -400,15 +404,15 @@ class ModelLossContractTest(unittest.TestCase):
         positions = torch.tensor([[1]])
         batch = _batch(
             Task.TTS,
-            labels=torch.tensor([[-100, 4]]),
-            acoustic_labels=torch.tensor([[[2]]]),
-            acoustic_label_positions=positions,
+            token_labels=torch.tensor([[-100, 4]]),
+            target_acoustic_codes=torch.tensor([[[2]]]),
+            target_audio_token_positions=positions,
         )
 
-        outputs = RVQLoss(layout)(batch, model)
+        outputs = RVQObjective(layout)(batch, model)
 
-        self.assertIn("causal_lm", outputs)
-        self.assertEqual(model.semantic_hidden_calls, 1)
+        self.assertIn("rvq", outputs)
+        self.assertEqual(model.token_hidden_calls, 1)
         self.assertTrue(torch.equal(model.positions, positions))
         self.assertEqual(outputs["loss"].shape, ())
         self.assertTrue(torch.isfinite(outputs["loss"]))
@@ -417,21 +421,23 @@ class ModelLossContractTest(unittest.TestCase):
 def _batch(
     task: Task,
     *,
-    labels: Tensor,
-    acoustic_labels: Tensor | None = None,
-    acoustic_label_positions: Tensor | None = None,
+    token_labels: Tensor,
+    target_acoustic_codes: Tensor | None = None,
+    target_audio_token_positions: Tensor | None = None,
 ) -> ModelBatch:
     batch = ModelBatch(
-        input_ids=labels.masked_fill(labels.eq(-100), 0),
-        labels=labels,
-        acoustic_input_ids=None,
-        acoustic_input_positions=None,
-        semantic_frame_labels=None if acoustic_labels is None else acoustic_labels,
-        acoustic_labels=acoustic_labels,
-        acoustic_label_positions=acoustic_label_positions,
+        input_ids=token_labels.masked_fill(token_labels.eq(-100), 0),
+        token_labels=token_labels,
+        acoustic_prompt_codes=None,
+        acoustic_prompt_positions=None,
+        target_semantic_codes=(
+            None if target_acoustic_codes is None else target_acoustic_codes
+        ),
+        target_acoustic_codes=target_acoustic_codes,
+        target_audio_token_positions=target_audio_token_positions,
         tasks=[task],
+        pad_token_id=99,
     )
-    batch.__dict__["attention_mask"] = torch.ones_like(labels, dtype=torch.bool)
     return batch
 
 

@@ -1,47 +1,89 @@
 # datamodule
 
-把 anydataset 的 raw sample 组织成模型可直接消费的 `ModelBatch`。数据契约与 position 语义的权威定义见 [总览 §2](../model-design.md)。
+把 anydataset 的 raw sample 组织成模型可直接消费的 `ModelBatch`。数据契约与 position
+语义的权威定义见 [总览 §2](../model-design.md)。
 
 ## 对外能力
 
-- `types.Speech` / `types.SpeechPair`：raw sample 的逻辑视图。`SpeechPair.from_raw()`
-  按 runtime 配置读取统一 `[frame, codebook]` codec view；LongCat 的第 0 个码本和后续
-  码本只在这里解释为 semantic/acoustic，数据集层不携带这组语义。
-- `types.Sample` / `types.ModelBatch`：单条与 batch 级训练输入。`ModelBatch.from_samples()` 完成 padding；mask 由 padding 值派生并缓存。
-- `types.Task` / `types.Language`：任务与语言枚举。`Task` 是 source/target modality、paired
-  语义与 instruction template 的唯一事实来源。
-- `task.build_sample()`：按任务把 `SpeechPair` 组装成 `Sample`，包括 chat template、
-  boa/eoa 包装、labels 与 acoustic positions 的生成。
-- `Collator`：按权重策略采样任务并 collate。
-- `DataModule`：Lightning 数据入口；`Config` 只保存 codec/dataloader 数据，`setup()` 通过
-  `wmt19_tts_codec(config.codec)` 选择当前工程使用的具体 codec view；持有可更新的
-  `Collator`，`set_strategy()` 由外部 callback 控制任务权重。重复调用 `setup()` 不会
-  重新加载已持有的数据集。
+- `protocol.DataRuntime`：datamodule 所需资源的最小只读协议，公开 codec identity/view、
+  text/audio tokenizer、layout 和 special token ID。正式 `Runtime` 与测试 fake 都通过该协议
+  显式注入。
+- `parser.parse_sample()`：把 `anydataset.types.Sample` 解析为 `SpeechPair`。它解释当前
+  `AudioView`，将 LongCat codebooks 分成 semantic/acoustic codes，并生成 text/audio token
+  IDs 与 audio token spans。
+- `sample.build_sample()`：根据 `Task` 把 `SpeechPair` 组装成 `ModelSample`，负责 chat
+  template、BOA/EOA/EOS、global ID 映射、token labels、acoustic prompt 和 target frame
+  positions。
+- `types.Speech` / `types.SpeechPair`：raw sample 的 codec、token 和语言逻辑视图。
+- `types.ModelSample` / `types.ModelBatch`：单条和 batch 级模型输入；
+  `ModelBatch.from_samples(..., pad_token_id=...)` 完成校验与 padding，mask 由 padding 字段
+  派生并缓存。
+- `task.Task` / `types.Language`：任务与语言枚举。`Task` 是 source/target modality、
+  `uses_source_role` 和 instruction template 的唯一事实来源。
+- `Collator(runtime, task_weights)`：按任务权重为 raw samples 选择任务，依次调用 parser、
+  sample builder 和 batch padding；`set_task_weights()` 原地更新后续 batch 的任务分布。
+- `DataModule(config, runtime, task_weights)`：Lightning 数据入口。`Config` 只保存
+  codec/dataloader 配置；`setup()` 加载 prepared dataset，并在加载前校验 config 与 runtime
+  的 codec identity。重复调用不会重新加载已持有的数据集。
 
 ## 输入输出
 
-- 输入：`anydataset.types.Sample`（source/target 两个 role，audio + text 两个 modality）。
-- 输出：`ModelBatch`，字段语义与 padding 约定见总览 §2.3，position 语义见总览 §2.4。
+输入是 `anydataset.types.Sample`，包含 source/target 两个 role 及 audio/text modality。
+内部转换顺序为：
+
+```text
+raw Sample
+    -> parser.parse_sample(runtime) -> SpeechPair
+    -> sample.build_sample(task, runtime) -> ModelSample
+    -> ModelBatch.from_samples(pad_token_id=runtime.pad_token_id) -> ModelBatch
+```
+
+`ModelSample` 和 `ModelBatch` 使用同一组核心字段：
+
+```python
+input_ids: Tensor
+token_labels: Tensor
+acoustic_prompt_codes: Tensor | None
+acoustic_prompt_positions: Tensor | None
+target_semantic_codes: Tensor | None
+target_acoustic_codes: Tensor | None
+target_audio_token_positions: Tensor | None
+```
+
+`ModelBatch` 额外保存 `tasks: list[Task]` 和 `pad_token_id`，并公开
+`attention_mask`、`acoustic_prompt_mask` 与 `target_acoustic_mask`。
 
 ## 边界
 
-- task 层负责所有序列拼接与位置生成；model 不搜索 source audio token，也不判断 acoustic prompt 边界。
+- `DataRuntime` 必须由组合入口显式传给 `DataModule`/`Collator`，再沿 parser 和 sample
+  builder 传递；datamodule 不自行选择 tokenizer、layout 或 special tokens。
+- `parser.py` 只解释 raw dataset representation；`sample.py` 只实现任务序列规则；
+  `types.py` 保存结构并处理局部校验、padding 和 mask。三层不反向读取彼此的私有逻辑。
+- LongCat 的第 0 个 codebook 和后续 codebooks 只在 parser 边界解释为 semantic/acoustic。
+  unified-token codec 的完整 codes 是 `semantic_codes`，`acoustic_codes=None`。
+- audio tokenizer 的输出统一称为 `audio_token_ids`；codec codebook index 统一称为
+  `semantic_codes` / `acoustic_codes`。只有 layout global IDs 使用 `input_ids` 和
+  `token_labels`。
 - chat template 先渲染为字符串并在字符串层切分 source placeholder，再分别 tokenize
-  prefix/suffix；不能在 token IDs 中搜索单独编码的 placeholder，因为 BPE 分词受相邻文本影响。
-- target 为 audio 时，boa 是结构性前缀不参与监督：`labels[len(input_ids) + 1:] = response_ids[1:]`，即只监督 semantic BPE tokens 和 eoa。
-- audio-target task 必须提供 semantic audio target；acoustic target 由 codec/profile 决定。
-  unified-token codec 使用 `acoustic_ids=None`，text-target task 仍不允许 acoustic target。
-- `semantic_frame_labels` 保存 codec-native target semantic codebooks，与 `acoustic_labels`
-  共享 frame 轴；它只表达完整 codec target，不包含或预计算任何 REPA teacher feature。
-- `ModelBatch.from_samples()` 负责检查 acoustic IDs/positions 成对存在、所有 batch/frame 轴对齐以及 task 执行签名一致；不把错误推迟到 model/loss。
+  prefix/suffix；不能在 token IDs 中搜索单独编码的 placeholder，因为 BPE 分词受相邻文本
+  影响。
+- target 为 audio 时，BOA 是结构性 response prefix，不参与监督：
+  `token_labels[len(input_ids) + 1:] = response_ids[1:]`，只监督 audio tokens 和 EOA。
+- `acoustic_prompt_codes` 与 `acoustic_prompt_positions` 必须成对存在，表示 source acoustic
+  frames 及其在 token sequence 中的注入位置。
+- `target_semantic_codes` 与 `target_acoustic_codes` 必须成对存在并共享 frame 轴；
+  `target_audio_token_positions` 将每个 acoustic frame 对齐到 target audio token。它们只表达
+  codec target，不保存或预计算 REPA teacher features。unified-token codec 没有独立
+  acoustic side channel，因此这些 target code 字段为 `None`。
+- `ModelBatch.from_samples()` 显式接收 `pad_token_id`，检查 prompt/target code-position 配对、
+  batch/frame 轴和 task execution signature；错误不推迟到 model/loss。
 - `ModelBatch` 只表达训练或 teacher-forcing evaluation，不表达缺少 target 的真实推理请求。
-- `Collator` 的策略校验要求同一策略内所有任务的 source/target modality 一致，保证 DDP 中不同 rank 走相同模型路径。
-- DataModule 构造时必须提供初始 strategy；stage callback 只在 epoch 边界更新同一个 collator，阶段切换不依赖 Trainer 重建 DataLoader。
-- `DataModule.setup()` 在加载数据前校验 datamodule 与 runtime 的 codec 身份一致；不允许
-  prepared codec view 和模型 codec 使用不同配置。
+- 同一 `task_weights` 中的任务必须具有相同 source/target modality，保证 DDP 各 rank 走相同
+  模型路径。DataModule 构造时必须提供初始权重；stage callback 只在 epoch 边界调用
+  `set_task_weights()`，不依赖 Trainer 重建 DataLoader。
 - `DataModule.train_samples()` 是 callback 按索引读取已 setup 训练样本的公开边界；callback
-  通过 `trainer.datamodule` 使用它，不读取私有 dataset 字段。
-- `Speech.bpe_spans` 通过 audio tokenizer 的 `frame_spans()` 取得，并校验 spans 与 semantic
-  frame 严格双射；不满足直接报错，不做静默修复。
-- raw language 在构造 `Speech` 时转成 `Language`，未知语言直接报错；task template 不消费
-  数据集各自的语言别名。
+  不读取私有 dataset 字段。
+- parser 生成 `Speech.audio_token_spans`，`Speech` 校验 spans 与 semantic frame 完整对齐；
+  不满足时直接报错，不做静默修复。
+- raw language 在 parser 边界转换为 `Language`，未知语言直接报错；task template 不消费
+  dataset 各自的语言别名。

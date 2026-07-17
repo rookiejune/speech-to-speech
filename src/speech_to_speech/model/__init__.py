@@ -1,22 +1,26 @@
 from .acoustic import (
     AcousticDiT,
     AcousticFlow,
-    AcousticFlowDecoder,
     AcousticRVQDecoder,
+    AcousticType,
+    DecoderConfig,
+    FlowRepaConfig,
     SpeechToSpeechFlowModel,
     SpeechToSpeechRVQModel,
 )
 from .adapter import AdapterType
-from .base import Config, SemanticModel
+from .base import Config, TokenModel
 
 __all__ = [
-    "AcousticFlowDecoder",
     "AcousticFlow",
     "AcousticDiT",
     "AcousticRVQDecoder",
+    "AcousticType",
     "AdapterType",
     "Config",
-    "SemanticModel",
+    "DecoderConfig",
+    "FlowRepaConfig",
+    "TokenModel",
     "SpeechToSpeechFlowModel",
     "SpeechToSpeechRVQModel",
 ]

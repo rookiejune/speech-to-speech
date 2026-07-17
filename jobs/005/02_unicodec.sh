@@ -10,7 +10,6 @@ export PYTHONUNBUFFERED=1
 cd "${SPEECH_TO_SPEECH_ROOT}"
 echo '{"event":"job.launch","codec":"unicodec"}'
 "${SPEECH_TO_SPEECH_UNICODEC_PYTHON}" scripts/overfit.py \
-  experiment=overfit \
   codec=unicodec \
   runtime=native \
   task=tts \

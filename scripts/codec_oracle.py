@@ -30,8 +30,7 @@ from speech_to_speech.codec_oracle import (
     single_batch_loader,
     timed,
 )
-from speech_to_speech.model import Config as ModelConfig
-from speech_to_speech.model import SpeechToSpeechFlowModel
+from speech_to_speech.model import DecoderConfig, SpeechToSpeechFlowModel
 from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import Runtime
 
@@ -54,7 +53,7 @@ TrainerPrecision = Literal[
 ]
 
 
-@hydra.main(version_base=None, config_path="../configs", config_name="config")
+@hydra.main(version_base=None, config_path="../configs", config_name="codec_oracle")
 def main(config: DictConfig) -> None:
     run(config)
 
@@ -63,7 +62,7 @@ def run(config: DictConfig) -> None:
     OmegaConf.resolve(config)
     pl.seed_everything(int(config.train.seed), workers=True)
     device = process_device()
-    objective = Objective(str(config.acoustic.objective))
+    objective = Objective(str(config.acoustic.type))
     initialization = Initialization(str(config.init.name))
     event(
         "run",
@@ -174,7 +173,7 @@ def fit(
         strategy=str(config.trainer.strategy),
         use_distributed_sampler=bool(config.trainer.use_distributed_sampler),
     )
-    with timed("trainer.fit", objective=Objective(str(config.acoustic.objective))):
+    with timed("trainer.fit", objective=Objective(str(config.acoustic.type))):
         if bool(config.data.lba.enabled):
             trainer.fit(
                 module,
@@ -252,8 +251,8 @@ def build_flow(
     if codes.size(-1) < 2:
         raise ValueError("flow screening requires semantic and acoustic codebooks.")
     model = SpeechToSpeechFlowModel(
-        model_config(config.acoustic),
-        runtime_snapshot=runtime,
+        runtime=runtime,
+        decoder=decoder_config(config.acoustic),
     )
     codec = runtime.codec
     semantic_codes = codes[:, 0]
@@ -304,8 +303,7 @@ def common_metadata(
 ) -> dict[str, Any]:
     return {
         "codec": str(config.codec.name),
-        "acoustic": str(config.acoustic.name),
-        "objective": str(config.acoustic.objective),
+        "objective": str(config.acoustic.type),
         "initialization": str(config.init.name),
         "code_shape": list(codes.shape),
         "codebook_shape": list(codebook.shape),
@@ -334,13 +332,13 @@ def build_logger(config: DictConfig, output_dir: Path):
     raise ValueError("logging.name must be tensorboard or csv.")
 
 
-def model_config(config: DictConfig) -> ModelConfig:
-    dim = config.decoder.dim
-    return ModelConfig(
-        acoustic_decoder_dim=None if dim is None else int(dim),
-        acoustic_decoder_layers=int(config.decoder.layers),
-        acoustic_decoder_heads=int(config.decoder.heads),
-        acoustic_decoder_ffn_ratio=int(config.decoder.ffn_ratio),
+def decoder_config(config: DictConfig) -> DecoderConfig:
+    hidden_dim = config.decoder.hidden_dim
+    return DecoderConfig(
+        hidden_dim=None if hidden_dim is None else int(hidden_dim),
+        layers=int(config.decoder.layers),
+        heads=int(config.decoder.heads),
+        ffn_ratio=int(config.decoder.ffn_ratio),
     )
 
 

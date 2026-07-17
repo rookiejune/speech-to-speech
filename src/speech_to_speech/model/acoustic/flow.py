@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import torch
-from anydataset.types import Modality
 from torch import Tensor, nn
 
-from ..base import SemanticModel
-from ..protocol import FlowSamplingRuntime
+from ..base import Config, TokenModel
+from ..protocol import FlowModelRuntime, FlowSamplingRuntime
+from ._config import DecoderConfig, FlowRepaConfig, decoder_options
 from .dit import AcousticDiT
-
-AcousticFlowDecoder = AcousticDiT
 
 
 class AcousticFlow(nn.Module):
@@ -24,19 +22,19 @@ class AcousticFlow(nn.Module):
         layers: int = 8,
         heads: int = 8,
         ffn_ratio: int = 4,
-        repa_dim: int | None = None,
-        repa_layer: int | None = None,
+        repa_feature_dim: int | None = None,
+        repa_student_layer: int | None = None,
     ) -> None:
         super().__init__()
-        self.decoder = AcousticFlowDecoder(
+        self.decoder = AcousticDiT(
             condition_dim,
             latent_dim,
             hidden_dim=hidden_dim,
             layers=layers,
             heads=heads,
             ffn_ratio=ffn_ratio,
-            repa_dim=repa_dim,
-            repa_layer=repa_layer,
+            repa_feature_dim=repa_feature_dim,
+            repa_student_layer=repa_student_layer,
         )
         self.runtime = runtime
 
@@ -62,79 +60,87 @@ class AcousticFlow(nn.Module):
         ).final
 
 
-class SpeechToSpeechFlowModel(SemanticModel):
+class SpeechToSpeechFlowModel(TokenModel):
     """Speech-to-speech composition using a flow-matching decoder."""
 
-    def __init__(self, config=None, runtime_snapshot=None) -> None:
-        super().__init__(config=config, runtime_snapshot=runtime_snapshot)
+    def __init__(
+        self,
+        config: Config | None = None,
+        *,
+        runtime: FlowModelRuntime,
+        decoder: DecoderConfig | None = None,
+        repa: FlowRepaConfig | None = None,
+    ) -> None:
+        super().__init__(config=config, runtime=runtime)
+        options = decoder_options(decoder)
         backbone_weight = self.backbone.get_input_embeddings().weight
         self.acoustic_flow = AcousticFlow(
             self.backbone.config.hidden_size,
             self.runtime.codec.acoustic_feature_dim,
-            self.runtime.flow_matching,
-            hidden_dim=self.config.acoustic_decoder_dim,
-            layers=self.config.acoustic_decoder_layers,
-            heads=self.config.acoustic_decoder_heads,
-            ffn_ratio=self.config.acoustic_decoder_ffn_ratio,
-            repa_dim=self.config.acoustic_repa_dim,
-            repa_layer=self.config.acoustic_repa_layer,
+            runtime.flow_matching,
+            hidden_dim=options["hidden_dim"],
+            layers=options["layers"],
+            heads=options["heads"],
+            ffn_ratio=options["ffn_ratio"],
+            repa_feature_dim=None if repa is None else repa["feature_dim"],
+            repa_student_layer=None if repa is None else repa["student_layer"],
         ).to(device=backbone_weight.device, dtype=backbone_weight.dtype)
 
     @property
-    def acoustic_decoder(self) -> AcousticFlowDecoder:
+    def acoustic_decoder(self) -> AcousticDiT:
         return self.acoustic_flow.decoder
 
-    def acoustic_target_latent(self, acoustic_labels: Tensor) -> Tensor:
-        if acoustic_labels.dim() != 3:
-            raise ValueError("acoustic labels must have shape [B, F, N].")
-        safe_labels = acoustic_labels.clamp_min(0)
-        features = self._acoustic_features(safe_labels)
-        return features.masked_fill((acoustic_labels < 0).all(dim=-1)[..., None], 0)
+    def acoustic_target_latent(self, target_acoustic_codes: Tensor) -> Tensor:
+        if target_acoustic_codes.dim() != 3:
+            raise ValueError("target acoustic codes must have shape [B, F, N].")
+        safe_codes = target_acoustic_codes.clamp_min(0)
+        features = self.acoustic_code_features(safe_codes)
+        return features.masked_fill(
+            (target_acoustic_codes < 0).all(dim=-1)[..., None], 0
+        )
 
     @torch.no_grad()
-    def sample_acoustic(
-        self, condition: Tensor, mask: Tensor | None = None
+    def sample_acoustic_features(
+        self,
+        condition: Tensor,
+        *,
+        mask: Tensor | None = None,
+        generator: torch.Generator | None = None,
     ) -> Tensor:
-        return self.acoustic_flow.sample(condition, mask=mask)
+        return self.acoustic_flow.sample(
+            condition,
+            mask=mask,
+            generator=generator,
+        )
 
     @torch.no_grad()
-    def generate_audio(
+    def generate_audio_features(
         self,
         prompt_ids: Tensor,
         *,
         max_new_tokens: int,
         temperature: float = 1.0,
         top_p: float = 1.0,
-        acoustic_input_ids: Tensor | None = None,
-        acoustic_input_positions: Tensor | None = None,
-        acoustic_input_mask: Tensor | None = None,
+        acoustic_prompt_codes: Tensor | None = None,
+        acoustic_prompt_positions: Tensor | None = None,
+        acoustic_prompt_mask: Tensor | None = None,
         prompt_attention_mask: Tensor | None = None,
         do_sample: bool = True,
         use_cache: bool = True,
     ) -> tuple[Tensor, Tensor]:
-        generated, condition, spans = self._generate(
+        generated, condition, frame_mask = self.generate_audio_condition(
             prompt_ids,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
-            acoustic_input_ids=acoustic_input_ids,
-            acoustic_input_positions=acoustic_input_positions,
-            acoustic_input_mask=acoustic_input_mask,
+            acoustic_prompt_codes=acoustic_prompt_codes,
+            acoustic_prompt_positions=acoustic_prompt_positions,
+            acoustic_prompt_mask=acoustic_prompt_mask,
             prompt_attention_mask=prompt_attention_mask,
-            stop_token_id=self.runtime.eoa_token_id,
-            generation_modality=Modality.AUDIO,
-            allowed_token_ids=None,
             do_sample=do_sample,
             use_cache=use_cache,
-            collect_audio_condition=True,
         )
-        if condition is None or spans is None:
-            raise ValueError(
-                "semantic generation produced no codec-decodable audio tokens."
-            )
-        frame_count = spans.sum(dim=1)
-        frame_mask = (
-            torch.arange(condition.size(1), device=condition.device)[None]
-            < frame_count[:, None]
+        return generated, self.sample_acoustic_features(
+            condition,
+            mask=frame_mask,
         )
-        return generated, self.sample_acoustic(condition, frame_mask)

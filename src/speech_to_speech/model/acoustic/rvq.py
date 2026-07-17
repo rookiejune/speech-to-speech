@@ -4,12 +4,13 @@ from collections.abc import Sequence
 from typing import cast
 
 import torch
-from anydataset.types import Modality
 from torch import Tensor, nn
 from transformers import Qwen3Config, Qwen3Model
 
 from .._sampling import top_p_filter
-from ..base import SemanticModel
+from ..base import Config, TokenModel
+from ..protocol import TokenModelRuntime
+from ._config import DecoderConfig, decoder_options
 
 
 class AcousticRVQDecoder(nn.Module):
@@ -122,11 +123,17 @@ class AcousticRVQDecoder(nn.Module):
         if condition.dim() != 3 or condition.size(-1) != self.condition_dim:
             raise ValueError("condition must have shape [batch, frame, condition_dim].")
 
-    def _embedding(self, codebook: int, ids: Tensor) -> Tensor:
-        if ids.dtype == torch.bool or ids.is_floating_point() or ids.is_complex():
-            raise TypeError("acoustic code labels must contain integer ids.")
-        if bool((ids < 0).any()) or bool((ids >= self.codebook_sizes[codebook]).any()):
-            raise ValueError("acoustic code label is outside the codec codebook.")
+    def _embedding(self, codebook: int, codes: Tensor) -> Tensor:
+        if (
+            codes.dtype == torch.bool
+            or codes.is_floating_point()
+            or codes.is_complex()
+        ):
+            raise TypeError("acoustic codes must contain integers.")
+        if bool((codes < 0).any()) or bool(
+            (codes >= self.codebook_sizes[codebook]).any()
+        ):
+            raise ValueError("acoustic code is outside the codec codebook.")
         embedding = cast(
             nn.Embedding,
             cast(object, self.codebook_embeddings[codebook]),
@@ -135,35 +142,35 @@ class AcousticRVQDecoder(nn.Module):
             nn.Module,
             cast(object, self.embedding_projections[codebook]),
         )
-        value = embedding(ids)
+        value = embedding(codes)
         return projection(value)
 
     def forward(
         self,
         condition: Tensor,
-        acoustic_labels: Tensor | None = None,
+        target_acoustic_codes: Tensor | None = None,
     ) -> tuple[Tensor, ...]:
         """Return one teacher-forced ``[B, F, K_q]`` tensor per codebook."""
         self._validate_condition(condition)
-        if acoustic_labels is not None:
-            if acoustic_labels.shape != (
+        if target_acoustic_codes is not None:
+            if target_acoustic_codes.shape != (
                 condition.size(0),
                 condition.size(1),
                 self.codebooks,
             ):
-                raise ValueError("acoustic_labels must have shape [B, F, codebooks].")
-            if bool((acoustic_labels < 0).any()):
-                raise ValueError("acoustic_labels cannot contain padding values.")
+                raise ValueError("target_acoustic_codes must have shape [B, F, codebooks].")
+            if bool((target_acoustic_codes < 0).any()):
+                raise ValueError("target_acoustic_codes cannot contain padding values.")
 
         condition_hidden = self.condition(condition)
         inputs = [condition_hidden + self.codebook_bos[0]]
         for codebook in range(1, self.codebooks):
-            if acoustic_labels is None:
+            if target_acoustic_codes is None:
                 previous = torch.zeros(
                     condition.shape[:2], dtype=torch.long, device=condition.device
                 )
             else:
-                previous = acoustic_labels[..., codebook - 1].clamp_min(0)
+                previous = target_acoustic_codes[..., codebook - 1].clamp_min(0)
             inputs.append(
                 condition_hidden
                 + self.codebook_bos[codebook]
@@ -232,17 +239,19 @@ class AcousticRVQDecoder(nn.Module):
         return torch.stack(output, dim=-1)
 
 
-class SpeechToSpeechRVQModel(SemanticModel):
-    """Semantic model composition using a discrete RVQ acoustic decoder."""
+class SpeechToSpeechRVQModel(TokenModel):
+    """Speech-to-speech composition using a discrete RVQ acoustic decoder."""
 
     def __init__(
         self,
-        config=None,
-        runtime_snapshot=None,
+        config: Config | None = None,
         *,
+        runtime: TokenModelRuntime,
+        decoder: DecoderConfig | None = None,
         codebook_embeddings: Sequence[Tensor] | None = None,
     ) -> None:
-        super().__init__(config=config, runtime_snapshot=runtime_snapshot)
+        super().__init__(config=config, runtime=runtime)
+        options = decoder_options(decoder)
         sizes = self.runtime.codec.acoustic_codebook_sizes
         backbone_weight = self.backbone.get_input_embeddings().weight
         self.acoustic_decoder = AcousticRVQDecoder(
@@ -250,23 +259,23 @@ class SpeechToSpeechRVQModel(SemanticModel):
             len(sizes),
             sizes,
             codebook_embeddings=codebook_embeddings,
-            hidden_dim=self.config.acoustic_decoder_dim,
-            layers=self.config.acoustic_decoder_layers,
-            heads=self.config.acoustic_decoder_heads,
-            ffn_ratio=self.config.acoustic_decoder_ffn_ratio,
+            hidden_dim=options["hidden_dim"],
+            layers=options["layers"],
+            heads=options["heads"],
+            ffn_ratio=options["ffn_ratio"],
         ).to(device=backbone_weight.device, dtype=backbone_weight.dtype)
 
     def acoustic_logits(
         self,
         hidden_states: Tensor,
         target_positions: Tensor,
-        acoustic_labels: Tensor | None = None,
+        target_acoustic_codes: Tensor | None = None,
     ) -> tuple[Tensor, ...]:
         condition = self.target_frame_condition(hidden_states, target_positions)
-        return self.acoustic_decoder(condition, acoustic_labels)
+        return self.acoustic_decoder(condition, target_acoustic_codes)
 
     @torch.no_grad()
-    def sample_acoustic(
+    def sample_acoustic_codes(
         self,
         condition: Tensor,
         *,
@@ -282,46 +291,60 @@ class SpeechToSpeechRVQModel(SemanticModel):
         )
 
     @torch.no_grad()
-    def generate_audio(
+    def sample_acoustic_features(
+        self,
+        condition: Tensor,
+        *,
+        mask: Tensor | None = None,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        generator: torch.Generator | None = None,
+    ) -> Tensor:
+        codes = self.sample_acoustic_codes(
+            condition,
+            temperature=temperature,
+            top_p=top_p,
+            generator=generator,
+        )
+        features = self.acoustic_code_features(codes)
+        if mask is not None:
+            features = features.masked_fill(~mask[..., None], 0)
+        return features
+
+    @torch.no_grad()
+    def generate_audio_features(
         self,
         prompt_ids: Tensor,
         *,
         max_new_tokens: int,
         temperature: float = 1.0,
         top_p: float = 1.0,
-        acoustic_input_ids: Tensor | None = None,
-        acoustic_input_positions: Tensor | None = None,
-        acoustic_input_mask: Tensor | None = None,
+        acoustic_prompt_codes: Tensor | None = None,
+        acoustic_prompt_positions: Tensor | None = None,
+        acoustic_prompt_mask: Tensor | None = None,
         prompt_attention_mask: Tensor | None = None,
         do_sample: bool = True,
         use_cache: bool = True,
     ) -> tuple[Tensor, Tensor]:
-        generated, condition, spans = self._generate(
+        generated, condition, frame_mask = self.generate_audio_condition(
             prompt_ids,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
-            acoustic_input_ids=acoustic_input_ids,
-            acoustic_input_positions=acoustic_input_positions,
-            acoustic_input_mask=acoustic_input_mask,
+            acoustic_prompt_codes=acoustic_prompt_codes,
+            acoustic_prompt_positions=acoustic_prompt_positions,
+            acoustic_prompt_mask=acoustic_prompt_mask,
             prompt_attention_mask=prompt_attention_mask,
-            stop_token_id=self.runtime.eoa_token_id,
-            generation_modality=Modality.AUDIO,
-            allowed_token_ids=None,
             do_sample=do_sample,
             use_cache=use_cache,
-            collect_audio_condition=True,
         )
-        if condition is None or spans is None:
-            raise ValueError(
-                "semantic generation produced no codec-decodable audio tokens."
-            )
-        codes = self.sample_acoustic(
+        features = self.sample_acoustic_features(
             condition,
+            mask=frame_mask,
             temperature=temperature,
             top_p=top_p,
         )
-        return generated, self._acoustic_features(codes)
+        return generated, features
 
 
 def _heads(hidden_dim: int, requested: int) -> int:

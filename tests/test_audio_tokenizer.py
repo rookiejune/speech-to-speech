@@ -48,10 +48,15 @@ class TorchCodecBPETest(unittest.TestCase):
             vocab_size=5,
         )
         tokenizer = TorchCodecBPE.wrap(base)
+        frames = [[1], [2], [3]]
+        token_ids = base.encode(frames)
 
-        self.assertEqual(tokenizer.encode([[1], [2], [3]]), [4])
-        self.assertEqual(tokenizer.decode([4]), [(1,), (2,), (3,)])
-        self.assertEqual(tokenizer.frame_spans([4]), [3])
+        self.assertEqual(tokenizer.encode(frames), token_ids)
+        self.assertEqual(tokenizer.decode(token_ids), base.decode(token_ids))
+        self.assertEqual(
+            tokenizer.frame_spans(token_ids),
+            [len(base.decode([token_id])) for token_id in token_ids],
+        )
 
 
 if __name__ == "__main__":

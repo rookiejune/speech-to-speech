@@ -138,6 +138,14 @@ class _UnifiedCodecContract:
 class Runtime:
     config: Config
 
+    @property
+    def codec_name(self) -> str:
+        return self.config.codec
+
+    @property
+    def audio_view(self) -> AudioView:
+        return self.config.audio_view
+
     @cached_property
     def text_tokenizer(self) -> TextTokenizer:
         tokenizer = AutoTokenizer.from_pretrained(self.config.backbone)
@@ -269,13 +277,6 @@ def init_runtime(config: Config) -> Runtime:
         _runtime = Runtime(config=config)
     elif _runtime.config != config:
         raise RuntimeError("runtime is already initialized with a different config.")
-    return _runtime
-
-
-def runtime() -> Runtime:
-    global _runtime
-    if _runtime is None:
-        raise RuntimeError("runtime is not initialized")
     return _runtime
 
 

@@ -103,7 +103,7 @@ class TorchCodecBPE(CodecBPE):
         return spans
 
 
-def semantic_ids_from_audio_tokens(
+def semantic_codes_from_audio_tokens(
     audio_tokenizer: AudioTokenizer,
     audio_token_ids: Sequence[int] | Tensor,
 ) -> Tensor:
@@ -112,7 +112,7 @@ def semantic_ids_from_audio_tokens(
     device = audio_token_ids.device if isinstance(audio_token_ids, Tensor) else None
     if isinstance(decoded, Tensor):
         if decoded.dim() != 2:
-            raise ValueError("decoded semantic ids must have shape [frames, codebooks].")
+            raise ValueError("decoded semantic codes must have shape [frames, codebooks].")
         return decoded.to(device=device, dtype=torch.long)
 
     frames: list[Tensor] = []
@@ -139,7 +139,7 @@ def _single_code(frame: Sequence[int]) -> int:
     if len(frame) != 1:
         raise ValueError(
             "identity audio tokenizer requires one semantic code per frame; "
-            "configure a CodecBPE tokenizer for multi-codebook semantic ids."
+            "configure a CodecBPE tokenizer for multi-codebook semantic codes."
         )
     return int(frame[0])
 
@@ -171,4 +171,8 @@ def _validate_ids(ids: Tensor, name: str) -> None:
         raise TypeError(f"{name} must contain integer ids.")
 
 
-__all__ = ["NativeAudioTokenizer", "TorchCodecBPE", "semantic_ids_from_audio_tokens"]
+__all__ = [
+    "NativeAudioTokenizer",
+    "TorchCodecBPE",
+    "semantic_codes_from_audio_tokens",
+]

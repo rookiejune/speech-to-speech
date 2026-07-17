@@ -1,5 +1,1 @@
 name: longcat
-view: longcat
-decoder: 16k_4codebooks
-cache_dir:
-local_files_only: false

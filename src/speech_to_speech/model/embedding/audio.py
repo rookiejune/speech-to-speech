@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import cached_property
 from typing import Protocol
 
 import torch
@@ -13,13 +14,13 @@ _EMBEDDING_CHUNK_SIZE = 2_048
 
 
 class _Runtime(Protocol):
-    @property
+    @cached_property
     def audio_tokenizer(self) -> AudioTokenizer: ...
 
-    @property
+    @cached_property
     def backbone(self) -> Backbone: ...
 
-    @property
+    @cached_property
     def codec(self) -> Codec: ...
 
 

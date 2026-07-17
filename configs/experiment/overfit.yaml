@@ -1,8 +1,8 @@
 # @package _global_
 defaults:
   - /codec: longcat
-  - /acoustic: dit
-  - /data: wmt19_tts
+  - /acoustic: flow
+  - /data: wmt19_tts_fixed
   - /runtime: default
   - /optimizer: sft
   - /flow: default
@@ -12,7 +12,7 @@ defaults:
   - _self_
 
 task: tts
-output_dir: ${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech/002-single-batch-overfit/${task}/${acoustic.name}-${acoustic.decoder.layers}l
+output_dir: ${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech/002-single-batch-overfit/${task}/${acoustic.type}-${acoustic.decoder.layers}l
 
 callbacks:
   sample:

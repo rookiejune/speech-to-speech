@@ -26,13 +26,11 @@ from speech_to_speech.datamodule.collator import Collator
 from speech_to_speech.callback import WorldSizeContract
 from speech_to_speech.datamodule.module import Config as DataConfig
 from speech_to_speech.datamodule.module import DataModule
+from speech_to_speech.datamodule.parser import _parse_audio_item, parse_sample
 from speech_to_speech.datamodule.types import (
     Language,
     ModelBatch,
-    Sample,
-    SpeechPair,
-    Task,
-    _parse_audio_item,
+    ModelSample,
 )
 from speech_to_speech.callback.stage import Config as StageConfig
 from speech_to_speech.callback.stage import StageSwitcher
@@ -40,7 +38,8 @@ from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model import SpeechToSpeechFlowModel
 from speech_to_speech.runtime.singleton import Config, Runtime
 from speech_to_speech.runtime.singleton import _audio_tokenizer, _dtype
-from speech_to_speech.runtime.audio_tokenizer import TorchCodecBPE
+from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer, TorchCodecBPE
+from speech_to_speech.task import Task
 from scripts.overfit import FixedDataModule, build_trainer, run, runtime_config
 
 
@@ -59,10 +58,13 @@ class _Tokenizer:
 class ContractTest(unittest.TestCase):
     def test_trainer_presets_have_one_composable_schema(self):
         configs = [
-            _compose("experiment=acoustic_oracle"),
-            _compose("experiment=overfit"),
-            _compose("experiment=overfit", "trainer=ddp"),
-            _compose("experiment=acoustic_oracle_ddp_lba"),
+            _compose(config_name="codec_oracle"),
+            _compose(),
+            _compose("trainer=ddp"),
+            _compose(
+                "experiment=acoustic_oracle_ddp_lba",
+                config_name="codec_oracle",
+            ),
         ]
         expected = {
             "accelerator",
@@ -95,7 +97,6 @@ class ContractTest(unittest.TestCase):
         trainer,
     ):
         config = _compose(
-            "experiment=overfit",
             "trainer=ddp",
             "trainer.max_epochs=-1",
             "trainer.precision=bf16-mixed",
@@ -125,7 +126,18 @@ class ContractTest(unittest.TestCase):
         self.assertIsNone(runtime_config.audio_tokenizer)
         self.assertIsNone(runtime_config.device)
         self.assertEqual(model_config.semantic_audio_adapter, "linear")
-        self.assertIsNone(model_config.acoustic_decoder_dim)
+        self.assertEqual(model_config.acoustic_prompt_adapter, "linear")
+
+    def test_acoustic_presets_expose_only_supported_options(self):
+        flow = _compose()
+        rvq = _compose("acoustic=rvq")
+
+        self.assertEqual(flow.acoustic.type, "flow")
+        self.assertEqual(flow.acoustic.repa.teacher_layer, 9)
+        self.assertIn("student_layer", flow.acoustic.repa)
+        self.assertEqual(set(flow.codec), {"name"})
+        self.assertEqual(rvq.acoustic.type, "rvq")
+        self.assertNotIn("repa", rvq.acoustic)
 
     def test_overfit_acoustic_branch_constructs_evaluation_on_py39(self):
         class EvaluationReached(Exception):
@@ -145,16 +157,16 @@ class ContractTest(unittest.TestCase):
                     "output_dir": output_dir,
                     "task": "tts",
                     "codec": {"name": "longcat"},
-                    "data": {"sample_index": 0},
+                    "data": {"root": None, "split": "train", "sample_index": 0},
                     "train": {"seed": 0, "max_steps": 1},
                     "optimizer": {
                         "learning_rate": 2e-5,
                         "weight_decay": 0.01,
                     },
                     "acoustic": {
-                        "objective": "flow",
+                        "type": "flow",
                         "decoder": {
-                            "dim": None,
+                            "hidden_dim": None,
                             "layers": 1,
                             "heads": 1,
                             "ffn_ratio": 1,
@@ -172,7 +184,7 @@ class ContractTest(unittest.TestCase):
             ), patch.object(
                 SpeechToSpeechFlowModel, "__init__", return_value=None
             ), patch(
-                "scripts.overfit.Loss"
+                "scripts.overfit.FlowObjective"
             ), patch(
                 "scripts.overfit.SpeechToSpeech"
             ), patch(
@@ -184,10 +196,10 @@ class ContractTest(unittest.TestCase):
     def test_task_is_the_modality_source_of_truth(self):
         self.assertIs(Task.S2ST.source_modality, Modality.AUDIO)
         self.assertIs(Task.S2ST.target_modality, Modality.AUDIO)
-        self.assertTrue(Task.S2ST.paired)
+        self.assertTrue(Task.S2ST.uses_source_role)
         self.assertIsNone(Task.AUDIO_AR.source_modality)
         self.assertIs(Task.ASR.target_modality, Modality.TEXT)
-        self.assertFalse(Task.TTS.paired)
+        self.assertFalse(Task.TTS.uses_source_role)
 
     def test_runtime_separates_audio_id_capabilities(self):
         rt = Runtime(Config())
@@ -205,16 +217,19 @@ class ContractTest(unittest.TestCase):
         item = AudioItem(
             views={AudioView.UNICODEC: torch.tensor([[1], [2], [3]])}
         )
-        with patch(
-            "speech_to_speech.datamodule.types.runtime",
-            return_value=SimpleNamespace(
-                config=SimpleNamespace(audio_view=AudioView.UNICODEC)
-            ),
-        ):
-            semantic, acoustic = _parse_audio_item(item)
+        semantic, acoustic = _parse_audio_item(item, AudioView.UNICODEC)
 
         self.assertTrue(torch.equal(semantic, torch.tensor([[1], [2], [3]])))
         self.assertIsNone(acoustic)
+
+    def test_parser_rejects_non_codec_audio_views(self):
+        item = AudioItem(
+            views={AudioView.WAVEFORM: torch.zeros(2, 2)},
+            meta={},
+        )
+
+        with self.assertRaisesRegex(ValueError, "unsupported codec audio view"):
+            _parse_audio_item(item, AudioView.WAVEFORM)
 
     @patch("speech_to_speech.runtime.singleton.AutoModelForCausalLM.from_pretrained")
     def test_backbone_loading_forwards_runtime_configuration(self, from_pretrained):
@@ -310,38 +325,37 @@ class ContractTest(unittest.TestCase):
         wrap.assert_called_once_with(tokenizer)
         self.assertIs(loaded, wrapped)
 
-    @patch("speech_to_speech.datamodule.types.runtime")
-    def test_raw_text_is_encoded_at_the_datamodule_boundary(self, runtime):
+    def test_raw_text_is_encoded_at_the_datamodule_boundary(self):
         tokenizer = _Tokenizer(10)
-        runtime.return_value = SimpleNamespace(
-            config=SimpleNamespace(audio_view=AudioView.LONGCAT),
+        runtime = SimpleNamespace(
+            audio_view=AudioView.LONGCAT,
             text_tokenizer=tokenizer,
+            audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
         )
         raw = _raw_sample()
 
-        pair = SpeechPair.from_raw(raw)
+        pair = parse_sample(raw, runtime)
 
-        self.assertTrue(torch.equal(pair.source.text_ids, torch.tensor([1, 2])))
+        self.assertTrue(
+            torch.equal(pair.source.text_token_ids, torch.tensor([1, 2]))
+        )
         self.assertIs(pair.source.language, Language.ZH)
         self.assertIs(pair.target.language, Language.EN)
-        self.assertEqual(pair.source.acoustic_ids.shape, (2, 1))
+        self.assertEqual(pair.source.acoustic_codes.shape, (2, 1))
         self.assertTrue(
-            torch.equal(pair.source.acoustic_ids, torch.tensor([[2], [3]]))
+            torch.equal(pair.source.acoustic_codes, torch.tensor([[2], [3]]))
         )
         self.assertEqual(tokenizer.encoded, ("target text", False))
 
-    @patch(
-        "speech_to_speech.datamodule.module.runtime",
-        return_value=SimpleNamespace(config=SimpleNamespace(codec="longcat")),
-    )
     @patch("zhuyin.datasets.wmt19_tts.wmt19_tts_codec")
-    def test_datamodule_setup_loads_dataset_once(self, load_dataset, _runtime):
+    def test_datamodule_setup_loads_dataset_once(self, load_dataset):
         load_dataset.return_value = []
         datamodule = DataModule(
             DataConfig(
                 codec="longcat",
                 dataloader={"batch_size": 1, "num_workers": 0},
             ),
+            SimpleNamespace(codec_name="longcat"),
             {Task.TTS: 1.0},
         )
 
@@ -350,16 +364,13 @@ class ContractTest(unittest.TestCase):
 
         load_dataset.assert_called_once_with(codec="longcat")
 
-    @patch(
-        "speech_to_speech.datamodule.module.runtime",
-        return_value=SimpleNamespace(config=SimpleNamespace(codec="longcat")),
-    )
-    def test_datamodule_rejects_runtime_codec_mismatch(self, _runtime):
+    def test_datamodule_rejects_runtime_codec_mismatch(self):
         datamodule = DataModule(
             DataConfig(
                 codec="unicodec",
                 dataloader={"batch_size": 1, "num_workers": 0},
             ),
+            SimpleNamespace(codec_name="longcat"),
             {Task.TTS: 1.0},
         )
 
@@ -370,84 +381,98 @@ class ContractTest(unittest.TestCase):
     def test_overfit_datamodule_repeats_only_the_selected_sample(self, load_dataset):
         samples = [object(), object()]
         load_dataset.return_value = samples
-        datamodule = FixedDataModule("longcat", {Task.TTS: 1.0}, sample_index=1)
+        datamodule = FixedDataModule(
+            "longcat",
+            SimpleNamespace(codec_name="longcat"),
+            {Task.TTS: 1.0},
+            sample_index=1,
+        )
         datamodule.collator = Mock(side_effect=lambda batch: batch)
 
         datamodule.setup()
         first_epoch = list(datamodule.train_dataloader())
         second_epoch = list(datamodule.train_dataloader())
 
-        load_dataset.assert_called_once_with(codec="longcat", split="train")
+        load_dataset.assert_called_once_with(
+            codec="longcat",
+            root=None,
+            split="train",
+        )
         self.assertEqual(first_epoch, [[samples[1]]])
         self.assertEqual(second_epoch, [[samples[1]]])
 
-    @patch(
-        "speech_to_speech.datamodule.types.runtime",
-        return_value=SimpleNamespace(pad_token_id=99),
-    )
-    def test_model_batch_rejects_mixed_execution_signatures(self, _runtime):
+    def test_overfit_datamodule_rejects_runtime_codec_mismatch(self):
+        datamodule = FixedDataModule(
+            "unicodec",
+            SimpleNamespace(codec_name="longcat"),
+            {Task.TTS: 1.0},
+            sample_index=0,
+        )
+
+        with self.assertRaisesRegex(ValueError, "same codec"):
+            datamodule.setup()
+
+    def test_model_batch_rejects_mixed_execution_signatures(self):
         samples = [
             _sample(Task.ASR),
             _sample(Task.TEXT_AR),
         ]
         with self.assertRaisesRegex(ValueError, "same source and target modalities"):
-            ModelBatch.from_samples(samples)
+            ModelBatch.from_samples(samples, pad_token_id=99)
 
-    @patch(
-        "speech_to_speech.datamodule.types.runtime",
-        return_value=SimpleNamespace(pad_token_id=99),
-    )
-    def test_model_batch_accepts_unified_audio_target(self, _runtime):
-        batch = ModelBatch.from_samples([_sample(Task.TTS)])
+    def test_model_batch_accepts_unified_audio_target(self):
+        batch = ModelBatch.from_samples([_sample(Task.TTS)], pad_token_id=99)
 
-        self.assertIsNone(batch.acoustic_labels)
-        self.assertIsNone(batch.acoustic_label_positions)
+        self.assertIsNone(batch.target_acoustic_codes)
+        self.assertIsNone(batch.target_audio_token_positions)
 
-    def test_collator_updates_the_existing_strategy(self):
-        collator = Collator({Task.TTS: 1.0, Task.T2ST: 1.0})
+    def test_collator_updates_the_existing_task_weights(self):
+        collator = Collator(Mock(), {Task.TTS: 1.0, Task.T2ST: 1.0})
         original = collator
         self.assertEqual(set(collator.tasks), {Task.TTS, Task.T2ST})
 
-        collator.set_strategy({Task.ASR: 1.0, Task.S2TT: 1.0})
+        collator.set_task_weights({Task.ASR: 1.0, Task.S2TT: 1.0})
 
         self.assertIs(collator, original)
         self.assertEqual(set(collator.tasks), {Task.ASR, Task.S2TT})
 
-    def test_stage_switcher_restores_the_strategy_from_current_epoch(self):
-        strategies = [{Task.TTS: 1.0}, {Task.ASR: 1.0}, {Task.TEXT_AR: 1.0}]
-        datamodule = SimpleNamespace(set_strategy=Mock())
+    def test_stage_switcher_restores_task_weights_from_current_epoch(self):
+        task_weights = [{Task.TTS: 1.0}, {Task.ASR: 1.0}, {Task.TEXT_AR: 1.0}]
+        datamodule = SimpleNamespace(set_task_weights=Mock())
         trainer = SimpleNamespace(datamodule=datamodule, current_epoch=3)
-        switcher = StageSwitcher(StageConfig(strategies, milestones=[2, 4]))
+        switcher = StageSwitcher(
+            StageConfig(task_weights, epoch_milestones=[2, 4])
+        )
 
         switcher.on_fit_start(trainer, Mock())
         switcher.on_train_epoch_end(trainer, Mock())
 
         self.assertEqual(
-            datamodule.set_strategy.call_args_list,
-            [unittest.mock.call(strategies[1]), unittest.mock.call(strategies[2])],
+            datamodule.set_task_weights.call_args_list,
+            [unittest.mock.call(task_weights[1]), unittest.mock.call(task_weights[2])],
         )
 
 
-def _sample(task: Task) -> Sample:
-    return Sample(
+def _sample(task: Task) -> ModelSample:
+    return ModelSample(
         input_ids=torch.tensor([1, 2]),
-        labels=torch.tensor([-100, 2]),
-        acoustic_input_ids=None,
-        acoustic_input_positions=None,
-        semantic_frame_labels=None,
-        acoustic_labels=None,
-        acoustic_label_positions=None,
+        token_labels=torch.tensor([-100, 2]),
+        acoustic_prompt_codes=None,
+        acoustic_prompt_positions=None,
+        target_semantic_codes=None,
+        target_acoustic_codes=None,
+        target_audio_token_positions=None,
         task=task,
     )
 
 
-def _compose(*overrides: str) -> DictConfig:
+def _compose(*overrides: str, config_name: str = "overfit") -> DictConfig:
     root = Path(__file__).parents[1]
     with initialize_config_dir(
         version_base=None,
         config_dir=str(root / "configs"),
     ):
-        return compose(config_name="config", overrides=list(overrides))
+        return compose(config_name=config_name, overrides=list(overrides))
 
 
 def _raw_sample():

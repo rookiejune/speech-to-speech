@@ -1,11 +1,6 @@
-name: rvq
-objective: rvq
+type: rvq
 decoder:
-  dim:
+  hidden_dim:
   layers: 8
   heads: 8
   ffn_ratio: 4
-repa:
-  weight:
-  teacher: microsoft/wavlm-base
-  layer: 9

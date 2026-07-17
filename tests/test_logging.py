@@ -67,12 +67,12 @@ class LoggingTest(unittest.TestCase):
         outputs = Outputs(
             loss=torch.ones(()),
             flow_matching=item,
-            semantic=item,
+            token=item,
         )
 
         self.assertEqual(
             [name for name, _ in loss_items(outputs)],
-            ["semantic", "flow_matching"],
+            ["token", "flow_matching"],
         )
 
 

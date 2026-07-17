@@ -21,10 +21,10 @@ def evaluate(
 ) -> dict[str, float]:
     batch = device_batch(batch, next(model.parameters()).device)
     if (
-        batch.acoustic_labels is None
-        or batch.acoustic_label_positions is None
-        or batch.semantic_frame_labels is None
-        or batch.acoustic_target_mask is None
+        batch.target_acoustic_codes is None
+        or batch.target_audio_token_positions is None
+        or batch.target_semantic_codes is None
+        or batch.target_acoustic_mask is None
     ):
         raise RuntimeError("acoustic evaluation requires complete target fields")
     if batch.input_ids.size(0) != 1:
@@ -33,21 +33,21 @@ def evaluate(
     was_training = model.training
     model.eval()
     try:
-        hidden_states = model.semantic_hidden(
+        hidden_states = model.token_hidden_states(
             batch.input_ids,
             attention_mask=batch.attention_mask,
-            acoustic_input_ids=batch.acoustic_input_ids,
-            acoustic_input_positions=batch.acoustic_input_positions,
-            acoustic_input_mask=batch.acoustic_input_mask,
+            acoustic_prompt_codes=batch.acoustic_prompt_codes,
+            acoustic_prompt_positions=batch.acoustic_prompt_positions,
+            acoustic_prompt_mask=batch.acoustic_prompt_mask,
         )
         condition = model.target_frame_condition(
-            hidden_states, batch.acoustic_label_positions
+            hidden_states, batch.target_audio_token_positions
         )
-        safe_labels = batch.acoustic_labels.clamp_min(0)
-        target = codec.acoustic_codes_to_features(safe_labels)
-        mask = batch.acoustic_target_mask
+        safe_codes = batch.target_acoustic_codes.clamp_min(0)
+        target = codec.acoustic_codes_to_features(safe_codes)
+        mask = batch.target_acoustic_mask
         valid = mask[0]
-        semantic = batch.semantic_frame_labels[0, valid].unsqueeze(0)
+        semantic = batch.target_semantic_codes[0, valid].unsqueeze(0)
         target = target[0, valid].unsqueeze(0)
         reference = mono(codec.decode_features(semantic, target))
 
@@ -57,11 +57,11 @@ def evaluate(
             if condition.is_cuda:
                 torch.cuda.synchronize(condition.device)
             started = time.perf_counter()
-            if isinstance(model, SpeechToSpeechFlowModel):
-                sampled = model.acoustic_flow.sample(condition, generator=generator)
-            else:
-                codes = model.sample_acoustic(condition, generator=generator)
-                sampled = codec.acoustic_codes_to_features(codes)
+            sampled = model.sample_acoustic_features(
+                condition,
+                mask=mask,
+                generator=generator,
+            )
             if condition.is_cuda:
                 torch.cuda.synchronize(condition.device)
             elapsed = time.perf_counter() - started
@@ -90,13 +90,14 @@ def device_batch(batch: ModelBatch, device: torch.device) -> ModelBatch:
 
     return ModelBatch(
         input_ids=cast_tensor(move(batch.input_ids)),
-        labels=cast_tensor(move(batch.labels)),
-        acoustic_input_ids=move(batch.acoustic_input_ids),
-        acoustic_input_positions=move(batch.acoustic_input_positions),
-        semantic_frame_labels=move(batch.semantic_frame_labels),
-        acoustic_labels=move(batch.acoustic_labels),
-        acoustic_label_positions=move(batch.acoustic_label_positions),
+        token_labels=cast_tensor(move(batch.token_labels)),
+        acoustic_prompt_codes=move(batch.acoustic_prompt_codes),
+        acoustic_prompt_positions=move(batch.acoustic_prompt_positions),
+        target_semantic_codes=move(batch.target_semantic_codes),
+        target_acoustic_codes=move(batch.target_acoustic_codes),
+        target_audio_token_positions=move(batch.target_audio_token_positions),
         tasks=batch.tasks,
+        pad_token_id=batch.pad_token_id,
     )
 
 

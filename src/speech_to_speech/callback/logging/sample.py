@@ -7,7 +7,8 @@ from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 
 from ...datamodule import DataModule
-from ...pl_module.generation import Request, Result, requests_from_batch
+from ...generation import Request, Result
+from ...generation.batch import requests_from_batch
 from .._lightning import attached_datamodule, audio_experiment, text_experiment
 
 
@@ -65,6 +66,6 @@ class SampleLogger(Callback):
             elif text_writer is not None:
                 text_writer.add_text(
                     f"sample/{index}",
-                    " ".join(str(value) for value in result["token_ids"].tolist()),
+                    " ".join(str(value) for value in result["response_ids"].tolist()),
                     trainer.global_step,
                 )

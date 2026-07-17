@@ -1,6 +1,1 @@
 name: unicodec
-view: unicodec
-cache_dir:
-domain: "0"
-bandwidth_id: 0
-local_files_only: false

@@ -18,15 +18,18 @@ from anytrain.idspace import Layout
 from torch import Tensor, nn
 
 from speech_to_speech.datamodule.collator import Collator
-from speech_to_speech.datamodule.types import Task
-from speech_to_speech.loss import Loss
-from speech_to_speech.model.acoustic import SpeechToSpeechFlowModel
+from speech_to_speech.loss import FlowObjective
+from speech_to_speech.model.acoustic import (
+    SpeechToSpeechFlowModel,
+    SpeechToSpeechRVQModel,
+)
 from speech_to_speech.model.base import Config as ModelConfig
-from speech_to_speech.pl_module.decode import (
+from speech_to_speech.generation import (
     decode_generated_audio,
     decode_generated_codes,
 )
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
+from speech_to_speech.task import Task
 
 
 class _TextTokenizer:
@@ -126,9 +129,24 @@ class _FlowRuntime:
         return SimpleNamespace(final=torch.zeros_like(x_0))
 
 
+class _Teacher:
+    feature_dim = 3
+
+    def __call__(
+        self,
+        semantic_codes: Tensor,
+        acoustic_codes: Tensor,
+        mask: Tensor,
+    ) -> Tensor:
+        del semantic_codes, acoustic_codes
+        return torch.ones(mask.shape + (self.feature_dim,), device=mask.device)
+
+
 class _Runtime:
     def __init__(self) -> None:
         self.config = SimpleNamespace(audio_view=AudioView.LONGCAT)
+        self.codec_name = "longcat"
+        self.audio_view = AudioView.LONGCAT
         self.text_tokenizer = _TextTokenizer()
         self.audio_tokenizer = NativeAudioTokenizer(vocab_size=8)
         self.codec = _Codec()
@@ -148,127 +166,197 @@ class _Runtime:
 class FakeClosureTest(unittest.TestCase):
     def test_flow_model_uses_runtime_sampler(self):
         rt = _Runtime()
-        with _runtime(rt):
-            model = SpeechToSpeechFlowModel(
-                ModelConfig(
-                    semantic_audio_adapter=None,
-                    semantic_audio_output_adapter=None,
-                    acoustic_prompt_adapter=None,
-                ),
-                runtime_snapshot=rt,
-            )
-            output = model.sample_acoustic(torch.zeros(2, 3, 4))
+        model = SpeechToSpeechFlowModel(
+            ModelConfig(
+                semantic_audio_adapter=None,
+                semantic_audio_output_adapter=None,
+                acoustic_prompt_adapter=None,
+            ),
+            runtime=rt,
+        )
+        output = model.sample_acoustic_features(torch.zeros(2, 3, 4))
 
         self.assertTrue(rt.flow_matching.sampled)
         self.assertEqual(output.shape, (2, 3, 4))
 
+    def test_flow_repa_config_closes_model_and_objective(self):
+        rt = _Runtime()
+        batch = Collator(rt, {Task.TTS: 1.0})([_raw_sample(0)])
+        model = SpeechToSpeechFlowModel(
+            ModelConfig(
+                semantic_audio_adapter=None,
+                semantic_audio_output_adapter=None,
+                acoustic_prompt_adapter=None,
+            ),
+            runtime=rt,
+            decoder={
+                "hidden_dim": 4,
+                "layers": 1,
+                "heads": 1,
+                "ffn_ratio": 2,
+            },
+            repa={"feature_dim": 3, "student_layer": 1},
+        )
+        objective = FlowObjective(
+            rt.layout,
+            rt.flow_matching,
+            repa={"weight": 0.1, "teacher": _Teacher()},
+        )
+
+        outputs = objective(batch, model)
+
+        self.assertIn("repa", outputs)
+        self.assertTrue(torch.isfinite(outputs["loss"]))
+        self.assertEqual(model.acoustic_decoder.repa_student_layer, 1)
+        self.assertIsNotNone(model.acoustic_decoder.repa_projection)
+
+    def test_rvq_model_generates_acoustic_features(self):
+        torch.manual_seed(0)
+        rt = _Runtime()
+        model = SpeechToSpeechRVQModel(
+            ModelConfig(
+                semantic_audio_adapter=None,
+                semantic_audio_output_adapter=None,
+                acoustic_prompt_adapter=None,
+            ),
+            runtime=rt,
+            decoder={
+                "hidden_dim": 4,
+                "layers": 1,
+                "heads": 1,
+                "ffn_ratio": 2,
+            },
+        ).eval()
+
+        def audio_logits(hidden_states: Tensor, local_ids=None) -> Tensor:
+            self.assertIsNone(local_ids)
+            logits = hidden_states.new_full(
+                (*hidden_states.shape[:-1], 10),
+                float("-inf"),
+            )
+            logits[..., 0] = 0
+            return logits
+
+        with patch.object(model, "semantic_audio_logits", side_effect=audio_logits):
+            generated, features = model.generate_audio_features(
+                torch.tensor([[1, 2]]),
+                max_new_tokens=2,
+                do_sample=False,
+                use_cache=False,
+            )
+
+        self.assertTrue(
+            torch.equal(generated, torch.tensor([[1, 2, 32, 32]]))
+        )
+        self.assertEqual(features.shape, (1, 2, rt.codec.acoustic_feature_dim))
+        self.assertTrue(torch.isfinite(features).all())
+
     def test_all_tasks_build_expected_model_batches(self):
         rt = _Runtime()
-        with _runtime(rt):
-            for task in Task:
-                with self.subTest(task=task.value):
-                    batch = Collator({task: 1.0})([_raw_sample(0), _raw_sample(1)])
+        for task in Task:
+            with self.subTest(task=task.value):
+                batch = Collator(rt, {task: 1.0})(
+                    [_raw_sample(0), _raw_sample(1)]
+                )
 
-                    self.assertEqual(batch.tasks, [task, task])
-                    self.assertEqual(batch.input_ids.shape, batch.labels.shape)
+                self.assertEqual(batch.tasks, [task, task])
+                self.assertEqual(batch.input_ids.shape, batch.token_labels.shape)
+                self.assertEqual(
+                    batch.acoustic_prompt_codes is not None,
+                    task.source_modality is Modality.AUDIO,
+                )
+                self.assertEqual(
+                    batch.target_acoustic_codes is not None,
+                    task.target_modality is Modality.AUDIO,
+                )
+                if task.target_modality is Modality.AUDIO:
+                    supervised = batch.token_labels[0].ne(-100).nonzero().flatten()
+                    first = int(supervised[0])
+                    last = int(supervised[-1])
                     self.assertEqual(
-                        batch.acoustic_input_ids is not None,
-                        task.source_modality is Modality.AUDIO,
+                        int(batch.input_ids[0, first - 1]), rt.boa_token_id
                     )
-                    self.assertEqual(
-                        batch.acoustic_labels is not None,
-                        task.target_modality is Modality.AUDIO,
-                    )
-                    if task.target_modality is Modality.AUDIO:
-                        supervised = batch.labels[0].ne(-100).nonzero().flatten()
-                        first = int(supervised[0])
-                        last = int(supervised[-1])
-                        self.assertEqual(int(batch.input_ids[0, first - 1]), rt.boa_token_id)
-                        self.assertEqual(int(batch.input_ids[0, last]), rt.eoa_token_id)
+                    self.assertEqual(int(batch.input_ids[0, last]), rt.eoa_token_id)
 
     def test_all_task_paths_forward_backward_and_update_parameters(self):
         for task in Task:
             with self.subTest(task=task.value):
                 torch.manual_seed(0)
                 rt = _Runtime()
-                with _runtime(rt):
-                    batch = Collator({task: 1.0})([_raw_sample(0), _raw_sample(1)])
-                    model = SpeechToSpeechFlowModel(
-                        ModelConfig(
-                            semantic_audio_adapter=None,
-                            semantic_audio_output_adapter=None,
-                            acoustic_prompt_adapter=None,
-                        ),
-                        runtime_snapshot=rt,
-                    )
-                    loss = Loss(rt.layout, rt.flow_matching)
-                    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-                    before = {
-                        name: parameter.detach().clone()
+                batch = Collator(rt, {task: 1.0})(
+                    [_raw_sample(0), _raw_sample(1)]
+                )
+                model = SpeechToSpeechFlowModel(
+                    ModelConfig(
+                        semantic_audio_adapter=None,
+                        semantic_audio_output_adapter=None,
+                        acoustic_prompt_adapter=None,
+                    ),
+                    runtime=rt,
+                )
+                loss = FlowObjective(rt.layout, rt.flow_matching)
+                optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+                before = {
+                    name: parameter.detach().clone()
+                    for name, parameter in model.named_parameters()
+                }
+
+                outputs = loss(batch, model)
+                optimizer.zero_grad()
+                outputs["loss"].backward()
+                optimizer.step()
+
+                self.assertTrue(torch.isfinite(outputs["loss"]))
+                self.assertEqual(
+                    "flow_matching" in outputs,
+                    task.target_modality is Modality.AUDIO,
+                )
+                self.assertTrue(
+                    any(
+                        not torch.equal(before[name], parameter.detach())
                         for name, parameter in model.named_parameters()
-                    }
-
-                    outputs = loss(batch, model)
-                    optimizer.zero_grad()
-                    outputs["loss"].backward()
-                    optimizer.step()
-
-                    self.assertTrue(torch.isfinite(outputs["loss"]))
-                    self.assertEqual(
-                        "flow_matching" in outputs,
-                        task.target_modality is Modality.AUDIO,
                     )
-                    self.assertTrue(
-                        any(
-                            not torch.equal(before[name], parameter.detach())
-                            for name, parameter in model.named_parameters()
-                        )
-                    )
+                )
 
     def test_fake_semantic_and_acoustic_outputs_decode_to_waveform(self):
         rt = _Runtime()
-        with _runtime(rt):
-            batch = Collator({Task.TTS: 1.0})([_raw_sample(0)])
-            model = SpeechToSpeechFlowModel(
-                ModelConfig(
-                    semantic_audio_adapter=None,
-                    semantic_audio_output_adapter=None,
-                    acoustic_prompt_adapter=None,
-                ),
-                runtime_snapshot=rt,
-            )
-            labels = batch.labels[0]
-            start, end = rt.codec_audio_range
-            semantic = labels[labels.ge(start) & labels.lt(end)][None]
-            assert batch.acoustic_labels is not None
-            features = model.acoustic_target_latent(batch.acoustic_labels)
-            self.assertEqual(
-                features.dtype,
-                rt.backbone.get_input_embeddings().weight.dtype,
-            )
+        batch = Collator(rt, {Task.TTS: 1.0})([_raw_sample(0)])
+        model = SpeechToSpeechFlowModel(
+            ModelConfig(
+                semantic_audio_adapter=None,
+                semantic_audio_output_adapter=None,
+                acoustic_prompt_adapter=None,
+            ),
+            runtime=rt,
+        )
+        labels = batch.token_labels[0]
+        start, end = rt.codec_audio_range
+        semantic = labels[labels.ge(start) & labels.lt(end)][None]
+        assert batch.target_acoustic_codes is not None
+        features = model.acoustic_target_latent(batch.target_acoustic_codes)
+        self.assertEqual(
+            features.dtype,
+            rt.backbone.get_input_embeddings().weight.dtype,
+        )
 
-            waveform = decode_generated_audio(
-                semantic,
-                features,
-                codec=rt.codec,
-                audio_tokenizer=rt.audio_tokenizer,
-                audio_token_range=rt.codec_audio_range,
-            )
+        waveform = decode_generated_audio(
+            semantic,
+            features,
+            codec=rt.codec,
+            audio_tokenizer=rt.audio_tokenizer,
+            audio_token_range=rt.codec_audio_range,
+        )
 
-            self.assertEqual(waveform.shape, (1, 3))
-            self.assertTrue(torch.isfinite(waveform).all())
-            decoded_codes = decode_generated_codes(
-                semantic,
-                batch.acoustic_labels,
-                codec=rt.codec,
-                audio_tokenizer=rt.audio_tokenizer,
-                audio_token_range=rt.codec_audio_range,
-            )
-            self.assertTrue(torch.equal(decoded_codes, waveform))
-
-
-def _runtime(rt: _Runtime):
-    return patch("speech_to_speech.runtime.singleton._runtime", rt)
+        self.assertEqual(waveform.shape, (1, 3))
+        self.assertTrue(torch.isfinite(waveform).all())
+        decoded_codes = decode_generated_codes(
+            semantic,
+            batch.target_acoustic_codes,
+            codec=rt.codec,
+            audio_tokenizer=rt.audio_tokenizer,
+            audio_token_range=rt.codec_audio_range,
+        )
+        self.assertTrue(torch.equal(decoded_codes, waveform))
 
 
 def _raw_sample(offset: int):

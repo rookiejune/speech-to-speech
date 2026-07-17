@@ -8,9 +8,10 @@ import torch.nn.functional as F
 from anydataset.types import Modality
 from torch import Tensor
 
-from ..datamodule.types import Task
-from ..model.protocol import GenerationRuntime, SemanticGeneration
-from .generation import Request, generate
+from ..task import Task
+from .protocol import GenerationRuntime, TextEvaluationModel
+from .service import generate
+from .types import Request
 
 
 class TextProbe(TypedDict):
@@ -26,7 +27,7 @@ class TextProbeResult(TypedDict):
 @torch.no_grad()
 def evaluate_text(
     probes: Mapping[str, TextProbe],
-    model: SemanticGeneration,
+    model: TextEvaluationModel,
     *,
     max_new_tokens: int,
 ) -> dict[str, TextProbeResult]:
@@ -53,7 +54,7 @@ def evaluate_text(
     results: dict[str, TextProbeResult] = {}
     for (name, probe), generation in zip(probes.items(), generations):
         results[name] = TextProbeResult(
-            generated=_decode(runtime, generation["token_ids"]),
+            generated=_decode(runtime, generation["response_ids"]),
             nll=_reference_nll(model, prompts[name], probe["reference"]),
         )
     return results
@@ -72,7 +73,7 @@ def _prompt_ids(runtime: GenerationRuntime, instruction: str) -> Tensor:
 
 
 def _reference_nll(
-    model: SemanticGeneration,
+    model: TextEvaluationModel,
     prompt_ids: Tensor,
     reference: str,
 ) -> float:
@@ -88,12 +89,12 @@ def _reference_nll(
     )
     device = model.backbone.get_input_embeddings().weight.device
     input_ids = torch.cat((prompt_ids, response_ids)).to(device=device)[None]
-    hidden_states = model.semantic_hidden(
+    hidden_states = model.token_hidden_states(
         input_ids,
         attention_mask=torch.ones_like(input_ids, dtype=torch.bool),
     )
     predictors = hidden_states[0, prompt_ids.numel() - 1 : -1]
-    prediction = model.semantic_logits(predictors)[..., text_start:text_end].float()
+    prediction = model.token_logits(predictors)[..., text_start:text_end].float()
     target = input_ids[0, prompt_ids.numel() :] - text_start
     return float(F.cross_entropy(prediction, target).detach().cpu())
 

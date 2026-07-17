@@ -6,7 +6,7 @@ from torch import Tensor, nn
 from .types import LossItem
 
 
-class SemanticLoss(nn.Module):
+class TokenLoss(nn.Module):
     def __init__(self, layout: Layout) -> None:
         super().__init__()
         self.layout = layout
@@ -14,18 +14,16 @@ class SemanticLoss(nn.Module):
     def forward(
         self,
         hidden_states: Tensor,
-        labels: Tensor,
-        logits: Callable[[Tensor], Tensor],
+        token_labels: Tensor,
+        token_logits: Callable[[Tensor], Tensor],
     ) -> LossItem:
-        if hidden_states.dim() != 3 or labels.dim() != 2:
+        if hidden_states.dim() != 3 or token_labels.dim() != 2:
             raise ValueError(
-                "semantic hidden states and labels must have shapes [B, T, H] and [B, T]."
+                "token hidden states and labels must have shapes [B, T, H] and [B, T]."
             )
-        if hidden_states.shape[:2] != labels.shape:
-            raise ValueError(
-                "semantic hidden states and labels must align on batch and sequence."
-            )
-        target = labels[:, 1:]
+        if hidden_states.shape[:2] != token_labels.shape:
+            raise ValueError("token hidden states and labels must align on sequence.")
+        target = token_labels[:, 1:]
         prediction = hidden_states[:, :-1]
 
         valid = target.ne(-100)
@@ -39,10 +37,10 @@ class SemanticLoss(nn.Module):
             )
         selected_target = target[valid]
         if selected_target.numel() == 0:
-            raise ValueError("semantic labels must contain at least one target token.")
-        selected_logits = logits(prediction[valid])
+            raise ValueError("token labels must contain at least one target token.")
+        selected_logits = token_logits(prediction[valid])
         if selected_logits.shape != (selected_target.numel(), self.layout.vocab_size):
-            raise ValueError("semantic logits do not match selected targets and layout.")
+            raise ValueError("token logits do not match selected targets and layout.")
         selected_loss = nn.functional.cross_entropy(
             selected_logits,
             selected_target,

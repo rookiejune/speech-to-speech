@@ -11,10 +11,10 @@ from anytrain.idspace import Layout
 from torch import Tensor, nn
 
 from speech_to_speech.callback.logging import TextRetentionLogger
-from speech_to_speech.datamodule.types import Task
-from speech_to_speech.loss import SemanticObjective
+from speech_to_speech.task import Task
+from speech_to_speech.loss import TokenObjective
+from speech_to_speech.generation import Result
 from speech_to_speech.pl_module import Config, SpeechToSpeech
-from speech_to_speech.pl_module.generation import Result
 
 
 class _Tokenizer:
@@ -56,11 +56,11 @@ class _Model(nn.Module):
             logits=torch.zeros(*input_ids.shape, 10, device=input_ids.device)
         )
 
-    def semantic_hidden(self, input_ids: Tensor, **kwargs) -> Tensor:
+    def token_hidden_states(self, input_ids: Tensor, **kwargs) -> Tensor:
         del kwargs
         return torch.zeros(*input_ids.shape, 4, device=input_ids.device)
 
-    def semantic_logits(self, hidden_states: Tensor) -> Tensor:
+    def token_logits(self, hidden_states: Tensor) -> Tensor:
         return torch.zeros(hidden_states.size(0), 10, device=hidden_states.device)
 
 
@@ -79,22 +79,22 @@ PROBES = {
 class TextRetentionTest(unittest.TestCase):
     def test_objective_is_registered_as_a_child_module(self):
         model = _Model()
-        objective = SemanticObjective(model.runtime.layout)
+        objective = TokenObjective(model.runtime.layout)
 
         module = SpeechToSpeech(Config(), model=model, objective=objective)
 
         self.assertIs(dict(module.named_children())["objective"], objective)
 
-    def test_t2tt_is_paired_text_to_text(self):
+    def test_t2tt_uses_source_role_for_text_to_text(self):
         self.assertIs(Task.T2TT.source_modality, Modality.TEXT)
         self.assertIs(Task.T2TT.target_modality, Modality.TEXT)
-        self.assertTrue(Task.T2TT.paired)
+        self.assertTrue(Task.T2TT.uses_source_role)
 
-    @patch("speech_to_speech.pl_module.text.generate")
+    @patch("speech_to_speech.generation.text.generate")
     def test_module_evaluates_greedy_generation_and_text_only_nll(self, generate):
         generate.return_value = [
             Result(
-                token_ids=torch.tensor([5, 6]),
+                response_ids=torch.tensor([5, 6]),
                 audio=None,
             )
             for _ in PROBES

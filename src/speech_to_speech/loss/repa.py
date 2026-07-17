@@ -18,8 +18,8 @@ class Teacher(Protocol):
 
     def __call__(
         self,
-        semantic_ids: Tensor,
-        acoustic_ids: Tensor,
+        semantic_codes: Tensor,
+        acoustic_codes: Tensor,
         mask: Tensor,
     ) -> Tensor: ...
 
@@ -60,18 +60,21 @@ class WavLMTeacher(nn.Module):
     @torch.no_grad()
     def forward(
         self,
-        semantic_ids: Tensor,
-        acoustic_ids: Tensor,
+        semantic_codes: Tensor,
+        acoustic_codes: Tensor,
         mask: Tensor,
     ) -> Tensor:
-        if semantic_ids.shape[:2] != acoustic_ids.shape[:2]:
+        if semantic_codes.shape[:2] != acoustic_codes.shape[:2]:
             raise ValueError("teacher semantic and acoustic codes must align")
-        if mask.shape != semantic_ids.shape[:2]:
+        if mask.shape != semantic_codes.shape[:2]:
             raise ValueError("teacher mask must align with codec frames")
 
         waveforms = [
             self._waveform(
-                torch.cat((semantic_ids[row, valid], acoustic_ids[row, valid]), dim=-1)
+                torch.cat(
+                    (semantic_codes[row, valid], acoustic_codes[row, valid]),
+                    dim=-1,
+                )
             )
             for row, valid in enumerate(mask)
         ]

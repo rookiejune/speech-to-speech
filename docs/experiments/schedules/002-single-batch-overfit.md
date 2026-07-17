@@ -1,7 +1,7 @@
 # 002 Single Batch Overfit
 
-配置从公共 Hydra 根组合，正式入口为 `experiment=overfit`。job 后追加参数使用 Hydra
-override，例如 `train.max_steps=10 optimizer.learning_rate=2e-5`。
+正式入口使用 `configs/overfit.yaml` 组合实验配置。job 后追加参数使用 Hydra override，
+例如 `train.max_steps=10 optimizer.learning_rate=2e-5`。
 
 ## 目标
 

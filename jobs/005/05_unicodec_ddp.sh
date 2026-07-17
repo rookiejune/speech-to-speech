@@ -10,7 +10,6 @@ export PYTHONUNBUFFERED=1
 cd "${SPEECH_TO_SPEECH_ROOT}"
 echo '{"event":"job.launch","codec":"unicodec","strategy":"ddp","lba":false}'
 "${SPEECH_TO_SPEECH_UNICODEC_PYTHON}" scripts/overfit.py \
-  experiment=overfit \
   trainer=ddp \
   trainer.max_epochs=-1 \
   trainer.precision=bf16-mixed \

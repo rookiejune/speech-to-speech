@@ -15,7 +15,7 @@ class AcousticDiTTest(unittest.TestCase):
     def test_repa_projection_is_only_registered_when_configured(self):
         model = AcousticDiT(6, 4, hidden_dim=8, layers=2, heads=2)
 
-        self.assertIsNone(model.repa)
+        self.assertIsNone(model.repa_projection)
         with self.assertRaisesRegex(RuntimeError, "not configured"):
             model.forward_with_features(
                 torch.randn(1, 2, 4),
@@ -48,7 +48,7 @@ class AcousticDiTTest(unittest.TestCase):
             layers=2,
             heads=2,
             ffn_ratio=2,
-            repa_dim=6,
+            repa_feature_dim=6,
         )
 
     def test_shapes_and_backward(self):
@@ -131,8 +131,8 @@ class AcousticDiTTest(unittest.TestCase):
             layers=8,
             heads=2,
             ffn_ratio=2,
-            repa_dim=5,
-            repa_layer=4,
+            repa_feature_dim=5,
+            repa_student_layer=4,
         )
         captured: list[Tensor] = []
         handle = model.blocks[3].register_forward_hook(
@@ -147,7 +147,10 @@ class AcousticDiTTest(unittest.TestCase):
         finally:
             handle.remove()
 
-        torch.testing.assert_close(representation, model.repa(captured[0]))
+        torch.testing.assert_close(
+            representation,
+            model.repa_projection(captured[0]),
+        )
 
     def test_wavlm_teacher_uses_layer_nine_and_aligns_frames(self):
         wavlm = _WavLM()

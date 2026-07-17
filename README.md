@@ -6,21 +6,24 @@ decoding experiments.
 The main training path is:
 
 ```text
-raw sample -> datamodule -> ModelBatch -> model -> Loss -> Lightning module
+raw sample -> datamodule -> ModelBatch -> model + objective -> Lightning module
 ```
 
 `runtime` supplies the shared tokenizer, codec, backbone, vocabulary layout,
-and flow runtime used along that path. Real inference uses an independent
-`Request -> Result` generation interface instead of an incomplete
-`ModelBatch`.
+and flow runtime used along that path. `loss` exposes the explicit
+`TokenObjective`, `FlowObjective`, and `RVQObjective` training
+compositions. `generation` owns the independent `Request -> Result` inference
+interface, batching, text evaluation, and waveform decode instead of treating
+an incomplete `ModelBatch` as a request.
 
 ## Entry Points
 
-- `scripts/overfit.py`: fixed-sample TTS/S2ST overfit and callback smoke tests.
+- `scripts/overfit.py`: fixed-sample TTS/S2ST overfit and callback smoke tests;
+  its Hydra root is `configs/overfit.yaml`.
 - `scripts/generation_smoke.py`: cached versus full-recompute S2ST generation
-  check.
+  and variable-batch generation checks using the public `generation` package.
 - `scripts/codec_oracle.py`: Hydra entry point for codec oracle experiments;
-  configuration starts at `configs/config.yaml`.
+  its Hydra root is `configs/codec_oracle.yaml`.
 - `jobs/`: machine-aware wrappers for formal experiment runs. Each wrapper
   invokes one of the Python entry points directly and forwards extra arguments.
 
@@ -30,8 +33,8 @@ and flow runtime used along that path. Real inference uses an independent
   ownership, training, and generation contracts.
 - [`docs/design/`](docs/design/): public capabilities and boundaries of each
   module.
-- [`docs/experiments/todo.md`](docs/experiments/todo.md): current implementation
-  status and remaining validation work.
+- [`docs/experiments/todo.md`](docs/experiments/todo.md): remaining validation
+  work and engineering debt.
 - [`docs/experiments/schedules/`](docs/experiments/schedules/): experiment plans.
 - [`docs/experiments/results/`](docs/experiments/results/): results corresponding
   to those plans.

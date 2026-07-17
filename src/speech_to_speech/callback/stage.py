@@ -8,25 +8,31 @@ from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 
 from ._lightning import attached_datamodule
-from ..datamodule import DataModule, Task
+from ..datamodule import DataModule
+from ..task import Task
 
 
 @dataclass(frozen=True)
 class Config:
-    strategies: list[dict[Task, float]]
-    milestones: list[int]
+    task_weights_by_stage: list[dict[Task, float]]
+    epoch_milestones: list[int]
 
 
 class StageSwitcher(Callback):
     def __init__(self, config: Config) -> None:
         super().__init__()
 
-        if len(config.strategies) != len(config.milestones) + 1:
-            raise ValueError("len(strategies) should be len(milestones) + 1")
-        if any(milestone < 1 for milestone in config.milestones) or (
-            config.milestones != sorted(set(config.milestones))
+        if len(config.task_weights_by_stage) != len(config.epoch_milestones) + 1:
+            raise ValueError(
+                "task_weights_by_stage must contain one more item than epoch_milestones"
+            )
+        if any(milestone < 1 for milestone in config.epoch_milestones) or (
+            config.epoch_milestones
+            != sorted(set(config.epoch_milestones))
         ):
-            raise ValueError("milestones must be positive and strictly increasing")
+            raise ValueError(
+                "epoch_milestones must be positive and strictly increasing"
+            )
 
         self.config = config
         self._stage: int | None = None
@@ -39,7 +45,7 @@ class StageSwitcher(Callback):
         del pl_module
         self._set_stage(
             trainer,
-            bisect_right(self.config.milestones, trainer.current_epoch),
+            bisect_right(self.config.epoch_milestones, trainer.current_epoch),
         )
 
     def on_train_epoch_end(
@@ -51,7 +57,7 @@ class StageSwitcher(Callback):
         finished_epochs = trainer.current_epoch + 1
         self._set_stage(
             trainer,
-            bisect_right(self.config.milestones, finished_epochs),
+            bisect_right(self.config.epoch_milestones, finished_epochs),
         )
 
     def _set_stage(self, trainer: Trainer, stage: int) -> None:
@@ -59,4 +65,4 @@ class StageSwitcher(Callback):
             return
         self._stage = stage
         datamodule = cast(DataModule, attached_datamodule(trainer))
-        datamodule.set_strategy(self.config.strategies[stage])
+        datamodule.set_task_weights(self.config.task_weights_by_stage[stage])

@@ -1,0 +1,10 @@
+defaults:
+  - experiment: overfit
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${output_dir}/hydra
+  output_subdir: config

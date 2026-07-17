@@ -9,9 +9,10 @@ from torch import Tensor
 
 from scripts._acoustic_evaluation import evaluate
 from speech_to_speech.callback.logging.sample import SampleLogger
-from speech_to_speech.datamodule import ModelBatch, Task
+from speech_to_speech.datamodule import ModelBatch
 from speech_to_speech.model.acoustic import AcousticRVQDecoder
-from speech_to_speech.pl_module.generation import Result
+from speech_to_speech.generation import Result
+from speech_to_speech.task import Task
 
 
 class _RandomGenerationModule:
@@ -23,7 +24,7 @@ class _RandomGenerationModule:
         torch.rand(4)
         if self.use_cuda:
             torch.rand(4, device=torch.device("cuda", torch.cuda.current_device()))
-        return [Result(token_ids=torch.tensor([1]), audio=None)]
+        return [Result(response_ids=torch.tensor([1]), audio=None)]
 
 
 class _EvaluationModel:
@@ -43,7 +44,7 @@ class _EvaluationModel:
         self.training = mode
         return self
 
-    def semantic_hidden(self, input_ids: Tensor, **kwargs: object) -> Tensor:
+    def token_hidden_states(self, input_ids: Tensor, **kwargs: object) -> Tensor:
         del input_ids, kwargs
         return torch.zeros(1, 2, 3)
 
@@ -53,9 +54,14 @@ class _EvaluationModel:
         del hidden_states, target_positions
         return torch.zeros(1, 2, 3)
 
-    def sample_acoustic(
-        self, condition: Tensor, *, generator: torch.Generator
+    def sample_acoustic_features(
+        self,
+        condition: Tensor,
+        *,
+        mask: Tensor | None = None,
+        generator: torch.Generator,
     ) -> Tensor:
+        del mask
         self.generator_seeds.append(generator.initial_seed())
         return torch.rand(
             (*condition.shape[:2], 1),
@@ -105,13 +111,13 @@ class RNGCallbackTest(unittest.TestCase):
         batch = SimpleNamespace(
             input_ids=torch.ones(1, 2, dtype=torch.long),
             attention_mask=torch.ones(1, 2, dtype=torch.bool),
-            acoustic_input_ids=None,
-            acoustic_input_positions=None,
-            acoustic_input_mask=None,
-            acoustic_labels=torch.zeros(1, 2, 1, dtype=torch.long),
-            acoustic_label_positions=torch.zeros(1, 2, dtype=torch.long),
-            semantic_frame_labels=torch.zeros(1, 2, 1, dtype=torch.long),
-            acoustic_target_mask=torch.ones(1, 2, dtype=torch.bool),
+            acoustic_prompt_codes=None,
+            acoustic_prompt_positions=None,
+            acoustic_prompt_mask=None,
+            target_acoustic_codes=torch.zeros(1, 2, 1, dtype=torch.long),
+            target_audio_token_positions=torch.zeros(1, 2, dtype=torch.long),
+            target_semantic_codes=torch.zeros(1, 2, 1, dtype=torch.long),
+            target_acoustic_mask=torch.ones(1, 2, dtype=torch.bool),
         )
         torch.manual_seed(123)
         before = torch.random.get_rng_state().clone()
@@ -154,13 +160,14 @@ class RNGCallbackTest(unittest.TestCase):
 def sample_logger_fixture() -> tuple[SampleLogger, object]:
     batch = ModelBatch(
         input_ids=torch.tensor([[1, 2]]),
-        labels=torch.tensor([[-100, 2]]),
-        acoustic_input_ids=None,
-        acoustic_input_positions=None,
-        semantic_frame_labels=None,
-        acoustic_labels=None,
-        acoustic_label_positions=None,
+        token_labels=torch.tensor([[-100, 2]]),
+        acoustic_prompt_codes=None,
+        acoustic_prompt_positions=None,
+        target_semantic_codes=None,
+        target_acoustic_codes=None,
+        target_audio_token_positions=None,
         tasks=[Task.T2TT],
+        pad_token_id=0,
     )
     experiment = SimpleNamespace(add_text=Mock())
     trainer = SimpleNamespace(

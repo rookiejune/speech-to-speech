@@ -1,68 +1,106 @@
 # loss
 
-组合训练 objective，消费 `ModelBatch` 和模型公开接口，产出含标量 `loss` 的 mapping。position 语义见 [总览 §2.4](../model-design.md)。
+组合训练 objective，消费 `ModelBatch` 和模型公开接口，产出含标量 `loss` 的 mapping。
+position 语义见 [总览 §2.4](../model-design.md)。
 
 ## 对外能力
 
 - `Objective[ModelT]`：统一描述 model/objective 配对的泛型 `nn.Module` 契约，确保 objective
   的参数和子模块参与设备迁移、checkpoint 与 DDP。
-- `SemanticObjective`：semantic-only 组合入口；`Loss`：flow objective 组合入口；
-  `RVQLoss`：离散 acoustic objective 组合入口。三者的 `forward(batch, model)` 都返回含标量
-  总损失的 `Outputs`，直接满足 Lightning 训练契约。
-- `SemanticLoss`：按 layout 对 text/audio token 分别统计 CE，`-100` 不参与计算；shift 在此完成，
-  并只把有效 `hidden[:, :-1]` 交给 model 的 global-logits 能力。
+- `TokenObjective`：只组合 text/audio token CE；`FlowObjective`：组合 token CE、
+  acoustic flow matching 和可选 REPA；`RVQObjective`：组合 token CE 与 acoustic RVQ CE。
+  三者的 `forward(batch, model)` 都返回含标量总损失的 `Outputs`，直接满足 Lightning
+  训练契约。
+- `TokenLoss`：按 layout 对 text/audio token 分别统计 CE，`-100` 不参与计算；causal
+  shift 在此完成，只把有效 predictor hidden states 交给 model 的 `token_logits()`。
 - `AcousticFlowLoss`：frame-mask 的 velocity objective，只在有效 acoustic frame 上计算；
   启用 REPA 时通过 `forward_with_features()` 复用同一次 DiT 前向。
 - `CausalAcousticLoss`：对每个 RVQ codebook 计算 masked CE，再在 codebook 维等权平均；
   acoustic padding ID 不进入 decoder embedding 或 loss。
-- `WavLMTeacher`：在线解码完整 target codec codes，以 16 kHz waveform 运行冻结的
-  `microsoft/wavlm-base`，取 `hidden_states[9]` 并插值到有效 acoustic frame 轴。
-- `RepaLoss`：把 DiT 第 4 个 block 的逐帧表示投影到 WavLM hidden dimension，与
-  stop-gradient teacher feature 计算 masked cosine distance。
+- `WavLMTeacher`：在线解码完整 target semantic/acoustic codes，以 16 kHz waveform 运行冻结
+  WavLM，取得配置层的 hidden states 并插值到有效 acoustic frame 轴。
+- `RepaLoss`：把选定 DiT block 的逐帧表示投影到 WavLM hidden dimension，与
+  stop-gradient teacher features 计算 masked cosine distance。
 - `types.LossItem` / `types.Outputs`：上层日志与训练消费的稳定结构。
-- `types.loss_items()`：按 semantic、flow matching、REPA、causal LM 的稳定顺序遍历实际
-  存在的分项，供 callback 和实验 summary 复用。
+- `types.loss_items()`：按 token、flow matching、REPA、RVQ 的稳定顺序遍历实际存在的
+  分项，供 callback 和实验 summary 复用。
 
 ## Objective 组合
 
+三个组合入口共享 token forward：
+
 ```python
-def forward(self, batch: ModelBatch, model) -> Outputs:
-    hidden_states = model.semantic_hidden(
-        batch.input_ids,
-        attention_mask=batch.attention_mask,
-        acoustic_input_ids=batch.acoustic_input_ids,
-        acoustic_input_positions=batch.acoustic_input_positions,
-        acoustic_input_mask=batch.acoustic_input_mask,
-    )
-    semantic = self.semantic(hidden_states, batch.labels, model.semantic_logits)
-    # 存在 acoustic target fields 的 batch：
-    #   condition = model.target_frame_condition(
-    #       hidden_states, batch.acoustic_label_positions)
-    #   model 内部把 token 位置 p 转为 predictor 位置 p - 1。
+hidden_states = model.token_hidden_states(
+    batch.input_ids,
+    attention_mask=batch.attention_mask,
+    acoustic_prompt_codes=batch.acoustic_prompt_codes,
+    acoustic_prompt_positions=batch.acoustic_prompt_positions,
+    acoustic_prompt_mask=batch.acoustic_prompt_mask,
+)
+token = self.token(
+    hidden_states,
+    batch.token_labels,
+    model.token_logits,
+)
+result = {"loss": token.loss.mean(), "token": token}
 ```
 
-正常训练的 objective 组合固定为：所有 batch 计算 semantic CE；存在 acoustic target fields
-时额外计算模型对应的 acoustic objective。Loss 根据结构化 target fields 选择路径，不通过
-task modality 猜测 codec representation，也不通过布尔开关表达组合。
+存在独立 acoustic target codes 时，flow 与 RVQ 入口再执行各自分支：
 
-`SemanticObjective` 只计算 semantic CE，不要求 model 提供 acoustic objective 接口。
-`Loss` 固定组合 semantic CE 与 flow matching；传入包含正数 `weight` 和 `teacher` 的
-`RepaConfig` 时显式加入 REPA。`RVQLoss` 固定组合 semantic CE 与 codebook causal CE。
-训练入口显式选择 model/objective 对，不在 objective 内按具体模型类型猜组合。REPA 只属于
-flow 组合；teacher 通过结构化接口注入，dataset 不绑定 WavLM 型号或层号。
+```python
+# FlowObjective
+condition = model.target_frame_condition(
+    hidden_states,
+    batch.target_audio_token_positions,
+)
+target = model.acoustic_target_latent(batch.target_acoustic_codes)
+acoustic = self.flow_matching(
+    model.acoustic_decoder,
+    condition,
+    target,
+    batch.target_acoustic_mask,
+    self.flow_runtime,
+)
 
-oracle 等 diagnostic 使用独立 objective/入口。REPA 通过数值权重表达目标组合，不新增
-模式布尔开关；未传权重时不计算。启用 acoustic objective 的 batch 必须携带完整 target 字段；
-缺失直接报错，不静默跳过。
+# RVQObjective
+teacher_forced_codes = batch.target_acoustic_codes.masked_fill(
+    ~batch.target_acoustic_mask[..., None],
+    0,
+)
+logits = model.acoustic_logits(
+    hidden_states,
+    batch.target_audio_token_positions,
+    teacher_forced_codes,
+)
+rvq = self.rvq(logits, batch.target_acoustic_codes, batch.target_acoustic_mask)
+```
+
+所有 batch 都计算 token CE。是否增加 acoustic objective 只由
+`batch.target_acoustic_codes is not None` 决定，不通过 task modality 猜测 codec
+representation，也不通过模式布尔开关表达组合。结构化 target fields 不完整时直接报错。
+
+`TokenObjective` 不要求 model 提供 acoustic 能力。`FlowObjective` 固定组合 token CE 与
+flow matching；传入包含正数 `weight` 和 `teacher` 的 `RepaConfig` 时显式加入 REPA。
+`RVQObjective` 固定组合 token CE 与 codebook causal CE。训练入口显式选择 model/objective
+配对，不在 objective 内按具体模型类型猜组合。
+
+REPA 只属于 flow 组合。teacher 显式接收 `target_semantic_codes`、
+`target_acoustic_codes` 和 `target_acoustic_mask`；dataset 不绑定 WavLM 型号、层号或 teacher
+features。oracle 等 diagnostic 使用独立 objective/入口。
 
 ## 边界
 
-- `Loss` 不实现模型内部逻辑，只通过结构化 Protocol 的 `layout`、`semantic_hidden()`、
-  `semantic_logits()`、`target_frame_condition()`、`acoustic_decoder` 等公开能力读取监督所需表示，
-  不依赖具体模型类。
-- `SpeechToSpeech` 通过泛型 `Objective` 保留 model/objective 的配对类型，不在训练循环中 cast。
-- flow runtime 等 objective 资源在 Loss 构造时显式传入，不通过 `model.runtime` 向下读取。
+- `TokenObjective`、`FlowObjective` 和 `RVQObjective` 只依赖结构化 Protocol 的
+  `layout`、`token_hidden_states()`、`token_logits()`、`target_frame_condition()`、
+  `acoustic_decoder` 等公开能力，不依赖具体模型类。
+- target position 表示 token 自身位置 `p`；causal predictor shift `p - 1` 由 model 的
+  `target_frame_condition()` 统一处理，objective 不重复偏移。
+- `SpeechToSpeech` 通过泛型 `Objective` 保留 model/objective 的配对类型，不在训练循环中
+  cast。
+- flow runtime 等 objective 资源在 `FlowObjective` 构造时显式传入，不通过
+  `model.runtime` 向下读取。
 - 子 objective 在 `__init__` 中构造完毕，forward 不挂载新 submodule。
-- `causal_lm.py` 只实现离散 acoustic objective，不读取 model/runtime 或重复 condition 对齐。
-- REPA teacher 始终保持 eval/frozen；teacher feature detach，梯度只进入 DiT 与 student
+- `causal_lm.py` 只实现离散 acoustic RVQ objective，不读取 model/runtime 或重复 condition
+  对齐；其稳定输出键是 `rvq`。
+- REPA teacher 始终保持 eval/frozen；teacher features detach，梯度只进入 DiT 与 student
   projector。

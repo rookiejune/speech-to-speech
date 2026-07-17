@@ -2,21 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Sequence
-from typing import Any, Optional, cast
+from typing import Any, Optional
 
 import torch
 import torch.nn.functional as F
 from anydataset.types import Modality
 from torch import nn
-from torch.nn.utils.rnn import pad_sequence
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from ..runtime import Runtime, runtime
-from ._sampling import top_p_filter
+from ._generation import generate
 from .adapter import AdapterType, create_adapter
 from .embedding import create_semantic_audio_modules
 from .embedding.audio import merge_by_positions
-from .protocol import ModelRuntime
+from .protocol import TokenModelRuntime
 
 
 @dataclass
@@ -24,30 +22,21 @@ class Config:
     semantic_audio_adapter: Optional[AdapterType] = AdapterType.LINEAR
     semantic_audio_output_adapter: Optional[AdapterType] = AdapterType.LINEAR
     acoustic_prompt_adapter: Optional[AdapterType] = AdapterType.LINEAR
-    acoustic_decoder_dim: Optional[int] = None
-    acoustic_decoder_layers: int = 8
-    acoustic_decoder_heads: int = 8
-    acoustic_decoder_ffn_ratio: int = 4
-    acoustic_repa_dim: Optional[int] = None
-    acoustic_repa_layer: Optional[int] = None
 
 
-class SemanticModel(nn.Module):
-    """Shared loading, semantic modeling, and acoustic-prompt logic."""
+class TokenModel(nn.Module):
+    """Shared token modeling and acoustic-prompt logic."""
 
     def __init__(
         self,
         config: Config | None = None,
-        runtime_snapshot: Runtime | ModelRuntime | None = None,
+        *,
+        runtime: TokenModelRuntime,
     ) -> None:
         super().__init__()
 
         self.config = config or Config()
-        snapshot = runtime() if runtime_snapshot is None else runtime_snapshot
-        self.runtime = cast(
-            ModelRuntime,
-            cast(object, snapshot),
-        )
+        self.runtime = runtime
         self.layout = self.runtime.layout
         (
             self.semantic_audio_embedding,
@@ -127,7 +116,7 @@ class SemanticModel(nn.Module):
             weight = weight.index_select(0, local_ids)
         return F.linear(projected, weight)
 
-    def semantic_logits(self, hidden_state: torch.Tensor) -> torch.Tensor:
+    def token_logits(self, hidden_state: torch.Tensor) -> torch.Tensor:
         """Return logits in the complete global vocabulary."""
         logits = hidden_state.new_full(
             (*hidden_state.shape[:-1], self.runtime.layout.vocab_size),
@@ -170,12 +159,12 @@ class SemanticModel(nn.Module):
         if not bool((text_mask | audio_mask).all()):
             raise ValueError("selected token ids contain an invalid vocabulary id.")
         if bool(text_mask.any()):
-            text_ids = token_ids[text_mask] - text_start
-            logits[..., text_mask] = self.text_logits(hidden_state, text_ids)
+            text_token_ids = token_ids[text_mask] - text_start
+            logits[..., text_mask] = self.text_logits(hidden_state, text_token_ids)
         if bool(audio_mask.any()):
-            audio_ids = token_ids[audio_mask] - audio_start
+            audio_token_ids = token_ids[audio_mask] - audio_start
             logits[..., audio_mask] = self.semantic_audio_logits(
-                hidden_state, audio_ids
+                hidden_state, audio_token_ids
             )
         return logits
 
@@ -184,9 +173,9 @@ class SemanticModel(nn.Module):
         input_ids: torch.Tensor,
         *,
         attention_mask: torch.Tensor | None = None,
-        acoustic_input_ids: torch.Tensor | None = None,
-        acoustic_input_positions: torch.Tensor | None = None,
-        acoustic_input_mask: torch.Tensor | None = None,
+        acoustic_prompt_codes: torch.Tensor | None = None,
+        acoustic_prompt_positions: torch.Tensor | None = None,
+        acoustic_prompt_mask: torch.Tensor | None = None,
         output_hidden_states: bool = False,
         _generation_token_ids: torch.Tensor | None = None,
         _generation_modality: Modality | None = None,
@@ -197,9 +186,9 @@ class SemanticModel(nn.Module):
         backbone_output = self._backbone_output(
             input_ids,
             attention_mask=attention_mask,
-            acoustic_input_ids=acoustic_input_ids,
-            acoustic_input_positions=acoustic_input_positions,
-            acoustic_input_mask=acoustic_input_mask,
+            acoustic_prompt_codes=acoustic_prompt_codes,
+            acoustic_prompt_positions=acoustic_prompt_positions,
+            acoustic_prompt_mask=acoustic_prompt_mask,
             **kwargs,
         )
         hidden_states = backbone_output.last_hidden_state
@@ -213,7 +202,7 @@ class SemanticModel(nn.Module):
         elif _generation_token_ids is not None:
             logits = self._selected_logits(logit_hidden_states, _generation_token_ids)
         else:
-            logits = self.semantic_logits(logit_hidden_states)
+            logits = self.token_logits(logit_hidden_states)
         return CausalLMOutputWithPast(
             loss=None,
             logits=logits,  # pyright: ignore[reportArgumentType]
@@ -224,22 +213,22 @@ class SemanticModel(nn.Module):
             attentions=backbone_output.attentions,  # pyright: ignore[reportArgumentType]
         )
 
-    def semantic_hidden(
+    def token_hidden_states(
         self,
         input_ids: torch.Tensor,
         *,
         attention_mask: torch.Tensor | None = None,
-        acoustic_input_ids: torch.Tensor | None = None,
-        acoustic_input_positions: torch.Tensor | None = None,
-        acoustic_input_mask: torch.Tensor | None = None,
+        acoustic_prompt_codes: torch.Tensor | None = None,
+        acoustic_prompt_positions: torch.Tensor | None = None,
+        acoustic_prompt_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Encode one training batch without constructing vocabulary logits."""
         return self._backbone_output(
             input_ids,
             attention_mask=attention_mask,
-            acoustic_input_ids=acoustic_input_ids,
-            acoustic_input_positions=acoustic_input_positions,
-            acoustic_input_mask=acoustic_input_mask,
+            acoustic_prompt_codes=acoustic_prompt_codes,
+            acoustic_prompt_positions=acoustic_prompt_positions,
+            acoustic_prompt_mask=acoustic_prompt_mask,
             use_cache=False,
         ).last_hidden_state
 
@@ -248,24 +237,24 @@ class SemanticModel(nn.Module):
         input_ids: torch.Tensor,
         *,
         attention_mask: torch.Tensor | None,
-        acoustic_input_ids: torch.Tensor | None,
-        acoustic_input_positions: torch.Tensor | None,
-        acoustic_input_mask: torch.Tensor | None,
+        acoustic_prompt_codes: torch.Tensor | None,
+        acoustic_prompt_positions: torch.Tensor | None,
+        acoustic_prompt_mask: torch.Tensor | None,
         **kwargs: Any,
     ) -> Any:
         if input_ids.dim() != 2:
             raise ValueError("input_ids must have shape [batch, sequence].")
         inputs_embeds = self._input_embedding(input_ids)
-        if acoustic_input_ids is not None:
-            if acoustic_input_positions is None:
+        if acoustic_prompt_codes is not None:
+            if acoustic_prompt_positions is None:
                 raise ValueError(
-                    "acoustic_input_positions is required with acoustic_input_ids."
+                    "acoustic_prompt_positions is required with acoustic_prompt_codes."
                 )
             acoustic = self._acoustic_prompt_embedding(
                 input_ids,
-                acoustic_input_ids,
-                acoustic_input_positions,
-                acoustic_input_mask,
+                acoustic_prompt_codes,
+                acoustic_prompt_positions,
+                acoustic_prompt_mask,
             )
             inputs_embeds = inputs_embeds + acoustic
 
@@ -276,16 +265,16 @@ class SemanticModel(nn.Module):
             **kwargs,
         )
 
-    def generate_semantic(
+    def generate_tokens(
         self,
         prompt_ids: torch.Tensor,
         *,
         max_new_tokens: int,
         temperature: float = 1.0,
         top_p: float = 1.0,
-        acoustic_input_ids: torch.Tensor | None = None,
-        acoustic_input_positions: torch.Tensor | None = None,
-        acoustic_input_mask: torch.Tensor | None = None,
+        acoustic_prompt_codes: torch.Tensor | None = None,
+        acoustic_prompt_positions: torch.Tensor | None = None,
+        acoustic_prompt_mask: torch.Tensor | None = None,
         prompt_attention_mask: torch.Tensor | None = None,
         stop_token_id: int | None = None,
         generation_modality: Modality | None = None,
@@ -293,14 +282,15 @@ class SemanticModel(nn.Module):
         do_sample: bool = True,
         use_cache: bool = True,
     ) -> torch.Tensor:
-        generated, _, _ = self._generate(
+        generated, _, _ = generate(
+            self,
             prompt_ids,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
-            acoustic_input_ids=acoustic_input_ids,
-            acoustic_input_positions=acoustic_input_positions,
-            acoustic_input_mask=acoustic_input_mask,
+            acoustic_prompt_codes=acoustic_prompt_codes,
+            acoustic_prompt_positions=acoustic_prompt_positions,
+            acoustic_prompt_mask=acoustic_prompt_mask,
             prompt_attention_mask=prompt_attention_mask,
             stop_token_id=stop_token_id,
             generation_modality=generation_modality,
@@ -311,163 +301,48 @@ class SemanticModel(nn.Module):
         )
         return generated
 
-    def _generate(
+    def generate_audio_condition(
         self,
         prompt_ids: torch.Tensor,
         *,
         max_new_tokens: int,
-        temperature: float,
-        top_p: float,
-        acoustic_input_ids: torch.Tensor | None,
-        acoustic_input_positions: torch.Tensor | None,
-        acoustic_input_mask: torch.Tensor | None,
-        prompt_attention_mask: torch.Tensor | None,
-        stop_token_id: int | None,
-        generation_modality: Modality | None,
-        allowed_token_ids: Sequence[int] | torch.Tensor | None,
-        do_sample: bool,
-        use_cache: bool,
-        collect_audio_condition: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        if max_new_tokens < 0 or temperature <= 0 or not 0 < top_p <= 1:
-            raise ValueError("invalid generation parameters")
-        if generation_modality is not None and generation_modality not in {
-            Modality.TEXT,
-            Modality.AUDIO,
-        }:
-            raise ValueError(
-                f"unsupported generation modality: {generation_modality.value}"
-            )
-        if generation_modality is not None and allowed_token_ids is not None:
-            raise ValueError(
-                "generation modality and allowed token ids cannot both be provided."
-            )
-        if prompt_ids.dim() != 2 or prompt_ids.size(0) < 1:
-            raise ValueError("generation requires at least one prompt row.")
-        if prompt_attention_mask is None:
-            prompt_attention_mask = torch.ones_like(prompt_ids, dtype=torch.bool)
-        if prompt_attention_mask.shape != prompt_ids.shape:
-            raise ValueError("prompt attention mask must align with prompt ids.")
-        if not bool(prompt_attention_mask.any(dim=1).all()):
-            raise ValueError("each generation prompt must contain at least one token.")
-
-        generation_token_ids = None
-        if allowed_token_ids is not None:
-            generation_token_ids = torch.as_tensor(
-                allowed_token_ids,
-                device=prompt_ids.device,
-                dtype=torch.long,
-            )
-            if generation_token_ids.dim() != 1 or generation_token_ids.numel() == 0:
-                raise ValueError("allowed_token_ids must be a non-empty 1D sequence.")
-            if generation_token_ids.unique().numel() != generation_token_ids.numel():
-                raise ValueError("allowed_token_ids must not contain duplicates.")
-            text_start, text_end = self.runtime.layout.blocks["text"]
-            audio_start, audio_end = self.runtime.layout.blocks["audio"]
-            text_mask = generation_token_ids.ge(text_start) & generation_token_ids.lt(
-                text_end
-            )
-            audio_mask = generation_token_ids.ge(audio_start) & generation_token_ids.lt(
-                audio_end
-            )
-            if not bool((text_mask | audio_mask).all()):
-                raise ValueError("allowed_token_ids contains an invalid vocabulary id.")
-
-        prompt_width = prompt_ids.size(1)
-        capacity = prompt_width + max_new_tokens
-        generated = prompt_ids.new_empty(prompt_ids.size(0), capacity)
-        generated[:, :prompt_width] = prompt_ids
-        attention_mask = torch.zeros_like(generated, dtype=torch.bool)
-        attention_mask[:, :prompt_width] = prompt_attention_mask
-        length = prompt_width
-        input_ids = generated[:, :length]
-        past_key_values = None
-        condition_steps: list[torch.Tensor] = []
-        span_steps: list[torch.Tensor] = []
-        finished = torch.zeros(prompt_ids.size(0), dtype=torch.bool, device=prompt_ids.device)
-        for _ in range(max_new_tokens):
-            inject_acoustic = past_key_values is None
-            output = self(
-                input_ids,
-                attention_mask=attention_mask[:, :length],
-                acoustic_input_ids=acoustic_input_ids if inject_acoustic else None,
-                acoustic_input_positions=acoustic_input_positions
-                if inject_acoustic
-                else None,
-                acoustic_input_mask=acoustic_input_mask if inject_acoustic else None,
-                output_hidden_states=collect_audio_condition,
-                _generation_token_ids=generation_token_ids,
-                _generation_modality=generation_modality,
-                past_key_values=past_key_values,
-                use_cache=use_cache,
-            )
-            logits = output.logits[:, -1] / temperature
-            if top_p < 1.0:
-                logits = top_p_filter(logits, top_p)
-            next_indices = (
-                torch.distributions.Categorical(logits=logits).sample()
-                if do_sample
-                else logits.argmax(dim=-1)
-            )
-            if generation_token_ids is not None:
-                next_ids = generation_token_ids.index_select(0, next_indices)
-            elif generation_modality is not None:
-                start, _ = self.layout.blocks[generation_modality.value]
-                next_ids = next_indices + start
-            else:
-                next_ids = next_indices
-            next_ids = next_ids.unsqueeze(-1)
-
-            if collect_audio_condition:
-                if output.hidden_states is None:
-                    raise RuntimeError("model did not return generation hidden states.")
-                codec_start, codec_end = self.runtime.codec_audio_range
-                token_ids = next_ids[:, 0]
-                active = (
-                    ~finished & token_ids.ge(codec_start) & token_ids.lt(codec_end)
-                )
-                local_ids = (token_ids - codec_start).clamp(
-                    0, self.audio_token_frame_spans.numel() - 1
-                )
-                spans = self.audio_token_frame_spans.index_select(0, local_ids)
-                span_steps.append(spans.masked_fill(~active, 0))
-                condition_steps.append(output.hidden_states[-1][:, -1])
-
-            generated[:, length] = next_ids[:, 0]
-            length += 1
-            if stop_token_id is not None:
-                finished |= next_ids[:, 0].eq(stop_token_id)
-                if bool(finished.all()):
-                    break
-            if use_cache:
-                past_key_values = output.past_key_values
-                if past_key_values is None:
-                    raise RuntimeError("backbone did not return a generation cache.")
-                input_ids = next_ids
-            else:
-                input_ids = generated[:, :length]
-            attention_mask[:, length - 1] = True
-
-        generated = generated[:, :length]
-        if not span_steps:
-            return generated, None, None
-        frame_spans = torch.stack(span_steps, dim=1)
-        frame_counts = frame_spans.sum(dim=1)
-        if bool(frame_counts.eq(0).any()):
-            raise ValueError("an audio generation row produced no codec-decodable tokens.")
-        token_conditions = torch.stack(condition_steps, dim=1)
-        condition = pad_sequence(
-            [
-                torch.repeat_interleave(
-                    token_conditions[row],
-                    frame_spans[row],
-                    dim=0,
-                )
-                for row in range(prompt_ids.size(0))
-            ],
-            batch_first=True,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        acoustic_prompt_codes: torch.Tensor | None = None,
+        acoustic_prompt_positions: torch.Tensor | None = None,
+        acoustic_prompt_mask: torch.Tensor | None = None,
+        prompt_attention_mask: torch.Tensor | None = None,
+        do_sample: bool = True,
+        use_cache: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Generate audio tokens and their frame-aligned acoustic condition."""
+        generated, condition, frame_spans = generate(
+            self,
+            prompt_ids,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            acoustic_prompt_codes=acoustic_prompt_codes,
+            acoustic_prompt_positions=acoustic_prompt_positions,
+            acoustic_prompt_mask=acoustic_prompt_mask,
+            prompt_attention_mask=prompt_attention_mask,
+            stop_token_id=self.runtime.eoa_token_id,
+            generation_modality=Modality.AUDIO,
+            allowed_token_ids=None,
+            do_sample=do_sample,
+            use_cache=use_cache,
+            collect_audio_condition=True,
         )
-        return generated, condition, frame_spans
+        if condition is None or frame_spans is None:
+            raise ValueError(
+                "token generation produced no codec-decodable audio tokens."
+            )
+        frame_counts = frame_spans.sum(dim=1)
+        frame_mask = (
+            torch.arange(condition.size(1), device=condition.device)[None]
+            < frame_counts[:, None]
+        )
+        return generated, condition, frame_mask
 
     def target_frame_condition(
         self,
@@ -494,18 +369,20 @@ class SemanticModel(nn.Module):
 
     def target_frame_label_condition(
         self,
-        labels: torch.Tensor,
+        token_labels: torch.Tensor,
         target_positions: torch.Tensor,
     ) -> torch.Tensor:
-        """Embed teacher-forced semantic labels at target acoustic frames."""
-        if labels.dim() != 2 or target_positions.dim() != 2:
-            raise ValueError("labels and target positions must be [B, S] and [B, F].")
-        if labels.size(0) != target_positions.size(0):
-            raise ValueError("labels and target positions must align on batch.")
+        """Embed teacher-forced token labels at target acoustic frames."""
+        if token_labels.dim() != 2 or target_positions.dim() != 2:
+            raise ValueError(
+                "token labels and target positions must be [B, S] and [B, F]."
+            )
+        if token_labels.size(0) != target_positions.size(0):
+            raise ValueError("token labels and target positions must align on batch.")
 
-        valid = target_positions.ge(0) & target_positions.lt(labels.size(1))
-        safe_positions = target_positions.clamp(0, labels.size(1) - 1)
-        safe_labels = labels.gather(1, safe_positions)
+        valid = target_positions.ge(0) & target_positions.lt(token_labels.size(1))
+        safe_positions = target_positions.clamp(0, token_labels.size(1) - 1)
+        safe_labels = token_labels.gather(1, safe_positions)
         valid = valid & safe_labels.ne(-100)
         safe_labels = safe_labels.masked_fill(~valid, 0)
         condition = self._input_embedding(safe_labels)
@@ -517,39 +394,39 @@ class SemanticModel(nn.Module):
         text_mask = input_ids.ge(text_start) & input_ids.lt(text_end)
         audio_mask = input_ids.ge(audio_start) & input_ids.lt(audio_end)
         if not bool((text_mask | audio_mask).all()):
-            raise ValueError("semantic ids contain an id outside the runtime layout.")
+            raise ValueError("input token ids contain an id outside the runtime layout.")
         output = self.backbone.get_input_embeddings()(
             input_ids.clamp(text_start, text_end - 1) - text_start
         )
         if bool(audio_mask.any()):
-            audio_ids = input_ids[audio_mask] - audio_start
+            audio_token_ids = input_ids[audio_mask] - audio_start
             output[audio_mask] = self.semantic_audio_adapter(
-                self.semantic_audio_embedding(audio_ids)
+                self.semantic_audio_embedding(audio_token_ids)
             )
         return output
 
     def _acoustic_prompt_embedding(
         self,
         input_ids: torch.Tensor,
-        acoustic_input_ids: torch.Tensor,
-        positions: torch.Tensor,
+        acoustic_prompt_codes: torch.Tensor,
+        token_positions: torch.Tensor,
         frame_mask: torch.Tensor | None,
     ) -> torch.Tensor:
-        if acoustic_input_ids.dim() != 3 or positions.dim() != 2:
+        if acoustic_prompt_codes.dim() != 3 or token_positions.dim() != 2:
             raise ValueError("acoustic inputs must have shapes [B, F, M] and [B, F].")
-        if acoustic_input_ids.shape[:2] != positions.shape:
+        if acoustic_prompt_codes.shape[:2] != token_positions.shape:
             raise ValueError(
-                "acoustic ids and positions must align on batch and frame dimensions."
+                "acoustic codes and token positions must align on batch and frame."
             )
         if frame_mask is None:
-            frame_mask = (acoustic_input_ids != -1).all(dim=-1)
-        if frame_mask.shape != positions.shape:
-            raise ValueError("acoustic frame mask must align with acoustic positions.")
-        safe_ids = acoustic_input_ids.masked_fill(acoustic_input_ids == -1, 0)
-        frame_features = self._acoustic_features(safe_ids)
+            frame_mask = (acoustic_prompt_codes != -1).all(dim=-1)
+        if frame_mask.shape != token_positions.shape:
+            raise ValueError("acoustic frame mask must align with token positions.")
+        safe_codes = acoustic_prompt_codes.masked_fill(acoustic_prompt_codes == -1, 0)
+        frame_features = self.acoustic_code_features(safe_codes)
         frame_features, token_mask = merge_by_positions(
             frame_features,
-            positions,
+            token_positions,
             input_ids.size(1),
             frame_mask,
         )
@@ -559,20 +436,21 @@ class SemanticModel(nn.Module):
             dtype=frame_features.dtype
         )
 
-    def _acoustic_features(self, codes: torch.Tensor) -> torch.Tensor:
+    def acoustic_code_features(self, codes: torch.Tensor) -> torch.Tensor:
+        """Convert codec-local acoustic codes to model-aligned features."""
         features = self.runtime.codec.acoustic_codes_to_features(codes)
         weight = self.backbone.get_input_embeddings().weight
         return features.to(device=weight.device, dtype=weight.dtype)
 
 
-def _frame_span_lookup(runtime_snapshot: ModelRuntime) -> torch.Tensor:
+def _frame_span_lookup(runtime: TokenModelRuntime) -> torch.Tensor:
     spans = torch.as_tensor(
-        runtime_snapshot.audio_tokenizer.frame_spans(
-            range(runtime_snapshot.audio_tokenizer.vocab_size)
+        runtime.audio_tokenizer.frame_spans(
+            range(runtime.audio_tokenizer.vocab_size)
         ),
         dtype=torch.long,
     )
-    if spans.shape != (runtime_snapshot.audio_tokenizer.vocab_size,):
+    if spans.shape != (runtime.audio_tokenizer.vocab_size,):
         raise ValueError("audio token frame spans must cover the tokenizer vocabulary.")
     if bool((spans <= 0).any()):
         raise ValueError("audio token frame spans must be positive.")

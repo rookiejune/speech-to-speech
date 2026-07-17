@@ -7,7 +7,7 @@ from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 
 from .._lightning import scalar_experiment, text_experiment
-from ...pl_module.text import TextProbe, TextProbeResult
+from ...generation import TextProbe, TextProbeResult
 
 
 class _Module(Protocol):

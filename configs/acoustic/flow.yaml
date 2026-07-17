@@ -1,0 +1,12 @@
+type: flow
+normalize_features: true
+decoder:
+  hidden_dim:
+  layers: 8
+  heads: 8
+  ffn_ratio: 4
+repa:
+  weight:
+  teacher_checkpoint: microsoft/wavlm-base
+  teacher_layer: 9
+  student_layer:

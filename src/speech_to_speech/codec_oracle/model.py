@@ -49,12 +49,12 @@ class AcousticFlowScreening(pl.LightningModule):
 
     def condition(self, semantic_codes: Tensor) -> Tensor:
         start, _ = self.model.layout.blocks["audio"]
-        labels = semantic_codes + start
+        token_labels = semantic_codes + start
         positions = torch.arange(
             semantic_codes.size(1),
             device=semantic_codes.device,
         ).expand_as(semantic_codes)
-        return self.model.target_frame_label_condition(labels, positions)
+        return self.model.target_frame_label_condition(token_labels, positions)
 
     def features(self, acoustic_codes: Tensor) -> Tensor:
         return self.model.acoustic_target_latent(acoustic_codes).float()
