@@ -24,6 +24,12 @@ class AudioOutput(TypedDict):
     sample_rate: int
 
 
+class AcousticGeneration(TypedDict):
+    sequence: Tensor
+    features: Tensor
+    frame_counts: Tensor
+
+
 class Result(TypedDict):
     response_ids: Tensor
     audio: AudioOutput | None

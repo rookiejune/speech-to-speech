@@ -4,12 +4,15 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import TypeVar, TypedDict
 
+import torch
 from anydataset.types import Modality
 from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
 
 from .._compat import StrEnum
+from .._tensor import is_signed_integer_dtype
 from ..task import Task
+
 ACOUSTIC_PAD_ID = -1
 
 
@@ -91,6 +94,32 @@ class ModelBatch:
     tasks: list[Task]
     pad_token_id: int
 
+    def __post_init__(self) -> None:
+        if self.input_ids.dim() != 2 or self.token_labels.shape != self.input_ids.shape:
+            raise ValueError(
+                "batch input ids and token labels must be aligned 2D tensors."
+            )
+        if not is_signed_integer_dtype(
+            self.input_ids.dtype
+        ) or not is_signed_integer_dtype(self.token_labels.dtype):
+            raise TypeError(
+                "batch input ids and token labels must use signed integer dtypes."
+            )
+        batch_size = self.input_ids.size(0)
+        if batch_size < 1:
+            raise ValueError("ModelBatch requires at least one row.")
+        if len(self.tasks) != batch_size:
+            raise ValueError("ModelBatch tasks must provide one Task per row.")
+        if any(not isinstance(task, Task) for task in self.tasks):
+            raise TypeError("ModelBatch tasks must contain Task values.")
+        signatures = {
+            (task.source_modality, task.target_modality) for task in self.tasks
+        }
+        if len(signatures) != 1:
+            raise ValueError(
+                "all samples in a batch must use the same source and target modalities."
+            )
+
     @classmethod
     def from_samples(
         cls,
@@ -102,14 +131,6 @@ class ModelBatch:
             raise ValueError("ModelBatch requires at least one sample.")
         for sample in samples:
             _validate_sample(sample, pad_token_id)
-        signatures = {
-            (sample.task.source_modality, sample.task.target_modality)
-            for sample in samples
-        }
-        if len(signatures) != 1:
-            raise ValueError(
-                "all samples in a batch must use the same source and target modalities."
-            )
         return cls(
             input_ids=_pad([sample.input_ids for sample in samples], pad_token_id),
             token_labels=_pad([sample.token_labels for sample in samples], -100),
@@ -191,7 +212,9 @@ def _validate_sample(sample: ModelSample, pad_token_id: int) -> None:
         sample.input_ids.dim() != 1
         or sample.token_labels.shape != sample.input_ids.shape
     ):
-        raise ValueError("sample input ids and token labels must be aligned 1D tensors.")
+        raise ValueError(
+            "sample input ids and token labels must be aligned 1D tensors."
+        )
 
     if sample.acoustic_prompt is not None:
         _validate_acoustic_pair(
@@ -211,14 +234,20 @@ def _validate_sample(sample: ModelSample, pad_token_id: int) -> None:
             name="acoustic target",
             pad_token_id=pad_token_id,
         )
-    if target is not None and target["semantic_codes"].size(0) != target["codes"].size(0):
-        raise ValueError(
-            "target semantic and acoustic codes must share the frame axis."
-        )
+        semantic_codes = target["semantic_codes"]
+        _validate_codes(semantic_codes, name="target semantic codes")
+        if semantic_codes.size(0) != target["codes"].size(0):
+            raise ValueError(
+                "target semantic and acoustic codes must share the frame axis."
+            )
     if sample.task.target_modality is Modality.TEXT and target is not None:
         raise ValueError("text-target tasks must not provide acoustic target fields.")
     if target is not None:
-        labels = sample.token_labels[target["token_positions"]]
+        positions = target["token_positions"].to(
+            device=sample.token_labels.device,
+            dtype=torch.long,
+        )
+        labels = sample.token_labels[positions]
         if bool(labels.eq(-100).any()):
             raise ValueError("acoustic target positions must point to semantic labels.")
 
@@ -235,10 +264,12 @@ def _validate_acoustic_pair(
         raise ValueError(f"{name} codes and token positions must be provided together.")
     if codes is None or token_positions is None:
         return
-    if codes.dim() != 2 or token_positions.dim() != 1:
-        raise ValueError(
-            f"{name} codes and token positions must have shapes "
-            "[frames, codebooks] and [frames]."
+    _validate_codes(codes, name=f"{name} codes")
+    if token_positions.dim() != 1:
+        raise ValueError(f"{name} token positions must have shape [frames].")
+    if not is_signed_integer_dtype(token_positions.dtype):
+        raise TypeError(
+            f"{name} token positions must contain integer indices using a signed dtype."
         )
     if codes.size(0) != token_positions.numel():
         raise ValueError(f"{name} codes and token positions must share the frame axis.")
@@ -246,5 +277,17 @@ def _validate_acoustic_pair(
         (token_positions >= input_ids.numel()).any()
     ):
         raise ValueError(f"{name} positions must point inside the token sequence.")
-    if bool(input_ids[token_positions].eq(pad_token_id).any()):
+    positions = token_positions.to(device=input_ids.device, dtype=torch.long)
+    if bool(input_ids[positions].eq(pad_token_id).any()):
         raise ValueError(f"{name} positions must not point to padding tokens.")
+
+
+def _validate_codes(codes: Tensor, *, name: str) -> None:
+    if codes.dim() != 2:
+        raise ValueError(f"{name} must have shape [frames, codebooks].")
+    if codes.size(0) == 0 or codes.size(1) == 0:
+        raise ValueError(f"{name} must contain at least one frame and codebook.")
+    if not is_signed_integer_dtype(codes.dtype):
+        raise TypeError(f"{name} must contain integer codec IDs using a signed dtype.")
+    if bool((codes < 0).any()):
+        raise ValueError(f"{name} must contain non-negative codec IDs.")

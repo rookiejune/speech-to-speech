@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from .._tensor import is_signed_integer_dtype
 from .types import LossItem
 
 
@@ -17,7 +18,11 @@ class CausalAcousticLoss(nn.Module):
         mask: Tensor,
     ) -> LossItem:
         if labels.dim() != 3 or mask.shape != labels.shape[:2]:
-            raise ValueError("RVQ labels and mask must have shapes [B, F, Q] and [B, F].")
+            raise ValueError(
+                "RVQ labels and mask must have shapes [B, F, Q] and [B, F]."
+            )
+        if not is_signed_integer_dtype(labels.dtype):
+            raise TypeError("RVQ labels must use a signed integer dtype.")
         if mask.dtype != torch.bool:
             raise TypeError("RVQ target mask must be boolean.")
         if len(logits) != labels.size(-1):
@@ -26,20 +31,25 @@ class CausalAcousticLoss(nn.Module):
         losses = []
         for codebook, value in enumerate(logits):
             if value.shape[:2] != labels.shape[:2]:
-                raise ValueError("RVQ logits must align with labels on batch and frame.")
+                raise ValueError(
+                    "RVQ logits must align with labels on batch and frame."
+                )
             target = labels[..., codebook]
             if bool(((target < 0) & mask).any()):
                 raise ValueError("valid RVQ targets cannot contain padding IDs.")
+            if bool(((target >= value.size(-1)) & mask).any()):
+                raise ValueError("valid RVQ target is outside its logits codebook.")
+            safe_value = value.masked_fill(~mask[..., None], 0)
+            safe_target = target.masked_fill(~mask, 0).to(dtype=torch.long)
             loss = F.cross_entropy(
-                value.movedim(-1, 1),
-                target.clamp_min(0),
+                safe_value.movedim(-1, 1),
+                safe_target,
                 reduction="none",
-            )
+            ).masked_fill(~mask, 0)
             losses.append(loss)
         frame_losses = torch.stack(losses, dim=-1)
-        weights = mask.to(dtype=frame_losses.dtype)
-        frame_count = weights.sum(dim=1).clamp_min(1)
-        codebook_losses = (frame_losses * weights[..., None]).sum(dim=1)
+        frame_count = mask.sum(dim=1).clamp_min(1)
+        codebook_losses = frame_losses.sum(dim=1)
         codebook_losses = codebook_losses / frame_count[:, None]
         return LossItem(
             loss=codebook_losses.mean(dim=-1),

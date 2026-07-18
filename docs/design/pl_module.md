@@ -8,7 +8,8 @@ Lightning 训练集成、独立推理 service 和日志边界。生成契约见
 `SpeechToSpeechModule[ModelT]` 是薄 Lightning wrapper：
 
 - 构造时通过 `Objective[ModelT]` 保留 model/objective 类型配对。
-- `training_step()` 调用 objective，记录一次 total loss，并保留分项到 backward 完成。
+- `training_step()` 调用 objective，跨 rank 归约并记录一次 total loss，同时保留分项到 backward
+  完成。
 - `configure_optimizers()` 委托 anytrain optimizer preset。
 - `generate()` / `evaluate_text()` 只负责切换 eval mode、调用 generation 包并恢复原 mode。
 
@@ -52,6 +53,12 @@ random state。
 ## 边界
 
 - `AcousticPrompt` 只允许用于 audio-source task，非法组合在 service 入口报错。
-- generation service 对变长 prompt 左 padding，逐行跟踪 EOS/EOA，按实际 frame 数裁剪 decode。
+- service 在 padding 前校验原始 request：prompt 是非空一维 runtime global ID；acoustic codes
+  是与 codec codebook 数量和范围一致的非空二维整数 Tensor；frame positions 是对齐、非负且
+  指向 prompt 内 codec audio token 的一维整数 Tensor。无 acoustic codebook 的 codec 不接受
+  `AcousticPrompt`，`-1` 只由 service 作为 batch padding 引入。
+- acoustic model 把生成时已有的每行有效 frame count 返回给 service；service 不重新展开 token
+  span，并把 token 数和 frame 数相同的行合并为一次 codec decode。变长 prompt 仍使用左
+  padding，EOS/EOA 与结果顺序逐行跟踪。
 - callback 只依赖 `Outputs`/`LossItem`、datamodule 与 pl_module 公共能力。
-- total loss 只由 LightningModule 记录一次，分项 logger 不重复记录。
+- total loss 只由 LightningModule 以 `sync_dist=True` 记录一次，分项 logger 不重复记录。

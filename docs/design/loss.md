@@ -11,14 +11,15 @@ position 语义见 [总览 §2.4](../model-design.md)。
   acoustic flow matching 和可选 REPA；`RVQObjective`：组合 token CE 与 acoustic RVQ CE。
   三者的 `forward(batch, model)` 都返回含标量总损失的 `Outputs`，直接满足 Lightning
   训练契约。
-- `TokenLoss`：按 layout 对 text/audio token 分别统计 CE，`-100` 不参与计算；causal
-  shift 在此完成，只把有效 predictor hidden states 交给 model 的 `token_logits()`。
+- `TokenLoss`：按 batch task 的 target modality 在对应局部词表上计算 CE，每行必须至少包含一个
+  非 `-100` target；causal shift 在此完成，只把有效 predictor hidden states 交给
+  `model.token_logits(hidden, modality)`，text/audio head 不做跨模态 softmax 竞争。
 - `AcousticFlowLoss`：frame-mask 的 velocity objective，只在有效 acoustic frame 上计算；
   启用 REPA 时通过 `forward_with_features()` 复用同一次 DiT 前向。
 - `CausalAcousticLoss`：对每个 RVQ codebook 计算 masked CE，再在 codebook 维等权平均；
   acoustic padding ID 不进入 decoder embedding 或 loss。
-- `WavLMTeacher`：在线解码完整 target semantic/acoustic codes，以 16 kHz waveform 运行冻结
-  WavLM，取得配置层的 hidden states 并插值到有效 acoustic frame 轴。
+- `WavLMTeacher`：按 boolean frame mask 在线解码 target semantic/acoustic codes，以 16 kHz
+  waveform 运行冻结 WavLM，取得配置层的 hidden states 并插值、写回原有效 frame 位置。
 - `RepaLoss`：把选定 DiT block 的逐帧表示投影到 WavLM hidden dimension，与
   stop-gradient teacher features 计算 masked cosine distance。
 - `types.LossItem` / `types.Outputs`：上层日志与训练消费的稳定结构。
@@ -41,6 +42,7 @@ hidden_states = model.token_hidden_states(
 token = self.token(
     hidden_states,
     batch.token_labels,
+    batch.tasks[0].target_modality,
     model.token_logits,
 )
 result = {"loss": token.loss.mean(), "token": token}
@@ -94,7 +96,7 @@ teacher features。oracle 等 diagnostic 使用独立 objective/入口。
 ## 边界
 
 - `TokenObjective`、`FlowObjective` 和 `RVQObjective` 只依赖结构化 Protocol 的
-  `layout`、`token_hidden_states()`、`token_logits()`、`target_frame_condition()`、
+  `layout`、`token_hidden_states()`、`token_logits(hidden, modality)`、`target_frame_condition()`、
   `acoustic_decoder` 等公开能力，不依赖具体模型类。
 - target position 表示 token 自身位置 `p`；causal predictor shift `p - 1` 由 model 的
   `target_frame_condition()` 统一处理，objective 不重复偏移。
@@ -103,6 +105,8 @@ teacher features。oracle 等 diagnostic 使用独立 objective/入口。
 - flow runtime 等 objective 资源在 `FlowObjective` 构造时显式传入，不通过
   `model.runtime` 向下读取。
 - 子 objective 在 `__init__` 中构造完毕，forward 不挂载新 submodule。
+- flow matching、RVQ CE 和 REPA 在非线性 loss 计算前把无效 frame 替换为安全值，并只归约
+  boolean mask 选中的 frame；padding 位置的 NaN/Inf 不参与 forward，也不产生梯度。
 - `causal_lm.py` 只实现离散 acoustic RVQ objective，不读取 model/runtime 或重复 condition
   对齐；其稳定输出键是 `rvq`。
 - REPA teacher 始终保持 eval/frozen；teacher features detach，梯度只进入 DiT 与 student

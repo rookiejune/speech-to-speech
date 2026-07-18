@@ -9,6 +9,7 @@ from torch import Tensor
 
 from ..runtime.protocol import GenerationRuntime
 from ..runtime.types import Backbone
+from .types import AcousticGeneration
 
 
 class TokenGenerator(Protocol):
@@ -51,7 +52,11 @@ class TextEvaluationModel(TokenGenerator, Protocol):
         acoustic_prompt_mask: Tensor | None = None,
     ) -> Tensor: ...
 
-    def token_logits(self, hidden_state: Tensor) -> Tensor: ...
+    def token_logits(
+        self,
+        hidden_state: Tensor,
+        modality: Modality | None = None,
+    ) -> Tensor: ...
 
 
 @runtime_checkable
@@ -69,4 +74,4 @@ class AcousticFeatureGenerator(TokenGenerator, Protocol):
         prompt_attention_mask: Tensor | None = None,
         do_sample: bool = True,
         use_cache: bool = True,
-    ) -> tuple[Tensor, Tensor]: ...
+    ) -> AcousticGeneration: ...

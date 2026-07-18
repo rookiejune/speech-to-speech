@@ -74,11 +74,17 @@ acoustic_target: AcousticTarget | None
   对齐到 target audio token。它只表达
   codec target，不保存或预计算 REPA teacher features。unified-token codec 没有独立
   acoustic side channel，因此这些 target code 字段为 `None`。
-- `ModelBatch.from_samples()` 显式接收 `pad_token_id`，检查 prompt/target 内部 frame 轴和
-  task execution signature；错误不推迟到 model/loss。
+- `ModelBatch.from_samples()` 显式接收 `pad_token_id`，在 padding 前要求 acoustic/semantic
+  codes 是非空、二维、非负有符号整数 tensor，并检查 prompt/target 内部 frame 轴；
+  `ModelBatch` 自身要求 input/label 是非空、对齐的有符号整数二维 batch、每行恰有一个
+  `Task`，并维护单一 task execution signature。codebook 上界由持有具体 codec size 的下游
+  负责。
+- `ACOUSTIC_PAD_ID=-1` 只由 batch padding 引入，不能出现在未 padding 的 `ModelSample`
+  中；因此派生的 frame mask 只包含右侧 padding，不会形成内部空洞。
 - `ModelBatch` 只表达训练或 teacher-forcing evaluation，不表达缺少 target 的真实推理请求。
 - 同一 `task_weights` 中的任务必须具有相同 source/target modality，保证 DDP 各 rank 走相同
-  模型路径。DataModule 构造时必须提供初始权重；stage callback 只在 epoch 边界调用
+  模型路径。每项权重必须有限且非负，总和必须有限且为正；非法 stage 更新在替换现有权重前
+  报错。DataModule 构造时必须提供初始权重；stage callback 只在 epoch 边界调用
   `set_task_weights()`，不依赖 Trainer 重建 DataLoader。
 - `DataModule.train_samples()` 是 callback 按索引读取已 setup 训练样本的公开边界；callback
   不读取私有 dataset 字段。

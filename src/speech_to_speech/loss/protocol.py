@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from anydataset.types import Modality
 from anytrain.idspace import Layout
 from torch import Tensor
 
@@ -20,7 +21,11 @@ class TokenObjectiveModel(Protocol):
         acoustic_prompt_mask: Tensor | None = None,
     ) -> Tensor: ...
 
-    def token_logits(self, hidden_state: Tensor) -> Tensor: ...
+    def token_logits(
+        self,
+        hidden_state: Tensor,
+        modality: Modality | None = None,
+    ) -> Tensor: ...
 
 
 class AcousticDecoder(Protocol):

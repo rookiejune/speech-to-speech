@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import random
 from collections.abc import Mapping
 
@@ -23,8 +24,10 @@ class Collator:
         self.set_task_weights(task_weights)
 
     def set_task_weights(self, task_weights: Mapping[Task, float]) -> None:
-        _validate_tasks(list(task_weights))
-        self._task_weights = dict(task_weights)
+        weights = dict(task_weights)
+        _validate_tasks(list(weights))
+        _validate_weights(list(weights.values()))
+        self._task_weights = weights
 
     @property
     def tasks(self) -> list[Task]:
@@ -52,10 +55,15 @@ def _validate_tasks(tasks: list[Task]) -> None:
     source = tasks[0].source_modality
     target = tasks[0].target_modality
     for task in tasks:
-        if (
-            task.source_modality is not source
-            or task.target_modality is not target
-        ):
+        if task.source_modality is not source or task.target_modality is not target:
             raise ValueError(
                 "all weighted tasks must use the same source and target modalities."
             )
+
+
+def _validate_weights(weights: list[float]) -> None:
+    if any(not math.isfinite(weight) or weight < 0 for weight in weights):
+        raise ValueError("task weights must be finite and non-negative.")
+    total = sum(weights)
+    if not math.isfinite(total) or total <= 0:
+        raise ValueError("task weights must have a finite positive total.")

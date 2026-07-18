@@ -238,7 +238,7 @@ class FakeClosureTest(unittest.TestCase):
             return logits
 
         with patch.object(model, "semantic_audio_logits", side_effect=audio_logits):
-            generated, features = model.generate_audio_features(
+            generation = model.generate_audio_features(
                 torch.tensor([[1, 2]]),
                 max_new_tokens=2,
                 do_sample=False,
@@ -246,18 +246,20 @@ class FakeClosureTest(unittest.TestCase):
             )
 
         self.assertTrue(
-            torch.equal(generated, torch.tensor([[1, 2, 32, 32]]))
+            torch.equal(generation["sequence"], torch.tensor([[1, 2, 32, 32]]))
         )
-        self.assertEqual(features.shape, (1, 2, rt.codec.acoustic_feature_dim))
-        self.assertTrue(torch.isfinite(features).all())
+        self.assertEqual(
+            generation["features"].shape,
+            (1, 2, rt.codec.acoustic_feature_dim),
+        )
+        self.assertTrue(torch.equal(generation["frame_counts"], torch.tensor([2])))
+        self.assertTrue(torch.isfinite(generation["features"]).all())
 
     def test_all_tasks_build_expected_model_batches(self):
         rt = _Runtime()
         for task in Task:
             with self.subTest(task=task.value):
-                batch = Collator(rt, {task: 1.0})(
-                    [_raw_sample(0), _raw_sample(1)]
-                )
+                batch = Collator(rt, {task: 1.0})([_raw_sample(0), _raw_sample(1)])
 
                 self.assertEqual(batch.tasks, [task, task])
                 self.assertEqual(batch.input_ids.shape, batch.token_labels.shape)
@@ -283,9 +285,7 @@ class FakeClosureTest(unittest.TestCase):
             with self.subTest(task=task.value):
                 torch.manual_seed(0)
                 rt = _Runtime()
-                batch = Collator(rt, {task: 1.0})(
-                    [_raw_sample(0), _raw_sample(1)]
-                )
+                batch = Collator(rt, {task: 1.0})([_raw_sample(0), _raw_sample(1)])
                 model = SpeechToSpeechFlowModel(
                     ModelConfig(
                         semantic_audio_adapter=None,

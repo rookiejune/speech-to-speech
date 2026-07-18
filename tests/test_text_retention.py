@@ -49,6 +49,7 @@ class _Model(nn.Module):
             layout=Layout(text=(0, 8), audio=(8, 10)),
             eos_token_id=7,
         )
+        self.token_modalities: list[Modality] = []
 
     def forward(self, input_ids: Tensor, **kwargs):
         del kwargs
@@ -60,8 +61,20 @@ class _Model(nn.Module):
         del kwargs
         return torch.zeros(*input_ids.shape, 4, device=input_ids.device)
 
-    def token_logits(self, hidden_states: Tensor) -> Tensor:
-        return torch.zeros(hidden_states.size(0), 10, device=hidden_states.device)
+    def token_logits(
+        self,
+        hidden_states: Tensor,
+        modality: Modality | None = None,
+    ) -> Tensor:
+        if modality is None:
+            raise ValueError("text evaluation must select a token modality")
+        self.token_modalities.append(modality)
+        start, end = self.runtime.layout.blocks[modality.value]
+        return torch.zeros(
+            hidden_states.size(0),
+            end - start,
+            device=hidden_states.device,
+        )
 
 
 PROBES = {
@@ -91,7 +104,9 @@ class TextRetentionTest(unittest.TestCase):
         self.assertTrue(Task.T2TT.uses_source_role)
 
     @patch("speech_to_speech.generation.text.generate_responses")
-    def test_module_evaluates_greedy_generation_and_text_only_nll(self, generate_responses):
+    def test_module_evaluates_greedy_generation_and_text_only_nll(
+        self, generate_responses
+    ):
         generate_responses.return_value = [
             Result(
                 response_ids=torch.tensor([5, 6]),
@@ -99,7 +114,8 @@ class TextRetentionTest(unittest.TestCase):
             )
             for _ in PROBES
         ]
-        module = SpeechToSpeechModule(Config(), model=_Model(), objective=Mock())
+        model = _Model()
+        module = SpeechToSpeechModule(Config(), model=model, objective=Mock())
 
         results = module.evaluate_text(PROBES, max_new_tokens=16)
 
@@ -110,6 +126,7 @@ class TextRetentionTest(unittest.TestCase):
         self.assertFalse(generate_responses.call_args.kwargs["do_sample"])
         self.assertEqual(results["zh_en"]["generated"], "5 6")
         self.assertAlmostEqual(results["zh_en"]["nll"], math.log(8), places=6)
+        self.assertEqual(model.token_modalities, [Modality.TEXT] * len(PROBES))
 
     def test_callback_records_baseline_and_respects_interval(self):
         evaluate_text = Mock(

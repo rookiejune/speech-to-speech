@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
+from ...generation.types import AcousticGeneration
 from ..base import Config, TokenModel
 from ..protocol import FlowModelRuntime, FlowSamplingRuntime
 from ._config import DecoderConfig, FlowRepaConfig, decoder_options
@@ -46,18 +47,26 @@ class AcousticFlow(nn.Module):
         mask: Tensor | None = None,
         generator: torch.Generator | None = None,
     ) -> Tensor:
+        if mask is not None:
+            if mask.shape != condition.shape[:2]:
+                raise ValueError("acoustic frame mask must align with condition.")
+            if mask.dtype != torch.bool:
+                raise TypeError("acoustic frame mask must be boolean.")
         latent = torch.randn(
             (*condition.shape[:2], self.decoder.latent_dim),
             device=condition.device,
             dtype=condition.dtype,
             generator=generator,
         )
-        return self.runtime.sample(
+        output = self.runtime.sample(
             self.decoder,
             latent,
             condition=condition,
             mask=mask,
         ).final
+        if mask is not None:
+            output = output.masked_fill(~mask[..., None], 0)
+        return output
 
 
 class SpeechToSpeechFlowModel(TokenModel):
@@ -127,7 +136,7 @@ class SpeechToSpeechFlowModel(TokenModel):
         prompt_attention_mask: Tensor | None = None,
         do_sample: bool = True,
         use_cache: bool = True,
-    ) -> tuple[Tensor, Tensor]:
+    ) -> AcousticGeneration:
         generated, condition, frame_mask = self.generate_audio_condition(
             prompt_ids,
             max_new_tokens=max_new_tokens,
@@ -140,7 +149,8 @@ class SpeechToSpeechFlowModel(TokenModel):
             do_sample=do_sample,
             use_cache=use_cache,
         )
-        return generated, self.sample_acoustic_features(
-            condition,
-            mask=frame_mask,
+        return AcousticGeneration(
+            sequence=generated,
+            features=self.sample_acoustic_features(condition, mask=frame_mask),
+            frame_counts=frame_mask.sum(dim=1),
         )

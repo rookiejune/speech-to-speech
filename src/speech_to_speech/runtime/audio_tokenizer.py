@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from numbers import Integral
 from typing import cast, overload
 
 import torch
 from anytrain.tokenizer import CodecBPE
 from torch import Tensor
 
+from .._tensor import is_signed_integer_dtype
 from .types import AudioTokenizer
 
 
@@ -16,7 +18,11 @@ class NativeAudioTokenizer:
     """Identity tokenizer for native single-codebook semantic IDs."""
 
     def __init__(self, *, vocab_size: int) -> None:
-        self._vocab_size = vocab_size
+        if isinstance(vocab_size, bool) or not isinstance(vocab_size, Integral):
+            raise TypeError("native audio tokenizer vocab size must be an integer.")
+        if vocab_size < 1:
+            raise ValueError("native audio tokenizer vocab size must be positive.")
+        self._vocab_size = int(vocab_size)
 
     @property
     def vocab_size(self) -> int:
@@ -24,26 +30,34 @@ class NativeAudioTokenizer:
 
     def encode(self, frames: Sequence[Sequence[int]] | Tensor) -> Tensor:
         if isinstance(frames, Tensor):
-            if frames.dim() != 2:
+            _validate_ids(frames, "frames")
+            if frames.dim() != 2 or frames.size(1) != 1:
                 raise ValueError("native audio tokenizer expects [frames, codebooks].")
-            frames = frames.tolist()
-        return torch.tensor([_single_code(frame) for frame in frames], dtype=torch.long)
+            _validate_range(frames, "frames", self.vocab_size)
+            return frames[:, 0].to(dtype=torch.long)
+        return torch.tensor(
+            [_single_code(frame, self.vocab_size) for frame in frames],
+            dtype=torch.long,
+        )
 
     def decode(
         self,
         token_ids: Sequence[int] | Tensor,
-    ) -> list[tuple[int, ...]]:
-        return [(int(token_id),) for token_id in token_ids]
+    ) -> list[tuple[int, ...]] | Tensor:
+        if isinstance(token_ids, Tensor):
+            _validate_native_token_ids(token_ids, self.vocab_size)
+            return token_ids.to(dtype=torch.long).unsqueeze(-1)
+        values = _native_token_ids(token_ids, self.vocab_size)
+        return [(token_id,) for token_id in values]
 
     def frame_spans(
         self,
         token_ids: Sequence[int] | Tensor,
     ) -> list[int] | Tensor:
         if not isinstance(token_ids, Tensor):
+            _native_token_ids(token_ids, self.vocab_size)
             return [1] * len(token_ids)
-        _validate_ids(token_ids, "token ids")
-        if token_ids.dim() != 1:
-            raise ValueError("token id tensor must have shape [tokens].")
+        _validate_native_token_ids(token_ids, self.vocab_size)
         return torch.ones_like(token_ids, dtype=torch.long)
 
 
@@ -112,7 +126,9 @@ def semantic_codes_from_audio_tokens(
     device = audio_token_ids.device if isinstance(audio_token_ids, Tensor) else None
     if isinstance(decoded, Tensor):
         if decoded.dim() != 2:
-            raise ValueError("decoded semantic codes must have shape [frames, codebooks].")
+            raise ValueError(
+                "decoded semantic codes must have shape [frames, codebooks]."
+            )
         return decoded.to(device=device, dtype=torch.long)
 
     frames: list[Tensor] = []
@@ -135,13 +151,35 @@ def semantic_codes_from_audio_tokens(
         ) from error
 
 
-def _single_code(frame: Sequence[int]) -> int:
+def _single_code(frame: Sequence[int], vocab_size: int) -> int:
+    if not isinstance(frame, Sequence) or isinstance(frame, (str, bytes)):
+        raise ValueError("native audio tokenizer expects [frames, codebooks].")
     if len(frame) != 1:
         raise ValueError(
             "identity audio tokenizer requires one semantic code per frame; "
             "configure a CodecBPE tokenizer for multi-codebook semantic codes."
         )
-    return int(frame[0])
+    return _native_id(frame[0], "frames", vocab_size)
+
+
+def _native_token_ids(token_ids: Sequence[int], vocab_size: int) -> list[int]:
+    return [_native_id(token_id, "token ids", vocab_size) for token_id in token_ids]
+
+
+def _native_id(value: object, name: str, vocab_size: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must contain integer ids.")
+    token_id = int(value)
+    if not 0 <= token_id < vocab_size:
+        raise ValueError(f"{name} must contain ids in [0, {vocab_size}).")
+    return token_id
+
+
+def _validate_native_token_ids(token_ids: Tensor, vocab_size: int) -> None:
+    _validate_ids(token_ids, "token ids")
+    if token_ids.dim() != 1:
+        raise ValueError("token id tensor must have shape [tokens].")
+    _validate_range(token_ids, "token ids", vocab_size)
 
 
 def _frames(frames: Tensor, codebook_sizes: Sequence[int]) -> list[list[int]]:
@@ -167,8 +205,13 @@ def _ids(ids: Tensor) -> list[int]:
 
 
 def _validate_ids(ids: Tensor, name: str) -> None:
-    if ids.dtype == torch.bool or torch.is_floating_point(ids) or torch.is_complex(ids):
-        raise TypeError(f"{name} must contain integer ids.")
+    if not is_signed_integer_dtype(ids.dtype):
+        raise TypeError(f"{name} must contain integer ids using a signed dtype.")
+
+
+def _validate_range(ids: Tensor, name: str, vocab_size: int) -> None:
+    if bool(((ids < 0) | (ids >= vocab_size)).any()):
+        raise ValueError(f"{name} must contain ids in [0, {vocab_size}).")
 
 
 __all__ = [

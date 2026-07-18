@@ -4,12 +4,14 @@ import unittest
 from types import SimpleNamespace
 
 import torch
+from anydataset.types import Modality
 from anytrain.idspace import Layout
 from torch import Tensor, nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.loss import FlowObjective, RVQObjective, TokenObjective
+from speech_to_speech.loss.flow_matching import AcousticFlowLoss
 from speech_to_speech.loss.token import TokenLoss
 from speech_to_speech.model.base import Config, TokenModel
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
@@ -68,6 +70,23 @@ class _Decoder(nn.Module):
         return self(x_t, t, condition=condition, mask=mask), torch.ones_like(condition)
 
 
+class _NonfinitePaddedDecoder(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.prediction = nn.Parameter(torch.tensor([[[1.0], [float("nan")]]]))
+
+    def forward(
+        self,
+        x_t: Tensor,
+        t: Tensor,
+        *,
+        condition: Tensor,
+        mask: Tensor | None = None,
+    ) -> Tensor:
+        del x_t, t, condition, mask
+        return self.prediction
+
+
 class _FlowRuntime:
     def training_sample(self, x_1: Tensor, *, x_0: Tensor | None = None):
         del x_0
@@ -98,6 +117,7 @@ class _FlowModel:
         self.positions: Tensor | None = None
         self.token_hidden_calls = 0
         self.logit_rows = 0
+        self.logit_modalities: list[Modality] = []
 
     def __call__(self, input_ids: Tensor, **kwargs) -> CausalLMOutputWithPast:
         logits = torch.zeros(
@@ -114,9 +134,17 @@ class _FlowModel:
         self.token_hidden_calls += 1
         return torch.zeros(*input_ids.shape, 2)
 
-    def token_logits(self, hidden_states: Tensor) -> Tensor:
+    def token_logits(
+        self,
+        hidden_states: Tensor,
+        modality: Modality | None = None,
+    ) -> Tensor:
+        if modality is None:
+            raise ValueError("objective must select a token modality")
         self.logit_rows += hidden_states.size(0)
-        return torch.zeros(hidden_states.size(0), self.layout.vocab_size)
+        self.logit_modalities.append(modality)
+        start, end = self.layout.blocks[modality.value]
+        return torch.zeros(hidden_states.size(0), end - start)
 
     def target_frame_condition(
         self, hidden_states: Tensor, target_positions: Tensor
@@ -133,6 +161,7 @@ class _TokenForwardModel:
         self.layout = layout
         self.token_hidden_calls = 0
         self.logit_rows = 0
+        self.logit_modalities: list[Modality] = []
 
     def __call__(self, input_ids: Tensor, **kwargs) -> CausalLMOutputWithPast:
         return CausalLMOutputWithPast(
@@ -148,9 +177,17 @@ class _TokenForwardModel:
         self.token_hidden_calls += 1
         return torch.zeros(*input_ids.shape, 2)
 
-    def token_logits(self, hidden_states: Tensor) -> Tensor:
+    def token_logits(
+        self,
+        hidden_states: Tensor,
+        modality: Modality | None = None,
+    ) -> Tensor:
+        if modality is None:
+            raise ValueError("objective must select a token modality")
         self.logit_rows += hidden_states.size(0)
-        return torch.zeros(hidden_states.size(0), self.layout.vocab_size)
+        self.logit_modalities.append(modality)
+        start, end = self.layout.blocks[modality.value]
+        return torch.zeros(hidden_states.size(0), end - start)
 
 
 class _RVQModel(_FlowModel):
@@ -166,12 +203,12 @@ class _RVQModel(_FlowModel):
 
 
 class ModelLossContractTest(unittest.TestCase):
-    def test_sparse_token_logits_match_dense_cross_entropy(self):
+    def test_sparse_modality_logits_match_dense_modality_cross_entropy(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
         labels = torch.tensor(
             [
-                [-100, -100, 1, 4, -100],
-                [-100, 5, -100, 2, 6],
+                [-100, -100, 4, 5, -100],
+                [-100, 5, -100, 4, 6],
             ]
         )
         hidden_values = torch.arange(30, dtype=torch.float32).reshape(2, 5, 3) / 10
@@ -184,20 +221,28 @@ class ModelLossContractTest(unittest.TestCase):
         item = TokenLoss(layout)(
             sparse_hidden,
             labels,
-            lambda selected: nn.functional.linear(selected, sparse_weight),
+            Modality.AUDIO,
+            lambda selected, modality: nn.functional.linear(
+                selected,
+                sparse_weight[slice(*layout.blocks[modality.value])],
+            ),
         )
-        dense_logits = nn.functional.linear(dense_hidden, dense_weight)
+        audio_start, audio_end = layout.blocks[Modality.AUDIO.value]
+        dense_logits = nn.functional.linear(
+            dense_hidden,
+            dense_weight[audio_start:audio_end],
+        )
 
         target = labels[:, 1:]
         valid = target.ne(-100)
         token_loss = torch.zeros_like(target, dtype=torch.float32)
         token_loss[valid] = nn.functional.cross_entropy(
             dense_logits[:, :-1][valid],
-            target[valid],
+            target[valid] - audio_start,
             reduction="none",
         )
-        text = target.ge(0) & target.lt(4)
-        audio = target.ge(4) & target.lt(7)
+        text = torch.zeros_like(valid)
+        audio = valid
         text_count = text.sum(dim=1)
         audio_count = audio.sum(dim=1)
         total_count = text_count + audio_count
@@ -227,6 +272,43 @@ class ModelLossContractTest(unittest.TestCase):
             self.fail("token head gradients are unavailable")
         torch.testing.assert_close(sparse_hidden.grad, dense_hidden.grad)
         torch.testing.assert_close(sparse_weight.grad, dense_weight.grad)
+
+    def test_token_loss_rejects_a_batch_row_without_targets(self):
+        layout = Layout(text=(0, 4), audio=(4, 7))
+        loss = TokenLoss(layout)
+
+        with self.assertRaisesRegex(ValueError, "each token label row"):
+            loss(
+                torch.zeros(2, 2, 3),
+                torch.tensor([[-100, -100], [-100, 1]]),
+                Modality.TEXT,
+                lambda hidden, modality: torch.zeros(
+                    hidden.size(0),
+                    layout.blocks[modality.value][1] - layout.blocks[modality.value][0],
+                ),
+            )
+
+        with self.assertRaisesRegex(TypeError, "signed integer"):
+            loss(
+                torch.zeros(1, 2, 3),
+                torch.tensor([[-100, 1]], dtype=torch.float32),
+                Modality.TEXT,
+                lambda hidden, modality: torch.zeros(
+                    hidden.size(0),
+                    layout.blocks[modality.value][1] - layout.blocks[modality.value][0],
+                ),
+            )
+
+        item = loss(
+            torch.zeros(1, 2, 3),
+            torch.tensor([[-100, 1]], dtype=torch.int32),
+            Modality.TEXT,
+            lambda hidden, modality: torch.zeros(
+                hidden.size(0),
+                layout.blocks[modality.value][1] - layout.blocks[modality.value][0],
+            ),
+        )
+        self.assertTrue(torch.isfinite(item.loss).all())
 
     def test_backbone_text_embedding_has_one_registered_path(self):
         backbone = _Backbone()
@@ -345,6 +427,7 @@ class ModelLossContractTest(unittest.TestCase):
         TokenObjective(layout)(batch, model)
 
         self.assertEqual(model.logit_rows, 2)
+        self.assertEqual(model.logit_modalities, [Modality.TEXT])
 
     def test_audio_target_automatically_adds_flow_objective(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
@@ -362,9 +445,31 @@ class ModelLossContractTest(unittest.TestCase):
 
         self.assertIn("flow_matching", outputs)
         self.assertEqual(model.token_hidden_calls, 1)
+        self.assertEqual(model.logit_modalities, [Modality.AUDIO])
         self.assertTrue(torch.equal(model.positions, positions))
         self.assertEqual(outputs["loss"].shape, ())
         self.assertTrue(torch.isfinite(outputs["loss"]))
+
+    def test_flow_loss_ignores_nonfinite_padding_in_forward_and_backward(self):
+        decoder = _NonfinitePaddedDecoder()
+        mask = torch.tensor([[True, False]])
+
+        item = AcousticFlowLoss()(
+            decoder,
+            torch.zeros(1, 2, 2),
+            torch.zeros(1, 2, 1),
+            mask,
+            _FlowRuntime(),
+        )
+        item.loss.mean().backward()
+
+        self.assertTrue(torch.isfinite(item.loss).all())
+        self.assertIsNotNone(decoder.prediction.grad)
+        gradient = decoder.prediction.grad
+        if gradient is None:
+            self.fail("flow prediction gradient is unavailable")
+        self.assertTrue(torch.isfinite(gradient).all())
+        self.assertTrue(torch.equal(gradient[:, 1], torch.zeros_like(gradient[:, 1])))
 
     def test_unified_audio_target_uses_token_objective_only(self):
         layout = Layout(text=(0, 4), audio=(4, 7))

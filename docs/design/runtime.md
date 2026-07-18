@@ -34,6 +34,10 @@ sample builder 和 batch padding 所需资源。
 - `semantic_codes_from_audio_tokens()`：把 audio token IDs 解码为
   `[frames, semantic_codebooks]`。
 
+Native tokenizer 的 list 入口只接受 vocabulary 范围内的整数 ID，Tensor 入口要求有符号整数
+dtype，避免 PyTorch 对扩展 unsigned dtype 的比较与索引行为在下游晚失败；Tensor
+encode/decode 保持原 device，并直接使用向量视图，不经过逐标量 Python 转换。
+
 `frame_spans()` 只返回每个 token 覆盖的 frame 数，不重建内容。
 
 ## Singleton 边界

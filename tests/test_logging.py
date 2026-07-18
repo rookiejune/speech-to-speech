@@ -2,16 +2,35 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import torch
 
 from speech_to_speech.callback.logging import FlowMatchingLogger, GradNormLogger
 from speech_to_speech.loss import LossItem, Outputs, loss_items
+from speech_to_speech.pl_module import Config, SpeechToSpeechModule
 from speech_to_speech.reporting import window_summary
 
 
 class LoggingTest(unittest.TestCase):
+    def test_total_loss_is_synchronized_across_ranks(self):
+        objective = Mock()
+        outputs = Outputs(loss=torch.tensor(2.0))
+        objective.forward.return_value = outputs
+        module = SpeechToSpeechModule(Config(), model=Mock(), objective=objective)
+
+        with patch.object(module, "log") as log:
+            result = module.training_step(Mock())
+
+        self.assertIs(result, outputs)
+        log.assert_called_once_with(
+            "train/loss",
+            outputs["loss"],
+            prog_bar=True,
+            on_step=True,
+            sync_dist=True,
+        )
+
     def test_grad_norm_logger_respects_its_interval(self):
         weight = torch.nn.Parameter(torch.zeros(2))
         bias = torch.nn.Parameter(torch.zeros(1))

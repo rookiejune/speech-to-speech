@@ -68,6 +68,10 @@ class WavLMTeacher(nn.Module):
             raise ValueError("teacher semantic and acoustic codes must align")
         if mask.shape != semantic_codes.shape[:2]:
             raise ValueError("teacher mask must align with codec frames")
+        if mask.dtype != torch.bool:
+            raise TypeError("teacher mask must be boolean")
+        if mask.size(0) < 1 or not bool(mask.any(dim=1).all()):
+            raise ValueError("each teacher mask row must contain a valid frame")
 
         waveforms = [
             self._waveform(
@@ -107,7 +111,8 @@ class WavLMTeacher(nn.Module):
                 mode="linear",
                 align_corners=False,
             )[0].transpose(0, 1)
-            aligned[row, :frame_count] = value
+            valid = mask[row].to(device=aligned.device)
+            aligned[row, valid] = value
         return aligned
 
     @property
@@ -152,10 +157,21 @@ class RepaLoss(nn.Module):
             raise ValueError("REPA representation and teacher shapes must match")
         if mask.shape != target.shape[:2]:
             raise ValueError("REPA mask must align with teacher frames")
-        prediction = F.normalize(representation.float(), dim=-1)
-        teacher = F.normalize(target.detach().to(representation.device).float(), dim=-1)
-        frame_loss = 1 - (prediction * teacher).sum(dim=-1)
+        if mask.dtype != torch.bool:
+            raise TypeError("REPA mask must be boolean")
+        frame_mask = mask[..., None]
+        prediction = F.normalize(
+            representation.masked_fill(~frame_mask, 0).float(), dim=-1
+        )
+        teacher = F.normalize(
+            target.detach()
+            .to(representation.device)
+            .masked_fill(~frame_mask, 0)
+            .float(),
+            dim=-1,
+        )
+        frame_loss = (1 - (prediction * teacher).sum(dim=-1)).masked_fill(~mask, 0)
         weights = mask.to(dtype=frame_loss.dtype)
         frame_count = weights.sum(dim=1)
-        loss = (frame_loss * weights).sum(dim=1) / frame_count.clamp_min(1)
+        loss = frame_loss.sum(dim=1) / frame_count.clamp_min(1)
         return LossItem(loss=loss, details={"cosine": 1 - loss})

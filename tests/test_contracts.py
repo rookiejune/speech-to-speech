@@ -6,6 +6,7 @@ import sys
 from tempfile import TemporaryDirectory
 from types import ModuleType
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock, patch
 
 import torch
@@ -35,7 +36,6 @@ from speech_to_speech.datamodule.types import (
 from speech_to_speech.callback.stage import Config as StageConfig
 from speech_to_speech.callback.stage import StageSwitcher
 from speech_to_speech.model import Config as ModelConfig
-from speech_to_speech.model import SpeechToSpeechFlowModel
 from speech_to_speech.runtime import Config, Runtime
 from speech_to_speech.runtime.runtime import audio_tokenizer, dtype
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer, TorchCodecBPE
@@ -175,16 +175,15 @@ class ContractTest(unittest.TestCase):
                     },
                 }
             )
-            with patch("scripts.overfit.pl.seed_everything"), patch(
-                "scripts.overfit.runtime_config", return_value=Mock()
-            ), patch(
-                "scripts.overfit.init_runtime", return_value=runtime
-            ), patch(
-                "scripts.overfit.FixedDataModule", return_value=datamodule
-            ), patch(
-                "scripts.overfit.flow", return_value=(Mock(), Mock(), None)
-            ), patch(
-                "scripts.overfit.AcousticEvaluation", side_effect=EvaluationReached
+            with (
+                patch("scripts.overfit.pl.seed_everything"),
+                patch("scripts.overfit.runtime_config", return_value=Mock()),
+                patch("scripts.overfit.init_runtime", return_value=runtime),
+                patch("scripts.overfit.FixedDataModule", return_value=datamodule),
+                patch("scripts.overfit.flow", return_value=(Mock(), Mock(), None)),
+                patch(
+                    "scripts.overfit.AcousticEvaluation", side_effect=EvaluationReached
+                ),
             ):
                 with self.assertRaises(EvaluationReached):
                     run(config)
@@ -210,9 +209,7 @@ class ContractTest(unittest.TestCase):
         self.assertFalse(rt.is_codec_audio_id(rt.eoa_token_id))
 
     def test_unified_codec_uses_semantic_codes_without_acoustic_side_channel(self):
-        item = AudioItem(
-            views={AudioView.UNICODEC: torch.tensor([[1], [2], [3]])}
-        )
+        item = AudioItem(views={AudioView.UNICODEC: torch.tensor([[1], [2], [3]])})
         semantic, acoustic = _parse_audio_item(item, AudioView.UNICODEC)
 
         self.assertTrue(torch.equal(semantic, torch.tensor([[1], [2], [3]])))
@@ -284,9 +281,7 @@ class ContractTest(unittest.TestCase):
     def test_runtime_forwards_flow_configuration(self, sampler, flow_runtime):
         configured_sampler = Mock()
         sampler.return_value = configured_sampler
-        rt = Runtime(
-            Config(flow_method="euler", flow_nfe=7, flow_num_steps=6)
-        )
+        rt = Runtime(Config(flow_method="euler", flow_nfe=7, flow_num_steps=6))
 
         loaded = rt.flow_matching
 
@@ -310,14 +305,13 @@ class ContractTest(unittest.TestCase):
             "zhuyin.tokenizers": ModuleType("zhuyin.tokenizers"),
             "zhuyin.tokenizers.codec_bpe": module,
         }
-        with patch.dict(sys.modules, modules), patch.object(
-            TorchCodecBPE, "wrap", return_value=wrapped
-        ) as wrap:
+        with (
+            patch.dict(sys.modules, modules),
+            patch.object(TorchCodecBPE, "wrap", return_value=wrapped) as wrap,
+        ):
             loaded = audio_tokenizer("~/bpe/longcat/vocab_100k")
 
-        codec_bpe.assert_called_once_with(
-            Path("~/bpe/longcat/vocab_100k").expanduser()
-        )
+        codec_bpe.assert_called_once_with(Path("~/bpe/longcat/vocab_100k").expanduser())
         wrap.assert_called_once_with(tokenizer)
         self.assertIs(loaded, wrapped)
 
@@ -332,9 +326,7 @@ class ContractTest(unittest.TestCase):
 
         pair = parse_sample(raw, runtime)
 
-        self.assertTrue(
-            torch.equal(pair.source.text_token_ids, torch.tensor([1, 2]))
-        )
+        self.assertTrue(torch.equal(pair.source.text_token_ids, torch.tensor([1, 2])))
         self.assertIs(pair.source.language, Language.ZH)
         self.assertIs(pair.target.language, Language.EN)
         self.assertEqual(pair.source.acoustic_codes.shape, (2, 1))
@@ -416,10 +408,125 @@ class ContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "same source and target modalities"):
             ModelBatch.from_samples(samples, pad_token_id=99)
 
+    def test_model_batch_direct_constructor_maintains_batch_task_invariants(self):
+        def batch(tasks: list[Task]) -> ModelBatch:
+            return ModelBatch(
+                input_ids=torch.ones(2, 2, dtype=torch.long),
+                token_labels=torch.ones(2, 2, dtype=torch.long),
+                acoustic_prompt=None,
+                acoustic_target=None,
+                tasks=tasks,
+                pad_token_id=99,
+            )
+
+        cases = (
+            ([], ValueError, "one Task per row"),
+            ([Task.ASR], ValueError, "one Task per row"),
+            (
+                [Task.ASR, Task.TEXT_AR],
+                ValueError,
+                "same source and target modalities",
+            ),
+        )
+
+        for tasks, error, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(error, message):
+                batch(tasks)
+
+        with self.assertRaisesRegex(TypeError, "Task values"):
+            batch([Task.ASR, cast(Task, "asr")])
+
+        with self.assertRaisesRegex(ValueError, "at least one row"):
+            ModelBatch(
+                input_ids=torch.empty(0, 2, dtype=torch.long),
+                token_labels=torch.empty(0, 2, dtype=torch.long),
+                acoustic_prompt=None,
+                acoustic_target=None,
+                tasks=[],
+                pad_token_id=99,
+            )
+
+        with self.assertRaisesRegex(TypeError, "signed integer"):
+            ModelBatch(
+                input_ids=torch.ones(1, 2, dtype=torch.uint64),
+                token_labels=torch.ones(1, 2, dtype=torch.long),
+                acoustic_prompt=None,
+                acoustic_target=None,
+                tasks=[Task.ASR],
+                pad_token_id=99,
+            )
+
     def test_model_batch_accepts_unified_audio_target(self):
         batch = ModelBatch.from_samples([_sample(Task.TTS)], pad_token_id=99)
 
         self.assertIsNone(batch.acoustic_target)
+
+    def test_model_batch_rejects_padding_ids_inside_unpadded_acoustic_fields(self):
+        samples = {
+            "acoustic prompt codes": ModelSample(
+                input_ids=torch.tensor([1, 4]),
+                token_labels=torch.tensor([-100, 4]),
+                acoustic_prompt={
+                    "codes": torch.tensor([[-1, 2]]),
+                    "token_positions": torch.tensor([0]),
+                },
+                acoustic_target=None,
+                task=Task.ASR,
+            ),
+            "acoustic target codes": _target_sample(torch.tensor([[-1, 2]])),
+            "target semantic codes": _target_sample(
+                torch.tensor([[1, 2]]),
+                semantic_codes=torch.tensor([[-1]]),
+            ),
+        }
+
+        for name, sample in samples.items():
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(
+                    ValueError, f"{name} must contain non-negative codec IDs"
+                ),
+            ):
+                ModelBatch.from_samples([sample], pad_token_id=99)
+
+    def test_model_batch_rejects_malformed_acoustic_code_tensors(self):
+        cases = (
+            (
+                _target_sample(torch.tensor([1, 2])),
+                ValueError,
+                "acoustic target codes must have shape",
+            ),
+            (
+                _target_sample(torch.empty((0, 2), dtype=torch.long)),
+                ValueError,
+                "acoustic target codes must contain at least one frame",
+            ),
+            (
+                _target_sample(torch.tensor([[1.0, 2.0]])),
+                TypeError,
+                "acoustic target codes must contain integer codec IDs",
+            ),
+            (
+                _target_sample(
+                    torch.tensor([[1, 2]]),
+                    semantic_codes=torch.tensor([1]),
+                ),
+                ValueError,
+                "target semantic codes must have shape",
+            ),
+            (
+                _target_sample(
+                    torch.tensor([[1, 2], [2, 1]]),
+                    semantic_codes=torch.tensor([[1]]),
+                ),
+                ValueError,
+                "semantic and acoustic codes must share the frame axis",
+            ),
+        )
+
+        for sample, error, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(error, message):
+                ModelBatch.from_samples([sample], pad_token_id=99)
 
     def test_collator_updates_the_existing_task_weights(self):
         collator = Collator(Mock(), {Task.TTS: 1.0, Task.T2ST: 1.0})
@@ -431,13 +538,32 @@ class ContractTest(unittest.TestCase):
         self.assertIs(collator, original)
         self.assertEqual(set(collator.tasks), {Task.ASR, Task.S2TT})
 
+    def test_collator_rejects_invalid_task_weights_before_updating(self):
+        collator = Collator(Mock(), {Task.TTS: 1.0})
+        cases = (
+            ({Task.TTS: -1.0}, "finite and non-negative"),
+            ({Task.TTS: float("nan")}, "finite and non-negative"),
+            ({Task.TTS: float("inf")}, "finite and non-negative"),
+            ({Task.TTS: 0.0}, "finite positive total"),
+            (
+                {Task.TTS: 1e308, Task.T2ST: 1e308},
+                "finite positive total",
+            ),
+        )
+
+        for weights, message in cases:
+            with (
+                self.subTest(weights=weights),
+                self.assertRaisesRegex(ValueError, message),
+            ):
+                collator.set_task_weights(weights)
+            self.assertEqual(collator.tasks, [Task.TTS])
+
     def test_stage_switcher_restores_task_weights_from_current_epoch(self):
         task_weights = [{Task.TTS: 1.0}, {Task.ASR: 1.0}, {Task.TEXT_AR: 1.0}]
         datamodule = SimpleNamespace(set_task_weights=Mock())
         trainer = SimpleNamespace(datamodule=datamodule, current_epoch=3)
-        switcher = StageSwitcher(
-            StageConfig(task_weights, epoch_milestones=[2, 4])
-        )
+        switcher = StageSwitcher(StageConfig(task_weights, epoch_milestones=[2, 4]))
 
         switcher.on_fit_start(trainer, Mock())
         switcher.on_train_epoch_end(trainer, Mock())
@@ -455,6 +581,29 @@ def _sample(task: Task) -> ModelSample:
         acoustic_prompt=None,
         acoustic_target=None,
         task=task,
+    )
+
+
+def _target_sample(
+    codes: torch.Tensor,
+    *,
+    semantic_codes: torch.Tensor | None = None,
+) -> ModelSample:
+    frames = codes.size(0)
+    return ModelSample(
+        input_ids=torch.tensor([1, 4]),
+        token_labels=torch.tensor([-100, 4]),
+        acoustic_prompt=None,
+        acoustic_target={
+            "semantic_codes": (
+                torch.ones((frames, 1), dtype=torch.long)
+                if semantic_codes is None
+                else semantic_codes
+            ),
+            "codes": codes,
+            "token_positions": torch.ones(frames, dtype=torch.long),
+        },
+        task=Task.TTS,
     )
 
 

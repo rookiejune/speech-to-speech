@@ -47,7 +47,13 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         del batch_idx
         outputs = self.objective.forward(batch, self.model)
         self._current_loss_outputs = outputs
-        self.log("train/loss", outputs["loss"], prog_bar=True, on_step=True)
+        self.log(
+            "train/loss",
+            outputs["loss"],
+            prog_bar=True,
+            on_step=True,
+            sync_dist=True,
+        )
         return outputs
 
     def current_loss_outputs(self) -> Outputs:

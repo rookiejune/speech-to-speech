@@ -78,9 +78,7 @@ class AcousticFlowLoss(nn.Module):
         )
         return self._loss(prediction, sample, target, mask), representation
 
-    def _validate_inputs(
-        self, condition: Tensor, target: Tensor, mask: Tensor
-    ) -> None:
+    def _validate_inputs(self, condition: Tensor, target: Tensor, mask: Tensor) -> None:
         if condition.dim() != 3 or target.dim() != 3 or mask.dim() != 2:
             raise ValueError(
                 "condition, target, and mask must have shapes [B, F, H], [B, F, D], and [B, F]."
@@ -102,12 +100,17 @@ class AcousticFlowLoss(nn.Module):
         if prediction.shape != sample.velocity.shape:
             raise ValueError("flow decoder output must match target latent shape.")
 
-        frame_loss = F.mse_loss(prediction, sample.velocity, reduction="none").mean(
-            dim=-1
-        )
+        frame_mask = mask[..., None]
+        safe_prediction = prediction.masked_fill(~frame_mask, 0)
+        safe_velocity = sample.velocity.masked_fill(~frame_mask, 0)
+        frame_loss = F.mse_loss(
+            safe_prediction,
+            safe_velocity,
+            reduction="none",
+        ).mean(dim=-1)
         weights = mask.to(dtype=frame_loss.dtype)
         frame_count = weights.sum(dim=1)
-        loss = (frame_loss * weights).sum(dim=1) / frame_count.clamp_min(1)
+        loss = frame_loss.sum(dim=1) / frame_count.clamp_min(1)
         return LossItem(
             loss=loss,
             details={

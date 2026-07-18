@@ -7,6 +7,8 @@ import torch
 from torch import Tensor, nn
 from transformers import Qwen3Config, Qwen3Model
 
+from ..._tensor import is_signed_integer_dtype
+from ...generation.types import AcousticGeneration
 from .._sampling import top_p_filter
 from ..base import Config, TokenModel
 from ..protocol import TokenModelRuntime
@@ -124,12 +126,10 @@ class AcousticRVQDecoder(nn.Module):
             raise ValueError("condition must have shape [batch, frame, condition_dim].")
 
     def _embedding(self, codebook: int, codes: Tensor) -> Tensor:
-        if (
-            codes.dtype == torch.bool
-            or codes.is_floating_point()
-            or codes.is_complex()
-        ):
-            raise TypeError("acoustic codes must contain integers.")
+        if not is_signed_integer_dtype(codes.dtype):
+            raise TypeError(
+                "acoustic codes must contain integers using a signed dtype."
+            )
         if bool((codes < 0).any()) or bool(
             (codes >= self.codebook_sizes[codebook]).any()
         ):
@@ -142,49 +142,72 @@ class AcousticRVQDecoder(nn.Module):
             nn.Module,
             cast(object, self.embedding_projections[codebook]),
         )
-        value = embedding(codes)
+        value = embedding(codes.to(dtype=torch.long))
         return projection(value)
 
     def forward(
         self,
         condition: Tensor,
         target_acoustic_codes: Tensor | None = None,
+        *,
+        mask: Tensor | None = None,
     ) -> tuple[Tensor, ...]:
         """Return one teacher-forced ``[B, F, K_q]`` tensor per codebook."""
         self._validate_condition(condition)
+        frame_mask = _frame_mask(condition, mask)
         if target_acoustic_codes is not None:
             if target_acoustic_codes.shape != (
                 condition.size(0),
                 condition.size(1),
                 self.codebooks,
             ):
-                raise ValueError("target_acoustic_codes must have shape [B, F, codebooks].")
-            if bool((target_acoustic_codes < 0).any()):
-                raise ValueError("target_acoustic_codes cannot contain padding values.")
+                raise ValueError(
+                    "target_acoustic_codes must have shape [B, F, codebooks]."
+                )
+            if not is_signed_integer_dtype(target_acoustic_codes.dtype):
+                raise TypeError(
+                    "target_acoustic_codes must use a signed integer dtype."
+                )
+            packed_targets = target_acoustic_codes.flatten(0, 1)[frame_mask.flatten()]
+            limits = torch.tensor(
+                self.codebook_sizes,
+                device=packed_targets.device,
+                dtype=torch.long,
+            )
+            if bool(((packed_targets < 0) | (packed_targets >= limits)).any()):
+                raise ValueError(
+                    "target_acoustic_codes contains an ID outside its codebook."
+                )
+        else:
+            packed_targets = None
 
-        condition_hidden = self.condition(condition)
+        packed_condition = condition.flatten(0, 1)[frame_mask.flatten()]
+        condition_hidden = self.condition(packed_condition)
         inputs = [condition_hidden + self.codebook_bos[0]]
         for codebook in range(1, self.codebooks):
-            if target_acoustic_codes is None:
+            if packed_targets is None:
                 previous = torch.zeros(
-                    condition.shape[:2], dtype=torch.long, device=condition.device
+                    condition_hidden.size(0), dtype=torch.long, device=condition.device
                 )
             else:
-                previous = target_acoustic_codes[..., codebook - 1].clamp_min(0)
+                previous = packed_targets[..., codebook - 1]
             inputs.append(
                 condition_hidden
                 + self.codebook_bos[codebook]
                 + self._embedding(codebook - 1, previous)
             )
-        decoder_input = torch.stack(inputs, dim=2).flatten(0, 1)
+        decoder_input = torch.stack(inputs, dim=1)
         hidden = self.decoder(
             inputs_embeds=decoder_input,
             use_cache=False,
             return_dict=True,
-        ).last_hidden_state.unflatten(0, condition.shape[:2])
+        ).last_hidden_state
         return tuple(
-            cast(nn.Linear, cast(object, self.heads[codebook]))(
-                hidden[..., codebook, :]
+            _scatter(
+                cast(nn.Linear, cast(object, self.heads[codebook]))(
+                    hidden[..., codebook, :]
+                ),
+                frame_mask,
             )
             for codebook in range(self.codebooks)
         )
@@ -194,18 +217,21 @@ class AcousticRVQDecoder(nn.Module):
         self,
         condition: Tensor,
         *,
+        mask: Tensor | None = None,
         temperature: float = 1.0,
         top_p: float = 1.0,
         generator: torch.Generator | None = None,
     ) -> Tensor:
         """Sample codebooks autoregressively while keeping frames parallel."""
         self._validate_condition(condition)
+        frame_mask = _frame_mask(condition, mask)
         if temperature <= 0 or not 0 < top_p <= 1:
             raise ValueError(
                 "temperature must be positive and top_p must be in (0, 1]."
             )
 
-        condition_hidden = self.condition(condition)
+        packed_condition = condition.flatten(0, 1)[frame_mask.flatten()]
+        condition_hidden = self.condition(packed_condition)
         output: list[Tensor] = []
         past_key_values = None
         for codebook in range(self.codebooks):
@@ -215,7 +241,7 @@ class AcousticRVQDecoder(nn.Module):
                     codebook - 1, output[-1]
                 )
             state_output = self.decoder(
-                inputs_embeds=decoder_input.flatten(0, 1)[:, None],
+                inputs_embeds=decoder_input[:, None],
                 past_key_values=past_key_values,
                 use_cache=True,
                 return_dict=True,
@@ -223,20 +249,18 @@ class AcousticRVQDecoder(nn.Module):
             past_key_values = state_output.past_key_values
             if past_key_values is None:
                 raise RuntimeError("RVQ decoder did not return a generation cache.")
-            state = state_output.last_hidden_state[:, -1].unflatten(
-                0, condition.shape[:2]
-            )
+            state = state_output.last_hidden_state[:, -1]
             head = cast(nn.Linear, cast(object, self.heads[codebook]))
             logits = head(state) / temperature
             if top_p < 1.0:
                 logits = top_p_filter(logits, top_p)
             value = torch.multinomial(
-                logits.softmax(dim=-1).flatten(0, -2),
+                logits.softmax(dim=-1),
                 1,
                 generator=generator,
-            ).view(condition.shape[:2])
+            )[:, 0]
             output.append(value)
-        return torch.stack(output, dim=-1)
+        return _scatter(torch.stack(output, dim=-1), frame_mask)
 
 
 class SpeechToSpeechRVQModel(TokenModel):
@@ -272,19 +296,25 @@ class SpeechToSpeechRVQModel(TokenModel):
         target_acoustic_codes: Tensor | None = None,
     ) -> tuple[Tensor, ...]:
         condition = self.target_frame_condition(hidden_states, target_positions)
-        return self.acoustic_decoder(condition, target_acoustic_codes)
+        return self.acoustic_decoder(
+            condition,
+            target_acoustic_codes,
+            mask=target_positions.ge(0),
+        )
 
     @torch.no_grad()
     def sample_acoustic_codes(
         self,
         condition: Tensor,
         *,
+        mask: Tensor | None = None,
         temperature: float = 1.0,
         top_p: float = 1.0,
         generator: torch.Generator | None = None,
     ) -> Tensor:
         return self.acoustic_decoder.generate(
             condition,
+            mask=mask,
             temperature=temperature,
             top_p=top_p,
             generator=generator,
@@ -302,6 +332,7 @@ class SpeechToSpeechRVQModel(TokenModel):
     ) -> Tensor:
         codes = self.sample_acoustic_codes(
             condition,
+            mask=mask,
             temperature=temperature,
             top_p=top_p,
             generator=generator,
@@ -325,7 +356,7 @@ class SpeechToSpeechRVQModel(TokenModel):
         prompt_attention_mask: Tensor | None = None,
         do_sample: bool = True,
         use_cache: bool = True,
-    ) -> tuple[Tensor, Tensor]:
+    ) -> AcousticGeneration:
         generated, condition, frame_mask = self.generate_audio_condition(
             prompt_ids,
             max_new_tokens=max_new_tokens,
@@ -344,11 +375,44 @@ class SpeechToSpeechRVQModel(TokenModel):
             temperature=temperature,
             top_p=top_p,
         )
-        return generated, features
+        return AcousticGeneration(
+            sequence=generated,
+            features=features,
+            frame_counts=frame_mask.sum(dim=1),
+        )
 
 
 def _heads(hidden_dim: int, requested: int) -> int:
     for heads in range(min(hidden_dim, requested), 0, -1):
         if hidden_dim % heads == 0:
             return heads
-    raise RuntimeError("a positive hidden dimension must have an attention head divisor")
+    raise RuntimeError(
+        "a positive hidden dimension must have an attention head divisor"
+    )
+
+
+def _frame_mask(condition: Tensor, mask: Tensor | None) -> Tensor:
+    if mask is None:
+        frame_mask = torch.ones(
+            condition.shape[:2], dtype=torch.bool, device=condition.device
+        )
+    else:
+        if mask.shape != condition.shape[:2]:
+            raise ValueError("acoustic frame mask must align with condition.")
+        if mask.dtype != torch.bool:
+            raise TypeError("acoustic frame mask must be boolean.")
+        if mask.device != condition.device:
+            raise ValueError(
+                "acoustic frame mask and condition must use the same device."
+            )
+        frame_mask = mask
+    if frame_mask.size(0) < 1 or not bool(frame_mask.any(dim=1).all()):
+        raise ValueError("each acoustic condition row must contain a valid frame.")
+    return frame_mask
+
+
+def _scatter(values: Tensor, mask: Tensor) -> Tensor:
+    frame_indices = mask.flatten().nonzero().flatten()
+    output = values.new_zeros((mask.numel(), *values.shape[1:]))
+    output = output.index_copy(0, frame_indices, values)
+    return output.unflatten(0, mask.shape)

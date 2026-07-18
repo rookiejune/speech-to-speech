@@ -12,7 +12,6 @@ from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
 from omegaconf import DictConfig, OmegaConf
-from torch import Tensor
 
 from speech_to_speech.callback import StageConfig, StageSwitcher, WorldSizeContract
 from speech_to_speech.callback.logging import (
@@ -27,7 +26,6 @@ from speech_to_speech.datamodule import ModelBatch
 from speech_to_speech.generation.batch import requests_from_batch
 from speech_to_speech.model import (
     AcousticType,
-    TokenModel,
     SpeechToSpeechFlowModel,
     SpeechToSpeechRVQModel,
 )
@@ -112,27 +110,30 @@ def run(config: DictConfig) -> None:
         )
     else:
         loss_pair = ("token", "rvq")
-    callbacks = cast(list[Callback], [
-        OutputsLogger(),
-        GradNormLogger(),
-        TextRetentionLogger(
-            {
-                "zh_en": {
-                    "instruction": "Translate into English: 昨晚的暴雨导致三趟列车晚点。",
-                    "reference": "Last night's heavy rain delayed three trains.",
+    callbacks = cast(
+        list[Callback],
+        [
+            OutputsLogger(),
+            GradNormLogger(),
+            TextRetentionLogger(
+                {
+                    "zh_en": {
+                        "instruction": "Translate into English: 昨晚的暴雨导致三趟列车晚点。",
+                        "reference": "Last night's heavy rain delayed three trains.",
+                    },
                 },
-            },
-            every_n_steps=1,
-            max_new_tokens=8,
-        ),
-        StageSwitcher(
-            StageConfig(
-                task_weights_by_stage=[{task: 1.0}],
-                epoch_milestones=[],
-            )
-        ),
-        summary,
-    ])
+                every_n_steps=1,
+                max_new_tokens=8,
+            ),
+            StageSwitcher(
+                StageConfig(
+                    task_weights_by_stage=[{task: 1.0}],
+                    epoch_milestones=[],
+                )
+            ),
+            summary,
+        ],
+    )
     if bool(config.callbacks.sample.enabled):
         callbacks.insert(
             2,
@@ -270,9 +271,7 @@ def runtime_config(config: DictConfig) -> RuntimeConfig:
     return RuntimeConfig(
         codec=str(config.codec.name),
         backbone=str(config.runtime.backbone),
-        audio_tokenizer=(
-            None if audio_tokenizer is None else str(audio_tokenizer)
-        ),
+        audio_tokenizer=(None if audio_tokenizer is None else str(audio_tokenizer)),
         device=str(device),
         dtype=str(config.runtime.dtype),
         attn_implementation=str(config.runtime.attn_implementation),

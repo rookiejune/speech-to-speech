@@ -94,7 +94,7 @@ def _reference_nll(
         attention_mask=torch.ones_like(input_ids, dtype=torch.bool),
     )
     predictors = hidden_states[0, prompt_ids.numel() - 1 : -1]
-    prediction = model.token_logits(predictors)[..., text_start:text_end].float()
+    prediction = model.token_logits(predictors, Modality.TEXT).float()
     target = input_ids[0, prompt_ids.numel() :] - text_start
     return float(F.cross_entropy(prediction, target).detach().cpu())
 

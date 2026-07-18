@@ -37,10 +37,17 @@ class TokenObjective(Objective[TokenObjectiveModel]):
             batch.input_ids,
             attention_mask=batch.attention_mask,
             acoustic_prompt_codes=None if prompt is None else prompt["codes"],
-            acoustic_prompt_positions=None if prompt is None else prompt["token_positions"],
+            acoustic_prompt_positions=None
+            if prompt is None
+            else prompt["token_positions"],
             acoustic_prompt_mask=batch.acoustic_prompt_mask,
         )
-        token = self.token(hidden_states, batch.token_labels, model.token_logits)
+        token = self.token(
+            hidden_states,
+            batch.token_labels,
+            batch.tasks[0].target_modality,
+            model.token_logits,
+        )
         return {"loss": token.loss.mean(), "token": token}
 
 
@@ -72,10 +79,17 @@ class FlowObjective(Objective[FlowObjectiveModel]):
             batch.input_ids,
             attention_mask=batch.attention_mask,
             acoustic_prompt_codes=None if prompt is None else prompt["codes"],
-            acoustic_prompt_positions=None if prompt is None else prompt["token_positions"],
+            acoustic_prompt_positions=None
+            if prompt is None
+            else prompt["token_positions"],
             acoustic_prompt_mask=batch.acoustic_prompt_mask,
         )
-        token = self.token(hidden_states, batch.token_labels, model.token_logits)
+        token = self.token(
+            hidden_states,
+            batch.token_labels,
+            batch.tasks[0].target_modality,
+            model.token_logits,
+        )
         result: Outputs = {"loss": token.loss.mean(), "token": token}
 
         if target_data is not None:
@@ -140,15 +154,24 @@ class RVQObjective(Objective[RVQObjectiveModel]):
             batch.input_ids,
             attention_mask=batch.attention_mask,
             acoustic_prompt_codes=None if prompt is None else prompt["codes"],
-            acoustic_prompt_positions=None if prompt is None else prompt["token_positions"],
+            acoustic_prompt_positions=None
+            if prompt is None
+            else prompt["token_positions"],
             acoustic_prompt_mask=batch.acoustic_prompt_mask,
         )
-        token = self.token(hidden_states, batch.token_labels, model.token_logits)
+        token = self.token(
+            hidden_states,
+            batch.token_labels,
+            batch.tasks[0].target_modality,
+            model.token_logits,
+        )
         result: Outputs = {"loss": token.loss.mean(), "token": token}
 
         if target_data is not None:
             if batch.acoustic_target_mask is None:
-                raise RuntimeError("model batch did not produce an acoustic target mask.")
+                raise RuntimeError(
+                    "model batch did not produce an acoustic target mask."
+                )
             labels = target_data["codes"]
             logits = model.acoustic_logits(
                 hidden_states,

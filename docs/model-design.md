@@ -111,7 +111,8 @@ padding 与 mask：
 `ModelBatch.from_samples(samples, pad_token_id=...)` 是跨字段校验边界：
 
 - input 与 token label 必须是对齐的一维序列。
-- acoustic prompt/target 以完整结构出现，内部 tensor 共用 frame 轴。
+- acoustic prompt/target 以完整结构出现；未 padding 的 codes 必须是非空二维非负整数 tensor，
+  内部 tensor 共用 frame 轴。
 - position 必须指向序列内非 padding token。
 - 同一 batch 的 task 必须具有相同 source/target modality 执行签名。
 
@@ -177,17 +178,20 @@ class FlowRepaConfig(TypedDict):
 model 的训练能力是：
 
 - `token_hidden_states()`：返回完整 backbone 表示，不构造 vocabulary logits。
-- `token_logits()`：在有效 predictor rows 上构造 global text+audio logits。
+- `token_logits(hidden, modality)`：在有效 predictor rows 上只构造 target modality 的局部
+  vocabulary logits；省略 modality 时为通用 forward 构造 global text+audio logits。
 - `target_frame_condition()`：把 target token position 对齐到 acoustic frame。
 - flow/RVQ 各自提供 acoustic target 与 decoder 能力。
 
 `TokenObjective`、`FlowObjective`、`RVQObjective` 只依赖结构化 Protocol。所有 batch 计算 token CE；存在 acoustic target 时，组合对应的 flow 或 RVQ objective。REPA 只属于 flow，通过显式 teacher 与正数 weight 加入。
+token CE 的 softmax 只覆盖 task 的 target modality，不让 text/audio head 跨模态竞争；flow、RVQ
+与 REPA 只对 boolean mask 选中的有效 frame 计算非线性 loss，padding NaN/Inf 不参与梯度。
 
 ## 6. Generation
 
 训练与推理是两条独立路径：
 
-- `ModelBatch -> token_hidden_states -> sparse token_logits -> objective`
+- `ModelBatch -> token_hidden_states -> sparse modality token_logits -> objective`
 - `Request -> generation service -> token/audio generation -> decode -> Result`
 
 `speech_to_speech.generation` 拥有 `Request`、`Result`、service、decode 与 text evaluation；`pl_module` 只负责 Lightning 集成。
@@ -197,7 +201,8 @@ model 对外提供：
 - `generation_step()`：供私有自回归循环使用的单步、目标 head 前向契约。
 - `generate_tokens()`：text 或 semantic-audio token generation。
 - `generate_audio_condition()`：生成 audio tokens 及 frame-aligned condition。
-- `generate_audio_features()`：flow/RVQ 组合返回 sequence 与 codec acoustic features。
+- `generate_audio_features()`：flow/RVQ 组合返回 sequence、padded codec acoustic features 与
+  每行有效 frame count。
 
 通用 `generate_sequence()` 自回归循环位于私有 `model/_generation.py`，具体模型不跨文件调用
 基类私有方法。循环首步编码完整多模态 prompt，后续复用 KV cache；cache 只属于单次调用。
@@ -209,10 +214,15 @@ model 对外提供：
 - text：`prompt -> text tokens -> EOS`。
 - audio：`prompt + BOA -> semantic-audio tokens -> EOA`。
 
-service 把 model sequence 裁剪为不含 stop token 的 `Result.response_ids`。有独立 acoustic representation 时用 features 解码；unified-token codec 直接解码 semantic codes，返回 `AudioOutput(features=None, waveform, sample_rate)`。
+service 把 model sequence 裁剪为不含 stop token 的 `Result.response_ids`。有独立 acoustic
+representation 时直接复用 model 返回的 frame count 裁剪 features；token 数和 frame 数相同的
+行合并执行 codec decode。unified-token codec 直接解码 semantic codes，返回
+`AudioOutput(features=None, waveform, sample_rate)`。
 
 ## 7. Data 与阶段配置
 
 DataModule 显式持有 runtime 与一个可更新的 Collator。初始 `task_weights` 在构造时确定；`StageSwitcher` 在 epoch 边界调用 `set_task_weights()`。`persistent_workers=False` 使下一 epoch worker 获得更新状态。
 
-同一组 task weights 只能包含相同 source/target modality 的任务，以保证 batch 执行签名稳定。正式多任务 DDP 使用 `find_unused_parameters=True`；静态 codec oracle 冻结目标路径外参数并使用静态 DDP 契约。
+同一组 task weights 只能包含相同 source/target modality 的任务，权重必须有限、非负且总和为
+正，以保证 batch 执行签名稳定。正式多任务 DDP 使用 `find_unused_parameters=True`；total
+loss 日志跨 rank 归约。静态 codec oracle 冻结目标路径外参数并使用静态 DDP 契约。

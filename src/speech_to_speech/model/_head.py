@@ -39,7 +39,17 @@ class VocabularyHeadMixin:
             weight = weight.index_select(0, local_ids)
         return F.linear(projected, weight)
 
-    def token_logits(self, hidden_state: torch.Tensor) -> torch.Tensor:
+    def token_logits(
+        self,
+        hidden_state: torch.Tensor,
+        modality: Modality | None = None,
+    ) -> torch.Tensor:
+        if modality is Modality.TEXT:
+            return self.text_logits(hidden_state)
+        if modality is Modality.AUDIO:
+            return self.semantic_audio_logits(hidden_state)
+        if modality is not None:
+            raise ValueError(f"unsupported token modality: {modality.value}")
         logits = hidden_state.new_full(
             (*hidden_state.shape[:-1], self.runtime.layout.vocab_size),
             float("-inf"),
@@ -57,13 +67,13 @@ class VocabularyHeadMixin:
     ) -> torch.Tensor:
         if modality is Modality.TEXT:
             start, _ = self.runtime.layout.blocks[Modality.TEXT.value]
-            logits = self.text_logits(hidden_state)
+            logits = self.token_logits(hidden_state, modality)
             for token_id in (self.runtime.pad_token_id, self.runtime.bos_token_id):
                 logits[..., token_id - start] = float("-inf")
             return logits
         if modality is Modality.AUDIO:
             start, _ = self.runtime.layout.blocks[Modality.AUDIO.value]
-            logits = self.semantic_audio_logits(hidden_state)
+            logits = self.token_logits(hidden_state, modality)
             logits[..., self.runtime.boa_token_id - start] = float("-inf")
             return logits
         raise ValueError(f"unsupported generation modality: {modality.value}")
