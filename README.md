@@ -73,6 +73,9 @@ Two-GPU contract runs use `jobs/005/04_longcat_ddp_lba.sh` and
 and summary artifacts under their run directory, while `generation_smoke.py`
 writes `metrics.json`. Keep TensorBoard enabled for long full-model runs and
 monitor the supervised curves rather than relying only on the final summary.
+UniCodec jobs require a Python environment compatible with `fairseq==0.12.2`;
+select it through `SPEECH_TO_SPEECH_UNICODEC_PYTHON` instead of assuming the
+main training environment is compatible.
 
 ## Documentation
 

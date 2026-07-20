@@ -19,10 +19,7 @@
   text/audio 局部词表 loss、backward、generation 和 waveform decode 均 finite，再决定是否重跑
   100-step overfit 趋势。
 - 在相同 LongCat prepared data、model、optimizer 和训练预算下完成 codec/random audio
-  embedding initialization 对照；005 的 2-step smoke 只验证闭环，2000-step 长跑只有 codec
-  initialization，尚不支持优劣结论
-  （[005 result, lines 15-18](results/005-acoustic-oracle-codec-screening.md#L15-L18)，
-  [lines 78-96](results/005-acoustic-oracle-codec-screening.md#L78-L96)）。
+  embedding initialization 对照；当前代码尚无可比较结果，完整对照前不支持初始化优劣结论。
 - 在本轮 runtime 显式注入、输入约束、任务权重与 device 改动后，用两张 GPU 分别重新运行
   LongCat oracle 与 UniCodec fixed-sample wrapper 至少 2 steps，验收静态 `ddp`、多任务
   `find_unused_parameters=True`、跨 rank total loss 和 per-rank runtime device。
