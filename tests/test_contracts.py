@@ -25,6 +25,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from speech_to_speech.datamodule.collator import Collator
 from speech_to_speech.callback import WorldSizeContract
+from speech_to_speech.datamodule import DatasetConfig, DatasetName, ToyDataset
 from speech_to_speech.datamodule.module import Config as DataConfig
 from speech_to_speech.datamodule.module import DataModule
 from speech_to_speech.datamodule.parser import _parse_audio_item, parse_sample
@@ -35,7 +36,7 @@ from speech_to_speech.datamodule.types import (
 )
 from speech_to_speech.callback.stage import Config as StageConfig
 from speech_to_speech.callback.stage import StageSwitcher
-from speech_to_speech.model import Config as ModelConfig
+from speech_to_speech.model import Config as ModelConfig, ToyConfig
 from speech_to_speech.runtime import Config, Runtime
 from speech_to_speech.runtime.runtime import audio_tokenizer, dtype
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer, TorchCodecBPE
@@ -333,7 +334,87 @@ class ContractTest(unittest.TestCase):
         datamodule.setup()
         datamodule.setup()
 
-        load_dataset.assert_called_once_with(codec="longcat")
+        load_dataset.assert_called_once_with(
+            codec="longcat",
+            root=None,
+            split="train",
+        )
+
+    def test_toy_dataset_uses_codec_shapes_and_value_ranges(self):
+        cases = (
+            (
+                "longcat",
+                SimpleNamespace(
+                    semantic_codebook=torch.zeros(5, 4),
+                    acoustic_codebook_sizes=(3, 7),
+                ),
+                AudioView.LONGCAT,
+                (5, 3, 7),
+            ),
+            (
+                "unicodec",
+                SimpleNamespace(
+                    semantic_codebook=torch.zeros(11, 4),
+                    acoustic_codebook_sizes=(),
+                ),
+                AudioView.UNICODEC,
+                (11,),
+            ),
+        )
+
+        for codec_name, codec, view, sizes in cases:
+            with self.subTest(codec=codec_name):
+                dataset = ToyDataset(codec_name, codec, samples=2, frames=3)
+                first = dataset[0]
+                again = dataset[0]
+                self.assertEqual(len(dataset), 2)
+                for role in (Role.SOURCE, Role.TARGET):
+                    item = first[(role, Modality.AUDIO)]
+                    codes = item.views[view]
+                    self.assertEqual(tuple(codes.shape), (3, len(sizes)))
+                    for codebook, size in enumerate(sizes):
+                        self.assertTrue((codes[:, codebook] >= 0).all())
+                        self.assertTrue((codes[:, codebook] < size).all())
+                    self.assertTrue(
+                        torch.equal(codes, again[(role, Modality.AUDIO)].views[view])
+                    )
+
+    @patch("zhuyin.datasets.wmt19_tts.wmt19_tts_codec")
+    def test_datamodule_loads_toy_data_without_prepared_dataset(self, prepared):
+        codec = SimpleNamespace(
+            semantic_codebook=torch.zeros(5, 4),
+            acoustic_codebook_sizes=(3,),
+        )
+        datamodule = DataModule(
+            DataConfig(
+                codec="longcat",
+                dataloader={"batch_size": 1, "num_workers": 0},
+                dataset=DatasetConfig(
+                    name=DatasetName.TOY,
+                    toy_samples=2,
+                    toy_frames=3,
+                ),
+            ),
+            SimpleNamespace(codec_name="longcat", codec=codec),
+            {Task.TTS: 1.0},
+        )
+
+        datamodule.setup()
+
+        prepared.assert_not_called()
+        self.assertEqual(len(datamodule.train_samples([0, 1])), 2)
+
+    def test_toy_settings_reject_invalid_dimensions(self):
+        with self.assertRaisesRegex(ValueError, "divisible"):
+            ToyConfig(hidden_size=7, heads=2)
+        with self.assertRaisesRegex(ValueError, "toy_samples"):
+            DatasetConfig(name=DatasetName.TOY, toy_samples=0)
+        codec = SimpleNamespace(
+            semantic_codebook=torch.zeros(5, 4),
+            acoustic_codebook_sizes=(),
+        )
+        with self.assertRaisesRegex(ValueError, "LongCat"):
+            ToyDataset("longcat", codec)
 
     def test_datamodule_rejects_runtime_codec_mismatch(self):
         datamodule = DataModule(

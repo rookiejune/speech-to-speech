@@ -6,6 +6,7 @@ from typing import Optional, Type, TypeVar, Union, cast
 from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf
 
 from speech_to_speech.codec_oracle import Config as OracleConfig
+from speech_to_speech.datamodule import DatasetConfig, DatasetName
 from speech_to_speech.model import AcousticType, AdapterType, DecoderConfig
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
@@ -36,9 +37,7 @@ class RVQConfig:
 
 
 @dataclass
-class FixedDataConfig:
-    root: Optional[str] = None
-    split: str = MISSING
+class FixedDataConfig(DatasetConfig):
     sample_index: int = MISSING
 
 
@@ -74,8 +73,16 @@ class SampleCallbackConfig:
 
 
 @dataclass
+class EvaluationCallbackConfig:
+    enabled: bool = True
+
+
+@dataclass
 class OverfitCallbacksConfig:
     sample: SampleCallbackConfig = field(default_factory=SampleCallbackConfig)
+    evaluation: EvaluationCallbackConfig = field(
+        default_factory=EvaluationCallbackConfig
+    )
 
 
 @dataclass
@@ -202,6 +209,14 @@ def _prepare(config: DictConfig) -> DictConfig:
     initialization = result.get("codec_oracle", {}).get("initialization")
     if initialization is not None:
         result.codec_oracle.initialization = str(initialization).upper()
+    dataset = result.get("data", {}).get("name")
+    if dataset is not None:
+        raw = str(dataset)
+        result.data.name = (
+            DatasetName[raw].name
+            if raw in DatasetName.__members__
+            else DatasetName(raw).name
+        )
     return result
 
 

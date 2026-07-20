@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections.abc import Iterable, Mapping, Sequence
 from typing import TypedDict
 
@@ -9,7 +9,8 @@ from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader
 
 from .collator import Collator
-from .protocol import DataRuntime
+from .dataset import DatasetConfig, load_dataset
+from .protocol import DatasetRuntime
 from ..task import Task
 from .types import ModelBatch
 
@@ -23,13 +24,14 @@ class DataLoaderConfig(TypedDict):
 class Config:
     codec: str
     dataloader: DataLoaderConfig
+    dataset: DatasetConfig = field(default_factory=DatasetConfig)
 
 
 class DataModule(LightningDataModule):
     def __init__(
         self,
         config: Config,
-        runtime: DataRuntime,
+        runtime: DatasetRuntime,
         task_weights: Mapping[Task, float],
     ) -> None:
         super().__init__()
@@ -49,9 +51,7 @@ class DataModule(LightningDataModule):
                 "datamodule and runtime must use the same codec: "
                 f"{self.config.codec!r} != {runtime_codec!r}."
             )
-        from zhuyin.datasets.wmt19_tts import wmt19_tts_codec
-
-        self._train_dataset = wmt19_tts_codec(codec=self.config.codec)
+        self._train_dataset = load_dataset(self.config.dataset, self.runtime)
 
     def set_task_weights(self, task_weights: Mapping[Task, float]) -> None:
         self.collator.set_task_weights(task_weights)

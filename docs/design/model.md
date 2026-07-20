@@ -19,6 +19,8 @@
   model 各自消费的 runtime 资源边界。
 - `AdapterType`：基础 `Config` 三个 adapter 字段的 `linear|mlp` 字符串枚举；`None` 表示输入输出
   dimension 相同的 identity adapter。
+- `ToyConfig` / `create_toy_backbone()`：构造随机初始化的一层或少层 Qwen backbone，用于 CPU
+  model/data 契约测试；词表大小来自 runtime layout，但不读取 `runtime.backbone`。
 - `AcousticType`、`DecoderConfig`、`FlowRepaConfig`：组合入口的严格配置结构。
 
 ## Token 接口
@@ -66,15 +68,18 @@ def generate_tokens(...) -> Tensor: ...
 
 ## 配置边界
 
-`model.Config` 只包含基础模型真正消费的 adapter：
+`model.Config` 只包含基础模型真正消费的设置：
 
 - `semantic_audio_adapter`
 - `semantic_audio_output_adapter`
 - `acoustic_prompt_adapter`
+- `toy`
 
 三个字段都使用公开 `AdapterType`；`linear` 是默认值，`mlp` 使用 gated SiLU adapter，`None`
-只在输入输出 dimension 相同时合法。Hydra `model` preset 与这三个字段一一对应，overfit 与
-codec-oracle root schema 直接复用 `model.Config`。
+只在输入输出 dimension 相同时合法。`toy=None` 时模型使用 `runtime.backbone`；非空时由
+`ToyConfig` 构造随机 tiny Qwen，runtime 仍负责 tokenizer、codec、layout、special IDs 与 flow
+sampler。Hydra `model` preset 与这些字段一一对应，overfit 与 codec-oracle root schema 直接复用
+`model.Config`。
 
 decoder 使用独立 `DecoderConfig(hidden_dim, layers, heads, ffn_ratio)`。flow 可额外接收
 `FlowRepaConfig(feature_dim, student_layer)`；RVQ 可额外接收初始化 decoder 各 acoustic

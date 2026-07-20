@@ -8,6 +8,8 @@
 - `protocol.DataRuntime`：datamodule 所需资源的最小只读协议，公开 codec identity/view、
   text/audio tokenizer、layout 和 special token ID。正式 `Runtime` 与测试 fake 都通过该协议
   显式注入。
+- `DatasetRuntime`：在 `DataRuntime` 上增加正式 codec object，仅供 dataset factory 根据
+  codebook metadata 构造 toy prepared-code samples。
 - `parser.parse_sample()`：把 `anydataset.types.Sample` 解析为 `SpeechPair`。它解释当前
   `AudioView`，将 LongCat codebooks 分成 semantic/acoustic codes，并生成 text/audio token
   IDs 与 audio token spans。
@@ -22,11 +24,13 @@
   `uses_source_role` 和 instruction template 的唯一事实来源。
 - `Collator(runtime, task_weights)`：按任务权重为 raw samples 选择任务，依次调用 parser、
   sample builder 和 batch padding；`set_task_weights()` 原地更新后续 batch 的任务分布。
-- `DataLoaderConfig(batch_size, num_workers)` / `Config(codec, dataloader)`：公开的 DataLoader
-  与 DataModule 配置结构。
-- `DataModule(config, runtime, task_weights)`：Lightning 数据入口；`setup()` 加载 prepared
-  dataset，并在加载前校验 config 与 runtime 的 codec identity。重复调用不会重新加载已持有的
-  数据集。
+- `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts` prepared data 或确定性的内存
+  `toy` data。toy codes 根据正式 codec 的 semantic/acoustic codebook 数量和值域构造。
+- `ToyDataset`：提供完整 source/target audio+text raw sample，不读取文件、不修改全局 RNG。
+- `DataLoaderConfig(batch_size, num_workers)` / `Config(codec, dataloader, dataset)`：公开的
+  DataLoader、dataset 与 DataModule 配置结构。
+- `DataModule(config, runtime, task_weights)`：Lightning 数据入口；`setup()` 加载所选 dataset，
+  并在加载前校验 config 与 runtime 的 codec identity。重复调用不会重新加载已持有的数据集。
 
 ## 输入输出
 
@@ -57,8 +61,11 @@ acoustic_target: AcousticTarget | None
 
 ## 边界
 
-- `DataRuntime` 必须由组合入口显式传给 `DataModule`/`Collator`，再沿 parser 和 sample
-  builder 传递；datamodule 不自行选择 tokenizer、layout 或 special tokens。
+- runtime 必须由组合入口显式传入：`DataModule` 接收 `DatasetRuntime`，`Collator` 及下游 parser
+  和 sample builder 只消费较小的 `DataRuntime`；datamodule 不自行选择 tokenizer、layout 或
+  special tokens。
+- toy dataset 只读取正式 runtime 的 codec identity 与 codebook metadata；它不提供 tokenizer、
+  codec、layout 或 special token，因此不存在 toy runtime 分支。
 - `parser.py` 只解释 raw dataset representation；`sample.py` 只实现任务序列规则；
   `types.py` 保存结构并处理局部校验、padding 和 mask。三层不反向读取彼此的私有逻辑。
 - LongCat 的第 0 个 codebook 和后续 codebooks 只在 parser 边界解释为 semantic/acoustic。

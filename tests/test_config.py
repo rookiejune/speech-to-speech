@@ -23,7 +23,13 @@ from scripts.codec_oracle import build_runtime as build_oracle_runtime
 from scripts.overfit import _composition, runtime_config
 from speech_to_speech.codec_oracle import Config as OracleConfig
 from speech_to_speech.codec_oracle import DataConfig, Initialization
-from speech_to_speech.model import AdapterType, Config as ModelConfig, DecoderConfig
+from speech_to_speech.datamodule import DatasetName
+from speech_to_speech.model import (
+    AdapterType,
+    Config as ModelConfig,
+    DecoderConfig,
+    ToyConfig,
+)
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.runtime import Config as RuntimeConfig
 
@@ -59,6 +65,31 @@ class ConfigTest(unittest.TestCase):
             Initialization.CODEC,
         )
         self.assertFalse(hasattr(oracle, "acoustic"))
+
+    def test_toy_smoke_selects_model_and_dataset_without_a_toy_runtime(self):
+        config = overfit(_compose("overfit", "experiment=toy_smoke"))
+
+        self.assertIsInstance(config, OverfitFlowConfig)
+        self.assertIsInstance(config.runtime, RuntimeConfig)
+        self.assertEqual(config.runtime.codec, "longcat")
+        self.assertEqual(config.runtime.backbone, "Qwen/Qwen3-0.6B")
+        self.assertEqual(config.runtime.device, "cpu")
+        self.assertIsInstance(config.model.toy, ToyConfig)
+        self.assertEqual(config.model.toy.hidden_size, 32)
+        self.assertIs(config.data.name, DatasetName.TOY)
+        self.assertEqual(config.data.toy_samples, 8)
+        self.assertEqual(config.data.toy_frames, 4)
+        self.assertEqual(config.train.max_steps, 2)
+        self.assertFalse(config.callbacks.sample.enabled)
+        self.assertFalse(config.callbacks.evaluation.enabled)
+
+        production = overfit(_compose("overfit"))
+        self.assertIsNone(production.model.toy)
+        self.assertIs(production.data.name, DatasetName.WMT19_TTS)
+
+        selected = overfit(_compose("overfit", "model=toy", "data=toy"))
+        self.assertIsInstance(selected.model.toy, ToyConfig)
+        self.assertIs(selected.data.name, DatasetName.TOY)
 
     def test_composition_must_match_codec_capabilities(self):
         flow = overfit(_compose("overfit"))

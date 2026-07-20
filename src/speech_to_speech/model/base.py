@@ -16,6 +16,7 @@ from .adapter import AdapterType, create_adapter
 from .embedding import create_semantic_audio_modules
 from .embedding.audio import merge_by_positions
 from .protocol import TokenModelRuntime
+from .toy import ToyConfig, create_toy_backbone
 from ..runtime.types import BackboneOutput
 
 
@@ -24,6 +25,7 @@ class Config:
     semantic_audio_adapter: Optional[AdapterType] = AdapterType.LINEAR
     semantic_audio_output_adapter: Optional[AdapterType] = AdapterType.LINEAR
     acoustic_prompt_adapter: Optional[AdapterType] = AdapterType.LINEAR
+    toy: Optional[ToyConfig] = None
 
 
 class TokenModel(VocabularyHeadMixin, nn.Module):
@@ -40,17 +42,23 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         self.config = config or Config()
         self.runtime = runtime
         self.layout = self.runtime.layout
+        text_start, text_end = self.layout.blocks["text"]
+        self.backbone = (
+            self.runtime.backbone
+            if self.config.toy is None
+            else create_toy_backbone(self.config.toy, text_end - text_start)
+        )
         (
             self.semantic_audio_embedding,
             self.semantic_audio_adapter,
         ) = create_semantic_audio_modules(
-            self.config.semantic_audio_adapter, self.runtime
+            self.config.semantic_audio_adapter,
+            self.runtime,
+            self.backbone,
         )
-        self.backbone = self.runtime.backbone
         hidden_size = self.backbone.config.hidden_size
         input_embedding = self.backbone.get_input_embeddings()
         output_embedding = self.backbone.get_output_embeddings()
-        text_start, text_end = self.layout.blocks["text"]
         text_vocab_size = text_end - text_start
         if input_embedding.weight.size(0) < text_vocab_size:
             raise ValueError(

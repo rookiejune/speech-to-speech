@@ -18,21 +18,19 @@ class _Runtime(Protocol):
     def audio_tokenizer(self) -> AudioTokenizer: ...
 
     @cached_property
-    def backbone(self) -> Backbone: ...
-
-    @cached_property
     def codec(self) -> Codec: ...
 
 
 def create_semantic_audio_modules(
     adapter_type: AdapterType | None,
     runtime: _Runtime,
+    backbone: Backbone,
 ) -> tuple[nn.Embedding, nn.Module]:
-    backbone_weight = runtime.backbone.get_input_embeddings().weight
+    backbone_weight = backbone.get_input_embeddings().weight
     adapter = create_adapter(
         adapter_type,
         runtime.codec.semantic_codebook.size(-1),
-        runtime.backbone.config.hidden_size,
+        backbone.config.hidden_size,
     ).to(device=backbone_weight.device, dtype=backbone_weight.dtype)
     semantic_audio = embedding(runtime.codec, runtime.audio_tokenizer).to(
         device=backbone_weight.device,

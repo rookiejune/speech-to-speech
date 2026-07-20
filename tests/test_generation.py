@@ -10,13 +10,12 @@ from anydataset.types import Modality
 from anytrain.idspace import Layout
 from torch import Tensor, nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.models.qwen3 import Qwen3Config, Qwen3ForCausalLM
 
 from speech_to_speech.callback.logging.sample import SampleLogger
 from speech_to_speech.datamodule.module import Config as DataConfig
 from speech_to_speech.datamodule.module import DataModule
 from speech_to_speech.datamodule.types import ACOUSTIC_PAD_ID, ModelBatch
-from speech_to_speech.model import AdapterType
+from speech_to_speech.model import AdapterType, ToyConfig
 from speech_to_speech.model.acoustic import SpeechToSpeechFlowModel
 from speech_to_speech.model.base import Config as ModelConfig
 from speech_to_speech.model.base import TokenModel
@@ -102,18 +101,6 @@ class _TinyRuntime(_Runtime):
         self.layout = Layout(text=(0, 8), audio=(8, 12))
         self.audio_tokenizer = NativeAudioTokenizer(vocab_size=2)
         self.codec = _TinyCodec()
-        self.backbone = Qwen3ForCausalLM(
-            Qwen3Config(
-                vocab_size=8,
-                hidden_size=8,
-                intermediate_size=16,
-                num_hidden_layers=1,
-                num_attention_heads=2,
-                num_key_value_heads=1,
-                head_dim=4,
-                max_position_embeddings=32,
-            )
-        )
         self.eos_token_id = 3
         self.boa_token_id = 10
         self.eoa_token_id = 11
@@ -253,16 +240,10 @@ class _VariableStopModel(_UnifiedGenerationModel):
 class GenerationTest(unittest.TestCase):
     def test_frame_span_buffer_follows_the_backbone_device(self):
         runtime = _TinyRuntime()
-        runtime.backbone.to(device="meta")
-
         model = TokenModel(
-            ModelConfig(
-                semantic_audio_adapter=None,
-                semantic_audio_output_adapter=None,
-                acoustic_prompt_adapter=None,
-            ),
+            _model_config(),
             runtime=runtime,
-        )
+        ).to(device="meta")
 
         self.assertEqual(model.audio_token_frame_spans.device.type, "meta")
         self.assertNotIn("audio_token_frame_spans", model.state_dict())
@@ -279,11 +260,7 @@ class GenerationTest(unittest.TestCase):
 
     def test_modality_generation_masks_special_tokens(self):
         model = TokenModel(
-            ModelConfig(
-                semantic_audio_adapter=None,
-                semantic_audio_output_adapter=None,
-                acoustic_prompt_adapter=None,
-            ),
+            _model_config(),
             runtime=_TinyRuntime(),
         ).eval()
 
@@ -324,11 +301,7 @@ class GenerationTest(unittest.TestCase):
 
     def test_forward_skips_the_backbone_lm_head(self):
         model = TokenModel(
-            ModelConfig(
-                semantic_audio_adapter=None,
-                semantic_audio_output_adapter=None,
-                acoustic_prompt_adapter=None,
-            ),
+            _model_config(),
             runtime=_TinyRuntime(),
         ).eval()
 
@@ -343,11 +316,7 @@ class GenerationTest(unittest.TestCase):
 
     def test_generation_only_computes_the_allowed_output_head(self):
         model = TokenModel(
-            ModelConfig(
-                semantic_audio_adapter=None,
-                semantic_audio_output_adapter=None,
-                acoustic_prompt_adapter=None,
-            ),
+            _model_config(),
             runtime=_TinyRuntime(),
         ).eval()
 
@@ -376,11 +345,7 @@ class GenerationTest(unittest.TestCase):
 
     def test_generation_rejects_invalid_constraints(self):
         model = TokenModel(
-            ModelConfig(
-                semantic_audio_adapter=None,
-                semantic_audio_output_adapter=None,
-                acoustic_prompt_adapter=None,
-            ),
+            _model_config(),
             runtime=_TinyRuntime(),
         ).eval()
 
@@ -538,11 +503,7 @@ class GenerationTest(unittest.TestCase):
 
     def test_audio_generation_requires_an_audio_model(self):
         model = TokenModel(
-            ModelConfig(
-                semantic_audio_adapter=None,
-                semantic_audio_output_adapter=None,
-                acoustic_prompt_adapter=None,
-            ),
+            _model_config(),
             runtime=_TinyRuntime(),
         ).eval()
         request = Request(
@@ -557,11 +518,7 @@ class GenerationTest(unittest.TestCase):
     def test_acoustic_prompt_adapter_bias_only_affects_prompt_positions(self):
         rt = _TinyRuntime()
         model = TokenModel(
-            ModelConfig(
-                semantic_audio_adapter=None,
-                semantic_audio_output_adapter=None,
-                acoustic_prompt_adapter=AdapterType.LINEAR,
-            ),
+            _model_config(acoustic_prompt_adapter=AdapterType.LINEAR),
             runtime=rt,
         ).eval()
         with torch.no_grad():
@@ -584,11 +541,7 @@ class GenerationTest(unittest.TestCase):
         torch.manual_seed(0)
         rt = _TinyRuntime()
         model = TokenModel(
-            ModelConfig(
-                semantic_audio_adapter=None,
-                semantic_audio_output_adapter=None,
-                acoustic_prompt_adapter=None,
-            ),
+            _model_config(),
             runtime=rt,
         ).eval()
         model.acoustic_prompt_gate.data.fill_(1)
@@ -818,6 +771,24 @@ class GenerationTest(unittest.TestCase):
         logger.on_train_batch_start(trainer, module, None, 0)
 
         module.generate.assert_not_called()
+
+
+def _model_config(
+    *,
+    acoustic_prompt_adapter: AdapterType | None = None,
+) -> ModelConfig:
+    return ModelConfig(
+        semantic_audio_adapter=None,
+        semantic_audio_output_adapter=None,
+        acoustic_prompt_adapter=acoustic_prompt_adapter,
+        toy=ToyConfig(
+            hidden_size=8,
+            intermediate_size=16,
+            layers=1,
+            heads=2,
+            max_position_embeddings=32,
+        ),
+    )
 
 
 def _request() -> Request:

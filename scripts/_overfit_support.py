@@ -12,7 +12,13 @@ from lightning.pytorch.callbacks import Callback
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset, Subset
 
-from speech_to_speech.datamodule import Collator, DataRuntime, ModelBatch
+from speech_to_speech.datamodule import (
+    Collator,
+    DatasetConfig,
+    DatasetRuntime,
+    ModelBatch,
+    load_dataset,
+)
 from speech_to_speech.loss import Outputs, loss_items
 from speech_to_speech.model import SpeechToSpeechFlowModel, SpeechToSpeechRVQModel
 from speech_to_speech.reporting import window_summary
@@ -122,20 +128,18 @@ class FixedDataModule(LightningDataModule):
     def __init__(
         self,
         codec: str,
-        runtime: DataRuntime,
+        runtime: DatasetRuntime,
         task_weights: Mapping[Task, float],
         sample_index: int,
         *,
-        root: Path | None = None,
-        split: str = "train",
+        dataset: DatasetConfig | None = None,
     ) -> None:
         super().__init__()
         self.codec = codec
         self.runtime = runtime
         self.collator = Collator(runtime, task_weights)
         self.sample_index = sample_index
-        self.root = root
-        self.split = split
+        self.dataset_config = dataset or DatasetConfig()
         self._dataset: Dataset[RawSample] | None = None
         self._training: Subset[RawSample] | None = None
 
@@ -148,18 +152,9 @@ class FixedDataModule(LightningDataModule):
                 "fixed datamodule and runtime must use the same codec: "
                 f"{self.codec!r} != {self.runtime.codec_name!r}."
             )
-        from zhuyin.datasets.wmt19_tts import wmt19_tts_codec
-
         self._dataset = cast(
             Dataset[RawSample],
-            cast(
-                object,
-                wmt19_tts_codec(
-                    codec=self.codec,
-                    root=self.root,
-                    split=self.split,
-                ),
-            ),
+            cast(object, load_dataset(self.dataset_config, self.runtime)),
         )
         self._training = Subset(self._dataset, [self.sample_index])
 

@@ -3,6 +3,7 @@ defaults:
   - /model: default
   - /model/acoustic: flow
   - /runtime: longcat
+  - /data: wmt19_tts
   - /pl_module: sft
   - /trainer: default
   - /logging: tensorboard
@@ -16,11 +17,6 @@ callbacks:
   sample:
     enabled: true
     every_n_steps: 1
-
-data:
-  root:
-  split: train
-  sample_index: 0
 
 train:
   seed: 0

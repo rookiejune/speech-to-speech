@@ -6,10 +6,12 @@ from anydataset.types import Modality
 from torch import nn
 
 from .protocol import TokenModelRuntime
+from ..runtime.types import Backbone
 
 
 class VocabularyHeadMixin:
     runtime: TokenModelRuntime
+    backbone: Backbone
     semantic_audio_embedding: nn.Embedding
     semantic_audio_output_adapter: nn.Module
 
@@ -19,7 +21,7 @@ class VocabularyHeadMixin:
         local_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         text_start, text_end = self.runtime.layout.blocks["text"]
-        output = self.runtime.backbone.get_output_embeddings()
+        output = self.backbone.get_output_embeddings()
         weight = output.weight[: text_end - text_start]
         bias = output.bias
         bias = None if bias is None else bias[: text_end - text_start]

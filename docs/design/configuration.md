@@ -9,8 +9,11 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
 - `runtime`：完整映射 `runtime.Config`，统一拥有 codec、backbone、audio tokenizer、device、dtype、
   attention backend 与 flow sampling。`longcat`、`longcat_native`、`unicodec` 表示相互兼容的资源
   snapshot；不再拆分 `codec` 和 `sampler` 组。
-- `model`：完整映射 `model.Config` 的三个 adapter。`model/acoustic` 选择 flow/RVQ composition，
-  preset package 仍是顶层 `acoustic`，避免把 subtype 字段混入基础 `model.Config`。
+- `model`：完整映射 `model.Config` 的三个 adapter 与可选 `ToyConfig`。`model=toy` 只替换
+  backbone；`model/acoustic` 选择 flow/RVQ composition，preset package 仍是顶层 `acoustic`，
+  避免把 subtype 字段混入基础 `model.Config`。
+- `data`：overfit 数据源 preset；`data=toy` 使用 `DatasetConfig` 选择内存 codec samples，
+  production/fixed-sample experiment 默认仍使用 WMT19 TTS prepared data。
 - `pl_module`：完整映射 `pl_module.Config` 的 learning rate 与 weight decay；不再使用含义重复的
   `optimizer` 组。
 - `codec_oracle`：完整映射 `codec_oracle.Config`，统一拥有 initialization、target normalization、
@@ -18,8 +21,10 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
   `oracle`、`init` 或 `data/oracle` 组。
 
 `trainer`、`logging`、`callback` 与 `experiment` 属于 Lightning/Hydra 运行编排，可以没有同名
-`src` 包。overfit 的 fixed-sample data 和 train budget 没有独立替代项，直接位于 overfit
-experiment；oracle callbacks 总是成套使用，因此合并为单个 preset。
+`src` 包。overfit 的 sample index 和 train budget 位于 experiment；数据源通过公开
+`DatasetConfig` 选择。overfit 的 `callbacks.evaluation.enabled` 控制声学生成评估；真实
+fixed-sample experiment 默认启用，随机输出不构成质量结论的 `toy_smoke` 显式关闭。oracle
+callbacks 总是成套使用，因此合并为单个 preset。
 
 ## 生产默认与完整链路测试
 
@@ -39,6 +44,8 @@ DataLoader 构造参数供 Lightning 重建；UniCodec DDP smoke 则要求每个
 - `unicodec_overfit`：UniCodec fixed-sample 100-step overfit。
 - `unicodec_ddp_smoke`：UniCodec 两卡两步验收。
 - `overfit`：TTS/S2ST fixed-sample 完整链路实验。
+- `toy_smoke`：正式 LongCat runtime 加 tiny model/in-memory dataset 的 CPU 两步训练契约测试；
+  不读取真实 backbone 权重或 WMT19 prepared dataset，也不替代真实资源验收。
 
 `jobs/002` 与 `jobs/005` 都显式传递对应的 `experiment=`；002 job 另行选择 TTS/S2ST task，005
 job 的 Python 调用只保留 experiment、项目输出目录和 `"$@"` 参数透传。测试预算因此由

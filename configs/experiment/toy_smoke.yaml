@@ -1,0 +1,46 @@
+# @package _global_
+defaults:
+  - /model: toy
+  - /model/acoustic: flow
+  - /runtime: longcat_native
+  - /data: toy
+  - /pl_module: sft
+  - /trainer: default
+  - /logging: csv
+  - _self_
+
+task: tts
+run_name: toy-${acoustic.name}
+output_dir: ${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech/toy-smoke/${task}/${run_name}
+
+acoustic:
+  decoder:
+    hidden_dim: 32
+    layers: 1
+    heads: 2
+    ffn_ratio: 2
+
+runtime:
+  device: cpu
+  dtype: float32
+  attn_implementation:
+  flow_nfe: 2
+  flow_num_steps: 2
+
+callbacks:
+  sample:
+    enabled: false
+    every_n_steps: 1
+  evaluation:
+    enabled: false
+
+train:
+  seed: 0
+  max_steps: 2
+
+trainer:
+  accelerator: cpu
+  devices: 1
+  precision: 32-true
+  log_every_n_steps: 1
+  enable_checkpointing: false

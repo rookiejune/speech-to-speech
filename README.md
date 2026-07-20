@@ -56,9 +56,19 @@ instead starts the production-oriented 1,000,000-step full-data LBA
 configuration.
 The 002 wrappers likewise select `experiment=overfit` explicitly.
 
+For the source-level model/data contract smoke, select
+`experiment=toy_smoke`. It uses a random tiny Qwen backbone and deterministic
+in-memory codec samples on CPU while retaining the existing `longcat_native`
+runtime for the tokenizer, codec, layout, special IDs, and flow sampler. It
+therefore avoids the pretrained language-model weights and prepared WMT19
+dataset, but it is not an offline fake runtime and does not replace the real
+LongCat/UniCodec acceptance runs.
+
 Hydra roots are parsed into strict entry-specific dataclasses before execution.
 `runtime` owns the codec, audio tokenizer, device, dtype, and flow sampling
-fields. `model/acoustic=flow|rvq` selects the formal model/objective
+fields. `model=toy` replaces only the model-owned backbone; it does not select
+or construct a runtime. `data=toy` selects deterministic in-memory prepared-code
+samples. `model/acoustic=flow|rvq` selects the formal model/objective
 composition; unified-token experiments select `runtime=unicodec` without an
 acoustic model group.
 `pl_module` owns overfit optimizer settings, while `codec_oracle` owns its

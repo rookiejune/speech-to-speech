@@ -5,20 +5,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-from anydataset.types import (
-    AudioItem,
-    AudioView,
-    Modality,
-    Role,
-    TextItem,
-    TextMeta,
-    TextView,
-)
+from anydataset.types import AudioView, Modality
 from anytrain.idspace import Layout
 from torch import Tensor, nn
 
-from speech_to_speech.datamodule.collator import Collator
+from speech_to_speech.datamodule import Collator, ToyDataset
 from speech_to_speech.loss import FlowObjective
+from speech_to_speech.model import ToyConfig
 from speech_to_speech.model.acoustic import (
     SpeechToSpeechFlowModel,
     SpeechToSpeechRVQModel,
@@ -81,35 +74,6 @@ class _Codec:
         return semantic + acoustic_features[..., 0]
 
 
-class _Backbone(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.config = SimpleNamespace(hidden_size=4)
-        self.input_embeddings = nn.Embedding(32, 4)
-        self.output_embeddings = nn.Linear(4, 32, bias=False)
-        self.rnn = nn.GRU(4, 4, batch_first=True)
-
-    def get_input_embeddings(self) -> nn.Embedding:
-        return self.input_embeddings
-
-    def get_output_embeddings(self) -> nn.Module:
-        return self.output_embeddings
-
-    @property
-    def base_model(self) -> _Backbone:
-        return self
-
-    def forward(self, *, inputs_embeds: Tensor, **kwargs):
-        output_hidden_states = kwargs["output_hidden_states"]
-        hidden, _ = self.rnn(inputs_embeds)
-        return SimpleNamespace(
-            last_hidden_state=hidden,
-            hidden_states=(hidden,) if output_hidden_states else None,
-            past_key_values=None,
-            attentions=None,
-        )
-
-
 class _FlowRuntime:
     def __init__(self) -> None:
         self.sampled = False
@@ -150,7 +114,6 @@ class _Runtime:
         self.text_tokenizer = _TextTokenizer()
         self.audio_tokenizer = NativeAudioTokenizer(vocab_size=8)
         self.codec = _Codec()
-        self.backbone = _Backbone()
         self.layout = Layout(text=(0, 32), audio=(32, 42))
         self.flow_matching = _FlowRuntime()
         self.pad_token_id = 0
@@ -167,11 +130,7 @@ class FakeClosureTest(unittest.TestCase):
     def test_flow_model_uses_runtime_sampler(self):
         rt = _Runtime()
         model = SpeechToSpeechFlowModel(
-            ModelConfig(
-                semantic_audio_adapter=None,
-                semantic_audio_output_adapter=None,
-                acoustic_prompt_adapter=None,
-            ),
+            _model_config(),
             runtime=rt,
         )
         output = model.sample_acoustic_features(torch.zeros(2, 3, 4))
@@ -181,13 +140,9 @@ class FakeClosureTest(unittest.TestCase):
 
     def test_flow_repa_config_closes_model_and_objective(self):
         rt = _Runtime()
-        batch = Collator(rt, {Task.TTS: 1.0})([_raw_sample(0)])
+        batch = Collator(rt, {Task.TTS: 1.0})([_dataset(rt)[0]])
         model = SpeechToSpeechFlowModel(
-            ModelConfig(
-                semantic_audio_adapter=None,
-                semantic_audio_output_adapter=None,
-                acoustic_prompt_adapter=None,
-            ),
+            _model_config(),
             runtime=rt,
             decoder={
                 "hidden_dim": 4,
@@ -214,11 +169,7 @@ class FakeClosureTest(unittest.TestCase):
         torch.manual_seed(0)
         rt = _Runtime()
         model = SpeechToSpeechRVQModel(
-            ModelConfig(
-                semantic_audio_adapter=None,
-                semantic_audio_output_adapter=None,
-                acoustic_prompt_adapter=None,
-            ),
+            _model_config(),
             runtime=rt,
             decoder={
                 "hidden_dim": 4,
@@ -257,9 +208,10 @@ class FakeClosureTest(unittest.TestCase):
 
     def test_all_tasks_build_expected_model_batches(self):
         rt = _Runtime()
+        samples = list(_dataset(rt))
         for task in Task:
             with self.subTest(task=task.value):
-                batch = Collator(rt, {task: 1.0})([_raw_sample(0), _raw_sample(1)])
+                batch = Collator(rt, {task: 1.0})(samples)
 
                 self.assertEqual(batch.tasks, [task, task])
                 self.assertEqual(batch.input_ids.shape, batch.token_labels.shape)
@@ -285,13 +237,9 @@ class FakeClosureTest(unittest.TestCase):
             with self.subTest(task=task.value):
                 torch.manual_seed(0)
                 rt = _Runtime()
-                batch = Collator(rt, {task: 1.0})([_raw_sample(0), _raw_sample(1)])
+                batch = Collator(rt, {task: 1.0})(list(_dataset(rt)))
                 model = SpeechToSpeechFlowModel(
-                    ModelConfig(
-                        semantic_audio_adapter=None,
-                        semantic_audio_output_adapter=None,
-                        acoustic_prompt_adapter=None,
-                    ),
+                    _model_config(),
                     runtime=rt,
                 )
                 loss = FlowObjective(rt.layout, rt.flow_matching)
@@ -320,13 +268,9 @@ class FakeClosureTest(unittest.TestCase):
 
     def test_fake_semantic_and_acoustic_outputs_decode_to_waveform(self):
         rt = _Runtime()
-        batch = Collator(rt, {Task.TTS: 1.0})([_raw_sample(0)])
+        batch = Collator(rt, {Task.TTS: 1.0})([_dataset(rt)[0]])
         model = SpeechToSpeechFlowModel(
-            ModelConfig(
-                semantic_audio_adapter=None,
-                semantic_audio_output_adapter=None,
-                acoustic_prompt_adapter=None,
-            ),
+            _model_config(),
             runtime=rt,
         )
         labels = batch.token_labels[0]
@@ -336,7 +280,7 @@ class FakeClosureTest(unittest.TestCase):
         features = model.acoustic_target_latent(batch.acoustic_target["codes"])
         self.assertEqual(
             features.dtype,
-            rt.backbone.get_input_embeddings().weight.dtype,
+            model.backbone.get_input_embeddings().weight.dtype,
         )
 
         waveform = decode_generated_audio(
@@ -359,32 +303,28 @@ class FakeClosureTest(unittest.TestCase):
         self.assertTrue(torch.equal(decoded_codes, waveform))
 
 
-def _raw_sample(offset: int):
-    def audio(base: int) -> AudioItem:
-        return AudioItem(
-            views={
-                AudioView.LONGCAT: torch.tensor(
-                    [
-                        [base, base + 1],
-                        [base + 1, base + 2],
-                        [base + 2, base + 3],
-                    ]
-                )
-            }
-        )
+def _model_config() -> ModelConfig:
+    return ModelConfig(
+        semantic_audio_adapter=None,
+        semantic_audio_output_adapter=None,
+        acoustic_prompt_adapter=None,
+        toy=ToyConfig(
+            hidden_size=4,
+            intermediate_size=8,
+            layers=1,
+            heads=1,
+            max_position_embeddings=64,
+        ),
+    )
 
-    return {
-        (Role.SOURCE, Modality.AUDIO): audio(offset),
-        (Role.SOURCE, Modality.TEXT): TextItem(
-            views={TextView.TEXT: f"source {offset}"},
-            meta={TextMeta.LANG: "zh"},
-        ),
-        (Role.TARGET, Modality.AUDIO): audio(offset + 3),
-        (Role.TARGET, Modality.TEXT): TextItem(
-            views={TextView.TEXT: f"target {offset}"},
-            meta={TextMeta.LANG: "en"},
-        ),
-    }
+
+def _dataset(runtime: _Runtime) -> ToyDataset:
+    return ToyDataset(
+        runtime.codec_name,
+        runtime.codec,
+        samples=2,
+        frames=3,
+    )
 
 
 if __name__ == "__main__":

@@ -77,12 +77,7 @@ def run(config: OverfitConfig) -> None:
         rt,
         {task: 1.0},
         config.data.sample_index,
-        root=(
-            None
-            if config.data.root is None
-            else Path(config.data.root).expanduser()
-        ),
-        split=config.data.split,
+        dataset=config.data,
     )
 
     repa_weight = None
@@ -104,7 +99,7 @@ def run(config: OverfitConfig) -> None:
         )
     else:
         module, model = rvq(rt, config.pl_module, config.model, config.acoustic)
-    if uses_acoustic_decoder:
+    if uses_acoustic_decoder and config.callbacks.evaluation.enabled:
         datamodule.setup("fit")
         batch = next(iter(datamodule.train_dataloader()))
         evaluation = AcousticEvaluation(
@@ -183,9 +178,7 @@ def run(config: OverfitConfig) -> None:
     if not trainer.is_global_zero:
         return
 
-    if uses_acoustic_decoder:
-        if evaluation is None:
-            raise RuntimeError("acoustic evaluation is unavailable.")
+    if evaluation is not None:
         generation = evaluate_generation(module, evaluation.batch, codec)
         (output_dir / "generation.json").write_text(
             json.dumps(generation, indent=2, sort_keys=True) + "\n"
