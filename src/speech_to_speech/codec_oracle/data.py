@@ -8,6 +8,7 @@ from typing import Any, Literal, Optional, cast
 
 import torch
 from anydataset.types import AudioItem, AudioView, Modality, Role
+from lba import LBA
 from lightning import pytorch as pl
 from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
@@ -91,8 +92,6 @@ class DataModule(pl.LightningDataModule):
                 persistent_workers=persistent_workers,
                 collate_fn=collate_fn,
             )
-        from lba import LBA
-
         return LBA(
             self.dataset,
             batch_size=self.data.batch_size,

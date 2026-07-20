@@ -9,10 +9,11 @@ import torch
 from anydataset.types import AudioItem, AudioView, Modality, Role
 from anytrain.idspace import Layout
 from hydra import compose, initialize_config_dir
+from lightning.fabric.utilities.data import _replace_dunder_methods
 from lightning.pytorch.callbacks import Callback, ModelCheckpoint
-from lba import LBA
+from lightning.pytorch.utilities.data import _update_dataloader
 from torch import nn
-from torch.utils.data import RandomSampler
+from torch.utils.data import DataLoader, DistributedSampler, RandomSampler
 
 from scripts._config import CodecOracleConfig, codec_oracle
 from scripts.codec_oracle import (
@@ -85,7 +86,7 @@ class CodecOracleTest(unittest.TestCase):
         self.assertFalse(kwargs["auto_insert_metric_name"])
         self.assertIn(checkpoint.return_value, callbacks)
 
-    def test_lba_loader_exposes_dataset_for_lightning_sampler_injection(self):
+    def test_lba_loader_supports_lightning_sampler_injection(self):
         data = DataConfig(
             batch_size=3,
             num_workers=0,
@@ -102,9 +103,17 @@ class CodecOracleTest(unittest.TestCase):
         dataset = [_sample(2)]
         datamodule.dataset = dataset
 
-        loader = datamodule.train_dataloader()
+        with _replace_dunder_methods(DataLoader, "dataset"):
+            loader = datamodule.train_dataloader()
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=2,
+            rank=0,
+            shuffle=False,
+        )
+        updated = _update_dataloader(loader, sampler)
 
-        self.assertIsInstance(loader, LBA)
+        self.assertEqual(type(loader).__name__, "LBA")
         self.assertIs(loader.dataset, dataset)
         self.assertIsInstance(loader.sampler, RandomSampler)
         self.assertEqual(loader.batch_size, 3)
@@ -114,6 +123,9 @@ class CodecOracleTest(unittest.TestCase):
         self.assertEqual(loader.max_padded_length, 12)
         self.assertTrue(callable(loader.collate_fn))
         self.assertTrue(callable(loader.len_fn))
+        self.assertIs(updated.sampler, sampler)
+        self.assertEqual(updated.max_padded_length, 12)
+        self.assertTrue(callable(updated.len_fn))
 
     def test_collate_pads_variable_length_codec_sequences(self):
         data = _config("codec_oracle.data.max_seconds=2.0").codec_oracle.data
