@@ -25,7 +25,6 @@ from speech_to_speech.codec_oracle import (
     Initialization,
     Logger as OracleLogger,
     Objective,
-    WorldSizeContract,
     codes as sample_codes,
     event,
     single_batch_loader,
@@ -140,10 +139,7 @@ def training_callbacks(
     oracle: Callback,
     output_dir: Path,
 ) -> list[Callback]:
-    callbacks: list[Callback] = [
-        oracle,
-        WorldSizeContract(config.trainer.expected_world_size),
-    ]
+    callbacks: list[Callback] = [oracle]
     if config.callbacks.grad_norm.enabled:
         callbacks.append(
             GradNormLogger(

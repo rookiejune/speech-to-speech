@@ -1,7 +1,6 @@
 accelerator: gpu
 devices: auto
 strategy: ddp_find_unused_parameters_true
-expected_world_size: 2
 use_distributed_sampler: true
 precision: bf16-mixed
 max_epochs: -1

@@ -9,9 +9,10 @@
 `bf16-mixed` 训练 1,000,000 steps，并每 10,000 steps 记录 sample 和归档 checkpoint。完整链路
 短验收不修改这些默认值，而由 `acoustic_oracle_smoke` /
 `acoustic_oracle_ddp_lba_smoke`（flow）和 `acoustic_oracle_rvq_smoke` /
-`acoustic_oracle_rvq_ddp_lba_smoke`（RVQ）分别提供单卡、两卡 smoke 的数据上限、trainer、callback
-和两步预算；对应 job 显式选择 experiment。`jobs/005/08-11` 提供 Flow/RVQ 的正式单卡与两卡
-wrapper，不选择 experiment，因此不会覆盖生产数据范围、训练预算和 callback 间隔。
+`acoustic_oracle_rvq_ddp_lba_smoke`（RVQ）分别提供默认与显式 DDP smoke 的数据上限、trainer、
+callback 和两步预算；对应 job 显式选择 experiment，并通过 `CUDA_VISIBLE_DEVICES` 提供单卡、
+两卡默认值。`jobs/005/08-11` 提供 Flow/RVQ 的正式单卡与两卡 wrapper，不选择 experiment，
+因此不会覆盖生产数据范围、训练预算和 callback 间隔。
 
 Oracle 的 artifact 目录由 `repo_output_root/output_subdir` 派生；TensorBoard event files 集中写到
 `repo_output_root/tensorboard/output_subdir/version_*`。这使 Flow/RVQ、单卡/DDP 和不同初始化可以
@@ -50,9 +51,8 @@ Oracle 的 artifact 目录由 `repo_output_root/output_subdir` 派生；TensorBo
 - `Logger`：按 objective 聚合总 loss；flow 固定样本记录 feature MSE，RVQ 固定样本记录总/逐
   codebook accuracy 和 feature MSE。两者都记录 reconstruction/sample waveform，并在训练结束写
   `metrics.json`；DDP 总 loss 先跨 rank 求均值，histogram 和 artifact 只由 global zero 写。RVQ
-  wrapper 另向 Trainer 记录总/逐 codebook cross-entropy。
-- `WorldSizeContract`：校验实际 world size；distributed sampler 的注入和 epoch 推进由
-  Lightning 负责。
+  wrapper 另向 Trainer 记录总/逐 codebook cross-entropy。fit start 日志记录实际 strategy 与
+  world size，但不约束设备数量。
 - `event()` / `timed()`：输出 codec oracle 专用的结构化阶段日志。
 
 ## 边界
@@ -78,4 +78,5 @@ Oracle 的 artifact 目录由 `repo_output_root/output_subdir` 派生；TensorBo
   显式注入 codec、codes、metadata 和 output directory 等运行时依赖。
 - initialization 与 objective 的字符串只在配置边界转换一次；入口据此选择对应 screening model，
   内部不维护无效的字符串分派。
-- 中间 metric、waveform 和 checkpoint 写入实验 output directory，不写入项目 repo。
+- 中间 metric、waveform 和 checkpoint 写入 `repo_output_root/output_subdir`；默认位于项目根，
+  但由 `.gitignore` 排除。

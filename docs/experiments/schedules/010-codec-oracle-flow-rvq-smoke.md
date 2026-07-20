@@ -16,7 +16,8 @@ RVQ 两种 objective，以及各自的单卡 fixed-sample、两卡 LBA 配置。
 ## 验收标准
 
 - forward、backward 和 optimizer step 完成，监督 loss finite。
-- 单卡与两卡配置分别满足 world size 1/2；两卡使用静态 `ddp` 和 Lightning distributed sampler。
+- 单卡与两卡 wrapper 分别默认暴露 1/2 张 GPU；实际 world size 随 `CUDA_VISIBLE_DEVICES`，两卡
+  运行使用静态 `ddp` 和 Lightning distributed sampler。
 - Flow 产出 feature MSE，RVQ 产出总/逐 codebook accuracy 与 feature MSE。
 - reconstruction/sample waveform、TensorBoard histogram、step checkpoint、`last.ckpt` 和
   `metrics.json` 均存在。

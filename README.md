@@ -71,6 +71,11 @@ dataset, but it is not an offline fake runtime and does not replace the real
 LongCat/UniCodec acceptance runs.
 
 Hydra roots are parsed into strict entry-specific dataclasses before execution.
+Both trainer presets use `devices: auto`, so Lightning consumes every device
+visible through `CUDA_VISIBLE_DEVICES`. Job wrappers provide machine-facing
+single- or two-GPU visibility defaults; override that environment variable at
+submission time to change the device set.
+
 `runtime` owns the codec, audio tokenizer, device, dtype, and flow sampling
 fields. `model=toy` replaces only the model-owned backbone; it does not select
 or construct a runtime. `data=toy` selects deterministic in-memory prepared-code
@@ -81,7 +86,7 @@ acoustic model group.
 decoder, data, initialization, normalization, and optimizer settings. Entry
 points reject codec/composition mismatches.
 
-Two-GPU contract runs use `jobs/005/04_longcat_ddp_lba.sh` for Flow,
+Two-GPU DDP runs use `jobs/005/04_longcat_ddp_lba.sh` for Flow,
 `jobs/005/07_longcat_rvq_ddp_lba.sh` for RVQ, and `jobs/005/05_unicodec_ddp.sh`
 for unified-token training. Formal LongCat DDP runs use
 `jobs/005/09_longcat_flow_ddp_lba_formal.sh` and

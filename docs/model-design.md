@@ -180,8 +180,8 @@ class FlowRepaConfig(TypedDict):
 `SpeechToSpeechFlowModel` 接收 `decoder` 与可选 `repa`；`SpeechToSpeechRVQModel` 接收
 `decoder` 与可选 `codebook_embeddings`，但无法接收后被忽略的 REPA 字段。Hydra 使用
 `model/acoustic=flow|rvq`，flow preset 独占 teacher 与 student REPA 配置；root schema 直接复用
-基础 `model.Config`。codec oracle 固定使用 flow，并由 `codec_oracle.Config` 配置 decoder 与
-target normalization，不复用带 REPA 的 acoustic preset。unified-token codec 通过
+基础 `model.Config`。codec oracle 由 `codec_oracle.Config` 显式选择 Flow/RVQ objective，并
+配置 decoder 与 target normalization，不复用带 REPA 的 acoustic preset。unified-token codec 通过
 `runtime=unicodec ~model/acoustic` 选择 token-only composition。ODE sampler 由
 `runtime.Config.flow_*` 统一拥有；入口校验 codec capability，不自动改写 composition。
 

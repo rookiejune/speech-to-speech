@@ -65,9 +65,11 @@ class CodecOracleTest(unittest.TestCase):
             "callbacks.grad_norm.enabled=false",
             "callbacks.nonfinite.enabled=false",
         )
+        oracle = Callback()
 
-        callbacks = training_callbacks(config, Callback(), Path(self.id()))
+        callbacks = training_callbacks(config, oracle, Path(self.id()))
 
+        self.assertEqual(callbacks, [oracle])
         self.assertFalse(any(isinstance(x, ModelCheckpoint) for x in callbacks))
 
         config = _config(

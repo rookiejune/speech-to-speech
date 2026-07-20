@@ -1,7 +1,6 @@
 accelerator: gpu
-devices: 1
+devices: auto
 strategy: auto
-expected_world_size: 1
 use_distributed_sampler: true
 precision: bf16-mixed
 max_epochs: -1

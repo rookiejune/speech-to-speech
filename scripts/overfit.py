@@ -13,7 +13,7 @@ from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig
 
-from speech_to_speech.callback import StageConfig, StageSwitcher, WorldSizeContract
+from speech_to_speech.callback import StageConfig, StageSwitcher
 from speech_to_speech.callback.logging import (
     FlowMatchingLogger,
     GradLogger,
@@ -215,10 +215,6 @@ def build_trainer(
     output_dir: Path,
     callbacks: list[Callback],
 ) -> pl.Trainer:
-    callbacks = [
-        WorldSizeContract(config.trainer.expected_world_size),
-        *callbacks,
-    ]
     return pl.Trainer(
         accelerator=config.trainer.accelerator,
         devices=config.trainer.devices,

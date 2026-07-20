@@ -54,7 +54,6 @@ class TrainerConfig:
     accelerator: str = MISSING
     devices: Union[int, str] = MISSING
     strategy: str = MISSING
-    expected_world_size: int = MISSING
     use_distributed_sampler: bool = MISSING
     precision: str = MISSING
     max_epochs: int = MISSING

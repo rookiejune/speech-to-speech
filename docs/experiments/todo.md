@@ -9,9 +9,11 @@
 - 在 Python 3.9 / PyTorch 2.8 环境用官方 LongCat checkpoint 验收
   `LongCat.from_pretrained()`、短音频 encode/decode 和一步 acoustic
   forward/backward/optimizer step；本地 synthetic checkpoint 只覆盖 loader 契约。
-- 用真实 100k LongCat BPE 与 Qwen checkpoint 对比优化前后的 model 初始化耗时、单步训练
-  峰值显存和 cached generation 吞吐，确认分块 embedding、按模态稀疏监督 logits、RVQ valid
-  frame packing 与 batched codec decode 的生产收益。
+- 现有 100k LongCat BPE 在 010 的 1000 条临时数据上把全部 source/target 都压成单个 audio
+  token，不能进入正式联合训练。完整 train split 就绪后，显式限制最大 token span 重新训练
+  BPE，并先在 held-out split 验收压缩分布；随后再与 native token + Qwen checkpoint 对比
+  model 初始化耗时、单步峰值显存和 cached generation 吞吐。首轮联合训练按
+  [011 schedule](schedules/011-qwen-rvq-staged-joint-training.md) 使用 native token。
 - 在真实训练 checkpoint 上复验 bfloat16 变长 batch generation，报告 batch/逐请求 token
   agreement rate 与 top-1 logit margin；随机 audio head 的逐 token parity 不作为生产门槛
   （[008 result, lines 41-49](results/008-real-batch-generation-benchmark.md#L41-L49)）。

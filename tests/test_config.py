@@ -238,7 +238,7 @@ class ConfigTest(unittest.TestCase):
 
     def test_codec_oracle_smoke_experiments_own_the_test_budgets(self):
         cases = [
-            ("acoustic_oracle_smoke", 1, False, 1, "auto", True),
+            ("acoustic_oracle_smoke", 1, False, "auto", "auto", True),
             (
                 "acoustic_oracle_ddp_lba_smoke",
                 32,
@@ -275,7 +275,7 @@ class ConfigTest(unittest.TestCase):
 
     def test_codec_oracle_rvq_smoke_experiments_select_rvq_objective(self):
         cases = [
-            ("acoustic_oracle_rvq_smoke", 1, False, 1, "auto", True),
+            ("acoustic_oracle_rvq_smoke", 1, False, "auto", "auto", True),
             (
                 "acoustic_oracle_rvq_ddp_lba_smoke",
                 32,
@@ -337,7 +337,7 @@ class ConfigTest(unittest.TestCase):
             (
                 "unicodec_overfit",
                 100,
-                1,
+                "auto",
                 "auto",
                 False,
                 True,
@@ -547,34 +547,31 @@ class ConfigTest(unittest.TestCase):
     def test_codec_screening_formal_jobs_keep_production_defaults(self):
         root = Path(__file__).parents[1]
         jobs = {
-            "08_longcat_flow_formal.sh": ((), Objective.FLOW, 1, "auto", 1),
+            "08_longcat_flow_formal.sh": ((), Objective.FLOW, "auto", "auto"),
             "09_longcat_flow_ddp_lba_formal.sh": (
                 ("trainer=ddp", "trainer.strategy=ddp"),
                 Objective.FLOW,
                 "auto",
                 "ddp",
-                2,
             ),
             "10_longcat_rvq_formal.sh": (
                 ("codec_oracle=rvq",),
                 Objective.RVQ,
-                1,
                 "auto",
-                1,
+                "auto",
             ),
             "11_longcat_rvq_ddp_lba_formal.sh": (
                 ("codec_oracle=rvq", "trainer=ddp", "trainer.strategy=ddp"),
                 Objective.RVQ,
                 "auto",
                 "ddp",
-                2,
             ),
         }
         selections = ("codec_oracle=rvq", "trainer=ddp", "trainer.strategy=ddp")
 
         for filename, values in jobs.items():
             with self.subTest(job=filename):
-                overrides, objective, devices, strategy, world_size = values
+                overrides, objective, devices, strategy = values
                 source = (root / "jobs" / "005" / filename).read_text()
                 config = codec_oracle(_compose("codec_oracle", *overrides))
 
@@ -588,7 +585,6 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual(config.train.max_steps, 1_000_000)
                 self.assertEqual(config.trainer.devices, devices)
                 self.assertEqual(config.trainer.strategy, strategy)
-                self.assertEqual(config.trainer.expected_world_size, world_size)
                 self.assertEqual(
                     config.callbacks.oracle.sample_every_n_steps,
                     10_000,

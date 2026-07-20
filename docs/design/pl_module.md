@@ -19,10 +19,9 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
 
 ## callback
 
-`speech_to_speech.callback` 只导出 `StageConfig`、`StageSwitcher` 与 `WorldSizeContract`；以下日志
-callback 从 `speech_to_speech.callback.logging` 导入：
+`speech_to_speech.callback` 只导出 `StageConfig` 与 `StageSwitcher`；以下日志 callback 从
+`speech_to_speech.callback.logging` 导入：
 
-- `WorldSizeContract`：fit start 校验实际 world size。
 - `StageSwitcher`：按 `epoch_milestones` 调用 datamodule 的 `set_task_weights()`，并从
   `current_epoch` 恢复当前 stage。
 - `OutputsLogger`：按 task 展开 `LossItem`，不读取 model head。

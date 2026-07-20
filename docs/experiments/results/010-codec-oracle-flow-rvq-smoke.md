@@ -36,7 +36,7 @@ DDP `metrics.json` 的 loss 是 callback 在两个 rank 上同步求 mean 后由
   codebook loss histogram、grad norm 和 reconstruction/sample audio。
 - 四组都保留 `step-1.ckpt`、`step-2.ckpt` 和 `last.ckpt`。Flow checkpoint 约 2.56 GB，RVQ
   checkpoint 约 2.65 GB；non-finite callback 保持启用且未报告异常。
-- 两组 DDP 都通过 `WorldSizeContract(world_size=2)`，并各写出两份独立 rank 的 LBA log/jsonl。
+- 两组 DDP 的实际 world size 均为 2，并各写出两份独立 rank 的 LBA log/jsonl。
   RVQ 使用静态 `ddp` 完成两个 backward/optimizer step，没有 unused-parameter 错误。
 
 ## 现场修复

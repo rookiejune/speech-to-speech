@@ -11,7 +11,6 @@ from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 from torch import Tensor
 
-from ..callback import WorldSizeContract as BaseWorldSizeContract
 from ..callback._lightning import (
     audio_experiment,
     histogram_experiment,
@@ -74,7 +73,13 @@ class Logger(Callback):
     def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         if not trainer.is_global_zero:
             return
-        event("trainer.fit", "started", objective=self.objective)
+        event(
+            "trainer.fit",
+            "started",
+            objective=self.objective,
+            strategy=type(trainer.strategy).__name__,
+            world_size=trainer.world_size,
+        )
         experiment = text_experiment(trainer)
         if experiment is not None:
             experiment.add_text(
@@ -285,16 +290,4 @@ class Logger(Callback):
         )
 
 
-class WorldSizeContract(BaseWorldSizeContract):
-    def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        super().on_fit_start(trainer, pl_module)
-        if trainer.is_global_zero:
-            event(
-                "distributed.contract",
-                "ready",
-                strategy=type(trainer.strategy).__name__,
-                world_size=trainer.world_size,
-            )
-
-
-__all__ = ["Logger", "WorldSizeContract"]
+__all__ = ["Logger"]

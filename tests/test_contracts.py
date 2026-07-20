@@ -24,7 +24,6 @@ from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig, OmegaConf
 
 from speech_to_speech.datamodule.collator import Collator
-from speech_to_speech.callback import WorldSizeContract
 from speech_to_speech.datamodule import DatasetConfig, DatasetName, ToyDataset
 from speech_to_speech.datamodule.module import Config as DataConfig
 from speech_to_speech.datamodule.module import DataModule
@@ -72,7 +71,6 @@ class ContractTest(unittest.TestCase):
             "accelerator",
             "devices",
             "strategy",
-            "expected_world_size",
             "use_distributed_sampler",
             "precision",
             "max_epochs",
@@ -83,6 +81,7 @@ class ContractTest(unittest.TestCase):
 
         for config in configs:
             self.assertEqual(set(config.trainer), expected)
+            self.assertEqual(config.trainer.devices, "auto")
 
         self.assertEqual(
             configs[2].trainer.strategy,
@@ -116,9 +115,7 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(kwargs["gradient_clip_val"], 1.0)
         self.assertTrue(kwargs["enable_checkpointing"])
         self.assertIs(kwargs["logger"], logger.return_value)
-        self.assertIsInstance(kwargs["callbacks"][0], WorldSizeContract)
-        self.assertEqual(kwargs["callbacks"][0].expected, 2)
-        self.assertEqual(kwargs["callbacks"][1:], callbacks)
+        self.assertEqual(kwargs["callbacks"], callbacks)
 
     def test_public_configs_support_omegaconf_structured(self):
         runtime_config = OmegaConf.structured(Config)
