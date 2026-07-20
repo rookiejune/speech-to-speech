@@ -25,7 +25,6 @@ from speech_to_speech.codec_oracle import (
     Initialization,
     Logger as OracleLogger,
     Objective,
-    SamplerEpochSetter,
     WorldSizeContract,
     codes as sample_codes,
     event,
@@ -134,8 +133,6 @@ def training_callbacks(
         oracle,
         WorldSizeContract(config.trainer.expected_world_size),
     ]
-    if config.codec_oracle.data.lba.enabled:
-        callbacks.append(SamplerEpochSetter())
     if config.callbacks.grad_norm.enabled:
         callbacks.append(
             GradNormLogger(
@@ -197,7 +194,6 @@ def fit(
                     config.runtime.codec,
                     frame_rate=frame_rate,
                     output_dir=output_dir,
-                    seed=config.train.seed,
                 ),
             )
         else:

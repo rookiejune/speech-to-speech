@@ -51,7 +51,7 @@ class TrainConfig:
 @dataclass
 class TrainerConfig:
     accelerator: str = MISSING
-    devices: int = MISSING
+    devices: Union[int, str] = MISSING
     strategy: str = MISSING
     expected_world_size: int = MISSING
     use_distributed_sampler: bool = MISSING

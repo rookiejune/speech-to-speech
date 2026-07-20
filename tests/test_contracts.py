@@ -89,6 +89,8 @@ class ContractTest(unittest.TestCase):
         )
         self.assertEqual(configs[3].trainer.strategy, "ddp")
         self.assertEqual(configs[3].trainer.precision, "bf16-mixed")
+        self.assertTrue(configs[2].trainer.use_distributed_sampler)
+        self.assertTrue(configs[3].trainer.use_distributed_sampler)
 
     @patch("scripts.overfit.pl.Trainer")
     @patch("scripts.overfit.build_logger")
@@ -105,6 +107,7 @@ class ContractTest(unittest.TestCase):
 
         self.assertIs(built, trainer.return_value)
         kwargs = trainer.call_args.kwargs
+        self.assertEqual(kwargs["devices"], "auto")
         self.assertEqual(kwargs["strategy"], "ddp_find_unused_parameters_true")
         self.assertEqual(kwargs["max_epochs"], -1)
         self.assertEqual(kwargs["precision"], "bf16-mixed")

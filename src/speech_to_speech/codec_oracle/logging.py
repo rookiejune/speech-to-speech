@@ -10,11 +10,9 @@ import torch.nn.functional as F
 from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 from torch import Tensor
-from torch.utils.data import DistributedSampler
 
 from ..callback import WorldSizeContract as BaseWorldSizeContract
 from ..callback._lightning import (
-    attached_datamodule,
     audio_experiment,
     histogram_experiment,
     scalar_experiment,
@@ -224,16 +222,4 @@ class WorldSizeContract(BaseWorldSizeContract):
             )
 
 
-class SamplerEpochSetter(Callback):
-    def on_train_epoch_start(
-        self,
-        trainer: Trainer,
-        pl_module: LightningModule,
-    ) -> None:
-        del pl_module
-        sampler = getattr(attached_datamodule(trainer), "sampler", None)
-        if isinstance(sampler, DistributedSampler):
-            sampler.set_epoch(trainer.current_epoch)
-
-
-__all__ = ["Logger", "SamplerEpochSetter", "WorldSizeContract"]
+__all__ = ["Logger", "WorldSizeContract"]

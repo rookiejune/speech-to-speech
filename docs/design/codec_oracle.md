@@ -23,8 +23,9 @@
   `find_unused_parameters=False` 的 DDP。
 - unified-token codec 不使用独立 screening model；其 codes 作为 semantic audio tokens，
   `acoustic_codes=None`，复用正式 DataModule、token model、objective 与 generation/decode。
-- `DataModule`：仅供 LongCat acoustic-only screening 加载 prepared codec view，支持显式
-  distributed sampler 和 LBA；它接收严格 `DataConfig` / `LBAConfig`，不依赖 OmegaConf。
+- `DataModule`：仅供 LongCat acoustic-only screening 加载 prepared codec view，返回可由
+  Lightning 注入 distributed sampler 的 LBA/DataLoader；它接收严格 `DataConfig` /
+  `LBAConfig`，不依赖 OmegaConf。
   unified-token codec 不使用该入口。
 - `codes()` / `collate()` / `single_batch_loader()`：单样本裁剪、变长 padding 与
   single-batch overfit 数据入口。
@@ -37,7 +38,8 @@
   提供二维 floating reference，`Initialization.RANDOM.weight()` 复用该函数。
 - `Logger`：对固定 codes 聚合 flow loss 与 sample feature MSE，记录 oracle reconstruction 和
   sampled waveform，并在训练结束写 `metrics.json`。
-- `WorldSizeContract` / `SamplerEpochSetter`：分别校验 world size 和推进显式 sampler epoch。
+- `WorldSizeContract`：校验实际 world size；distributed sampler 的注入和 epoch 推进由
+  Lightning 负责。
 - `event()` / `timed()`：输出 codec oracle 专用的结构化阶段日志。
 
 ## 边界

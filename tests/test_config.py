@@ -132,11 +132,18 @@ class ConfigTest(unittest.TestCase):
 
     def test_codec_oracle_smoke_experiments_own_the_test_budgets(self):
         cases = [
-            ("acoustic_oracle_smoke", 1, False, 1, "auto"),
-            ("acoustic_oracle_ddp_lba_smoke", 32, True, 2, "ddp"),
+            ("acoustic_oracle_smoke", 1, False, 1, "auto", True),
+            (
+                "acoustic_oracle_ddp_lba_smoke",
+                32,
+                True,
+                "auto",
+                "ddp",
+                True,
+            ),
         ]
 
-        for experiment, sample_limit, lba, devices, strategy in cases:
+        for experiment, sample_limit, lba, devices, strategy, sampler in cases:
             with self.subTest(experiment=experiment):
                 config = codec_oracle(
                     _compose("codec_oracle", f"experiment={experiment}")
@@ -149,6 +156,7 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual(config.runtime.flow_num_steps, 2)
                 self.assertEqual(config.trainer.devices, devices)
                 self.assertEqual(config.trainer.strategy, strategy)
+                self.assertIs(config.trainer.use_distributed_sampler, sampler)
                 self.assertEqual(
                     (
                         config.callbacks.oracle.sample_every_n_steps,
@@ -167,17 +175,19 @@ class ConfigTest(unittest.TestCase):
                 1,
                 "auto",
                 False,
+                True,
             ),
             (
                 "unicodec_ddp_smoke",
                 2,
-                2,
+                "auto",
                 "ddp_find_unused_parameters_true",
                 True,
+                False,
             ),
         ]
 
-        for experiment, max_steps, devices, strategy, checkpointing in cases:
+        for experiment, max_steps, devices, strategy, checkpointing, sampler in cases:
             with self.subTest(experiment=experiment):
                 config = overfit(_compose("overfit", f"experiment={experiment}"))
 
@@ -191,6 +201,7 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual(config.trainer.max_epochs, -1)
                 self.assertEqual(config.trainer.log_every_n_steps, 1)
                 self.assertIs(config.trainer.enable_checkpointing, checkpointing)
+                self.assertIs(config.trainer.use_distributed_sampler, sampler)
                 self.assertTrue(config.callbacks.sample.enabled)
                 self.assertEqual(config.callbacks.sample.every_n_steps, 1)
 

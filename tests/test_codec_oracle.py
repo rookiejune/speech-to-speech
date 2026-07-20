@@ -10,17 +10,21 @@ from anydataset.types import AudioItem, AudioView, Modality, Role
 from anytrain.idspace import Layout
 from hydra import compose, initialize_config_dir
 from lightning.pytorch.callbacks import Callback, ModelCheckpoint
+from lba import LBA
 from torch import nn
+from torch.utils.data import RandomSampler
 
 from scripts._config import CodecOracleConfig, codec_oracle
 from scripts.codec_oracle import build_flow, process_device, training_callbacks
 from speech_to_speech.codec_oracle import (
     AcousticFlowScreening,
+    DataConfig,
+    DataModule,
     Initialization,
+    LBAConfig,
     collate,
     single_batch_loader,
 )
-from speech_to_speech.codec_oracle import SamplerEpochSetter
 from speech_to_speech.model import AcousticFlow, AdapterType
 
 
@@ -45,9 +49,8 @@ class CodecOracleTest(unittest.TestCase):
             [torch.device("cuda:3"), torch.device("cuda:2")],
         )
 
-    def test_sampler_epoch_callback_is_only_enabled_for_lba(self):
+    def test_training_callbacks_archive_all_periodic_checkpoints(self):
         config = _config(
-            "codec_oracle.data.lba.enabled=false",
             "trainer.enable_checkpointing=false",
             "callbacks.grad_norm.enabled=false",
             "callbacks.nonfinite.enabled=false",
@@ -55,19 +58,9 @@ class CodecOracleTest(unittest.TestCase):
 
         callbacks = training_callbacks(config, Callback(), Path(self.id()))
 
-        self.assertFalse(any(isinstance(x, SamplerEpochSetter) for x in callbacks))
-        config = _config(
-            "codec_oracle.data.lba.enabled=true",
-            "trainer.enable_checkpointing=false",
-            "callbacks.grad_norm.enabled=false",
-            "callbacks.nonfinite.enabled=false",
-        )
-        callbacks = training_callbacks(config, Callback(), Path(self.id()))
-        self.assertTrue(any(isinstance(x, SamplerEpochSetter) for x in callbacks))
         self.assertFalse(any(isinstance(x, ModelCheckpoint) for x in callbacks))
 
         config = _config(
-            "codec_oracle.data.lba.enabled=true",
             "trainer.enable_checkpointing=true",
             "callbacks.grad_norm.enabled=false",
             "callbacks.nonfinite.enabled=false",
@@ -82,6 +75,36 @@ class CodecOracleTest(unittest.TestCase):
         self.assertTrue(kwargs["save_last"])
         self.assertFalse(kwargs["auto_insert_metric_name"])
         self.assertIn(checkpoint.return_value, callbacks)
+
+    def test_lba_loader_exposes_dataset_for_lightning_sampler_injection(self):
+        data = DataConfig(
+            batch_size=3,
+            num_workers=0,
+            pin_memory=True,
+            persistent_workers=True,
+            lba=LBAConfig(enabled=True, max_batch_seconds=6.0),
+        )
+        datamodule = DataModule(
+            data,
+            "longcat",
+            frame_rate=2.0,
+            output_dir=Path(self.id()),
+        )
+        dataset = [_sample(2)]
+        datamodule.dataset = dataset
+
+        loader = datamodule.train_dataloader()
+
+        self.assertIsInstance(loader, LBA)
+        self.assertIs(loader.dataset, dataset)
+        self.assertIsInstance(loader.sampler, RandomSampler)
+        self.assertEqual(loader.batch_size, 3)
+        self.assertEqual(loader.num_workers, 0)
+        self.assertTrue(loader.pin_memory)
+        self.assertFalse(loader.persistent_workers)
+        self.assertEqual(loader.max_padded_length, 12)
+        self.assertTrue(callable(loader.collate_fn))
+        self.assertTrue(callable(loader.len_fn))
 
     def test_collate_pads_variable_length_codec_sequences(self):
         data = _config("codec_oracle.data.max_seconds=2.0").codec_oracle.data
