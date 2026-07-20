@@ -10,7 +10,8 @@
 短验收不修改这些默认值，而由 `acoustic_oracle_smoke` /
 `acoustic_oracle_ddp_lba_smoke`（flow）和 `acoustic_oracle_rvq_smoke` /
 `acoustic_oracle_rvq_ddp_lba_smoke`（RVQ）分别提供单卡、两卡 smoke 的数据上限、trainer、callback
-和两步预算；对应 job 显式选择 experiment。
+和两步预算；对应 job 显式选择 experiment。`jobs/005/08-11` 提供 Flow/RVQ 的正式单卡与两卡
+wrapper，不选择 experiment，因此不会覆盖生产数据范围、训练预算和 callback 间隔。
 
 ## 对外能力
 

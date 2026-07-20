@@ -49,9 +49,13 @@ DataLoader 构造参数供 Lightning 重建；UniCodec DDP smoke 则要求每个
 - `toy_smoke`：正式 LongCat runtime 加 tiny model/in-memory dataset 的 CPU 两步训练契约测试；
   不读取真实 backbone 权重或 WMT19 prepared dataset，也不替代真实资源验收。
 
-`jobs/002` 与 `jobs/005` 都显式传递对应的 `experiment=`；002 job 另行选择 TTS/S2ST task，005
-job 的 Python 调用只保留 experiment、项目输出目录和 `"$@"` 参数透传。测试预算因此由
-experiment 单点维护，调用 005 smoke wrapper 时无需再传 `train.max_steps=2`。
+`jobs/002` 与 `jobs/005/01-07` 都显式传递对应的 `experiment=`；002 job 另行选择 TTS/S2ST task，
+005 smoke job 的 Python 调用只保留 experiment、项目输出目录和 `"$@"` 参数透传。测试预算因此由
+experiment 单点维护，调用 smoke wrapper 时无需再传 `train.max_steps=2`。
+
+`jobs/005/08-11` 是 LongCat Flow/RVQ 的正式单卡与两卡入口。它们不选择 experiment，直接继承
+root config 的完整数据、LBA、1,000,000-step 预算和生产 callback 间隔；只选择 objective、trainer
+和隔离的输出目录。两卡入口显式使用已验收的静态 `ddp` strategy。
 
 ## 入口边界
 

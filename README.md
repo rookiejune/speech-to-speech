@@ -46,15 +46,20 @@ jobs/004/01_s2st.sh --batch-sizes 1,2,4
 jobs/005/01_longcat.sh codec_oracle.initialization=codec
 jobs/005/06_longcat_rvq.sh
 jobs/005/02_unicodec.sh
+jobs/005/08_longcat_flow_formal.sh codec_oracle.data.root=/path/to/data
+jobs/005/09_longcat_flow_ddp_lba_formal.sh codec_oracle.data.root=/path/to/data
+jobs/005/10_longcat_rvq_formal.sh codec_oracle.data.root=/path/to/data
+jobs/005/11_longcat_rvq_ddp_lba_formal.sh codec_oracle.data.root=/path/to/data
 ```
 
-The 005 wrappers are full-path validation runs, not aliases for the bare
-production config. They select explicit experiments containing their data,
-trainer, callback, and step budgets: LongCat single-GPU and DDP smoke runs use
-two steps, UniCodec fixed-sample overfit uses 100 steps, and UniCodec DDP smoke
-uses two steps. Running `scripts/codec_oracle.py` without `experiment=...`
-instead starts the production-oriented 1,000,000-step full-data LBA
-configuration.
+The 01-07 wrappers under 005 are full-path validation runs. They select explicit
+experiments containing their data, trainer, callback, and step budgets: LongCat
+single-GPU and DDP smoke runs use two steps, UniCodec fixed-sample overfit uses
+100 steps, and UniCodec DDP smoke uses two steps. The 08-11 LongCat formal
+wrappers deliberately omit `experiment=...` and retain the production-oriented
+1,000,000-step full-data LBA configuration. Their DDP variants select the
+validated static DDP strategy and write to a separate output root from the
+single-GPU runs.
 The 002 wrappers likewise select `experiment=overfit` explicitly.
 
 For the source-level model/data contract smoke, select
@@ -78,8 +83,10 @@ points reject codec/composition mismatches.
 
 Two-GPU contract runs use `jobs/005/04_longcat_ddp_lba.sh` for Flow,
 `jobs/005/07_longcat_rvq_ddp_lba.sh` for RVQ, and `jobs/005/05_unicodec_ddp.sh`
-for unified-token training. Override machine-facing values such as
-`CUDA_VISIBLE_DEVICES`, `SPEECH_TO_SPEECH_PYTHON`, or
+for unified-token training. Formal LongCat DDP runs use
+`jobs/005/09_longcat_flow_ddp_lba_formal.sh` and
+`jobs/005/11_longcat_rvq_ddp_lba_formal.sh`. Override machine-facing values such
+as `CUDA_VISIBLE_DEVICES`, `SPEECH_TO_SPEECH_PYTHON`, or
 `SPEECH_TO_SPEECH_UNICODEC_PYTHON` only at submission time. Outputs default to
 `$DYNAMIC_HOME/train/speech-to-speech`; training entries write TensorBoard logs
 and summary artifacts under their run directory, while `generation_smoke.py`

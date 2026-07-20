@@ -419,7 +419,7 @@ class ConfigTest(unittest.TestCase):
                     f"/tmp/train/002-single-batch-overfit/{task}/token",
                 )
 
-    def test_codec_screening_jobs_select_complete_experiments(self):
+    def test_codec_screening_smoke_jobs_select_complete_experiments(self):
         root = Path(__file__).parents[1]
         jobs = {
             "01_longcat.sh": "acoustic_oracle_smoke",
@@ -436,6 +436,60 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual(
                     re.findall(r"\bexperiment=([a-z0-9_]+)", source),
                     [expected],
+                )
+
+    def test_codec_screening_formal_jobs_keep_production_defaults(self):
+        root = Path(__file__).parents[1]
+        jobs = {
+            "08_longcat_flow_formal.sh": ((), Objective.FLOW, 1, "auto", 1),
+            "09_longcat_flow_ddp_lba_formal.sh": (
+                ("trainer=ddp", "trainer.strategy=ddp"),
+                Objective.FLOW,
+                "auto",
+                "ddp",
+                2,
+            ),
+            "10_longcat_rvq_formal.sh": (
+                ("codec_oracle=rvq",),
+                Objective.RVQ,
+                1,
+                "auto",
+                1,
+            ),
+            "11_longcat_rvq_ddp_lba_formal.sh": (
+                ("codec_oracle=rvq", "trainer=ddp", "trainer.strategy=ddp"),
+                Objective.RVQ,
+                "auto",
+                "ddp",
+                2,
+            ),
+        }
+        selections = ("codec_oracle=rvq", "trainer=ddp", "trainer.strategy=ddp")
+
+        for filename, values in jobs.items():
+            with self.subTest(job=filename):
+                overrides, objective, devices, strategy, world_size = values
+                source = (root / "jobs" / "005" / filename).read_text()
+                config = codec_oracle(_compose("codec_oracle", *overrides))
+
+                self.assertNotIn("experiment=", source)
+                self.assertIn('"$@"', source)
+                for selection in selections:
+                    self.assertIs(selection in source, selection in overrides)
+                self.assertIs(config.codec_oracle.objective, objective)
+                self.assertIsNone(config.codec_oracle.data.sample_limit)
+                self.assertTrue(config.codec_oracle.data.lba.enabled)
+                self.assertEqual(config.train.max_steps, 1_000_000)
+                self.assertEqual(config.trainer.devices, devices)
+                self.assertEqual(config.trainer.strategy, strategy)
+                self.assertEqual(config.trainer.expected_world_size, world_size)
+                self.assertEqual(
+                    config.callbacks.oracle.sample_every_n_steps,
+                    10_000,
+                )
+                self.assertEqual(
+                    config.callbacks.checkpoint.every_n_train_steps,
+                    10_000,
                 )
 
 
