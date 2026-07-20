@@ -88,7 +88,8 @@ for unified-token training. Formal LongCat DDP runs use
 `jobs/005/11_longcat_rvq_ddp_lba_formal.sh`. Override machine-facing values such
 as `CUDA_VISIBLE_DEVICES`, `SPEECH_TO_SPEECH_PYTHON`, or
 `SPEECH_TO_SPEECH_UNICODEC_PYTHON` only at submission time. Outputs default to
-`$DYNAMIC_HOME/train/speech-to-speech`; training entries write checkpoints and
+`$SPEECH_TO_SPEECH_TRAIN_ROOT` (jobs default it to
+`$DYNAMIC_HOME/train/speech-to-speech`); training entries write checkpoints and
 summary artifacts under `repo_output_root/output_subdir`, while TensorBoard
 events are centralized at `repo_output_root/tensorboard/output_subdir/version_*`.
 This lets one TensorBoard invocation compare the whole repository. Keep

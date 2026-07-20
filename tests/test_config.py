@@ -188,6 +188,17 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(csv.logging.save_dir, csv.output_dir)
         self.assertEqual(csv.logging.run_name, "csv")
 
+    def test_repo_output_root_prefers_the_project_training_root(self):
+        with patch.dict(
+            "os.environ",
+            {"SPEECH_TO_SPEECH_TRAIN_ROOT": "/tmp/speech-train"},
+        ):
+            oracle = codec_oracle(_compose("codec_oracle"))
+            overfit_config = overfit(_compose("overfit"))
+
+        self.assertEqual(oracle.repo_output_root, "/tmp/speech-train")
+        self.assertEqual(overfit_config.repo_output_root, "/tmp/speech-train")
+
     def test_logging_builder_uses_the_configured_layout(self):
         tensorboard = codec_oracle(_compose("codec_oracle")).logging
         with patch("scripts._logging.TensorBoardLogger") as logger:
