@@ -4,11 +4,12 @@ from dataclasses import dataclass, field
 
 from ..model import DecoderConfig
 from .data import DataConfig
-from .types import Initialization
+from .types import Initialization, Objective
 
 
 @dataclass(frozen=True)
 class Config:
+    objective: Objective = Objective.FLOW
     initialization: Initialization = Initialization.CODEC
     normalize_features: bool = True
     learning_rate: float = 3e-4

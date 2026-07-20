@@ -6,6 +6,7 @@ from typing import Optional, Type, TypeVar, Union, cast
 from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf
 
 from speech_to_speech.codec_oracle import Config as OracleConfig
+from speech_to_speech.codec_oracle import Initialization, Objective
 from speech_to_speech.datamodule import DatasetConfig, DatasetName
 from speech_to_speech.model import AcousticType, AdapterType, DecoderConfig
 from speech_to_speech.model import Config as ModelConfig
@@ -192,6 +193,24 @@ def codec_oracle(config: DictConfig) -> CodecOracleConfig:
 
 def _prepare(config: DictConfig) -> DictConfig:
     result = cast(DictConfig, OmegaConf.create(OmegaConf.to_container(config)))
+    initialization = result.get("codec_oracle", {}).get("initialization")
+    normalized_initialization = None
+    if initialization is not None:
+        raw = str(initialization)
+        normalized_initialization = (
+            Initialization[raw]
+            if raw in Initialization.__members__
+            else Initialization(raw)
+        )
+        result.codec_oracle.initialization = normalized_initialization.value
+    objective = result.get("codec_oracle", {}).get("objective")
+    normalized_objective = None
+    if objective is not None:
+        raw = str(objective)
+        normalized_objective = (
+            Objective[raw] if raw in Objective.__members__ else Objective(raw)
+        )
+        result.codec_oracle.objective = normalized_objective.value
     OmegaConf.resolve(result)
     for key in (
         "semantic_audio_adapter",
@@ -206,9 +225,10 @@ def _prepare(config: DictConfig) -> DictConfig:
                 if raw in AdapterType.__members__
                 else AdapterType(raw).name
             )
-    initialization = result.get("codec_oracle", {}).get("initialization")
-    if initialization is not None:
-        result.codec_oracle.initialization = str(initialization).upper()
+    if normalized_initialization is not None:
+        result.codec_oracle.initialization = normalized_initialization.name
+    if normalized_objective is not None:
+        result.codec_oracle.objective = normalized_objective.name
     dataset = result.get("data", {}).get("name")
     if dataset is not None:
         raw = str(dataset)

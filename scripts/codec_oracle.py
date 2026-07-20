@@ -22,6 +22,7 @@ from speech_to_speech.codec_oracle import (
 )
 from speech_to_speech.codec_oracle import (
     AcousticFlowScreening,
+    AcousticRVQScreening,
     Initialization,
     Logger as OracleLogger,
     Objective,
@@ -33,6 +34,7 @@ from speech_to_speech.codec_oracle import (
 )
 from speech_to_speech.model import (
     SpeechToSpeechFlowModel,
+    SpeechToSpeechRVQModel,
 )
 from speech_to_speech.runtime import Runtime
 
@@ -76,7 +78,7 @@ def main(config: DictConfig) -> None:
 def run(config: CodecOracleConfig) -> None:
     pl.seed_everything(config.train.seed, workers=True)
     device = process_device(config.runtime.device)
-    objective = Objective.FLOW
+    objective = config.codec_oracle.objective
     initialization = config.codec_oracle.initialization
     event(
         "run",
@@ -92,13 +94,23 @@ def run(config: CodecOracleConfig) -> None:
     codec = runtime.codec
     data = config.codec_oracle.data
     codes = load_codes(data, config.runtime.codec, frame_rate=codec.frame_rate)
-    module, metadata = build_flow(
-        config,
-        codes,
-        initialization,
-        runtime,
-        device,
-    )
+    if objective is Objective.FLOW:
+        module, metadata = build_flow(
+            config,
+            codes,
+            initialization,
+            runtime,
+            device,
+        )
+    elif objective is Objective.RVQ:
+        module, metadata = build_rvq(
+            config,
+            codes,
+            initialization,
+            runtime,
+        )
+    else:
+        raise AssertionError(f"unsupported objective: {objective}")
 
     callback = OracleLogger(
         objective=objective,
@@ -159,7 +171,7 @@ def training_callbacks(
 
 def fit(
     config: CodecOracleConfig,
-    module: AcousticFlowScreening,
+    module: AcousticFlowScreening | AcousticRVQScreening,
     codes: Tensor,
     callbacks: list[Callback],
     output_dir: Path,
@@ -185,7 +197,7 @@ def fit(
         strategy=config.trainer.strategy,
         use_distributed_sampler=config.trainer.use_distributed_sampler,
     )
-    with timed("trainer.fit", objective=Objective.FLOW):
+    with timed("trainer.fit", objective=config.codec_oracle.objective):
         if data.lba.enabled:
             trainer.fit(
                 module,
@@ -293,6 +305,49 @@ def build_flow(
     return module, metadata
 
 
+@torch.no_grad()
+def build_rvq(
+    config: CodecOracleConfig,
+    codes: Tensor,
+    initialization: Initialization,
+    runtime: Runtime,
+) -> tuple[AcousticRVQScreening, dict[str, Any]]:
+    codec = runtime.codec
+    acoustic_sizes = codec.acoustic_codebook_sizes
+    expected_codebooks = 1 + len(acoustic_sizes)
+    if not acoustic_sizes:
+        raise ValueError("RVQ screening requires acoustic codebooks.")
+    if codes.size(-1) != expected_codebooks:
+        raise ValueError(
+            "RVQ screening prepared codes must match the runtime codec: "
+            f"{codes.size(-1)} != {expected_codebooks}."
+        )
+    model = SpeechToSpeechRVQModel(
+        config.model,
+        runtime=runtime,
+        decoder=config.codec_oracle.decoder,
+    )
+    codebook = codec.semantic_codebook.detach().float()
+    module = AcousticRVQScreening(
+        model,
+        initialization=initialization,
+        seed=config.train.seed,
+        learning_rate=config.codec_oracle.learning_rate,
+        weight_decay=config.codec_oracle.weight_decay,
+    )
+    metadata = common_metadata(
+        config,
+        codes,
+        codebook,
+        frame_rate=codec.frame_rate,
+    ) | {
+        "semantic_frames": int(codes.size(0)),
+        "acoustic_codebooks": len(acoustic_sizes),
+        "acoustic_codebook_sizes": list(acoustic_sizes),
+    }
+    return module, metadata
+
+
 def common_metadata(
     config: CodecOracleConfig,
     codes: Tensor,
@@ -302,7 +357,7 @@ def common_metadata(
 ) -> dict[str, Any]:
     return {
         "codec": config.runtime.codec,
-        "objective": Objective.FLOW.value,
+        "objective": config.codec_oracle.objective.value,
         "initialization": config.codec_oracle.initialization.value,
         "code_shape": list(codes.shape),
         "codebook_shape": list(codebook.shape),

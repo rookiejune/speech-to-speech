@@ -10,6 +10,7 @@ from .._compat import StrEnum
 
 class Objective(StrEnum):
     FLOW = auto()
+    RVQ = auto()
 
 
 class Initialization(StrEnum):

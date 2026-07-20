@@ -22,7 +22,7 @@ from scripts._config import (
 from scripts.codec_oracle import build_runtime as build_oracle_runtime
 from scripts.overfit import _composition, runtime_config
 from speech_to_speech.codec_oracle import Config as OracleConfig
-from speech_to_speech.codec_oracle import DataConfig, Initialization
+from speech_to_speech.codec_oracle import DataConfig, Initialization, Objective
 from speech_to_speech.datamodule import DatasetName
 from speech_to_speech.model import (
     AdapterType,
@@ -64,6 +64,7 @@ class ConfigTest(unittest.TestCase):
             oracle.codec_oracle.initialization,
             Initialization.CODEC,
         )
+        self.assertIs(oracle.codec_oracle.objective, Objective.FLOW)
         self.assertFalse(hasattr(oracle, "acoustic"))
 
     def test_toy_smoke_selects_model_and_dataset_without_a_toy_runtime(self):
@@ -197,6 +198,65 @@ class ConfigTest(unittest.TestCase):
                     ),
                     (1, 1, 1, 1),
                 )
+
+    def test_codec_oracle_rvq_smoke_experiments_select_rvq_objective(self):
+        cases = [
+            ("acoustic_oracle_rvq_smoke", 1, False, 1, "auto", True),
+            (
+                "acoustic_oracle_rvq_ddp_lba_smoke",
+                32,
+                True,
+                "auto",
+                "ddp",
+                True,
+            ),
+        ]
+
+        for experiment, sample_limit, lba, devices, strategy, sampler in cases:
+            with self.subTest(experiment=experiment):
+                config = codec_oracle(
+                    _compose("codec_oracle", f"experiment={experiment}")
+                )
+
+                self.assertIs(config.codec_oracle.objective, Objective.RVQ)
+                self.assertEqual(config.codec_oracle.data.sample_limit, sample_limit)
+                self.assertIs(config.codec_oracle.data.lba.enabled, lba)
+                self.assertEqual(config.train.max_steps, 2)
+                self.assertEqual(config.trainer.devices, devices)
+                self.assertEqual(config.trainer.strategy, strategy)
+                self.assertIs(config.trainer.use_distributed_sampler, sampler)
+                self.assertIn("/rvq-8l/", config.output_dir)
+                self.assertEqual(
+                    (
+                        config.callbacks.oracle.sample_every_n_steps,
+                        config.callbacks.oracle.histogram_every_n_steps,
+                        config.callbacks.grad_norm.every_n_steps,
+                        config.callbacks.checkpoint.every_n_train_steps,
+                    ),
+                    (1, 1, 1, 1),
+                )
+
+    def test_codec_oracle_enum_inputs_resolve_to_stable_value_paths(self):
+        lower = codec_oracle(
+            _compose(
+                "codec_oracle",
+                "codec_oracle.objective=rvq",
+                "codec_oracle.initialization=codec",
+            )
+        )
+        upper = codec_oracle(
+            _compose(
+                "codec_oracle",
+                "codec_oracle.objective=RVQ",
+                "codec_oracle.initialization=CODEC",
+            )
+        )
+
+        self.assertIs(lower.codec_oracle.objective, Objective.RVQ)
+        self.assertIs(upper.codec_oracle.objective, Objective.RVQ)
+        self.assertIs(upper.codec_oracle.initialization, Initialization.CODEC)
+        self.assertEqual(lower.output_dir, upper.output_dir)
+        self.assertIn("/rvq-8l/codec", upper.output_dir)
 
     def test_unicodec_experiments_close_the_token_training_chain(self):
         cases = [
@@ -366,6 +426,8 @@ class ConfigTest(unittest.TestCase):
             "02_unicodec.sh": "unicodec_overfit",
             "04_longcat_ddp_lba.sh": "acoustic_oracle_ddp_lba_smoke",
             "05_unicodec_ddp.sh": "unicodec_ddp_smoke",
+            "06_longcat_rvq.sh": "acoustic_oracle_rvq_smoke",
+            "07_longcat_rvq_ddp_lba.sh": "acoustic_oracle_rvq_ddp_lba_smoke",
         }
 
         for filename, expected in jobs.items():

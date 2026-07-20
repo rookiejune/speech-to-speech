@@ -8,7 +8,7 @@ defaults:
   - _self_
   - experiment: null
 
-output_dir: ${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech/005-codec-oracle/${runtime.codec}/flow-${codec_oracle.decoder.layers}l/${codec_oracle.initialization}
+output_dir: ${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech/005-codec-oracle/${runtime.codec}/${codec_oracle.objective}-${codec_oracle.decoder.layers}l/${codec_oracle.initialization}
 
 train:
   seed: 0

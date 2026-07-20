@@ -1,4 +1,7 @@
 # @package _global_
+defaults:
+  - override /codec_oracle: rvq
+  - _self_
 
 output_dir: ${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech/005-codec-oracle-smoke/${runtime.codec}/${codec_oracle.objective}-${codec_oracle.decoder.layers}l/${codec_oracle.initialization}
 
@@ -11,10 +14,6 @@ codec_oracle:
     persistent_workers: false
     lba:
       enabled: false
-
-runtime:
-  flow_nfe: 4
-  flow_num_steps: 2
 
 train:
   max_steps: 2

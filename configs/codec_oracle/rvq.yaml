@@ -1,6 +1,6 @@
-objective: flow
+objective: rvq
 initialization: codec
-normalize_features: true
+normalize_features: false
 learning_rate: 0.0003
 weight_decay: 0.01
 decoder:

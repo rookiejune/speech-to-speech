@@ -16,9 +16,9 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
   production/fixed-sample experiment 默认仍使用 WMT19 TTS prepared data。
 - `pl_module`：完整映射 `pl_module.Config` 的 learning rate 与 weight decay；不再使用含义重复的
   `optimizer` 组。
-- `codec_oracle`：完整映射 `codec_oracle.Config`，统一拥有 initialization、target normalization、
-  decoder、optimizer 参数和 `codec_oracle.DataConfig`。LBA 是该模块的 data 能力，不再使用顶层
-  `oracle`、`init` 或 `data/oracle` 组。
+- `codec_oracle`：完整映射 `codec_oracle.Config`，统一拥有 objective、initialization、target
+  normalization、decoder、optimizer 参数和 `codec_oracle.DataConfig`。LBA 是该模块的 data 能力，
+  不再使用顶层 `oracle`、`init` 或 `data/oracle` 组。
 
 `trainer`、`logging`、`callback` 与 `experiment` 属于 Lightning/Hydra 运行编排，可以没有同名
 `src` 包。overfit 的 sample index 和 train budget 位于 experiment；数据源通过公开
@@ -41,6 +41,8 @@ DataLoader 构造参数供 Lightning 重建；UniCodec DDP smoke 则要求每个
 
 - `acoustic_oracle_smoke`：LongCat 单卡两步验收。
 - `acoustic_oracle_ddp_lba_smoke`：LongCat 两卡 LBA 两步验收。
+- `acoustic_oracle_rvq_smoke`：LongCat RVQ oracle 单卡两步验收。
+- `acoustic_oracle_rvq_ddp_lba_smoke`：LongCat RVQ oracle 两卡 LBA 两步验收。
 - `unicodec_overfit`：UniCodec fixed-sample 100-step overfit。
 - `unicodec_ddp_smoke`：UniCodec 两卡两步验收。
 - `overfit`：TTS/S2ST fixed-sample 完整链路实验。
@@ -74,4 +76,7 @@ codec codes；入口显式拒绝 CodecBPE tokenizer，而不是静默忽略。
 - flow method、NFE 和 step 数直接覆盖 `runtime.flow_*`；RVQ/token 中保留这些字段是
   `runtime.Config` 的稳定 shape，不需要再为未使用字段创建 variant schema。
 - codec capability 必须与 composition 一致，入口不自动把 flow/RVQ 改成 token model。
-- codec oracle 固定使用 flow model；decoder 与 normalization 位于 `codec_oracle.*`。
+- codec oracle 通过 `codec_oracle.objective=flow|rvq` 选择 acoustic screening model；decoder、
+  normalization 与 optimizer 位于 `codec_oracle.*`。flow objective 额外使用 runtime 的 flow
+  sampling 和 normalization 字段，RVQ objective 不读取这些字段；两种 objective 的
+  initialization 都只控制 semantic audio embedding。

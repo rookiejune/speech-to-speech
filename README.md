@@ -44,6 +44,7 @@ jobs/002/01_tts.sh train.max_steps=2
 jobs/002/02_s2st.sh train.max_steps=2 model/acoustic=rvq
 jobs/004/01_s2st.sh --batch-sizes 1,2,4
 jobs/005/01_longcat.sh codec_oracle.initialization=codec
+jobs/005/06_longcat_rvq.sh
 jobs/005/02_unicodec.sh
 ```
 
@@ -75,8 +76,9 @@ acoustic model group.
 decoder, data, initialization, normalization, and optimizer settings. Entry
 points reject codec/composition mismatches.
 
-Two-GPU contract runs use `jobs/005/04_longcat_ddp_lba.sh` and
-`jobs/005/05_unicodec_ddp.sh`. Override machine-facing values such as
+Two-GPU contract runs use `jobs/005/04_longcat_ddp_lba.sh` for Flow,
+`jobs/005/07_longcat_rvq_ddp_lba.sh` for RVQ, and `jobs/005/05_unicodec_ddp.sh`
+for unified-token training. Override machine-facing values such as
 `CUDA_VISIBLE_DEVICES`, `SPEECH_TO_SPEECH_PYTHON`, or
 `SPEECH_TO_SPEECH_UNICODEC_PYTHON` only at submission time. Outputs default to
 `$DYNAMIC_HOME/train/speech-to-speech`; training entries write TensorBoard logs

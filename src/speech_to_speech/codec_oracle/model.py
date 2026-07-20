@@ -8,8 +8,9 @@ from anytrain.framework.flow_matching import ContinuousFlowRuntime
 from lightning import pytorch as pl
 from torch import Tensor, nn
 
+from ..loss.causal_lm import CausalAcousticLoss
 from ..loss.flow_matching import AcousticFlowLoss
-from ..model import SpeechToSpeechFlowModel
+from ..model import SpeechToSpeechFlowModel, SpeechToSpeechRVQModel
 from .trace import timed
 from .types import Initialization
 
@@ -114,3 +115,110 @@ class AcousticFlowScreening(pl.LightningModule):
         generator = torch.Generator(device=condition.device).manual_seed(seed)
         normalized = self.model.acoustic_flow.sample(condition, generator=generator)
         return normalized * self.target_std + self.target_mean
+
+
+class AcousticRVQScreening(pl.LightningModule):
+    """Acoustic RVQ code prediction wrapper for codec oracle screening."""
+
+    def __init__(
+        self,
+        model: SpeechToSpeechRVQModel,
+        *,
+        initialization: Initialization,
+        seed: int,
+        learning_rate: float,
+        weight_decay: float,
+    ) -> None:
+        super().__init__()
+        self.model = model
+        self.model.requires_grad_(False)
+        self.model.semantic_audio_embedding.requires_grad_(True)
+        self.model.semantic_audio_adapter.requires_grad_(True)
+        self.model.acoustic_decoder.requires_grad_(True)
+        self.model.acoustic_decoder.decoder.embed_tokens.requires_grad_(False)
+        self.model.acoustic_decoder.codebook_embeddings[-1].requires_grad_(False)
+        self.model.acoustic_decoder.embedding_projections[-1].requires_grad_(False)
+        weight = initialization.weight(
+            self.model.semantic_audio_embedding.weight.detach(),
+            seed=seed,
+        )
+        with torch.no_grad():
+            self.model.semantic_audio_embedding.weight.copy_(weight)
+        self.objective = CausalAcousticLoss()
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+
+    def condition(self, semantic_codes: Tensor) -> Tensor:
+        start, _ = self.model.layout.blocks["audio"]
+        token_labels = semantic_codes + start
+        positions = torch.arange(
+            semantic_codes.size(1),
+            device=semantic_codes.device,
+        ).expand_as(semantic_codes)
+        return self.model.target_frame_label_condition(token_labels, positions)
+
+    def features(self, acoustic_codes: Tensor) -> Tensor:
+        return self.model.acoustic_code_features(acoustic_codes).float()
+
+    def _logits(
+        self,
+        semantic_codes: Tensor,
+        acoustic_codes: Tensor,
+        mask: Tensor,
+    ) -> tuple[Tensor, ...]:
+        return self.model.acoustic_decoder(
+            self.condition(semantic_codes),
+            acoustic_codes,
+            mask=mask,
+        )
+
+    def training_step(
+        self,
+        batch: Mapping[str, Tensor],
+        batch_idx: int,
+    ) -> dict[str, Any]:
+        del batch_idx
+        codes = batch["codes"]
+        mask = batch["mask"]
+        safe_codes = codes.masked_fill(~mask[..., None], 0)
+        semantic_codes = safe_codes[..., 0]
+        acoustic_codes = safe_codes[..., 1:]
+        logits = self._logits(semantic_codes, acoustic_codes, mask)
+        item = self.objective(logits, acoustic_codes, mask)
+        loss = item.loss.mean()
+        self.log("train/rvq_loss", loss, on_step=True, prog_bar=True, sync_dist=True)
+        if item.details is not None:
+            for name, value in item.details.items():
+                self.log(
+                    f"train/rvq_{name}_loss",
+                    value.mean(),
+                    on_step=True,
+                    sync_dist=True,
+                )
+        self.log("train/batch_size", float(codes.size(0)), on_step=True, sync_dist=True)
+        self.log("train/valid_frames", mask.sum().float(), on_step=True, sync_dist=True)
+        return {"loss": loss, "rvq": item}
+
+    def configure_optimizers(self):
+        parameters = [
+            *self.model.semantic_audio_embedding.parameters(),
+            *self.model.semantic_audio_adapter.parameters(),
+            *self.model.acoustic_decoder.parameters(),
+        ]
+        return torch.optim.AdamW(
+            [parameter for parameter in parameters if parameter.requires_grad],
+            lr=self.learning_rate,
+            weight_decay=self.weight_decay,
+        )
+
+    @torch.no_grad()
+    def sample(self, semantic_codes: Tensor, *, seed: int) -> Tensor:
+        condition = self.condition(semantic_codes)
+        generator = torch.Generator(device=condition.device).manual_seed(seed)
+        return self.model.acoustic_decoder.generate(
+            condition,
+            generator=generator,
+        )
+
+
+__all__ = ["AcousticFlowScreening", "AcousticRVQScreening"]

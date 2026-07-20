@@ -1,12 +1,12 @@
 # @package _global_
 defaults:
+  - override /codec_oracle: rvq
   - override /trainer: ddp
   - _self_
 
 output_dir: ${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech/005-codec-oracle-ddp-lba-smoke/${runtime.codec}/${codec_oracle.objective}-${codec_oracle.decoder.layers}l/${codec_oracle.initialization}
 
 codec_oracle:
-  normalize_features: false
   data:
     sample_limit: 32
     batch_size: 8
@@ -17,10 +17,6 @@ codec_oracle:
       enabled: true
       max_batch_seconds: 8.0
       prefetch_batches: 0
-
-runtime:
-  flow_nfe: 4
-  flow_num_steps: 2
 
 train:
   max_steps: 2
