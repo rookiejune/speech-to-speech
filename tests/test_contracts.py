@@ -40,6 +40,7 @@ from speech_to_speech.runtime import Config, Runtime
 from speech_to_speech.runtime.runtime import audio_tokenizer, dtype
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer, TorchCodecBPE
 from speech_to_speech.task import Task
+from scripts._config import overfit as parse_overfit
 from scripts.overfit import FixedDataModule, build_trainer, run, runtime_config
 
 
@@ -62,7 +63,7 @@ class ContractTest(unittest.TestCase):
             _compose(),
             _compose("trainer=ddp"),
             _compose(
-                "experiment=acoustic_oracle_ddp_lba",
+                "experiment=acoustic_oracle_ddp_lba_smoke",
                 config_name="codec_oracle",
             ),
         ]
@@ -91,16 +92,12 @@ class ContractTest(unittest.TestCase):
 
     @patch("scripts.overfit.pl.Trainer")
     @patch("scripts.overfit.build_logger")
-    def test_overfit_trainer_consumes_the_composed_ddp_contract(
+    def test_overfit_trainer_consumes_the_unicodec_ddp_contract(
         self,
         logger,
         trainer,
     ):
-        config = _compose(
-            "trainer=ddp",
-            "trainer.max_epochs=-1",
-            "trainer.precision=bf16-mixed",
-        )
+        config = parse_overfit(_compose("experiment=unicodec_ddp_smoke"))
         callbacks = [Callback()]
         output_dir = Path(self.id())
 
@@ -130,12 +127,14 @@ class ContractTest(unittest.TestCase):
 
     def test_acoustic_presets_expose_only_supported_options(self):
         flow = _compose()
-        rvq = _compose("acoustic=rvq")
+        rvq = _compose("model/acoustic=rvq")
 
         self.assertEqual(flow.acoustic.type, "flow")
         self.assertEqual(flow.acoustic.repa.teacher_layer, 9)
         self.assertIn("student_layer", flow.acoustic.repa)
-        self.assertEqual(set(flow.codec), {"name"})
+        self.assertNotIn("normalize_features", flow.acoustic)
+        self.assertEqual(flow.runtime.codec, "longcat")
+        self.assertEqual(flow.model.semantic_audio_adapter, "linear")
         self.assertEqual(rvq.acoustic.type, "rvq")
         self.assertNotIn("repa", rvq.acoustic)
 
@@ -152,28 +151,15 @@ class ContractTest(unittest.TestCase):
         datamodule = Mock()
         datamodule.train_dataloader.return_value = [Mock()]
         with TemporaryDirectory() as output_dir:
-            config = OmegaConf.create(
-                {
-                    "output_dir": output_dir,
-                    "task": "tts",
-                    "codec": {"name": "longcat"},
-                    "data": {"root": None, "split": "train", "sample_index": 0},
-                    "train": {"seed": 0, "max_steps": 1},
-                    "optimizer": {
-                        "learning_rate": 2e-5,
-                        "weight_decay": 0.01,
-                    },
-                    "acoustic": {
-                        "type": "flow",
-                        "decoder": {
-                            "hidden_dim": None,
-                            "layers": 1,
-                            "heads": 1,
-                            "ffn_ratio": 1,
-                        },
-                        "repa": {"weight": None},
-                    },
-                }
+            config = parse_overfit(
+                _compose(
+                    "runtime=longcat_native",
+                    f"output_dir={output_dir}",
+                    "train.max_steps=1",
+                    "acoustic.decoder.layers=1",
+                    "acoustic.decoder.heads=1",
+                    "acoustic.decoder.ffn_ratio=1",
+                )
             )
             with (
                 patch("scripts.overfit.pl.seed_everything"),
@@ -255,18 +241,12 @@ class ContractTest(unittest.TestCase):
             dtype("not_a_dtype")
 
     def test_overfit_runtime_config_preserves_native_audio_tokenizer(self):
-        config = OmegaConf.create(
-            {
-                "codec": {"name": "unicodec"},
-                "runtime": {
-                    "backbone": "fake/backbone",
-                    "audio_tokenizer": None,
-                    "device": "cuda",
-                    "dtype": "bfloat16",
-                    "attn_implementation": "flash_attention_2",
-                },
-                "flow": {"method": "midpoint", "nfe": 20, "num_steps": 10},
-            }
+        config = parse_overfit(
+            _compose(
+                "runtime=unicodec",
+                "~model/acoustic",
+                "runtime.backbone=fake/backbone",
+            )
         )
 
         with patch.dict("os.environ", {"LOCAL_RANK": "1"}):

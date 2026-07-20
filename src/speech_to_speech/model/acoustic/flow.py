@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import torch
 from torch import Tensor, nn
 
@@ -77,7 +79,7 @@ class SpeechToSpeechFlowModel(TokenModel):
         config: Config | None = None,
         *,
         runtime: FlowModelRuntime,
-        decoder: DecoderConfig | None = None,
+        decoder: DecoderConfig | Mapping[str, object] | None = None,
         repa: FlowRepaConfig | None = None,
     ) -> None:
         super().__init__(config=config, runtime=runtime)
@@ -87,10 +89,10 @@ class SpeechToSpeechFlowModel(TokenModel):
             self.backbone.config.hidden_size,
             self.runtime.codec.acoustic_feature_dim,
             runtime.flow_matching,
-            hidden_dim=options["hidden_dim"],
-            layers=options["layers"],
-            heads=options["heads"],
-            ffn_ratio=options["ffn_ratio"],
+            hidden_dim=options.hidden_dim,
+            layers=options.layers,
+            heads=options.heads,
+            ffn_ratio=options.ffn_ratio,
             repa_feature_dim=None if repa is None else repa["feature_dim"],
             repa_student_layer=None if repa is None else repa["student_layer"],
         ).to(device=backbone_weight.device, dtype=backbone_weight.dtype)

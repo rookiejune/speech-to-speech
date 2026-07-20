@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from omegaconf import DictConfig
-
 from speech_to_speech.loss import FlowObjective, RVQObjective, TokenObjective, WavLMTeacher
 from speech_to_speech.model import (
-    DecoderConfig,
+    Config as ModelConfig,
     FlowRepaConfig,
     SpeechToSpeechFlowModel,
     SpeechToSpeechRVQModel,
@@ -14,12 +12,18 @@ from speech_to_speech.pl_module import Config, SpeechToSpeechModule
 from speech_to_speech.pl_module.protocol import FlowCompositionModel, RVQCompositionModel
 from speech_to_speech.runtime import Runtime
 
+if __package__:
+    from ._config import FlowConfig, RVQConfig
+else:
+    from _config import FlowConfig, RVQConfig
+
 
 def token(
     runtime: Runtime,
     config: Config,
+    model_config: ModelConfig,
 ) -> tuple[SpeechToSpeechModule[TokenModel], TokenModel]:
-    model = TokenModel(runtime=runtime)
+    model = TokenModel(model_config, runtime=runtime)
     module = SpeechToSpeechModule(
         config,
         model=model,
@@ -31,7 +35,8 @@ def token(
 def flow(
     runtime: Runtime,
     config: Config,
-    acoustic: DictConfig,
+    model_config: ModelConfig,
+    acoustic: FlowConfig,
 ) -> tuple[
     SpeechToSpeechModule[FlowCompositionModel], SpeechToSpeechFlowModel, float | None
 ]:
@@ -40,13 +45,14 @@ def flow(
     if weight is not None:
         teacher = WavLMTeacher(
             runtime.codec,
-            checkpoint=str(acoustic.repa.teacher_checkpoint),
-            layer=int(acoustic.repa.teacher_layer),
+            checkpoint=acoustic.repa.teacher_checkpoint,
+            layer=acoustic.repa.teacher_layer,
             device=runtime.backbone.get_input_embeddings().weight.device,
         )
     model = SpeechToSpeechFlowModel(
+        model_config,
         runtime=runtime,
-        decoder=decoder(acoustic.decoder),
+        decoder=acoustic.decoder,
         repa=(
             None
             if teacher is None
@@ -55,7 +61,7 @@ def flow(
                 student_layer=(
                     None
                     if acoustic.repa.student_layer is None
-                    else int(acoustic.repa.student_layer)
+                    else acoustic.repa.student_layer
                 ),
             )
         ),
@@ -66,7 +72,7 @@ def flow(
         repa=(
             None
             if weight is None or teacher is None
-            else {"weight": float(weight), "teacher": teacher}
+            else {"weight": weight, "teacher": teacher}
         ),
     )
     return SpeechToSpeechModule(config, model=model, objective=objective), model, weight
@@ -75,22 +81,17 @@ def flow(
 def rvq(
     runtime: Runtime,
     config: Config,
-    acoustic: DictConfig,
+    model_config: ModelConfig,
+    acoustic: RVQConfig,
 ) -> tuple[SpeechToSpeechModule[RVQCompositionModel], SpeechToSpeechRVQModel]:
-    model = SpeechToSpeechRVQModel(runtime=runtime, decoder=decoder(acoustic.decoder))
+    model = SpeechToSpeechRVQModel(
+        model_config,
+        runtime=runtime,
+        decoder=acoustic.decoder,
+    )
     module = SpeechToSpeechModule[RVQCompositionModel](
         config,
         model=model,
         objective=RVQObjective(runtime.layout),
     )
     return module, model
-
-
-def decoder(config: DictConfig) -> DecoderConfig:
-    hidden_dim = config.hidden_dim
-    return DecoderConfig(
-        hidden_dim=None if hidden_dim is None else int(hidden_dim),
-        layers=int(config.layers),
-        heads=int(config.heads),
-        ffn_ratio=int(config.ffn_ratio),
-    )

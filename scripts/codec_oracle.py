@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
+from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, Optional, cast
 
 import hydra
 import torch
@@ -10,12 +11,13 @@ from anytrain.lightning import DebugCallback
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 from torch import Tensor
 from zhuyin.datasets.wmt19_tts import wmt19_tts_codec
 
 from speech_to_speech.callback.logging import GradNormLogger
 from speech_to_speech.codec_oracle import (
+    DataConfig as OracleDataConfig,
     DataModule as OracleDataModule,
 )
 from speech_to_speech.codec_oracle import (
@@ -30,9 +32,23 @@ from speech_to_speech.codec_oracle import (
     single_batch_loader,
     timed,
 )
-from speech_to_speech.model import DecoderConfig, SpeechToSpeechFlowModel
-from speech_to_speech.runtime import Config as RuntimeConfig
+from speech_to_speech.model import (
+    SpeechToSpeechFlowModel,
+)
 from speech_to_speech.runtime import Runtime
+
+if __package__:
+    from ._config import (
+        CodecOracleConfig,
+        LoggingConfig,
+        codec_oracle as parse_config,
+    )
+else:
+    from _config import (
+        CodecOracleConfig,
+        LoggingConfig,
+        codec_oracle as parse_config,
+    )
 
 TrainerPrecision = Literal[
     64,
@@ -55,38 +71,35 @@ TrainerPrecision = Literal[
 
 @hydra.main(version_base=None, config_path="../configs", config_name="codec_oracle")
 def main(config: DictConfig) -> None:
-    run(config)
+    run(parse_config(config))
 
 
-def run(config: DictConfig) -> None:
-    OmegaConf.resolve(config)
-    pl.seed_everything(int(config.train.seed), workers=True)
-    device = process_device()
-    objective = Objective(str(config.acoustic.type))
-    initialization = Initialization(str(config.init.name))
+def run(config: CodecOracleConfig) -> None:
+    pl.seed_everything(config.train.seed, workers=True)
+    device = process_device(config.runtime.device)
+    objective = Objective.FLOW
+    initialization = config.codec_oracle.initialization
     event(
         "run",
         "start",
-        codec=str(config.codec.name),
+        codec=config.runtime.codec,
         objective=objective,
         initialization=initialization,
     )
-    output_dir = Path(str(config.output_dir)).expanduser()
+    output_dir = Path(config.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     runtime = build_runtime(config, device)
     codec = runtime.codec
-    codes = load_codes(config.data, config.codec, frame_rate=codec.frame_rate)
-    if objective is Objective.FLOW:
-        module, metadata = build_flow(
-            config,
-            codes,
-            initialization,
-            runtime,
-            device,
-        )
-    else:
-        raise ValueError("codec screening entry only supports acoustic flow.")
+    data = config.codec_oracle.data
+    codes = load_codes(data, config.runtime.codec, frame_rate=codec.frame_rate)
+    module, metadata = build_flow(
+        config,
+        codes,
+        initialization,
+        runtime,
+        device,
+    )
 
     callback = OracleLogger(
         objective=objective,
@@ -94,12 +107,10 @@ def run(config: DictConfig) -> None:
         codes=codes,
         output_dir=output_dir,
         sample_rate=int(codec.sample_rate),
-        seed=int(config.train.seed),
-        sample_every_n_steps=int(config.callbacks.oracle.sample_every_n_steps),
-        histogram_every_n_steps=int(
-            config.callbacks.oracle.histogram_every_n_steps
-        ),
-        save_audio=bool(config.callbacks.oracle.save_audio),
+        seed=config.train.seed,
+        sample_every_n_steps=config.callbacks.oracle.sample_every_n_steps,
+        histogram_every_n_steps=config.callbacks.oracle.histogram_every_n_steps,
+        save_audio=config.callbacks.oracle.save_audio,
         metadata=metadata,
     )
     callbacks = training_callbacks(config, callback, output_dir)
@@ -109,80 +120,84 @@ def run(config: DictConfig) -> None:
         codes,
         callbacks,
         output_dir,
+        data=data,
         frame_rate=codec.frame_rate,
     )
 
 
 def training_callbacks(
-    config: DictConfig,
+    config: CodecOracleConfig,
     oracle: Callback,
     output_dir: Path,
 ) -> list[Callback]:
     callbacks: list[Callback] = [
         oracle,
-        WorldSizeContract(int(config.trainer.expected_world_size)),
+        WorldSizeContract(config.trainer.expected_world_size),
     ]
-    if bool(config.data.lba.enabled):
+    if config.codec_oracle.data.lba.enabled:
         callbacks.append(SamplerEpochSetter())
-    if bool(config.callbacks.grad_norm.enabled):
+    if config.callbacks.grad_norm.enabled:
         callbacks.append(
             GradNormLogger(
-                every_n_steps=int(config.callbacks.grad_norm.every_n_steps),
+                every_n_steps=config.callbacks.grad_norm.every_n_steps,
             )
         )
-    if bool(config.trainer.enable_checkpointing):
+    if config.trainer.enable_checkpointing:
         callbacks.append(
             ModelCheckpoint(
                 dirpath=output_dir / "checkpoints",
-                filename=str(config.callbacks.checkpoint.filename),
-                save_last=bool(config.callbacks.checkpoint.save_last),
-                save_top_k=int(config.callbacks.checkpoint.save_top_k),
+                filename=config.callbacks.checkpoint.filename,
+                save_last=config.callbacks.checkpoint.save_last,
+                save_top_k=config.callbacks.checkpoint.save_top_k,
+                every_n_train_steps=(
+                    config.callbacks.checkpoint.every_n_train_steps
+                ),
+                auto_insert_metric_name=False,
             )
         )
-    if bool(config.callbacks.nonfinite.enabled):
+    if config.callbacks.nonfinite.enabled:
         callbacks.append(DebugCallback())
     return callbacks
 
 
 def fit(
-    config: DictConfig,
+    config: CodecOracleConfig,
     module: AcousticFlowScreening,
     codes: Tensor,
     callbacks: list[Callback],
     output_dir: Path,
     *,
+    data: OracleDataConfig,
     frame_rate: float,
 ) -> None:
-    with timed("logger.build", logger=str(config.logging.name)):
+    with timed("logger.build", logger=config.logging.name):
         logger = build_logger(config.logging, output_dir)
-        logger.log_hyperparams(
-            cast(dict[str, Any], OmegaConf.to_container(config, resolve=True))
-        )
+        logger.log_hyperparams(asdict(config))
     trainer = pl.Trainer(
-        accelerator=str(config.trainer.accelerator),
+        accelerator=config.trainer.accelerator,
         devices=config.trainer.devices,
-        precision=cast(TrainerPrecision, str(config.trainer.precision)),
-        max_steps=int(config.train.max_steps),
-        max_epochs=int(config.trainer.max_epochs),
-        log_every_n_steps=int(config.trainer.log_every_n_steps),
-        enable_checkpointing=bool(config.trainer.enable_checkpointing),
-        gradient_clip_val=float(config.trainer.gradient_clip_val),
+        precision=cast(TrainerPrecision, config.trainer.precision),
+        max_steps=config.train.max_steps,
+        max_epochs=config.trainer.max_epochs,
+        log_every_n_steps=config.trainer.log_every_n_steps,
+        enable_checkpointing=config.trainer.enable_checkpointing,
+        gradient_clip_val=config.trainer.gradient_clip_val,
         default_root_dir=str(output_dir),
         logger=logger,
         callbacks=callbacks,
-        strategy=str(config.trainer.strategy),
-        use_distributed_sampler=bool(config.trainer.use_distributed_sampler),
+        strategy=config.trainer.strategy,
+        use_distributed_sampler=config.trainer.use_distributed_sampler,
     )
-    with timed("trainer.fit", objective=Objective(str(config.acoustic.type))):
-        if bool(config.data.lba.enabled):
+    with timed("trainer.fit", objective=Objective.FLOW):
+        if data.lba.enabled:
             trainer.fit(
                 module,
                 datamodule=OracleDataModule(
-                    config.data,
-                    config.codec,
+                    data,
+                    config.runtime.codec,
                     frame_rate=frame_rate,
                     output_dir=output_dir,
-                    seed=int(config.train.seed),
+                    seed=config.train.seed,
                 ),
             )
         else:
@@ -194,21 +209,20 @@ def fit(
             )
 
 
-def load_codes(data: DictConfig, codec: DictConfig, *, frame_rate: float) -> Tensor:
-    name = str(codec.name)
+def load_codes(data: OracleDataConfig, codec: str, *, frame_rate: float) -> Tensor:
     with timed(
         "dataset.load",
-        codec=name,
-        split=str(data.split),
-        sample_index=int(data.sample_index),
+        codec=codec,
+        split=data.split,
+        sample_index=data.sample_index,
     ):
         dataset = wmt19_tts_codec(
-            codec=name,
+            codec=codec,
             root=path(data.root),
-            split=str(data.split),
+            split=data.split,
         )
         codes = sample_codes(
-            dataset[int(data.sample_index)],
+            dataset[data.sample_index],
             codec=codec,
             data=data,
             frame_rate=frame_rate,
@@ -216,7 +230,7 @@ def load_codes(data: DictConfig, codec: DictConfig, *, frame_rate: float) -> Ten
     event(
         "dataset.sample",
         "ready",
-        codec=name,
+        codec=codec,
         code_shape=list(codes.shape),
         code_min=int(codes.min()),
         code_max=int(codes.max()),
@@ -224,25 +238,13 @@ def load_codes(data: DictConfig, codec: DictConfig, *, frame_rate: float) -> Ten
     return codes
 
 
-def build_runtime(config: DictConfig, device: torch.device) -> Runtime:
-    return Runtime(
-        RuntimeConfig(
-            codec=str(config.codec.name),
-            backbone=str(config.runtime.backbone),
-            audio_tokenizer=None,
-            device=str(device),
-            dtype=str(config.runtime.dtype),
-            attn_implementation=str(config.runtime.attn_implementation),
-            flow_method=str(config.flow.method),
-            flow_nfe=int(config.flow.nfe),
-            flow_num_steps=int(config.flow.num_steps),
-        )
-    )
+def build_runtime(config: CodecOracleConfig, device: torch.device) -> Runtime:
+    return Runtime(replace(config.runtime, device=str(device)))
 
 
 @torch.no_grad()
 def build_flow(
-    config: DictConfig,
+    config: CodecOracleConfig,
     codes: Tensor,
     initialization: Initialization,
     runtime: Runtime,
@@ -251,15 +253,16 @@ def build_flow(
     if codes.size(-1) < 2:
         raise ValueError("flow screening requires semantic and acoustic codebooks.")
     model = SpeechToSpeechFlowModel(
+        config.model,
         runtime=runtime,
-        decoder=decoder_config(config.acoustic),
+        decoder=config.codec_oracle.decoder,
     )
     codec = runtime.codec
     semantic_codes = codes[:, 0]
     acoustic_codes = codes[:, 1:]
     with timed(
         "codec.dequantize_probe",
-        codec=str(config.codec.name),
+        codec=config.runtime.codec,
         code_shape=list(acoustic_codes.shape),
     ):
         target = codec.acoustic_codes_to_features(
@@ -267,16 +270,16 @@ def build_flow(
         ).float()
     mean, std = _feature_stats(
         target,
-        enabled=bool(config.acoustic.normalize_features),
+        enabled=config.codec_oracle.normalize_features,
     )
     codebook = codec.semantic_codebook.detach().float()
     module = AcousticFlowScreening(
         model,
         initialization=initialization,
-        seed=int(config.train.seed),
+        seed=config.train.seed,
         flow_runtime=runtime.flow_matching,
-        learning_rate=float(config.optimizer.learning_rate),
-        weight_decay=float(config.optimizer.weight_decay),
+        learning_rate=config.codec_oracle.learning_rate,
+        weight_decay=config.codec_oracle.weight_decay,
         target_mean=mean.cpu(),
         target_std=std.cpu(),
     )
@@ -295,22 +298,22 @@ def build_flow(
 
 
 def common_metadata(
-    config: DictConfig,
+    config: CodecOracleConfig,
     codes: Tensor,
     codebook: Tensor,
     *,
     frame_rate: float,
 ) -> dict[str, Any]:
     return {
-        "codec": str(config.codec.name),
-        "objective": str(config.acoustic.type),
-        "initialization": str(config.init.name),
+        "codec": config.runtime.codec,
+        "objective": Objective.FLOW.value,
+        "initialization": config.codec_oracle.initialization.value,
         "code_shape": list(codes.shape),
         "codebook_shape": list(codebook.shape),
         "codebook_mean": float(codebook.mean()),
         "codebook_std": float(codebook.std(correction=0)),
         "frame_rate": frame_rate,
-        "max_seconds": float(config.data.max_seconds),
+        "max_seconds": config.codec_oracle.data.max_seconds,
     }
 
 
@@ -323,8 +326,8 @@ def _feature_stats(target: Tensor, *, enabled: bool) -> tuple[Tensor, Tensor]:
     return mean, std
 
 
-def build_logger(config: DictConfig, output_dir: Path):
-    name = str(config.name)
+def build_logger(config: LoggingConfig, output_dir: Path):
+    name = config.name
     if name == "tensorboard":
         return TensorBoardLogger(save_dir=str(output_dir), name="tensorboard")
     if name == "csv":
@@ -332,25 +335,21 @@ def build_logger(config: DictConfig, output_dir: Path):
     raise ValueError("logging.name must be tensorboard or csv.")
 
 
-def decoder_config(config: DictConfig) -> DecoderConfig:
-    hidden_dim = config.decoder.hidden_dim
-    return DecoderConfig(
-        hidden_dim=None if hidden_dim is None else int(hidden_dim),
-        layers=int(config.decoder.layers),
-        heads=int(config.decoder.heads),
-        ffn_ratio=int(config.decoder.ffn_ratio),
+def process_device(configured: Optional[str]) -> torch.device:
+    requested = torch.device("cuda" if configured is None else configured)
+    if requested.type != "cuda":
+        raise ValueError("codec oracle requires runtime.device to be cuda.")
+    device = (
+        requested
+        if requested.index is not None
+        else torch.device("cuda", int(os.environ.get("LOCAL_RANK", "0")))
     )
-
-
-def process_device() -> torch.device:
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    device = torch.device("cuda", local_rank)
     torch.cuda.set_device(device)
     return device
 
 
-def path(value: Any) -> Path | None:
-    return None if value is None else Path(str(value)).expanduser()
+def path(value: Optional[str]) -> Path | None:
+    return None if value is None else Path(value).expanduser()
 
 
 if __name__ == "__main__":

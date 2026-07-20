@@ -1,4 +1,6 @@
+# @package acoustic
 type: rvq
+name: ${.type}-${.decoder.layers}l
 decoder:
   hidden_dim:
   layers: 8

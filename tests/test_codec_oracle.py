@@ -3,14 +3,17 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import torch
 from anydataset.types import AudioItem, AudioView, Modality, Role
 from anytrain.idspace import Layout
+from hydra import compose, initialize_config_dir
 from lightning.pytorch.callbacks import Callback, ModelCheckpoint
-from omegaconf import OmegaConf
 from torch import nn
 
+from scripts._config import CodecOracleConfig, codec_oracle
+from scripts.codec_oracle import build_flow, process_device, training_callbacks
 from speech_to_speech.codec_oracle import (
     AcousticFlowScreening,
     Initialization,
@@ -18,55 +21,73 @@ from speech_to_speech.codec_oracle import (
     single_batch_loader,
 )
 from speech_to_speech.codec_oracle import SamplerEpochSetter
-from speech_to_speech.model import AcousticFlow
-from scripts.codec_oracle import training_callbacks
+from speech_to_speech.model import AcousticFlow, AdapterType
 
 
 class CodecOracleTest(unittest.TestCase):
     def test_experiment_precision_matches_bfloat16_runtime(self):
-        root = Path(__file__).parents[1]
-        config = OmegaConf.load(root / "configs/experiment/acoustic_oracle.yaml")
+        config = _config()
 
         self.assertEqual(config.trainer.precision, "bf16-mixed")
+        self.assertIsNone(config.runtime.audio_tokenizer)
+
+    @patch("scripts.codec_oracle.torch.cuda.set_device")
+    def test_process_device_preserves_explicit_index(self, set_device):
+        with patch.dict("os.environ", {"LOCAL_RANK": "0"}):
+            explicit = process_device("cuda:3")
+        with patch.dict("os.environ", {"LOCAL_RANK": "2"}):
+            local = process_device("cuda")
+
+        self.assertEqual(explicit, torch.device("cuda:3"))
+        self.assertEqual(local, torch.device("cuda:2"))
+        self.assertEqual(
+            [call.args[0] for call in set_device.call_args_list],
+            [torch.device("cuda:3"), torch.device("cuda:2")],
+        )
 
     def test_sampler_epoch_callback_is_only_enabled_for_lba(self):
-        config = OmegaConf.create(
-            {
-                "data": {"lba": {"enabled": False}},
-                "trainer": {
-                    "expected_world_size": 1,
-                    "enable_checkpointing": False,
-                },
-                "callbacks": {
-                    "grad_norm": {"enabled": False},
-                    "checkpoint": {
-                        "filename": "step-{step}",
-                        "save_last": True,
-                        "save_top_k": 0,
-                    },
-                    "nonfinite": {"enabled": False},
-                },
-            }
+        config = _config(
+            "codec_oracle.data.lba.enabled=false",
+            "trainer.enable_checkpointing=false",
+            "callbacks.grad_norm.enabled=false",
+            "callbacks.nonfinite.enabled=false",
         )
 
         callbacks = training_callbacks(config, Callback(), Path(self.id()))
 
         self.assertFalse(any(isinstance(x, SamplerEpochSetter) for x in callbacks))
-        config.data.lba.enabled = True
+        config = _config(
+            "codec_oracle.data.lba.enabled=true",
+            "trainer.enable_checkpointing=false",
+            "callbacks.grad_norm.enabled=false",
+            "callbacks.nonfinite.enabled=false",
+        )
         callbacks = training_callbacks(config, Callback(), Path(self.id()))
         self.assertTrue(any(isinstance(x, SamplerEpochSetter) for x in callbacks))
         self.assertFalse(any(isinstance(x, ModelCheckpoint) for x in callbacks))
 
-        config.trainer.enable_checkpointing = True
-        callbacks = training_callbacks(config, Callback(), Path(self.id()))
-        self.assertTrue(any(isinstance(x, ModelCheckpoint) for x in callbacks))
+        config = _config(
+            "codec_oracle.data.lba.enabled=true",
+            "trainer.enable_checkpointing=true",
+            "callbacks.grad_norm.enabled=false",
+            "callbacks.nonfinite.enabled=false",
+        )
+        with patch("scripts.codec_oracle.ModelCheckpoint") as checkpoint:
+            callbacks = training_callbacks(config, Callback(), Path(self.id()))
+
+        checkpoint.assert_called_once()
+        kwargs = checkpoint.call_args.kwargs
+        self.assertEqual(kwargs["every_n_train_steps"], 10_000)
+        self.assertEqual(kwargs["save_top_k"], -1)
+        self.assertTrue(kwargs["save_last"])
+        self.assertFalse(kwargs["auto_insert_metric_name"])
+        self.assertIn(checkpoint.return_value, callbacks)
 
     def test_collate_pads_variable_length_codec_sequences(self):
-        codec = OmegaConf.create({"name": "longcat"})
-        data = OmegaConf.create({"max_seconds": 2.0})
+        data = _config("codec_oracle.data.max_seconds=2.0").codec_oracle.data
         batch = collate(
             [_sample(3), _sample(1)],
-            codec=codec,
+            codec="longcat",
             data=data,
             frame_rate=2.0,
         )
@@ -99,6 +120,47 @@ class CodecOracleTest(unittest.TestCase):
         self.assertTrue(torch.equal(first, second))
         self.assertFalse(torch.equal(first, codebook))
 
+    @patch("scripts.codec_oracle.AcousticFlowScreening")
+    @patch("scripts.codec_oracle.SpeechToSpeechFlowModel")
+    def test_build_flow_consumes_model_and_oracle_configs(self, model, screening):
+        config = _config(
+            "model.semantic_audio_adapter=mlp",
+            "codec_oracle.decoder.layers=3",
+            "codec_oracle.normalize_features=false",
+        )
+        target = torch.tensor([[[2.0], [4.0]]])
+        codec = SimpleNamespace(
+            acoustic_codes_to_features=Mock(return_value=target),
+            semantic_codebook=torch.arange(8, dtype=torch.float32).reshape(4, 2),
+            frame_rate=25.0,
+        )
+        runtime = SimpleNamespace(codec=codec, flow_matching=Mock())
+        codes = torch.tensor([[1, 2], [3, 4]])
+
+        built, _ = build_flow(
+            config,
+            codes,
+            Initialization.CODEC,
+            runtime,
+            torch.device("cpu"),
+        )
+
+        self.assertIs(built, screening.return_value)
+        built_model_config = model.call_args.args[0]
+        self.assertIs(built_model_config.semantic_audio_adapter, AdapterType.MLP)
+        self.assertEqual(model.call_args.kwargs["decoder"].layers, 3)
+        self.assertTrue(
+            torch.equal(
+                screening.call_args.kwargs["target_mean"],
+                torch.zeros(1, 1, 1),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                screening.call_args.kwargs["target_std"],
+                torch.ones(1, 1, 1),
+            )
+        )
 
     def test_acoustic_flow_screening_uses_formal_model_target_latent(self):
         calls: list[torch.Tensor] = []
@@ -216,6 +278,14 @@ def _sample(frames: int):
             views={AudioView.LONGCAT: torch.arange(frames * 4).reshape(frames, 4)}
         )
     }
+
+
+def _config(*overrides: str) -> CodecOracleConfig:
+    root = Path(__file__).parents[1]
+    with initialize_config_dir(version_base=None, config_dir=str(root / "configs")):
+        return codec_oracle(
+            compose(config_name="codec_oracle", overrides=list(overrides))
+        )
 
 
 if __name__ == "__main__":

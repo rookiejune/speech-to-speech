@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import cast
 
 import torch
@@ -271,7 +271,7 @@ class SpeechToSpeechRVQModel(TokenModel):
         config: Config | None = None,
         *,
         runtime: TokenModelRuntime,
-        decoder: DecoderConfig | None = None,
+        decoder: DecoderConfig | Mapping[str, object] | None = None,
         codebook_embeddings: Sequence[Tensor] | None = None,
     ) -> None:
         super().__init__(config=config, runtime=runtime)
@@ -283,10 +283,10 @@ class SpeechToSpeechRVQModel(TokenModel):
             len(sizes),
             sizes,
             codebook_embeddings=codebook_embeddings,
-            hidden_dim=options["hidden_dim"],
-            layers=options["layers"],
-            heads=options["heads"],
-            ffn_ratio=options["ffn_ratio"],
+            hidden_dim=options.hidden_dim,
+            layers=options.layers,
+            heads=options.heads,
+            ffn_ratio=options.ffn_ratio,
         ).to(device=backbone_weight.device, dtype=backbone_weight.dtype)
 
     def acoustic_logits(

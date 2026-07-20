@@ -1,0 +1,3 @@
+semantic_audio_adapter: linear
+semantic_audio_output_adapter: linear
+acoustic_prompt_adapter: linear

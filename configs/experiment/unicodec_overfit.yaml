@@ -1,16 +1,15 @@
 # @package _global_
 defaults:
   - /model: default
-  - /model/acoustic: flow
-  - /runtime: longcat
+  - /runtime: unicodec
   - /pl_module: sft
   - /trainer: default
   - /logging: tensorboard
   - _self_
 
 task: tts
-run_name: ${oc.select:acoustic.name,token}
-output_dir: ${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech/002-single-batch-overfit/${task}/${run_name}
+run_name: token
+output_dir: ${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech/005-codec-screening/unicodec/formal
 
 callbacks:
   sample:

@@ -1,6 +1,18 @@
 defaults:
-  - experiment: acoustic_oracle
+  - model: default
+  - runtime: longcat_native
+  - codec_oracle: default
+  - trainer: default
+  - logging: tensorboard
+  - callback/codec_oracle@callbacks
   - _self_
+  - experiment: null
+
+output_dir: ${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech/005-codec-oracle/${runtime.codec}/flow-${codec_oracle.decoder.layers}l/${codec_oracle.initialization}
+
+train:
+  seed: 0
+  max_steps: 1000000
 
 hydra:
   job:

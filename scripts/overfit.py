@@ -3,15 +3,16 @@ from __future__ import annotations
 import json
 import os
 import time
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, Union, cast
+from typing import TYPE_CHECKING, Any, Union, cast
 
 import hydra
 import torch
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
 from speech_to_speech.callback import StageConfig, StageSwitcher, WorldSizeContract
 from speech_to_speech.callback.logging import (
@@ -29,64 +30,80 @@ from speech_to_speech.model import (
     SpeechToSpeechFlowModel,
     SpeechToSpeechRVQModel,
 )
-from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.pl_module import SpeechToSpeechModule
 from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import init_runtime
 from speech_to_speech.runtime.types import Codec
 from speech_to_speech.task import Task
 
+if TYPE_CHECKING:
+    from scripts._config import OverfitConfig
+
 if __package__:
+    from ._config import (
+        LoggingConfig,
+        OverfitFlowConfig,
+        OverfitTokenConfig,
+        overfit as parse_config,
+    )
     from ._overfit_composition import flow, rvq, token
     from ._overfit_support import AcousticEvaluation, FixedDataModule, LossSummary
 else:
+    from _config import (
+        LoggingConfig,
+        OverfitFlowConfig,
+        OverfitTokenConfig,
+        overfit as parse_config,
+    )
     from _overfit_composition import flow, rvq, token
     from _overfit_support import AcousticEvaluation, FixedDataModule, LossSummary
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="overfit")
 def main(config: DictConfig) -> None:
-    run(config)
+    run(parse_config(config))
 
 
-def run(config: DictConfig) -> None:
-    OmegaConf.resolve(config)
-    output_dir = Path(str(config.output_dir)).expanduser()
+def run(config: OverfitConfig) -> None:
+    output_dir = Path(config.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    pl.seed_everything(int(config.train.seed), workers=True)
+    pl.seed_everything(config.train.seed, workers=True)
     rt = init_runtime(runtime_config(config))
     codec = rt.codec
-    flow_matching = rt.flow_matching
-    task = Task(str(config.task))
-    acoustic_type = AcousticType(str(config.acoustic.type))
+    task = Task(config.task)
     datamodule = FixedDataModule(
-        str(config.codec.name),
+        config.runtime.codec,
         rt,
         {task: 1.0},
-        int(config.data.sample_index),
+        config.data.sample_index,
         root=(
             None
             if config.data.root is None
-            else Path(str(config.data.root)).expanduser()
+            else Path(config.data.root).expanduser()
         ),
-        split=str(config.data.split),
+        split=config.data.split,
     )
 
     repa_weight = None
-    torch.manual_seed(int(config.train.seed))
+    torch.manual_seed(config.train.seed)
     uses_acoustic_decoder = bool(codec.acoustic_codebook_sizes)
-    module_config = ModuleConfig(
-        learning_rate=float(config.optimizer.learning_rate),
-        weight_decay=float(config.optimizer.weight_decay),
+    acoustic_type = _composition(
+        config,
+        uses_acoustic_decoder=uses_acoustic_decoder,
     )
     evaluation: AcousticEvaluation | None = None
-    if not uses_acoustic_decoder:
-        module, model = token(rt, module_config)
-    elif acoustic_type is AcousticType.FLOW:
-        module, model, repa_weight = flow(rt, module_config, config.acoustic)
+    if isinstance(config, OverfitTokenConfig):
+        module, model = token(rt, config.pl_module, config.model)
+    elif isinstance(config, OverfitFlowConfig):
+        module, model, repa_weight = flow(
+            rt,
+            config.pl_module,
+            config.model,
+            config.acoustic,
+        )
     else:
-        module, model = rvq(rt, module_config, config.acoustic)
+        module, model = rvq(rt, config.pl_module, config.model, config.acoustic)
     if uses_acoustic_decoder:
         datamodule.setup("fit")
         batch = next(iter(datamodule.train_dataloader()))
@@ -98,17 +115,18 @@ def run(config: DictConfig) -> None:
             batch,
             codec,
             output_dir,
-            every_n_steps=max(1, int(config.train.max_steps) // 5),
+            every_n_steps=max(1, config.train.max_steps // 5),
             seeds=range(4),
         )
     summary = LossSummary()
+    loss_pair: tuple[str, str] | None = None
     if acoustic_type is AcousticType.FLOW:
         loss_pair = (
             ("flow_matching", "repa")
             if repa_weight is not None
             else ("token", "flow_matching")
         )
-    else:
+    elif acoustic_type is AcousticType.RVQ:
         loss_pair = ("token", "rvq")
     callbacks = cast(
         list[Callback],
@@ -134,17 +152,19 @@ def run(config: DictConfig) -> None:
             summary,
         ],
     )
-    if bool(config.callbacks.sample.enabled):
+    if config.callbacks.sample.enabled:
         callbacks.insert(
             2,
             SampleLogger(
-                [int(config.data.sample_index)],
-                every_n_steps=int(config.callbacks.sample.every_n_steps),
+                [config.data.sample_index],
+                every_n_steps=config.callbacks.sample.every_n_steps,
             ),
         )
     if evaluation is not None:
         callbacks.append(evaluation)
     if uses_acoustic_decoder:
+        if loss_pair is None or acoustic_type is None:
+            raise RuntimeError("acoustic composition metadata is unavailable.")
         callbacks.insert(
             1,
             GradLogger(
@@ -156,7 +176,7 @@ def run(config: DictConfig) -> None:
             ),
         )
     if uses_acoustic_decoder and acoustic_type is AcousticType.FLOW:
-        callbacks.insert(1, FlowMatchingLogger(flow_matching, every_n_steps=1))
+        callbacks.insert(1, FlowMatchingLogger(rt.flow_matching, every_n_steps=1))
     trainer = build_trainer(config, output_dir, callbacks)
     trainer.fit(module, datamodule=datamodule)
 
@@ -180,8 +200,8 @@ def run(config: DictConfig) -> None:
     )
     result = {
         "task": task.value,
-        "sample_index": int(config.data.sample_index),
-        "max_steps": int(config.train.max_steps),
+        "sample_index": config.data.sample_index,
+        "max_steps": config.train.max_steps,
         "parameters": {
             "total": sum(parameter.numel() for parameter in model.parameters()),
             "trainable": sum(
@@ -199,28 +219,28 @@ def run(config: DictConfig) -> None:
 
 
 def build_trainer(
-    config: DictConfig,
+    config: OverfitConfig,
     output_dir: Path,
     callbacks: list[Callback],
 ) -> pl.Trainer:
     callbacks = [
-        WorldSizeContract(int(config.trainer.expected_world_size)),
+        WorldSizeContract(config.trainer.expected_world_size),
         *callbacks,
     ]
     return pl.Trainer(
-        accelerator=str(config.trainer.accelerator),
+        accelerator=config.trainer.accelerator,
         devices=config.trainer.devices,
-        precision=cast(Any, str(config.trainer.precision)),
-        max_steps=int(config.train.max_steps),
-        max_epochs=int(config.trainer.max_epochs),
+        precision=cast(Any, config.trainer.precision),
+        max_steps=config.train.max_steps,
+        max_epochs=config.trainer.max_epochs,
         default_root_dir=str(output_dir),
         logger=build_logger(config.logging, output_dir),
         callbacks=callbacks,
-        log_every_n_steps=int(config.trainer.log_every_n_steps),
-        enable_checkpointing=bool(config.trainer.enable_checkpointing),
-        gradient_clip_val=float(config.trainer.gradient_clip_val),
-        strategy=str(config.trainer.strategy),
-        use_distributed_sampler=bool(config.trainer.use_distributed_sampler),
+        log_every_n_steps=config.trainer.log_every_n_steps,
+        enable_checkpointing=config.trainer.enable_checkpointing,
+        gradient_clip_val=config.trainer.gradient_clip_val,
+        strategy=config.trainer.strategy,
+        use_distributed_sampler=config.trainer.use_distributed_sampler,
     )
 
 
@@ -263,26 +283,40 @@ def evaluate_generation(
     }
 
 
-def runtime_config(config: DictConfig) -> RuntimeConfig:
-    audio_tokenizer = config.runtime.audio_tokenizer
-    device = torch.device(str(config.runtime.device))
-    if device.type == "cuda" and device.index is None:
+def runtime_config(config: OverfitConfig) -> RuntimeConfig:
+    device = (
+        None if config.runtime.device is None else torch.device(config.runtime.device)
+    )
+    if device is not None and device.type == "cuda" and device.index is None:
         device = torch.device("cuda", int(os.environ.get("LOCAL_RANK", "0")))
-    return RuntimeConfig(
-        codec=str(config.codec.name),
-        backbone=str(config.runtime.backbone),
-        audio_tokenizer=(None if audio_tokenizer is None else str(audio_tokenizer)),
-        device=str(device),
-        dtype=str(config.runtime.dtype),
-        attn_implementation=str(config.runtime.attn_implementation),
-        flow_method=str(config.flow.method),
-        flow_nfe=int(config.flow.nfe),
-        flow_num_steps=int(config.flow.num_steps),
+    return replace(
+        config.runtime,
+        device=None if device is None else str(device),
     )
 
 
-def build_logger(config: DictConfig, output_dir: Path):
-    name = str(config.name)
+def _composition(
+    config: OverfitConfig,
+    *,
+    uses_acoustic_decoder: bool,
+) -> AcousticType | None:
+    if isinstance(config, OverfitTokenConfig):
+        if uses_acoustic_decoder:
+            raise ValueError(
+                "codec exposes independent acoustic codebooks; configure "
+                "model/acoustic=flow or model/acoustic=rvq."
+            )
+        return None
+    if not uses_acoustic_decoder:
+        raise ValueError(
+            "codec has no independent acoustic codebooks; remove the acoustic "
+            "config group with ~model/acoustic."
+        )
+    return AcousticType(config.acoustic.type)
+
+
+def build_logger(config: LoggingConfig, output_dir: Path):
+    name = config.name
     if name == "tensorboard":
         return TensorBoardLogger(save_dir=str(output_dir), name="tensorboard")
     if name == "csv":

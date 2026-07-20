@@ -3,8 +3,8 @@ devices: 1
 strategy: auto
 expected_world_size: 1
 use_distributed_sampler: true
-precision: 32-true
+precision: bf16-mixed
 max_epochs: -1
-log_every_n_steps: 1
+log_every_n_steps: 10
 enable_checkpointing: true
 gradient_clip_val: 1.0

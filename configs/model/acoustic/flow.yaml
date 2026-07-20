@@ -1,5 +1,6 @@
+# @package acoustic
 type: flow
-normalize_features: true
+name: ${.type}-${.decoder.layers}l
 decoder:
   hidden_dim:
   layers: 8

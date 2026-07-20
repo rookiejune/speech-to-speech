@@ -19,6 +19,25 @@ from .types import AudioTokenizer, Backbone, Codec, TextTokenizer
 if TYPE_CHECKING:
     from anytrain.framework.flow_matching import ContinuousFlowRuntime
 
+_FLOW_METHODS = frozenset(
+    {
+        "adaptive_heun",
+        "bosh3",
+        "dopri5",
+        "dopri8",
+        "euler",
+        "explicit_adams",
+        "fehlberg2",
+        "fixed_adams",
+        "heun2",
+        "heun3",
+        "implicit_adams",
+        "midpoint",
+        "rk4",
+        "scipy_solver",
+    }
+)
+
 
 @dataclass(frozen=True)
 class Config:
@@ -31,6 +50,17 @@ class Config:
     flow_method: str = "midpoint"
     flow_nfe: int = 20
     flow_num_steps: int = 10
+
+    def __post_init__(self) -> None:
+        if self.flow_method not in _FLOW_METHODS:
+            raise ValueError(f"unsupported flow method: {self.flow_method}")
+        if self.flow_nfe <= 0:
+            raise ValueError(f"flow_nfe must be positive, got {self.flow_nfe}.")
+        if self.flow_num_steps < 2:
+            raise ValueError(
+                "flow_num_steps must be at least 2, "
+                f"got {self.flow_num_steps}."
+            )
 
     @property
     def audio_view(self) -> AudioView:
