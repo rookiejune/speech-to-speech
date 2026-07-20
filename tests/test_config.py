@@ -19,6 +19,7 @@ from scripts._config import (
     codec_oracle,
     overfit,
 )
+from scripts._logging import build as build_logger
 from scripts.codec_oracle import build_runtime as build_oracle_runtime
 from scripts.overfit import _composition, runtime_config
 from speech_to_speech.codec_oracle import Config as OracleConfig
@@ -161,6 +162,58 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.callbacks.oracle.sample_every_n_steps, 10_000)
         self.assertEqual(config.callbacks.checkpoint.every_n_train_steps, 10_000)
         self.assertEqual(config.callbacks.checkpoint.save_top_k, -1)
+
+    def test_training_outputs_use_one_tensorboard_root(self):
+        configs = (
+            overfit(_compose("overfit")),
+            overfit(_compose("overfit", "experiment=unicodec_overfit")),
+            codec_oracle(_compose("codec_oracle")),
+            codec_oracle(_compose("codec_oracle", "codec_oracle=rvq")),
+        )
+
+        for config in configs:
+            with self.subTest(output_subdir=config.output_subdir):
+                root = Path(config.repo_output_root)
+                self.assertEqual(
+                    Path(config.output_dir),
+                    root / config.output_subdir,
+                )
+                self.assertEqual(
+                    Path(config.logging.save_dir),
+                    root / "tensorboard",
+                )
+                self.assertEqual(config.logging.run_name, config.output_subdir)
+
+        csv = overfit(_compose("overfit", "experiment=toy_smoke"))
+        self.assertEqual(csv.logging.save_dir, csv.output_dir)
+        self.assertEqual(csv.logging.run_name, "csv")
+
+    def test_logging_builder_uses_the_configured_layout(self):
+        tensorboard = codec_oracle(_compose("codec_oracle")).logging
+        with patch("scripts._logging.TensorBoardLogger") as logger:
+            built = build_logger(tensorboard)
+
+        self.assertIs(built, logger.return_value)
+        logger.assert_called_once_with(
+            save_dir=tensorboard.save_dir,
+            name=tensorboard.run_name,
+        )
+
+        csv = overfit(_compose("overfit", "experiment=toy_smoke")).logging
+        with patch("scripts._logging.CSVLogger") as logger:
+            built = build_logger(csv)
+
+        self.assertIs(built, logger.return_value)
+        logger.assert_called_once_with(save_dir=csv.save_dir, name=csv.run_name)
+
+    def test_output_subdir_cannot_escape_the_repo_output_root(self):
+        for override in ("output_subdir=/tmp/run", "output_subdir=../run"):
+            with self.subTest(override=override):
+                with self.assertRaisesRegex(ValueError, "output_subdir"):
+                    codec_oracle(_compose("codec_oracle", override))
+
+        with self.assertRaisesRegex(ValueError, "output_dir must equal"):
+            overfit(_compose("overfit", "output_dir=/tmp/other"))
 
     def test_codec_oracle_smoke_experiments_own_the_test_budgets(self):
         cases = [
@@ -399,25 +452,48 @@ class ConfigTest(unittest.TestCase):
         for filename, task in jobs.items():
             with self.subTest(job=filename):
                 source = (root / "jobs" / "002" / filename).read_text()
-                match = re.search(r'output_dir="([^"]+)"', source)
+                match = re.search(r'output_subdir="([^"]+)"', source)
                 self.assertIsNotNone(match)
-                override = match.group(1).replace(
-                    "${SPEECH_TO_SPEECH_TRAIN_ROOT}",
-                    "/tmp/train",
-                ).replace(r"\${", "${")
+                subdir = match.group(1).replace(r"\${", "${")
                 config = overfit(
                     _compose(
                         "overfit",
                         "runtime=unicodec",
                         "~model/acoustic",
                         f"task={task}",
-                        f"output_dir={override}",
+                        "repo_output_root=/tmp/train",
+                        f"output_subdir={subdir}",
                     )
                 )
                 self.assertEqual(
                     config.output_dir,
                     f"/tmp/train/002-single-batch-overfit/{task}/token",
                 )
+                self.assertEqual(
+                    config.logging.save_dir,
+                    "/tmp/train/tensorboard",
+                )
+                self.assertEqual(
+                    config.logging.run_name,
+                    f"002-single-batch-overfit/{task}/token",
+                )
+
+    def test_training_jobs_override_root_and_relative_subdir(self):
+        root = Path(__file__).parents[1]
+        jobs = [*sorted((root / "jobs" / "002").glob("*.sh"))]
+        jobs.extend(sorted((root / "jobs" / "005").glob("*.sh")))
+
+        for path in jobs:
+            with self.subTest(job=path.name):
+                source = path.read_text()
+                self.assertIn(
+                    'repo_output_root="${SPEECH_TO_SPEECH_TRAIN_ROOT}"',
+                    source,
+                )
+                match = re.search(r'output_subdir="([^"]+)"', source)
+                self.assertIsNotNone(match)
+                self.assertFalse(Path(match.group(1)).is_absolute())
+                self.assertNotRegex(source, r"\boutput_dir=")
 
     def test_codec_screening_smoke_jobs_select_complete_experiments(self):
         root = Path(__file__).parents[1]

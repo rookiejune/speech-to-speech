@@ -1,1 +1,3 @@
 name: csv
+save_dir: ${output_dir}
+run_name: csv

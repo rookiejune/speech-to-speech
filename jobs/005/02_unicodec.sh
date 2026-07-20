@@ -10,5 +10,6 @@ cd "${SPEECH_TO_SPEECH_ROOT}"
 echo '{"event":"job.launch","codec":"unicodec"}'
 "${SPEECH_TO_SPEECH_UNICODEC_PYTHON}" scripts/overfit.py \
   experiment=unicodec_overfit \
-  output_dir="${SPEECH_TO_SPEECH_TRAIN_ROOT}/005-codec-screening/unicodec/formal" \
+  repo_output_root="${SPEECH_TO_SPEECH_TRAIN_ROOT}" \
+  output_subdir="005-codec-screening/unicodec/formal" \
   "$@"

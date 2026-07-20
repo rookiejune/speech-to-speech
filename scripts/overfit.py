@@ -11,7 +11,6 @@ import hydra
 import torch
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
-from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
 from omegaconf import DictConfig
 
 from speech_to_speech.callback import StageConfig, StageSwitcher, WorldSizeContract
@@ -41,20 +40,20 @@ if TYPE_CHECKING:
 
 if __package__:
     from ._config import (
-        LoggingConfig,
         OverfitFlowConfig,
         OverfitTokenConfig,
         overfit as parse_config,
     )
+    from ._logging import build as build_logger
     from ._overfit_composition import flow, rvq, token
     from ._overfit_support import AcousticEvaluation, FixedDataModule, LossSummary
 else:
     from _config import (
-        LoggingConfig,
         OverfitFlowConfig,
         OverfitTokenConfig,
         overfit as parse_config,
     )
+    from _logging import build as build_logger
     from _overfit_composition import flow, rvq, token
     from _overfit_support import AcousticEvaluation, FixedDataModule, LossSummary
 
@@ -227,7 +226,7 @@ def build_trainer(
         max_steps=config.train.max_steps,
         max_epochs=config.trainer.max_epochs,
         default_root_dir=str(output_dir),
-        logger=build_logger(config.logging, output_dir),
+        logger=build_logger(config.logging),
         callbacks=callbacks,
         log_every_n_steps=config.trainer.log_every_n_steps,
         enable_checkpointing=config.trainer.enable_checkpointing,
@@ -306,15 +305,6 @@ def _composition(
             "config group with ~model/acoustic."
         )
     return AcousticType(config.acoustic.type)
-
-
-def build_logger(config: LoggingConfig, output_dir: Path):
-    name = config.name
-    if name == "tensorboard":
-        return TensorBoardLogger(save_dir=str(output_dir), name="tensorboard")
-    if name == "csv":
-        return CSVLogger(save_dir=str(output_dir), name="csv")
-    raise ValueError("logging.name must be tensorboard or csv.")
 
 
 if __name__ == "__main__":

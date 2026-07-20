@@ -3,7 +3,7 @@ defaults:
   - override /codec_oracle: rvq
   - _self_
 
-output_dir: ${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech/005-codec-oracle-smoke/${runtime.codec}/${codec_oracle.objective}-${codec_oracle.decoder.layers}l/${codec_oracle.initialization}
+output_subdir: 005-codec-oracle-smoke/${runtime.codec}/${codec_oracle.objective}-${codec_oracle.decoder.layers}l/${codec_oracle.initialization}
 
 codec_oracle:
   data:

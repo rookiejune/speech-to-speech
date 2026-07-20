@@ -10,7 +10,6 @@ import torch
 from anytrain.lightning import DebugCallback
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback, ModelCheckpoint
-from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
 from omegaconf import DictConfig
 from torch import Tensor
 from zhuyin.datasets.wmt19_tts import wmt19_tts_codec
@@ -41,15 +40,15 @@ from speech_to_speech.runtime import Runtime
 if __package__:
     from ._config import (
         CodecOracleConfig,
-        LoggingConfig,
         codec_oracle as parse_config,
     )
+    from ._logging import build as build_logger
 else:
     from _config import (
         CodecOracleConfig,
-        LoggingConfig,
         codec_oracle as parse_config,
     )
+    from _logging import build as build_logger
 
 TrainerPrecision = Literal[
     64,
@@ -180,7 +179,7 @@ def fit(
     frame_rate: float,
 ) -> None:
     with timed("logger.build", logger=config.logging.name):
-        logger = build_logger(config.logging, output_dir)
+        logger = build_logger(config.logging)
         logger.log_hyperparams(asdict(config))
     trainer = pl.Trainer(
         accelerator=config.trainer.accelerator,
@@ -375,15 +374,6 @@ def _feature_stats(target: Tensor, *, enabled: bool) -> tuple[Tensor, Tensor]:
     mean = target.mean(dim=(0, 1), keepdim=True)
     std = target.std(dim=(0, 1), correction=0, keepdim=True).clamp_min(1e-5)
     return mean, std
-
-
-def build_logger(config: LoggingConfig, output_dir: Path):
-    name = config.name
-    if name == "tensorboard":
-        return TensorBoardLogger(save_dir=str(output_dir), name="tensorboard")
-    if name == "csv":
-        return CSVLogger(save_dir=str(output_dir), name="csv")
-    raise ValueError("logging.name must be tensorboard or csv.")
 
 
 def process_device(configured: Optional[str]) -> torch.device:

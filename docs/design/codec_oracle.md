@@ -13,6 +13,10 @@
 和两步预算；对应 job 显式选择 experiment。`jobs/005/08-11` 提供 Flow/RVQ 的正式单卡与两卡
 wrapper，不选择 experiment，因此不会覆盖生产数据范围、训练预算和 callback 间隔。
 
+Oracle 的 artifact 目录由 `repo_output_root/output_subdir` 派生；TensorBoard event files 集中写到
+`repo_output_root/tensorboard/output_subdir/version_*`。这使 Flow/RVQ、单卡/DDP 和不同初始化可以
+在同一个 TensorBoard 根目录下并列比较，同时不改变 checkpoint、waveform 或 `metrics.json` 的位置。
+
 ## 对外能力
 
 - `Objective` / `Initialization`：使用字符串枚举选择 `FLOW` 或 `RVQ` objective，以及 codec/random

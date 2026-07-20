@@ -158,7 +158,8 @@ class ContractTest(unittest.TestCase):
             config = parse_overfit(
                 _compose(
                     "runtime=longcat_native",
-                    f"output_dir={output_dir}",
+                    f"repo_output_root={output_dir}",
+                    "output_subdir=contract-test",
                     "train.max_steps=1",
                     "acoustic.decoder.layers=1",
                     "acoustic.decoder.heads=1",

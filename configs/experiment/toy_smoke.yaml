@@ -11,7 +11,7 @@ defaults:
 
 task: tts
 run_name: toy-${acoustic.name}
-output_dir: ${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech/toy-smoke/${task}/${run_name}
+output_subdir: toy-smoke/${task}/${run_name}
 
 acoustic:
   decoder:

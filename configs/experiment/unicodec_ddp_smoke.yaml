@@ -10,7 +10,7 @@ defaults:
 
 task: tts
 run_name: token
-output_dir: ${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech/005-codec-screening/unicodec/formal-ddp
+output_subdir: 005-codec-screening/unicodec/formal-ddp
 
 callbacks:
   sample:

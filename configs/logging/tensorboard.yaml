@@ -1,1 +1,3 @@
 name: tensorboard
+save_dir: ${repo_output_root}/tensorboard
+run_name: ${output_subdir}

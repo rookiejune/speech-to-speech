@@ -33,6 +33,12 @@ callbacks 总是成套使用，因此合并为单个 preset。
 sample logging 与 checkpoint archive 都每 10,000 steps 触发。该入口不是 smoke test；需要短验收
 时必须显式选择 experiment，避免生产默认被测试预算污染。
 
+训练输出由 `repo_output_root`、相对的 `output_subdir` 和派生的 `output_dir` 组成。checkpoint、音频、
+Hydra metadata 与 `metrics.json` 写入 `output_dir`；TensorBoard/CSV logger 的路径由 logging preset
+统一计算。TensorBoard 运行目录为
+`repo_output_root/tensorboard/output_subdir/version_*`，因此可以直接把整个项目的 TensorBoard 根
+目录交给比较工具。`output_subdir` 不允许绝对路径或 `..`，`output_dir` 也不允许独立 override。
+
 共享 `trainer=ddp` 使用 Lightning 默认 distributed sampler。LongCat LBA 直接暴露 dataset 与
 DataLoader 构造参数供 Lightning 重建；UniCodec DDP smoke 则要求每个 rank 重复读取同一个固定
 样本，因此仅该 experiment 显式设置 `use_distributed_sampler: false`。
@@ -50,8 +56,8 @@ DataLoader 构造参数供 Lightning 重建；UniCodec DDP smoke 则要求每个
   不读取真实 backbone 权重或 WMT19 prepared dataset，也不替代真实资源验收。
 
 `jobs/002` 与 `jobs/005/01-07` 都显式传递对应的 `experiment=`；002 job 另行选择 TTS/S2ST task，
-005 smoke job 的 Python 调用只保留 experiment、项目输出目录和 `"$@"` 参数透传。测试预算因此由
-experiment 单点维护，调用 smoke wrapper 时无需再传 `train.max_steps=2`。
+training job 传递 `repo_output_root`、相对 `output_subdir` 和 `"$@"` 参数。测试预算因此由 experiment
+单点维护，调用 smoke wrapper 时无需再传 `train.max_steps=2`。
 
 `jobs/005/08-11` 是 LongCat Flow/RVQ 的正式单卡与两卡入口。它们不选择 experiment，直接继承
 root config 的完整数据、LBA、1,000,000-step 预算和生产 callback 间隔；只选择 objective、trainer

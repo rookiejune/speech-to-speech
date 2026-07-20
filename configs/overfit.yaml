@@ -2,6 +2,9 @@ defaults:
   - experiment: overfit
   - _self_
 
+repo_output_root: ${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech
+output_dir: ${repo_output_root}/${output_subdir}
+
 hydra:
   job:
     chdir: false

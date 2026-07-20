@@ -11,7 +11,7 @@ defaults:
 
 task: tts
 run_name: ${oc.select:acoustic.name,token}
-output_dir: ${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech/002-single-batch-overfit/${task}/${run_name}
+output_subdir: 002-single-batch-overfit/${task}/${run_name}
 
 callbacks:
   sample:

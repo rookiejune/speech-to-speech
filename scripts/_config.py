@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional, Type, TypeVar, Union, cast
 
 from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf
@@ -65,6 +66,8 @@ class TrainerConfig:
 @dataclass
 class LoggingConfig:
     name: str = MISSING
+    save_dir: str = MISSING
+    run_name: str = MISSING
 
 
 @dataclass
@@ -90,6 +93,8 @@ class OverfitCallbacksConfig:
 class _OverfitConfig:
     task: str = MISSING
     run_name: str = MISSING
+    repo_output_root: str = MISSING
+    output_subdir: str = MISSING
     output_dir: str = MISSING
     model: ModelConfig = field(default_factory=ModelConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
@@ -157,6 +162,8 @@ class OracleCallbacksConfig:
 
 @dataclass
 class CodecOracleConfig:
+    repo_output_root: str = MISSING
+    output_subdir: str = MISSING
     output_dir: str = MISSING
     model: ModelConfig = field(default_factory=ModelConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
@@ -181,14 +188,28 @@ def overfit(config: DictConfig) -> OverfitConfig:
             schema = OverfitFlowConfig
         else:
             schema = OverfitRVQConfig
-    return _parse(config, schema)
+    result = _parse(config, schema)
+    _validate_output(result)
+    return result
 
 
 def codec_oracle(config: DictConfig) -> CodecOracleConfig:
     result = _parse(_prepare(config), CodecOracleConfig)
+    _validate_output(result)
     if result.runtime.audio_tokenizer is not None:
         raise ValueError("codec oracle runtime.audio_tokenizer must be null.")
     return result
+
+
+def _validate_output(config: _OverfitConfig | CodecOracleConfig) -> None:
+    subdir = Path(config.output_subdir)
+    if subdir == Path(".") or subdir.is_absolute() or ".." in subdir.parts:
+        raise ValueError(
+            "output_subdir must be a non-empty relative path without '..'."
+        )
+    expected = Path(config.repo_output_root).expanduser() / subdir
+    if Path(config.output_dir).expanduser() != expected:
+        raise ValueError("output_dir must equal repo_output_root/output_subdir.")
 
 
 def _prepare(config: DictConfig) -> DictConfig:
