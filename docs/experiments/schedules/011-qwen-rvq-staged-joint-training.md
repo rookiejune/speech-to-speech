@@ -123,7 +123,8 @@ steps 仍无 held-out CE 改善时停止并检查数据/condition，不扩大预
 
 - 从 codec-derived native semantic embedding 初始化，不加载 010 的 2-step 训练值。
 - 只训练 `semantic_audio_embedding`、`semantic_audio_adapter` 和 `acoustic_decoder`；condition 绕过
-  Qwen transformer，不把 oracle 的梯度当作 Qwen 联合梯度。
+  Qwen transformer，不把 oracle 的梯度当作 Qwen 联合梯度。RVQ decoder 的 token embedding、最后
+  一个 codebook embedding 与其 projection 保持结构性冻结，只优化其余 decoder 参数。
 - 初始 AdamW LR `3e-4`、weight decay `0.01`，2% warmup 后 WSD/cosine；最终值以 P0
   held-out 曲线为准，配置冻结后再启动正式 run。
 - 每 1k steps 验证 RVQ CE/accuracy/feature MSE，每 10k steps 保存 sample、完整归档
