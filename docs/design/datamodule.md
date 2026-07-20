@@ -22,9 +22,11 @@
   `uses_source_role` 和 instruction template 的唯一事实来源。
 - `Collator(runtime, task_weights)`：按任务权重为 raw samples 选择任务，依次调用 parser、
   sample builder 和 batch padding；`set_task_weights()` 原地更新后续 batch 的任务分布。
-- `DataModule(config, runtime, task_weights)`：Lightning 数据入口。`Config` 只保存
-  codec/dataloader 配置；`setup()` 加载 prepared dataset，并在加载前校验 config 与 runtime
-  的 codec identity。重复调用不会重新加载已持有的数据集。
+- `DataLoaderConfig(batch_size, num_workers)` / `Config(codec, dataloader)`：公开的 DataLoader
+  与 DataModule 配置结构。
+- `DataModule(config, runtime, task_weights)`：Lightning 数据入口；`setup()` 加载 prepared
+  dataset，并在加载前校验 config 与 runtime 的 codec identity。重复调用不会重新加载已持有的
+  数据集。
 
 ## 输入输出
 
@@ -86,6 +88,8 @@ acoustic_target: AcousticTarget | None
   模型路径。每项权重必须有限且非负，总和必须有限且为正；非法 stage 更新在替换现有权重前
   报错。DataModule 构造时必须提供初始权重；stage callback 只在 epoch 边界调用
   `set_task_weights()`，不依赖 Trainer 重建 DataLoader。
+- `DataLoaderConfig` 只允许入口可调的 `batch_size` 与 `num_workers`；`persistent_workers=False`
+  由 DataModule 固定，以保证下一 epoch 的 worker 取得 stage 更新后的 collator。
 - `DataModule.train_samples()` 是 callback 按索引读取已 setup 训练样本的公开边界；callback
   不读取私有 dataset 字段。
 - parser 生成 `Speech.audio_token_spans`，`Speech` 校验 spans 与 semantic frame 完整对齐；

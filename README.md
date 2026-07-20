@@ -26,17 +26,66 @@ integration is provided by `SpeechToSpeechModule`.
 - `scripts/generation_smoke.py`: cached versus full-recompute S2ST generation
   and variable-batch generation checks using the public `generation` package;
   cache probes, benchmarks, and reporting live in separate private script modules.
-- `scripts/codec_oracle.py`: Hydra entry point for codec oracle experiments;
-  its Hydra root is `configs/codec_oracle.yaml`.
+- `scripts/codec_oracle.py`: Hydra entry point for codec oracle training. With
+  no experiment override, `configs/codec_oracle.yaml` uses the full prepared
+  dataset through LBA for 1,000,000 steps at `bf16-mixed` precision, logging a
+  sample and archiving a checkpoint every 10,000 steps.
 - `jobs/`: machine-aware wrappers for formal experiment runs. Each wrapper
   invokes one of the Python entry points directly and forwards extra arguments.
+
+## Experiment Runs
+
+Use the job wrappers as the formal entry points; they load the workspace and
+project environments themselves. Hydra-based jobs accept `key=value` overrides,
+while the generation smoke accepts normal command-line flags:
+
+```bash
+jobs/002/01_tts.sh train.max_steps=2
+jobs/002/02_s2st.sh train.max_steps=2 model/acoustic=rvq
+jobs/004/01_s2st.sh --batch-sizes 1,2,4
+jobs/005/01_longcat.sh codec_oracle.initialization=codec
+jobs/005/02_unicodec.sh
+```
+
+The 005 wrappers are full-path validation runs, not aliases for the bare
+production config. They select explicit experiments containing their data,
+trainer, callback, and step budgets: LongCat single-GPU and DDP smoke runs use
+two steps, UniCodec fixed-sample overfit uses 100 steps, and UniCodec DDP smoke
+uses two steps. Running `scripts/codec_oracle.py` without `experiment=...`
+instead starts the production-oriented 1,000,000-step full-data LBA
+configuration.
+The 002 wrappers likewise select `experiment=overfit` explicitly.
+
+Hydra roots are parsed into strict entry-specific dataclasses before execution.
+`runtime` owns the codec, audio tokenizer, device, dtype, and flow sampling
+fields. `model/acoustic=flow|rvq` selects the formal model/objective
+composition; unified-token experiments select `runtime=unicodec` without an
+acoustic model group.
+`pl_module` owns overfit optimizer settings, while `codec_oracle` owns its
+decoder, data, initialization, normalization, and optimizer settings. Entry
+points reject codec/composition mismatches.
+
+Two-GPU contract runs use `jobs/005/04_longcat_ddp_lba.sh` and
+`jobs/005/05_unicodec_ddp.sh`. Override machine-facing values such as
+`CUDA_VISIBLE_DEVICES`, `SPEECH_TO_SPEECH_PYTHON`, or
+`SPEECH_TO_SPEECH_UNICODEC_PYTHON` only at submission time. Outputs default to
+`$DYNAMIC_HOME/train/speech-to-speech`; training entries write TensorBoard logs
+and summary artifacts under their run directory, while `generation_smoke.py`
+writes `metrics.json`. Keep TensorBoard enabled for long full-model runs and
+monitor the supervised curves rather than relying only on the final summary.
 
 ## Documentation
 
 - [`docs/model-design.md`](docs/model-design.md): stable cross-module data,
   ownership, training, and generation contracts.
+- [`docs/design/generation.md`](docs/design/generation.md): public request,
+  batching, decoding, and text-evaluation contracts.
+- [`docs/design/configuration.md`](docs/design/configuration.md): Hydra groups,
+  strict entry schemas, and config ownership boundaries.
 - [`docs/design/`](docs/design/): public capabilities and boundaries of each
   module.
+- [`docs/experiments/conclusion.md`](docs/experiments/conclusion.md): validated
+  conclusions with links to their supporting results.
 - [`docs/experiments/todo.md`](docs/experiments/todo.md): remaining validation
   work and engineering debt.
 - [`docs/experiments/schedules/`](docs/experiments/schedules/): experiment plans.

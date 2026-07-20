@@ -67,5 +67,8 @@ warmup，本实验不据此比较性能。
 
 004 真实 cached generation/decode 验收通过。标准 padded variable-length batch 仍未验证。
 
+变长 batch generation 的后续验收见
+[008 Real Batch Generation Benchmark](008-real-batch-generation-benchmark.md)。
+
 本地回归：`30 passed, 16 subtests passed`；改动文件 Ruff、`py_compile`、shell syntax
 与 `git diff --check` 通过。

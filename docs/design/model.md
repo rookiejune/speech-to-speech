@@ -17,6 +17,8 @@
   所依赖的推理能力；`TextEvaluationModel` 组合 token generation 与 reference scoring。
 - `runtime.protocol.TokenModelRuntime` / `model.protocol.FlowModelRuntime`：token 与 flow
   model 各自消费的 runtime 资源边界。
+- `AdapterType`：基础 `Config` 三个 adapter 字段的 `linear|mlp` 字符串枚举；`None` 表示输入输出
+  dimension 相同的 identity adapter。
 - `AcousticType`、`DecoderConfig`、`FlowRepaConfig`：组合入口的严格配置结构。
 
 ## Token 接口
@@ -30,6 +32,10 @@ def forward(
     acoustic_prompt_positions: Tensor | None = None,
     acoustic_prompt_mask: Tensor | None = None,
     output_hidden_states: bool = False,
+    past_key_values: Cache | None = None,
+    use_cache: bool = False,
+    position_ids: Tensor | None = None,
+    cache_position: Tensor | None = None,
 ) -> CausalLMOutputWithPast: ...
 
 def token_hidden_states(...) -> Tensor: ...
@@ -42,8 +48,10 @@ def generate_tokens(...) -> Tensor: ...
 ```
 
 - `forward()` 返回 global text+audio logits，不接收 labels 或计算 loss。
-- `generation_step()` 只返回最后位置的目标 modality 或显式 token 子集 logits；生成控制参数
-  不进入 `forward()`。
+- `forward()` 支持 HF backbone 的 cache/position 参数；sampling、stop 和 output-head selection
+  参数不进入该通用接口。
+- `generation_step()` 只返回最后位置的目标 modality 或显式 token 子集 logits，并把 cache
+  状态传给 backbone。
 - 训练先用 `token_hidden_states()` 取得完整表示，再由 objective 只选有效 predictor rows，并用
   task 的 target modality 调用 `token_logits()`；CE 只构造对应 text 或 audio 局部词表 logits，
   不为 prompt、padding 或另一模态构造大词表 logits。未传 modality 的通用 `forward()` 仍返回
@@ -64,10 +72,17 @@ def generate_tokens(...) -> Tensor: ...
 - `semantic_audio_output_adapter`
 - `acoustic_prompt_adapter`
 
+三个字段都使用公开 `AdapterType`；`linear` 是默认值，`mlp` 使用 gated SiLU adapter，`None`
+只在输入输出 dimension 相同时合法。Hydra `model` preset 与这三个字段一一对应，overfit 与
+codec-oracle root schema 直接复用 `model.Config`。
+
 decoder 使用独立 `DecoderConfig(hidden_dim, layers, heads, ffn_ratio)`。flow 可额外接收
-`FlowRepaConfig(feature_dim, student_layer)`；RVQ 构造函数没有 REPA 参数。Hydra 使用
-`acoustic.type=flow|rvq`，flow preset 独占 `teacher_checkpoint`、`teacher_layer` 与
-`student_layer`。
+`FlowRepaConfig(feature_dim, student_layer)`；RVQ 可额外接收初始化 decoder 各 acoustic
+codebook 的 `codebook_embeddings`，但没有 REPA 参数。Hydra 使用
+`model/acoustic=flow|rvq`，flow preset 独占 teacher 与 student REPA 配置。ODE sampling 由
+`runtime.Config.flow_*` 拥有。没有独立 acoustic codebooks 的 unified-token codec 使用
+`~model/acoustic` 选择 token-only schema；入口不根据 codec 静默覆盖用户选择。固定 flow 的
+codec-oracle 使用 `codec_oracle.decoder`，不读取 REPA 配置。
 
 ## Embedding
 

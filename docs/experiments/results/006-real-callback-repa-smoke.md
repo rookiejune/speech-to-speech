@@ -31,4 +31,9 @@ TensorBoard 每个训练 step 都记录了 total/objective loss、flow time、fl
 
 当前真实 TTS 的在线 WavLM REPA 与全部 callback 可共同运行并完成 optimizer step。两步 smoke 只证明闭环和数值有限，不证明 REPA 改善收敛或音频质量；仍需相同预算的 flow 与 flow + REPA 长程对照。
 
-启动阶段仍缺少结构化 start/done/elapsed 日志；当前依赖远端日志文件和 TensorBoard 定位重型 callback。静态检查另有 `model/acoustic/dit.py` 的 dtype 推断错误，运行时未触发。
+后续相同预算的 100-step 对照及结论见
+[007 Flow 与 REPA 对比结果](007-flow-repa-comparison.md)。
+
+启动阶段仍缺少结构化 start/done/elapsed 日志；当前依赖远端日志文件和 TensorBoard 定位重型
+callback。当时静态检查另有 `model/acoustic/dit.py` 的 dtype 推断错误，运行时未触发；后续重构
+已修复，2026-07-19 在项目 `py39` basedpyright 配置下复验为 `0 errors`。

@@ -17,8 +17,12 @@
 - `codec_audio_range`、`audio_generation_allowed_ids` 与 modality generation IDs。
 - `flow_matching`：训练 sample 与 generation ODE sampler 的共享 runtime。
 
-`RuntimeConfig.codec` 是 codec identity 的唯一配置源；`audio_view` 由字符串枚举转换，未知 codec
-显式报错。codec preset 只保留入口实际消费的 `name`，不暴露可独立覆盖的第二身份。
+`runtime.Config.codec` 是 codec identity 的唯一配置源；`audio_view` 由字符串枚举转换，未知 codec
+显式报错。Hydra runtime preset 直接映射完整 `runtime.Config`，同时选择相互兼容的 codec、audio
+tokenizer 与 backbone snapshot。ODE method、NFE 与 step 数直接使用 `flow_method`、`flow_nfe` 与
+`flow_num_steps`，不再通过独立 sampler 组转换；`Config` 在构造时校验 method、正 NFE 和至少
+2 个 steps，因此 token/RVQ composition 也不会静默携带无效 runtime。model composition 由
+`model/acoustic` 选择。
 
 ## 协议
 

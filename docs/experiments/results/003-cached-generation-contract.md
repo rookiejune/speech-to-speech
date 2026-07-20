@@ -27,3 +27,7 @@
 
 - 真实 Qwen3/LongCat cached S2ST generation/decode。
 - padded variable-length batch、每行独立 EOA/EOS 和 acoustic frame mask。
+
+对应的后续真实资源验收分别见
+[004 Real Cached Generation](004-real-cached-generation.md) 与
+[008 Real Batch Generation Benchmark](008-real-batch-generation-benchmark.md)。

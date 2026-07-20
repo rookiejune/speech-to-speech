@@ -1,5 +1,15 @@
 # Conclusion
 
+## 适用范围
+
+本页最后一次真实实验更新止于 009（2026-07-14），当时的结论汇总代码快照为
+`cec3a6c`。此后 model/runtime/data/generation/DDP 契约和按模态 token CE 均有调整；在当前
+复验项完成前，下列数值和闭环结论作为历史基线保留，不作为当前 `HEAD` 的回归验收结果
+（[待复验项，lines 15-29](todo.md#L15-L29)）。新复验应建立下一组一一对应的 schedule/result，
+通过后再更新本页。
+
+## 已验证结论
+
 - 固定同一条真实样本时，TTS 与 S2ST 的 semantic objective 都能在 100 steps 内接近
   记忆；加入 source semantic/acoustic condition 后仍保持可优化性
   （[002 result, lines 49-58](results/002-single-batch-overfit.md#L49-L58)）。
