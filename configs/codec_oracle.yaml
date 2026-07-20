@@ -8,7 +8,7 @@ defaults:
   - _self_
   - experiment: null
 
-repo_output_root: ${oc.env:SPEECH_TO_SPEECH_TRAIN_ROOT,${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech}
+repo_output_root: ${oc.env:SPEECH_TO_SPEECH_TRAIN_ROOT,${oc.env:SPEECH_TO_SPEECH_ROOT,.}}
 output_subdir: 005-codec-oracle/${runtime.codec}/${codec_oracle.objective}-${codec_oracle.decoder.layers}l/${codec_oracle.initialization}
 output_dir: ${repo_output_root}/${output_subdir}
 

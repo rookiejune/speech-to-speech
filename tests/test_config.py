@@ -199,6 +199,16 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(oracle.repo_output_root, "/tmp/speech-train")
         self.assertEqual(overfit_config.repo_output_root, "/tmp/speech-train")
 
+    def test_repo_output_root_falls_back_to_the_project_root(self):
+        with patch.dict(
+            "os.environ",
+            {"SPEECH_TO_SPEECH_ROOT": "/tmp/speech-repo"},
+            clear=True,
+        ):
+            config = codec_oracle(_compose("codec_oracle"))
+
+        self.assertEqual(config.repo_output_root, "/tmp/speech-repo")
+
     def test_logging_builder_uses_the_configured_layout(self):
         tensorboard = codec_oracle(_compose("codec_oracle")).logging
         with patch("scripts._logging.TensorBoardLogger") as logger:
@@ -505,6 +515,15 @@ class ConfigTest(unittest.TestCase):
                 self.assertIsNotNone(match)
                 self.assertFalse(Path(match.group(1)).is_absolute())
                 self.assertNotRegex(source, r"\boutput_dir=")
+
+    def test_jobs_default_the_training_root_to_the_project_root(self):
+        root = Path(__file__).parents[1]
+        source = (root / "jobs" / "env.sh").read_text()
+
+        self.assertIn(
+            'SPEECH_TO_SPEECH_TRAIN_ROOT:-${SPEECH_TO_SPEECH_ROOT}',
+            source,
+        )
 
     def test_codec_screening_smoke_jobs_select_complete_experiments(self):
         root = Path(__file__).parents[1]

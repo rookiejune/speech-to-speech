@@ -6,3 +6,8 @@ __pycache__/
 storage/
 outputs/
 debug/
+
+# Local training artifacts at the project root.
+/tensorboard/
+/[0-9][0-9][0-9]-*/
+/toy-smoke/
