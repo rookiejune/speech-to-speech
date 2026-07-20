@@ -29,7 +29,8 @@
   `acoustic_codes=None`，复用正式 DataModule、token model、objective 与 generation/decode。
 - `DataModule`：仅供 LongCat acoustic-only screening 加载 prepared codec view，返回可由
   Lightning 注入 distributed sampler 的 LBA/DataLoader；它接收严格 `DataConfig` /
-  `LBAConfig`，不依赖 OmegaConf。
+  `LBAConfig`，不依赖 OmegaConf。LBA DataLoader 子类在模块加载时导入，确保 Lightning 进入
+  data hook 前能包装其构造方法并在 DDP 重建时保留 `len_fn` 等参数。
   unified-token codec 不使用该入口。
 - `codes()` / `collate()` / `single_batch_loader()`：单样本裁剪、变长 padding 与
   single-batch overfit 数据入口。

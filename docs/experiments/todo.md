@@ -20,9 +20,12 @@
   100-step overfit 趋势。
 - 在相同 LongCat prepared data、model、optimizer 和训练预算下完成 codec/random audio
   embedding initialization 对照；当前代码尚无可比较结果，完整对照前不支持初始化优劣结论。
-- 在本轮 runtime 显式注入、输入约束、任务权重与 device 改动后，用两张 GPU 分别重新运行
-  LongCat oracle 与 UniCodec fixed-sample wrapper 至少 2 steps，验收静态 `ddp`、多任务
-  `find_unused_parameters=True`、跨 rank total loss 和 per-rank runtime device。
+- 在本轮 runtime 显式注入、输入约束、任务权重与 device 改动后，用两张 GPU 重新运行 UniCodec
+  fixed-sample wrapper 至少 2 steps，验收多任务 `find_unused_parameters=True`、跨 rank total loss
+  和 per-rank runtime device。LongCat Flow/RVQ oracle 静态 DDP 已完成
+  （[010 result](results/010-codec-oracle-flow-rvq-smoke.md)）。
+- 共享 WMT19 TTS `base` store 仍是 anydataset schema v1；在 NAS 容量恢复后迁移为 schema v2，
+  替代 010 验收使用的机器本地临时副本。
 
 ## 其他工程欠账
 

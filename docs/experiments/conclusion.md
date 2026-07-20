@@ -2,14 +2,17 @@
 
 ## 适用范围
 
-本页最后一次真实实验更新止于 009（2026-07-14），当时的结论汇总代码快照为
-`cec3a6c`。此后 model/runtime/data/generation/DDP 契约和按模态 token CE 均有调整；在当前
-复验项完成前，下列数值和闭环结论作为历史基线保留，不作为当前 `HEAD` 的回归验收结果
-（[待复验项，lines 15-29](todo.md#L15-L29)）。新复验应建立下一组一一对应的 schedule/result，
-通过后再更新本页。
+本页最新真实实验是 010（2026-07-21），其 LongCat codec oracle 结论对应代码快照
+`9127e62`。010 只复验 Flow/RVQ oracle；008/009 之后 model/runtime/data/generation 和按模态
+token CE 仍有调整，因此相应 generation/overfit 数值作为历史基线保留，未完成的当前复验项见
+[todo, lines 15-28](todo.md#L15-L28)。
 
 ## 已验证结论
 
+- 真实 Qwen3/LongCat 上，Flow 与 RVQ oracle 的单卡 fixed-sample、两卡静态 DDP + LBA 均完成
+  2-step forward/backward/optimizer 和完整 callback；RVQ 静态 DDP 没有 unused-parameter 错误。
+  该 smoke 只验证执行契约，不支持质量或收敛结论
+  （[010 result, lines 20-40](results/010-codec-oracle-flow-rvq-smoke.md#L20-L40)）。
 - 真实 Qwen3/LongCat 变长 batch 4 的 prompt、source acoustic frames、KV cache 和
   waveform decode 在 float32 下完成逐请求 token parity；该短生成 probe 的吞吐为
   serial 的 1.78x，peak allocated 只增加约 22 MB
