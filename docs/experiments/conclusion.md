@@ -2,13 +2,25 @@
 
 ## 适用范围
 
-本页最新真实实验是 010（2026-07-21），其 LongCat codec oracle 结论对应代码快照
-`9127e62`。010 只复验 Flow/RVQ oracle；008/009 之后 model/runtime/data/generation 和按模态
-token CE 仍有调整，因此相应 generation/overfit 数值作为历史基线保留，未完成的当前复验项见
-[todo, lines 15-28](todo.md#L15-L28)。
+本页最新真实实验是 011 的 P0 fixed-sample 子项（2026-07-21），对应远端代码快照
+`d5f6902`；它只通过真实 Qwen/native/RVQ 的单卡训练与 teacher-forced acoustic decode，
+端到端 generation gate 仍失败，因此 011 P0 尚未完成。010 的 LongCat codec oracle 结论对应
+代码快照 `9127e62`。008/009 之后 model/runtime/data/generation 和按模态 token CE 仍有调整，
+因此相应 generation/overfit 数值作为历史基线保留，未完成项见
+[todo, lines 20-34](todo.md#L20-L34)。
 
 ## 已验证结论
 
+- 真实 Qwen3-0.6B、LongCat native token 与 8 层 RVQ decoder 上，TTS/S2ST fixed-sample
+  均完成 2-step forward/backward/optimizer；两条 total、audio token CE 和各 RVQ codebook CE
+  均下降。teacher-forced RVQ sampling 在 3 个记录点、每点 4 个 seed 上均可 decode 2.16s
+  finite waveform，但 feature MSE 非单调，该 smoke 不支持收敛或质量结论
+  （[011 result, lines 24-49](results/011-qwen-rvq-staged-joint-training.md#L24-L49)）。
+- 同一 011 run 的训练后端到端 generation 尚未通过：Python 3.12 runtime Protocol 对真实
+  registered `nn.Module` backbone 产生 false negative，两条任务退出码为 1，未写出
+  `generation.json`/`metrics.json`。这是真实 P0 接口失败，不能由 training-only metrics
+  或 teacher-forced waveform 代替
+  （[011 result, lines 51-89](results/011-qwen-rvq-staged-joint-training.md#L51-L89)）。
 - 真实 Qwen3/LongCat 上，Flow 与 RVQ oracle 的单卡 fixed-sample、两卡静态 DDP + LBA 均完成
   2-step forward/backward/optimizer 和完整 callback；RVQ 静态 DDP 没有 unused-parameter 错误。
   该 smoke 只验证执行契约，不支持质量或收敛结论

@@ -17,9 +17,13 @@
 - 在真实训练 checkpoint 上复验 bfloat16 变长 batch generation，报告 batch/逐请求 token
   agreement rate 与 top-1 logit margin；随机 audio head 的逐 token parity 不作为生产门槛
   （[008 result, lines 41-49](results/008-real-batch-generation-benchmark.md#L41-L49)）。
-- 按模态 token CE 改动后，重新运行真实 TTS/S2ST fixed-sample flow 与 RVQ 至少 2 steps；确认
-  text/audio 局部词表 loss、backward、generation 和 waveform decode 均 finite，再决定是否重跑
-  100-step overfit 趋势。
+- 011 P0 的真实 Qwen/native/RVQ TTS 与 S2ST 已完成 2-step forward/backward/optimizer 和
+  teacher-forced waveform decode，但训练后 generation 被 Python 3.12 下
+  `AcousticFeatureGenerator` 对真实 registered `nn.Module` backbone 的 false negative 阻塞。
+  修复能力契约并补真实 backbone 回归测试后，原样重跑到两条 `generation.json`、
+  `metrics.json` finite 且退出码为 0（[011 result](results/011-qwen-rvq-staged-joint-training.md)）。
+- 完成 011 的其余 P0：Flow TTS/S2ST 2-step 合同复验、两卡 DDP 与 resume、32-sample RVQ
+  100-step、1k pilot，以及 010 checkpoint 严格 import 后丢弃；P0 全部门槛通过前不进入 A。
 - 在相同 LongCat prepared data、model、optimizer 和训练预算下完成 codec/random audio
   embedding initialization 对照；当前代码尚无可比较结果，完整对照前不支持初始化优劣结论。
 - 在本轮 runtime 显式注入、输入约束、任务权重与 device 改动后，用两张 GPU 重新运行 UniCodec
