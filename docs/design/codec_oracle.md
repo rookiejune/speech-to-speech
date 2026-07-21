@@ -78,5 +78,6 @@ Oracle 的 artifact 目录由 `repo_output_root/output_subdir` 派生；TensorBo
   显式注入 codec、codes、metadata 和 output directory 等运行时依赖。
 - initialization 与 objective 的字符串只在配置边界转换一次；入口据此选择对应 screening model，
   内部不维护无效的字符串分派。
-- 中间 metric、waveform 和 checkpoint 写入 `repo_output_root/output_subdir`；默认位于项目根，
-  但由 `.gitignore` 排除。
+- 中间 metric、waveform 和 checkpoint 写入 `repo_output_root/output_subdir`；默认根目录由
+  `SPEECH_TO_SPEECH_TRAIN_ROOT` 或 `$DYNAMIC_HOME/train/speech-to-speech` 提供，TensorBoard event
+  files 写入 `repo_output_root/tensorboard/...`。

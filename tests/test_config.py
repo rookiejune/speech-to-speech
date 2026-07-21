@@ -9,7 +9,7 @@ import torch
 from hydra import compose, initialize_config_dir
 from hydra.errors import ConfigCompositionException
 from omegaconf import DictConfig
-from omegaconf.errors import ConfigAttributeError, ConfigKeyError
+from omegaconf.errors import ConfigAttributeError, ConfigKeyError, InterpolationResolutionError
 
 from scripts._config import (
     CodecOracleConfig,
@@ -37,7 +37,10 @@ from speech_to_speech.runtime import Config as RuntimeConfig
 
 @patch.dict(
     "os.environ",
-    {"SPEECH_TO_SPEECH_AUDIO_TOKENIZER": "/tmp/audio-tokenizer"},
+    {
+        "DYNAMIC_HOME": "/tmp/dynamic",
+        "SPEECH_TO_SPEECH_AUDIO_TOKENIZER": "/tmp/audio-tokenizer",
+    },
 )
 class ConfigTest(unittest.TestCase):
     def test_roots_parse_to_src_aligned_configs(self):
@@ -199,15 +202,22 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(oracle.repo_output_root, "/tmp/speech-train")
         self.assertEqual(overfit_config.repo_output_root, "/tmp/speech-train")
 
-    def test_repo_output_root_falls_back_to_the_project_root(self):
+    def test_repo_output_root_falls_back_to_the_dynamic_train_root(self):
         with patch.dict(
             "os.environ",
-            {"SPEECH_TO_SPEECH_ROOT": "/tmp/speech-repo"},
+            {"DYNAMIC_HOME": "/tmp/dynamic"},
             clear=True,
         ):
             config = codec_oracle(_compose("codec_oracle"))
 
-        self.assertEqual(config.repo_output_root, "/tmp/speech-repo")
+        self.assertEqual(config.repo_output_root, "/tmp/dynamic/train/speech-to-speech")
+
+    def test_missing_training_root_fails_without_dynamic_home(self):
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            self.assertRaisesRegex(InterpolationResolutionError, "DYNAMIC_HOME"),
+        ):
+            codec_oracle(_compose("codec_oracle"))
 
     def test_logging_builder_uses_the_configured_layout(self):
         tensorboard = codec_oracle(_compose("codec_oracle")).logging
@@ -516,12 +526,16 @@ class ConfigTest(unittest.TestCase):
                 self.assertFalse(Path(match.group(1)).is_absolute())
                 self.assertNotRegex(source, r"\boutput_dir=")
 
-    def test_jobs_default_the_training_root_to_the_project_root(self):
+    def test_jobs_default_the_training_root_to_dynamic_home_train(self):
         root = Path(__file__).parents[1]
         source = (root / "jobs" / "env.sh").read_text()
 
         self.assertIn(
-            'SPEECH_TO_SPEECH_TRAIN_ROOT:-${SPEECH_TO_SPEECH_ROOT}',
+            'SPEECH_TO_SPEECH_TRAIN_ROOT="${DYNAMIC_HOME}/train/speech-to-speech"',
+            source,
+        )
+        self.assertIn(
+            'DYNAMIC_HOME:?Set DYNAMIC_HOME or SPEECH_TO_SPEECH_TRAIN_ROOT',
             source,
         )
 

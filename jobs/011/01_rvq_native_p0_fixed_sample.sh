@@ -2,22 +2,19 @@
 set -euo pipefail
 
 export LOCATION="${LOCATION:-fudan}"
-export STATIC_HOME="${STATIC_HOME:-/mnt/pami202/zhuyin}"
-export DYNAMIC_HOME="${DYNAMIC_HOME:-/mnt/pami202/zhuyin/dynamic}"
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
-export HF_HOME="${HF_HOME:-${STATIC_HOME}/huggingface}"
-export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
-export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets}"
-export ANYTRAIN_HOME="${ANYTRAIN_HOME:-${STATIC_HOME}/.anytrain}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export PYTHONUNBUFFERED=1
 
 if [[ -z "${SPEECH_TO_SPEECH_PYTHON:-}" && -x /home/zhuyin/anaconda3/envs/py312/bin/python ]]; then
   export SPEECH_TO_SPEECH_PYTHON=/home/zhuyin/anaconda3/envs/py312/bin/python
 fi
-export SPEECH_TO_SPEECH_TRAIN_ROOT="${SPEECH_TO_SPEECH_TRAIN_ROOT:-${DYNAMIC_HOME}/train/speech-to-speech}"
 
 source "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
+export HF_HOME="${HF_HOME:-${STATIC_HOME}/huggingface}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets}"
+export ANYTRAIN_HOME="${ANYTRAIN_HOME:-${STATIC_HOME}/.anytrain}"
 
 default_qwen_root="${HF_HUB_CACHE}/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca"
 if [[ -z "${SPEECH_TO_SPEECH_P0_QWEN_ROOT:-}" && -d "${default_qwen_root}" ]]; then

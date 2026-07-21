@@ -2,7 +2,7 @@ defaults:
   - experiment: overfit
   - _self_
 
-repo_output_root: ${oc.env:SPEECH_TO_SPEECH_TRAIN_ROOT,${oc.env:SPEECH_TO_SPEECH_ROOT,.}}
+repo_output_root: ${oc.env:SPEECH_TO_SPEECH_TRAIN_ROOT,${oc.env:DYNAMIC_HOME}/train/speech-to-speech}
 output_dir: ${repo_output_root}/${output_subdir}
 
 hydra:
