@@ -81,6 +81,51 @@ class LoggingTest(unittest.TestCase):
         self.assertIn("sampler=SimpleNamespace", text)
         self.assertIn("mean=0.0", text)
 
+    def test_flow_logger_records_bucketed_loss_by_time(self):
+        experiment = Mock()
+        strategy = Mock()
+        strategy.reduce.side_effect = lambda value, *, reduce_op: value
+        trainer = SimpleNamespace(
+            global_step=2,
+            is_global_zero=True,
+            logger=SimpleNamespace(experiment=experiment),
+            strategy=strategy,
+        )
+        runtime = SimpleNamespace(
+            time_sampler=SimpleNamespace(t_min=0.0, t_max=1.0),
+        )
+        flow = LossItem(
+            loss=torch.tensor([1.0, 3.0, 5.0, 7.0]),
+            details={"t": torch.tensor([0.0, 0.2, 0.6, 1.0])},
+        )
+
+        callback = FlowMatchingLogger(
+            runtime,
+            every_n_steps=1,
+            time_bucket_count=2,
+        )
+
+        callback.on_train_batch_end(
+            trainer,
+            SimpleNamespace(),
+            {"flow_matching": flow},
+            None,
+            0,
+        )
+
+        scalar_calls = [
+            (call.args[0], call.args[1], call.args[2])
+            for call in experiment.add_scalar.call_args_list
+        ]
+        self.assertEqual(
+            scalar_calls,
+            [
+                ("flow/loss_t/0.00_0.50", 2.0, 2),
+                ("flow/loss_t/0.50_1.00", 6.0, 2),
+            ],
+        )
+        self.assertEqual(strategy.reduce.call_count, 2)
+
     def test_loss_items_use_stable_objective_order(self):
         item = LossItem(torch.ones(1), details=None)
         outputs = Outputs(
