@@ -21,7 +21,8 @@
   teacher-forced waveform decode，但训练后 generation 被 Python 3.12 下
   `AcousticFeatureGenerator` 对真实 registered `nn.Module` backbone 的 false negative 阻塞。
   修复能力契约并补真实 backbone 回归测试后，原样重跑到两条 `generation.json`、
-  `metrics.json` finite 且退出码为 0（[011 result](results/011-qwen-rvq-staged-joint-training.md)）。
+  `metrics.json` finite 且退出码为 0（[012 schedule](schedules/012-generation-capability-contract-rerun.md)，
+  [011 result](results/011-qwen-rvq-staged-joint-training.md)）。
 - 完成 011 的其余 P0：Flow TTS/S2ST 2-step 合同复验、两卡 DDP 与 resume、32-sample RVQ
   100-step、1k pilot，以及 010 checkpoint 严格 import 后丢弃；P0 全部门槛通过前不进入 A。
 - 在相同 LongCat prepared data、model、optimizer 和训练预算下完成 codec/random audio
