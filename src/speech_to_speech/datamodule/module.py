@@ -4,7 +4,10 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TypedDict, cast
 
-from anydataset.types import Sample as RawSample
+from anydataset.dataset import AnyDataset, MergedDataset
+from anydataset.store import StoreLocalBatchSampler
+from anydataset.store.reader import StoreDataset
+from anydataset.types import AudioView, Modality, Role, Sample as RawSample
 from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader
 from typing_extensions import NotRequired
@@ -88,6 +91,23 @@ class DataModule(LightningDataModule):
         if not isinstance(self.collator.runtime, DataRuntimeSnapshot):
             snapshot = DataRuntimeSnapshot.from_runtime(self.runtime)
             self.collator.runtime = cast(DataRuntime, cast(object, snapshot))
+        store_dataset = _store_group_dataset(self._train_dataset)
+        if store_dataset is not None:
+            return DataLoader(
+                self._train_dataset,
+                batch_sampler=StoreLocalBatchSampler(
+                    store_dataset,
+                    batch_size=loader["batch_size"],
+                    views=_audio_views(self.runtime.audio_view),
+                    shuffle=True,
+                ),
+                num_workers=num_workers,
+                pin_memory=loader.get("pin_memory", False),
+                persistent_workers=(
+                    loader.get("persistent_workers", False) and num_workers > 0
+                ),
+                collate_fn=self.collator,
+            )
         return DataLoader(
             self._train_dataset,
             batch_size=loader["batch_size"],
@@ -98,3 +118,24 @@ class DataModule(LightningDataModule):
             ),
             collate_fn=self.collator,
         )
+
+
+def _store_group_dataset(dataset: object) -> StoreDataset | None:
+    if isinstance(dataset, StoreDataset):
+        return dataset
+    if isinstance(dataset, AnyDataset):
+        source = dataset.dataset
+        return source if isinstance(source, StoreDataset) else None
+    if isinstance(dataset, MergedDataset):
+        left = _store_group_dataset(dataset.left)
+        if left is not None:
+            return left
+        return _store_group_dataset(dataset.right)
+    return None
+
+
+def _audio_views(audio_view: AudioView) -> tuple[tuple[Role, Modality, AudioView], ...]:
+    return (
+        (Role.SOURCE, Modality.AUDIO, audio_view),
+        (Role.TARGET, Modality.AUDIO, audio_view),
+    )

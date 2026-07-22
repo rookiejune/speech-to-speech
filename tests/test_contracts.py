@@ -7,10 +7,12 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import ModuleType, SimpleNamespace
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 from unittest.mock import Mock, patch
 
 import torch
+from anydataset import AnyDataset, Source, Spec
+from anydataset.store import DatasetWriter, StoreLocalBatchSampler
 from anydataset.types import (
     AudioItem,
     AudioView,
@@ -632,6 +634,27 @@ class ContractTest(unittest.TestCase):
             split="train",
         )
 
+    @patch("zhuyin.datasets.wmt19_tts.wmt19_tts_codec")
+    def test_datamodule_keeps_standard_loader_for_non_store_dataset(
+        self,
+        load_dataset,
+    ):
+        load_dataset.return_value = [_raw_sample(), _raw_sample()]
+        datamodule = DataModule(
+            DataConfig(
+                codec="longcat",
+                dataloader={"batch_size": 2, "num_workers": 0},
+            ),
+            _data_runtime(),
+            {Task.TTS: 1.0},
+        )
+
+        datamodule.setup()
+        loader = cast(Any, datamodule.train_dataloader())
+
+        self.assertNotIsInstance(loader.batch_sampler, StoreLocalBatchSampler)
+        self.assertEqual(loader.batch_size, 2)
+
     def test_toy_dataset_uses_codec_shapes_and_value_ranges(self):
         cases = (
             (
@@ -673,10 +696,6 @@ class ContractTest(unittest.TestCase):
 
     @patch("zhuyin.datasets.wmt19_tts.wmt19_tts_codec")
     def test_datamodule_loads_toy_data_without_prepared_dataset(self, prepared):
-        codec = SimpleNamespace(
-            semantic_codebook=torch.zeros(5, 4),
-            acoustic_codebook_sizes=(3,),
-        )
         datamodule = DataModule(
             DataConfig(
                 codec="longcat",
@@ -687,7 +706,7 @@ class ContractTest(unittest.TestCase):
                     toy_frames=3,
                 ),
             ),
-            SimpleNamespace(codec_name="longcat", codec=codec),
+            _data_runtime(),
             {Task.TTS: 1.0},
         )
 
@@ -695,6 +714,87 @@ class ContractTest(unittest.TestCase):
 
         prepared.assert_not_called()
         self.assertEqual(len(datamodule.train_samples([0, 1])), 2)
+        loader = cast(Any, datamodule.train_dataloader())
+        self.assertNotIsInstance(loader.batch_sampler, StoreLocalBatchSampler)
+
+    def test_datamodule_uses_store_local_sampler_for_store_backed_data(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with patch.dict("os.environ", {"ANYDATASET_HOME": str(root / "cache")}):
+                output = root / "dataset"
+                DatasetWriter(
+                    output,
+                    dataset_id="toy-speech",
+                    split="train",
+                    max_shard_samples=2,
+                ).write([_raw_sample(index) for index in range(4)])
+                dataset = AnyDataset(
+                    Spec(source=Source.STORE, path=str(output), split="train")
+                )
+                datamodule = DataModule(
+                    DataConfig(
+                        codec="longcat",
+                        dataloader={"batch_size": 2, "num_workers": 0},
+                    ),
+                    _data_runtime(),
+                    {Task.TTS: 1.0},
+                )
+
+                with patch(
+                    "speech_to_speech.datamodule.module.load_dataset",
+                    return_value=dataset,
+                ) as load:
+                    datamodule.setup()
+                    loader = cast(Any, datamodule.train_dataloader())
+
+                load.assert_called_once()
+                self.assertIs(loader.dataset, dataset)
+                self.assertIsInstance(loader.batch_sampler, StoreLocalBatchSampler)
+                sampler = loader.batch_sampler
+                self.assertIs(sampler.dataset, dataset.dataset)
+                self.assertEqual(sampler.batch_size, 2)
+                self.assertTrue(sampler.shuffle)
+                self.assertEqual(
+                    sampler.views,
+                    (
+                        (Role.SOURCE, Modality.AUDIO, AudioView.LONGCAT),
+                        (Role.TARGET, Modality.AUDIO, AudioView.LONGCAT),
+                    ),
+                )
+                self.assertEqual(len(datamodule.train_samples([0, 1])), 2)
+
+    def test_datamodule_uses_store_local_sampler_through_merged_data(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with patch.dict("os.environ", {"ANYDATASET_HOME": str(root / "cache")}):
+                output = root / "dataset"
+                DatasetWriter(
+                    output,
+                    dataset_id="toy-speech",
+                    split="train",
+                    max_shard_samples=2,
+                ).write([_raw_sample(index) for index in range(4)])
+                dataset = AnyDataset(
+                    Spec(source=Source.STORE, path=str(output), split="train")
+                ).merge(ToyDataset("longcat", _longcat_codec(), samples=4, frames=2))
+                datamodule = DataModule(
+                    DataConfig(
+                        codec="longcat",
+                        dataloader={"batch_size": 2, "num_workers": 0},
+                    ),
+                    _data_runtime(),
+                    {Task.TTS: 1.0},
+                )
+
+                with patch(
+                    "speech_to_speech.datamodule.module.load_dataset",
+                    return_value=dataset,
+                ):
+                    datamodule.setup()
+                    loader = cast(Any, datamodule.train_dataloader())
+
+                self.assertIs(loader.dataset, dataset)
+                self.assertIsInstance(loader.batch_sampler, StoreLocalBatchSampler)
 
     def test_toy_settings_reject_invalid_dimensions(self):
         with self.assertRaisesRegex(ValueError, "divisible"):
@@ -1080,7 +1180,29 @@ def _compose(*overrides: str, config_name: str = "overfit") -> DictConfig:
         return compose(config_name=config_name, overrides=list(overrides))
 
 
-def _raw_sample():
+def _data_runtime():
+    return SimpleNamespace(
+        codec_name="longcat",
+        audio_view=AudioView.LONGCAT,
+        text_tokenizer=_Tokenizer(10),
+        audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
+        layout=Layout(text=(0, 10), audio=(10, 20)),
+        pad_token_id=0,
+        eos_token_id=1,
+        boa_token_id=18,
+        eoa_token_id=19,
+        codec=_longcat_codec(),
+    )
+
+
+def _longcat_codec():
+    return SimpleNamespace(
+        semantic_codebook=torch.zeros(5, 4),
+        acoustic_codebook_sizes=(3,),
+    )
+
+
+def _raw_sample(index: int = 0):
     def audio(offset: int) -> AudioItem:
         return AudioItem(
             views={
@@ -1091,12 +1213,12 @@ def _raw_sample():
         )
 
     return {
-        (Role.SOURCE, Modality.AUDIO): audio(0),
+        (Role.SOURCE, Modality.AUDIO): audio(index),
         (Role.SOURCE, Modality.TEXT): TextItem(
             views={TextView.TEXT: "source text"},
             meta={TextMeta.LANG: Lang.ZH},
         ),
-        (Role.TARGET, Modality.AUDIO): audio(4),
+        (Role.TARGET, Modality.AUDIO): audio(index + 4),
         (Role.TARGET, Modality.TEXT): TextItem(
             views={TextView.TEXT: "target text"},
             meta={TextMeta.LANG: Lang.EN},

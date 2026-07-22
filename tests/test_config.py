@@ -603,6 +603,7 @@ class ConfigTest(unittest.TestCase):
         self.assertIsInstance(default, StagedTrainRVQConfig)
         self.assertEqual(default.stage.name, StageName.STAGE_1)
         self.assertFalse(default.callbacks.performance.enabled)
+        self.assertFalse(default.trainer.use_distributed_sampler)
         with self.assertRaises(AttributeError):
             getattr(default.data, "sample_index")
 
@@ -618,6 +619,7 @@ class ConfigTest(unittest.TestCase):
         ddp = parse_train(_compose("train", "trainer=static_ddp", "stage=stage_4"))
 
         self.assertEqual(ddp.trainer.strategy, "ddp_find_unused_parameters_false")
+        self.assertFalse(ddp.trainer.use_distributed_sampler)
         self.assertEqual(set(ddp.stage.loaders), {"asr_s2tt", "tts_t2st", "s2st", "mt"})
 
         token = parse_train(_compose("train", "model/acoustic=none"))

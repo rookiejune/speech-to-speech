@@ -43,6 +43,7 @@ train:
 
 trainer:
   strategy: ddp_find_unused_parameters_false
+  use_distributed_sampler: false
   log_every_n_steps: 10
   enable_checkpointing: true
 

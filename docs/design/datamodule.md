@@ -115,6 +115,11 @@ acoustic_target: AcousticTarget | None
 - `DataModule` 在构造 loader 前把 collator 的完整 runtime 替换为 `DataRuntimeSnapshot`；主进程
   仍持有正式 runtime 供 dataset setup 使用。`persistent_workers` 只在 `num_workers > 0` 时启用，
   `pin_memory` 由入口显式配置。
+- 对 store-backed prepared speech dataset，`DataModule` 使用 anydataset 的
+  `StoreLocalBatchSampler`，按 source/target audio payload shard 分组后 shuffle。DataLoader 仍索引
+  原始外层 dataset，因此 `AnyDataset` transform 或 `MergedDataset` 组合不会被绕过；正式
+  `train.yaml` 关闭 Lightning 自动 distributed sampler，由该 batch sampler 按 runtime shard
+  负责多进程切分。
 - `DataModule.train_samples()` 是 callback 按索引读取已 setup 训练样本的公开边界；callback
   不读取私有 dataset 字段。
 - parser 生成 `Speech.audio_token_spans`，`Speech` 校验 spans 与 semantic frame 完整对齐；
