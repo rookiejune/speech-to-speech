@@ -119,6 +119,8 @@ class AcousticRVQDecoder(nn.Module):
         )
         self.decoder = Qwen3Model(config)
         self.decoder.embed_tokens.requires_grad_(False)
+        self.codebook_embeddings[-1].requires_grad_(False)
+        self.embedding_projections[-1].requires_grad_(False)
         self.heads = nn.ModuleList(nn.Linear(hidden_dim, size) for size in sizes)
 
     def _validate_condition(self, condition: Tensor) -> None:
@@ -126,14 +128,6 @@ class AcousticRVQDecoder(nn.Module):
             raise ValueError("condition must have shape [batch, frame, condition_dim].")
 
     def _embedding(self, codebook: int, codes: Tensor) -> Tensor:
-        if not is_signed_integer_dtype(codes.dtype):
-            raise TypeError(
-                "acoustic codes must contain integers using a signed dtype."
-            )
-        if bool((codes < 0).any()) or bool(
-            (codes >= self.codebook_sizes[codebook]).any()
-        ):
-            raise ValueError("acoustic code is outside the codec codebook.")
         embedding = cast(
             nn.Embedding,
             cast(object, self.codebook_embeddings[codebook]),

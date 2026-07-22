@@ -60,7 +60,9 @@ class TextEvaluationModel(TokenGenerator, Protocol):
 
 
 @runtime_checkable
-class AcousticFeatureGenerator(TokenGenerator, Protocol):
+class AcousticFeatureGeneration(Protocol):
+    """Optional model capability for conditioned acoustic generation."""
+
     def generate_audio_features(
         self,
         prompt_ids: Tensor,
@@ -75,3 +77,11 @@ class AcousticFeatureGenerator(TokenGenerator, Protocol):
         do_sample: bool = True,
         use_cache: bool = True,
     ) -> AcousticGeneration: ...
+
+
+class AcousticFeatureGenerator(
+    TokenGenerator,
+    AcousticFeatureGeneration,
+    Protocol,
+):
+    pass

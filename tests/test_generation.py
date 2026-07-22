@@ -196,12 +196,30 @@ class _UnifiedGenerationModel(_GenerationModel):
         self.runtime.codec = _UnifiedCodec()
 
 
+class _RegisteredBackbone(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.embedding = nn.Embedding(1, 1)
+
+    def get_input_embeddings(self) -> nn.Embedding:
+        return self.embedding
+
+
+class _RegisteredGenerationModel(_GenerationModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.backbone = _RegisteredBackbone()
+
+
 class _VariableStopModel(_UnifiedGenerationModel):
     def __init__(self) -> None:
         super().__init__()
         self.step = 0
+        self.batch_sizes: list[int] = []
+        self.cache_selections: list[list[int]] = []
 
     def generation_step(self, input_ids: Tensor, **kwargs) -> CausalLMOutputWithPast:
+        self.batch_sizes.append(input_ids.size(0))
         generation_token_ids = kwargs.get("token_ids")
         generation_modality = kwargs.get("modality")
         use_cache = kwargs["use_cache"]
@@ -233,7 +251,17 @@ class _VariableStopModel(_UnifiedGenerationModel):
             device=input_ids.device,
         )
         logits[torch.arange(input_ids.size(0)), 0, local] = 0
-        cache = SimpleNamespace(length=self.step, source=0) if use_cache else None
+        cache = (
+            SimpleNamespace(
+                length=self.step,
+                source=0,
+                batch_select_indices=lambda indices: self.cache_selections.append(
+                    indices.tolist()
+                ),
+            )
+            if use_cache
+            else None
+        )
         return CausalLMOutputWithPast(logits=logits, past_key_values=cache)
 
 
@@ -515,6 +543,20 @@ class GenerationTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "AcousticFeatureGenerator"):
             generate_responses([request], model, max_new_tokens=1)
 
+    def test_audio_generation_accepts_a_registered_module_backbone(self):
+        model = _RegisteredGenerationModel()
+
+        result = generate_responses(
+            [_request()],
+            model,
+            max_new_tokens=3,
+            do_sample=False,
+        )[0]
+
+        self.assertIn("backbone", model._modules)
+        self.assertIsNotNone(result["audio"])
+        self.assertEqual(model.sample_calls, 1)
+
     def test_acoustic_prompt_adapter_bias_only_affects_prompt_positions(self):
         rt = _TinyRuntime()
         model = TokenModel(
@@ -557,6 +599,47 @@ class GenerationTest(unittest.TestCase):
         full = model.generate_tokens(torch.tensor([[1, 2]]), use_cache=False, **kwargs)
 
         self.assertTrue(torch.equal(cached, full))
+
+    def test_tiny_qwen_cache_compacts_finished_rows(self):
+        def generate(use_cache: bool) -> tuple[Tensor, list[int]]:
+            model = TokenModel(
+                _model_config(),
+                runtime=_TinyRuntime(),
+            ).eval()
+            generation_step = model.generation_step
+            batch_sizes: list[int] = []
+
+            def variable_step(input_ids: Tensor, **kwargs) -> CausalLMOutputWithPast:
+                batch_sizes.append(input_ids.size(0))
+                output = generation_step(input_ids, **kwargs)
+                next_ids = torch.where(
+                    input_ids[:, -1].eq(4) | input_ids[:, -1].eq(2),
+                    model.runtime.eos_token_id,
+                    2,
+                )
+                logits = torch.full_like(output.logits, float("-inf"))
+                logits[torch.arange(input_ids.size(0)), 0, next_ids] = 0
+                output.logits = logits
+                return output
+
+            with patch.object(model, "generation_step", side_effect=variable_step):
+                generated = model.generate_tokens(
+                    torch.tensor([[1, 4], [1, 5]]),
+                    max_new_tokens=2,
+                    stop_token_id=model.runtime.eos_token_id,
+                    generation_modality=Modality.TEXT,
+                    do_sample=False,
+                    use_cache=use_cache,
+                )
+            return generated, batch_sizes
+
+        cached, cached_batch_sizes = generate(True)
+        full, full_batch_sizes = generate(False)
+
+        self.assertTrue(torch.equal(cached, full))
+        self.assertTrue(torch.equal(cached, torch.tensor([[1, 4, 3, 3], [1, 5, 2, 3]])))
+        self.assertEqual(cached_batch_sizes, [2, 1])
+        self.assertEqual(full_batch_sizes, [2, 1])
 
     def test_cached_audio_generation_matches_full_recompute(self):
         cached_model = _GenerationModel()
@@ -646,7 +729,6 @@ class GenerationTest(unittest.TestCase):
             self.assertEqual(audio["features"].size(0), 2)
 
     def test_batch_generation_tracks_stop_per_row(self):
-        model = _VariableStopModel()
         requests = [
             Request(prompt_ids=torch.tensor([1]), task=Task.T2TT, acoustic_prompt=None),
             Request(
@@ -654,10 +736,23 @@ class GenerationTest(unittest.TestCase):
             ),
         ]
 
-        results = generate_responses(requests, model, max_new_tokens=3, do_sample=False)
+        for use_cache in (False, True):
+            with self.subTest(use_cache=use_cache):
+                model = _VariableStopModel()
+                results = generate_responses(
+                    requests,
+                    model,
+                    max_new_tokens=3,
+                    do_sample=False,
+                    use_cache=use_cache,
+                )
 
-        self.assertEqual(results[0]["response_ids"].numel(), 0)
-        self.assertTrue(torch.equal(results[1]["response_ids"], torch.tensor([1])))
+                self.assertEqual(results[0]["response_ids"].numel(), 0)
+                self.assertTrue(
+                    torch.equal(results[1]["response_ids"], torch.tensor([1]))
+                )
+                self.assertEqual(model.batch_sizes, [2, 1])
+                self.assertEqual(model.cache_selections, [[1]] if use_cache else [])
 
     def test_cache_preserves_source_condition_and_collects_hidden_online(self):
         model = _GenerationModel()

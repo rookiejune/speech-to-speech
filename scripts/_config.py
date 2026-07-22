@@ -81,11 +81,23 @@ class EvaluationCallbackConfig:
 
 
 @dataclass
+class PerformanceConfig:
+    enabled: bool = MISSING
+    hardware_peak_flops: Optional[float] = MISSING
+    log_every_n_steps: int = MISSING
+    warmup_steps: int = MISSING
+    measure_window_steps: int = MISSING
+    sync_cuda: bool = MISSING
+    sync_distributed: bool = MISSING
+
+
+@dataclass
 class OverfitCallbacksConfig:
     sample: SampleCallbackConfig = field(default_factory=SampleCallbackConfig)
     evaluation: EvaluationCallbackConfig = field(
         default_factory=EvaluationCallbackConfig
     )
+    performance: PerformanceConfig = field(default_factory=PerformanceConfig)
 
 
 @dataclass
@@ -157,6 +169,7 @@ class OracleCallbacksConfig:
     checkpoint: CheckpointCallbackConfig = field(
         default_factory=CheckpointCallbackConfig
     )
+    performance: PerformanceConfig = field(default_factory=PerformanceConfig)
 
 
 @dataclass
@@ -189,6 +202,11 @@ def overfit(config: DictConfig) -> OverfitConfig:
             schema = OverfitRVQConfig
     result = _parse(config, schema)
     _validate_output(result)
+    if result.callbacks.performance.enabled and result.callbacks.sample.enabled:
+        raise ValueError(
+            "overfit performance requires callbacks.sample.enabled=false because "
+            "sample generation cannot be excluded from distributed step timing."
+        )
     return result
 
 

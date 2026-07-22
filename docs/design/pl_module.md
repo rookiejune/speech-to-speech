@@ -34,10 +34,44 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
 Sample/evaluation callback 在隔离 RNG context 内运行，不改变后续训练的 CPU 或当前 CUDA
 random state。
 
+## performance
+
+联合训练显式启用 performance 时，必须同时设置 `callbacks.sample.enabled=false`；入口显式拒绝
+performance 与 sample logging 同时启用。`SampleLogger` 在 `on_train_batch_start` 只由 rank zero
+执行 generation，DDP 的其他 rank 会在后续同步点等待，因此改变 callback 顺序也不能可靠地把这段
+额外工作从各 rank 的 step time 中排除。
+
+满足该前提后，`scripts/overfit.py` 使用 `speech_to_speech.performance.TrainingFlops` 组装
+`anytrain.PerformanceCallback`。provider 按实际 module、batch 和 objective 输出分析 token、Flow 或
+RVQ 路径的动态训练 FLOPs；入口把 performance callback 放在 callback 列表首位，并省略
+`GradLogger` 与 `GradNormLogger`。前者的额外 `autograd.grad`、后者重复的全局梯度 norm 如果与
+MFU 同时运行，会增加实测 step time，但没有对应的模型训练 FLOPs，因而会扭曲指标口径。DDP 默认
+在每个 batch timer 前 barrier，使上一 batch 仅 rank zero 执行的日志与评估不会泄漏到下一步计时；
+可通过 `callbacks.performance.sync_distributed` 显式关闭。
+
+当前 provider 的支持边界是标准 Qwen3 FlashAttention 2 backbone、标准 adapter/Flow/RVQ decoder
+和全量训练。它校验 objective/model 配对及实际输出分支；REPA、分阶段冻结、替换后的模块或无法
+识别的结构会明确报错，不用不完整公式继续记录 MFU。
+
+估算口径统计 Linear 与 attention matrix multiplication，并按 forward 的两倍估算 backward；lookup、
+scatter、normalization、activation、loss 和冻结 codec feature extraction 不计入模型 FLOPs，但对应
+耗时仍在实际 step time 中。
+
+生产统计不从单个 `example_input_array` 推导固定 FLOPs；该字段只提供一个 forward 示例，供 summary、
+tracing 或 graph logging 使用，也不直接使用 `lightning.fabric.utilities.throughput.measure_flops()`。
+实际 batch 的有效序列/帧长度、padded shape、objective 分支和各 rank 的 LBA 工作量都可能不同，
+FlashAttention 或其他 custom op 也可能不在通用算子计数覆盖范围内；生产 provider 因此使用动态
+解析计数，DDP 聚合与 step timing 由 anytrain 负责。Lightning 的 `measure_flops()` 只用于测试或
+校准受支持的基础算子公式，不能替代该生产口径。
+
 ## 边界
 
 - `SpeechToSpeechModule.generate()` / `evaluate_text()` 不持有跨调用 generation cache，也不修改
   request/result；validation、batching 和 decode 仍由 generation service 负责。
 - callback 只依赖 `Outputs`/`LossItem`、datamodule 与 pl_module 公共能力；`GradLogger` 额外要求
   LightningModule 实现 `current_loss_outputs()` 生命周期契约。
+- `TrainingFlops` 负责解释 speech-to-speech 的模型、batch 与 objective；`PerformanceCallback` 只负责
+  optimizer-step 聚合、计时、硬件峰值推断和 MFU 记录，不内置任务 batch schema。
+- overfit performance composition 不包含 `SampleLogger`、`GradLogger` 或 `GradNormLogger`；前者由
+  配置显式关闭，后两者由入口自动省略。
 - total loss 只由 LightningModule 以 `sync_dist=True` 记录一次，分项 logger 不重复记录。

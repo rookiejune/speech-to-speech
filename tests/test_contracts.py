@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import multiprocessing
+import pickle
+import sys
 import unittest
 from pathlib import Path
-import sys
 from tempfile import TemporaryDirectory
-from types import ModuleType
-from types import SimpleNamespace
-from typing import cast
+from types import ModuleType, SimpleNamespace
+from typing import Protocol, cast
 from unittest.mock import Mock, patch
 
 import torch
@@ -20,6 +21,7 @@ from anydataset.types import (
     TextView,
 )
 from hydra import compose, initialize_config_dir
+from anytrain.idspace import Layout
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig, OmegaConf
 
@@ -28,6 +30,7 @@ from speech_to_speech.datamodule import DatasetConfig, DatasetName, ToyDataset
 from speech_to_speech.datamodule.module import Config as DataConfig
 from speech_to_speech.datamodule.module import DataModule
 from speech_to_speech.datamodule.parser import _parse_audio_item, parse_sample
+from speech_to_speech.datamodule.protocol import DataRuntime, DataRuntimeSnapshot
 from speech_to_speech.datamodule.types import (
     Language,
     ModelBatch,
@@ -56,7 +59,55 @@ class _Tokenizer:
         return [1, 2]
 
 
+class _Event(Protocol):
+    def set(self) -> None: ...
+
+    def wait(self, timeout: float | None = None) -> bool: ...
+
+
+class _Queue(Protocol):
+    def put(self, value: list[Task]) -> None: ...
+
+    def get(self, *, timeout: float) -> list[Task]: ...
+
+    def close(self) -> None: ...
+
+
+def _observe_task_updates(
+    collator: Collator,
+    ready: _Event,
+    updated: _Event,
+    output: _Queue,
+) -> None:
+    output.put(collator.tasks)
+    ready.set()
+    if updated.wait(timeout=5.0):
+        output.put(collator.tasks)
+
+
 class ContractTest(unittest.TestCase):
+    def test_worker_runtime_snapshot_excludes_model_and_codec(self):
+        runtime = SimpleNamespace(
+            codec_name="longcat",
+            audio_view=AudioView.LONGCAT,
+            text_tokenizer=_Tokenizer(10),
+            audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
+            layout=Layout(text=(0, 10), audio=(10, 20)),
+            pad_token_id=0,
+            eos_token_id=1,
+            boa_token_id=18,
+            eoa_token_id=19,
+            codec=object(),
+            backbone=object(),
+        )
+
+        snapshot = pickle.loads(pickle.dumps(DataRuntimeSnapshot.from_runtime(runtime)))
+
+        self.assertFalse(hasattr(snapshot, "codec"))
+        self.assertFalse(hasattr(snapshot, "backbone"))
+        self.assertEqual(snapshot.layout.blocks, runtime.layout.blocks)
+        self.assertIs(snapshot.layout, snapshot.layout)
+
     def test_trainer_presets_have_one_composable_schema(self):
         configs = [
             _compose(config_name="codec_oracle"),
@@ -523,6 +574,28 @@ class ContractTest(unittest.TestCase):
 
         self.assertIsNone(batch.acoustic_target)
 
+    def test_model_batch_owns_acoustic_target_position_constraints(self):
+        def batch(position: int, codes: torch.Tensor | None = None) -> ModelBatch:
+            return ModelBatch(
+                input_ids=torch.tensor([[1, 4]]),
+                token_labels=torch.tensor([[-100, 4]]),
+                acoustic_prompt=None,
+                acoustic_target={
+                    "semantic_codes": torch.tensor([[[1]]]),
+                    "codes": (torch.tensor([[[1, 2]]]) if codes is None else codes),
+                    "token_positions": torch.tensor([[position]]),
+                },
+                tasks=[Task.TTS],
+                pad_token_id=99,
+            )
+
+        with self.assertRaisesRegex(ValueError, "at least 1"):
+            batch(0)
+        with self.assertRaisesRegex(ValueError, "exceeds"):
+            batch(2)
+        with self.assertRaisesRegex(ValueError, "whole padded frame"):
+            batch(-1, torch.tensor([[[-1, 2]]]))
+
     def test_model_batch_rejects_padding_ids_inside_unpadded_acoustic_fields(self):
         samples = {
             "acoustic prompt codes": ModelSample(
@@ -599,6 +672,33 @@ class ContractTest(unittest.TestCase):
 
         self.assertIs(collator, original)
         self.assertEqual(set(collator.tasks), {Task.ASR, Task.S2TT})
+
+    def test_collator_task_updates_cross_worker_processes(self):
+        runtime = cast(DataRuntime, cast(object, None))
+        collator = Collator(runtime, {Task.TTS: 1.0})
+        context = multiprocessing.get_context()
+        ready = context.Event()
+        updated = context.Event()
+        output = context.Queue()
+        process = context.Process(
+            target=_observe_task_updates,
+            args=(collator, ready, updated, output),
+        )
+
+        process.start()
+        try:
+            self.assertTrue(ready.wait(timeout=5.0))
+            self.assertEqual(output.get(timeout=5.0), [Task.TTS])
+            collator.set_task_weights({Task.ASR: 1.0})
+            updated.set()
+            self.assertEqual(output.get(timeout=5.0), [Task.ASR])
+            process.join(timeout=5.0)
+            self.assertEqual(process.exitcode, 0)
+        finally:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5.0)
+            output.close()
 
     def test_collator_rejects_invalid_task_weights_before_updating(self):
         collator = Collator(Mock(), {Task.TTS: 1.0})

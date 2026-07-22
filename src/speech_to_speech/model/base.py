@@ -124,7 +124,9 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         )
         hidden_states = backbone_output.last_hidden_state
         logits = self.token_logits(hidden_states)
-        return self._output(backbone_output, hidden_states, logits, output_hidden_states)
+        return self._output(
+            backbone_output, hidden_states, logits, output_hidden_states
+        )
 
     def generation_step(
         self,
@@ -142,7 +144,9 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
     ) -> CausalLMOutputWithPast:
         """Run one autoregressive step with an explicit output-head selection."""
         if token_ids is not None and modality is not None:
-            raise ValueError("generation token ids and modality cannot both be provided.")
+            raise ValueError(
+                "generation token ids and modality cannot both be provided."
+            )
         backbone_output = self._backbone_output(
             input_ids,
             attention_mask=attention_mask,
@@ -160,7 +164,9 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             logits = self.selected_logits(last_hidden_state, token_ids)
         else:
             logits = self.token_logits(last_hidden_state)
-        return self._output(backbone_output, hidden_states, logits, output_hidden_states)
+        return self._output(
+            backbone_output, hidden_states, logits, output_hidden_states
+        )
 
     @staticmethod
     def _output(
@@ -328,11 +334,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         if hidden_states.size(0) != target_positions.size(0):
             raise ValueError("hidden states and target positions must align on batch.")
         mask = target_positions.ge(0)
-        if bool((mask & target_positions.lt(1)).any()):
-            raise ValueError("target token positions must have a causal predictor.")
         safe_positions = (target_positions - 1).clamp_min(0)
-        if bool((safe_positions >= hidden_states.size(1)).any()):
-            raise ValueError("target hidden position exceeds the sequence length.")
         condition = hidden_states.gather(
             1,
             safe_positions[..., None].expand(-1, -1, hidden_states.size(-1)),
@@ -366,15 +368,16 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         text_mask = input_ids.ge(text_start) & input_ids.lt(text_end)
         audio_mask = input_ids.ge(audio_start) & input_ids.lt(audio_end)
         if not bool((text_mask | audio_mask).all()):
-            raise ValueError("input token ids contain an id outside the runtime layout.")
+            raise ValueError(
+                "input token ids contain an id outside the runtime layout."
+            )
         output = self.backbone.get_input_embeddings()(
             input_ids.clamp(text_start, text_end - 1) - text_start
         )
-        if bool(audio_mask.any()):
-            audio_token_ids = input_ids[audio_mask] - audio_start
-            output[audio_mask] = self.semantic_audio_adapter(
-                self.semantic_audio_embedding(audio_token_ids)
-            )
+        audio_token_ids = input_ids[audio_mask] - audio_start
+        output[audio_mask] = self.semantic_audio_adapter(
+            self.semantic_audio_embedding(audio_token_ids)
+        )
         return output
 
     def _acoustic_prompt_embedding(
@@ -404,9 +407,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         )
         frame_features = self.acoustic_prompt_adapter(frame_features)
         frame_features = frame_features.masked_fill(~token_mask[..., None], 0)
-        return frame_features * self.acoustic_prompt_gate.to(
-            dtype=frame_features.dtype
-        )
+        return frame_features * self.acoustic_prompt_gate.to(dtype=frame_features.dtype)
 
     def acoustic_code_features(self, codes: torch.Tensor) -> torch.Tensor:
         """Convert codec-local acoustic codes to model-aligned features."""
@@ -417,9 +418,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
 
 def _frame_span_lookup(runtime: TokenModelRuntime) -> torch.Tensor:
     spans = torch.as_tensor(
-        runtime.audio_tokenizer.frame_spans(
-            range(runtime.audio_tokenizer.vocab_size)
-        ),
+        runtime.audio_tokenizer.frame_spans(range(runtime.audio_tokenizer.vocab_size)),
         dtype=torch.long,
     )
     if spans.shape != (runtime.audio_tokenizer.vocab_size,):

@@ -16,6 +16,8 @@ class CausalAcousticLoss(nn.Module):
         logits: tuple[Tensor, ...],
         labels: Tensor,
         mask: Tensor,
+        *,
+        validate: bool = True,
     ) -> LossItem:
         if labels.dim() != 3 or mask.shape != labels.shape[:2]:
             raise ValueError(
@@ -28,6 +30,12 @@ class CausalAcousticLoss(nn.Module):
         if len(logits) != labels.size(-1):
             raise ValueError("RVQ logits must provide one tensor per codebook.")
 
+        if validate:
+            valid_targets = labels[mask]
+            limits = labels.new_tensor([value.size(-1) for value in logits])
+            if bool(((valid_targets < 0) | (valid_targets >= limits)).any()):
+                raise ValueError("valid RVQ target is outside its logits codebook.")
+
         losses = []
         for codebook, value in enumerate(logits):
             if value.shape[:2] != labels.shape[:2]:
@@ -35,10 +43,6 @@ class CausalAcousticLoss(nn.Module):
                     "RVQ logits must align with labels on batch and frame."
                 )
             target = labels[..., codebook]
-            if bool(((target < 0) & mask).any()):
-                raise ValueError("valid RVQ targets cannot contain padding IDs.")
-            if bool(((target >= value.size(-1)) & mask).any()):
-                raise ValueError("valid RVQ target is outside its logits codebook.")
             safe_value = value.masked_fill(~mask[..., None], 0)
             safe_target = target.masked_fill(~mask, 0).to(dtype=torch.long)
             loss = F.cross_entropy(

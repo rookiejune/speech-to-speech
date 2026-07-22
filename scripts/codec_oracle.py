@@ -3,15 +3,16 @@ from __future__ import annotations
 import os
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Any, Literal, Optional, cast
+from typing import Any, Literal, Optional, Protocol, cast
 
 import hydra
 import torch
-from anytrain.lightning import DebugCallback
+from anytrain.lightning import DebugCallback, PerformanceCallback
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback, ModelCheckpoint
 from omegaconf import DictConfig
 from torch import Tensor
+from transformers import AutoConfig
 from zhuyin.datasets.wmt19_tts import wmt19_tts_codec
 
 from speech_to_speech.callback.logging import GradNormLogger
@@ -21,18 +22,17 @@ from speech_to_speech.codec_oracle import (
 )
 from speech_to_speech.codec_oracle import (
     AcousticFlowScreening,
+    AcousticFlowModel,
+    AcousticRVQModel,
     AcousticRVQScreening,
     Initialization,
     Logger as OracleLogger,
     Objective,
+    TrainingFlops,
     codes as sample_codes,
     event,
     single_batch_loader,
     timed,
-)
-from speech_to_speech.model import (
-    SpeechToSpeechFlowModel,
-    SpeechToSpeechRVQModel,
 )
 from speech_to_speech.runtime import Runtime
 
@@ -106,6 +106,7 @@ def run(config: CodecOracleConfig) -> None:
             codes,
             initialization,
             runtime,
+            device,
         )
     else:
         raise AssertionError(f"unsupported objective: {objective}")
@@ -139,8 +140,22 @@ def training_callbacks(
     oracle: Callback,
     output_dir: Path,
 ) -> list[Callback]:
-    callbacks: list[Callback] = [oracle]
-    if config.callbacks.grad_norm.enabled:
+    callbacks: list[Callback] = []
+    performance = config.callbacks.performance
+    if performance.enabled:
+        callbacks.append(
+            PerformanceCallback(
+                model_flops_per_batch=TrainingFlops(),
+                hardware_peak_flops=performance.hardware_peak_flops,
+                log_every_n_steps=performance.log_every_n_steps,
+                warmup_steps=performance.warmup_steps,
+                measure_window_steps=performance.measure_window_steps,
+                sync_cuda=performance.sync_cuda,
+                sync_distributed=performance.sync_distributed,
+            )
+        )
+    callbacks.append(oracle)
+    if config.callbacks.grad_norm.enabled and not performance.enabled:
         callbacks.append(
             GradNormLogger(
                 every_n_steps=config.callbacks.grad_norm.every_n_steps,
@@ -153,9 +168,7 @@ def training_callbacks(
                 filename=config.callbacks.checkpoint.filename,
                 save_last=config.callbacks.checkpoint.save_last,
                 save_top_k=config.callbacks.checkpoint.save_top_k,
-                every_n_train_steps=(
-                    config.callbacks.checkpoint.every_n_train_steps
-                ),
+                every_n_train_steps=(config.callbacks.checkpoint.every_n_train_steps),
                 auto_insert_metric_name=False,
             )
         )
@@ -255,10 +268,14 @@ def build_flow(
 ) -> tuple[AcousticFlowScreening, dict[str, Any]]:
     if codes.size(-1) < 2:
         raise ValueError("flow screening requires semantic and acoustic codebooks.")
-    model = SpeechToSpeechFlowModel(
-        config.model,
+    model = AcousticFlowModel(
+        adapter=config.model.semantic_audio_adapter,
         runtime=runtime,
+        condition_dim=condition_dim(config),
+        flow_runtime=runtime.flow_matching,
         decoder=config.codec_oracle.decoder,
+        device=device,
+        dtype=model_dtype(config.runtime.dtype),
     )
     codec = runtime.codec
     semantic_codes = codes[:, 0]
@@ -306,6 +323,7 @@ def build_rvq(
     codes: Tensor,
     initialization: Initialization,
     runtime: Runtime,
+    device: torch.device,
 ) -> tuple[AcousticRVQScreening, dict[str, Any]]:
     codec = runtime.codec
     acoustic_sizes = codec.acoustic_codebook_sizes
@@ -317,10 +335,13 @@ def build_rvq(
             "RVQ screening prepared codes must match the runtime codec: "
             f"{codes.size(-1)} != {expected_codebooks}."
         )
-    model = SpeechToSpeechRVQModel(
-        config.model,
+    model = AcousticRVQModel(
+        adapter=config.model.semantic_audio_adapter,
         runtime=runtime,
+        condition_dim=condition_dim(config),
         decoder=config.codec_oracle.decoder,
+        device=device,
+        dtype=model_dtype(config.runtime.dtype),
     )
     codebook = codec.semantic_codebook.detach().float()
     module = AcousticRVQScreening(
@@ -370,6 +391,35 @@ def _feature_stats(target: Tensor, *, enabled: bool) -> tuple[Tensor, Tensor]:
     mean = target.mean(dim=(0, 1), keepdim=True)
     std = target.std(dim=(0, 1), correction=0, keepdim=True).clamp_min(1e-5)
     return mean, std
+
+
+class _BackboneConfig(Protocol):
+    hidden_size: int
+
+
+def condition_dim(config: CodecOracleConfig) -> int:
+    if config.model.toy is not None:
+        return config.model.toy.hidden_size
+    loaded = AutoConfig.from_pretrained(config.runtime.backbone)
+    backbone = cast(_BackboneConfig, cast(object, loaded))
+    hidden_size = backbone.hidden_size
+    if isinstance(hidden_size, bool) or not isinstance(hidden_size, int):
+        raise TypeError("backbone hidden_size must be an integer.")
+    if hidden_size <= 0:
+        raise ValueError("backbone hidden_size must be positive.")
+    return hidden_size
+
+
+def model_dtype(value: Optional[str]) -> torch.dtype:
+    if value is None:
+        return torch.get_default_dtype()
+    try:
+        result = getattr(torch, value)
+    except AttributeError as error:
+        raise ValueError(f"unknown torch dtype: {value}") from error
+    if not isinstance(result, torch.dtype) or not result.is_floating_point:
+        raise ValueError(f"oracle model dtype must be floating point: {value}")
+    return result
 
 
 def process_device(configured: Optional[str]) -> torch.device:

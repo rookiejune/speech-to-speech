@@ -5,6 +5,7 @@ defaults:
   - trainer: default
   - logging: tensorboard
   - callback/codec_oracle@callbacks
+  - callback/performance@callbacks.performance
   - _self_
   - experiment: null
 

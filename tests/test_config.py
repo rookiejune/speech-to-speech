@@ -9,7 +9,11 @@ import torch
 from hydra import compose, initialize_config_dir
 from hydra.errors import ConfigCompositionException
 from omegaconf import DictConfig
-from omegaconf.errors import ConfigAttributeError, ConfigKeyError, InterpolationResolutionError
+from omegaconf.errors import (
+    ConfigAttributeError,
+    ConfigKeyError,
+    InterpolationResolutionError,
+)
 
 from scripts._config import (
     CodecOracleConfig,
@@ -21,11 +25,17 @@ from scripts._config import (
 )
 from scripts._logging import build as build_logger
 from scripts.codec_oracle import build_runtime as build_oracle_runtime
-from scripts.overfit import _composition, runtime_config
+from scripts.overfit import (
+    _composition,
+    _gradient_logger,
+    _performance,
+    runtime_config,
+)
 from speech_to_speech.codec_oracle import Config as OracleConfig
 from speech_to_speech.codec_oracle import DataConfig, Initialization, Objective
 from speech_to_speech.datamodule import DatasetName
 from speech_to_speech.model import (
+    AcousticType,
     AdapterType,
     Config as ModelConfig,
     DecoderConfig,
@@ -46,9 +56,7 @@ class ConfigTest(unittest.TestCase):
     def test_roots_parse_to_src_aligned_configs(self):
         flow = overfit(_compose("overfit"))
         rvq = overfit(_compose("overfit", "model/acoustic=rvq"))
-        token = overfit(
-            _compose("overfit", "runtime=unicodec", "~model/acoustic")
-        )
+        token = overfit(_compose("overfit", "runtime=unicodec", "~model/acoustic"))
         oracle = codec_oracle(_compose("codec_oracle"))
 
         self.assertIsInstance(flow, OverfitFlowConfig)
@@ -70,6 +78,8 @@ class ConfigTest(unittest.TestCase):
         )
         self.assertIs(oracle.codec_oracle.objective, Objective.FLOW)
         self.assertFalse(hasattr(oracle, "acoustic"))
+        self.assertFalse(flow.callbacks.performance.enabled)
+        self.assertTrue(oracle.callbacks.performance.enabled)
 
     def test_toy_smoke_selects_model_and_dataset_without_a_toy_runtime(self):
         config = overfit(_compose("overfit", "experiment=toy_smoke"))
@@ -98,9 +108,7 @@ class ConfigTest(unittest.TestCase):
 
     def test_composition_must_match_codec_capabilities(self):
         flow = overfit(_compose("overfit"))
-        token = overfit(
-            _compose("overfit", "runtime=unicodec", "~model/acoustic")
-        )
+        token = overfit(_compose("overfit", "runtime=unicodec", "~model/acoustic"))
 
         self.assertIsNone(_composition(token, uses_acoustic_decoder=False))
         with self.assertRaisesRegex(ValueError, "model/acoustic=flow"):
@@ -130,11 +138,29 @@ class ConfigTest(unittest.TestCase):
                 _compose("codec_oracle", "+acoustic.type=flow"),
                 "acoustic",
             ),
+            (
+                codec_oracle,
+                _compose(
+                    "codec_oracle",
+                    "+callbacks.performance.compute_dtype=bf16",
+                ),
+                "callbacks.performance.compute_dtype",
+            ),
+            (
+                codec_oracle,
+                _compose(
+                    "codec_oracle",
+                    "+callbacks.performance.model_flops_per_step=1.0",
+                ),
+                "callbacks.performance.model_flops_per_step",
+            ),
         ]
 
         for parser, raw, key in cases:
             with self.subTest(key=key):
-                with self.assertRaises((ConfigKeyError, ConfigAttributeError)) as raised:
+                with self.assertRaises(
+                    (ConfigKeyError, ConfigAttributeError)
+                ) as raised:
                     parser(raw)
                 self.assertIn(key, str(raised.exception))
 
@@ -152,12 +178,15 @@ class ConfigTest(unittest.TestCase):
         data = config.codec_oracle.data
 
         self.assertIsNone(data.sample_limit)
+        self.assertIsNone(data.max_seconds)
         self.assertEqual(data.batch_size, 8)
-        self.assertEqual(data.num_workers, 0)
-        self.assertFalse(data.pin_memory)
-        self.assertFalse(data.persistent_workers)
+        self.assertEqual(data.num_workers, 8)
+        self.assertTrue(data.pin_memory)
+        self.assertTrue(data.persistent_workers)
         self.assertTrue(data.lba.enabled)
         self.assertEqual(data.lba.max_batch_seconds, 8.0)
+        self.assertEqual(data.lba.prefetch_batches, 4)
+        self.assertEqual(data, DataConfig())
         self.assertEqual(config.train.max_steps, 1_000_000)
         self.assertEqual(config.trainer.precision, "bf16-mixed")
         self.assertEqual(config.trainer.max_epochs, -1)
@@ -165,6 +194,108 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.callbacks.oracle.sample_every_n_steps, 10_000)
         self.assertEqual(config.callbacks.checkpoint.every_n_train_steps, 10_000)
         self.assertEqual(config.callbacks.checkpoint.save_top_k, -1)
+        self.assertTrue(config.callbacks.performance.enabled)
+        self.assertIsNone(config.callbacks.performance.hardware_peak_flops)
+        self.assertEqual(config.callbacks.performance.log_every_n_steps, 100)
+        self.assertEqual(config.callbacks.performance.warmup_steps, 20)
+        self.assertEqual(config.callbacks.performance.measure_window_steps, 100)
+        self.assertTrue(config.callbacks.performance.sync_cuda)
+        self.assertTrue(config.callbacks.performance.sync_distributed)
+
+    def test_overfit_performance_is_explicitly_opt_in(self):
+        default = overfit(_compose("overfit"))
+        enabled = overfit(
+            _compose(
+                "overfit",
+                "callbacks.performance.enabled=true",
+                "callbacks.sample.enabled=false",
+                "callbacks.performance.hardware_peak_flops=123.0",
+            )
+        )
+
+        self.assertFalse(default.callbacks.performance.enabled)
+        self.assertTrue(enabled.callbacks.performance.enabled)
+        self.assertEqual(enabled.callbacks.performance.hardware_peak_flops, 123.0)
+        self.assertEqual(enabled.callbacks.performance.log_every_n_steps, 100)
+        self.assertEqual(enabled.callbacks.performance.warmup_steps, 20)
+        self.assertEqual(enabled.callbacks.performance.measure_window_steps, 100)
+        self.assertTrue(enabled.callbacks.performance.sync_cuda)
+        self.assertTrue(enabled.callbacks.performance.sync_distributed)
+
+        with self.assertRaisesRegex(ValueError, "sample.enabled=false"):
+            overfit(
+                _compose(
+                    "overfit",
+                    "callbacks.performance.enabled=true",
+                )
+            )
+
+    @patch("scripts.overfit.TrainingFlops")
+    @patch("scripts.overfit.PerformanceCallback")
+    def test_overfit_performance_builds_the_dynamic_provider(
+        self,
+        performance,
+        training_flops,
+    ):
+        disabled = overfit(_compose("overfit"))
+        enabled = overfit(
+            _compose(
+                "overfit",
+                "callbacks.sample.enabled=false",
+                "callbacks.performance.enabled=true",
+                "callbacks.performance.hardware_peak_flops=123.0",
+            )
+        )
+
+        self.assertIsNone(_performance(disabled))
+        callback = _performance(enabled)
+
+        performance.assert_called_once_with(
+            model_flops_per_batch=training_flops.return_value,
+            hardware_peak_flops=123.0,
+            log_every_n_steps=100,
+            warmup_steps=20,
+            measure_window_steps=100,
+            sync_cuda=True,
+            sync_distributed=True,
+        )
+        self.assertIs(callback, performance.return_value)
+
+    @patch("scripts.overfit.GradLogger")
+    def test_overfit_performance_omits_extra_gradient_passes(self, grad_logger):
+        default = overfit(_compose("overfit"))
+        performance = overfit(
+            _compose(
+                "overfit",
+                "callbacks.sample.enabled=false",
+                "callbacks.performance.enabled=true",
+            )
+        )
+        loss_pair = ("token", "flow_matching")
+
+        gradient = _gradient_logger(default, AcousticType.FLOW, loss_pair)
+
+        self.assertIs(gradient, grad_logger.return_value)
+        grad_logger.assert_called_once_with(
+            loss_pair,
+            "model.backbone.model.layers.0.self_attn.q_proj.weight",
+            every_n_steps=1,
+        )
+        grad_logger.reset_mock()
+
+        rvq_pair = ("token", "rvq")
+        rvq_gradient = _gradient_logger(default, AcousticType.RVQ, rvq_pair)
+
+        self.assertIs(rvq_gradient, grad_logger.return_value)
+        grad_logger.assert_called_once_with(
+            rvq_pair,
+            "model.backbone.model.layers.0.self_attn.q_proj.weight",
+            every_n_steps=1,
+        )
+        grad_logger.reset_mock()
+
+        self.assertIsNone(_gradient_logger(performance, AcousticType.FLOW, loss_pair))
+        grad_logger.assert_not_called()
 
     def test_training_outputs_use_one_tensorboard_root(self):
         configs = (
@@ -266,6 +397,7 @@ class ConfigTest(unittest.TestCase):
                 )
 
                 self.assertEqual(config.codec_oracle.data.sample_limit, sample_limit)
+                self.assertEqual(config.codec_oracle.data.max_seconds, 4.0)
                 self.assertIs(config.codec_oracle.data.lba.enabled, lba)
                 self.assertEqual(config.train.max_steps, 2)
                 self.assertEqual(config.runtime.flow_nfe, 4)
@@ -279,8 +411,11 @@ class ConfigTest(unittest.TestCase):
                         config.callbacks.oracle.histogram_every_n_steps,
                         config.callbacks.grad_norm.every_n_steps,
                         config.callbacks.checkpoint.every_n_train_steps,
+                        config.callbacks.performance.log_every_n_steps,
+                        config.callbacks.performance.warmup_steps,
+                        config.callbacks.performance.measure_window_steps,
                     ),
-                    (1, 1, 1, 1),
+                    (1, 1, 1, 1, 1, 0, 2),
                 )
 
     def test_codec_oracle_rvq_smoke_experiments_select_rvq_objective(self):
@@ -304,6 +439,7 @@ class ConfigTest(unittest.TestCase):
 
                 self.assertIs(config.codec_oracle.objective, Objective.RVQ)
                 self.assertEqual(config.codec_oracle.data.sample_limit, sample_limit)
+                self.assertEqual(config.codec_oracle.data.max_seconds, 4.0)
                 self.assertIs(config.codec_oracle.data.lba.enabled, lba)
                 self.assertEqual(config.train.max_steps, 2)
                 self.assertEqual(config.trainer.devices, devices)
@@ -316,8 +452,11 @@ class ConfigTest(unittest.TestCase):
                         config.callbacks.oracle.histogram_every_n_steps,
                         config.callbacks.grad_norm.every_n_steps,
                         config.callbacks.checkpoint.every_n_train_steps,
+                        config.callbacks.performance.log_every_n_steps,
+                        config.callbacks.performance.warmup_steps,
+                        config.callbacks.performance.measure_window_steps,
                     ),
-                    (1, 1, 1, 1),
+                    (1, 1, 1, 1, 1, 0, 2),
                 )
 
     def test_codec_oracle_enum_inputs_resolve_to_stable_value_paths(self):
@@ -535,9 +674,35 @@ class ConfigTest(unittest.TestCase):
             source,
         )
         self.assertIn(
-            'DYNAMIC_HOME:?Set DYNAMIC_HOME or SPEECH_TO_SPEECH_TRAIN_ROOT',
+            "DYNAMIC_HOME:?Set DYNAMIC_HOME or SPEECH_TO_SPEECH_TRAIN_ROOT",
             source,
         )
+
+    def test_unicodec_jobs_require_a_compatible_python(self):
+        root = Path(__file__).parents[1]
+        env = (root / "jobs" / "env.sh").read_text()
+        jobs = {
+            "02_unicodec.sh": ("unicodec_overfit", "overfit"),
+            "05_unicodec_ddp.sh": ("unicodec_ddp_smoke", "ddp-smoke"),
+        }
+
+        self.assertNotIn(
+            "SPEECH_TO_SPEECH_UNICODEC_PYTHON=",
+            env,
+        )
+        for filename, (experiment, output_name) in jobs.items():
+            with self.subTest(job=filename):
+                source = (root / "jobs" / "005" / filename).read_text()
+                config = overfit(_compose("overfit", f"experiment={experiment}"))
+                self.assertIn(
+                    "SPEECH_TO_SPEECH_UNICODEC_PYTHON:?Set ",
+                    source,
+                )
+                self.assertTrue(config.output_subdir.endswith(f"/{output_name}"))
+                self.assertIn(
+                    f'output_subdir="{config.output_subdir}"',
+                    source,
+                )
 
     def test_codec_screening_smoke_jobs_select_complete_experiments(self):
         root = Path(__file__).parents[1]
@@ -594,7 +759,7 @@ class ConfigTest(unittest.TestCase):
                 for selection in selections:
                     self.assertIs(selection in source, selection in overrides)
                 self.assertIs(config.codec_oracle.objective, objective)
-                self.assertIsNone(config.codec_oracle.data.sample_limit)
+                self.assertEqual(config.codec_oracle.data, DataConfig())
                 self.assertTrue(config.codec_oracle.data.lba.enabled)
                 self.assertEqual(config.train.max_steps, 1_000_000)
                 self.assertEqual(config.trainer.devices, devices)

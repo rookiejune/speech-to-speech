@@ -96,6 +96,17 @@ class AcousticRVQTest(unittest.TestCase):
 
         self.assertEqual(len(model.decoder.layers), 8)
 
+    def test_structurally_unused_embeddings_are_frozen(self):
+        self.assertFalse(self.model.decoder.embed_tokens.weight.requires_grad)
+        self.assertFalse(self.model.codebook_embeddings[-1].weight.requires_grad)
+        self.assertFalse(
+            any(
+                parameter.requires_grad
+                for parameter in self.model.embedding_projections[-1].parameters()
+            )
+        )
+        self.assertTrue(self.model.codebook_embeddings[-2].weight.requires_grad)
+
     def test_generation_uses_one_cached_token_per_codebook(self):
         lengths = []
         handle = self.model.decoder.register_forward_pre_hook(

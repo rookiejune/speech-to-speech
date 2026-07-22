@@ -119,6 +119,28 @@ class ModelBatch:
             raise ValueError(
                 "all samples in a batch must use the same source and target modalities."
             )
+        source_modality, target_modality = next(iter(signatures))
+        if source_modality is not Modality.AUDIO and self.acoustic_prompt is not None:
+            raise ValueError(
+                "only audio-source tasks may provide acoustic prompt fields."
+            )
+        if target_modality is Modality.TEXT and self.acoustic_target is not None:
+            raise ValueError(
+                "text-target tasks must not provide acoustic target fields."
+            )
+        _validate_batch_acoustic(
+            self.input_ids,
+            self.acoustic_prompt,
+            name="acoustic prompt",
+            minimum_position=0,
+        )
+        _validate_batch_acoustic(
+            self.input_ids,
+            self.acoustic_target,
+            name="acoustic target",
+            minimum_position=1,
+        )
+        _validate_batch_target_labels(self.token_labels, self.acoustic_target)
 
     @classmethod
     def from_samples(
@@ -159,6 +181,16 @@ class ModelBatch:
         code_mask = (self.acoustic_target["codes"] != ACOUSTIC_PAD_ID).all(dim=-1)
         return (self.acoustic_target["token_positions"] >= 0) & code_mask
 
+    def pin_memory(self) -> ModelBatch:
+        return ModelBatch(
+            input_ids=self.input_ids.pin_memory(),
+            token_labels=self.token_labels.pin_memory(),
+            acoustic_prompt=_pin_prompt(self.acoustic_prompt),
+            acoustic_target=_pin_target(self.acoustic_target),
+            tasks=list(self.tasks),
+            pad_token_id=self.pad_token_id,
+        )
+
 
 def _pad(values: list[Tensor], padding_value: int) -> Tensor:
     return pad_sequence(
@@ -192,6 +224,25 @@ def _target(values: list[AcousticTarget | None]) -> AcousticTarget | None:
         token_positions=_pad(
             [value["token_positions"] for value in targets], ACOUSTIC_PAD_ID
         ),
+    )
+
+
+def _pin_prompt(value: AcousticPrompt | None) -> AcousticPrompt | None:
+    if value is None:
+        return None
+    return AcousticPrompt(
+        codes=value["codes"].pin_memory(),
+        token_positions=value["token_positions"].pin_memory(),
+    )
+
+
+def _pin_target(value: AcousticTarget | None) -> AcousticTarget | None:
+    if value is None:
+        return None
+    return AcousticTarget(
+        semantic_codes=value["semantic_codes"].pin_memory(),
+        codes=value["codes"].pin_memory(),
+        token_positions=value["token_positions"].pin_memory(),
     )
 
 
@@ -234,6 +285,11 @@ def _validate_sample(sample: ModelSample, pad_token_id: int) -> None:
             name="acoustic target",
             pad_token_id=pad_token_id,
         )
+        if bool((target["token_positions"] < 1).any()):
+            raise ValueError(
+                "acoustic target positions must be at least 1 so every frame has "
+                "a causal predecessor."
+            )
         semantic_codes = target["semantic_codes"]
         _validate_codes(semantic_codes, name="target semantic codes")
         if semantic_codes.size(0) != target["codes"].size(0):
@@ -250,6 +306,92 @@ def _validate_sample(sample: ModelSample, pad_token_id: int) -> None:
         labels = sample.token_labels[positions]
         if bool(labels.eq(-100).any()):
             raise ValueError("acoustic target positions must point to semantic labels.")
+
+
+def _validate_batch_acoustic(
+    input_ids: Tensor,
+    value: AcousticPrompt | AcousticTarget | None,
+    *,
+    name: str,
+    minimum_position: int,
+) -> None:
+    if value is None:
+        return
+    codes = value["codes"]
+    positions = value["token_positions"]
+    if codes.dim() != 3 or positions.dim() != 2:
+        raise ValueError(f"{name} batch fields must have shapes [B, F, Q] and [B, F].")
+    if not is_signed_integer_dtype(codes.dtype) or not is_signed_integer_dtype(
+        positions.dtype
+    ):
+        raise TypeError(f"{name} batch fields must use signed integer dtypes.")
+    if codes.size(-1) < 1:
+        raise ValueError(f"{name} codes must contain at least one codebook.")
+    if codes.shape[:2] != positions.shape:
+        raise ValueError(f"{name} batch fields must align on batch and frame.")
+    if positions.size(0) != input_ids.size(0):
+        raise ValueError(f"{name} batch must align with input batch size.")
+    if codes.device != input_ids.device or positions.device != input_ids.device:
+        raise ValueError(f"{name} batch fields must use the input tensor device.")
+    active = positions.ge(0)
+    if bool((positions < -1).any()):
+        raise ValueError(f"{name} positions may only use -1 as padding.")
+    if bool((active & positions.lt(minimum_position)).any()):
+        raise ValueError(
+            f"{name} positions must be at least {minimum_position} for active frames."
+        )
+    if bool((active & positions.ge(input_ids.size(1))).any()):
+        raise ValueError(f"{name} position exceeds the token sequence length.")
+    code_mask = codes.ge(0).all(dim=-1)
+    code_padding = codes.eq(ACOUSTIC_PAD_ID).all(dim=-1)
+    if not bool((code_mask | code_padding).all()):
+        raise ValueError(
+            f"{name} codes must be non-negative or use -1 for a whole padded frame."
+        )
+    if not torch.equal(active, code_mask):
+        raise ValueError(
+            f"{name} positions and codes must share the same padding mask."
+        )
+    if positions.size(1) < 1 or not bool(active.any(dim=1).all()):
+        raise ValueError(f"each {name} batch row must contain an active frame.")
+    semantic = value.get("semantic_codes")
+    if semantic is not None:
+        if semantic.dim() != 3 or semantic.shape[:2] != positions.shape:
+            raise ValueError(
+                "acoustic target semantic codes must align on batch and frame."
+            )
+        if not is_signed_integer_dtype(semantic.dtype):
+            raise TypeError("acoustic target semantic codes must use a signed dtype.")
+        if semantic.size(-1) < 1:
+            raise ValueError("acoustic target semantic codes must contain a codebook.")
+        if semantic.device != input_ids.device:
+            raise ValueError(
+                "acoustic target semantic codes must use the input tensor device."
+            )
+        semantic_mask = semantic.ge(0).all(dim=-1)
+        semantic_padding = semantic.eq(ACOUSTIC_PAD_ID).all(dim=-1)
+        if not bool((semantic_mask | semantic_padding).all()) or not torch.equal(
+            semantic_mask, active
+        ):
+            raise ValueError(
+                "acoustic target semantic codes must share the frame padding mask."
+            )
+
+
+def _validate_batch_target_labels(
+    labels: Tensor,
+    target: AcousticTarget | None,
+) -> None:
+    if target is None:
+        return
+    positions = target["token_positions"]
+    if positions.device != labels.device:
+        raise ValueError("acoustic target labels and positions must use one device.")
+    active = positions.ge(0)
+    rows = torch.arange(labels.size(0), device=positions.device)[:, None]
+    selected = labels[rows.expand_as(positions)[active], positions[active]]
+    if bool(selected.eq(-100).any()):
+        raise ValueError("acoustic target positions must point to semantic labels.")
 
 
 def _validate_acoustic_pair(

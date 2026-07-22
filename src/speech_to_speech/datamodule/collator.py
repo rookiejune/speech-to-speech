@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import math
+import multiprocessing
 import random
 from collections.abc import Mapping
+from typing import Any
 
 from anydataset.types import Sample as RawSample
 
@@ -12,6 +14,34 @@ from .sample import build_sample
 from ..task import Task
 from .types import ModelBatch, ModelSample
 
+_TASKS = tuple(Task)
+_ABSENT = -1.0
+
+
+class _TaskWeights:
+    def __init__(self, values: Mapping[Task, float]) -> None:
+        self._values: Any = multiprocessing.Array(
+            "d",
+            [_ABSENT] * len(_TASKS),
+            lock=True,
+        )
+        self.set(values)
+
+    def set(self, values: Mapping[Task, float]) -> None:
+        weights = dict(values)
+        _validate_tasks(list(weights))
+        _validate_weights(list(weights.values()))
+        updated = [float(weights.get(task, _ABSENT)) for task in _TASKS]
+        with self._values.get_lock():
+            self._values[:] = updated
+
+    def get(self) -> tuple[list[Task], list[float]]:
+        with self._values.get_lock():
+            values = list(self._values[:])
+        tasks = [task for task, weight in zip(_TASKS, values) if weight >= 0]
+        weights = [weight for weight in values if weight >= 0]
+        return tasks, weights
+
 
 class Collator:
     def __init__(
@@ -20,22 +50,18 @@ class Collator:
         task_weights: Mapping[Task, float],
     ) -> None:
         self.runtime = runtime
-        self._task_weights: Mapping[Task, float] = {}
-        self.set_task_weights(task_weights)
+        self._task_weights = _TaskWeights(task_weights)
 
     def set_task_weights(self, task_weights: Mapping[Task, float]) -> None:
-        weights = dict(task_weights)
-        _validate_tasks(list(weights))
-        _validate_weights(list(weights.values()))
-        self._task_weights = weights
+        self._task_weights.set(task_weights)
 
     @property
     def tasks(self) -> list[Task]:
-        return list(self._task_weights)
+        tasks, _ = self._task_weights.get()
+        return tasks
 
     def _model_samples(self, samples: list[RawSample]) -> list[ModelSample]:
-        available = self.tasks
-        weights = [self._task_weights[task] for task in available]
+        available, weights = self._task_weights.get()
         tasks = random.choices(available, weights=weights, k=len(samples))
         return [
             build_sample(parse_sample(sample, self.runtime), task, self.runtime)

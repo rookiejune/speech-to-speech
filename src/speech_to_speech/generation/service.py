@@ -11,7 +11,7 @@ from torch.nn.utils.rnn import pad_sequence
 from .._tensor import is_signed_integer_dtype
 from ..task import Task
 from .decode import decode_generated_audio, decode_generated_semantic
-from .protocol import AcousticFeatureGenerator, TokenGenerator
+from .protocol import AcousticFeatureGeneration, TokenGenerator
 from .types import AcousticGeneration, AcousticPrompt, AudioOutput, Request, Result
 
 
@@ -48,7 +48,7 @@ def generate_responses(
         )
         acoustic_generation: AcousticGeneration | None = None
         if modality is Modality.AUDIO and model.runtime.codec.acoustic_codebook_sizes:
-            if not isinstance(model, AcousticFeatureGenerator):
+            if not isinstance(model, AcousticFeatureGeneration):
                 raise TypeError(
                     "a codec with acoustic codebooks requires an "
                     "AcousticFeatureGenerator."

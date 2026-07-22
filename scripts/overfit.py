@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Union, cast
 
 import hydra
 import torch
+from anytrain.lightning import PerformanceCallback
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig
@@ -30,6 +31,7 @@ from speech_to_speech.model import (
     SpeechToSpeechRVQModel,
 )
 from speech_to_speech.pl_module import SpeechToSpeechModule
+from speech_to_speech.performance import TrainingFlops
 from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import init_runtime
 from speech_to_speech.runtime.types import Codec
@@ -126,7 +128,6 @@ def run(config: OverfitConfig) -> None:
         list[Callback],
         [
             OutputsLogger(),
-            GradNormLogger(),
             TextRetentionLogger(
                 {
                     "zh_en": {
@@ -146,6 +147,8 @@ def run(config: OverfitConfig) -> None:
             summary,
         ],
     )
+    if not config.callbacks.performance.enabled:
+        callbacks.insert(1, GradNormLogger())
     if config.callbacks.sample.enabled:
         callbacks.insert(
             2,
@@ -156,21 +159,17 @@ def run(config: OverfitConfig) -> None:
         )
     if evaluation is not None:
         callbacks.append(evaluation)
-    if uses_acoustic_decoder:
-        if loss_pair is None or acoustic_type is None:
-            raise RuntimeError("acoustic composition metadata is unavailable.")
+    gradient = _gradient_logger(config, acoustic_type, loss_pair)
+    if gradient is not None:
         callbacks.insert(
             1,
-            GradLogger(
-                loss_pair,
-                "model.acoustic_flow.decoder.input.weight"
-                if acoustic_type is AcousticType.FLOW
-                else "model.acoustic_decoder.decoder.layers.0.self_attn.q_proj.weight",
-                every_n_steps=1,
-            ),
+            gradient,
         )
     if uses_acoustic_decoder and acoustic_type is AcousticType.FLOW:
         callbacks.insert(1, FlowMatchingLogger(rt.flow_matching, every_n_steps=1))
+    performance = _performance(config)
+    if performance is not None:
+        callbacks.insert(0, performance)
     trainer = build_trainer(config, output_dir, callbacks)
     trainer.fit(module, datamodule=datamodule)
 
@@ -280,6 +279,37 @@ def runtime_config(config: OverfitConfig) -> RuntimeConfig:
     return replace(
         config.runtime,
         device=None if device is None else str(device),
+    )
+
+
+def _performance(config: OverfitConfig) -> Callback | None:
+    performance = config.callbacks.performance
+    if not performance.enabled:
+        return None
+    return PerformanceCallback(
+        model_flops_per_batch=TrainingFlops(),
+        hardware_peak_flops=performance.hardware_peak_flops,
+        log_every_n_steps=performance.log_every_n_steps,
+        warmup_steps=performance.warmup_steps,
+        measure_window_steps=performance.measure_window_steps,
+        sync_cuda=performance.sync_cuda,
+        sync_distributed=performance.sync_distributed,
+    )
+
+
+def _gradient_logger(
+    config: OverfitConfig,
+    acoustic_type: AcousticType | None,
+    loss_pair: tuple[str, str] | None,
+) -> GradLogger | None:
+    if acoustic_type is None or config.callbacks.performance.enabled:
+        return None
+    if loss_pair is None:
+        raise RuntimeError("acoustic composition metadata is unavailable.")
+    return GradLogger(
+        loss_pair,
+        "model.backbone.model.layers.0.self_attn.q_proj.weight",
+        every_n_steps=1,
     )
 
 

@@ -27,8 +27,10 @@
 `generation.protocol` 定义 service 所依赖的窄模型协议：
 
 - `TokenGenerator`：公开 runtime、backbone 和 `generate_tokens()`。
-- `AcousticFeatureGenerator`：为具有 acoustic codebook 的 codec 增加
-  `generate_audio_features()`。
+- `AcousticFeatureGeneration`：只描述可选的 `generate_audio_features()` 能力。service 的
+  `model` 参数仍由 `TokenGenerator` 表达基础契约；需要独立 acoustic codebook 时再检查这个窄
+  runtime 协议，避免把 registered `nn.Module` backbone 等无关成员纳入能力识别。
+- `AcousticFeatureGenerator`：组合上述两个协议，供训练 composition 静态表达完整模型契约。
 - `TextEvaluationModel`：在 token generation 之外增加 hidden state 与 modality-local logits，
   用于 reference NLL。
 
@@ -96,7 +98,9 @@ audio 路径至少要生成一个 codec-decodable token。service 按
 codec 保留 batch 轴。flow 与 RVQ 都返回相同的 `AcousticGeneration`，service 不按 objective
 类型分叉。
 
-自回归 cache、sampling、allowed IDs、逐行 stop 状态和 frame condition 收集属于 model；请求
+自回归 cache、sampling、allowed IDs、逐行 stop 状态和 frame condition 收集属于 model。已有行
+生成 stop token 后，后续步骤只对剩余 active rows 执行 backbone 与 sampling；cache 同步收缩，
+最终 sequence 仍保持原 batch 顺序。请求
 分组、输入校验、结果裁剪与 decode 属于 service；ID range、token frame span 与 codec 能力属于
 runtime。三层不重复推导同一约束。
 

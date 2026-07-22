@@ -217,7 +217,8 @@ model 对外提供：
   每行有效 frame count。
 
 通用 `generate_sequence()` 自回归循环位于私有 `model/_generation.py`，具体模型不跨文件调用
-基类私有方法。循环首步编码完整多模态 prompt，后续复用 KV cache；cache 只属于单次调用。
+基类私有方法。循环首步编码完整多模态 prompt，后续复用 KV cache；已结束行会同步从输入和 cache
+移除，只让 active rows 继续计算。cache 只属于单次调用。
 
 `AcousticPrompt` 使用 `codes` 与 `token_positions`，只允许出现在 audio-source task。service 按 target modality 和是否存在 acoustic prompt 分组，左 padding 变长 prompt，逐行追踪 EOS/EOA，并恢复原请求顺序。
 
@@ -233,7 +234,9 @@ representation 时直接复用 model 返回的 frame count 裁剪 features；`(t
 
 ## 7. Data 与阶段配置
 
-DataModule 显式持有 runtime 与一个可更新的 Collator。初始 `task_weights` 在构造时确定；`StageSwitcher` 在 epoch 边界调用 `set_task_weights()`。`persistent_workers=False` 使下一 epoch worker 获得更新状态。
+DataModule 显式持有 runtime 与一个可更新的 Collator。初始 `task_weights` 在构造时确定；
+`StageSwitcher` 在 epoch 边界调用 `set_task_weights()`。task weights 位于进程共享数组，持久 worker
+在后续 collate 时读取新值；worker 侧 runtime 是不含 backbone/codec 的数据快照。
 
 同一组 task weights 只能包含相同 source/target modality 的任务，权重必须有限、非负且总和为
 正，以保证 batch 执行签名稳定。正式多任务 DDP 使用 `find_unused_parameters=True`；total

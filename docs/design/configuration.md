@@ -24,14 +24,37 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
 `src` 包。overfit 的 sample index 和 train budget 位于 experiment；数据源通过公开
 `DatasetConfig` 选择。overfit 的 `callbacks.evaluation.enabled` 控制声学生成评估；真实
 fixed-sample experiment 默认启用，随机输出不构成质量结论的 `toy_smoke` 显式关闭。oracle
-callbacks 总是成套使用，因此合并为单个 preset。
+callbacks 总是成套使用，因此合并为单个 preset。共享 `callback/performance` preset 只暴露开关、
+硬件峰值 override、记录 cadence、warmup、窗口、CUDA 同步和分布式起点对齐；训练 dtype 与 FLOPs
+口径由实际入口和 provider 决定，不作为可脱离模型配置的 Hydra 字段。
 
 ## 生产默认与完整链路测试
 
 裸 `scripts/codec_oracle.py` 组合 `configs/codec_oracle.yaml` 的生产训练默认：prepared dataset
-不设 `sample_limit`，启用 LBA，训练 1,000,000 steps，并由默认 trainer 使用 `bf16-mixed`；
-sample logging 与 checkpoint archive 都每 10,000 steps 触发。该入口不是 smoke test；需要短验收
-时必须显式选择 experiment，避免生产默认被测试预算污染。
+不设 `sample_limit` 或额外的 `max_seconds`，启用 LBA，训练 1,000,000 steps，并由默认 trainer 使用
+`bf16-mixed`；LBA 的 8 秒 batch budget 同时是单样本硬上限，默认 `overlong=error` 明确暴露未清洗
+样本，调用方可显式选择 `filter` 或 `truncate`。入口使用 8 个持久 worker、pinned memory 和
+4-batch LBA prefetch；sample logging 与 checkpoint archive 都每 10,000 steps 触发。该入口不是 smoke test；
+需要短验收时必须显式选择 experiment，避免生产默认被测试预算污染。
+
+codec oracle 默认启用 `anytrain.PerformanceCallback`，通过
+`codec_oracle.TrainingFlops` 按当前 local-rank batch 估算训练 FLOPs；硬件峰值默认由 anytrain 按
+设备和实际 compute dtype 推断，特殊机器可覆盖 `callbacks.performance.hardware_peak_flops`。生产
+配置每 100 optimizer steps 记录一次，跳过前 20 steps，并使用最近 100 steps 的 FLOPs/time 总和
+计算 MFU。四个 oracle smoke experiment 显式改为逐步记录、无 warmup、2-step 窗口。
+
+联合 token/Flow/RVQ 训练的 overfit root config 保持 `callbacks.performance.enabled: false`，避免短
+fixed-sample 验收默认承担性能测试。显式启用时必须同时关闭 sample logging，例如
+`callbacks.performance.enabled=true callbacks.sample.enabled=false`；两者同时启用会在入口边界明确
+失败。`SampleLogger` 在 `on_train_batch_start` 只由 rank zero 执行 generation，DDP 其他 rank 会在
+后续同步点等待，不能靠调整 callback 顺序可靠排除这段时间。
+
+满足该前提后，入口使用 `speech_to_speech.performance.TrainingFlops` 组装
+`anytrain.PerformanceCallback`，并沿用同一套硬件峰值 override、cadence、warmup、窗口和 CUDA 同步
+配置。performance callback 位于 callback 列表首位，使其 step timer 在后续 batch-end 诊断前结束；
+该模式不组装 `GradLogger` 或重复计算全局 norm 的 `GradNormLogger`，因为这些额外计算会进入实测
+step time，却不属于 provider 统计的训练 FLOPs。DDP 默认在下一 batch timer 启动前执行 barrier，
+避免仅 rank zero 执行的 batch-end 诊断使各 rank 起点错位。
 
 训练输出由 `repo_output_root`、相对的 `output_subdir` 和派生的 `output_dir` 组成。checkpoint、音频、
 Hydra metadata 与 `metrics.json` 写入 `output_dir`；TensorBoard/CSV logger 的路径由 logging preset

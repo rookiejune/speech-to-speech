@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from anytrain.stats import TimeBucketedMean, time_bucketed_mean
 from lightning import LightningModule, Trainer
@@ -120,8 +120,8 @@ def _sync_bucketed(trainer: Trainer, bucketed: TimeBucketedMean) -> TimeBucketed
         return bucketed
     return TimeBucketedMean(
         edges=bucketed.edges,
-        total=reduce(bucketed.total, reduce_op="sum"),
-        count=reduce(bucketed.count, reduce_op="sum"),
+        total=cast(Tensor, reduce(bucketed.total, reduce_op="sum")),
+        count=cast(Tensor, reduce(bucketed.count, reduce_op="sum")),
     )
 
 

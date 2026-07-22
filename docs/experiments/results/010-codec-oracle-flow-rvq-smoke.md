@@ -35,7 +35,9 @@ DDP `metrics.json` 的 loss 是 callback 在两个 rank 上同步求 mean 后由
 - RVQ TensorBoard 包含总/逐 codebook CE、总/逐 codebook sampled accuracy、feature MSE、三个
   codebook loss histogram、grad norm 和 reconstruction/sample audio。
 - 四组都保留 `step-1.ckpt`、`step-2.ckpt` 和 `last.ckpt`。Flow checkpoint 约 2.56 GB，RVQ
-  checkpoint 约 2.65 GB；non-finite callback 保持启用且未报告异常。
+  checkpoint 约 2.65 GB；non-finite callback 保持启用且未报告异常。这两个大小来自当时仍持有
+  完整 Qwen 的历史 wrapper；当前轻量 oracle 已从 state dict 移除 backbone，实际新 checkpoint
+  大小需在下一次真实资源验收中重新记录，不能沿用本表数值。
 - 两组 DDP 的实际 world size 均为 2，并各写出两份独立 rank 的 LBA log/jsonl。
   RVQ 使用静态 `ddp` 完成两个 backward/optimizer step，没有 unused-parameter 错误。
 

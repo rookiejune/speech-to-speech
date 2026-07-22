@@ -6,7 +6,7 @@ from .dataset import (
     load_dataset,
 )
 from .module import Config, DataLoaderConfig, DataModule
-from .protocol import DataRuntime, DatasetRuntime
+from .protocol import DataRuntime, DataRuntimeSnapshot, DatasetRuntime
 from .types import (
     ACOUSTIC_PAD_ID,
     AcousticPrompt,
@@ -27,6 +27,7 @@ __all__ = [
     "DataLoaderConfig",
     "DataModule",
     "DataRuntime",
+    "DataRuntimeSnapshot",
     "DatasetConfig",
     "DatasetName",
     "DatasetRuntime",

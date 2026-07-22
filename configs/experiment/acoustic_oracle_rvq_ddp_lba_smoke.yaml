@@ -9,6 +9,8 @@ output_subdir: 005-codec-oracle-ddp-lba-smoke/${runtime.codec}/${codec_oracle.ob
 codec_oracle:
   data:
     sample_limit: 32
+    max_seconds: 4.0
+    overlong: truncate
     batch_size: 8
     num_workers: 0
     pin_memory: false
@@ -26,6 +28,10 @@ trainer:
   log_every_n_steps: 1
 
 callbacks:
+  performance:
+    log_every_n_steps: 1
+    warmup_steps: 0
+    measure_window_steps: 2
   oracle:
     sample_every_n_steps: 1
     histogram_every_n_steps: 1

@@ -1,23 +1,26 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from collections.abc import Iterable, Mapping, Sequence
-from typing import TypedDict
+from dataclasses import dataclass, field
+from typing import TypedDict, cast
 
 from anydataset.types import Sample as RawSample
 from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader
+from typing_extensions import NotRequired
 
+from ..task import Task
 from .collator import Collator
 from .dataset import DatasetConfig, load_dataset
-from .protocol import DatasetRuntime
-from ..task import Task
+from .protocol import DataRuntime, DataRuntimeSnapshot, DatasetRuntime
 from .types import ModelBatch
 
 
 class DataLoaderConfig(TypedDict):
     batch_size: int
     num_workers: int
+    pin_memory: NotRequired[bool]
+    persistent_workers: NotRequired[bool]
 
 
 @dataclass
@@ -25,6 +28,22 @@ class Config:
     codec: str
     dataloader: DataLoaderConfig
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
+
+    def __post_init__(self) -> None:
+        batch_size = self.dataloader["batch_size"]
+        num_workers = self.dataloader["num_workers"]
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int):
+            raise TypeError("dataloader batch_size must be an integer.")
+        if batch_size <= 0:
+            raise ValueError("dataloader batch_size must be positive.")
+        if isinstance(num_workers, bool) or not isinstance(num_workers, int):
+            raise TypeError("dataloader num_workers must be an integer.")
+        if num_workers < 0:
+            raise ValueError("dataloader num_workers must be non-negative.")
+        for name in ("pin_memory", "persistent_workers"):
+            value = self.dataloader.get(name, False)
+            if not isinstance(value, bool):
+                raise TypeError(f"dataloader {name} must be a boolean.")
 
 
 class DataModule(LightningDataModule):
@@ -64,9 +83,18 @@ class DataModule(LightningDataModule):
     def train_dataloader(self) -> Iterable[ModelBatch]:
         if self._train_dataset is None:
             raise RuntimeError("DataModule.setup() must run before train_dataloader().")
+        loader = self.config.dataloader
+        num_workers = loader["num_workers"]
+        if not isinstance(self.collator.runtime, DataRuntimeSnapshot):
+            snapshot = DataRuntimeSnapshot.from_runtime(self.runtime)
+            self.collator.runtime = cast(DataRuntime, cast(object, snapshot))
         return DataLoader(
             self._train_dataset,
-            **self.config.dataloader,
-            persistent_workers=False,
+            batch_size=loader["batch_size"],
+            num_workers=num_workers,
+            pin_memory=loader.get("pin_memory", False),
+            persistent_workers=(
+                loader.get("persistent_workers", False) and num_workers > 0
+            ),
             collate_fn=self.collator,
         )

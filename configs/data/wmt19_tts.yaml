@@ -3,4 +3,3 @@ root:
 split: train
 toy_samples: 8
 toy_frames: 4
-sample_index: 0

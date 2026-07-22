@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -18,9 +19,10 @@ from ..callback._lightning import (
     text_experiment,
 )
 from ..loss.types import LossItem
-from ..reporting import window_summary
 from .trace import event, timed
 from .types import Objective
+
+_LOSS_WINDOW = 20
 
 
 class _AcousticFlowScreening(Protocol):
@@ -67,7 +69,7 @@ class Logger(Callback):
         self.histogram_every_n_steps = histogram_every_n_steps
         self.save_audio = save_audio
         self.metadata = dict(metadata)
-        self.losses: list[float] = []
+        self._losses = _LossWindow()
         self.samples: list[dict[str, float | int]] = []
 
     def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
@@ -104,12 +106,7 @@ class Logger(Callback):
         del batch, batch_idx
         loss = outputs.get("loss") if isinstance(outputs, Mapping) else outputs
         if isinstance(loss, Tensor):
-            reduced = trainer.strategy.reduce(
-                loss.detach().float(),
-                reduce_op="mean",
-            )
-            if trainer.is_global_zero:
-                self.losses.append(float(reduced))
+            self._losses.append(loss)
         if trainer.is_global_zero and isinstance(outputs, Mapping):
             item = outputs.get(
                 "flow_matching" if self.objective is Objective.FLOW else "rvq"
@@ -129,14 +126,15 @@ class Logger(Callback):
             self._sample(trainer, pl_module)
 
     def on_train_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        loss = self._losses.summary(trainer, pl_module)
         if not trainer.is_global_zero:
             return
         if not self.samples or self.samples[-1]["step"] != trainer.global_step:
             self._sample(trainer, pl_module)
         report = {
             **self.metadata,
-            "steps": len(self.losses),
-            "loss": window_summary(self.losses),
+            "steps": loss["steps"],
+            "loss": loss,
             "samples": self.samples,
         }
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -162,9 +160,7 @@ class Logger(Callback):
                 primary = metrics["code_accuracy"]
             else:
                 raise AssertionError(f"unsupported objective: {self.objective}")
-        self.samples.append(
-            {"step": trainer.global_step, "value": primary, **metrics}
-        )
+        self.samples.append({"step": trainer.global_step, "value": primary, **metrics})
         experiment = scalar_experiment(trainer)
         if experiment is not None:
             for name, value in metrics.items():
@@ -288,6 +284,71 @@ class Logger(Callback):
             waveform.detach().float().cpu()[0],
             self.sample_rate,
         )
+
+
+class _LossWindow:
+    """Keep bounded GPU scalars and aggregate ranks once at train end."""
+
+    def __init__(self, window: int = _LOSS_WINDOW) -> None:
+        self.window = window
+        self.count = 0
+        self.first: list[Tensor] = []
+        self.last: deque[Tensor] = deque(maxlen=window)
+
+    def append(self, value: Tensor) -> None:
+        scalar = value.detach().float()
+        if scalar.numel() != 1:
+            raise ValueError("codec oracle total loss must be scalar.")
+        scalar = scalar.reshape(())
+        self.count += 1
+        if len(self.first) < self.window:
+            self.first.append(scalar)
+        self.last.append(scalar)
+
+    def summary(
+        self,
+        trainer: Trainer,
+        module: LightningModule,
+    ) -> dict[str, float | int | None]:
+        if self.count == 0:
+            local = torch.zeros(7, dtype=torch.float64, device=module.device)
+        else:
+            first = torch.stack(self.first).double()
+            last = torch.stack(tuple(self.last)).double()
+            local = torch.stack(
+                (
+                    first.new_tensor(float(self.count)),
+                    first[0],
+                    last[-1],
+                    first.sum(),
+                    first.new_tensor(float(first.numel())),
+                    last.sum(),
+                    last.new_tensor(float(last.numel())),
+                )
+            )
+        reduced = trainer.strategy.reduce(local, reduce_op="sum")
+        values = reduced.detach().cpu().tolist()
+        world_size = int(getattr(trainer, "world_size", 1))
+        if world_size <= 0:
+            raise ValueError("trainer world size must be positive.")
+        steps = int(round(values[0] / world_size))
+        if steps == 0:
+            return {"steps": 0}
+        first_count = int(round(values[4]))
+        last_count = int(round(values[6]))
+        if first_count <= 0 or last_count <= 0:
+            raise RuntimeError("codec oracle loss windows are unexpectedly empty.")
+        first_mean = values[3] / first_count
+        last_mean = values[5] / last_count
+        return {
+            "steps": steps,
+            "window": min(self.window, steps),
+            "first": values[1] / world_size,
+            "last": values[2] / world_size,
+            "first_mean": first_mean,
+            "last_mean": last_mean,
+            "last_to_first": None if first_mean == 0 else last_mean / first_mean,
+        }
 
 
 __all__ = ["Logger"]

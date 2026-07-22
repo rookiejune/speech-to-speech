@@ -1,0 +1,7 @@
+enabled: true
+hardware_peak_flops:
+log_every_n_steps: 100
+warmup_steps: 20
+measure_window_steps: 100
+sync_cuda: true
+sync_distributed: true

@@ -140,6 +140,6 @@ repository collection root:
 
 ```bash
 PYTHONPATH=speech-to-speech/src:workspace/src basedpyright --project speech-to-speech/pyrightconfig.json --pythonpath "$(command -v python)"
-PYTHONPATH=speech-to-speech:speech-to-speech/src:workspace/src python -m unittest discover -s speech-to-speech/tests -v
+DYNAMIC_HOME=/private/tmp/speech-to-speech-test PYTHONPATH=speech-to-speech:speech-to-speech/src:workspace/src python -m unittest discover -s speech-to-speech/tests -v
 PYTHONPATH=speech-to-speech/src:workspace/src python -m compileall -q speech-to-speech/src speech-to-speech/scripts speech-to-speech/tests
 ```

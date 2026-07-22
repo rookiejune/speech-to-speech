@@ -13,6 +13,9 @@ task: tts
 run_name: toy-${acoustic.name}
 output_subdir: toy-smoke/${task}/${run_name}
 
+data:
+  sample_index: 0
+
 acoustic:
   decoder:
     hidden_dim: 32

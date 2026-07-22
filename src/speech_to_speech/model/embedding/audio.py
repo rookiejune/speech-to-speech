@@ -104,8 +104,6 @@ def merge_by_positions(
 
     active = mask & positions.ge(0)
     active_positions = positions[active]
-    if bool((active_positions >= sequence_length).any()):
-        raise ValueError("frame position exceeds sequence length.")
     if active_positions.numel() == 0:
         output = features.new_zeros(
             features.size(0), sequence_length, features.size(-1)
@@ -161,7 +159,9 @@ def base_weight(codec: Codec, tokenizer: AudioTokenizer) -> Tensor:
         if spans.shape != (end - start,) or bool((spans <= 0).any()):
             raise ValueError("audio tokenizer tokens must have positive frame spans.")
         if int(spans.sum()) != unit_ids.size(0):
-            raise ValueError("audio tokenizer spans must align with decoded codec units.")
+            raise ValueError(
+                "audio tokenizer spans must align with decoded codec units."
+            )
         spans = spans.to(device=codebook.device)
 
         groups = torch.repeat_interleave(

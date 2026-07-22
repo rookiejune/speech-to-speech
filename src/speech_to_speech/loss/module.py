@@ -182,6 +182,7 @@ class RVQObjective(Objective[RVQObjectiveModel]):
                 logits,
                 labels,
                 batch.acoustic_target_mask,
+                validate=False,
             )
             result["rvq"] = acoustic
             result["loss"] = result["loss"] + acoustic.loss.mean()

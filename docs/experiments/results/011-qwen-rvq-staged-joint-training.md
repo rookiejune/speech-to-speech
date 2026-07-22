@@ -46,7 +46,8 @@ features 并通过 LongCat decode；它不是端到端 autoregressive generation
 每个任务的 3 个记录点乘 4 个 seed 均成功 decode，指标全部 finite。feature MSE 没有一致
 改善，因此仍只作为诊断量。`GradLogger` 当前在 acoustic decoder 的 q-proj 上比较 token/RVQ
 梯度；token objective 不经过该参数，token norm 为 0，故 cosine 记录为 `NaN`。这不是模型
-梯度 non-finite，但说明该指标必须改到计划中定义的真正共享参数后才可用于权重校准。
+梯度 non-finite。后续代码已把该 probe 改到 Qwen attention 的共享 q-proj，但本次历史结果
+仍不可用于权重校准，必须在后续运行中重新采集。
 
 ## Generation 阻塞
 

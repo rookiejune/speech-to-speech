@@ -9,7 +9,6 @@ source "${REPOS_ROOT}/workspace/jobs/env.sh"
 export SPEECH_TO_SPEECH_ROOT
 export PYTHONPATH="${SPEECH_TO_SPEECH_ROOT}/src:${REPOS_ROOT}/UniCodec:${REPOS_ROOT}/third_party/LongCat-Audio-Codec:${REPOS_ROOT}/third_party/length-based-batching-adapter/src:${PYTHONPATH:-}"
 export SPEECH_TO_SPEECH_PYTHON="${SPEECH_TO_SPEECH_PYTHON:-${WORKSPACE_PYTHON:-python}}"
-export SPEECH_TO_SPEECH_UNICODEC_PYTHON="${SPEECH_TO_SPEECH_UNICODEC_PYTHON:-${SPEECH_TO_SPEECH_PYTHON}}"
 if [[ -z "${SPEECH_TO_SPEECH_TRAIN_ROOT:-}" ]]; then
     : "${DYNAMIC_HOME:?Set DYNAMIC_HOME or SPEECH_TO_SPEECH_TRAIN_ROOT before sourcing jobs/env.sh}"
     SPEECH_TO_SPEECH_TRAIN_ROOT="${DYNAMIC_HOME}/train/speech-to-speech"

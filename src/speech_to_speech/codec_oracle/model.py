@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from functools import cached_property
+from typing import Any, Protocol
 
 import torch
 from anytrain.framework.flow_matching import ContinuousFlowRuntime
@@ -10,15 +11,155 @@ from torch import Tensor, nn
 
 from ..loss.causal_lm import CausalAcousticLoss
 from ..loss.flow_matching import AcousticFlowLoss
-from ..model import SpeechToSpeechFlowModel, SpeechToSpeechRVQModel
+from ..model import (
+    AcousticDiT,
+    AcousticFlow,
+    AcousticRVQDecoder,
+    AdapterType,
+    DecoderConfig,
+)
+from ..model.adapter import create_adapter
+from ..runtime.types import Codec
 from .trace import timed
 from .types import Initialization
+
+
+class _Runtime(Protocol):
+    @cached_property
+    def codec(self) -> Codec: ...
+
+
+class _AcousticOracleModel(nn.Module):
+    """The trainable audio-side subset shared by oracle objectives.
+
+    This deliberately has no reference to ``runtime.backbone``.  The semantic
+    embedding and adapter are built with the same helpers used by ``TokenModel``;
+    the acoustic decoder classes are the production implementations.  Keeping
+    this subset under a nested ``model`` attribute gives checkpoints a stable
+    ``model.*`` prefix while making it impossible to accidentally save Qwen.
+    """
+
+    def __init__(
+        self,
+        *,
+        config_adapter: AdapterType | None,
+        runtime: _Runtime,
+        condition_dim: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> None:
+        super().__init__()
+        if condition_dim <= 0:
+            raise ValueError("oracle condition dimension must be positive.")
+        self.runtime = runtime
+        self.semantic_audio_embedding = _semantic_embedding(
+            runtime.codec,
+            device=device,
+            dtype=dtype,
+        )
+        self.semantic_audio_adapter = create_adapter(
+            config_adapter,
+            self.semantic_audio_embedding.embedding_dim,
+            condition_dim,
+        ).to(device=device, dtype=dtype)
+
+    def semantic_condition(self, semantic_codes: Tensor) -> Tensor:
+        if semantic_codes.dim() != 2:
+            raise ValueError("semantic codes must have shape [batch, frame].")
+        return self.semantic_audio_adapter(
+            self.semantic_audio_embedding(semantic_codes)
+        )
+
+    def acoustic_code_features(self, codes: Tensor) -> Tensor:
+        """Convert codec-local codes to the decoder's configured dtype/device."""
+        reference = self.semantic_audio_embedding.weight
+        return self.runtime.codec.acoustic_codes_to_features(codes).to(
+            device=reference.device,
+            dtype=reference.dtype,
+        )
+
+    def acoustic_target_latent(self, codes: Tensor) -> Tensor:
+        if codes.dim() != 3:
+            raise ValueError("target acoustic codes must have shape [B, F, N].")
+        safe_codes = codes.clamp_min(0)
+        features = self.acoustic_code_features(safe_codes)
+        return features.masked_fill((codes < 0).all(dim=-1, keepdim=True), 0)
+
+
+class AcousticFlowModel(_AcousticOracleModel):
+    """Lightweight flow oracle model with the formal acoustic decoder."""
+
+    def __init__(
+        self,
+        *,
+        adapter: AdapterType | None,
+        runtime: _Runtime,
+        condition_dim: int,
+        flow_runtime: ContinuousFlowRuntime,
+        decoder: DecoderConfig,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> None:
+        super().__init__(
+            config_adapter=adapter,
+            runtime=runtime,
+            condition_dim=condition_dim,
+            device=device,
+            dtype=dtype,
+        )
+        self.acoustic_flow = AcousticFlow(
+            condition_dim,
+            runtime.codec.acoustic_feature_dim,
+            flow_runtime,
+            hidden_dim=decoder.hidden_dim,
+            layers=decoder.layers,
+            heads=decoder.heads,
+            ffn_ratio=decoder.ffn_ratio,
+        ).to(device=device, dtype=dtype)
+
+    @property
+    def acoustic_decoder(self) -> AcousticDiT:
+        return self.acoustic_flow.decoder
+
+
+class AcousticRVQModel(_AcousticOracleModel):
+    """Lightweight RVQ oracle model with the formal acoustic decoder."""
+
+    def __init__(
+        self,
+        *,
+        adapter: AdapterType | None,
+        runtime: _Runtime,
+        condition_dim: int,
+        decoder: DecoderConfig,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> None:
+        super().__init__(
+            config_adapter=adapter,
+            runtime=runtime,
+            condition_dim=condition_dim,
+            device=device,
+            dtype=dtype,
+        )
+        sizes = runtime.codec.acoustic_codebook_sizes
+        if not sizes:
+            raise ValueError("RVQ oracle requires at least one acoustic codebook.")
+        self.acoustic_decoder = AcousticRVQDecoder(
+            condition_dim,
+            len(sizes),
+            sizes,
+            hidden_dim=decoder.hidden_dim,
+            layers=decoder.layers,
+            heads=decoder.heads,
+            ffn_ratio=decoder.ffn_ratio,
+        ).to(device=device, dtype=dtype)
 
 
 class AcousticFlowScreening(pl.LightningModule):
     def __init__(
         self,
-        model: SpeechToSpeechFlowModel,
+        model: AcousticFlowModel,
         *,
         initialization: Initialization,
         seed: int,
@@ -30,10 +171,12 @@ class AcousticFlowScreening(pl.LightningModule):
     ) -> None:
         super().__init__()
         self.model = model
-        self.model.requires_grad_(False)
-        self.model.semantic_audio_embedding.requires_grad_(True)
-        self.model.semantic_audio_adapter.requires_grad_(True)
-        self.model.acoustic_flow.requires_grad_(True)
+        _train_only(
+            self.model,
+            self.model.semantic_audio_embedding,
+            self.model.semantic_audio_adapter,
+            self.model.acoustic_flow,
+        )
         weight = initialization.weight(
             self.model.semantic_audio_embedding.weight.detach(),
             seed=seed,
@@ -49,13 +192,7 @@ class AcousticFlowScreening(pl.LightningModule):
         self._logged_dequantize = False
 
     def condition(self, semantic_codes: Tensor) -> Tensor:
-        start, _ = self.model.layout.blocks["audio"]
-        token_labels = semantic_codes + start
-        positions = torch.arange(
-            semantic_codes.size(1),
-            device=semantic_codes.device,
-        ).expand_as(semantic_codes)
-        return self.model.target_frame_label_condition(token_labels, positions)
+        return self.model.semantic_condition(semantic_codes)
 
     def features(self, acoustic_codes: Tensor) -> Tensor:
         return self.model.acoustic_target_latent(acoustic_codes).float()
@@ -101,9 +238,9 @@ class AcousticFlowScreening(pl.LightningModule):
     def configure_optimizers(self):
         return torch.optim.AdamW(
             [
-                *self.model.semantic_audio_embedding.parameters(),
-                *self.model.semantic_audio_adapter.parameters(),
-                *self.model.acoustic_flow.parameters(),
+                parameter
+                for parameter in self.model.parameters()
+                if parameter.requires_grad
             ],
             lr=self.learning_rate,
             weight_decay=self.weight_decay,
@@ -122,7 +259,7 @@ class AcousticRVQScreening(pl.LightningModule):
 
     def __init__(
         self,
-        model: SpeechToSpeechRVQModel,
+        model: AcousticRVQModel,
         *,
         initialization: Initialization,
         seed: int,
@@ -131,13 +268,12 @@ class AcousticRVQScreening(pl.LightningModule):
     ) -> None:
         super().__init__()
         self.model = model
-        self.model.requires_grad_(False)
-        self.model.semantic_audio_embedding.requires_grad_(True)
-        self.model.semantic_audio_adapter.requires_grad_(True)
-        self.model.acoustic_decoder.requires_grad_(True)
-        self.model.acoustic_decoder.decoder.embed_tokens.requires_grad_(False)
-        self.model.acoustic_decoder.codebook_embeddings[-1].requires_grad_(False)
-        self.model.acoustic_decoder.embedding_projections[-1].requires_grad_(False)
+        _train_only(
+            self.model,
+            self.model.semantic_audio_embedding,
+            self.model.semantic_audio_adapter,
+            self.model.acoustic_decoder,
+        )
         weight = initialization.weight(
             self.model.semantic_audio_embedding.weight.detach(),
             seed=seed,
@@ -149,13 +285,7 @@ class AcousticRVQScreening(pl.LightningModule):
         self.weight_decay = weight_decay
 
     def condition(self, semantic_codes: Tensor) -> Tensor:
-        start, _ = self.model.layout.blocks["audio"]
-        token_labels = semantic_codes + start
-        positions = torch.arange(
-            semantic_codes.size(1),
-            device=semantic_codes.device,
-        ).expand_as(semantic_codes)
-        return self.model.target_frame_label_condition(token_labels, positions)
+        return self.model.semantic_condition(semantic_codes)
 
     def features(self, acoustic_codes: Tensor) -> Tensor:
         return self.model.acoustic_code_features(acoustic_codes).float()
@@ -184,7 +314,7 @@ class AcousticRVQScreening(pl.LightningModule):
         semantic_codes = safe_codes[..., 0]
         acoustic_codes = safe_codes[..., 1:]
         logits = self._logits(semantic_codes, acoustic_codes, mask)
-        item = self.objective(logits, acoustic_codes, mask)
+        item = self.objective(logits, acoustic_codes, mask, validate=False)
         loss = item.loss.mean()
         self.log("train/rvq_loss", loss, on_step=True, prog_bar=True, sync_dist=True)
         if item.details is not None:
@@ -200,13 +330,12 @@ class AcousticRVQScreening(pl.LightningModule):
         return {"loss": loss, "rvq": item}
 
     def configure_optimizers(self):
-        parameters = [
-            *self.model.semantic_audio_embedding.parameters(),
-            *self.model.semantic_audio_adapter.parameters(),
-            *self.model.acoustic_decoder.parameters(),
-        ]
         return torch.optim.AdamW(
-            [parameter for parameter in parameters if parameter.requires_grad],
+            [
+                parameter
+                for parameter in self.model.parameters()
+                if parameter.requires_grad
+            ],
             lr=self.learning_rate,
             weight_decay=self.weight_decay,
         )
@@ -221,4 +350,44 @@ class AcousticRVQScreening(pl.LightningModule):
         )
 
 
-__all__ = ["AcousticFlowScreening", "AcousticRVQScreening"]
+def _semantic_embedding(
+    codec: Codec,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> nn.Embedding:
+    codebook = codec.semantic_codebook
+    if not isinstance(codebook, Tensor):
+        raise TypeError("codec semantic codebook must be a tensor.")
+    if codebook.dim() != 2:
+        raise ValueError(
+            "codec oracle requires one semantic codebook with shape [vocab, dim]."
+        )
+    if codebook.size(0) < 1 or codebook.size(1) < 1:
+        raise ValueError("codec semantic codebook must be non-empty.")
+    if not codebook.is_floating_point():
+        raise TypeError("codec semantic codebook must be floating point.")
+    if not bool(torch.isfinite(codebook).all()):
+        raise ValueError("codec semantic codebook must contain finite values.")
+    weight = codebook.detach().to(device=device, dtype=dtype).clone()
+    return nn.Embedding.from_pretrained(weight, freeze=False)
+
+
+def _train_only(model: nn.Module, *modules: nn.Module) -> None:
+    trainable = [
+        parameter
+        for module in modules
+        for parameter in module.parameters()
+        if parameter.requires_grad
+    ]
+    model.requires_grad_(False)
+    for parameter in trainable:
+        parameter.requires_grad_(True)
+
+
+__all__ = [
+    "AcousticFlowModel",
+    "AcousticFlowScreening",
+    "AcousticRVQModel",
+    "AcousticRVQScreening",
+]

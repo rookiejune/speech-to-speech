@@ -35,11 +35,17 @@ class TokenLoss(nn.Module):
         valid = target.ne(-100)
         start, end = self.layout.blocks[modality.value]
         modality_mask = target.ge(start) & target.lt(end)
-        if bool((valid & ~modality_mask).any()):
-            raise ValueError(
-                f"labels contain an id outside the {modality.value} layout block."
+        invalid = torch.stack(
+            (
+                (valid & ~modality_mask).any(),
+                ~valid.any(dim=1).all(),
             )
-        if not bool(valid.any(dim=1).all()):
+        )
+        if bool(invalid.any()):
+            if bool(invalid[0]):
+                raise ValueError(
+                    f"labels contain an id outside the {modality.value} layout block."
+                )
             raise ValueError(
                 "each token label row must contain at least one target token."
             )

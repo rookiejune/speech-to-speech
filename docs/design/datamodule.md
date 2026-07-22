@@ -8,6 +8,8 @@
 - `protocol.DataRuntime`：datamodule 所需资源的最小只读协议，公开 codec identity/view、
   text/audio tokenizer、layout 和 special token ID。正式 `Runtime` 与测试 fake 都通过该协议
   显式注入。
+- `DataRuntimeSnapshot`：DataLoader worker 使用的可 pickle 数据视图，只保存 tokenizer、layout
+  blocks 和 special token ID；不携带 runtime 已缓存的 backbone、codec 或 CUDA module。
 - `DatasetRuntime`：在 `DataRuntime` 上增加正式 codec object，仅供 dataset factory 根据
   codebook metadata 构造 toy prepared-code samples。
 - `parser.parse_sample()`：把 `anydataset.types.Sample` 解析为 `SpeechPair`。它解释当前
@@ -27,8 +29,8 @@
 - `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts` prepared data 或确定性的内存
   `toy` data。toy codes 根据正式 codec 的 semantic/acoustic codebook 数量和值域构造。
 - `ToyDataset`：提供完整 source/target audio+text raw sample，不读取文件、不修改全局 RNG。
-- `DataLoaderConfig(batch_size, num_workers)` / `Config(codec, dataloader, dataset)`：公开的
-  DataLoader、dataset 与 DataModule 配置结构。
+- `DataLoaderConfig(batch_size, num_workers, pin_memory, persistent_workers)` /
+  `Config(codec, dataloader, dataset)`：公开的 DataLoader、dataset 与 DataModule 配置结构。
 - `DataModule(config, runtime, task_weights)`：Lightning 数据入口；`setup()` 加载所选 dataset，
   并在加载前校验 config 与 runtime 的 codec identity。重复调用不会重新加载已持有的数据集。
 
@@ -85,6 +87,7 @@ acoustic_target: AcousticTarget | None
   acoustic side channel，因此这些 target code 字段为 `None`。
 - `ModelBatch.from_samples()` 显式接收 `pad_token_id`，在 padding 前要求 acoustic/semantic
   codes 是非空、二维、非负有符号整数 tensor，并检查 prompt/target 内部 frame 轴；
+  acoustic target 的 `token_positions` 必须至少为 1，保证每个 frame 都有 causal predictor；
   `ModelBatch` 自身要求 input/label 是非空、对齐的有符号整数二维 batch、每行恰有一个
   `Task`，并维护单一 task execution signature。codebook 上界由持有具体 codec size 的下游
   负责。
@@ -94,9 +97,11 @@ acoustic_target: AcousticTarget | None
 - 同一 `task_weights` 中的任务必须具有相同 source/target modality，保证 DDP 各 rank 走相同
   模型路径。每项权重必须有限且非负，总和必须有限且为正；非法 stage 更新在替换现有权重前
   报错。DataModule 构造时必须提供初始权重；stage callback 只在 epoch 边界调用
-  `set_task_weights()`，不依赖 Trainer 重建 DataLoader。
-- `DataLoaderConfig` 只允许入口可调的 `batch_size` 与 `num_workers`；`persistent_workers=False`
-  由 DataModule 固定，以保证下一 epoch 的 worker 取得 stage 更新后的 collator。
+  `set_task_weights()`。task weights 使用进程共享数组，因此持久 worker 会在下一次 collate 时
+  看到更新，不要求 Trainer 重建 DataLoader。
+- `DataModule` 在构造 loader 前把 collator 的完整 runtime 替换为 `DataRuntimeSnapshot`；主进程
+  仍持有正式 runtime 供 dataset setup 使用。`persistent_workers` 只在 `num_workers > 0` 时启用，
+  `pin_memory` 由入口显式配置。
 - `DataModule.train_samples()` 是 callback 按索引读取已 setup 训练样本的公开边界；callback
   不读取私有 dataset 字段。
 - parser 生成 `Speech.audio_token_spans`，`Speech` 校验 spans 与 semantic frame 完整对齐；

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -23,7 +25,9 @@ from scripts.codec_oracle import (
     training_callbacks,
 )
 from speech_to_speech.codec_oracle import (
+    AcousticFlowModel,
     AcousticFlowScreening,
+    AcousticRVQModel,
     AcousticRVQScreening,
     DataConfig,
     DataModule,
@@ -32,10 +36,16 @@ from speech_to_speech.codec_oracle import (
     Logger as OracleLogger,
     Objective,
     collate,
+    codes,
     single_batch_loader,
 )
 from speech_to_speech.loss.types import LossItem
-from speech_to_speech.model import AcousticFlow, AcousticRVQDecoder, AdapterType
+from speech_to_speech.model import (
+    AcousticFlow,
+    AcousticRVQDecoder,
+    AdapterType,
+    DecoderConfig,
+)
 
 
 class CodecOracleTest(unittest.TestCase):
@@ -64,6 +74,7 @@ class CodecOracleTest(unittest.TestCase):
             "trainer.enable_checkpointing=false",
             "callbacks.grad_norm.enabled=false",
             "callbacks.nonfinite.enabled=false",
+            "callbacks.performance.enabled=false",
         )
         oracle = Callback()
 
@@ -87,6 +98,30 @@ class CodecOracleTest(unittest.TestCase):
         self.assertTrue(kwargs["save_last"])
         self.assertFalse(kwargs["auto_insert_metric_name"])
         self.assertIn(checkpoint.return_value, callbacks)
+
+    @patch("scripts.codec_oracle.TrainingFlops")
+    @patch("scripts.codec_oracle.PerformanceCallback")
+    def test_training_callbacks_configure_dynamic_mfu(
+        self,
+        performance,
+        training_flops,
+    ):
+        config = _config("callbacks.performance.hardware_peak_flops=123.0")
+        oracle = Callback()
+
+        callbacks = training_callbacks(config, oracle, Path(self.id()))
+
+        performance.assert_called_once_with(
+            model_flops_per_batch=training_flops.return_value,
+            hardware_peak_flops=123.0,
+            log_every_n_steps=100,
+            warmup_steps=20,
+            measure_window_steps=100,
+            sync_cuda=True,
+            sync_distributed=True,
+        )
+        self.assertIs(callbacks[0], performance.return_value)
+        self.assertIs(callbacks[1], oracle)
 
     def test_lba_loader_supports_lightning_sampler_injection(self):
         data = DataConfig(
@@ -144,6 +179,68 @@ class CodecOracleTest(unittest.TestCase):
         )
         self.assertTrue((batch["codes"][1, 1:] == -1).all())
 
+    def test_default_data_keeps_the_full_prepared_sequence(self):
+        value = codes(
+            _sample(5),
+            codec="longcat",
+            data=DataConfig(),
+            frame_rate=2.0,
+        )
+
+        self.assertEqual(tuple(value.shape), (5, 4))
+
+    def test_lba_budget_is_a_hard_sample_limit(self):
+        data = DataConfig(
+            max_seconds=None,
+            overlong="error",
+            lba=LBAConfig(enabled=True, max_batch_seconds=2.0),
+        )
+        with self.assertRaisesRegex(ValueError, "hard limit"):
+            codes(_sample(5), codec="longcat", data=data, frame_rate=2.0)
+
+        truncated = codes(
+            _sample(5),
+            codec="longcat",
+            data=DataConfig(
+                max_seconds=None,
+                overlong="truncate",
+                lba=LBAConfig(enabled=True, max_batch_seconds=2.0),
+            ),
+            frame_rate=2.0,
+        )
+        self.assertEqual(tuple(truncated.shape), (4, 4))
+
+    @patch("speech_to_speech.codec_oracle.data.wmt19_tts_codec")
+    def test_duration_filter_removes_overlong_samples(self, dataset):
+        dataset.return_value = [_sample(2), _sample(5), _sample(3)]
+        module = DataModule(
+            DataConfig(
+                overlong="filter",
+                num_workers=0,
+                lba=LBAConfig(enabled=True, max_batch_seconds=2.0),
+            ),
+            "longcat",
+            frame_rate=2.0,
+            output_dir=Path(self.id()),
+        )
+
+        with self.assertWarnsRegex(UserWarning, "filtered 1"):
+            module.setup()
+
+        self.assertEqual(len(module.dataset), 2)
+        self.assertEqual(module.filtered_samples, 1)
+
+    def test_data_rejects_invalid_duration_limits(self):
+        for value in (0.0, -1.0, float("nan")):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValueError, "max_seconds"),
+            ):
+                DataConfig(max_seconds=value)
+
+        with self.assertRaisesRegex(TypeError, "max_seconds"):
+            DataConfig(max_seconds=True)
+
     def test_single_batch_loader_keeps_discrete_training_inputs(self):
         codes = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
 
@@ -166,9 +263,15 @@ class CodecOracleTest(unittest.TestCase):
         self.assertTrue(torch.equal(first, second))
         self.assertFalse(torch.equal(first, codebook))
 
+    @patch("scripts.codec_oracle.condition_dim", return_value=4)
     @patch("scripts.codec_oracle.AcousticFlowScreening")
-    @patch("scripts.codec_oracle.SpeechToSpeechFlowModel")
-    def test_build_flow_consumes_model_and_oracle_configs(self, model, screening):
+    @patch("scripts.codec_oracle.AcousticFlowModel")
+    def test_build_flow_consumes_model_and_oracle_configs(
+        self,
+        model,
+        screening,
+        condition_dim,
+    ):
         config = _config(
             "model.semantic_audio_adapter=mlp",
             "codec_oracle.decoder.layers=3",
@@ -192,9 +295,16 @@ class CodecOracleTest(unittest.TestCase):
         )
 
         self.assertIs(built, screening.return_value)
-        built_model_config = model.call_args.args[0]
-        self.assertIs(built_model_config.semantic_audio_adapter, AdapterType.MLP)
-        self.assertEqual(model.call_args.kwargs["decoder"].layers, 3)
+        condition_dim.assert_called_once_with(config)
+        model.assert_called_once_with(
+            adapter=AdapterType.MLP,
+            runtime=runtime,
+            condition_dim=4,
+            flow_runtime=runtime.flow_matching,
+            decoder=config.codec_oracle.decoder,
+            device=torch.device("cpu"),
+            dtype=torch.bfloat16,
+        )
         self.assertTrue(
             torch.equal(
                 screening.call_args.kwargs["target_mean"],
@@ -208,9 +318,15 @@ class CodecOracleTest(unittest.TestCase):
             )
         )
 
+    @patch("scripts.codec_oracle.condition_dim", return_value=4)
     @patch("scripts.codec_oracle.AcousticRVQScreening")
-    @patch("scripts.codec_oracle.SpeechToSpeechRVQModel")
-    def test_build_rvq_consumes_model_and_oracle_configs(self, model, screening):
+    @patch("scripts.codec_oracle.AcousticRVQModel")
+    def test_build_rvq_consumes_model_and_oracle_configs(
+        self,
+        model,
+        screening,
+        condition_dim,
+    ):
         config = _config(
             "codec_oracle=rvq",
             "model.semantic_audio_adapter=mlp",
@@ -229,14 +345,58 @@ class CodecOracleTest(unittest.TestCase):
             codes,
             Initialization.CODEC,
             runtime,
+            torch.device("cpu"),
         )
 
         self.assertIs(built, screening.return_value)
-        built_model_config = model.call_args.args[0]
-        self.assertIs(built_model_config.semantic_audio_adapter, AdapterType.MLP)
-        self.assertEqual(model.call_args.kwargs["decoder"].layers, 3)
+        condition_dim.assert_called_once_with(config)
+        model.assert_called_once_with(
+            adapter=AdapterType.MLP,
+            runtime=runtime,
+            condition_dim=4,
+            decoder=config.codec_oracle.decoder,
+            device=torch.device("cpu"),
+            dtype=torch.bfloat16,
+        )
         self.assertEqual(metadata["objective"], "rvq")
         self.assertEqual(metadata["acoustic_codebook_sizes"], [7, 9])
+
+    def test_lightweight_oracle_models_do_not_register_a_backbone(self):
+        codec = SimpleNamespace(
+            semantic_codebook=torch.arange(32, dtype=torch.float32).reshape(8, 4),
+            acoustic_codebook_sizes=(7, 9),
+            acoustic_feature_dim=4,
+        )
+        runtime = SimpleNamespace(codec=codec)
+        decoder = DecoderConfig(hidden_dim=4, layers=1, heads=1, ffn_ratio=2)
+
+        flow = AcousticFlowModel(
+            adapter=AdapterType.LINEAR,
+            runtime=runtime,
+            condition_dim=4,
+            flow_runtime=_Flow(),
+            decoder=decoder,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        rvq = AcousticRVQModel(
+            adapter=AdapterType.LINEAR,
+            runtime=runtime,
+            condition_dim=4,
+            decoder=decoder,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+
+        for model in (flow, rvq):
+            with self.subTest(model=type(model).__name__):
+                keys = tuple(model.state_dict())
+                self.assertFalse(any("backbone" in key for key in keys))
+                self.assertFalse(hasattr(model, "backbone"))
+                self.assertEqual(
+                    tuple(model.semantic_condition(torch.tensor([[1, 2]])).shape),
+                    (1, 2, 4),
+                )
 
     def test_acoustic_flow_screening_uses_formal_model_target_latent(self):
         calls: list[torch.Tensor] = []
@@ -278,7 +438,9 @@ class CodecOracleTest(unittest.TestCase):
             for parameter in group["params"]
         }
         trainable = {
-            id(parameter) for parameter in module.parameters() if parameter.requires_grad
+            id(parameter)
+            for parameter in module.parameters()
+            if parameter.requires_grad
         }
         self.assertEqual(optimized, trainable)
 
@@ -319,9 +481,7 @@ class CodecOracleTest(unittest.TestCase):
             weight_decay=0.0,
         )
         batch = {
-            "codes": torch.tensor(
-                [[[1, 3, 4], [2, 5, 6], [-1, -1, -1]]]
-            ),
+            "codes": torch.tensor([[[1, 3, 4], [2, 5, 6], [-1, -1, -1]]]),
             "mask": torch.tensor([[True, True, False]]),
         }
 
@@ -361,7 +521,9 @@ class CodecOracleTest(unittest.TestCase):
             )
         )
         trainable = {
-            id(parameter) for parameter in module.parameters() if parameter.requires_grad
+            id(parameter)
+            for parameter in module.parameters()
+            if parameter.requires_grad
         }
         self.assertEqual(optimized, trainable)
 
@@ -382,8 +544,9 @@ class CodecOracleTest(unittest.TestCase):
         )
         codec = SimpleNamespace(
             decode_features=Mock(
-                side_effect=lambda semantic, features: semantic[..., 0].float()
-                + features[..., 0]
+                side_effect=lambda semantic, features: (
+                    semantic[..., 0].float() + features[..., 0]
+                )
             )
         )
         logger = OracleLogger(
@@ -416,9 +579,8 @@ class CodecOracleTest(unittest.TestCase):
         )
 
         self.assertEqual(logger.samples[0]["step"], 1)
-        self.assertEqual(logger.losses, [1.0])
-        strategy.reduce.assert_called_once()
-        self.assertEqual(strategy.reduce.call_args.kwargs, {"reduce_op": "mean"})
+        self.assertEqual(logger._losses.count, 1)
+        strategy.reduce.assert_not_called()
         self.assertIn("code_accuracy", logger.samples[0])
         self.assertIn("codebook_0_accuracy", logger.samples[0])
         scalar_tags = [call.args[0] for call in experiment.add_scalar.call_args_list]
@@ -433,6 +595,48 @@ class CodecOracleTest(unittest.TestCase):
         )
         experiment.add_audio.assert_called_once()
         codec.decode_features.assert_called_once()
+
+    def test_oracle_loss_window_reduces_once_at_train_end(self):
+        strategy = Mock()
+        strategy.reduce.side_effect = lambda value, *, reduce_op: value
+        trainer = SimpleNamespace(
+            global_step=3,
+            is_global_zero=True,
+            strategy=strategy,
+            world_size=1,
+        )
+        module = SimpleNamespace(device=torch.device("cpu"))
+        with TemporaryDirectory() as directory:
+            logger = OracleLogger(
+                objective=Objective.FLOW,
+                codec=Mock(),
+                codes=torch.ones((1, 2), dtype=torch.long),
+                output_dir=Path(directory),
+                sample_rate=16_000,
+                seed=0,
+                sample_every_n_steps=100,
+                histogram_every_n_steps=100,
+                save_audio=False,
+                metadata={},
+            )
+            for value in (1.0, 2.0, 4.0):
+                logger.on_train_batch_end(
+                    trainer,
+                    module,
+                    {"loss": torch.tensor(value)},
+                    None,
+                    0,
+                )
+            with patch.object(logger, "_sample"):
+                logger.on_train_end(trainer, module)
+
+            report = json.loads((Path(directory) / "metrics.json").read_text())
+
+        strategy.reduce.assert_called_once()
+        self.assertEqual(strategy.reduce.call_args.kwargs, {"reduce_op": "sum"})
+        self.assertEqual(report["steps"], 3)
+        self.assertEqual(report["loss"]["first"], 1.0)
+        self.assertEqual(report["loss"]["last"], 4.0)
 
 
 class _Flow:
@@ -469,6 +673,11 @@ class _OracleModel(nn.Module):
     def target_frame_label_condition(self, token_labels, positions):
         return self.semantic_audio_embedding(token_labels - 4)
 
+    def semantic_condition(self, semantic_codes):
+        return self.semantic_audio_adapter(
+            self.semantic_audio_embedding(semantic_codes)
+        )
+
     def acoustic_target_latent(self, labels):
         return self.dequantize(labels)
 
@@ -496,6 +705,11 @@ class _RVQOracleModel(nn.Module):
     def target_frame_label_condition(self, token_labels, positions):
         del positions
         return self.semantic_audio_embedding(token_labels - 4)
+
+    def semantic_condition(self, semantic_codes):
+        return self.semantic_audio_adapter(
+            self.semantic_audio_embedding(semantic_codes)
+        )
 
     def acoustic_code_features(self, codes):
         values = codes.float().sum(dim=-1, keepdim=True)

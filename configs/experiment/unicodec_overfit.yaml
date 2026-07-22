@@ -10,7 +10,10 @@ defaults:
 
 task: tts
 run_name: token
-output_subdir: 005-codec-screening/unicodec/formal
+output_subdir: 005-codec-screening/unicodec/overfit
+
+data:
+  sample_index: 0
 
 callbacks:
   sample:

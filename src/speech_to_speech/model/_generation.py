@@ -92,19 +92,29 @@ def generate_sequence(
     past_key_values: Cache | None = None
     condition_steps: list[Tensor] = []
     span_steps: list[Tensor] = []
-    finished = torch.zeros(
-        prompt_ids.size(0), dtype=torch.bool, device=prompt_ids.device
-    )
+    batch_size = prompt_ids.size(0)
+    active_rows = torch.arange(batch_size, dtype=torch.long, device=prompt_ids.device)
     for _ in range(max_new_tokens):
         inject_acoustic = past_key_values is None
+        active_attention_mask = (
+            attention_mask
+            if active_rows.numel() == batch_size
+            else attention_mask.index_select(0, active_rows)
+        )
         output = model.generation_step(
             input_ids,
-            attention_mask=attention_mask[:, :length],
-            acoustic_prompt_codes=acoustic_prompt_codes if inject_acoustic else None,
-            acoustic_prompt_positions=(
-                acoustic_prompt_positions if inject_acoustic else None
+            attention_mask=active_attention_mask[:, :length],
+            acoustic_prompt_codes=(
+                _rows(acoustic_prompt_codes, active_rows) if inject_acoustic else None
             ),
-            acoustic_prompt_mask=acoustic_prompt_mask if inject_acoustic else None,
+            acoustic_prompt_positions=(
+                _rows(acoustic_prompt_positions, active_rows)
+                if inject_acoustic
+                else None
+            ),
+            acoustic_prompt_mask=(
+                _rows(acoustic_prompt_mask, active_rows) if inject_acoustic else None
+            ),
             output_hidden_states=collect_audio_condition,
             token_ids=generation_token_ids,
             modality=generation_modality,
@@ -128,35 +138,69 @@ def generate_sequence(
             next_ids = next_indices + start
         else:
             next_ids = next_indices
-        next_ids = next_ids.unsqueeze(-1)
 
         if collect_audio_condition:
             if output.hidden_states is None:
                 raise RuntimeError("model did not return generation hidden states.")
             codec_start, codec_end = model.runtime.codec_audio_range
-            token_ids = next_ids[:, 0]
-            active = ~finished & token_ids.ge(codec_start) & token_ids.lt(codec_end)
-            local_ids = (token_ids - codec_start).clamp(
+            codec_tokens = next_ids.ge(codec_start) & next_ids.lt(codec_end)
+            local_ids = (next_ids - codec_start).clamp(
                 0, model.audio_token_frame_spans.numel() - 1
             )
             spans = model.audio_token_frame_spans.index_select(0, local_ids)
-            span_steps.append(spans.masked_fill(~active, 0))
-            condition_steps.append(output.hidden_states[-1][:, -1])
+            step_spans = spans.new_zeros(batch_size)
+            step_spans.index_copy_(
+                0,
+                active_rows,
+                spans.masked_fill(~codec_tokens, 0),
+            )
+            span_steps.append(step_spans)
+            active_condition = output.hidden_states[-1][:, -1]
+            step_condition = active_condition.new_zeros(
+                batch_size, active_condition.size(-1)
+            )
+            step_condition.index_copy_(0, active_rows, active_condition)
+            condition_steps.append(step_condition)
 
-        generated[:, length] = next_ids[:, 0]
+        if active_rows.numel() == batch_size:
+            generated[:, length] = next_ids
+        else:
+            if stop_token_id is None:
+                raise RuntimeError(
+                    "generation rows became inactive without a stop token."
+                )
+            generated[:, length] = stop_token_id
+            generated[active_rows, length] = next_ids
         length += 1
+        attention_mask[active_rows, length - 1] = True
+
+        continuing_rows: Tensor | None = None
         if stop_token_id is not None:
-            finished |= next_ids[:, 0].eq(stop_token_id)
-            if bool(finished.all()):
+            continuing = next_ids.ne(stop_token_id)
+            if not bool(continuing.any()):
                 break
+            continuing_rows = continuing.nonzero(as_tuple=False).flatten()
+            active_rows = active_rows.index_select(0, continuing_rows)
         if use_cache:
             past_key_values = output.past_key_values
             if past_key_values is None:
                 raise RuntimeError("backbone did not return a generation cache.")
-            input_ids = next_ids
+            if (
+                continuing_rows is not None
+                and continuing_rows.numel() != next_ids.numel()
+            ):
+                past_key_values.batch_select_indices(continuing_rows)
+            input_ids = (
+                next_ids
+                if continuing_rows is None
+                else next_ids.index_select(0, continuing_rows)
+            ).unsqueeze(-1)
         else:
-            input_ids = generated[:, :length]
-        attention_mask[:, length - 1] = True
+            input_ids = (
+                generated[:, :length]
+                if continuing_rows is None
+                else generated.index_select(0, active_rows)[:, :length]
+            )
 
     generated = generated[:, :length]
     if not span_steps:
@@ -178,6 +222,12 @@ def generate_sequence(
         batch_first=True,
     )
     return generated, condition, frame_spans
+
+
+def _rows(value: Tensor | None, rows: Tensor) -> Tensor | None:
+    if value is None or value.size(0) == rows.numel():
+        return value
+    return value.index_select(0, rows)
 
 
 def _generation_token_ids(
