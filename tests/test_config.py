@@ -697,6 +697,42 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual(config.text_data.dataloader.batch_size, 4)
                 self.assertIn("013-fdu-stage-smoke", config.output_dir)
 
+    def test_fdu_acoustic_none_smoke_configs_cover_all_stages(self):
+        stage_0 = overfit(
+            _compose("overfit", "experiment=fdu_stage_0_acoustic_none_smoke")
+        )
+        self.assertIsInstance(stage_0, OverfitTokenConfig)
+        self.assertIs(stage_0.stage.name, StageName.STAGE_0)
+        self.assertEqual(stage_0.task, "s2st")
+        self.assertEqual(stage_0.acoustic.type, AcousticType.NONE.value)
+        self.assertEqual(stage_0.run_name, "stage_0-token")
+        self.assertFalse(stage_0.callbacks.evaluation.enabled)
+        self.assertEqual(stage_0.train.max_steps, 2)
+
+        for index in range(1, 5):
+            with self.subTest(stage=index):
+                config = parse_train(
+                    _compose(
+                        "train",
+                        f"experiment=fdu_stage_{index}_acoustic_none_smoke",
+                    )
+                )
+
+                self.assertIsInstance(config, StagedTrainTokenConfig)
+                self.assertIs(config.stage.name, StageName(f"stage_{index}"))
+                self.assertEqual(config.acoustic.type, AcousticType.NONE.value)
+                self.assertEqual(config.run_name, f"stage_{index}-token")
+                self.assertEqual(config.train.max_steps, 2)
+                self.assertEqual(
+                    config.trainer.strategy,
+                    "ddp_find_unused_parameters_false",
+                )
+                self.assertFalse(config.trainer.use_distributed_sampler)
+                self.assertFalse(config.trainer.enable_checkpointing)
+                self.assertEqual(config.data.dataloader.batch_size, 4)
+                self.assertEqual(config.text_data.dataloader.batch_size, 4)
+                self.assertIn("013-fdu-stage-smoke", config.output_dir)
+
     def test_train_datamodule_routes_mt_to_text_loader(self):
         config = parse_train(_compose("train", "stage=stage_2"))
 
@@ -902,12 +938,27 @@ class ConfigTest(unittest.TestCase):
         }
         overfit_stage_jobs = {
             "10_stage_0_smoke.sh": "fdu_stage_0_smoke",
+            "20_stage_0_acoustic_none_smoke.sh": (
+                "fdu_stage_0_acoustic_none_smoke"
+            ),
         }
         stage_jobs = {
             "11_stage_1_smoke.sh": "fdu_stage_1_smoke",
             "12_stage_2_smoke.sh": "fdu_stage_2_smoke",
             "13_stage_3_smoke.sh": "fdu_stage_3_smoke",
             "14_stage_4_smoke.sh": "fdu_stage_4_smoke",
+            "21_stage_1_acoustic_none_smoke.sh": (
+                "fdu_stage_1_acoustic_none_smoke"
+            ),
+            "22_stage_2_acoustic_none_smoke.sh": (
+                "fdu_stage_2_acoustic_none_smoke"
+            ),
+            "23_stage_3_acoustic_none_smoke.sh": (
+                "fdu_stage_3_acoustic_none_smoke"
+            ),
+            "24_stage_4_acoustic_none_smoke.sh": (
+                "fdu_stage_4_acoustic_none_smoke"
+            ),
         }
 
         for filename, experiment in oracle_jobs.items():
