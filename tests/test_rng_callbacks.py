@@ -6,9 +6,10 @@ from unittest.mock import Mock, patch
 
 import torch
 from torch import Tensor
+from anydataset.types import Lang, Modality, Role, TextItem, TextMeta, TextView
 
-from scripts._acoustic_evaluation import evaluate
-from speech_to_speech.callback.logging.sample import SampleLogger
+from speech_to_speech.generation.evaluation import evaluate
+from speech_to_speech.callback.logging.task_sample import TaskSampleLogger
 from speech_to_speech.datamodule import ModelBatch
 from speech_to_speech.model.acoustic import AcousticRVQDecoder
 from speech_to_speech.generation import Result
@@ -19,8 +20,8 @@ class _RandomGenerationModule:
     def __init__(self, *, use_cuda: bool = False) -> None:
         self.use_cuda = use_cuda
 
-    def generate(self, requests: object) -> list[Result]:
-        del requests
+    def generate(self, requests: object, **kwargs: object) -> list[Result]:
+        del requests, kwargs
         torch.rand(4)
         if self.use_cuda:
             torch.rand(4, device=torch.device("cuda", torch.cuda.current_device()))
@@ -82,9 +83,9 @@ class _Codec:
 
 
 class RNGCallbackTest(unittest.TestCase):
-    def test_sample_logger_preserves_cpu_rng(self):
+    def test_task_sample_logger_preserves_cpu_rng(self):
         self.addCleanup(torch.random.set_rng_state, torch.random.get_rng_state())
-        logger, trainer = sample_logger_fixture()
+        logger, trainer = task_sample_logger_fixture()
         module = _RandomGenerationModule()
         torch.manual_seed(123)
         before = torch.random.get_rng_state().clone()
@@ -94,9 +95,9 @@ class RNGCallbackTest(unittest.TestCase):
         self.assertTrue(torch.equal(torch.random.get_rng_state(), before))
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
-    def test_sample_logger_preserves_current_cuda_rng(self):
+    def test_task_sample_logger_preserves_current_cuda_rng(self):
         self.addCleanup(torch.cuda.set_rng_state, torch.cuda.get_rng_state())
-        logger, trainer = sample_logger_fixture()
+        logger, trainer = task_sample_logger_fixture()
         module = _RandomGenerationModule(use_cuda=True)
         torch.cuda.manual_seed(123)
         before = torch.cuda.get_rng_state().clone()
@@ -105,7 +106,7 @@ class RNGCallbackTest(unittest.TestCase):
 
         self.assertTrue(torch.equal(torch.cuda.get_rng_state(), before))
 
-    def test_acoustic_evaluation_uses_local_generators(self):
+    def test_generation_evaluation_uses_local_generators(self):
         self.addCleanup(torch.random.set_rng_state, torch.random.get_rng_state())
         model = _EvaluationModel()
         batch = SimpleNamespace(
@@ -124,7 +125,8 @@ class RNGCallbackTest(unittest.TestCase):
         before = torch.random.get_rng_state().clone()
 
         with patch(
-            "scripts._acoustic_evaluation.device_batch", return_value=batch
+            "speech_to_speech.generation.evaluation.device_batch",
+            return_value=batch,
         ):
             evaluate(model, batch, _Codec(), seeds=(5, 7))
 
@@ -158,7 +160,7 @@ class RNGCallbackTest(unittest.TestCase):
         self.assertTrue(torch.equal(torch.random.get_rng_state(), before))
 
 
-def sample_logger_fixture() -> tuple[SampleLogger, object]:
+def task_sample_logger_fixture() -> tuple[TaskSampleLogger, object]:
     batch = ModelBatch(
         input_ids=torch.tensor([[1, 2]]),
         token_labels=torch.tensor([[-100, 2]]),
@@ -174,8 +176,19 @@ def sample_logger_fixture() -> tuple[SampleLogger, object]:
         logger=SimpleNamespace(experiment=experiment),
         datamodule=SimpleNamespace(collator=Mock(return_value=batch)),
     )
-    logger = SampleLogger([0], every_n_steps=1)
-    logger.samples = [Mock()]
+    logger = TaskSampleLogger([0], every_n_steps=1)
+    logger.samples = [
+        {
+            (Role.SOURCE, Modality.TEXT): TextItem(
+                views={TextView.TEXT: "source"},
+                meta={TextMeta.LANG: Lang.ZH},
+            ),
+            (Role.TARGET, Modality.TEXT): TextItem(
+                views={TextView.TEXT: "target"},
+                meta={TextMeta.LANG: Lang.EN},
+            ),
+        }
+    ]
     return logger, trainer
 
 

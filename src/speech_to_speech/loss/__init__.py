@@ -2,7 +2,7 @@ from .causal_lm import CausalAcousticLoss
 from .module import FlowObjective, RepaConfig, RVQObjective, TokenObjective
 from .objective import Objective
 from .repa import RepaLoss, WavLMTeacher
-from .types import LossItem, Outputs, loss_items
+from .types import LossItem, Outputs, combine_outputs, loss_items
 
 __all__ = [
     "FlowObjective",
@@ -15,5 +15,6 @@ __all__ = [
     "RepaLoss",
     "TokenObjective",
     "WavLMTeacher",
+    "combine_outputs",
     "loss_items",
 ]

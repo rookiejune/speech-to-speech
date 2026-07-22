@@ -9,6 +9,7 @@ import torch
 
 from speech_to_speech.datamodule import Collator
 from speech_to_speech.generation.batch import requests_from_batch
+from speech_to_speech.generation.reporting import compare, summary
 from speech_to_speech.model import SpeechToSpeechFlowModel
 from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import init_runtime
@@ -18,11 +19,9 @@ from zhuyin.datasets.wmt19_tts import wmt19_tts_codec
 if __package__:
     from ._generation_benchmark import benchmark_batch
     from ._generation_probe import run, second_step
-    from ._generation_reporting import compare, summary
 else:
     from _generation_benchmark import benchmark_batch
     from _generation_probe import run, second_step
-    from _generation_reporting import compare, summary
 
 
 def main(argv: Sequence[str] | None = None) -> None:

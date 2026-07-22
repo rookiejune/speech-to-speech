@@ -12,7 +12,7 @@ acoustic output 与 waveform 来自同一次 cached generation。
 - source acoustic condition 通过 cache 持续影响后续 token。
 - audio token 采样时在线收集 predictor hidden，不在结束后重新 full forward。
 - tiny Qwen3 的 cache 与非 cache greedy sequence 一致。
-- SampleLogger 对每组样本只调用一次 generation。
+- TaskSampleLogger 对每组样本只调用一次 generation。
 
 ## 限制
 

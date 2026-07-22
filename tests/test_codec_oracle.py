@@ -18,12 +18,7 @@ from torch import nn
 from torch.utils.data import DataLoader, DistributedSampler, RandomSampler
 
 from scripts._config import CodecOracleConfig, codec_oracle
-from scripts.codec_oracle import (
-    build_flow,
-    build_rvq,
-    process_device,
-    training_callbacks,
-)
+from scripts.codec_oracle import training_callbacks
 from speech_to_speech.codec_oracle import (
     AcousticFlowModel,
     AcousticFlowScreening,
@@ -38,6 +33,11 @@ from speech_to_speech.codec_oracle import (
     collate,
     codes,
     single_batch_loader,
+)
+from speech_to_speech.codec_oracle.factory import (
+    build_flow,
+    build_rvq,
+    process_device,
 )
 from speech_to_speech.loss.types import LossItem
 from speech_to_speech.model import (
@@ -55,7 +55,7 @@ class CodecOracleTest(unittest.TestCase):
         self.assertEqual(config.trainer.precision, "bf16-mixed")
         self.assertIsNone(config.runtime.audio_tokenizer)
 
-    @patch("scripts.codec_oracle.torch.cuda.set_device")
+    @patch("speech_to_speech.codec_oracle.factory.torch.cuda.set_device")
     def test_process_device_preserves_explicit_index(self, set_device):
         with patch.dict("os.environ", {"LOCAL_RANK": "0"}):
             explicit = process_device("cuda:3")
@@ -263,9 +263,9 @@ class CodecOracleTest(unittest.TestCase):
         self.assertTrue(torch.equal(first, second))
         self.assertFalse(torch.equal(first, codebook))
 
-    @patch("scripts.codec_oracle.condition_dim", return_value=4)
-    @patch("scripts.codec_oracle.AcousticFlowScreening")
-    @patch("scripts.codec_oracle.AcousticFlowModel")
+    @patch("speech_to_speech.codec_oracle.factory.condition_dim", return_value=4)
+    @patch("speech_to_speech.codec_oracle.factory.AcousticFlowScreening")
+    @patch("speech_to_speech.codec_oracle.factory.AcousticFlowModel")
     def test_build_flow_consumes_model_and_oracle_configs(
         self,
         model,
@@ -318,9 +318,9 @@ class CodecOracleTest(unittest.TestCase):
             )
         )
 
-    @patch("scripts.codec_oracle.condition_dim", return_value=4)
-    @patch("scripts.codec_oracle.AcousticRVQScreening")
-    @patch("scripts.codec_oracle.AcousticRVQModel")
+    @patch("speech_to_speech.codec_oracle.factory.condition_dim", return_value=4)
+    @patch("speech_to_speech.codec_oracle.factory.AcousticRVQScreening")
+    @patch("speech_to_speech.codec_oracle.factory.AcousticRVQModel")
     def test_build_rvq_consumes_model_and_oracle_configs(
         self,
         model,
@@ -489,10 +489,9 @@ class CodecOracleTest(unittest.TestCase):
         output["loss"].backward()
 
         self.assertTrue(torch.isfinite(output["loss"]))
-        self.assertEqual(
-            set(output["rvq"].details or {}),
-            {"codebook_0", "codebook_1"},
-        )
+        details = output["rvq"].details or {}
+        self.assertEqual(set(details), {"codebook_0", "codebook_1", "frames"})
+        self.assertTrue(torch.equal(details["frames"], torch.tensor([2.0])))
         self.assertFalse(
             module.model.acoustic_decoder.decoder.embed_tokens.weight.requires_grad
         )

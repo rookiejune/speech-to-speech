@@ -8,7 +8,7 @@
   重新注入 source acoustic condition，作为 deterministic 对照。
 - audio generation 在采样 semantic token 时按 BPE span 收集 predictor hidden，删除结束后的
   full-sequence forward。
-- audio result 在一次调用中完成 token 裁剪、flow sampling 和 waveform decode；SampleLogger
+- audio result 在一次调用中完成 token 裁剪、flow sampling 和 waveform decode；TaskSampleLogger
   直接复用该 result。
 - teacher-forcing batch adapter 会裁掉 target semantic/acoustic 字段和 padding，只构造 prompt
   request。
@@ -20,7 +20,7 @@
 - fake cache 的所有后续 step 保留 source condition，且 acoustic sampling 与 waveform decode
   各只调用一次。
 - 随机初始化的一层 tiny Qwen3 cache 与非 cache greedy sequence 一致。
-- SampleLogger contract test 验证每次日志事件只调用一次 generation。
+- TaskSampleLogger contract test 验证每次日志事件只调用一次 generation。
 - 本地完整测试：`26 passed`；`py_compile`、改动文件 Ruff 和 `git diff --check` 通过。
 
 ## 未验证

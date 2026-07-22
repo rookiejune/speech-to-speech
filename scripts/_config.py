@@ -8,11 +8,17 @@ from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf
 
 from speech_to_speech.codec_oracle import Config as OracleConfig
 from speech_to_speech.codec_oracle import Initialization, Objective
-from speech_to_speech.datamodule import DatasetConfig, DatasetName
+from speech_to_speech.datamodule import (
+    DatasetConfig,
+    DatasetName,
+    TextDatasetConfig,
+    TextDatasetName,
+)
 from speech_to_speech.model import AcousticType, AdapterType, DecoderConfig
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.runtime import Config as RuntimeConfig
+from speech_to_speech.stage import ParameterGroup, StageConfig, StageName
 
 
 @dataclass
@@ -50,6 +56,27 @@ class TrainConfig:
 
 
 @dataclass
+class TrainDataLoaderConfig:
+    batch_size: int = MISSING
+    num_workers: int = MISSING
+    pin_memory: bool = False
+    persistent_workers: bool = False
+
+
+@dataclass
+class SpeechDataConfig:
+    codec: str = MISSING
+    dataloader: TrainDataLoaderConfig = field(default_factory=TrainDataLoaderConfig)
+    dataset: DatasetConfig = field(default_factory=DatasetConfig)
+
+
+@dataclass
+class TextDataConfig:
+    dataloader: TrainDataLoaderConfig = field(default_factory=TrainDataLoaderConfig)
+    dataset: TextDatasetConfig = field(default_factory=TextDatasetConfig)
+
+
+@dataclass
 class TrainerConfig:
     accelerator: str = MISSING
     devices: Union[int, str] = MISSING
@@ -70,7 +97,7 @@ class LoggingConfig:
 
 
 @dataclass
-class SampleCallbackConfig:
+class TaskSampleCallbackConfig:
     enabled: bool = MISSING
     every_n_steps: int = MISSING
 
@@ -92,8 +119,29 @@ class PerformanceConfig:
 
 
 @dataclass
+class GradNormCallbackConfig:
+    enabled: bool = MISSING
+    every_n_steps: int = MISSING
+
+
+@dataclass
+class NonfiniteCallbackConfig:
+    enabled: bool = MISSING
+
+
+@dataclass
+class CheckpointCallbackConfig:
+    filename: str = MISSING
+    save_last: bool = MISSING
+    save_top_k: int = MISSING
+    every_n_train_steps: int = MISSING
+
+
+@dataclass
 class OverfitCallbacksConfig:
-    sample: SampleCallbackConfig = field(default_factory=SampleCallbackConfig)
+    task_sample: TaskSampleCallbackConfig = field(
+        default_factory=TaskSampleCallbackConfig
+    )
     evaluation: EvaluationCallbackConfig = field(
         default_factory=EvaluationCallbackConfig
     )
@@ -101,8 +149,19 @@ class OverfitCallbacksConfig:
 
 
 @dataclass
+class StagedCallbacksConfig:
+    grad_norm: GradNormCallbackConfig = field(default_factory=GradNormCallbackConfig)
+    checkpoint: CheckpointCallbackConfig = field(
+        default_factory=CheckpointCallbackConfig
+    )
+    performance: PerformanceConfig = field(default_factory=PerformanceConfig)
+
+
+@dataclass
 class _OverfitConfig:
     task: str = MISSING
+    stage: StageConfig = field(default_factory=StageConfig)
+    parameter_stage: StageName = MISSING
     run_name: str = MISSING
     repo_output_root: str = MISSING
     output_subdir: str = MISSING
@@ -136,29 +195,50 @@ OverfitConfig = Union[OverfitTokenConfig, OverfitFlowConfig, OverfitRVQConfig]
 
 
 @dataclass
+class _StagedTrainConfig:
+    stage: StageConfig = field(default_factory=StageConfig)
+    run_name: str = MISSING
+    repo_output_root: str = MISSING
+    output_subdir: str = MISSING
+    output_dir: str = MISSING
+    model: ModelConfig = field(default_factory=ModelConfig)
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    data: SpeechDataConfig = field(default_factory=SpeechDataConfig)
+    text_data: TextDataConfig = field(default_factory=TextDataConfig)
+    pl_module: ModuleConfig = field(default_factory=ModuleConfig)
+    train: TrainConfig = field(default_factory=TrainConfig)
+    trainer: TrainerConfig = field(default_factory=TrainerConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
+    callbacks: StagedCallbacksConfig = field(default_factory=StagedCallbacksConfig)
+
+
+@dataclass
+class StagedTrainTokenConfig(_StagedTrainConfig):
+    pass
+
+
+@dataclass
+class StagedTrainFlowConfig(_StagedTrainConfig):
+    acoustic: FlowConfig = field(default_factory=FlowConfig)
+
+
+@dataclass
+class StagedTrainRVQConfig(_StagedTrainConfig):
+    acoustic: RVQConfig = field(default_factory=RVQConfig)
+
+
+StagedTrainConfig = Union[
+    StagedTrainTokenConfig,
+    StagedTrainFlowConfig,
+    StagedTrainRVQConfig,
+]
+
+
+@dataclass
 class OracleCallbackConfig:
     sample_every_n_steps: int = MISSING
     histogram_every_n_steps: int = MISSING
     save_audio: bool = MISSING
-
-
-@dataclass
-class GradNormCallbackConfig:
-    enabled: bool = MISSING
-    every_n_steps: int = MISSING
-
-
-@dataclass
-class NonfiniteCallbackConfig:
-    enabled: bool = MISSING
-
-
-@dataclass
-class CheckpointCallbackConfig:
-    filename: str = MISSING
-    save_last: bool = MISSING
-    save_top_k: int = MISSING
-    every_n_train_steps: int = MISSING
 
 
 @dataclass
@@ -202,11 +282,33 @@ def overfit(config: DictConfig) -> OverfitConfig:
             schema = OverfitRVQConfig
     result = _parse(config, schema)
     _validate_output(result)
-    if result.callbacks.performance.enabled and result.callbacks.sample.enabled:
+    if (
+        result.callbacks.performance.enabled
+        and result.callbacks.task_sample.enabled
+    ):
         raise ValueError(
-            "overfit performance requires callbacks.sample.enabled=false because "
-            "sample generation cannot be excluded from distributed step timing."
+            "overfit performance requires callbacks.task_sample.enabled=false "
+            "because task sample generation cannot be excluded from distributed "
+            "step timing."
         )
+    return result
+
+
+def train(config: DictConfig) -> StagedTrainConfig:
+    config = _prepare(config)
+    schema: Type[StagedTrainConfig]
+    if "acoustic" not in config:
+        schema = StagedTrainTokenConfig
+    else:
+        acoustic = AcousticType(str(config.acoustic.type))
+        if acoustic is AcousticType.FLOW:
+            schema = StagedTrainFlowConfig
+        else:
+            schema = StagedTrainRVQConfig
+    result = _parse(config, schema)
+    _validate_output(result)
+    if not result.stage.loaders:
+        raise ValueError("formal train requires stage.loaders.")
     return result
 
 
@@ -218,7 +320,9 @@ def codec_oracle(config: DictConfig) -> CodecOracleConfig:
     return result
 
 
-def _validate_output(config: _OverfitConfig | CodecOracleConfig) -> None:
+def _validate_output(
+    config: Union[_OverfitConfig, _StagedTrainConfig, CodecOracleConfig],
+) -> None:
     subdir = Path(config.output_subdir)
     if subdir == Path(".") or subdir.is_absolute() or ".." in subdir.parts:
         raise ValueError(
@@ -267,15 +371,71 @@ def _prepare(config: DictConfig) -> DictConfig:
         result.codec_oracle.initialization = normalized_initialization.name
     if normalized_objective is not None:
         result.codec_oracle.objective = normalized_objective.name
-    dataset = result.get("data", {}).get("name")
-    if dataset is not None:
-        raw = str(dataset)
-        result.data.name = (
-            DatasetName[raw].name
-            if raw in DatasetName.__members__
-            else DatasetName(raw).name
-        )
+    _normalize_dataset(result.get("data"))
+    _normalize_dataset(result.get("data", {}).get("dataset"))
+    _normalize_text_dataset(result.get("text_data", {}).get("dataset"))
+    stage = result.get("stage")
+    if stage is not None:
+        name = stage.get("name")
+        if name is not None:
+            raw = str(name)
+            stage.name = (
+                StageName[raw].name
+                if raw in StageName.__members__
+                else StageName(raw).name
+            )
+        for key in ("trainable_groups", "frozen_groups"):
+            groups = stage.get(key)
+            if groups is None:
+                continue
+            stage[key] = [
+                ParameterGroup[str(group)].name
+                if str(group) in ParameterGroup.__members__
+                else ParameterGroup(str(group)).name
+                for group in groups
+            ]
+    parameter_stage = result.get("parameter_stage")
+    if parameter_stage is not None:
+        raw = str(parameter_stage)
+        stage_name = StageName[raw] if raw in StageName.__members__ else StageName(raw)
+        result.parameter_stage = stage_name.name
+        if stage is not None:
+            if result.stage.name != stage_name.name:
+                raise ValueError(
+                    "parameter_stage must match stage.name; select stage "
+                    "with the Hydra config group, e.g. stage=stage_1."
+                )
+    elif stage is not None and "task" in result:
+        result.parameter_stage = result.stage.name
     return result
+
+
+def _normalize_dataset(value: object) -> None:
+    if not isinstance(value, DictConfig):
+        return
+    dataset = value.get("name")
+    if dataset is None:
+        return
+    raw = str(dataset)
+    value.name = (
+        DatasetName[raw].name
+        if raw in DatasetName.__members__
+        else DatasetName(raw).name
+    )
+
+
+def _normalize_text_dataset(value: object) -> None:
+    if not isinstance(value, DictConfig):
+        return
+    dataset = value.get("name")
+    if dataset is None:
+        return
+    raw = str(dataset)
+    value.name = (
+        TextDatasetName[raw].name
+        if raw in TextDatasetName.__members__
+        else TextDatasetName(raw).name
+    )
 
 
 def _parse(config: DictConfig, schema: Type[ConfigT]) -> ConfigT:

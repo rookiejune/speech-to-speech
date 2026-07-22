@@ -7,12 +7,8 @@ from typing import Any
 import torch
 
 from speech_to_speech.generation import Request, generate_responses
+from speech_to_speech.generation.reporting import audio_output
 from speech_to_speech.model import SpeechToSpeechFlowModel
-
-if __package__:
-    from ._generation_reporting import audio_output
-else:
-    from _generation_reporting import audio_output
 
 
 def benchmark_batch(

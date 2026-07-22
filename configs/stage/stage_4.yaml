@@ -1,0 +1,31 @@
+name: stage_4
+loaders:
+  asr_s2tt:
+    weight: 0.1
+    task_weights:
+      asr: 0.5
+      s2tt: 0.5
+  tts_t2st:
+    weight: 0.1
+    task_weights:
+      tts: 0.5
+      t2st: 0.5
+  s2st:
+    weight: 0.7
+    task_weights:
+      s2st: 1.0
+  mt:
+    weight: 0.1
+    task_weights:
+      mt: 1.0
+batches_per_step: 10
+trainable_groups:
+  - backbone
+  - semantic_audio_embedding
+  - semantic_audio_adapter
+  - acoustic_prompt
+  - semantic_audio_output
+  - acoustic_decoder
+frozen_groups: []
+backbone_top_fraction: 1.0
+

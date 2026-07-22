@@ -1,7 +1,8 @@
 # codec oracle
 
-为 codec screening 实验提供可测试的 oracle model 和 prepared-code 数据路径。Hydra
-配置、codec 资源加载、logger 与 Trainer 组装仍由 `scripts/codec_oracle.py` 负责。
+为 codec screening 实验提供可测试的 oracle model、factory 和 prepared-code 数据路径。Hydra
+配置、prepared-code 读取、logger 与 Trainer 组装仍由 `scripts/codec_oracle.py` 负责；
+`speech_to_speech.codec_oracle.factory` 负责 runtime、model、screening wrapper 和 metadata 构造。
 
 ## 运行配置
 
@@ -57,8 +58,11 @@ Oracle 的 artifact 目录由 `repo_output_root/output_subdir` 派生；TensorBo
 - `Config`：统一拥有 objective、initialization、flow target normalization、decoder、optimizer
   参数和 `DataConfig`；Hydra `codec_oracle` preset 直接映射该公开契约，`codec_oracle=rvq` 提供
   RVQ 默认值。
+- `factory.build_runtime()` / `build_flow()` / `build_rvq()`：从已解析配置和 runtime codec 构造
+  oracle runtime、轻量 model、screening wrapper 与运行 metadata；condition dim、dtype、CUDA
+  device 选择和 flow target statistics 都在该边界集中处理。
 - `Initialization` 自身负责 codec/random embedding initialization；flow target normalization
-  statistics 仍由运行入口从 probe features 计算。
+  statistics 由 factory 从 probe features 计算。
 - `matched_random_weight(reference, seed, rows=None)`：在 reference device/dtype 上按其总体
   mean/std 生成可复现的 matched-normal 权重；默认保持 shape，`rows` 只覆盖首维。公开调用方
   提供二维 floating reference，`Initialization.RANDOM.weight()` 复用该函数。
@@ -79,8 +83,8 @@ Oracle 的 artifact 目录由 `repo_output_root/output_subdir` 派生；TensorBo
 
 - 本模块表达 codec oracle 的模型、数据和专用 callback，不选择完整链路测试 experiment 或输出
   目录。
-- `scripts/codec_oracle.py` 是真实运行入口，不重复实现 model、collate 或 DataModule。
-- 入口按顶层配置构造 `Runtime`，但只触发 codec 与 flow runtime；非 toy 配置通过
+- `scripts/codec_oracle.py` 是真实运行入口，不重复实现 model factory、collate 或 DataModule。
+- factory 按顶层配置构造 `Runtime`，但只触发 codec 与 flow runtime；非 toy 配置通过
   `AutoConfig.from_pretrained()` 读取 backbone hidden size，不访问 `runtime.backbone`，因此不会加载
   或注册完整 Qwen 权重。screening checkpoint 的 trainable state 只含 `model.semantic_audio_*` 与
   `model.acoustic_flow` / `model.acoustic_decoder`，可按同名白名单导入联合模型。

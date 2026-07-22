@@ -4,7 +4,7 @@ import unittest
 
 import torch
 
-from scripts._generation_reporting import (
+from speech_to_speech.generation.reporting import (
     compare_logits,
     first_difference,
     optional_max_abs,

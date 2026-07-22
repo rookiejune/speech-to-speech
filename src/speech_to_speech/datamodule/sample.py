@@ -8,8 +8,17 @@ from torch import Tensor
 
 from ..task import Task
 from ._tokenization import token_ids
-from .protocol import DataRuntime
-from .types import AcousticPrompt, AcousticTarget, ModelSample, Speech, SpeechPair
+from .protocol import DataRuntime, TextRuntime
+from .types import (
+    AcousticPrompt,
+    AcousticTarget,
+    Language,
+    ModelSample,
+    Speech,
+    SpeechPair,
+    Text,
+    TextPair,
+)
 
 _PLACEHOLDER = "$$$PLACEHOLDER$$$"
 
@@ -109,6 +118,42 @@ def build_sample(
     )
 
 
+def build_text_sample(
+    text_pair: TextPair,
+    task: Task,
+    runtime: TextRuntime,
+) -> ModelSample:
+    if (
+        task.source_modality is Modality.AUDIO
+        or task.target_modality is not Modality.TEXT
+    ):
+        raise ValueError(f"{task.value} is not supported by the text-only data path.")
+
+    prompt = _text_prompt(text_pair.target.language, task, runtime)
+    source, target = _text_source_target(text_pair, task)
+    if task.source_modality is Modality.TEXT:
+        prefix_text, suffix_text = _split(prompt, _PLACEHOLDER)
+        tokenizer = runtime.text_tokenizer
+        prefix = token_ids(prefix_text, tokenizer)
+        suffix = token_ids(suffix_text, tokenizer)
+        source_ids = _global_text_ids(source, runtime)
+        input_ids = torch.cat([prefix, source_ids, suffix])
+    else:
+        input_ids = token_ids(prompt, runtime.text_tokenizer)
+
+    response_ids = _append_eos(_global_text_ids(target, runtime), runtime)
+    full_ids = torch.cat([input_ids, response_ids])
+    token_labels = torch.full_like(full_ids, -100)
+    token_labels[len(input_ids) :] = response_ids
+    return ModelSample(
+        input_ids=full_ids,
+        token_labels=token_labels,
+        acoustic_prompt=None,
+        acoustic_target=None,
+        task=task,
+    )
+
+
 def _prompt(
     speech_pair: SpeechPair,
     task: Task,
@@ -130,10 +175,37 @@ def _prompt(
     )
 
 
+def _text_prompt(
+    language: Language,
+    task: Task,
+    runtime: TextRuntime,
+) -> str:
+    instruction = task.template.format(
+        language=str(language),
+        source=_PLACEHOLDER,
+    )
+    return cast(
+        str,
+        runtime.text_tokenizer.apply_chat_template(
+            [{"role": "user", "content": instruction}],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+            return_dict=False,
+        ),
+    )
+
+
 def _source_target(speech_pair: SpeechPair, task: Task) -> tuple[Speech, Speech]:
     if task.uses_source_role:
         return speech_pair.source, speech_pair.target
     return speech_pair.target, speech_pair.target
+
+
+def _text_source_target(text_pair: TextPair, task: Task) -> tuple[Text, Text]:
+    if task.uses_source_role:
+        return text_pair.source, text_pair.target
+    return text_pair.target, text_pair.target
 
 
 def _split(sequence: str, delimiter: str) -> tuple[str, str]:
@@ -157,6 +229,13 @@ def _global_ids(
     return runtime.layout.to_global(modality.value, local_ids)
 
 
+def _global_text_ids(
+    text: Text,
+    runtime: TextRuntime,
+) -> Tensor:
+    return runtime.layout.to_global(Modality.TEXT.value, text.text_token_ids)
+
+
 def _boa_eoa(ids: Tensor, runtime: DataRuntime) -> Tensor:
     return torch.cat(
         (
@@ -167,5 +246,5 @@ def _boa_eoa(ids: Tensor, runtime: DataRuntime) -> Tensor:
     )
 
 
-def _append_eos(ids: Tensor, runtime: DataRuntime) -> Tensor:
+def _append_eos(ids: Tensor, runtime: TextRuntime) -> Tensor:
     return torch.cat([ids, ids.new_tensor([runtime.eos_token_id])])

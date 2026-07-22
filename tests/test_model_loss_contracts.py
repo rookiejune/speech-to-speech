@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import patch
 
 import torch
 from anydataset.types import Modality
@@ -10,10 +12,20 @@ from torch import Tensor, nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from speech_to_speech.datamodule.types import ModelBatch
-from speech_to_speech.loss import FlowObjective, RVQObjective, TokenObjective
+from speech_to_speech.loss import (
+    FlowObjective,
+    LossItem,
+    Objective,
+    Outputs,
+    RVQObjective,
+    TokenObjective,
+)
 from speech_to_speech.loss.flow_matching import AcousticFlowLoss
 from speech_to_speech.loss.token import TokenLoss
+from speech_to_speech.loss.types import LossItem, combine_outputs
 from speech_to_speech.model.base import Config, TokenModel
+from speech_to_speech.pl_module import Config as ModuleConfig
+from speech_to_speech.pl_module import SpeechToSpeechModule
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
 from speech_to_speech.task import Task
 
@@ -202,6 +214,25 @@ class _RVQModel(_FlowModel):
         return (torch.zeros(*condition.shape[:2], 3),)
 
 
+class _BatchObjective(Objective[Any]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.tasks: list[Task] = []
+
+    def forward(self, batch: ModelBatch, model: Any) -> Outputs:
+        del model
+        self.tasks.append(batch.tasks[0])
+        value = 1.0 if batch.tasks[0] is Task.ASR else 3.0
+        tokens = 1.0 if batch.tasks[0] is Task.ASR else 3.0
+        return {
+            "loss": torch.tensor(value),
+            "token": LossItem(
+                torch.tensor([value]),
+                {"tokens": torch.tensor([tokens])},
+            ),
+        }
+
+
 class ModelLossContractTest(unittest.TestCase):
     def test_sparse_modality_logits_match_dense_modality_cross_entropy(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
@@ -309,6 +340,72 @@ class ModelLossContractTest(unittest.TestCase):
             ),
         )
         self.assertTrue(torch.isfinite(item.loss).all())
+
+    def test_token_objective_uses_effective_token_mean(self):
+        layout = Layout(text=(0, 2), audio=(2, 4))
+        loss = TokenLoss(layout)
+        hidden = torch.tensor(
+            [[[0.0], [0.0], [0.0], [0.0]], [[0.0], [2.0], [2.0], [2.0]]]
+        )
+        labels = torch.tensor([[-100, 1, -100, -100], [-100, 1, 1, 1]])
+
+        def logits(values: Tensor, modality: Modality) -> Tensor:
+            del modality
+            value = values[:, 0]
+            return torch.stack((value, -value), dim=-1)
+
+        item = loss(hidden, labels, Modality.TEXT, logits)
+        details = item.details
+        if details is None:
+            self.fail("token loss details are unavailable")
+
+        weighted = item.weighted_mean(details["tokens"])
+        unweighted = item.loss.mean()
+
+        self.assertNotEqual(float(weighted), float(unweighted))
+        torch.testing.assert_close(
+            weighted,
+            nn.functional.cross_entropy(
+                torch.tensor([[0.0, -0.0], [0.0, -0.0], [2.0, -2.0], [2.0, -2.0]]),
+                torch.tensor([1, 1, 1, 1]),
+            ),
+        )
+
+    def test_training_step_reduces_tuple_batches_by_effective_tokens(self):
+        objective = _BatchObjective()
+        module = SpeechToSpeechModule(
+            ModuleConfig(),
+            model=cast(Any, SimpleNamespace()),
+            objective=objective,
+        )
+        asr = _batch(Task.ASR, token_labels=torch.tensor([[-100, 1]]))
+        mt = _batch(Task.MT, token_labels=torch.tensor([[-100, 1]]))
+
+        with patch.object(module, "log"):
+            outputs = module.training_step((asr, mt), 0)
+
+        self.assertEqual(objective.tasks, [Task.ASR, Task.MT])
+        torch.testing.assert_close(outputs["loss"], torch.tensor(2.5))
+
+    def test_combined_outputs_use_effective_units_without_loader_weights(self):
+        first = LossItem(
+            torch.tensor([1.0]),
+            {"tokens": torch.tensor([10.0])},
+        )
+        second = LossItem(
+            torch.tensor([3.0]),
+            {"tokens": torch.tensor([30.0])},
+        )
+
+        outputs = combine_outputs(
+            [
+                {"loss": torch.tensor(1.0), "token": first},
+                {"loss": torch.tensor(3.0), "token": second},
+            ]
+        )
+
+        torch.testing.assert_close(outputs["loss"], torch.tensor(2.5))
+        torch.testing.assert_close(outputs["token"].loss, torch.tensor([1.0, 3.0]))
 
     def test_backbone_text_embedding_has_one_registered_path(self):
         backbone = _Backbone()

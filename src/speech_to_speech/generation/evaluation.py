@@ -6,9 +6,9 @@ import time
 import torch
 from torch import Tensor
 
-from speech_to_speech.datamodule import ModelBatch
-from speech_to_speech.model import SpeechToSpeechFlowModel, SpeechToSpeechRVQModel
-from speech_to_speech.runtime.types import Codec
+from ..datamodule import ModelBatch
+from ..model import SpeechToSpeechFlowModel, SpeechToSpeechRVQModel
+from ..runtime.types import Codec
 
 
 @torch.no_grad()

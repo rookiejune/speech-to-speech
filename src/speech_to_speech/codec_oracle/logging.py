@@ -266,6 +266,8 @@ class Logger(Callback):
             return
         if self.objective is Objective.RVQ:
             for name, values in item.details.items():
+                if name == "frames":
+                    continue
                 experiment.add_histogram(
                     f"rvq/{name}_loss",
                     values.detach().float().cpu(),

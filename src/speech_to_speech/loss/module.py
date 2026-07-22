@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TypedDict
 
 from anytrain.idspace import Layout
+from torch import Tensor
 
 from ..datamodule.types import ModelBatch
 from .protocol import (
@@ -15,7 +16,14 @@ from .flow_matching import AcousticFlowLoss, FlowRuntime
 from .objective import Objective
 from .repa import RepaLoss, Teacher
 from .token import TokenLoss
-from .types import Outputs
+from .types import LossItem, Outputs
+
+
+def _weighted_mean(item: LossItem, key: str) -> Tensor:
+    details = item.details
+    if details is None or key not in details:
+        return item.loss.mean()
+    return item.weighted_mean(details[key].to(dtype=item.loss.dtype))
 
 
 class RepaConfig(TypedDict):
@@ -48,7 +56,7 @@ class TokenObjective(Objective[TokenObjectiveModel]):
             batch.tasks[0].target_modality,
             model.token_logits,
         )
-        return {"loss": token.loss.mean(), "token": token}
+        return {"loss": _weighted_mean(token, "tokens"), "token": token}
 
 
 class FlowObjective(Objective[FlowObjectiveModel]):
@@ -90,7 +98,7 @@ class FlowObjective(Objective[FlowObjectiveModel]):
             batch.tasks[0].target_modality,
             model.token_logits,
         )
-        result: Outputs = {"loss": token.loss.mean(), "token": token}
+        result: Outputs = {"loss": _weighted_mean(token, "tokens"), "token": token}
 
         if target_data is not None:
             if batch.acoustic_target_mask is None:
@@ -132,9 +140,12 @@ class FlowObjective(Objective[FlowObjectiveModel]):
                     batch.acoustic_target_mask,
                 )
                 result["repa"] = repa
-                result["loss"] = result["loss"] + self.repa_weight * repa.loss.mean()
+                result["loss_weights"] = {"repa": self.repa_weight}
+                result["loss"] = result["loss"] + self.repa_weight * _weighted_mean(
+                    repa, "frames"
+                )
             result["flow_matching"] = acoustic
-            result["loss"] = result["loss"] + acoustic.loss.mean()
+            result["loss"] = result["loss"] + _weighted_mean(acoustic, "frames")
         return result
 
 
@@ -165,7 +176,7 @@ class RVQObjective(Objective[RVQObjectiveModel]):
             batch.tasks[0].target_modality,
             model.token_logits,
         )
-        result: Outputs = {"loss": token.loss.mean(), "token": token}
+        result: Outputs = {"loss": _weighted_mean(token, "tokens"), "token": token}
 
         if target_data is not None:
             if batch.acoustic_target_mask is None:
@@ -185,5 +196,5 @@ class RVQObjective(Objective[RVQObjectiveModel]):
                 validate=False,
             )
             result["rvq"] = acoustic
-            result["loss"] = result["loss"] + acoustic.loss.mean()
+            result["loss"] = result["loss"] + _weighted_mean(acoustic, "frames")
         return result

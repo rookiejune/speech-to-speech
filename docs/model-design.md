@@ -140,6 +140,7 @@ generation 每采样出一个 codec-decodable audio token，就收集预测该 t
 | Task | source | token target | acoustic target |
 | --- | --- | --- | --- |
 | ASR | audio | text | no |
+| MT | text | text | no |
 | S2TT | audio | text | no |
 | S2ST | audio | semantic audio | codec-dependent |
 | TTS | text | semantic audio | codec-dependent |
@@ -179,7 +180,8 @@ class FlowRepaConfig(TypedDict):
 
 `SpeechToSpeechFlowModel` 接收 `decoder` 与可选 `repa`；`SpeechToSpeechRVQModel` 接收
 `decoder` 与可选 `codebook_embeddings`，但无法接收后被忽略的 REPA 字段。Hydra 使用
-`model/acoustic=flow|rvq`，flow preset 独占 teacher 与 student REPA 配置；root schema 直接复用
+`model/acoustic=flow|rvq`，flow preset 独占 teacher 与 student REPA 配置；训练组装由
+`speech_to_speech.pl_module.composition` 持有，入口脚本只传入解析后的配置；root schema 直接复用
 基础 `model.Config`。codec oracle 由 `codec_oracle.Config` 显式选择 Flow/RVQ objective，并
 配置 decoder 与 target normalization，不复用带 REPA 的 acoustic preset。unified-token codec 通过
 `runtime=unicodec ~model/acoustic` 选择 token-only composition。ODE sampler 由
@@ -239,5 +241,16 @@ DataModule 显式持有 runtime 与一个可更新的 Collator。初始 `task_we
 在后续 collate 时读取新值；worker 侧 runtime 是不含 backbone/codec 的数据快照。
 
 同一组 task weights 只能包含相同 source/target modality 的任务，权重必须有限、非负且总和为
-正，以保证 batch 执行签名稳定。正式多任务 DDP 使用 `find_unused_parameters=True`；total
-loss 日志跨 rank 归约。静态 codec oracle 冻结目标路径外参数并使用静态 DDP 契约。
+正，以保证每个子 batch 的执行签名稳定。task 与 loader 权重只控制进入训练 step 的数据频率，
+不额外乘到 loss 上；token、flow、RVQ 与 REPA loss 跨联合子 batch 按有效 token/frame 数聚合。
+静态 codec oracle 冻结目标路径外参数并使用静态 DDP 契约。
+
+`scripts/overfit.py` 只用于 fixed-sample overfit、smoke 和 stage freeze 合同验收；正式训练入口是
+`scripts/train.py`。`configs/stage/stage_*.yaml` 是 Stage 0-4 的默认训练契约：每个 stage 显式声明 loader
+权重、loader 内 task 权重、`batches_per_step`、可训练参数组、冻结参数组和
+`backbone_top_fraction`。`stage.py` 只负责把配置校验为 `StageSpec` 并执行 freeze。Stage
+1-2 默认冻结 backbone，只训练 speech interface；Stage 3 解冻 Qwen 顶部 1/3 block 与 final
+norm；Stage 4 全解冻 Qwen。RVQ decoder 的结构性冻结参数始终保持 frozen。Stage callback
+可以在同一 stage 切换 task 权重、loader 权重和参数冻结。正式 joint entry 以
+`find_unused_parameters=False` 为目标时，同一 optimizer step 必须通过 joint batch 覆盖所有
+仍可训练的执行路径，或在进入该 step 前冻结未使用参数组。

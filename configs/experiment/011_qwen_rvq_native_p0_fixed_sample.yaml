@@ -17,7 +17,7 @@ data:
   sample_index: 0
 
 callbacks:
-  sample:
+  task_sample:
     enabled: false
     every_n_steps: 1
   evaluation:

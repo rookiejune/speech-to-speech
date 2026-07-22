@@ -17,12 +17,14 @@ class LoggingTest(unittest.TestCase):
         objective = Mock()
         outputs = Outputs(loss=torch.tensor(2.0))
         objective.forward.return_value = outputs
+        objective.reduce.side_effect = lambda values: values[0]
         module = SpeechToSpeechModule(Config(), model=Mock(), objective=objective)
 
         with patch.object(module, "log") as log:
             result = module.training_step(Mock())
 
         self.assertIs(result, outputs)
+        objective.reduce.assert_called_once_with([outputs])
         log.assert_called_once_with(
             "train/loss",
             outputs["loss"],

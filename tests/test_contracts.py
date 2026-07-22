@@ -14,6 +14,7 @@ import torch
 from anydataset.types import (
     AudioItem,
     AudioView,
+    Lang,
     Modality,
     Role,
     TextItem,
@@ -24,12 +25,30 @@ from hydra import compose, initialize_config_dir
 from anytrain.idspace import Layout
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig, OmegaConf
+from torch import nn
 
-from speech_to_speech.datamodule.collator import Collator
-from speech_to_speech.datamodule import DatasetConfig, DatasetName, ToyDataset
+from speech_to_speech.datamodule.collator import Collator, TextCollator, _allocate_tasks
+from speech_to_speech.datamodule import (
+    DatasetConfig,
+    DatasetName,
+    FixedDataModule,
+    JointDataModule,
+    LoaderSchedule,
+    ScheduledDataLoader,
+    TextConfig,
+    TextDataModule,
+    TextDatasetConfig,
+    TextDatasetName,
+    ToyDataset,
+    load_text_dataset,
+)
 from speech_to_speech.datamodule.module import Config as DataConfig
 from speech_to_speech.datamodule.module import DataModule
-from speech_to_speech.datamodule.parser import _parse_audio_item, parse_sample
+from speech_to_speech.datamodule.parser import (
+    _parse_audio_item,
+    parse_sample,
+    parse_text_sample,
+)
 from speech_to_speech.datamodule.protocol import DataRuntime, DataRuntimeSnapshot
 from speech_to_speech.datamodule.types import (
     Language,
@@ -42,9 +61,15 @@ from speech_to_speech.model import Config as ModelConfig, ToyConfig
 from speech_to_speech.runtime import Config, Runtime
 from speech_to_speech.runtime.runtime import audio_tokenizer, dtype
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer, TorchCodecBPE
+from speech_to_speech.stage import ParameterGroup, STAGE_SPECS, StageName, apply_stage
 from speech_to_speech.task import Task
 from scripts._config import overfit as parse_overfit
-from scripts.overfit import FixedDataModule, build_trainer, run, runtime_config
+from scripts.overfit import (
+    _prepare_generation_module,
+    build_trainer,
+    run,
+    runtime_config,
+)
 
 
 class _Tokenizer:
@@ -59,6 +84,12 @@ class _Tokenizer:
         return [1, 2]
 
 
+class _ChatTokenizer(_Tokenizer):
+    def apply_chat_template(self, conversation, **kwargs) -> str:
+        del kwargs
+        return f"<user>{conversation[0]['content']}</user><assistant>"
+
+
 class _Event(Protocol):
     def set(self) -> None: ...
 
@@ -71,6 +102,51 @@ class _Queue(Protocol):
     def get(self, *, timeout: float) -> list[Task]: ...
 
     def close(self) -> None: ...
+
+
+class _FakeTrainDataModule:
+    def __init__(self, task: Task) -> None:
+        self.task = task
+        self.setup_stages: list[str | None] = []
+        self.train_dataloader_calls = 0
+
+    def setup(self, stage: str | None = None) -> None:
+        self.setup_stages.append(stage)
+
+    def train_dataloader(self):
+        self.train_dataloader_calls += 1
+        return [ModelBatch.from_samples([_sample(self.task)], pad_token_id=99)]
+
+
+class _StageBackbone(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.config = SimpleNamespace(num_hidden_layers=3)
+        self.model = nn.Module()
+        self.model.layers = nn.ModuleList(nn.Linear(1, 1) for _ in range(3))
+        self.model.norm = nn.LayerNorm(1)
+
+
+class _StageAcousticDecoder(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.decoder = nn.Module()
+        self.decoder.embed_tokens = nn.Embedding(1, 1)
+        self.codebook_embeddings = nn.ModuleList(nn.Embedding(1, 1) for _ in range(2))
+        self.embedding_projections = nn.ModuleList(nn.Linear(1, 1) for _ in range(2))
+        self.head = nn.Linear(1, 1)
+
+
+class _StageModel(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.backbone = _StageBackbone()
+        self.semantic_audio_embedding = nn.Embedding(1, 1)
+        self.semantic_audio_adapter = nn.Linear(1, 1)
+        self.acoustic_prompt_adapter = nn.Linear(1, 1)
+        self.acoustic_prompt_gate = nn.Parameter(torch.zeros(1))
+        self.semantic_audio_output_adapter = nn.Linear(1, 1)
+        self.acoustic_decoder = _StageAcousticDecoder()
 
 
 def _observe_task_updates(
@@ -227,10 +303,26 @@ class ContractTest(unittest.TestCase):
                 with self.assertRaises(EvaluationReached):
                     run(config)
 
+    @patch("scripts.overfit.torch.cuda.set_device")
+    def test_post_fit_generation_uses_runtime_device(self, set_device):
+        module = Mock()
+        module.parameters.return_value = iter(
+            [SimpleNamespace(device=torch.device("cuda", 0))]
+        )
+
+        device = _prepare_generation_module(module, torch.device("cuda", 0))
+
+        self.assertEqual(device, torch.device("cuda", 0))
+        set_device.assert_called_once_with(torch.device("cuda", 0))
+        module.to.assert_called_once_with(torch.device("cuda", 0))
+
     def test_task_is_the_modality_source_of_truth(self):
         self.assertIs(Task.S2ST.source_modality, Modality.AUDIO)
         self.assertIs(Task.S2ST.target_modality, Modality.AUDIO)
         self.assertTrue(Task.S2ST.uses_source_role)
+        self.assertIs(Task.MT.source_modality, Modality.TEXT)
+        self.assertIs(Task.MT.target_modality, Modality.TEXT)
+        self.assertTrue(Task.MT.uses_source_role)
         self.assertIsNone(Task.AUDIO_AR.source_modality)
         self.assertIs(Task.ASR.target_modality, Modality.TEXT)
         self.assertFalse(Task.TTS.uses_source_role)
@@ -367,6 +459,153 @@ class ContractTest(unittest.TestCase):
             torch.equal(pair.source.acoustic_codes, torch.tensor([[2], [3]]))
         )
         self.assertEqual(tokenizer.encoded, ("target text", False))
+
+    def test_text_parser_ignores_audio_fields(self):
+        tokenizer = _Tokenizer(10)
+        runtime = SimpleNamespace(text_tokenizer=tokenizer)
+
+        pair = parse_text_sample(_raw_text_sample(), runtime)
+
+        self.assertTrue(torch.equal(pair.source.text_token_ids, torch.tensor([1, 2])))
+        self.assertIs(pair.source.language, Language.ZH)
+        self.assertIs(pair.target.language, Language.EN)
+        self.assertEqual(tokenizer.encoded, ("target text", False))
+
+    def test_text_collator_builds_mt_batches_without_audio_runtime(self):
+        runtime = SimpleNamespace(
+            text_tokenizer=_ChatTokenizer(32),
+            layout=Layout(text=(0, 32), audio=(32, 36)),
+            pad_token_id=0,
+            eos_token_id=31,
+        )
+
+        batch = TextCollator(runtime, {Task.MT: 1.0})([_raw_text_sample()])
+
+        self.assertEqual(batch.tasks, [Task.MT])
+        self.assertIsNone(batch.acoustic_prompt)
+        self.assertIsNone(batch.acoustic_target)
+        self.assertTrue(batch.token_labels.ne(-100).any())
+        labels = batch.token_labels[batch.token_labels.ne(-100)]
+        self.assertTrue((labels >= 0).all())
+        self.assertTrue((labels < 32).all())
+
+    def test_text_collator_rejects_audio_tasks(self):
+        runtime = SimpleNamespace(
+            text_tokenizer=_ChatTokenizer(32),
+            layout=Layout(text=(0, 32), audio=(32, 36)),
+            pad_token_id=0,
+            eos_token_id=31,
+        )
+
+        with self.assertRaisesRegex(ValueError, "text-only"):
+            TextCollator(runtime, {Task.TTS: 1.0})
+
+    @patch("anydataset.presets.WMT19")
+    def test_text_dataset_config_loads_anydataset_wmt19(self, wmt19):
+        config = TextDatasetConfig(
+            name=TextDatasetName.WMT19,
+            split="validation",
+            source_lang="de",
+            target_lang="en",
+        )
+
+        loaded = load_text_dataset(config)
+
+        self.assertIs(loaded, wmt19.return_value)
+        wmt19.assert_called_once_with(
+            split="validation",
+            source_lang="de",
+            target_lang="en",
+        )
+
+    def test_text_datamodule_reads_toy_text_without_codec_runtime(self):
+        runtime = SimpleNamespace(
+            text_tokenizer=_ChatTokenizer(32),
+            layout=Layout(text=(0, 32), audio=(32, 36)),
+            pad_token_id=0,
+            eos_token_id=31,
+        )
+        datamodule = TextDataModule(
+            TextConfig(
+                dataloader={"batch_size": 2, "num_workers": 0},
+                dataset=TextDatasetConfig(
+                    name=TextDatasetName.TOY,
+                    toy_samples=2,
+                ),
+            ),
+            runtime,
+            {Task.MT: 1.0},
+        )
+
+        datamodule.setup()
+        batch = next(iter(datamodule.train_dataloader()))
+
+        self.assertEqual(batch.input_ids.size(0), 2)
+        self.assertEqual(batch.tasks, [Task.MT, Task.MT])
+        self.assertIsNone(batch.acoustic_prompt)
+        self.assertIsNone(batch.acoustic_target)
+
+    def test_scheduled_dataloader_rotates_homogeneous_loaders_by_weight(self):
+        speech = ModelBatch.from_samples([_sample(Task.TTS)], pad_token_id=99)
+        mt = ModelBatch.from_samples([_sample(Task.MT)], pad_token_id=99)
+        loader = ScheduledDataLoader(
+            {"speech": [speech], "mt": [mt]},
+            LoaderSchedule({"speech": 2.0, "mt": 1.0}),
+        )
+
+        iterator = iter(loader)
+        tasks = [next(iterator).tasks[0] for _ in range(6)]
+
+        self.assertEqual(
+            tasks,
+            [Task.TTS, Task.MT, Task.TTS, Task.TTS, Task.MT, Task.TTS],
+        )
+
+    def test_scheduled_dataloader_can_emit_fixed_joint_steps(self):
+        speech = ModelBatch.from_samples([_sample(Task.TTS)], pad_token_id=99)
+        mt = ModelBatch.from_samples([_sample(Task.MT)], pad_token_id=99)
+        with self.assertRaisesRegex(ValueError, "too small"):
+            LoaderSchedule({"speech": 9.0, "mt": 1.0}, batches_per_step=8)
+        loader = ScheduledDataLoader(
+            {"speech": [speech], "mt": [mt]},
+            LoaderSchedule({"speech": 2.0, "mt": 1.0}, batches_per_step=3),
+        )
+
+        batch = next(iter(loader))
+
+        self.assertIsInstance(batch, tuple)
+        self.assertEqual([item.tasks[0] for item in batch], [Task.TTS, Task.TTS, Task.MT])
+
+    def test_joint_datamodule_sets_up_children_and_returns_scheduled_loader(self):
+        speech = _FakeTrainDataModule(Task.TTS)
+        mt = _FakeTrainDataModule(Task.MT)
+        joint = JointDataModule(
+            {"speech": speech, "mt": mt},
+            LoaderSchedule({"speech": 1.0, "mt": 1.0}, batches_per_step=2),
+        )
+
+        joint.set_loader_weights({"speech": 1.0, "mt": 1.0})
+        joint.setup("fit")
+        loader = joint.train_dataloader()
+        iterator = iter(loader)
+
+        self.assertEqual(joint.schedule.batches_per_step, 2)
+        self.assertEqual(speech.setup_stages, ["fit"])
+        self.assertEqual(mt.setup_stages, ["fit"])
+        self.assertEqual(speech.train_dataloader_calls, 1)
+        self.assertEqual(mt.train_dataloader_calls, 1)
+        batch = next(iterator)
+        self.assertIsInstance(batch, tuple)
+        self.assertEqual([item.tasks[0] for item in batch], [Task.TTS, Task.MT])
+
+    def test_joint_datamodule_validates_loader_names(self):
+        with self.assertRaisesRegex(ValueError, "missing"):
+            JointDataModule(
+                {"speech": _FakeTrainDataModule(Task.TTS)},
+                LoaderSchedule({"speech": 1.0, "mt": 1.0}),
+            )
+        with self.assertRaisesRegex(ValueError, "finite positive"):
+            LoaderSchedule({"speech": 0.0, "mt": 0.0})
 
     @patch("zhuyin.datasets.wmt19_tts.wmt19_tts_codec")
     def test_datamodule_setup_loads_dataset_once(self, load_dataset):
@@ -721,6 +960,16 @@ class ContractTest(unittest.TestCase):
                 collator.set_task_weights(weights)
             self.assertEqual(collator.tasks, [Task.TTS])
 
+    def test_fixed_task_allocation_uses_batch_size_and_rejects_tiny_batches(self):
+        self.assertEqual(
+            _allocate_tasks([Task.T2ST, Task.TTS], [1.0, 2.0], 6),
+            [Task.T2ST, Task.T2ST, Task.TTS, Task.TTS, Task.TTS, Task.TTS],
+        )
+        collator = Collator(Mock(), {Task.TTS: 1.0, Task.T2ST: 0.0})
+        self.assertEqual(collator.tasks, [Task.TTS])
+        with self.assertRaisesRegex(ValueError, "too small"):
+            _allocate_tasks([Task.MT, Task.TTS], [1.0, 9.0], 8)
+
     def test_stage_switcher_restores_task_weights_from_current_epoch(self):
         task_weights = [{Task.TTS: 1.0}, {Task.ASR: 1.0}, {Task.TEXT_AR: 1.0}]
         datamodule = SimpleNamespace(set_task_weights=Mock())
@@ -734,6 +983,55 @@ class ContractTest(unittest.TestCase):
             datamodule.set_task_weights.call_args_list,
             [unittest.mock.call(task_weights[1]), unittest.mock.call(task_weights[2])],
         )
+
+    def test_stage_switcher_updates_loader_weights_and_freezes_parameters(self):
+        model = _StageModel()
+        datamodule = SimpleNamespace(
+            set_task_weights=Mock(),
+            set_loader_weights=Mock(),
+        )
+        trainer = SimpleNamespace(datamodule=datamodule, current_epoch=0)
+        pl_module = Mock()
+        pl_module.model = model
+        switcher = StageSwitcher(
+            StageConfig(
+                [{Task.TTS: 1.0}],
+                epoch_milestones=[],
+                loader_weights_by_stage=[{"tts": 0.9, "mt": 0.1}],
+                model_stages=[StageName.STAGE_1],
+            )
+        )
+
+        switcher.on_fit_start(trainer, pl_module)
+
+        datamodule.set_task_weights.assert_called_once_with({Task.TTS: 1.0})
+        datamodule.set_loader_weights.assert_called_once_with({"tts": 0.9, "mt": 0.1})
+        self.assertFalse(model.backbone.model.layers[0].weight.requires_grad)
+        self.assertTrue(model.semantic_audio_embedding.weight.requires_grad)
+
+    def test_stage_specs_freeze_explicit_parameter_groups(self):
+        model = _StageModel()
+
+        counts = apply_stage(model, STAGE_SPECS[StageName.STAGE_1])
+
+        self.assertGreater(counts[ParameterGroup.BACKBONE], 0)
+        self.assertFalse(model.backbone.model.layers[0].weight.requires_grad)
+        self.assertTrue(model.semantic_audio_embedding.weight.requires_grad)
+        self.assertTrue(model.acoustic_prompt_gate.requires_grad)
+        self.assertTrue(model.acoustic_decoder.head.weight.requires_grad)
+        self.assertFalse(model.acoustic_decoder.decoder.embed_tokens.weight.requires_grad)
+        self.assertFalse(model.acoustic_decoder.codebook_embeddings[-1].weight.requires_grad)
+        self.assertFalse(model.acoustic_decoder.embedding_projections[-1].weight.requires_grad)
+
+    def test_partial_qwen_stage_unfreezes_top_layers_and_final_norm(self):
+        model = _StageModel()
+
+        apply_stage(model, STAGE_SPECS[StageName.STAGE_3])
+
+        self.assertFalse(model.backbone.model.layers[0].weight.requires_grad)
+        self.assertFalse(model.backbone.model.layers[1].weight.requires_grad)
+        self.assertTrue(model.backbone.model.layers[2].weight.requires_grad)
+        self.assertTrue(model.backbone.model.norm.weight.requires_grad)
 
 
 def _sample(task: Task) -> ModelSample:
@@ -792,12 +1090,25 @@ def _raw_sample():
         (Role.SOURCE, Modality.AUDIO): audio(0),
         (Role.SOURCE, Modality.TEXT): TextItem(
             views={TextView.TEXT: "source text"},
-            meta={TextMeta.LANG: "zh"},
+            meta={TextMeta.LANG: Lang.ZH},
         ),
         (Role.TARGET, Modality.AUDIO): audio(4),
         (Role.TARGET, Modality.TEXT): TextItem(
             views={TextView.TEXT: "target text"},
-            meta={TextMeta.LANG: "en"},
+            meta={TextMeta.LANG: Lang.EN},
+        ),
+    }
+
+
+def _raw_text_sample():
+    return {
+        (Role.SOURCE, Modality.TEXT): TextItem(
+            views={TextView.TEXT: "source text"},
+            meta={TextMeta.LANG: Lang.ZH},
+        ),
+        (Role.TARGET, Modality.TEXT): TextItem(
+            views={TextView.TEXT: "target text"},
+            meta={TextMeta.LANG: Lang.EN},
         ),
     }
 

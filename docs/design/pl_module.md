@@ -7,37 +7,46 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
 `SpeechToSpeechModule[ModelT]` 是薄 Lightning wrapper：
 
 - 构造时通过 `Objective[ModelT]` 保留 model/objective 类型配对。
-- `training_step()` 调用 objective，跨 rank 归约并记录一次 total loss，同时保留分项到 backward
-  完成。
+- `training_step()` 接收单个 `ModelBatch` 或多个 homogeneous 子 batch；联合 batch 会逐个调用
+  objective，并按有效 token/frame 聚合分项 loss。它跨 rank 归约并记录一次 total loss，同时保留
+  分项到 backward 完成。
 - `current_loss_outputs()`：只在当前 training step 的 backward 完成前返回仍连接计算图的
   `Outputs`，供 `GradLogger` 计算指定分项梯度；其他时机显式报错。
 - `configure_optimizers()` 委托 anytrain optimizer preset。
 - `generate()` / `evaluate_text()` 只负责切换 eval mode、调用 generation 包并恢复原 mode。
 
+`pl_module.composition` 负责组装 `model + objective + SpeechToSpeechModule` 的 token/Flow/RVQ
+组合，入口只选择组合并传入已解析配置；该模块通过窄 Protocol 消费 acoustic config，不反向依赖
+`scripts._config`。
+
 `pl_module` 不实现 task 状态机、decode、文本 NLL、对齐或 loss；包级 API 只导出
-`Config` 与 `SpeechToSpeechModule`。
+`Config` 与 `SpeechToSpeechModule`，composition 通过显式子模块导入。
 
 ## callback
 
 `speech_to_speech.callback` 只导出 `StageConfig` 与 `StageSwitcher`；以下日志 callback 从
 `speech_to_speech.callback.logging` 导入：
 
-- `StageSwitcher`：按 `epoch_milestones` 调用 datamodule 的 `set_task_weights()`，并从
+- `StageSwitcher`：按 `epoch_milestones` 切换 task 权重、loader 权重和参数冻结，并从
   `current_epoch` 恢复当前 stage。
 - `OutputsLogger`：按 task 展开 `LossItem`，不读取 model head。
 - `GradLogger` / `GradNormLogger`：记录指定分项或全局梯度范数。
 - `FlowMatchingLogger`：显式接收 flow runtime，不向下读取 model runtime。
-- `SampleLogger`：只在 global zero 读取 datamodule 的公开 `train_samples()`/`collator`，一次
-  generation 结果复用 token、features 与 waveform。
+- `LossSummary`：收集训练输出里的 total loss 与分项 `LossItem`，只在训练结束后生成窗口摘要。
+- `AcousticEvaluation`：对 fixed-sample acoustic model 使用本地 generator seeds 采样，记录 feature、
+  waveform 与 STFT 距离；纯评估函数位于 `generation.evaluation`，不留在脚本私有模块。
+- `TaskSampleLogger`：只在 global zero 读取 datamodule 的公开 `train_samples()`/`collator`，
+  按真实 task 记录 source/reference/generated metadata，并复用一次 generation 的 token、features
+  与 waveform；它不运行额外神经网络评估器，也不重复计算 loss。
 - `TextRetentionLogger`：记录 text probe generation、reference NLL 与相对基线漂移。
 
-Sample/evaluation callback 在隔离 RNG context 内运行，不改变后续训练的 CPU 或当前 CUDA
+Task sample/evaluation callback 在隔离 RNG context 内运行，不改变后续训练的 CPU 或当前 CUDA
 random state。
 
 ## performance
 
-联合训练显式启用 performance 时，必须同时设置 `callbacks.sample.enabled=false`；入口显式拒绝
-performance 与 sample logging 同时启用。`SampleLogger` 在 `on_train_batch_start` 只由 rank zero
+联合训练显式启用 performance 时，必须同时设置 `callbacks.task_sample.enabled=false`；入口显式拒绝
+performance 与 task sample logging 同时启用。`TaskSampleLogger` 在 `on_train_batch_start` 只由 rank zero
 执行 generation，DDP 的其他 rank 会在后续同步点等待，因此改变 callback 顺序也不能可靠地把这段
 额外工作从各 rank 的 step time 中排除。
 
@@ -72,6 +81,6 @@ FlashAttention 或其他 custom op 也可能不在通用算子计数覆盖范围
   LightningModule 实现 `current_loss_outputs()` 生命周期契约。
 - `TrainingFlops` 负责解释 speech-to-speech 的模型、batch 与 objective；`PerformanceCallback` 只负责
   optimizer-step 聚合、计时、硬件峰值推断和 MFU 记录，不内置任务 batch schema。
-- overfit performance composition 不包含 `SampleLogger`、`GradLogger` 或 `GradNormLogger`；前者由
+- overfit performance composition 不包含 `TaskSampleLogger`、`GradLogger` 或 `GradNormLogger`；前者由
   配置显式关闭，后两者由入口自动省略。
 - total loss 只由 LightningModule 以 `sync_dist=True` 记录一次，分项 logger 不重复记录。

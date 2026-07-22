@@ -55,10 +55,12 @@ class CausalAcousticLoss(nn.Module):
         frame_count = mask.sum(dim=1).clamp_min(1)
         codebook_losses = frame_losses.sum(dim=1)
         codebook_losses = codebook_losses / frame_count[:, None]
+        details = {
+            f"codebook_{codebook}": codebook_losses[:, codebook]
+            for codebook in range(labels.size(-1))
+        }
+        details["frames"] = frame_count.to(dtype=frame_losses.dtype)
         return LossItem(
             loss=codebook_losses.mean(dim=-1),
-            details={
-                f"codebook_{codebook}": codebook_losses[:, codebook]
-                for codebook in range(labels.size(-1))
-            },
+            details=details,
         )

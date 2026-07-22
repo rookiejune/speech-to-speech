@@ -16,7 +16,7 @@ TTS/S2ST 单卡 fixed-sample 2-step 子项。两条训练和 teacher-forced acou
   `c1899de289a04d12100db370d81485cdf75e47ca`，LongCat native semantic token，8 层 RVQ
   decoder；总参数 `949,827,052`，可训练参数 `949,826,028`，decoder 参数 `184,031,980`。
 - 数据与预算：WMT19/LongCat prepared train sample 0，batch size 1，`bf16-mixed`，每个任务
-  2 optimizer steps；关闭逐步 `SampleLogger`，保留每步 4 个固定 seed 的 acoustic evaluation。
+  2 optimizer steps；关闭逐步 `TaskSampleLogger`，保留每步 4 个固定 seed 的 acoustic evaluation。
 - NAS `/mnt/pami202` 为 26 TB、使用率 100%，首轮任务在训练前发生 I/O stall。将 Qwen、
   LongCat cache 和 prepared data 复制到 `145:/tmp` 后，训练不再阻塞。该问题归类为运行环境
   容量问题，不归类为模型失败；所有 `/tmp` 产物均不是长期 artifact。

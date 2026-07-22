@@ -31,9 +31,9 @@ decode：
 - 2.16s waveform 的 acoustic sampling 为 `31–36 ms`，RTF 约 `0.015`。
 - waveform 全部 finite。
 
-S2ST 使用每步 SampleLogger 时，第 7 step 的未训练 semantic head 直接生成
+S2ST 使用旧逐步 sample logging 时，第 7 step 的未训练 semantic head 直接生成
 EOA，generation 按契约报“无 codec-decodable token”。Formal run 禁用每步
-SampleLogger，固定 teacher-forcing acoustic evaluation 每 20 steps 执行。
+task sample logging，固定 teacher-forcing acoustic evaluation 每 20 steps 执行。
 
 ## Overfit
 

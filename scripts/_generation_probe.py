@@ -8,26 +8,15 @@ import torch
 from anydataset.types import Modality
 
 from speech_to_speech.generation import Request, generate_responses
+from speech_to_speech.generation.reporting import (
+    allowed_values,
+    hidden_last,
+    hidden_layer_max_abs,
+    selected_id,
+    tensor_max_abs,
+    top_logits,
+)
 from speech_to_speech.model import SpeechToSpeechFlowModel
-
-if __package__:
-    from ._generation_reporting import (
-        allowed_values,
-        hidden_last,
-        hidden_layer_max_abs,
-        selected_id,
-        tensor_max_abs,
-        top_logits,
-    )
-else:
-    from _generation_reporting import (
-        allowed_values,
-        hidden_last,
-        hidden_layer_max_abs,
-        selected_id,
-        tensor_max_abs,
-        top_logits,
-    )
 
 
 def run(

@@ -11,9 +11,46 @@ from ..runtime.protocol import DataRuntime
 from ..runtime.types import AudioTokenizer, Codec, TextTokenizer
 
 
+class TextRuntime(Protocol):
+    @cached_property
+    def text_tokenizer(self) -> TextTokenizer: ...
+
+    @cached_property
+    def layout(self) -> Layout: ...
+
+    @cached_property
+    def pad_token_id(self) -> int: ...
+
+    @cached_property
+    def eos_token_id(self) -> int: ...
+
+
 class DatasetRuntime(DataRuntime, Protocol):
     @cached_property
     def codec(self) -> Codec: ...
+
+
+@dataclass(frozen=True)
+class TextRuntimeSnapshot:
+    """Pickleable worker view for text-only dataloaders."""
+
+    text_tokenizer: TextTokenizer
+    layout_blocks: tuple[tuple[str, tuple[int, int]], ...]
+    pad_token_id: int
+    eos_token_id: int
+
+    @classmethod
+    def from_runtime(cls, runtime: TextRuntime) -> TextRuntimeSnapshot:
+        return cls(
+            text_tokenizer=runtime.text_tokenizer,
+            layout_blocks=tuple(runtime.layout.blocks.items()),
+            pad_token_id=runtime.pad_token_id,
+            eos_token_id=runtime.eos_token_id,
+        )
+
+    @cached_property
+    def layout(self) -> Layout:
+        return Layout(**dict(self.layout_blocks))
 
 
 @dataclass(frozen=True)
@@ -50,4 +87,10 @@ class DataRuntimeSnapshot:
         return Layout(**dict(self.layout_blocks))
 
 
-__all__ = ["DataRuntime", "DataRuntimeSnapshot", "DatasetRuntime"]
+__all__ = [
+    "DataRuntime",
+    "DataRuntimeSnapshot",
+    "DatasetRuntime",
+    "TextRuntime",
+    "TextRuntimeSnapshot",
+]

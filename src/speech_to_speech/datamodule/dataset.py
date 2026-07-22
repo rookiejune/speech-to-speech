@@ -8,6 +8,7 @@ import torch
 from anydataset.types import (
     AudioItem,
     AudioView,
+    Lang,
     Modality,
     Role,
     Sample,
@@ -91,12 +92,12 @@ class ToyDataset(Dataset[Sample]):
             (Role.SOURCE, Modality.AUDIO): self._audio(index),
             (Role.SOURCE, Modality.TEXT): TextItem(
                 views={TextView.TEXT: f"toy source {index}"},
-                meta={TextMeta.LANG: "zh"},
+                meta={TextMeta.LANG: Lang.ZH},
             ),
             (Role.TARGET, Modality.AUDIO): self._audio(index + self.samples),
             (Role.TARGET, Modality.TEXT): TextItem(
                 views={TextView.TEXT: f"toy target {index}"},
-                meta={TextMeta.LANG: "en"},
+                meta={TextMeta.LANG: Lang.EN},
             ),
         }
 

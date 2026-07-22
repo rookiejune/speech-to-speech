@@ -114,6 +114,11 @@ request。核心 service 不依赖 `ModelBatch`。
 text modality-local logits 计算，并包含 EOS target。`SpeechToSpeechModule.generate()` 与
 `evaluate_text()` 只提供 eval-mode/no-grad 的 Lightning 适配，不改变 generation 契约。
 
+`generation.reporting` 提供 generation smoke/probe 复用的比较和摘要 helper；它服务于诊断脚本，
+不进入包级 `generation` API，也不参与在线推理流程。
+`generation.evaluation` 提供 fixed-sample acoustic evaluation 复用的 waveform/STFT helper；训练侧
+callback 只调用该诊断函数，不在脚本私有模块中维护平行实现。
+
 ## 边界
 
 - `Request` 表达真实推理，不能用缺 target 的 `ModelBatch` 代替。

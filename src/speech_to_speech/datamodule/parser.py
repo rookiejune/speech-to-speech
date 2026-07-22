@@ -7,14 +7,21 @@ from anydataset import types
 from torch import Tensor
 
 from ._tokenization import token_ids
-from .protocol import DataRuntime
-from .types import Language, Speech, SpeechPair
+from .protocol import DataRuntime, TextRuntime
+from .types import Language, Speech, SpeechPair, Text, TextPair
 
 
 def parse_sample(sample: types.Sample, runtime: DataRuntime) -> SpeechPair:
     return SpeechPair(
         _parse_role(sample, types.Role.SOURCE, runtime),
         _parse_role(sample, types.Role.TARGET, runtime),
+    )
+
+
+def parse_text_sample(sample: types.Sample, runtime: TextRuntime) -> TextPair:
+    return TextPair(
+        _parse_text_role(sample, types.Role.SOURCE, runtime),
+        _parse_text_role(sample, types.Role.TARGET, runtime),
     )
 
 
@@ -63,6 +70,19 @@ def _parse_role(
         text_token_ids=token_ids(text, runtime.text_tokenizer),
         audio_token_ids=audio_token_ids,
         audio_token_spans=audio_token_spans,
+        language=Language(text_item.meta[types.TextMeta.LANG]),
+    )
+
+
+def _parse_text_role(
+    sample: types.Sample,
+    role: types.Role,
+    runtime: TextRuntime,
+) -> Text:
+    text_item = cast(types.TextItem, sample[(role, types.Modality.TEXT)])
+    text = text_item.views[types.TextView.TEXT]
+    return Text(
+        text_token_ids=token_ids(text, runtime.text_tokenizer),
         language=Language(text_item.meta[types.TextMeta.LANG]),
     )
 

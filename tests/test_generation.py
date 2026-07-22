@@ -6,12 +6,21 @@ from typing import cast
 from unittest.mock import Mock, patch
 
 import torch
-from anydataset.types import Modality
+from anydataset.types import (
+    AudioItem,
+    AudioView,
+    Lang,
+    Modality,
+    Role,
+    TextItem,
+    TextMeta,
+    TextView,
+)
 from anytrain.idspace import Layout
 from torch import Tensor, nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from speech_to_speech.callback.logging.sample import SampleLogger
+from speech_to_speech.callback.logging.task_sample import TaskSampleLogger
 from speech_to_speech.datamodule.module import Config as DataConfig
 from speech_to_speech.datamodule.module import DataModule
 from speech_to_speech.datamodule.types import ACOUSTIC_PAD_ID, ModelBatch
@@ -799,7 +808,7 @@ class GenerationTest(unittest.TestCase):
         self.assertTrue(torch.equal(first_acoustic["codes"], torch.tensor([[3]])))
         self.assertTrue(torch.equal(second_acoustic["codes"], torch.tensor([[2], [1]])))
 
-    def test_sample_logger_reuses_one_generation_result(self):
+    def test_task_sample_logger_reuses_one_generation_result(self):
         batch = ModelBatch(
             input_ids=torch.tensor([[1, 6, 4, 7]]),
             token_labels=torch.tensor([[-100, -100, 4, 7]]),
@@ -824,8 +833,22 @@ class GenerationTest(unittest.TestCase):
             logger=SimpleNamespace(experiment=experiment),
             datamodule=datamodule,
         )
-        logger = SampleLogger([0], every_n_steps=1)
-        logger.samples = [Mock()]
+        logger = TaskSampleLogger([0], every_n_steps=1)
+        logger.samples = [
+            {
+                (Role.SOURCE, Modality.TEXT): TextItem(
+                    views={TextView.TEXT: "source"},
+                    meta={TextMeta.LANG: Lang.ZH},
+                ),
+                (Role.TARGET, Modality.TEXT): TextItem(
+                    views={TextView.TEXT: "target"},
+                    meta={TextMeta.LANG: Lang.EN},
+                ),
+                (Role.TARGET, Modality.AUDIO): AudioItem(
+                    views={AudioView.LONGCAT: torch.zeros(1, 2, dtype=torch.long)}
+                ),
+            }
+        ]
         trainer.is_global_zero = True
 
         logger.on_train_batch_start(trainer, module, None, 0)
@@ -833,12 +856,20 @@ class GenerationTest(unittest.TestCase):
         module.generate.assert_called_once()
         experiment.add_audio.assert_called_once()
         audio_call = experiment.add_audio.call_args
-        self.assertEqual(audio_call.args[0], "sample/0")
+        self.assertEqual(audio_call.args[0], "task_sample/0/generated")
         self.assertTrue(torch.equal(audio_call.args[1], result["audio"]["waveform"]))
         self.assertEqual(audio_call.args[2], 0)
         self.assertEqual(audio_call.kwargs, {"sample_rate": 16_000})
+        experiment.add_text.assert_called_once()
+        metadata_call = experiment.add_text.call_args
+        self.assertEqual(metadata_call.args[0], "task_sample/0/metadata")
+        self.assertIn('"task": "tts"', metadata_call.args[1])
+        self.assertIn('"dataset_index": 0', metadata_call.args[1])
+        self.assertIn('"duration_seconds": 0.0005', metadata_call.args[1])
+        self.assertIn('"status": "ok"', metadata_call.args[1])
+        self.assertIn('"waveform_finite": true', metadata_call.args[1])
 
-    def test_sample_logger_loads_samples_from_real_datamodule(self):
+    def test_task_sample_logger_loads_samples_from_real_datamodule(self):
         samples = [Mock(), Mock()]
         config = DataConfig(
             codec="longcat",
@@ -852,16 +883,71 @@ class GenerationTest(unittest.TestCase):
         with patch("zhuyin.datasets.wmt19_tts.wmt19_tts_codec", return_value=samples):
             datamodule.setup()
         trainer = SimpleNamespace(is_global_zero=True, datamodule=datamodule)
-        logger = SampleLogger([1, 0], every_n_steps=1)
+        logger = TaskSampleLogger([1, 0], every_n_steps=1)
 
         logger.on_fit_start(trainer, SimpleNamespace())
 
         self.assertEqual(logger.samples, [samples[1], samples[0]])
 
-    def test_sample_logger_skips_nonzero_ranks(self):
+    def test_task_sample_logger_logs_generation_failure(self):
+        batch = ModelBatch(
+            input_ids=torch.tensor([[1, 2]]),
+            token_labels=torch.tensor([[-100, 2]]),
+            acoustic_prompt=None,
+            acoustic_target=None,
+            tasks=[Task.T2TT],
+            pad_token_id=0,
+        )
+        module = SimpleNamespace(generate=Mock(side_effect=RuntimeError("boom")))
+        experiment = SimpleNamespace(add_text=Mock())
+        trainer = SimpleNamespace(
+            global_step=0,
+            is_global_zero=True,
+            logger=SimpleNamespace(experiment=experiment),
+            datamodule=SimpleNamespace(collator=Mock(return_value=batch)),
+        )
+        logger = TaskSampleLogger([0], every_n_steps=1)
+        logger.samples = [_raw_sample()]
+
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            logger.on_train_batch_start(trainer, module, None, 0)
+
+        experiment.add_text.assert_called_once()
+        metadata = experiment.add_text.call_args.args[1]
+        self.assertIn('"status": "failed"', metadata)
+        self.assertIn('"type": "RuntimeError"', metadata)
+
+    def test_task_sample_logger_logs_row_count_mismatch(self):
+        batch = ModelBatch(
+            input_ids=torch.tensor([[1, 2]]),
+            token_labels=torch.tensor([[-100, 2]]),
+            acoustic_prompt=None,
+            acoustic_target=None,
+            tasks=[Task.T2TT],
+            pad_token_id=0,
+        )
+        module = SimpleNamespace(generate=Mock(return_value=[]))
+        experiment = SimpleNamespace(add_text=Mock())
+        trainer = SimpleNamespace(
+            global_step=0,
+            is_global_zero=True,
+            logger=SimpleNamespace(experiment=experiment),
+            datamodule=SimpleNamespace(collator=Mock(return_value=batch)),
+        )
+        logger = TaskSampleLogger([0], every_n_steps=1)
+        logger.samples = [_raw_sample()]
+
+        with self.assertRaisesRegex(RuntimeError, "wrong row count"):
+            logger.on_train_batch_start(trainer, module, None, 0)
+
+        metadata = experiment.add_text.call_args.args[1]
+        self.assertIn('"status": "failed"', metadata)
+        self.assertIn("wrong row count", metadata)
+
+    def test_task_sample_logger_skips_nonzero_ranks(self):
         module = SimpleNamespace(generate=Mock())
         trainer = SimpleNamespace(global_step=0, is_global_zero=False)
-        logger = SampleLogger([0], every_n_steps=1)
+        logger = TaskSampleLogger([0], every_n_steps=1)
 
         logger.on_train_batch_start(trainer, module, None, 0)
 
@@ -895,6 +981,30 @@ def _request() -> Request:
             "token_positions": torch.tensor([0]),
         },
     )
+
+
+def _raw_sample():
+    def audio(offset: int) -> AudioItem:
+        return AudioItem(
+            views={
+                AudioView.LONGCAT: torch.tensor(
+                    [[offset, offset + 1], [offset + 2, offset + 3]]
+                )
+            }
+        )
+
+    return {
+        (Role.SOURCE, Modality.AUDIO): audio(0),
+        (Role.SOURCE, Modality.TEXT): TextItem(
+            views={TextView.TEXT: "source text"},
+            meta={TextMeta.LANG: Lang.ZH},
+        ),
+        (Role.TARGET, Modality.AUDIO): audio(4),
+        (Role.TARGET, Modality.TEXT): TextItem(
+            views={TextView.TEXT: "target text"},
+            meta={TextMeta.LANG: Lang.EN},
+        ),
+    }
 
 
 if __name__ == "__main__":

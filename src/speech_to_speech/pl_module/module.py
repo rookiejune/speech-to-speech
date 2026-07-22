@@ -9,7 +9,7 @@ from anytrain.optim.llm import create_optimizer
 from lightning.pytorch import LightningModule
 from torch import nn
 
-from ..datamodule.types import ModelBatch
+from ..datamodule.types import TrainBatch
 from ..generation.service import generate_responses
 from ..generation.text import TextProbe, TextProbeResult, evaluate_text
 from ..generation.types import Request, Result
@@ -43,9 +43,9 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         self.objective = objective
         self._current_loss_outputs: Outputs | None = None
 
-    def training_step(self, batch: ModelBatch, batch_idx: int = 0):
+    def training_step(self, batch: TrainBatch, batch_idx: int = 0):
         del batch_idx
-        outputs = self.objective.forward(batch, self.model)
+        outputs = self._loss_outputs(batch)
         self._current_loss_outputs = outputs
         self.log(
             "train/loss",
@@ -55,6 +55,15 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
             sync_dist=True,
         )
         return outputs
+
+    def _loss_outputs(self, batch: TrainBatch) -> Outputs:
+        if not isinstance(batch, tuple):
+            outputs = [self.objective.forward(batch, self.model)]
+        else:
+            outputs = [self.objective.forward(item, self.model) for item in batch]
+        return self.objective.reduce(
+            outputs,
+        )
 
     def current_loss_outputs(self) -> Outputs:
         """Return loss outputs kept alive until the backward pass completes."""

@@ -2,18 +2,17 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
-from scripts._config import FlowConfig, RepaConfig, RVQConfig
-from scripts._overfit_composition import flow, rvq, token
 from speech_to_speech.model import Config as ModelConfig, DecoderConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
+from speech_to_speech.pl_module.composition import flow, rvq, token
 
 
-class OverfitCompositionTest(unittest.TestCase):
-    @patch("scripts._overfit_composition.SpeechToSpeechModule")
-    @patch("scripts._overfit_composition.TokenObjective")
-    @patch("scripts._overfit_composition.TokenModel")
+class PlModuleCompositionTest(unittest.TestCase):
+    @patch("speech_to_speech.pl_module.composition.SpeechToSpeechModule")
+    @patch("speech_to_speech.pl_module.composition.TokenObjective")
+    @patch("speech_to_speech.pl_module.composition.TokenModel")
     def test_token_closes_model_and_objective(self, model, objective, module):
         runtime = SimpleNamespace(layout=Mock())
         model_config = ModelConfig()
@@ -24,16 +23,16 @@ class OverfitCompositionTest(unittest.TestCase):
         model.assert_called_once_with(model_config, runtime=runtime)
         objective.assert_called_once_with(runtime.layout)
         module.assert_called_once_with(
-            unittest.mock.ANY,
+            ANY,
             model=model.return_value,
             objective=objective.return_value,
         )
         self.assertIs(built_module, module.return_value)
 
-    @patch("scripts._overfit_composition.SpeechToSpeechModule")
-    @patch("scripts._overfit_composition.FlowObjective")
-    @patch("scripts._overfit_composition.SpeechToSpeechFlowModel")
-    @patch("scripts._overfit_composition.WavLMTeacher")
+    @patch("speech_to_speech.pl_module.composition.SpeechToSpeechModule")
+    @patch("speech_to_speech.pl_module.composition.FlowObjective")
+    @patch("speech_to_speech.pl_module.composition.SpeechToSpeechFlowModel")
+    @patch("speech_to_speech.pl_module.composition.WavLMTeacher")
     def test_flow_closes_repa_model_and_objective(
         self,
         teacher,
@@ -52,11 +51,9 @@ class OverfitCompositionTest(unittest.TestCase):
                 )
             ),
         )
-        acoustic = FlowConfig(
-            type="flow",
-            name="flow-2l",
+        acoustic = SimpleNamespace(
             decoder=DecoderConfig(hidden_dim=None, layers=2, heads=1, ffn_ratio=3),
-            repa=RepaConfig(
+            repa=SimpleNamespace(
                 weight=0.2,
                 teacher_checkpoint="teacher",
                 teacher_layer=4,
@@ -84,14 +81,12 @@ class OverfitCompositionTest(unittest.TestCase):
             {"weight": 0.2, "teacher": teacher.return_value},
         )
 
-    @patch("scripts._overfit_composition.SpeechToSpeechModule")
-    @patch("scripts._overfit_composition.RVQObjective")
-    @patch("scripts._overfit_composition.SpeechToSpeechRVQModel")
+    @patch("speech_to_speech.pl_module.composition.SpeechToSpeechModule")
+    @patch("speech_to_speech.pl_module.composition.RVQObjective")
+    @patch("speech_to_speech.pl_module.composition.SpeechToSpeechRVQModel")
     def test_rvq_model_receives_only_decoder_options(self, model, objective, module):
         runtime = SimpleNamespace(layout=Mock())
-        acoustic = RVQConfig(
-            type="rvq",
-            name="rvq-2l",
+        acoustic = SimpleNamespace(
             decoder=DecoderConfig(hidden_dim=None, layers=2, heads=1, ffn_ratio=3),
         )
         model_config = ModelConfig()

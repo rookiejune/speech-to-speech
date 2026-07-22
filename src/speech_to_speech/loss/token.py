@@ -75,6 +75,7 @@ class TokenLoss(nn.Module):
             details={
                 "text_loss": text_loss,
                 "audio_loss": audio_loss,
+                "tokens": total_count.to(dtype=hidden_states.dtype),
                 "text_tokens": text_count.to(dtype=hidden_states.dtype),
                 "audio_tokens": audio_count.to(dtype=hidden_states.dtype),
             },

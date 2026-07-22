@@ -319,6 +319,8 @@ class AcousticRVQScreening(pl.LightningModule):
         self.log("train/rvq_loss", loss, on_step=True, prog_bar=True, sync_dist=True)
         if item.details is not None:
             for name, value in item.details.items():
+                if name == "frames":
+                    continue
                 self.log(
                     f"train/rvq_{name}_loss",
                     value.mean(),

@@ -1,0 +1,33 @@
+# @package _global_
+defaults:
+  - /model: default
+  - /model/acoustic: rvq
+  - /runtime: longcat_native
+  - /data: wmt19_tts
+  - /pl_module: sft
+  - /trainer: default
+  - /logging: tensorboard
+  - override /stage: stage_4
+  - _self_
+
+task: s2st
+run_name: ${stage.name}-${oc.select:acoustic.name,token}
+output_subdir: 011-rvq-native-stage-smoke/${task}/${run_name}
+
+data:
+  sample_index: 0
+
+callbacks:
+  task_sample:
+    enabled: false
+    every_n_steps: 1
+  evaluation:
+    enabled: true
+
+train:
+  seed: 0
+  max_steps: 2
+
+trainer:
+  log_every_n_steps: 1
+  enable_checkpointing: false

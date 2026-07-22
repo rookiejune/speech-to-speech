@@ -1,12 +1,28 @@
-from .collator import Collator
+from .collator import Collator, TextCollator
 from .dataset import (
     DatasetConfig,
     DatasetName,
     ToyDataset,
     load_dataset,
 )
+from .fixed import FixedDataModule
+from .joint import JointDataModule, LoaderSchedule, ScheduledDataLoader, TrainDataModule
 from .module import Config, DataLoaderConfig, DataModule
-from .protocol import DataRuntime, DataRuntimeSnapshot, DatasetRuntime
+from .protocol import (
+    DataRuntime,
+    DataRuntimeSnapshot,
+    DatasetRuntime,
+    TextRuntime,
+    TextRuntimeSnapshot,
+)
+from .text import (
+    TextConfig,
+    TextDataModule,
+    TextDatasetConfig,
+    TextDatasetName,
+    ToyTextDataset,
+    load_text_dataset,
+)
 from .types import (
     ACOUSTIC_PAD_ID,
     AcousticPrompt,
@@ -16,6 +32,9 @@ from .types import (
     ModelSample,
     Speech,
     SpeechPair,
+    Text,
+    TextPair,
+    TrainBatch,
 )
 
 __all__ = [
@@ -31,11 +50,28 @@ __all__ = [
     "DatasetConfig",
     "DatasetName",
     "DatasetRuntime",
+    "FixedDataModule",
+    "JointDataModule",
     "Language",
+    "LoaderSchedule",
     "ModelBatch",
     "ModelSample",
+    "ScheduledDataLoader",
     "Speech",
     "SpeechPair",
+    "Text",
+    "TextCollator",
+    "TextConfig",
+    "TextDataModule",
+    "TextDatasetConfig",
+    "TextDatasetName",
+    "TextPair",
+    "TextRuntime",
+    "TextRuntimeSnapshot",
     "ToyDataset",
+    "ToyTextDataset",
+    "TrainBatch",
+    "TrainDataModule",
     "load_dataset",
+    "load_text_dataset",
 ]

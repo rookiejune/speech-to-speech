@@ -26,6 +26,12 @@
   `uses_source_role` 和 instruction template 的唯一事实来源。
 - `Collator(runtime, task_weights)`：按任务权重为 raw samples 选择任务，依次调用 parser、
   sample builder 和 batch padding；`set_task_weights()` 原地更新后续 batch 的任务分布。
+- `TextDataModule` / `TextCollator`：纯文本 MT 数据路径，只读取 source/target text，当前可配置为
+  anydataset `WMT19` preset 或 deterministic toy text samples，不消费 codec/audio tokenizer。
+- `JointDataModule` / `ScheduledDataLoader`：组织多个 homogeneous dataloader。默认按
+  optimizer step 确定性轮转；配置 `batches_per_step > 1` 时，一个 optimizer step 返回多个子
+  batch，供静态 DDP 覆盖多条可训练执行路径。每个子 dataloader 自己保持单一 execution
+  signature。
 - `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts` prepared data 或确定性的内存
   `toy` data。toy codes 根据正式 codec 的 semantic/acoustic codebook 数量和值域构造。
 - `ToyDataset`：提供完整 source/target audio+text raw sample，不读取文件、不修改全局 RNG。
@@ -33,6 +39,9 @@
   `Config(codec, dataloader, dataset)`：公开的 DataLoader、dataset 与 DataModule 配置结构。
 - `DataModule(config, runtime, task_weights)`：Lightning 数据入口；`setup()` 加载所选 dataset，
   并在加载前校验 config 与 runtime 的 codec identity。重复调用不会重新加载已持有的数据集。
+- `FixedDataModule(codec, runtime, task_weights, sample_index, dataset=...)`：fixed-sample
+  overfit/验收数据入口，只暴露一个 selected sample 的训练 loader，并复用同一公开
+  `train_samples()` 边界供 callback 读取 raw sample。
 
 ## 输入输出
 
@@ -95,10 +104,14 @@ acoustic_target: AcousticTarget | None
   中；因此派生的 frame mask 只包含右侧 padding，不会形成内部空洞。
 - `ModelBatch` 只表达训练或 teacher-forcing evaluation，不表达缺少 target 的真实推理请求。
 - 同一 `task_weights` 中的任务必须具有相同 source/target modality，保证 DDP 各 rank 走相同
-  模型路径。每项权重必须有限且非负，总和必须有限且为正；非法 stage 更新在替换现有权重前
-  报错。DataModule 构造时必须提供初始权重；stage callback 只在 epoch 边界调用
-  `set_task_weights()`。task weights 使用进程共享数组，因此持久 worker 会在下一次 collate 时
-  看到更新，不要求 Trainer 重建 DataLoader。
+  模型路径。0 权重任务不会参与 batch 分配；每项权重必须有限且非负，总和必须有限且为正；
+  按 batch size 固定分配时，任一非 0 权重任务拿不到至少 1 条 sample 会直接报错。非法 stage
+  更新在替换现有权重前报错。DataModule 构造时必须提供初始权重；stage callback 只在 epoch
+  边界调用 `set_task_weights()`。task weights 使用进程共享数组，因此持久 worker 会在下一次
+  collate 时看到更新，不要求 Trainer 重建 DataLoader。
+- `LoaderSchedule.batches_per_step=1` 保留单子 batch 轮转；`batches_per_step > 1` 使用固定
+  loader 分配，任一非 0 权重 loader 拿不到至少 1 个子 batch 会报错。loss 聚合不使用 loader
+  权重，权重只改变数据进入训练 step 的频率。
 - `DataModule` 在构造 loader 前把 collator 的完整 runtime 替换为 `DataRuntimeSnapshot`；主进程
   仍持有正式 runtime 供 dataset setup 使用。`persistent_workers` 只在 `num_workers > 0` 时启用，
   `pin_memory` 由入口显式配置。

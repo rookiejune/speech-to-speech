@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TypeVar, TypedDict
+from typing import TypeVar, TypedDict, Union
 
 import torch
 from anydataset.types import Modality
@@ -63,6 +63,24 @@ class Speech:
 class SpeechPair:
     source: Speech
     target: Speech
+
+
+@dataclass
+class Text:
+    text_token_ids: Tensor
+    language: Language
+
+    def __post_init__(self) -> None:
+        if self.text_token_ids.dim() != 1:
+            raise ValueError("text_token_ids must have shape [tokens].")
+        if not is_signed_integer_dtype(self.text_token_ids.dtype):
+            raise TypeError("text_token_ids must use a signed integer dtype.")
+
+
+@dataclass
+class TextPair:
+    source: Text
+    target: Text
 
 
 class AcousticPrompt(TypedDict):
@@ -190,6 +208,9 @@ class ModelBatch:
             tasks=list(self.tasks),
             pad_token_id=self.pad_token_id,
         )
+
+
+TrainBatch = Union[ModelBatch, tuple[ModelBatch, ...]]
 
 
 def _pad(values: list[Tensor], padding_value: int) -> Tensor:

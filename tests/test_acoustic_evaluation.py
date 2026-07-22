@@ -4,7 +4,7 @@ import unittest
 
 import torch
 
-from scripts._acoustic_evaluation import mono, stft_distance
+from speech_to_speech.generation.evaluation import mono, stft_distance
 
 
 class AcousticEvaluationTest(unittest.TestCase):

@@ -1,21 +1,47 @@
 from __future__ import annotations
 
+from typing import Optional, Protocol
+
 from speech_to_speech.loss import FlowObjective, RVQObjective, TokenObjective, WavLMTeacher
 from speech_to_speech.model import (
     Config as ModelConfig,
+    DecoderConfig,
     FlowRepaConfig,
     SpeechToSpeechFlowModel,
     SpeechToSpeechRVQModel,
     TokenModel,
 )
-from speech_to_speech.pl_module import Config, SpeechToSpeechModule
-from speech_to_speech.pl_module.protocol import FlowCompositionModel, RVQCompositionModel
 from speech_to_speech.runtime import Runtime
 
-if __package__:
-    from ._config import FlowConfig, RVQConfig
-else:
-    from _config import FlowConfig, RVQConfig
+from .module import Config, SpeechToSpeechModule
+from .protocol import FlowCompositionModel, RVQCompositionModel
+
+
+class RepaConfig(Protocol):
+    @property
+    def weight(self) -> Optional[float]: ...
+
+    @property
+    def teacher_checkpoint(self) -> str: ...
+
+    @property
+    def teacher_layer(self) -> int: ...
+
+    @property
+    def student_layer(self) -> Optional[int]: ...
+
+
+class FlowConfig(Protocol):
+    @property
+    def decoder(self) -> DecoderConfig: ...
+
+    @property
+    def repa(self) -> RepaConfig: ...
+
+
+class RVQConfig(Protocol):
+    @property
+    def decoder(self) -> DecoderConfig: ...
 
 
 def token(
@@ -38,7 +64,7 @@ def flow(
     model_config: ModelConfig,
     acoustic: FlowConfig,
 ) -> tuple[
-    SpeechToSpeechModule[FlowCompositionModel], SpeechToSpeechFlowModel, float | None
+    SpeechToSpeechModule[FlowCompositionModel], SpeechToSpeechFlowModel, Optional[float]
 ]:
     teacher = None
     weight = acoustic.repa.weight
@@ -58,11 +84,7 @@ def flow(
             if teacher is None
             else FlowRepaConfig(
                 feature_dim=teacher.feature_dim,
-                student_layer=(
-                    None
-                    if acoustic.repa.student_layer is None
-                    else acoustic.repa.student_layer
-                ),
+                student_layer=acoustic.repa.student_layer,
             )
         ),
     )

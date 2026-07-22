@@ -20,20 +20,24 @@ from scripts._config import (
     OverfitFlowConfig,
     OverfitRVQConfig,
     OverfitTokenConfig,
+    StagedTrainRVQConfig,
     codec_oracle,
     overfit,
+    train as parse_train,
 )
 from scripts._logging import build as build_logger
-from scripts.codec_oracle import build_runtime as build_oracle_runtime
 from scripts.overfit import (
     _composition,
     _gradient_logger,
     _performance,
+    _prepare_generation_module,
     runtime_config,
 )
+from scripts.train import build_datamodule as build_train_datamodule
 from speech_to_speech.codec_oracle import Config as OracleConfig
 from speech_to_speech.codec_oracle import DataConfig, Initialization, Objective
-from speech_to_speech.datamodule import DatasetName
+from speech_to_speech.codec_oracle.factory import build_runtime as build_oracle_runtime
+from speech_to_speech.datamodule import DataModule, DatasetName, JointDataModule, TextDataModule
 from speech_to_speech.model import (
     AcousticType,
     AdapterType,
@@ -43,6 +47,18 @@ from speech_to_speech.model import (
 )
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.runtime import Config as RuntimeConfig
+from speech_to_speech.stage import ParameterGroup, StageLoaderConfig, StageName
+
+
+class _DeviceRestoreModule(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.parameter = torch.nn.Parameter(torch.zeros(()))
+        self.moves: list[torch.device] = []
+
+    def to(self, device: torch.device):  # type: ignore[override]
+        self.moves.append(device)
+        return self
 
 
 @patch.dict(
@@ -95,7 +111,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.data.toy_samples, 8)
         self.assertEqual(config.data.toy_frames, 4)
         self.assertEqual(config.train.max_steps, 2)
-        self.assertFalse(config.callbacks.sample.enabled)
+        self.assertFalse(config.callbacks.task_sample.enabled)
         self.assertFalse(config.callbacks.evaluation.enabled)
 
         production = overfit(_compose("overfit"))
@@ -208,7 +224,7 @@ class ConfigTest(unittest.TestCase):
             _compose(
                 "overfit",
                 "callbacks.performance.enabled=true",
-                "callbacks.sample.enabled=false",
+                "callbacks.task_sample.enabled=false",
                 "callbacks.performance.hardware_peak_flops=123.0",
             )
         )
@@ -222,7 +238,7 @@ class ConfigTest(unittest.TestCase):
         self.assertTrue(enabled.callbacks.performance.sync_cuda)
         self.assertTrue(enabled.callbacks.performance.sync_distributed)
 
-        with self.assertRaisesRegex(ValueError, "sample.enabled=false"):
+        with self.assertRaisesRegex(ValueError, "task_sample.enabled=false"):
             overfit(
                 _compose(
                     "overfit",
@@ -241,7 +257,7 @@ class ConfigTest(unittest.TestCase):
         enabled = overfit(
             _compose(
                 "overfit",
-                "callbacks.sample.enabled=false",
+                "callbacks.task_sample.enabled=false",
                 "callbacks.performance.enabled=true",
                 "callbacks.performance.hardware_peak_flops=123.0",
             )
@@ -267,7 +283,7 @@ class ConfigTest(unittest.TestCase):
         performance = overfit(
             _compose(
                 "overfit",
-                "callbacks.sample.enabled=false",
+                "callbacks.task_sample.enabled=false",
                 "callbacks.performance.enabled=true",
             )
         )
@@ -296,6 +312,20 @@ class ConfigTest(unittest.TestCase):
 
         self.assertIsNone(_gradient_logger(performance, AcousticType.FLOW, loss_pair))
         grad_logger.assert_not_called()
+
+        frozen = overfit(_compose("overfit", "stage=stage_1"))
+        self.assertIsNone(_gradient_logger(frozen, AcousticType.RVQ, rvq_pair))
+        grad_logger.assert_not_called()
+
+        partial = overfit(_compose("overfit", "stage=stage_3"))
+        partial_gradient = _gradient_logger(partial, AcousticType.RVQ, rvq_pair)
+
+        self.assertIs(partial_gradient, grad_logger.return_value)
+        grad_logger.assert_called_once_with(
+            rvq_pair,
+            "model.backbone.model.norm.weight",
+            every_n_steps=1,
+        )
 
     def test_training_outputs_use_one_tensorboard_root(self):
         configs = (
@@ -516,8 +546,87 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual(config.trainer.log_every_n_steps, 1)
                 self.assertIs(config.trainer.enable_checkpointing, checkpointing)
                 self.assertIs(config.trainer.use_distributed_sampler, sampler)
-                self.assertTrue(config.callbacks.sample.enabled)
-                self.assertEqual(config.callbacks.sample.every_n_steps, 1)
+                self.assertTrue(config.callbacks.task_sample.enabled)
+                self.assertEqual(config.callbacks.task_sample.every_n_steps, 1)
+
+    def test_rvq_native_stage_smoke_configs_cover_all_parameter_stages(self):
+        for index, stage in enumerate(StageName):
+            with self.subTest(stage=stage):
+                config = overfit(
+                    _compose(
+                        "overfit",
+                        f"experiment=011_rvq_native_stage_{index}_smoke",
+                    )
+                )
+
+                self.assertIsInstance(config, OverfitRVQConfig)
+                self.assertIs(config.parameter_stage, stage)
+                self.assertIs(config.stage.name, stage)
+                self.assertEqual(config.task, "s2st")
+                self.assertEqual(config.runtime.codec, "longcat")
+                self.assertIsNone(config.runtime.audio_tokenizer)
+                self.assertEqual(config.train.max_steps, 2)
+                self.assertFalse(config.callbacks.task_sample.enabled)
+                self.assertTrue(config.callbacks.evaluation.enabled)
+
+        stage_1 = overfit(_compose("overfit", "stage=stage_1"))
+        self.assertIn(ParameterGroup.BACKBONE, stage_1.stage.frozen_groups)
+        self.assertEqual(set(stage_1.stage.loaders), {"asr", "tts"})
+        self.assertEqual(stage_1.stage.batches_per_step, 2)
+
+        stage_2 = overfit(_compose("overfit", "stage=stage_2"))
+        self.assertEqual(set(stage_2.stage.loaders), {"asr", "tts", "mt"})
+        self.assertEqual(stage_2.stage.loaders["mt"].task_weights, {"mt": 1.0})
+        self.assertEqual(stage_2.stage.batches_per_step, 10)
+
+        stage_4 = overfit(_compose("overfit", "stage=stage_4"))
+        self.assertEqual(
+            set(stage_4.stage.loaders),
+            {"asr_s2tt", "tts_t2st", "s2st", "mt"},
+        )
+        self.assertEqual(stage_4.stage.loaders["s2st"].weight, 0.70)
+
+    def test_train_root_uses_stage_config_and_static_ddp(self):
+        default = parse_train(_compose("train"))
+
+        self.assertIsInstance(default, StagedTrainRVQConfig)
+        self.assertEqual(default.stage.name, StageName.STAGE_1)
+        self.assertFalse(default.callbacks.performance.enabled)
+        with self.assertRaises(AttributeError):
+            getattr(default.data, "sample_index")
+
+        config = parse_train(_compose("train", "stage=stage_2"))
+        self.assertEqual(config.stage.name, StageName.STAGE_2)
+        self.assertEqual(set(config.stage.loaders), {"asr", "tts", "mt"})
+        self.assertEqual(config.stage.batches_per_step, 10)
+        self.assertEqual(config.data.codec, "longcat")
+        self.assertEqual(config.data.dataset.name, DatasetName.WMT19_TTS)
+        self.assertEqual(config.text_data.dataset.name.value, "wmt19")
+        self.assertEqual(config.train.max_steps, 1000000)
+
+        ddp = parse_train(_compose("train", "trainer=static_ddp", "stage=stage_4"))
+
+        self.assertEqual(ddp.trainer.strategy, "ddp_find_unused_parameters_false")
+        self.assertEqual(set(ddp.stage.loaders), {"asr_s2tt", "tts_t2st", "s2st", "mt"})
+
+    def test_train_datamodule_routes_mt_to_text_loader(self):
+        config = parse_train(_compose("train", "stage=stage_2"))
+
+        datamodule = build_train_datamodule(config, object())
+
+        self.assertIsInstance(datamodule, JointDataModule)
+        self.assertIsInstance(datamodule.datamodules["asr"], DataModule)
+        self.assertIsInstance(datamodule.datamodules["tts"], DataModule)
+        self.assertIsInstance(datamodule.datamodules["mt"], TextDataModule)
+        self.assertEqual(datamodule.schedule.weights, config.stage.loader_weights())
+        self.assertEqual(datamodule.schedule.batches_per_step, 10)
+
+        config.stage.loaders["bad"] = StageLoaderConfig(
+            weight=1.0,
+            task_weights={"mt": 1.0, "tts": 1.0},
+        )
+        with self.assertRaisesRegex(ValueError, "cannot mix pure text and speech"):
+            build_train_datamodule(config, object())
 
     def test_removed_parallel_groups_are_not_composable(self):
         cases = [
@@ -584,6 +693,27 @@ class ConfigTest(unittest.TestCase):
         built = build_oracle_runtime(oracle, torch.device("cuda:0"))
         self.assertEqual(built.config.flow_nfe, 4)
         self.assertEqual(built.config.flow_num_steps, 2)
+
+    @patch("scripts.overfit.torch.cuda.set_device")
+    def test_generation_module_restores_runtime_device_after_fit(
+        self,
+        set_device,
+    ):
+        module = _DeviceRestoreModule()
+        device = torch.device("cuda:0")
+
+        _prepare_generation_module(module, device)
+
+        set_device.assert_called_once_with(device)
+        self.assertEqual(module.moves, [device])
+
+    def test_generation_module_without_runtime_device_stays_on_current_device(self):
+        module = _DeviceRestoreModule()
+
+        device = _prepare_generation_module(module, None)
+
+        self.assertEqual(device, torch.device("cpu"))
+        self.assertEqual(module.moves, [])
 
     def test_runtime_rejects_invalid_flow_settings_for_every_composition(self):
         for override in (
@@ -664,6 +794,16 @@ class ConfigTest(unittest.TestCase):
                 self.assertIsNotNone(match)
                 self.assertFalse(Path(match.group(1)).is_absolute())
                 self.assertNotRegex(source, r"\boutput_dir=")
+
+    def test_staged_joint_job_uses_train_entry(self):
+        root = Path(__file__).parents[1]
+        source = (root / "jobs" / "011" / "03_staged_joint_train.sh").read_text()
+
+        self.assertIn("scripts/train.py", source)
+        self.assertNotIn("scripts/overfit.py", source)
+        self.assertIn('"trainer=static_ddp"', source)
+        self.assertIn("data.dataset.root=", source)
+        self.assertIn("SPEECH_TO_SPEECH_STAGE:-stage_1", source)
 
     def test_jobs_default_the_training_root_to_dynamic_home_train(self):
         root = Path(__file__).parents[1]
