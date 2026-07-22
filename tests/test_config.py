@@ -500,6 +500,45 @@ class ConfigTest(unittest.TestCase):
                     (1, 1, 1, 1, 1, 0, 2),
                 )
 
+    def test_fdu_codec_oracle_smoke_configs_cover_submission_settings(self):
+        cases = [
+            (
+                "fdu_oracle_flow_codec_smoke",
+                Objective.FLOW,
+                Initialization.CODEC,
+            ),
+            (
+                "fdu_oracle_flow_random_smoke",
+                Objective.FLOW,
+                Initialization.RANDOM,
+            ),
+            (
+                "fdu_oracle_rvq_codec_smoke",
+                Objective.RVQ,
+                Initialization.CODEC,
+            ),
+        ]
+
+        for experiment, objective, initialization in cases:
+            with self.subTest(experiment=experiment):
+                config = codec_oracle(
+                    _compose("codec_oracle", f"experiment={experiment}")
+                )
+
+                self.assertIs(config.codec_oracle.objective, objective)
+                self.assertIs(config.codec_oracle.initialization, initialization)
+                self.assertEqual(config.codec_oracle.data.sample_limit, 32)
+                self.assertEqual(config.codec_oracle.data.max_seconds, 4.0)
+                self.assertEqual(config.codec_oracle.data.overlong, "truncate")
+                self.assertEqual(config.codec_oracle.data.batch_size, 8)
+                self.assertEqual(config.codec_oracle.data.num_workers, 4)
+                self.assertTrue(config.codec_oracle.data.lba.enabled)
+                self.assertEqual(config.train.max_steps, 2)
+                self.assertIn(
+                    "013-fdu-codec-oracle-smoke",
+                    config.output_dir,
+                )
+
     def test_codec_oracle_enum_inputs_resolve_to_stable_value_paths(self):
         lower = codec_oracle(
             _compose(
@@ -627,6 +666,27 @@ class ConfigTest(unittest.TestCase):
         self.assertIsInstance(token, StagedTrainTokenConfig)
         self.assertEqual(token.acoustic.type, AcousticType.NONE.value)
         self.assertEqual(token.run_name, "stage_1-token")
+
+    def test_fdu_stage_smoke_configs_cover_formal_train_stages(self):
+        for index in range(1, 5):
+            with self.subTest(stage=index):
+                config = parse_train(
+                    _compose("train", f"experiment=fdu_stage_{index}_smoke")
+                )
+
+                self.assertIsInstance(config, StagedTrainRVQConfig)
+                self.assertIs(config.stage.name, StageName(f"stage_{index}"))
+                self.assertEqual(config.train.max_steps, 2)
+                self.assertEqual(
+                    config.trainer.strategy,
+                    "ddp_find_unused_parameters_false",
+                )
+                self.assertFalse(config.trainer.use_distributed_sampler)
+                self.assertFalse(config.trainer.enable_checkpointing)
+                self.assertEqual(config.data.dataloader.batch_size, 4)
+                self.assertEqual(config.data.dataloader.num_workers, 4)
+                self.assertEqual(config.text_data.dataloader.batch_size, 4)
+                self.assertIn("013-fdu-stage-smoke", config.output_dir)
 
     def test_train_datamodule_routes_mt_to_text_loader(self):
         config = parse_train(_compose("train", "stage=stage_2"))
@@ -823,6 +883,47 @@ class ConfigTest(unittest.TestCase):
         self.assertIn('"trainer=static_ddp"', source)
         self.assertIn("data.dataset.root=", source)
         self.assertIn("SPEECH_TO_SPEECH_STAGE:-stage_1", source)
+
+    def test_fdu_smoke_jobs_select_explicit_configs(self):
+        root = Path(__file__).parents[1]
+        oracle_jobs = {
+            "01_oracle_flow_codec.sh": "fdu_oracle_flow_codec_smoke",
+            "02_oracle_flow_random.sh": "fdu_oracle_flow_random_smoke",
+            "03_oracle_rvq_codec.sh": "fdu_oracle_rvq_codec_smoke",
+        }
+        stage_jobs = {
+            "11_stage_1_smoke.sh": "fdu_stage_1_smoke",
+            "12_stage_2_smoke.sh": "fdu_stage_2_smoke",
+            "13_stage_3_smoke.sh": "fdu_stage_3_smoke",
+            "14_stage_4_smoke.sh": "fdu_stage_4_smoke",
+        }
+
+        for filename, experiment in oracle_jobs.items():
+            with self.subTest(job=filename):
+                source = (root / "jobs" / "013" / filename).read_text()
+
+                self.assertIn("scripts/codec_oracle.py", source)
+                self.assertNotIn("scripts/train.py", source)
+                self.assertEqual(
+                    re.findall(r"\bexperiment=([a-z0-9_]+)", source),
+                    [experiment],
+                )
+                self.assertIn("SPEECH_TO_SPEECH_ORACLE_DATA_ROOT", source)
+                self.assertIn('"$@"', source)
+
+        for filename, experiment in stage_jobs.items():
+            with self.subTest(job=filename):
+                source = (root / "jobs" / "013" / filename).read_text()
+
+                self.assertIn("scripts/train.py", source)
+                self.assertNotIn("scripts/overfit.py", source)
+                self.assertEqual(
+                    re.findall(r"\bexperiment=([a-z0-9_]+)", source),
+                    [experiment],
+                )
+                self.assertIn("runtime.backbone=", source)
+                self.assertIn("SPEECH_TO_SPEECH_STAGE_DATA_ROOT", source)
+                self.assertIn('"$@"', source)
 
     def test_jobs_default_the_training_root_to_dynamic_home_train(self):
         root = Path(__file__).parents[1]

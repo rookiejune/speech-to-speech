@@ -1,0 +1,32 @@
+# @package _global_
+defaults:
+  - override /stage: stage_2
+  - override /trainer: static_ddp
+  - _self_
+
+output_subdir: 013-fdu-stage-smoke/${stage.name}/${run_name}
+
+data:
+  dataloader:
+    batch_size: 4
+    num_workers: 4
+    pin_memory: true
+    persistent_workers: true
+
+text_data:
+  dataloader:
+    batch_size: 4
+    num_workers: 4
+    pin_memory: true
+    persistent_workers: true
+
+train:
+  max_steps: 2
+
+trainer:
+  log_every_n_steps: 1
+  enable_checkpointing: false
+
+callbacks:
+  checkpoint:
+    every_n_train_steps: 1

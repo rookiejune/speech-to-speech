@@ -9,6 +9,7 @@ defaults:
   - logging: tensorboard
   - callback/performance@callbacks.performance
   - _self_
+  - experiment: null
 
 run_name: ${stage.name}-${oc.select:acoustic.name,token}
 repo_output_root: ${oc.env:SPEECH_TO_SPEECH_TRAIN_ROOT,${oc.env:DYNAMIC_HOME}/train/speech-to-speech}
