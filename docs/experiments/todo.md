@@ -32,8 +32,6 @@
   fixed-sample wrapper 至少 2 steps，验收多任务 `find_unused_parameters=True`、跨 rank total loss
   和 per-rank runtime device。LongCat Flow/RVQ oracle 静态 DDP 已完成
   （[010 result](results/010-codec-oracle-flow-rvq-smoke.md)）。
-- 共享 WMT19 TTS `base` store 仍是 anydataset schema v1；在 NAS 容量恢复后迁移为 schema v2，
-  替代 010 验收使用的机器本地临时副本。
 
 ## 其他工程欠账
 
