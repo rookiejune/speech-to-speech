@@ -1,6 +1,6 @@
 # 013 FDU codec oracle and staged smoke
 
-目标是在复旦共享环境上提交一组明确、可重复的 smoke jobs，覆盖 codec oracle 的三种设置与正式 staged joint train 的 stage_1 到 stage_4。
+目标是在复旦共享环境上提交一组明确、可重复的 smoke jobs，覆盖 codec oracle 的三种设置与 stage_0 到 stage_4。
 
 ## Codec oracle
 
@@ -14,6 +14,6 @@
 
 ## Stage smoke
 
-提交 jobs/013/11_stage_1_smoke.sh 到 jobs/013/14_stage_4_smoke.sh。四项分别选择 fdu_stage_1_smoke 到 fdu_stage_4_smoke，走正式 scripts/train.py staged joint entry，而不是 fixed-sample overfit entry。
+提交 jobs/013/10_stage_0_smoke.sh 到 jobs/013/14_stage_4_smoke.sh。stage_0 没有 formal train loader，因此 fdu_stage_0_smoke 走 scripts/overfit.py fixed-sample entry 验证 stage_0 参数阶段；stage_1 到 stage_4 走正式 scripts/train.py staged joint entry。
 
-四项都使用 Qwen3-0.6B、LongCat native tokens、RVQ acoustic decoder、两卡 staged train DDP 策略、2 optimizer steps 和 013-fdu-stage-smoke/... output 目录。speech data root 可用 SPEECH_TO_SPEECH_STAGE_DATA_ROOT 覆盖；oracle data root 可用 SPEECH_TO_SPEECH_ORACLE_DATA_ROOT 覆盖。
+五项都使用 Qwen3-0.6B、LongCat native tokens、RVQ acoustic decoder、2 optimizer steps 和 013-fdu-stage-smoke/... output 目录。stage_1 到 stage_4 使用两卡 staged train DDP 策略；stage_0 使用单卡 fixed-sample overfit。speech data root 可用 SPEECH_TO_SPEECH_STAGE_DATA_ROOT 覆盖；oracle data root 可用 SPEECH_TO_SPEECH_ORACLE_DATA_ROOT 覆盖。

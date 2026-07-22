@@ -668,6 +668,15 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(token.run_name, "stage_1-token")
 
     def test_fdu_stage_smoke_configs_cover_formal_train_stages(self):
+        stage_0 = overfit(_compose("overfit", "experiment=fdu_stage_0_smoke"))
+        self.assertIsInstance(stage_0, OverfitRVQConfig)
+        self.assertIs(stage_0.stage.name, StageName.STAGE_0)
+        self.assertEqual(stage_0.task, "s2st")
+        self.assertEqual(stage_0.train.max_steps, 2)
+        self.assertFalse(stage_0.callbacks.task_sample.enabled)
+        self.assertTrue(stage_0.callbacks.evaluation.enabled)
+        self.assertIn("013-fdu-stage-smoke", stage_0.output_dir)
+
         for index in range(1, 5):
             with self.subTest(stage=index):
                 config = parse_train(
@@ -891,6 +900,9 @@ class ConfigTest(unittest.TestCase):
             "02_oracle_flow_random.sh": "fdu_oracle_flow_random_smoke",
             "03_oracle_rvq_codec.sh": "fdu_oracle_rvq_codec_smoke",
         }
+        overfit_stage_jobs = {
+            "10_stage_0_smoke.sh": "fdu_stage_0_smoke",
+        }
         stage_jobs = {
             "11_stage_1_smoke.sh": "fdu_stage_1_smoke",
             "12_stage_2_smoke.sh": "fdu_stage_2_smoke",
@@ -909,6 +921,21 @@ class ConfigTest(unittest.TestCase):
                     [experiment],
                 )
                 self.assertIn("SPEECH_TO_SPEECH_ORACLE_DATA_ROOT", source)
+                self.assertIn('"$@"', source)
+
+        for filename, experiment in overfit_stage_jobs.items():
+            with self.subTest(job=filename):
+                source = (root / "jobs" / "013" / filename).read_text()
+
+                self.assertIn("scripts/overfit.py", source)
+                self.assertNotIn("scripts/train.py", source)
+                self.assertEqual(
+                    re.findall(r"\bexperiment=([a-z0-9_]+)", source),
+                    [experiment],
+                )
+                self.assertIn("runtime.backbone=", source)
+                self.assertIn("data.root=", source)
+                self.assertIn("SPEECH_TO_SPEECH_STAGE_DATA_ROOT", source)
                 self.assertIn('"$@"', source)
 
         for filename, experiment in stage_jobs.items():
