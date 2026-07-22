@@ -10,7 +10,7 @@ import torch
 from speech_to_speech.datamodule import Collator
 from speech_to_speech.generation.batch import requests_from_batch
 from speech_to_speech.generation.reporting import compare, summary
-from speech_to_speech.model import SpeechToSpeechFlowModel
+from speech_to_speech.model import FlowModel
 from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import init_runtime
 from speech_to_speech.task import Task
@@ -44,7 +44,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     batch = Collator(runtime, {Task.S2ST: 1.0})([dataset[args.sample_index]])
     request = requests_from_batch(batch)[0]
 
-    model = SpeechToSpeechFlowModel(runtime=runtime).eval()
+    model = FlowModel(runtime=runtime).eval()
     with torch.no_grad():
         model.acoustic_prompt_gate.fill_(args.acoustic_prompt_gate)
 

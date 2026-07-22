@@ -79,9 +79,9 @@ submission time to change the device set.
 `runtime` owns the codec, audio tokenizer, device, dtype, and flow sampling
 fields. `model=toy` replaces only the model-owned backbone; it does not select
 or construct a runtime. `data=toy` selects deterministic in-memory prepared-code
-samples. `model/acoustic=flow|rvq` selects the formal model/objective
-composition; unified-token experiments select `runtime=unicodec` without an
-acoustic model group.
+samples. `model/acoustic=none|flow|rvq` selects whether training uses only
+semantic audio tokens or also a downstream Flow/RVQ acoustic path; unified-token
+experiments select `runtime=unicodec model/acoustic=none`.
 `pl_module` owns overfit optimizer settings, while `codec_oracle` owns its
 decoder, data, initialization, normalization, and optimizer settings. Entry
 points reject codec/composition mismatches.

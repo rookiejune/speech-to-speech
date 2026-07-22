@@ -7,13 +7,13 @@ import torch
 from torch import Tensor
 
 from ..datamodule import ModelBatch
-from ..model import SpeechToSpeechFlowModel, SpeechToSpeechRVQModel
+from ..model import FlowModel, RVQModel
 from ..runtime.types import Codec
 
 
 @torch.no_grad()
 def evaluate(
-    model: SpeechToSpeechFlowModel | SpeechToSpeechRVQModel,
+    model: FlowModel | RVQModel,
     batch: ModelBatch,
     codec: Codec,
     *,

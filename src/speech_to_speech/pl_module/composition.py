@@ -7,8 +7,8 @@ from speech_to_speech.model import (
     Config as ModelConfig,
     DecoderConfig,
     FlowRepaConfig,
-    SpeechToSpeechFlowModel,
-    SpeechToSpeechRVQModel,
+    FlowModel,
+    RVQModel,
     TokenModel,
 )
 from speech_to_speech.runtime import Runtime
@@ -64,7 +64,7 @@ def flow(
     model_config: ModelConfig,
     acoustic: FlowConfig,
 ) -> tuple[
-    SpeechToSpeechModule[FlowCompositionModel], SpeechToSpeechFlowModel, Optional[float]
+    SpeechToSpeechModule[FlowCompositionModel], FlowModel, Optional[float]
 ]:
     teacher = None
     weight = acoustic.repa.weight
@@ -75,7 +75,7 @@ def flow(
             layer=acoustic.repa.teacher_layer,
             device=runtime.backbone.get_input_embeddings().weight.device,
         )
-    model = SpeechToSpeechFlowModel(
+    model = FlowModel(
         model_config,
         runtime=runtime,
         decoder=acoustic.decoder,
@@ -105,8 +105,8 @@ def rvq(
     config: Config,
     model_config: ModelConfig,
     acoustic: RVQConfig,
-) -> tuple[SpeechToSpeechModule[RVQCompositionModel], SpeechToSpeechRVQModel]:
-    model = SpeechToSpeechRVQModel(
+) -> tuple[SpeechToSpeechModule[RVQCompositionModel], RVQModel]:
+    model = RVQModel(
         model_config,
         runtime=runtime,
         decoder=acoustic.decoder,

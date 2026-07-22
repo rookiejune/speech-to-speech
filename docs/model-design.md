@@ -23,7 +23,7 @@ Raw Sample
     -> sample.build_sample(task, runtime)
     -> ModelSample
     -> ModelBatch
-    -> SpeechToSpeechFlowModel | SpeechToSpeechRVQModel
+    -> FlowModel | RVQModel
          -> token backbone
          -> text / semantic-audio token heads
          -> flow | RVQ acoustic decoder
@@ -178,14 +178,16 @@ class FlowRepaConfig(TypedDict):
     student_layer: int | None
 ```
 
-`SpeechToSpeechFlowModel` 接收 `decoder` 与可选 `repa`；`SpeechToSpeechRVQModel` 接收
+`FlowModel` 接收 `decoder` 与可选 `repa`；`RVQModel` 接收
 `decoder` 与可选 `codebook_embeddings`，但无法接收后被忽略的 REPA 字段。Hydra 使用
-`model/acoustic=flow|rvq`，flow preset 独占 teacher 与 student REPA 配置；训练组装由
-`speech_to_speech.pl_module.composition` 持有，入口脚本只传入解析后的配置；root schema 直接复用
-基础 `model.Config`。codec oracle 由 `codec_oracle.Config` 显式选择 Flow/RVQ objective，并
-配置 decoder 与 target normalization，不复用带 REPA 的 acoustic preset。unified-token codec 通过
-`runtime=unicodec ~model/acoustic` 选择 token-only composition。ODE sampler 由
-`runtime.Config.flow_*` 统一拥有；入口校验 codec capability，不自动改写 composition。
+`model/acoustic=none|flow|rvq`，`none` 只训练 semantic audio token，flow preset 独占
+teacher 与 student REPA 配置；训练组装由 `speech_to_speech.pl_module.composition` 持有，
+入口脚本只传入解析后的配置；root schema 直接复用基础 `model.Config`。codec oracle 由
+`codec_oracle.Config` 显式选择 Flow/RVQ objective，并配置 decoder 与 target normalization，
+不复用带 REPA 的 acoustic preset。unified-token codec 必须使用
+`runtime=unicodec model/acoustic=none`；有独立 acoustic codebook 的 codec 也可以显式选择
+`none` 作为 token-only baseline。ODE sampler 由 `runtime.Config.flow_*` 统一拥有；
+入口只校验 flow/RVQ 所需的 codec capability，不自动改写 composition。
 
 model 的训练能力是：
 

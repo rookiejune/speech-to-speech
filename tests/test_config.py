@@ -21,6 +21,7 @@ from scripts._config import (
     OverfitRVQConfig,
     OverfitTokenConfig,
     StagedTrainRVQConfig,
+    StagedTrainTokenConfig,
     codec_oracle,
     overfit,
     train as parse_train,
@@ -72,12 +73,13 @@ class ConfigTest(unittest.TestCase):
     def test_roots_parse_to_src_aligned_configs(self):
         flow = overfit(_compose("overfit"))
         rvq = overfit(_compose("overfit", "model/acoustic=rvq"))
-        token = overfit(_compose("overfit", "runtime=unicodec", "~model/acoustic"))
+        token = overfit(_compose("overfit", "runtime=unicodec", "model/acoustic=none"))
         oracle = codec_oracle(_compose("codec_oracle"))
 
         self.assertIsInstance(flow, OverfitFlowConfig)
         self.assertIsInstance(rvq, OverfitRVQConfig)
         self.assertIsInstance(token, OverfitTokenConfig)
+        self.assertEqual(token.acoustic.type, AcousticType.NONE.value)
         self.assertIsInstance(oracle, CodecOracleConfig)
         self.assertIsInstance(flow.runtime, RuntimeConfig)
         self.assertIsInstance(flow.model, ModelConfig)
@@ -124,13 +126,22 @@ class ConfigTest(unittest.TestCase):
 
     def test_composition_must_match_codec_capabilities(self):
         flow = overfit(_compose("overfit"))
-        token = overfit(_compose("overfit", "runtime=unicodec", "~model/acoustic"))
+        token = overfit(_compose("overfit", "runtime=unicodec", "model/acoustic=none"))
+        token_with_acoustic_codec = overfit(_compose("overfit", "model/acoustic=none"))
 
-        self.assertIsNone(_composition(token, uses_acoustic_decoder=False))
-        with self.assertRaisesRegex(ValueError, "model/acoustic=flow"):
-            _composition(token, uses_acoustic_decoder=True)
-        with self.assertRaisesRegex(ValueError, "remove the acoustic"):
-            _composition(flow, uses_acoustic_decoder=False)
+        self.assertIs(
+            _composition(token, codec_has_acoustic_codebooks=False),
+            AcousticType.NONE,
+        )
+        self.assertIs(
+            _composition(
+                token_with_acoustic_codec,
+                codec_has_acoustic_codebooks=True,
+            ),
+            AcousticType.NONE,
+        )
+        with self.assertRaisesRegex(ValueError, "model/acoustic=none"):
+            _composition(flow, codec_has_acoustic_codebooks=False)
 
     def test_root_schema_rejects_unknown_and_foreign_fields(self):
         cases = [
@@ -609,6 +620,12 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(ddp.trainer.strategy, "ddp_find_unused_parameters_false")
         self.assertEqual(set(ddp.stage.loaders), {"asr_s2tt", "tts_t2st", "s2st", "mt"})
 
+        token = parse_train(_compose("train", "model/acoustic=none"))
+
+        self.assertIsInstance(token, StagedTrainTokenConfig)
+        self.assertEqual(token.acoustic.type, AcousticType.NONE.value)
+        self.assertEqual(token.run_name, "stage_1-token")
+
     def test_train_datamodule_routes_mt_to_text_loader(self):
         config = parse_train(_compose("train", "stage=stage_2"))
 
@@ -725,7 +742,7 @@ class ConfigTest(unittest.TestCase):
                 raw = _compose(
                     "overfit",
                     "runtime=unicodec",
-                    "~model/acoustic",
+                    "model/acoustic=none",
                     override,
                 )
                 with self.assertRaises(ValueError):
@@ -736,7 +753,7 @@ class ConfigTest(unittest.TestCase):
             ((), "flow-8l"),
             (("model/acoustic=rvq",), "rvq-8l"),
             (("acoustic.decoder.layers=3",), "flow-3l"),
-            (("runtime=unicodec", "~model/acoustic"), "token"),
+            (("runtime=unicodec", "model/acoustic=none"), "token"),
         ]
 
         for overrides, expected in cases:
@@ -759,7 +776,7 @@ class ConfigTest(unittest.TestCase):
                     _compose(
                         "overfit",
                         "runtime=unicodec",
-                        "~model/acoustic",
+                        "model/acoustic=none",
                         f"task={task}",
                         "repo_output_root=/tmp/train",
                         f"output_subdir={subdir}",

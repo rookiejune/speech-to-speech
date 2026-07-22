@@ -11,14 +11,14 @@ from torch import Tensor
 
 from ...datamodule import ModelBatch
 from ...generation.evaluation import evaluate
-from ...model import SpeechToSpeechFlowModel, SpeechToSpeechRVQModel
+from ...model import FlowModel, RVQModel
 from ...runtime.types import Codec
 
 
 class AcousticEvaluation(Callback):
     def __init__(
         self,
-        model: SpeechToSpeechFlowModel | SpeechToSpeechRVQModel,
+        model: FlowModel | RVQModel,
         batch: ModelBatch,
         codec: Codec,
         output_dir: Path,

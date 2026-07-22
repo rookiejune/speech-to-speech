@@ -45,6 +45,12 @@ class RVQConfig:
 
 
 @dataclass
+class AcousticNoneConfig:
+    type: str = AcousticType.NONE.value
+    name: str = "token"
+
+
+@dataclass
 class FixedDataConfig(DatasetConfig):
     sample_index: int = MISSING
 
@@ -178,7 +184,7 @@ class _OverfitConfig:
 
 @dataclass
 class OverfitTokenConfig(_OverfitConfig):
-    pass
+    acoustic: AcousticNoneConfig = field(default_factory=AcousticNoneConfig)
 
 
 @dataclass
@@ -214,7 +220,7 @@ class _StagedTrainConfig:
 
 @dataclass
 class StagedTrainTokenConfig(_StagedTrainConfig):
-    pass
+    acoustic: AcousticNoneConfig = field(default_factory=AcousticNoneConfig)
 
 
 @dataclass
@@ -272,14 +278,13 @@ ConfigT = TypeVar("ConfigT")
 def overfit(config: DictConfig) -> OverfitConfig:
     config = _prepare(config)
     schema: Type[OverfitConfig]
-    if "acoustic" not in config:
+    acoustic = AcousticType(str(config.acoustic.type))
+    if acoustic is AcousticType.NONE:
         schema = OverfitTokenConfig
+    elif acoustic is AcousticType.FLOW:
+        schema = OverfitFlowConfig
     else:
-        acoustic = AcousticType(str(config.acoustic.type))
-        if acoustic is AcousticType.FLOW:
-            schema = OverfitFlowConfig
-        else:
-            schema = OverfitRVQConfig
+        schema = OverfitRVQConfig
     result = _parse(config, schema)
     _validate_output(result)
     if (
@@ -297,14 +302,13 @@ def overfit(config: DictConfig) -> OverfitConfig:
 def train(config: DictConfig) -> StagedTrainConfig:
     config = _prepare(config)
     schema: Type[StagedTrainConfig]
-    if "acoustic" not in config:
+    acoustic = AcousticType(str(config.acoustic.type))
+    if acoustic is AcousticType.NONE:
         schema = StagedTrainTokenConfig
+    elif acoustic is AcousticType.FLOW:
+        schema = StagedTrainFlowConfig
     else:
-        acoustic = AcousticType(str(config.acoustic.type))
-        if acoustic is AcousticType.FLOW:
-            schema = StagedTrainFlowConfig
-        else:
-            schema = StagedTrainRVQConfig
+        schema = StagedTrainRVQConfig
     result = _parse(config, schema)
     _validate_output(result)
     if not result.stage.loaders:

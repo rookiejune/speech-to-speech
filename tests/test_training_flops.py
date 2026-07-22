@@ -23,8 +23,8 @@ from speech_to_speech.model import (
     AdapterType,
     Config as ModelConfig,
     DecoderConfig,
-    SpeechToSpeechFlowModel,
-    SpeechToSpeechRVQModel,
+    FlowModel,
+    RVQModel,
     TokenModel,
     ToyConfig,
 )
@@ -267,8 +267,8 @@ def _token_model() -> TokenModel:
     return model
 
 
-def _flow_model() -> SpeechToSpeechFlowModel:
-    model = SpeechToSpeechFlowModel(
+def _flow_model() -> FlowModel:
+    model = FlowModel(
         _model_config(),
         runtime=cast(Any, _Runtime()),
         decoder=DecoderConfig(hidden_dim=4, layers=1, heads=1, ffn_ratio=2),
@@ -277,8 +277,8 @@ def _flow_model() -> SpeechToSpeechFlowModel:
     return model
 
 
-def _rvq_model() -> SpeechToSpeechRVQModel:
-    model = SpeechToSpeechRVQModel(
+def _rvq_model() -> RVQModel:
+    model = RVQModel(
         _model_config(),
         runtime=cast(Any, _Runtime()),
         decoder=DecoderConfig(hidden_dim=4, layers=1, heads=1, ffn_ratio=2),

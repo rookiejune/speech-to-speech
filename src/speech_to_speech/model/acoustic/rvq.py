@@ -257,8 +257,8 @@ class AcousticRVQDecoder(nn.Module):
         return _scatter(torch.stack(output, dim=-1), frame_mask)
 
 
-class SpeechToSpeechRVQModel(TokenModel):
-    """Speech-to-speech composition using a discrete RVQ acoustic decoder."""
+class RVQModel(TokenModel):
+    """Token model composition with a discrete RVQ acoustic decoder."""
 
     def __init__(
         self,

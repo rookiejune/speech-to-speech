@@ -1,6 +1,7 @@
 # @package _global_
 defaults:
   - /model: default
+  - /model/acoustic: none
   - /runtime: unicodec
   - /data: wmt19_tts
   - /pl_module: sft

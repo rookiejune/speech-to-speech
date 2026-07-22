@@ -16,11 +16,11 @@ from speech_to_speech.generation.reporting import (
     tensor_max_abs,
     top_logits,
 )
-from speech_to_speech.model import SpeechToSpeechFlowModel
+from speech_to_speech.model import FlowModel
 
 
 def run(
-    model: SpeechToSpeechFlowModel,
+    model: FlowModel,
     request: Request,
     *,
     seed: int,
@@ -89,7 +89,7 @@ def run(
 
 @torch.no_grad()
 def second_step(
-    model: SpeechToSpeechFlowModel,
+    model: FlowModel,
     request: Request,
 ) -> dict[str, Any]:
     device = model.backbone.get_input_embeddings().weight.device

@@ -256,6 +256,7 @@ class ContractTest(unittest.TestCase):
     def test_acoustic_presets_expose_only_supported_options(self):
         flow = _compose()
         rvq = _compose("model/acoustic=rvq")
+        none = _compose("model/acoustic=none")
 
         self.assertEqual(flow.acoustic.type, "flow")
         self.assertEqual(flow.acoustic.repa.teacher_layer, 9)
@@ -265,6 +266,9 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(flow.model.semantic_audio_adapter, "linear")
         self.assertEqual(rvq.acoustic.type, "rvq")
         self.assertNotIn("repa", rvq.acoustic)
+        self.assertEqual(none.acoustic.type, "none")
+        self.assertEqual(none.acoustic.name, "token")
+        self.assertNotIn("decoder", none.acoustic)
 
     def test_overfit_acoustic_branch_constructs_evaluation_on_py39(self):
         class EvaluationReached(Exception):
@@ -389,7 +393,7 @@ class ContractTest(unittest.TestCase):
         config = parse_overfit(
             _compose(
                 "runtime=unicodec",
-                "~model/acoustic",
+                "model/acoustic=none",
                 "runtime.backbone=fake/backbone",
             )
         )

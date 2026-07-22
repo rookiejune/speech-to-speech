@@ -71,8 +71,8 @@ class AcousticFlow(nn.Module):
         return output
 
 
-class SpeechToSpeechFlowModel(TokenModel):
-    """Speech-to-speech composition using a flow-matching decoder."""
+class FlowModel(TokenModel):
+    """Token model composition with a flow-matching acoustic decoder."""
 
     def __init__(
         self,

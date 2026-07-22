@@ -21,7 +21,7 @@ from ._flops import (
 from .callback.logging import GradLogger
 from .datamodule.types import ModelBatch
 from .loss import FlowObjective, LossItem, RVQObjective, TokenObjective
-from .model import SpeechToSpeechFlowModel, SpeechToSpeechRVQModel, TokenModel
+from .model import FlowModel, RVQModel, TokenModel
 from .pl_module import SpeechToSpeechModule
 
 
@@ -66,17 +66,17 @@ class TrainingFlops:
             if type(model) is not TokenModel:
                 raise TypeError("TokenObjective FLOPs require the standard TokenModel.")
         elif type(objective) is FlowObjective:
-            if type(model) is not SpeechToSpeechFlowModel:
+            if type(model) is not FlowModel:
                 raise TypeError(
-                    "FlowObjective FLOPs require the standard SpeechToSpeechFlowModel."
+                    "FlowObjective FLOPs require the standard FlowModel."
                 )
             _flow_objective(cast(FlowObjective, objective), model)
             if batch.acoustic_target is not None:
                 expected.add("flow_matching")
         elif type(objective) is RVQObjective:
-            if type(model) is not SpeechToSpeechRVQModel:
+            if type(model) is not RVQModel:
                 raise TypeError(
-                    "RVQObjective FLOPs require the standard SpeechToSpeechRVQModel."
+                    "RVQObjective FLOPs require the standard RVQModel."
                 )
             if batch.acoustic_target is not None:
                 expected.add("rvq")
@@ -91,7 +91,7 @@ class TrainingFlops:
         _trainable(model)
         forward = _token_path(token_model, core, batch)
 
-        if isinstance(model, SpeechToSpeechFlowModel):
+        if isinstance(model, FlowModel):
             target = _target(batch, model)
             if target is not None:
                 _, mask = target
@@ -106,7 +106,7 @@ class TrainingFlops:
                     batch=mask.size(0),
                     frames=mask.size(1),
                 )
-        elif isinstance(model, SpeechToSpeechRVQModel):
+        elif isinstance(model, RVQModel):
             target = _target(batch, model)
             if target is not None:
                 _, mask = target
@@ -127,7 +127,7 @@ class TrainingFlops:
 def _flow_objective(objective: FlowObjective, model: nn.Module) -> None:
     if objective.repa_weight is not None or objective.repa_teacher is not None:
         raise ValueError("training FLOPs do not support REPA.")
-    decoder = cast(SpeechToSpeechFlowModel, model).acoustic_decoder
+    decoder = cast(FlowModel, model).acoustic_decoder
     if decoder.repa_projection is not None or decoder.repa_student_layer is not None:
         raise ValueError("training FLOPs do not support REPA.")
 
@@ -177,7 +177,7 @@ def _trainable(model: nn.Module) -> None:
             f"{replaced_linear}."
         )
     allowed_frozen: set[str] = set()
-    if isinstance(model, SpeechToSpeechRVQModel):
+    if isinstance(model, RVQModel):
         last = model.acoustic_decoder.codebooks - 1
         allowed_frozen = {
             "acoustic_decoder.decoder.embed_tokens.weight",
@@ -288,7 +288,7 @@ def _token_head(model: TokenModel, batch: ModelBatch) -> int:
 
 def _target(
     batch: ModelBatch,
-    model: SpeechToSpeechFlowModel | SpeechToSpeechRVQModel,
+    model: FlowModel | RVQModel,
 ) -> tuple[Tensor, Tensor] | None:
     target = batch.acoustic_target
     if target is None:

@@ -1,7 +1,7 @@
 from ._config import AcousticType, DecoderConfig, FlowRepaConfig
 from .dit import AcousticDiT
-from .flow import AcousticFlow, SpeechToSpeechFlowModel
-from .rvq import AcousticRVQDecoder, SpeechToSpeechRVQModel
+from .flow import AcousticFlow, FlowModel
+from .rvq import AcousticRVQDecoder, RVQModel
 
 __all__ = [
     "AcousticDiT",
@@ -9,7 +9,7 @@ __all__ = [
     "AcousticRVQDecoder",
     "AcousticType",
     "DecoderConfig",
+    "FlowModel",
     "FlowRepaConfig",
-    "SpeechToSpeechFlowModel",
-    "SpeechToSpeechRVQModel",
+    "RVQModel",
 ]

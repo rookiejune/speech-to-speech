@@ -8,11 +8,11 @@ import torch
 
 from speech_to_speech.generation import Request, generate_responses
 from speech_to_speech.generation.reporting import audio_output
-from speech_to_speech.model import SpeechToSpeechFlowModel
+from speech_to_speech.model import FlowModel
 
 
 def benchmark_batch(
-    model: SpeechToSpeechFlowModel,
+    model: FlowModel,
     requests: Sequence[Request],
     *,
     seed: int,
@@ -66,7 +66,7 @@ def benchmark_batch(
 
 
 def timed_generate(
-    model: SpeechToSpeechFlowModel,
+    model: FlowModel,
     requests: Sequence[Request],
     seed: int,
     max_new_tokens: int,

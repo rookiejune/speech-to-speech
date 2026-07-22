@@ -28,8 +28,8 @@ from speech_to_speech.datamodule import FixedDataModule, ModelBatch
 from speech_to_speech.generation.batch import requests_from_batch
 from speech_to_speech.model import (
     AcousticType,
-    SpeechToSpeechFlowModel,
-    SpeechToSpeechRVQModel,
+    FlowModel,
+    RVQModel,
 )
 from speech_to_speech.pl_module import SpeechToSpeechModule
 from speech_to_speech.pl_module.composition import flow, rvq, token
@@ -95,11 +95,11 @@ def run(config: OverfitConfig) -> None:
 
     repa_weight = None
     torch.manual_seed(config.train.seed)
-    uses_acoustic_decoder = bool(codec.acoustic_codebook_sizes)
     acoustic_type = _composition(
         config,
-        uses_acoustic_decoder=uses_acoustic_decoder,
+        codec_has_acoustic_codebooks=bool(codec.acoustic_codebook_sizes),
     )
+    uses_acoustic_decoder = acoustic_type is not AcousticType.NONE
     evaluation: AcousticEvaluation | None = None
     if isinstance(config, OverfitTokenConfig):
         module, model = token(rt, config.pl_module, config.model)
@@ -117,7 +117,7 @@ def run(config: OverfitConfig) -> None:
         batch = next(iter(datamodule.train_dataloader()))
         evaluation = AcousticEvaluation(
             cast(
-                Union[SpeechToSpeechFlowModel, SpeechToSpeechRVQModel],
+                Union[FlowModel, RVQModel],
                 model,
             ),
             batch,
@@ -198,9 +198,9 @@ def run(config: OverfitConfig) -> None:
 
     acoustic_decoder_parameters = (
         sum(parameter.numel() for parameter in model.acoustic_flow.decoder.parameters())
-        if isinstance(model, SpeechToSpeechFlowModel)
+        if isinstance(model, FlowModel)
         else sum(parameter.numel() for parameter in model.acoustic_decoder.parameters())
-        if isinstance(model, SpeechToSpeechRVQModel)
+        if isinstance(model, RVQModel)
         else 0
     )
     result = {
@@ -311,10 +311,10 @@ def _performance(config: OverfitConfig) -> Callback | None:
 
 def _gradient_logger(
     config: OverfitConfig,
-    acoustic_type: AcousticType | None,
+    acoustic_type: AcousticType,
     loss_pair: tuple[str, str] | None,
 ) -> GradLogger | None:
-    if acoustic_type is None or config.callbacks.performance.enabled:
+    if acoustic_type is AcousticType.NONE or config.callbacks.performance.enabled:
         return None
     stage = config.stage.spec()
     if ParameterGroup.BACKBONE not in stage.trainable_groups:
@@ -336,12 +336,12 @@ def _gradient_logger(
 def _composition(
     config: OverfitConfig,
     *,
-    uses_acoustic_decoder: bool,
-) -> AcousticType | None:
+    codec_has_acoustic_codebooks: bool,
+) -> AcousticType:
     return acoustic_composition(
         config,
         token_type=OverfitTokenConfig,
-        uses_acoustic_decoder=uses_acoustic_decoder,
+        codec_has_acoustic_codebooks=codec_has_acoustic_codebooks,
     )
 
 

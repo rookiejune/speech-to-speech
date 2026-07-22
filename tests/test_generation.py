@@ -25,7 +25,7 @@ from speech_to_speech.datamodule.module import Config as DataConfig
 from speech_to_speech.datamodule.module import DataModule
 from speech_to_speech.datamodule.types import ACOUSTIC_PAD_ID, ModelBatch
 from speech_to_speech.model import AdapterType, ToyConfig
-from speech_to_speech.model.acoustic import SpeechToSpeechFlowModel
+from speech_to_speech.model.acoustic import FlowModel
 from speech_to_speech.model.base import Config as ModelConfig
 from speech_to_speech.model.base import TokenModel
 from speech_to_speech.generation import (
@@ -55,6 +55,10 @@ class _Codec:
     ) -> Tensor:
         self.decode_calls += 1
         return semantic_codes[..., 0].to(acoustic_features) + acoustic_features[..., 0]
+
+    def decode(self, codes: Tensor) -> Tensor:
+        self.decode_calls += 1
+        return codes[..., 0].float()
 
 
 class _UnifiedCodec(_Codec):
@@ -98,10 +102,14 @@ class _TinyCodec:
     acoustic_feature_dim = 8
     acoustic_codebook_sizes = (8,)
     semantic_codebook = torch.randn(2, 8)
+    sample_rate = 16_000
 
     def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor:
         values = acoustic_codes[..., :1].to(dtype=torch.float32)
         return values.expand(*values.shape[:-1], self.acoustic_feature_dim)
+
+    def decode(self, codes: Tensor) -> Tensor:
+        return codes[..., 0].float()
 
 
 class _TinyRuntime(_Runtime):
@@ -123,7 +131,7 @@ class _TinyRuntime(_Runtime):
         return 8, 9, 11
 
 
-class _GenerationModel(SpeechToSpeechFlowModel):
+class _GenerationModel(FlowModel):
     def __init__(self) -> None:
         nn.Module.__init__(self)
         self.runtime = _Runtime()
@@ -197,6 +205,19 @@ class _GenerationModel(SpeechToSpeechFlowModel):
         self.sample_calls += 1
         self.condition = condition.clone()
         return torch.zeros_like(condition)
+
+
+class _TokenGenerationModel(TokenModel):
+    def __init__(self) -> None:
+        nn.Module.__init__(self)
+        self.runtime = _Runtime()
+        self.layout = self.runtime.layout
+        self.backbone = SimpleNamespace(
+            get_input_embeddings=lambda: SimpleNamespace(weight=torch.empty(0))
+        )
+        self.calls: list[tuple[int, bool, int, int]] = []
+
+    generation_step = _GenerationModel.generation_step
 
 
 class _UnifiedGenerationModel(_GenerationModel):
@@ -415,6 +436,24 @@ class GenerationTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "must be a Task"):
             generate_responses([request], _GenerationModel(), max_new_tokens=1)
 
+    def test_token_only_generation_with_acoustic_codec_uses_semantic_decode(self):
+        model = _TokenGenerationModel()
+
+        result = generate_responses(
+            [_request()],
+            model,
+            max_new_tokens=3,
+            do_sample=False,
+        )[0]
+
+        self.assertEqual(model.runtime.codec.decode_calls, 1)
+        self.assertIsNotNone(result["audio"])
+        audio = result["audio"]
+        if audio is None:
+            self.fail("audio generation did not return an audio payload")
+        self.assertIsNone(audio["features"])
+        torch.testing.assert_close(audio["waveform"], torch.tensor([0.0, 1.0]))
+
     def test_generated_audio_decode_validates_token_ids_before_codec_work(self):
         codec = Mock()
         tokenizer = NativeAudioTokenizer(vocab_size=2)
@@ -538,19 +577,27 @@ class GenerationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "codec-decodable audio tokens"):
             generate_responses([request], _GenerationModel(), max_new_tokens=1)
 
-    def test_audio_generation_requires_an_audio_model(self):
+    def test_acoustic_codec_without_audio_model_decodes_semantic_tokens(self):
         model = TokenModel(
             _model_config(),
             runtime=_TinyRuntime(),
         ).eval()
+        sequence = torch.tensor([[1, 2, 8, 9, 11]])
         request = Request(
             prompt_ids=torch.tensor([1, 2]),
             task=Task.TTS,
             acoustic_prompt=None,
         )
 
-        with self.assertRaisesRegex(TypeError, "AcousticFeatureGenerator"):
-            generate_responses([request], model, max_new_tokens=1)
+        with patch.object(model, "generate_tokens", return_value=sequence):
+            result = generate_responses([request], model, max_new_tokens=3)[0]
+
+        self.assertTrue(torch.equal(result["response_ids"], torch.tensor([8, 9])))
+        self.assertIsNotNone(result["audio"])
+        self.assertIsNone(result["audio"]["features"])
+        self.assertTrue(
+            torch.equal(result["audio"]["waveform"], torch.tensor([0.0, 1.0]))
+        )
 
     def test_audio_generation_accepts_a_registered_module_backbone(self):
         model = _RegisteredGenerationModel()

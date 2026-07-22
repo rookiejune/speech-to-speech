@@ -31,7 +31,7 @@ class PlModuleCompositionTest(unittest.TestCase):
 
     @patch("speech_to_speech.pl_module.composition.SpeechToSpeechModule")
     @patch("speech_to_speech.pl_module.composition.FlowObjective")
-    @patch("speech_to_speech.pl_module.composition.SpeechToSpeechFlowModel")
+    @patch("speech_to_speech.pl_module.composition.FlowModel")
     @patch("speech_to_speech.pl_module.composition.WavLMTeacher")
     def test_flow_closes_repa_model_and_objective(
         self,
@@ -83,7 +83,7 @@ class PlModuleCompositionTest(unittest.TestCase):
 
     @patch("speech_to_speech.pl_module.composition.SpeechToSpeechModule")
     @patch("speech_to_speech.pl_module.composition.RVQObjective")
-    @patch("speech_to_speech.pl_module.composition.SpeechToSpeechRVQModel")
+    @patch("speech_to_speech.pl_module.composition.RVQModel")
     def test_rvq_model_receives_only_decoder_options(self, model, objective, module):
         runtime = SimpleNamespace(layout=Mock())
         acoustic = SimpleNamespace(

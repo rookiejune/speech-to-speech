@@ -4,9 +4,9 @@ from .acoustic import (
     AcousticRVQDecoder,
     AcousticType,
     DecoderConfig,
+    FlowModel,
     FlowRepaConfig,
-    SpeechToSpeechFlowModel,
-    SpeechToSpeechRVQModel,
+    RVQModel,
 )
 from .adapter import AdapterType
 from .base import Config, TokenModel
@@ -20,10 +20,10 @@ __all__ = [
     "AdapterType",
     "Config",
     "DecoderConfig",
+    "FlowModel",
     "FlowRepaConfig",
+    "RVQModel",
     "TokenModel",
     "ToyConfig",
     "create_toy_backbone",
-    "SpeechToSpeechFlowModel",
-    "SpeechToSpeechRVQModel",
 ]

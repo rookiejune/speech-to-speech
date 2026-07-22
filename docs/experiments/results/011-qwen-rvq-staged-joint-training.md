@@ -61,7 +61,7 @@ TypeError: a codec with acoustic codebooks requires an AcousticFeatureGenerator.
 acoustic evaluation 的 companion training-only run 能写出 `metrics.json`，且 loss 与本次
 TensorBoard 完全一致，但不能据此把 generation gate 记为通过。
 
-根因不是 RVQ model 缺少生成实现。`SpeechToSpeechRVQModel` 已实现
+根因不是 RVQ model 缺少生成实现。`RVQModel` 已实现
 `generate_audio_features()`，但 [`generate_responses()`](../../../src/speech_to_speech/generation/service.py#L51)
 用 runtime-checkable Protocol 对整个 `TokenGenerator` 做 `isinstance`。Python 3.12 使用
 `inspect.getattr_static()` 检查 Protocol 成员；真实 Qwen `backbone` 作为 `nn.Module` 子模块存于

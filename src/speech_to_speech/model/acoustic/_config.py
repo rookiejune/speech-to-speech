@@ -8,6 +8,7 @@ from ..._compat import StrEnum, auto
 
 
 class AcousticType(StrEnum):
+    NONE = auto()
     FLOW = auto()
     RVQ = auto()
 

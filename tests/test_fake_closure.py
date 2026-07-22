@@ -13,8 +13,8 @@ from speech_to_speech.datamodule import Collator, ToyDataset
 from speech_to_speech.loss import FlowObjective
 from speech_to_speech.model import ToyConfig
 from speech_to_speech.model.acoustic import (
-    SpeechToSpeechFlowModel,
-    SpeechToSpeechRVQModel,
+    FlowModel,
+    RVQModel,
 )
 from speech_to_speech.model.base import Config as ModelConfig
 from speech_to_speech.generation import (
@@ -129,7 +129,7 @@ class _Runtime:
 class FakeClosureTest(unittest.TestCase):
     def test_flow_model_uses_runtime_sampler(self):
         rt = _Runtime()
-        model = SpeechToSpeechFlowModel(
+        model = FlowModel(
             _model_config(),
             runtime=rt,
         )
@@ -141,7 +141,7 @@ class FakeClosureTest(unittest.TestCase):
     def test_flow_repa_config_closes_model_and_objective(self):
         rt = _Runtime()
         batch = Collator(rt, {Task.TTS: 1.0})([_dataset(rt)[0]])
-        model = SpeechToSpeechFlowModel(
+        model = FlowModel(
             _model_config(),
             runtime=rt,
             decoder={
@@ -168,7 +168,7 @@ class FakeClosureTest(unittest.TestCase):
     def test_rvq_model_generates_acoustic_features(self):
         torch.manual_seed(0)
         rt = _Runtime()
-        model = SpeechToSpeechRVQModel(
+        model = RVQModel(
             _model_config(),
             runtime=rt,
             decoder={
@@ -238,7 +238,7 @@ class FakeClosureTest(unittest.TestCase):
                 torch.manual_seed(0)
                 rt = _Runtime()
                 batch = Collator(rt, {task: 1.0})(list(_dataset(rt)))
-                model = SpeechToSpeechFlowModel(
+                model = FlowModel(
                     _model_config(),
                     runtime=rt,
                 )
@@ -269,7 +269,7 @@ class FakeClosureTest(unittest.TestCase):
     def test_fake_semantic_and_acoustic_outputs_decode_to_waveform(self):
         rt = _Runtime()
         batch = Collator(rt, {Task.TTS: 1.0})([_dataset(rt)[0]])
-        model = SpeechToSpeechFlowModel(
+        model = FlowModel(
             _model_config(),
             runtime=rt,
         )

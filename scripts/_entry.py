@@ -129,18 +129,13 @@ def acoustic_composition(
     config: object,
     *,
     token_type: type[TokenConfigT],
-    uses_acoustic_decoder: bool,
-) -> AcousticType | None:
+    codec_has_acoustic_codebooks: bool,
+) -> AcousticType:
     if isinstance(config, token_type):
-        if uses_acoustic_decoder:
-            raise ValueError(
-                "codec exposes independent acoustic codebooks; configure "
-                "model/acoustic=flow or model/acoustic=rvq."
-            )
-        return None
-    if not uses_acoustic_decoder:
+        return AcousticType.NONE
+    if not codec_has_acoustic_codebooks:
         raise ValueError(
-            "codec has no independent acoustic codebooks; remove the acoustic "
-            "config group with ~model/acoustic."
+            "codec has no independent acoustic codebooks; configure "
+            "model/acoustic=none."
         )
     return AcousticType(cast(AcousticEntryConfig, config).acoustic.type)

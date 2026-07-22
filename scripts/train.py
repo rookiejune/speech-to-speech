@@ -79,7 +79,7 @@ def run(config: StagedTrainConfig) -> None:
     torch.manual_seed(config.train.seed)
     acoustic_type = _composition(
         config,
-        uses_acoustic_decoder=bool(rt.codec.acoustic_codebook_sizes),
+        codec_has_acoustic_codebooks=bool(rt.codec.acoustic_codebook_sizes),
     )
     if isinstance(config, StagedTrainTokenConfig):
         module, model = token(rt, config.pl_module, config.model)
@@ -110,7 +110,7 @@ def run(config: StagedTrainConfig) -> None:
         },
         "batches_per_step": config.stage.batches_per_step,
         "max_steps": config.train.max_steps,
-        "composition": None if acoustic_type is None else acoustic_type.value,
+        "composition": acoustic_type.value,
         "parameters": {
             "total": sum(parameter.numel() for parameter in model.parameters()),
             "trainable": sum(
@@ -266,12 +266,12 @@ def _performance(config: StagedTrainConfig) -> Callback | None:
 def _composition(
     config: StagedTrainConfig,
     *,
-    uses_acoustic_decoder: bool,
-) -> AcousticType | None:
+    codec_has_acoustic_codebooks: bool,
+) -> AcousticType:
     return acoustic_composition(
         config,
         token_type=StagedTrainTokenConfig,
-        uses_acoustic_decoder=uses_acoustic_decoder,
+        codec_has_acoustic_codebooks=codec_has_acoustic_codebooks,
     )
 
 

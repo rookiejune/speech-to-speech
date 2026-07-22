@@ -130,11 +130,13 @@ codec codes；入口显式拒绝 CodecBPE tokenizer，而不是静默忽略。
 
 ## 组合
 
-- flow/RVQ 使用 `model/acoustic=flow|rvq`；RVQ schema 不接受 REPA。
-- unified-token codec 使用 `runtime=unicodec ~model/acoustic`，明确选择 token-only composition。
+- `model/acoustic=none|flow|rvq` 显式选择下游 acoustic path；`none` 只训练
+  semantic audio token，flow/RVQ 才启用 acoustic objective，RVQ schema 不接受 REPA。
+- unified-token codec 使用 `runtime=unicodec model/acoustic=none`；有独立 acoustic
+  codebook 的 codec 也可以显式选择 `none` 作为 token-only baseline。
 - flow method、NFE 和 step 数直接覆盖 `runtime.flow_*`；RVQ/token 中保留这些字段是
   `runtime.Config` 的稳定 shape，不需要再为未使用字段创建 variant schema。
-- codec capability 必须与 composition 一致，入口不自动把 flow/RVQ 改成 token model。
+- flow/RVQ 必须有独立 acoustic codebook；`none` 不要求 codec 缺少 acoustic codebook，入口不自动改写 composition。
 - codec oracle 通过 `codec_oracle.objective=flow|rvq` 选择 acoustic screening model；decoder、
   normalization 与 optimizer 位于 `codec_oracle.*`。flow objective 额外使用 runtime 的 flow
   sampling 和 normalization 字段，RVQ objective 不读取这些字段；两种 objective 的

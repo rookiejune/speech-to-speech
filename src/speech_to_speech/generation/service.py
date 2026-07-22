@@ -47,12 +47,11 @@ def generate_responses(
             else model.runtime.eos_token_id
         )
         acoustic_generation: AcousticGeneration | None = None
-        if modality is Modality.AUDIO and model.runtime.codec.acoustic_codebook_sizes:
-            if not isinstance(model, AcousticFeatureGeneration):
-                raise TypeError(
-                    "a codec with acoustic codebooks requires an "
-                    "AcousticFeatureGenerator."
-                )
+        if (
+            modality is Modality.AUDIO
+            and model.runtime.codec.acoustic_codebook_sizes
+            and isinstance(model, AcousticFeatureGeneration)
+        ):
             acoustic_generation = model.generate_audio_features(
                 prompt,
                 max_new_tokens=max_new_tokens,
