@@ -931,76 +931,111 @@ class ConfigTest(unittest.TestCase):
 
     def test_fdu_smoke_jobs_select_explicit_configs(self):
         root = Path(__file__).parents[1]
-        oracle_jobs = {
-            "01_oracle_flow_codec.sh": "fdu_oracle_flow_codec_smoke",
-            "02_oracle_flow_random.sh": "fdu_oracle_flow_random_smoke",
-            "03_oracle_rvq_codec.sh": "fdu_oracle_rvq_codec_smoke",
-        }
-        overfit_stage_jobs = {
-            "10_stage_0_smoke.sh": "fdu_stage_0_smoke",
-            "20_stage_0_acoustic_none_smoke.sh": (
-                "fdu_stage_0_acoustic_none_smoke"
+        helper = (root / "jobs" / "013" / "fdu_env.sh").read_text()
+        jobs = [
+            (
+                "01_oracle_flow_codec.sh",
+                "fdu_oracle_flow_codec_smoke",
+                "scripts/codec_oracle.py",
+                "fdu_oracle_data_args",
             ),
-        }
-        stage_jobs = {
-            "11_stage_1_smoke.sh": "fdu_stage_1_smoke",
-            "12_stage_2_smoke.sh": "fdu_stage_2_smoke",
-            "13_stage_3_smoke.sh": "fdu_stage_3_smoke",
-            "14_stage_4_smoke.sh": "fdu_stage_4_smoke",
-            "21_stage_1_acoustic_none_smoke.sh": (
-                "fdu_stage_1_acoustic_none_smoke"
+            (
+                "02_oracle_flow_random.sh",
+                "fdu_oracle_flow_random_smoke",
+                "scripts/codec_oracle.py",
+                "fdu_oracle_data_args",
             ),
-            "22_stage_2_acoustic_none_smoke.sh": (
-                "fdu_stage_2_acoustic_none_smoke"
+            (
+                "03_oracle_rvq_codec.sh",
+                "fdu_oracle_rvq_codec_smoke",
+                "scripts/codec_oracle.py",
+                "fdu_oracle_data_args",
             ),
-            "23_stage_3_acoustic_none_smoke.sh": (
-                "fdu_stage_3_acoustic_none_smoke"
+            (
+                "10_stage_0_smoke.sh",
+                "fdu_stage_0_smoke",
+                "scripts/overfit.py",
+                "fdu_stage_data_args data.root",
             ),
-            "24_stage_4_acoustic_none_smoke.sh": (
-                "fdu_stage_4_acoustic_none_smoke"
+            (
+                "11_stage_1_smoke.sh",
+                "fdu_stage_1_smoke",
+                "scripts/train.py",
+                "fdu_stage_data_args data.dataset.root",
             ),
-        }
+            (
+                "12_stage_2_smoke.sh",
+                "fdu_stage_2_smoke",
+                "scripts/train.py",
+                "fdu_stage_data_args data.dataset.root",
+            ),
+            (
+                "13_stage_3_smoke.sh",
+                "fdu_stage_3_smoke",
+                "scripts/train.py",
+                "fdu_stage_data_args data.dataset.root",
+            ),
+            (
+                "14_stage_4_smoke.sh",
+                "fdu_stage_4_smoke",
+                "scripts/train.py",
+                "fdu_stage_data_args data.dataset.root",
+            ),
+            (
+                "20_stage_0_acoustic_none_smoke.sh",
+                "fdu_stage_0_acoustic_none_smoke",
+                "scripts/overfit.py",
+                "fdu_stage_data_args data.root",
+            ),
+            (
+                "21_stage_1_acoustic_none_smoke.sh",
+                "fdu_stage_1_acoustic_none_smoke",
+                "scripts/train.py",
+                "fdu_stage_data_args data.dataset.root",
+            ),
+            (
+                "22_stage_2_acoustic_none_smoke.sh",
+                "fdu_stage_2_acoustic_none_smoke",
+                "scripts/train.py",
+                "fdu_stage_data_args data.dataset.root",
+            ),
+            (
+                "23_stage_3_acoustic_none_smoke.sh",
+                "fdu_stage_3_acoustic_none_smoke",
+                "scripts/train.py",
+                "fdu_stage_data_args data.dataset.root",
+            ),
+            (
+                "24_stage_4_acoustic_none_smoke.sh",
+                "fdu_stage_4_acoustic_none_smoke",
+                "scripts/train.py",
+                "fdu_stage_data_args data.dataset.root",
+            ),
+        ]
 
-        for filename, experiment in oracle_jobs.items():
+        self.assertIn("SPEECH_TO_SPEECH_ORACLE_DATA_ROOT", helper)
+        self.assertIn("SPEECH_TO_SPEECH_STAGE_DATA_ROOT", helper)
+        self.assertIn("SPEECH_TO_SPEECH_STAGE_QWEN_ROOT", helper)
+        self.assertIn("fdu_qwen_root()", helper)
+
+        for filename, experiment, entry, data_call in jobs:
             with self.subTest(job=filename):
                 source = (root / "jobs" / "013" / filename).read_text()
 
-                self.assertIn("scripts/codec_oracle.py", source)
-                self.assertNotIn("scripts/train.py", source)
+                self.assertIn(
+                    'source "$(dirname "${BASH_SOURCE[0]}")/fdu_env.sh"',
+                    source,
+                )
+                self.assertIn(entry, source)
                 self.assertEqual(
                     re.findall(r"\bexperiment=([a-z0-9_]+)", source),
                     [experiment],
                 )
-                self.assertIn("SPEECH_TO_SPEECH_ORACLE_DATA_ROOT", source)
-                self.assertIn('"$@"', source)
-
-        for filename, experiment in overfit_stage_jobs.items():
-            with self.subTest(job=filename):
-                source = (root / "jobs" / "013" / filename).read_text()
-
-                self.assertIn("scripts/overfit.py", source)
-                self.assertNotIn("scripts/train.py", source)
-                self.assertEqual(
-                    re.findall(r"\bexperiment=([a-z0-9_]+)", source),
-                    [experiment],
+                self.assertIn(data_call, source)
+                self.assertIn(
+                    '"repo_output_root=${SPEECH_TO_SPEECH_TRAIN_ROOT}"',
+                    source,
                 )
-                self.assertIn("runtime.backbone=", source)
-                self.assertIn("data.root=", source)
-                self.assertIn("SPEECH_TO_SPEECH_STAGE_DATA_ROOT", source)
-                self.assertIn('"$@"', source)
-
-        for filename, experiment in stage_jobs.items():
-            with self.subTest(job=filename):
-                source = (root / "jobs" / "013" / filename).read_text()
-
-                self.assertIn("scripts/train.py", source)
-                self.assertNotIn("scripts/overfit.py", source)
-                self.assertEqual(
-                    re.findall(r"\bexperiment=([a-z0-9_]+)", source),
-                    [experiment],
-                )
-                self.assertIn("runtime.backbone=", source)
-                self.assertIn("SPEECH_TO_SPEECH_STAGE_DATA_ROOT", source)
                 self.assertIn('"$@"', source)
 
     def test_jobs_default_the_training_root_to_dynamic_home_train(self):
