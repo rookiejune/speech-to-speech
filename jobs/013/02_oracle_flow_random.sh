@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-source "$(dirname "${BASH_SOURCE[0]}")/fdu_env.sh"
+REPOS_ROOT="${REPOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+source "${REPOS_ROOT}/workspace/jobs/fudan/speech_to_speech_env.sh"
 
 fdu_oracle_data_args
 

@@ -25,7 +25,9 @@ Stage_0 没有 formal train loader，因此使用 fixed-sample overfit entry 验
 
 ## Overrides
 
-`jobs/013/fdu_env.sh` 统一维护 FDU 环境、Qwen checkpoint 默认路径和可选数据 root：
+FDU 物理环境、Qwen checkpoint 默认路径和可选数据 root 由 workspace 侧
+`workspace/jobs/fudan/speech_to_speech_env.sh` 统一维护；本 repo 的 `jobs/013/*.sh`
+只选择 experiment、entry、device 和可追加的 Hydra overrides：
 
 - `SPEECH_TO_SPEECH_ORACLE_DATA_ROOT` 覆盖 oracle prepared data root。
 - `SPEECH_TO_SPEECH_STAGE_DATA_ROOT` 覆盖 stage smoke prepared data root。

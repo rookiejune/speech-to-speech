@@ -926,12 +926,29 @@ class ConfigTest(unittest.TestCase):
         self.assertIn("scripts/train.py", source)
         self.assertNotIn("scripts/overfit.py", source)
         self.assertIn('"trainer=static_ddp"', source)
-        self.assertIn("data.dataset.root=", source)
+        self.assertIn("fdu_stage_data_args data.dataset.root", source)
         self.assertIn("SPEECH_TO_SPEECH_STAGE:-stage_1", source)
+
+    def test_fdu_project_jobs_source_workspace_environment(self):
+        root = Path(__file__).parents[1]
+        jobs = [
+            *sorted((root / "jobs" / "011").glob("*.sh")),
+            *sorted((root / "jobs" / "013").glob("*.sh")),
+        ]
+
+        self.assertFalse((root / "jobs" / "013" / "fdu_env.sh").exists())
+        for path in jobs:
+            with self.subTest(job=str(path.relative_to(root))):
+                source = path.read_text()
+
+                self.assertIn("workspace/jobs/fudan/speech_to_speech_env.sh", source)
+                self.assertNotRegex(
+                    source,
+                    r"/(?:home|mnt|Users)/|hf-mirror|Qwen3-0\.6B|HF_HOME|ANYTRAIN_HOME",
+                )
 
     def test_fdu_smoke_jobs_select_explicit_configs(self):
         root = Path(__file__).parents[1]
-        helper = (root / "jobs" / "013" / "fdu_env.sh").read_text()
         jobs = [
             (
                 "01_oracle_flow_codec.sh",
@@ -1013,19 +1030,11 @@ class ConfigTest(unittest.TestCase):
             ),
         ]
 
-        self.assertIn("SPEECH_TO_SPEECH_ORACLE_DATA_ROOT", helper)
-        self.assertIn("SPEECH_TO_SPEECH_STAGE_DATA_ROOT", helper)
-        self.assertIn("SPEECH_TO_SPEECH_STAGE_QWEN_ROOT", helper)
-        self.assertIn("fdu_qwen_root()", helper)
-
         for filename, experiment, entry, data_call in jobs:
             with self.subTest(job=filename):
                 source = (root / "jobs" / "013" / filename).read_text()
 
-                self.assertIn(
-                    'source "$(dirname "${BASH_SOURCE[0]}")/fdu_env.sh"',
-                    source,
-                )
+                self.assertIn("workspace/jobs/fudan/speech_to_speech_env.sh", source)
                 self.assertIn(entry, source)
                 self.assertEqual(
                     re.findall(r"\bexperiment=([a-z0-9_]+)", source),
