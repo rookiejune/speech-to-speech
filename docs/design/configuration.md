@@ -37,6 +37,12 @@ callbacks 总是成套使用，因此合并为单个 preset。共享 `callback/p
 4-batch LBA prefetch；oracle sample logging 与 checkpoint archive 都每 10,000 steps 触发。该入口不是 smoke test；
 需要短验收时必须显式选择 experiment，避免生产默认被测试预算污染。
 
+codec oracle 默认组合 `runtime=longcat_native`，即 prepared semantic code 直接作为 frame-level
+condition。需要筛选 CodecBPE token 条件时，显式覆写 `runtime.audio_tokenizer=/path/to/bpe` 或选择
+等价 runtime preset；入口会保留 native prepared codes 作为 acoustic target，并将 BPE token embedding
+按 `frame_spans()` repeat 到同一 frame 轴。BPE artifact 路径不应直接拼进 `output_subdir`；正式实验应
+显式给出可读的 tokenizer flavor 子目录，避免与 native oracle 输出相互覆盖。
+
 codec oracle 默认启用 `anytrain.PerformanceCallback`，通过
 `codec_oracle.TrainingFlops` 按当前 local-rank batch 估算训练 FLOPs；硬件峰值默认由 anytrain 按
 设备和实际 compute dtype 推断，特殊机器可覆盖 `callbacks.performance.hardware_peak_flops`。生产

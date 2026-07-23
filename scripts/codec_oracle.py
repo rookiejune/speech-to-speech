@@ -28,6 +28,7 @@ from speech_to_speech.codec_oracle import (
     event,
     single_batch_loader,
     timed,
+    training_item,
 )
 from speech_to_speech.codec_oracle.factory import (
     build_flow,
@@ -35,6 +36,7 @@ from speech_to_speech.codec_oracle.factory import (
     build_runtime,
     process_device,
 )
+from speech_to_speech.runtime.types import AudioTokenizer
 
 if __package__:
     from ._config import (
@@ -92,6 +94,7 @@ def run(config: CodecOracleConfig) -> None:
     codec = runtime.codec
     data = config.codec_oracle.data
     codes = load_codes(data, config.runtime.codec, frame_rate=codec.frame_rate)
+    fixed_sample = training_item(codes, audio_tokenizer=runtime.audio_tokenizer)
     if objective is Objective.FLOW:
         module, metadata = build_flow(
             config,
@@ -122,6 +125,8 @@ def run(config: CodecOracleConfig) -> None:
         histogram_every_n_steps=config.callbacks.oracle.histogram_every_n_steps,
         save_audio=config.callbacks.oracle.save_audio,
         metadata=metadata,
+        semantic_tokens=fixed_sample["semantic_tokens"],
+        semantic_token_spans=fixed_sample["semantic_token_spans"],
     )
     callbacks = training_callbacks(config, callback, output_dir)
     fit(
@@ -131,6 +136,7 @@ def run(config: CodecOracleConfig) -> None:
         callbacks,
         output_dir,
         data=data,
+        audio_tokenizer=runtime.audio_tokenizer,
         frame_rate=codec.frame_rate,
     )
 
@@ -185,6 +191,7 @@ def fit(
     output_dir: Path,
     *,
     data: OracleDataConfig,
+    audio_tokenizer: AudioTokenizer,
     frame_rate: float,
 ) -> None:
     with timed("logger.build", logger=config.logging.name):
@@ -212,6 +219,7 @@ def fit(
                 datamodule=OracleDataModule(
                     data,
                     config.runtime.codec,
+                    audio_tokenizer=audio_tokenizer,
                     frame_rate=frame_rate,
                     output_dir=output_dir,
                 ),
@@ -221,6 +229,7 @@ def fit(
                 module,
                 train_dataloaders=single_batch_loader(
                     codes,
+                    audio_tokenizer,
                 ),
             )
 

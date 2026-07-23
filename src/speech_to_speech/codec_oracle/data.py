@@ -17,6 +17,8 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset, Subset
 from zhuyin.datasets.wmt19_tts import wmt19_tts_codec
 
+from ..runtime.types import AudioTokenizer
+
 
 @dataclass(frozen=True)
 class LBAConfig:
@@ -118,12 +120,14 @@ class DataModule(pl.LightningDataModule):
         data: DataConfig,
         codec: str,
         *,
+        audio_tokenizer: AudioTokenizer | None = None,
         frame_rate: float,
         output_dir: Path,
     ) -> None:
         super().__init__()
         self.data = data
         self.codec = codec
+        self.audio_tokenizer = audio_tokenizer
         self.frame_rate = frame_rate
         self.output_dir = output_dir
         self.dataset: Any | None = None
@@ -166,6 +170,7 @@ class DataModule(pl.LightningDataModule):
             collate,
             codec=self.codec,
             data=self.data,
+            audio_tokenizer=self.audio_tokenizer,
             frame_rate=self.frame_rate,
         )
         persistent_workers = self.data.persistent_workers and self.data.num_workers > 0
@@ -250,25 +255,60 @@ def collate(
     codec: str,
     data: DataConfig,
     frame_rate: float,
+    audio_tokenizer: AudioTokenizer | None = None,
 ) -> dict[str, Tensor]:
     values = [
-        codes(sample, codec=codec, data=data, frame_rate=frame_rate)
+        training_item(
+            codes(sample, codec=codec, data=data, frame_rate=frame_rate),
+            audio_tokenizer=audio_tokenizer,
+        )
         for sample in samples
     ]
-    padded = pad_sequence(values, batch_first=True, padding_value=-1)
-    mask = (padded >= 0).all(dim=-1)
-    return {"codes": padded, "mask": mask}
+    return {
+        "codes": pad_sequence(
+            [value["codes"] for value in values],
+            batch_first=True,
+            padding_value=-1,
+        ),
+        "mask": pad_sequence(
+            [value["mask"] for value in values],
+            batch_first=True,
+            padding_value=False,
+        ),
+        "semantic_tokens": pad_sequence(
+            [value["semantic_tokens"] for value in values],
+            batch_first=True,
+            padding_value=0,
+        ),
+        "semantic_token_spans": pad_sequence(
+            [value["semantic_token_spans"] for value in values],
+            batch_first=True,
+            padding_value=0,
+        ),
+    }
 
 
 def single_batch_loader(
     codes: Tensor,
+    audio_tokenizer: AudioTokenizer | None = None,
 ) -> DataLoader[dict[str, Tensor]]:
-    sample = {
-        "codes": codes,
-        "mask": torch.ones(codes.size(0), dtype=torch.bool),
-    }
+    sample = training_item(codes, audio_tokenizer=audio_tokenizer)
     dataset = cast(Dataset[dict[str, Tensor]], cast(object, [sample]))
     return DataLoader(dataset, batch_size=1, num_workers=0)
+
+
+def training_item(
+    codes: Tensor,
+    *,
+    audio_tokenizer: AudioTokenizer | None = None,
+) -> dict[str, Tensor]:
+    tokens, spans = _audio_tokens(codes, audio_tokenizer)
+    return {
+        "codes": codes,
+        "mask": torch.ones(codes.size(0), dtype=torch.bool),
+        "semantic_tokens": tokens,
+        "semantic_token_spans": spans,
+    }
 
 
 def _path(value: Optional[str]) -> Path | None:
@@ -314,6 +354,39 @@ def _prepared_codes(sample: Mapping[Any, Any], *, codec: str) -> Tensor:
     if not isinstance(value, Tensor) or value.dim() != 2:
         raise ValueError("prepared codec codes must have shape [frame, codebook].")
     return value
+
+
+def _audio_tokens(
+    codes: Tensor,
+    audio_tokenizer: AudioTokenizer | None,
+) -> tuple[Tensor, Tensor]:
+    if codes.dim() != 2 or codes.size(-1) < 1:
+        raise ValueError("codec oracle codes must have shape [frames, codebooks].")
+    if audio_tokenizer is None:
+        tokens = codes[:, 0].to(dtype=torch.long).contiguous()
+        spans = torch.ones(tokens.size(0), dtype=torch.long)
+        return tokens, spans
+
+    semantic_codes = codes[:, :1].to(dtype=torch.long).contiguous()
+    tokens = _as_tensor(audio_tokenizer.encode(semantic_codes)).to(dtype=torch.long)
+    spans = _as_tensor(audio_tokenizer.frame_spans(tokens)).to(dtype=torch.long)
+    if tokens.dim() != 1:
+        raise ValueError("audio tokenizer must encode oracle semantic codes to [tokens].")
+    if spans.shape != tokens.shape:
+        raise ValueError("audio tokenizer spans must align with encoded tokens.")
+    if tokens.numel() == 0:
+        raise ValueError("audio tokenizer encoded an empty oracle sequence.")
+    if bool((spans <= 0).any()):
+        raise ValueError("audio tokenizer spans must be positive.")
+    if int(spans.sum()) != codes.size(0):
+        raise ValueError("audio tokenizer spans must cover every oracle frame.")
+    return tokens.contiguous(), spans.contiguous()
+
+
+def _as_tensor(value: Tensor | list[int]) -> Tensor:
+    if isinstance(value, Tensor):
+        return value
+    return torch.tensor(value, dtype=torch.long)
 
 
 def _frames(seconds: float, frame_rate: float) -> int:

@@ -33,6 +33,7 @@ from speech_to_speech.codec_oracle import (
     collate,
     codes,
     single_batch_loader,
+    training_item,
 )
 from speech_to_speech.codec_oracle.factory import (
     build_flow,
@@ -46,6 +47,7 @@ from speech_to_speech.model import (
     AdapterType,
     DecoderConfig,
 )
+from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
 
 
 class CodecOracleTest(unittest.TestCase):
@@ -54,6 +56,11 @@ class CodecOracleTest(unittest.TestCase):
 
         self.assertEqual(config.trainer.precision, "bf16-mixed")
         self.assertIsNone(config.runtime.audio_tokenizer)
+
+    def test_codec_oracle_allows_explicit_bpe_tokenizer(self):
+        config = _config("runtime.audio_tokenizer=/tmp/longcat-bpe")
+
+        self.assertEqual(config.runtime.audio_tokenizer, "/tmp/longcat-bpe")
 
     @patch("speech_to_speech.codec_oracle.factory.torch.cuda.set_device")
     def test_process_device_preserves_explicit_index(self, set_device):
@@ -178,6 +185,43 @@ class CodecOracleTest(unittest.TestCase):
             torch.equal(batch["mask"], torch.tensor([[1, 1, 1], [1, 0, 0]]).bool())
         )
         self.assertTrue((batch["codes"][1, 1:] == -1).all())
+        self.assertTrue(
+            torch.equal(
+                batch["semantic_tokens"],
+                torch.tensor([[0, 4, 8], [0, 0, 0]]),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                batch["semantic_token_spans"],
+                torch.tensor([[1, 1, 1], [1, 0, 0]]),
+            )
+        )
+
+    def test_collate_encodes_bpe_tokens_and_spans(self):
+        batch = collate(
+            [_sample(3)],
+            codec="longcat",
+            data=DataConfig(),
+            frame_rate=2.0,
+            audio_tokenizer=_BpeTokenizer(),
+        )
+
+        expected = _sample(3)[(Role.TARGET, Modality.AUDIO)].views[AudioView.LONGCAT]
+        self.assertTrue(torch.equal(batch["codes"], expected.unsqueeze(0)))
+        self.assertTrue(
+            torch.equal(batch["semantic_tokens"], torch.tensor([[0, 1]]))
+        )
+        self.assertTrue(
+            torch.equal(batch["semantic_token_spans"], torch.tensor([[2, 1]]))
+        )
+
+    def test_training_item_rejects_misaligned_bpe_spans(self):
+        with self.assertRaisesRegex(ValueError, "cover every oracle frame"):
+            training_item(
+                torch.tensor([[0, 1], [1, 2], [2, 3]]),
+                audio_tokenizer=_BrokenBpeTokenizer(),
+            )
 
     def test_default_data_keeps_the_full_prepared_sequence(self):
         value = codes(
@@ -247,6 +291,8 @@ class CodecOracleTest(unittest.TestCase):
         flow = next(iter(single_batch_loader(codes)))
         self.assertEqual(tuple(flow["codes"].shape), (1, 2, 4))
         self.assertEqual(tuple(flow["mask"].shape), (1, 2))
+        self.assertEqual(tuple(flow["semantic_tokens"].shape), (1, 2))
+        self.assertEqual(tuple(flow["semantic_token_spans"].shape), (1, 2))
         self.assertTrue(flow["mask"].all())
         self.assertFalse(flow["codes"].is_floating_point())
 
@@ -367,7 +413,10 @@ class CodecOracleTest(unittest.TestCase):
             acoustic_codebook_sizes=(7, 9),
             acoustic_feature_dim=4,
         )
-        runtime = SimpleNamespace(codec=codec)
+        runtime = SimpleNamespace(
+            codec=codec,
+            audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
+        )
         decoder = DecoderConfig(hidden_dim=4, layers=1, heads=1, ffn_ratio=2)
 
         flow = AcousticFlowModel(
@@ -397,6 +446,48 @@ class CodecOracleTest(unittest.TestCase):
                     tuple(model.semantic_condition(torch.tensor([[1, 2]])).shape),
                     (1, 2, 4),
                 )
+
+    def test_bpe_condition_repeats_token_embeddings_by_span(self):
+        codec = SimpleNamespace(
+            semantic_codebook=torch.eye(4),
+            acoustic_codebook_sizes=(7,),
+            acoustic_feature_dim=4,
+        )
+        model = AcousticFlowModel(
+            adapter=None,
+            runtime=SimpleNamespace(codec=codec, audio_tokenizer=_BpeTokenizer()),
+            condition_dim=4,
+            flow_runtime=_Flow(),
+            decoder=DecoderConfig(hidden_dim=4, layers=1, heads=1, ffn_ratio=2),
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        with torch.no_grad():
+            model.semantic_audio_embedding.weight.copy_(
+                torch.arange(12, dtype=torch.float32).reshape(3, 4)
+            )
+
+        condition = model.semantic_condition(
+            torch.tensor([[0, 1, 0]]),
+            torch.tensor([[2, 1, 0]]),
+            frames=4,
+        )
+
+        self.assertTrue(
+            torch.equal(
+                condition,
+                torch.tensor(
+                    [
+                        [
+                            [0.0, 1.0, 2.0, 3.0],
+                            [0.0, 1.0, 2.0, 3.0],
+                            [4.0, 5.0, 6.0, 7.0],
+                            [0.0, 0.0, 0.0, 0.0],
+                        ]
+                    ]
+                ),
+            )
+        )
 
     def test_acoustic_flow_screening_uses_formal_model_target_latent(self):
         calls: list[torch.Tensor] = []
@@ -672,7 +763,8 @@ class _OracleModel(nn.Module):
     def target_frame_label_condition(self, token_labels, positions):
         return self.semantic_audio_embedding(token_labels - 4)
 
-    def semantic_condition(self, semantic_codes):
+    def semantic_condition(self, semantic_codes, spans=None, *, frames=None):
+        del spans, frames
         return self.semantic_audio_adapter(
             self.semantic_audio_embedding(semantic_codes)
         )
@@ -705,7 +797,8 @@ class _RVQOracleModel(nn.Module):
         del positions
         return self.semantic_audio_embedding(token_labels - 4)
 
-    def semantic_condition(self, semantic_codes):
+    def semantic_condition(self, semantic_codes, spans=None, *, frames=None):
+        del spans, frames
         return self.semantic_audio_adapter(
             self.semantic_audio_embedding(semantic_codes)
         )
@@ -718,12 +811,50 @@ class _RVQOracleModel(nn.Module):
 class _RVQLoggerModule:
     device = torch.device("cpu")
 
-    def sample(self, semantic_codes, *, seed):
-        del semantic_codes, seed
+    def sample(self, semantic_codes, *, seed, spans=None, frames=None):
+        del semantic_codes, seed, spans, frames
         return torch.tensor([[[2, 3], [4, 0]]])
 
     def features(self, acoustic_codes):
         return acoustic_codes.float().sum(dim=-1, keepdim=True)
+
+
+class _BpeTokenizer:
+    vocab_size = 3
+
+    def encode(self, frames):
+        del frames
+        return torch.tensor([0, 1], dtype=torch.long)
+
+    def decode(self, token_ids):
+        values = (
+            token_ids.detach().cpu().tolist()
+            if isinstance(token_ids, torch.Tensor)
+            else token_ids
+        )
+        spans = self.frame_spans(token_ids)
+        span_values = spans.detach().cpu().tolist() if isinstance(spans, torch.Tensor) else spans
+        return [
+            (int(value) % 4,)
+            for value, span in zip(values, span_values)
+            for _ in range(int(span))
+        ]
+
+    def frame_spans(self, token_ids):
+        size = token_ids.numel() if isinstance(token_ids, torch.Tensor) else len(token_ids)
+        spans = [2, 1, 1][:size]
+        if isinstance(token_ids, torch.Tensor):
+            return torch.tensor(spans, dtype=torch.long, device=token_ids.device)
+        return spans
+
+
+class _BrokenBpeTokenizer(_BpeTokenizer):
+    def frame_spans(self, token_ids):
+        size = token_ids.numel() if isinstance(token_ids, torch.Tensor) else len(token_ids)
+        spans = [1] * size
+        if isinstance(token_ids, torch.Tensor):
+            return torch.tensor(spans, dtype=torch.long, device=token_ids.device)
+        return spans
 
 
 def _sample(frames: int):

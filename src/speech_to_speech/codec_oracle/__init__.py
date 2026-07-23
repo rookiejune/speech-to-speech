@@ -1,5 +1,13 @@
 from .config import Config
-from .data import DataConfig, DataModule, LBAConfig, codes, collate, single_batch_loader
+from .data import (
+    DataConfig,
+    DataModule,
+    LBAConfig,
+    codes,
+    collate,
+    single_batch_loader,
+    training_item,
+)
 from .logging import Logger
 from .model import (
     AcousticFlowModel,
@@ -30,4 +38,5 @@ __all__ = [
     "matched_random_weight",
     "single_batch_loader",
     "timed",
+    "training_item",
 ]

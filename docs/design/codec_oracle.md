@@ -35,16 +35,17 @@ Oracle 的 artifact 目录由 `repo_output_root/output_subdir` 派生；TensorBo
 - `Objective` / `Initialization`：使用字符串枚举选择 `FLOW` 或 `RVQ` objective，以及 codec/random
   embedding initialization 模式。codec/random 权重由 `Initialization` 自身构造。
 - `AcousticFlowModel` / `AcousticRVQModel`：只持有 codec semantic embedding、正式 adapter 和对应
-  acoustic decoder。semantic embedding 直接复制单个 codec codebook；模型不构造 text/audio
-  output head、acoustic prompt adapter 或 Qwen backbone。
-- `AcousticFlowScreening`：持有轻量 Flow oracle model；prepared semantic codes 直接通过
-  semantic embedding/adapter 形成 condition，wrapper 负责 acoustic-only objective、optimizer
-  selection 与实验日志。只训练 semantic embedding、adapter 与 acoustic flow，可使用
-  `find_unused_parameters=False` 的静态 DDP。
+  acoustic decoder。默认 native tokenizer 时 semantic embedding 直接复制单个 codec codebook；
+  显式配置 CodecBPE artifact 时复用正式 audio-token embedding 初始化规则，为每个 BPE token
+  构造一行 embedding；模型不构造 text/audio output head、acoustic prompt adapter 或 Qwen backbone。
+- `AcousticFlowScreening`：持有轻量 Flow oracle model；prepared native semantic frames 或
+  CodecBPE token embedding 按 `frame_spans()` repeat 后形成 frame-level condition，wrapper 负责
+  acoustic-only objective、optimizer selection 与实验日志。只训练 semantic embedding、adapter 与
+  acoustic flow，可使用 `find_unused_parameters=False` 的静态 DDP。
 - `AcousticRVQScreening`：持有轻量 RVQ oracle model，以 prepared semantic codes 为条件，对每个
-  acoustic codebook 计算 causal cross-entropy。只训练条件 embedding、adapter 与 decoder 的实际
-  输出路径；decoder token embedding 和最后一级不会被消费的 acoustic embedding/projection 保持
-  结构性冻结。
+  acoustic codebook 计算 causal cross-entropy。显式 CodecBPE artifact 下同样先把 token embedding
+  按 BPE span repeat 到 prepared frame 对齐；只训练条件 embedding、adapter 与 decoder 的实际输出路径；
+  decoder token embedding 和最后一级不会被消费的 acoustic embedding/projection 保持结构性冻结。
 - unified-token codec 不使用独立 screening model；其 codes 作为 semantic audio tokens，
   `acoustic_codes=None`，复用正式 DataModule、token model、objective 与 generation/decode。
 - `DataModule`：仅供 LongCat acoustic-only screening 加载 prepared codec view，返回可由
@@ -53,8 +54,10 @@ Oracle 的 artifact 目录由 `repo_output_root/output_subdir` 派生；TensorBo
   data hook 前能包装其构造方法并在 DDP 重建时保留 `len_fn` 等参数。
   unified-token codec 不使用该入口。
 - `codes()` / `collate()` / `single_batch_loader()`：单样本硬上限策略、变长 padding 与
-  single-batch overfit 数据入口。启用 LBA 时，有效硬上限是显式 `max_seconds` 与
-  `lba.max_batch_seconds` 的较小值；超长样本不会再作为超预算 singleton 静默进入训练。
+  single-batch overfit 数据入口。batch 始终保留 native prepared `codes` 供 acoustic target 和 waveform
+  decode 使用；同时输出 `semantic_tokens` / `semantic_token_spans` 供 native 或 CodecBPE 条件路径使用。
+  启用 LBA 时，有效硬上限是显式 `max_seconds` 与 `lba.max_batch_seconds` 的较小值；超长样本不会再作为
+  超预算 singleton 静默进入训练。
 - `Config`：统一拥有 objective、initialization、flow target normalization、decoder、optimizer
   参数和 `DataConfig`；Hydra `codec_oracle` preset 直接映射该公开契约，`codec_oracle=rvq` 提供
   RVQ 默认值。
@@ -91,8 +94,10 @@ Oracle 的 artifact 目录由 `repo_output_root/output_subdir` 派生；TensorBo
 - prepared-code 硬上限和 LBA budget 使用 runtime codec 暴露的 frame rate；codec config
   只选择资源和 dataset view，不重复保存时间尺度。`error`、`filter`、`truncate` 是显式互斥策略，
   不做未记录的兼容回退。
-- oracle runtime 不接受 audio tokenizer artifact；prepared semantic code 直接索引 codec 初始化的
-  semantic embedding，CodecBPE token ID 与 raw codec code ID 不能混用。
+- oracle 默认使用 `longcat_native`，即 prepared semantic code 直接索引 codec 初始化的 semantic
+  embedding；显式配置 `runtime.audio_tokenizer` 时允许 CodecBPE artifact。BPE token ID 只用于条件
+  embedding，native prepared codec code 仍用于 acoustic target、duration/LBA 计算和 waveform decode；
+  两者不能混用。
 - codec/random initialization 只作用于 semantic audio embedding。当前 codec 公共契约只暴露
   acoustic codebook size 和 code-to-feature 转换，不暴露 acoustic codebook vectors；因此 RVQ
   decoder 的 acoustic embeddings 使用自身随机初始化，不能声称完成 acoustic codec initialization

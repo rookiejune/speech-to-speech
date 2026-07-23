@@ -198,14 +198,15 @@ class ConfigTest(unittest.TestCase):
                     parser(raw)
                 self.assertIn(key, str(raised.exception))
 
-    def test_oracle_rejects_audio_tokenizer_instead_of_ignoring_it(self):
+    def test_oracle_preserves_explicit_audio_tokenizer(self):
         raw = _compose(
             "codec_oracle",
             "runtime.audio_tokenizer=/tmp/tokenizer",
         )
 
-        with self.assertRaisesRegex(ValueError, "audio_tokenizer must be null"):
-            codec_oracle(raw)
+        config = codec_oracle(raw)
+
+        self.assertEqual(config.runtime.audio_tokenizer, "/tmp/tokenizer")
 
     def test_codec_oracle_root_is_the_production_training_default(self):
         config = codec_oracle(_compose("codec_oracle"))

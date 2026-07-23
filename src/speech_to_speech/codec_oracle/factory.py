@@ -160,10 +160,19 @@ def common_metadata(
 ) -> dict[str, Any]:
     return {
         "codec": config.runtime.codec,
+        "audio_tokenizer": (
+            "native" if config.runtime.audio_tokenizer is None else "artifact"
+        ),
+        "semantic_condition": (
+            "native_frame"
+            if config.runtime.audio_tokenizer is None
+            else "audio_tokenizer_span_repeat"
+        ),
         "objective": config.codec_oracle.objective.value,
         "initialization": config.codec_oracle.initialization.value,
         "code_shape": list(codes.shape),
         "codebook_shape": list(codebook.shape),
+        "semantic_codebook_rows": codebook.size(0),
         "codebook_mean": float(codebook.mean()),
         "codebook_std": float(codebook.std(correction=0)),
         "frame_rate": frame_rate,

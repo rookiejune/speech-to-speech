@@ -19,7 +19,9 @@ from ..model import (
     DecoderConfig,
 )
 from ..model.adapter import create_adapter
-from ..runtime.types import Codec
+from ..model.embedding.audio import base_weight
+from ..runtime.audio_tokenizer import NativeAudioTokenizer
+from ..runtime.types import AudioTokenizer, Codec
 from .trace import timed
 from .types import Initialization
 
@@ -27,6 +29,9 @@ from .types import Initialization
 class _Runtime(Protocol):
     @cached_property
     def codec(self) -> Codec: ...
+
+    @cached_property
+    def audio_tokenizer(self) -> AudioTokenizer: ...
 
 
 class _AcousticOracleModel(nn.Module):
@@ -53,7 +58,7 @@ class _AcousticOracleModel(nn.Module):
             raise ValueError("oracle condition dimension must be positive.")
         self.runtime = runtime
         self.semantic_audio_embedding = _semantic_embedding(
-            runtime.codec,
+            runtime,
             device=device,
             dtype=dtype,
         )
@@ -63,12 +68,21 @@ class _AcousticOracleModel(nn.Module):
             condition_dim,
         ).to(device=device, dtype=dtype)
 
-    def semantic_condition(self, semantic_codes: Tensor) -> Tensor:
-        if semantic_codes.dim() != 2:
-            raise ValueError("semantic codes must have shape [batch, frame].")
-        return self.semantic_audio_adapter(
-            self.semantic_audio_embedding(semantic_codes)
+    def semantic_condition(
+        self,
+        semantic_tokens: Tensor,
+        spans: Tensor | None = None,
+        *,
+        frames: int | None = None,
+    ) -> Tensor:
+        if semantic_tokens.dim() != 2:
+            raise ValueError("semantic tokens must have shape [batch, token].")
+        condition = self.semantic_audio_adapter(
+            self.semantic_audio_embedding(semantic_tokens)
         )
+        if spans is None:
+            return condition
+        return _repeat_condition(condition, spans, frames=frames)
 
     def acoustic_code_features(self, codes: Tensor) -> Tensor:
         """Convert codec-local codes to the decoder's configured dtype/device."""
@@ -191,8 +205,14 @@ class AcousticFlowScreening(pl.LightningModule):
         self.target_std = nn.Buffer(target_std)
         self._logged_dequantize = False
 
-    def condition(self, semantic_codes: Tensor) -> Tensor:
-        return self.model.semantic_condition(semantic_codes)
+    def condition(
+        self,
+        semantic_tokens: Tensor,
+        spans: Tensor | None = None,
+        *,
+        frames: int | None = None,
+    ) -> Tensor:
+        return self.model.semantic_condition(semantic_tokens, spans, frames=frames)
 
     def features(self, acoustic_codes: Tensor) -> Tensor:
         return self.model.acoustic_target_latent(acoustic_codes).float()
@@ -209,9 +229,13 @@ class AcousticFlowScreening(pl.LightningModule):
         codes = batch["codes"]
         mask = batch["mask"]
         safe_codes = codes.masked_fill(~mask[..., None], 0)
-        semantic_codes = safe_codes[..., 0]
         acoustic_codes = safe_codes[..., 1:]
-        condition = self.condition(semantic_codes)
+        semantic_tokens = batch.get("semantic_tokens")
+        spans = batch.get("semantic_token_spans")
+        if semantic_tokens is None:
+            semantic_tokens = safe_codes[..., 0]
+            spans = None
+        condition = self.condition(semantic_tokens, spans, frames=codes.size(1))
         if not self._logged_dequantize:
             with timed(
                 "train.first_dequantize",
@@ -247,8 +271,15 @@ class AcousticFlowScreening(pl.LightningModule):
         )
 
     @torch.no_grad()
-    def sample(self, semantic_codes: Tensor, *, seed: int) -> Tensor:
-        condition = self.condition(semantic_codes)
+    def sample(
+        self,
+        semantic_tokens: Tensor,
+        *,
+        seed: int,
+        spans: Tensor | None = None,
+        frames: int | None = None,
+    ) -> Tensor:
+        condition = self.condition(semantic_tokens, spans, frames=frames)
         generator = torch.Generator(device=condition.device).manual_seed(seed)
         normalized = self.model.acoustic_flow.sample(condition, generator=generator)
         return normalized * self.target_std + self.target_mean
@@ -284,20 +315,27 @@ class AcousticRVQScreening(pl.LightningModule):
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
 
-    def condition(self, semantic_codes: Tensor) -> Tensor:
-        return self.model.semantic_condition(semantic_codes)
+    def condition(
+        self,
+        semantic_tokens: Tensor,
+        spans: Tensor | None = None,
+        *,
+        frames: int | None = None,
+    ) -> Tensor:
+        return self.model.semantic_condition(semantic_tokens, spans, frames=frames)
 
     def features(self, acoustic_codes: Tensor) -> Tensor:
         return self.model.acoustic_code_features(acoustic_codes).float()
 
     def _logits(
         self,
-        semantic_codes: Tensor,
+        semantic_tokens: Tensor,
         acoustic_codes: Tensor,
         mask: Tensor,
+        spans: Tensor | None = None,
     ) -> tuple[Tensor, ...]:
         return self.model.acoustic_decoder(
-            self.condition(semantic_codes),
+            self.condition(semantic_tokens, spans, frames=acoustic_codes.size(1)),
             acoustic_codes,
             mask=mask,
         )
@@ -311,9 +349,13 @@ class AcousticRVQScreening(pl.LightningModule):
         codes = batch["codes"]
         mask = batch["mask"]
         safe_codes = codes.masked_fill(~mask[..., None], 0)
-        semantic_codes = safe_codes[..., 0]
         acoustic_codes = safe_codes[..., 1:]
-        logits = self._logits(semantic_codes, acoustic_codes, mask)
+        semantic_tokens = batch.get("semantic_tokens")
+        spans = batch.get("semantic_token_spans")
+        if semantic_tokens is None:
+            semantic_tokens = safe_codes[..., 0]
+            spans = None
+        logits = self._logits(semantic_tokens, acoustic_codes, mask, spans)
         item = self.objective(logits, acoustic_codes, mask, validate=False)
         loss = item.loss.mean()
         self.log("train/rvq_loss", loss, on_step=True, prog_bar=True, sync_dist=True)
@@ -343,8 +385,15 @@ class AcousticRVQScreening(pl.LightningModule):
         )
 
     @torch.no_grad()
-    def sample(self, semantic_codes: Tensor, *, seed: int) -> Tensor:
-        condition = self.condition(semantic_codes)
+    def sample(
+        self,
+        semantic_tokens: Tensor,
+        *,
+        seed: int,
+        spans: Tensor | None = None,
+        frames: int | None = None,
+    ) -> Tensor:
+        condition = self.condition(semantic_tokens, spans, frames=frames)
         generator = torch.Generator(device=condition.device).manual_seed(seed)
         return self.model.acoustic_decoder.generate(
             condition,
@@ -353,11 +402,12 @@ class AcousticRVQScreening(pl.LightningModule):
 
 
 def _semantic_embedding(
-    codec: Codec,
+    runtime: _Runtime,
     *,
     device: torch.device,
     dtype: torch.dtype,
 ) -> nn.Embedding:
+    codec = runtime.codec
     codebook = codec.semantic_codebook
     if not isinstance(codebook, Tensor):
         raise TypeError("codec semantic codebook must be a tensor.")
@@ -371,8 +421,49 @@ def _semantic_embedding(
         raise TypeError("codec semantic codebook must be floating point.")
     if not bool(torch.isfinite(codebook).all()):
         raise ValueError("codec semantic codebook must contain finite values.")
-    weight = codebook.detach().to(device=device, dtype=dtype).clone()
+    if isinstance(runtime.audio_tokenizer, NativeAudioTokenizer):
+        weight = codebook.detach()
+    else:
+        weight = base_weight(codec, runtime.audio_tokenizer)
+    weight = weight.to(device=device, dtype=dtype).clone()
     return nn.Embedding.from_pretrained(weight, freeze=False)
+
+
+def _repeat_condition(
+    condition: Tensor,
+    spans: Tensor,
+    *,
+    frames: int | None,
+) -> Tensor:
+    if condition.dim() != 3 or spans.dim() != 2:
+        raise ValueError("condition and spans must have shapes [B, T, D] and [B, T].")
+    if condition.shape[:2] != spans.shape:
+        raise ValueError("condition and spans must align on batch and token axes.")
+    if spans.dtype not in {torch.int8, torch.int16, torch.int32, torch.int64}:
+        raise TypeError("semantic token spans must use an integer dtype.")
+    if bool((spans < 0).any()):
+        raise ValueError("semantic token spans must be non-negative.")
+
+    frame_count = int(spans.sum(dim=1).max()) if frames is None else frames
+    if frame_count < 1:
+        raise ValueError("semantic token spans must cover at least one frame.")
+
+    output = condition.new_zeros(condition.size(0), frame_count, condition.size(-1))
+    span_rows = spans.to(device=condition.device, dtype=torch.long)
+    for row_index in range(condition.size(0)):
+        row_spans = span_rows[row_index]
+        valid = row_spans > 0
+        repeated = torch.repeat_interleave(
+            condition[row_index, valid],
+            row_spans[valid],
+            dim=0,
+        )
+        if repeated.size(0) == 0:
+            raise ValueError("semantic token spans must cover at least one frame.")
+        if repeated.size(0) > frame_count:
+            raise ValueError("semantic token spans exceed the target frame count.")
+        output[row_index, : repeated.size(0)] = repeated
+    return output
 
 
 def _train_only(model: nn.Module, *modules: nn.Module) -> None:

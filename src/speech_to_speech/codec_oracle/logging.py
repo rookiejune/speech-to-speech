@@ -28,7 +28,14 @@ _LOSS_WINDOW = 20
 class _AcousticFlowScreening(Protocol):
     device: torch.device
 
-    def sample(self, semantic_codes: Tensor, *, seed: int) -> Tensor: ...
+    def sample(
+        self,
+        semantic_tokens: Tensor,
+        *,
+        seed: int,
+        spans: Tensor | None = None,
+        frames: int | None = None,
+    ) -> Tensor: ...
 
     def features(self, acoustic_codes: Tensor) -> Tensor: ...
 
@@ -36,7 +43,14 @@ class _AcousticFlowScreening(Protocol):
 class _AcousticRVQScreening(Protocol):
     device: torch.device
 
-    def sample(self, semantic_codes: Tensor, *, seed: int) -> Tensor: ...
+    def sample(
+        self,
+        semantic_tokens: Tensor,
+        *,
+        seed: int,
+        spans: Tensor | None = None,
+        frames: int | None = None,
+    ) -> Tensor: ...
 
     def features(self, acoustic_codes: Tensor) -> Tensor: ...
 
@@ -57,6 +71,8 @@ class Logger(Callback):
         histogram_every_n_steps: int,
         save_audio: bool,
         metadata: Mapping[str, Any],
+        semantic_tokens: Tensor | None = None,
+        semantic_token_spans: Tensor | None = None,
     ) -> None:
         super().__init__()
         self.objective = objective
@@ -65,6 +81,16 @@ class Logger(Callback):
         self.output_dir = output_dir
         self.sample_rate = sample_rate
         self.seed = seed
+        self.semantic_tokens = (
+            codes[:, 0].contiguous()
+            if semantic_tokens is None
+            else semantic_tokens.contiguous()
+        )
+        self.semantic_token_spans = (
+            torch.ones(self.semantic_tokens.size(0), dtype=torch.long)
+            if semantic_token_spans is None
+            else semantic_token_spans.contiguous()
+        )
         self.sample_every_n_steps = sample_every_n_steps
         self.histogram_every_n_steps = histogram_every_n_steps
         self.save_audio = save_audio
@@ -176,8 +202,15 @@ class Logger(Callback):
     def _flow_sample(self, module: _AcousticFlowScreening) -> tuple[float, Tensor]:
         codes = self.codes.unsqueeze(0).to(module.device)
         semantic_codes = codes[..., 0]
+        semantic_tokens = self.semantic_tokens.unsqueeze(0).to(module.device)
+        spans = self.semantic_token_spans.unsqueeze(0).to(module.device)
         acoustic_codes = codes[..., 1:]
-        sampled = module.sample(semantic_codes, seed=self.seed)
+        sampled = module.sample(
+            semantic_tokens,
+            seed=self.seed,
+            spans=spans,
+            frames=acoustic_codes.size(1),
+        )
         target = module.features(acoustic_codes)
         value = float(F.mse_loss(sampled.float(), target.float()))
         with timed("callback.waveform_decode", objective=self.objective):
@@ -193,8 +226,15 @@ class Logger(Callback):
     ) -> tuple[dict[str, float], Tensor]:
         codes = self.codes.unsqueeze(0).to(module.device)
         semantic_codes = codes[..., 0]
+        semantic_tokens = self.semantic_tokens.unsqueeze(0).to(module.device)
+        spans = self.semantic_token_spans.unsqueeze(0).to(module.device)
         target_codes = codes[..., 1:]
-        sampled_codes = module.sample(semantic_codes, seed=self.seed)
+        sampled_codes = module.sample(
+            semantic_tokens,
+            seed=self.seed,
+            spans=spans,
+            frames=target_codes.size(1),
+        )
         matches = sampled_codes.eq(target_codes)
         codebook_accuracy = matches.float().mean(dim=(0, 1))
         target_features = module.features(target_codes)

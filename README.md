@@ -29,7 +29,10 @@ integration is provided by `SpeechToSpeechModule`.
 - `scripts/codec_oracle.py`: Hydra entry point for codec oracle training. With
   no experiment override, `configs/codec_oracle.yaml` uses the full prepared
   dataset through LBA for 1,000,000 steps at `bf16-mixed` precision, logging a
-  sample and archiving a checkpoint every 10,000 steps.
+  sample and archiving a checkpoint every 10,000 steps. The default runtime is
+  LongCat native semantic IDs; explicit `runtime.audio_tokenizer=/path/to/bpe`
+  enables CodecBPE conditioning, with token embeddings repeated by BPE span to
+  align with prepared acoustic frames.
 - `jobs/`: machine-aware wrappers for formal experiment runs. Each wrapper
   invokes one of the Python entry points directly and forwards extra arguments.
 

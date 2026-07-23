@@ -321,8 +321,6 @@ def train(config: DictConfig) -> StagedTrainConfig:
 def codec_oracle(config: DictConfig) -> CodecOracleConfig:
     result = _parse(_prepare(config), CodecOracleConfig)
     _validate_output(result)
-    if result.runtime.audio_tokenizer is not None:
-        raise ValueError("codec oracle runtime.audio_tokenizer must be null.")
     return result
 
 
