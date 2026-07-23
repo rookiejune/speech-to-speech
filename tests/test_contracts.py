@@ -688,6 +688,55 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(loader.prefetch_batches, 0)
         self.assertEqual(loader.log_dir, Path(self.id()) / "lba" / "tts")
 
+    def test_datamodule_lba_uses_store_local_sampler_for_store_backed_data(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with patch.dict("os.environ", {"ANYDATASET_HOME": str(root / "cache")}):
+                output = root / "dataset"
+                DatasetWriter(
+                    output,
+                    dataset_id="toy-speech",
+                    split="train",
+                    max_shard_samples=2,
+                ).write([_raw_sample(index) for index in range(4)])
+                dataset = AnyDataset(
+                    Spec(source=Source.STORE, path=str(output), split="train")
+                )
+                datamodule = DataModule(
+                    DataConfig(
+                        codec="longcat",
+                        dataloader={
+                            "batch_size": 2,
+                            "num_workers": 0,
+                            "lba": LBAConfig(enabled=True, prefetch_batches=0),
+                        },
+                    ),
+                    _data_runtime(),
+                    {Task.TTS: 1.0},
+                )
+
+                with patch(
+                    "speech_to_speech.datamodule.module.load_dataset",
+                    return_value=dataset,
+                ):
+                    datamodule.setup()
+                    loader = cast(Any, datamodule.train_dataloader())
+
+                self.assertEqual(type(loader).__name__, "LBA")
+                self.assertIs(loader.dataset, dataset)
+                self.assertIsInstance(loader.batch_sampler, StoreLocalBatchSampler)
+                sampler = loader.batch_sampler
+                self.assertIs(sampler.dataset, dataset.dataset)
+                self.assertEqual(sampler.batch_size, 2)
+                self.assertTrue(sampler.shuffle)
+                self.assertEqual(
+                    sampler.views,
+                    (
+                        (Role.SOURCE, Modality.AUDIO, AudioView.LONGCAT),
+                        (Role.TARGET, Modality.AUDIO, AudioView.LONGCAT),
+                    ),
+                )
+
     def test_text_datamodule_uses_lba_when_enabled(self):
         runtime = SimpleNamespace(
             text_tokenizer=_ChatTokenizer(32),

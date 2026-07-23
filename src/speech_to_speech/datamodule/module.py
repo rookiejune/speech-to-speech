@@ -106,6 +106,33 @@ class DataModule(LightningDataModule):
         store_dataset = _store_group_dataset(self._train_dataset)
         lba = loader.get("lba")
         if lba is not None and lba.enabled:
+            if store_dataset is not None:
+                return LBA(
+                    self._train_dataset,
+                    batch_sampler=_store_batch_sampler(
+                        store_dataset,
+                        batch_size=loader["batch_size"],
+                        audio_view=self.runtime.audio_view,
+                    ),
+                    num_workers=num_workers,
+                    pin_memory=loader.get("pin_memory", False),
+                    persistent_workers=(
+                        loader.get("persistent_workers", False) and num_workers > 0
+                    ),
+                    collate_fn=self.collator,
+                    len_fn=partial(
+                        speech_length,
+                        runtime=cast(DataRuntime, self.collator.runtime),
+                        tasks=tuple(self.collator.tasks),
+                        config=lba,
+                    ),
+                    max_padded_length=lba.max_batch_cost,
+                    max_padding_ratio=lba.max_padding_ratio,
+                    prefetch_batches=lba.prefetch_batches,
+                    planner_mode=cast(PlannerMode, lba.planner_mode),
+                    drop_last_flush=lba.drop_last_flush,
+                    log_dir=_lba_log_dir(self.output_dir, self.loader_name),
+                )
             return LBA(
                 self._train_dataset,
                 batch_size=loader["batch_size"],
@@ -132,11 +159,10 @@ class DataModule(LightningDataModule):
         if store_dataset is not None:
             return DataLoader(
                 self._train_dataset,
-                batch_sampler=StoreLocalBatchSampler(
+                batch_sampler=_store_batch_sampler(
                     store_dataset,
                     batch_size=loader["batch_size"],
-                    views=_audio_views(self.runtime.audio_view),
-                    shuffle=True,
+                    audio_view=self.runtime.audio_view,
                 ),
                 num_workers=num_workers,
                 pin_memory=loader.get("pin_memory", False),
@@ -175,6 +201,20 @@ def _audio_views(audio_view: AudioView) -> tuple[tuple[Role, Modality, AudioView
     return (
         (Role.SOURCE, Modality.AUDIO, audio_view),
         (Role.TARGET, Modality.AUDIO, audio_view),
+    )
+
+
+def _store_batch_sampler(
+    dataset: StoreDataset,
+    *,
+    batch_size: int,
+    audio_view: AudioView,
+) -> StoreLocalBatchSampler:
+    return StoreLocalBatchSampler(
+        dataset,
+        batch_size=batch_size,
+        views=_audio_views(audio_view),
+        shuffle=True,
     )
 
 

@@ -124,10 +124,13 @@ acoustic_target: AcousticTarget | None
   原始外层 dataset，因此 `AnyDataset` transform 或 `MergedDataset` 组合不会被绕过；正式
   `train.yaml` 关闭 Lightning 自动 distributed sampler，由该 batch sampler 按 runtime shard
   负责多进程切分。
-- 启用 `dataloader.lba.enabled` 时，LBA 直接拥有 loader 的 batching 策略，`StoreLocalBatchSampler`
-  不再同时参与。joint train 的外层 `ScheduledDataLoader` 不接受 Lightning 注入 sampler；当前
-  FDU smoke 验证 DDP 下每个子 loader 都能创建 per-rank LBA log 并完成 2-step 训练，正式 shard
-  locality 与 distributed sample partition 仍需在长跑前单独复核。
+- 启用 `dataloader.lba.enabled` 时，store-backed speech dataset 仍以 anydataset 的
+  `StoreLocalBatchSampler(shuffle=True)` 作为 source sampler；LBA 只消费该 sampler 产出的
+  store-local index 流并在其上做长度规划，不再使用自己的 `shuffle=True` 替代 store shuffle。
+  非 store map-style dataset 没有 anydataset shard/locality 语义，才使用 LBA/DataLoader 自己的
+  sample shuffle。joint train 的外层 `ScheduledDataLoader` 不接受 Lightning 注入 sampler；当前
+  FDU smoke 验证 DDP 下每个子 loader 都能创建 per-rank LBA log 并完成 2-step 训练，正式
+  distributed sample partition 仍需在长跑前单独复核。
 - `DataModule.train_samples()` 是 callback 按索引读取已 setup 训练样本的公开边界；callback
   不读取私有 dataset 字段。
 - parser 生成 `Speech.audio_token_spans`，`Speech` 校验 spans 与 semantic frame 完整对齐；
