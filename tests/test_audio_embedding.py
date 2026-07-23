@@ -4,7 +4,11 @@ import unittest
 
 import torch
 
-from speech_to_speech.model.embedding.audio import base_weight, merge_by_positions
+from speech_to_speech.model.embedding.audio import (
+    base_weight,
+    embedding,
+    merge_by_positions,
+)
 
 
 class AudioEmbeddingTest(unittest.TestCase):
@@ -65,6 +69,18 @@ class AudioEmbeddingTest(unittest.TestCase):
         self.assertIsNotNone(features.grad)
         self.assertTrue(torch.isfinite(features.grad).all())
 
+    def test_random_embedding_initialization_uses_tokenizer_vocab(self):
+        codebook = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+        tokenizer = _Tokenizer([])
+        tokenizer.embedding_initialization = "random"
+        tokenizer.vocab_size_override = 7
+
+        audio = embedding(_Codec(codebook), tokenizer)
+
+        self.assertEqual(audio.weight.shape, (9, 4))
+        self.assertEqual(tokenizer.decode_batch_sizes, [])
+        self.assertEqual(tokenizer.span_batch_sizes, [])
+
 
 def _reference_merge(embeddings: torch.Tensor) -> torch.Tensor:
     positions = torch.arange(embeddings.size(0), dtype=torch.float32)
@@ -90,11 +106,15 @@ class _Codec:
 class _Tokenizer:
     def __init__(self, tokens: list[list[tuple[int, ...]]]) -> None:
         self.tokens = tokens
+        self.embedding_initialization = "codec"
+        self.vocab_size_override: int | None = None
         self.decode_batch_sizes: list[int] = []
         self.span_batch_sizes: list[int] = []
 
     @property
     def vocab_size(self) -> int:
+        if self.vocab_size_override is not None:
+            return self.vocab_size_override
         return len(self.tokens)
 
     def decode(self, token_ids):

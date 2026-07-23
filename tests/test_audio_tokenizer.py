@@ -7,6 +7,7 @@ import torch
 from anytrain.tokenizer import CodecBPE
 
 from speech_to_speech.runtime.audio_tokenizer import (
+    FlattenedAudioTokenizer,
     NativeAudioTokenizer,
     TorchCodecBPE,
 )
@@ -111,6 +112,60 @@ class NativeAudioTokenizerTest(unittest.TestCase):
             with self.subTest(call=call):
                 with self.assertRaisesRegex(ValueError, r"\[0, 4\)"):
                     call()
+
+
+class FlattenedAudioTokenizerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tokenizer = FlattenedAudioTokenizer(
+            codebook_sizes=(4, 10),
+            codec_name="longcat",
+        )
+
+    def test_block_layout_uses_codec_and_codebook_markers(self):
+        token_ids = self.tokenizer.encode(torch.tensor([[1, 5], [2, 6]]))
+
+        self.assertTrue(
+            torch.equal(token_ids, torch.tensor([14, 15, 1, 2, 16, 9, 10]))
+        )
+        self.assertEqual(
+            self.tokenizer.special_tokens,
+            {
+                "codec:longcat": 14,
+                "codec:longcat:codebook:0": 15,
+                "codec:longcat:codebook:1": 16,
+            },
+        )
+
+    def test_round_trip_preserves_full_codec_frames(self):
+        frames = torch.tensor([[1, 5], [2, 6]], dtype=torch.int32)
+
+        token_ids = self.tokenizer.encode(frames)
+        decoded = self.tokenizer.decode(token_ids)
+        spans = self.tokenizer.frame_spans(token_ids)
+
+        self.assertTrue(torch.equal(decoded, frames.to(dtype=torch.long)))
+        self.assertTrue(torch.equal(spans, torch.tensor([0, 0, 1, 1, 0, 0, 0])))
+        self.assertEqual(
+            self.tokenizer.decode(token_ids.tolist()),
+            [(1, 5), (2, 6)],
+        )
+
+    def test_vocab_span_lookup_marks_only_first_codebook_as_frames(self):
+        spans = self.tokenizer.frame_spans(range(self.tokenizer.vocab_size))
+
+        self.assertEqual(spans, [1, 1, 1, 1, *([0] * 13)])
+
+    def test_rejects_invalid_flattened_grammar(self):
+        invalid = (
+            [14, 15, 1, 2, 16, 9],
+            [14, 1, 2, 16, 9, 10],
+            [14, 15, 1, 2, 16],
+            [14, 15, 1, 2, 16, 9, 40],
+        )
+        for token_ids in invalid:
+            with self.subTest(token_ids=token_ids):
+                with self.assertRaises(ValueError):
+                    self.tokenizer.decode(token_ids)
 
 
 @unittest.skipIf(tokenizers is None, "tokenizers is not installed")

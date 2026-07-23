@@ -1,22 +1,26 @@
 # @package _global_
 defaults:
-  - /model: default
+  - /model: toy
   - /model/acoustic: none
-  - /runtime: longcat_native
-  - /data: wmt19_tts
+  - /runtime: longcat_full_sequence
+  - /data: toy
   - /pl_module: sft
   - /trainer: default
-  - /logging: tensorboard
-  - override /stage: stage_0
+  - /logging: csv
   - override /parameter_policy: full
   - _self_
 
-task: s2st
-run_name: ${stage.name}-${oc.select:acoustic.name,token}
-output_subdir: 013-fdu-stage-smoke/${stage.name}/${task}/${run_name}
+task: tts
+run_name: longcat-full-sequence-token
+output_subdir: longcat-full-sequence-smoke/${task}/${run_name}
 
 data:
   sample_index: 0
+
+runtime:
+  device: cpu
+  dtype: float32
+  attn_implementation:
 
 callbacks:
   task_sample:
@@ -30,5 +34,8 @@ train:
   max_steps: 2
 
 trainer:
+  accelerator: cpu
+  devices: 1
+  precision: 32-true
   log_every_n_steps: 1
   enable_checkpointing: false

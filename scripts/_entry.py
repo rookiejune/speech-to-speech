@@ -129,13 +129,13 @@ def acoustic_composition(
     config: object,
     *,
     token_type: type[TokenConfigT],
-    codec_has_acoustic_codebooks: bool,
+    uses_acoustic_side_channel: bool,
 ) -> AcousticType:
     if isinstance(config, token_type):
         return AcousticType.NONE
-    if not codec_has_acoustic_codebooks:
+    if not uses_acoustic_side_channel:
         raise ValueError(
-            "codec has no independent acoustic codebooks; configure "
-            "model/acoustic=none."
+            "runtime representation has no independent acoustic side channel; "
+            "configure model/acoustic=none."
         )
     return AcousticType(cast(AcousticEntryConfig, config).acoustic.type)

@@ -21,6 +21,9 @@ class Codec(Protocol):
     def semantic_codebook(self) -> Tensor: ...
 
     @property
+    def codebook_sizes(self) -> tuple[int, ...]: ...
+
+    @property
     def acoustic_codebook_sizes(self) -> tuple[int, ...]: ...
 
     def encode(self, audio: Tensor, sample_rate: int) -> Tensor: ...
@@ -35,6 +38,8 @@ class Codec(Protocol):
 
 
 class AudioTokenizer(Protocol):
+    embedding_initialization: str
+
     @property
     def vocab_size(self) -> int: ...
 

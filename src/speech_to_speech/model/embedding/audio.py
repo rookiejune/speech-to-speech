@@ -27,16 +27,16 @@ def create_semantic_audio_modules(
     backbone: Backbone,
 ) -> tuple[nn.Embedding, nn.Module]:
     backbone_weight = backbone.get_input_embeddings().weight
-    adapter = create_adapter(
-        adapter_type,
-        runtime.codec.semantic_codebook.size(-1),
-        backbone.config.hidden_size,
-    ).to(device=backbone_weight.device, dtype=backbone_weight.dtype)
-    semantic_audio = embedding(runtime.codec, runtime.audio_tokenizer).to(
+    audio = embedding(runtime.codec, runtime.audio_tokenizer).to(
         device=backbone_weight.device,
         dtype=backbone_weight.dtype,
     )
-    return semantic_audio, adapter
+    adapter = create_adapter(
+        adapter_type,
+        audio.weight.size(-1),
+        backbone.config.hidden_size,
+    ).to(device=backbone_weight.device, dtype=backbone_weight.dtype)
+    return audio, adapter
 
 
 def _merge(embeddings: Tensor) -> Tensor:
@@ -178,6 +178,25 @@ def base_weight(codec: Codec, tokenizer: AudioTokenizer) -> Tensor:
     return output
 
 
+def random_weight(codec: Codec, tokenizer: AudioTokenizer) -> Tensor:
+    """Create randomly initialized audio-token weights in codec feature space."""
+    codebook = codec.semantic_codebook.detach()
+    if codebook.dim() not in {2, 3}:
+        raise ValueError(
+            "codec semantic_codebook must have shape [vocab, dim] or "
+            "[codebooks, vocab, dim]."
+        )
+    dim = codebook.size(-1)
+    output = torch.empty(
+        tokenizer.vocab_size,
+        dim,
+        device=codebook.device,
+        dtype=codebook.dtype,
+    )
+    nn.init.normal_(output, std=dim**-0.5)
+    return output
+
+
 def _unit_ids(units: list[tuple[int, ...]] | Tensor, codebook: Tensor) -> Tensor:
     if isinstance(units, Tensor):
         unit_ids = units.to(device=codebook.device, dtype=torch.long)
@@ -218,7 +237,13 @@ def embedding(codec: Codec, tokenizer: AudioTokenizer) -> nn.Embedding:
 
     The final two rows are reserved for BOA and EOA.
     """
-    base = base_weight(codec, tokenizer)
+    initialization = tokenizer.embedding_initialization
+    if initialization == "codec":
+        base = base_weight(codec, tokenizer)
+    elif initialization == "random":
+        base = random_weight(codec, tokenizer)
+    else:
+        raise ValueError(f"unsupported audio embedding initialization: {initialization}")
     special = torch.empty(
         (2, base.size(1)),
         device=base.device,

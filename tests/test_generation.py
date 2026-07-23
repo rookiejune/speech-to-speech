@@ -212,6 +212,7 @@ class _TokenGenerationModel(TokenModel):
         nn.Module.__init__(self)
         self.runtime = _Runtime()
         self.layout = self.runtime.layout
+        self.audio_token_frame_spans = torch.tensor([1, 1])
         self.backbone = SimpleNamespace(
             get_input_embeddings=lambda: SimpleNamespace(weight=torch.empty(0))
         )
@@ -761,7 +762,7 @@ class GenerationTest(unittest.TestCase):
 
         self.assertEqual(len(results), 2)
         self.assertEqual([call[3] for call in model.calls], [2, 2])
-        self.assertEqual(model.runtime.audio_tokenizer.frame_spans.call_count, 1)
+        self.assertEqual(model.runtime.audio_tokenizer.frame_spans.call_count, 0)
         self.assertEqual(model.runtime.codec.decode_calls, 1)
 
     def test_generation_reuses_frame_counts_and_batches_acoustic_decode(self):

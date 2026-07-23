@@ -423,6 +423,6 @@ def _frame_span_lookup(runtime: TokenModelRuntime) -> torch.Tensor:
     )
     if spans.shape != (runtime.audio_tokenizer.vocab_size,):
         raise ValueError("audio token frame spans must cover the tokenizer vocabulary.")
-    if bool((spans <= 0).any()):
-        raise ValueError("audio token frame spans must be positive.")
+    if bool((spans < 0).any()) or not bool((spans > 0).any()):
+        raise ValueError("audio token frame spans must be non-negative and non-empty.")
     return spans

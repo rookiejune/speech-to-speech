@@ -13,8 +13,9 @@
 - `DatasetRuntime`：在 `DataRuntime` 上增加正式 codec object，仅供 dataset factory 根据
   codebook metadata 构造 toy prepared-code samples。
 - `parser.parse_sample()`：把 `anydataset.types.Sample` 解析为 `SpeechPair`。它解释当前
-  `AudioView`，将 LongCat codebooks 分成 semantic/acoustic codes，并生成 text/audio token
-  IDs 与 audio token spans。
+  `AudioView` 与 runtime `audio_representation`，将解耦路线的 LongCat codebooks 分成
+  semantic/acoustic codes，或在 `full_codec_sequence` 下把完整 codec codes 作为 token
+  supervision，并生成 text/audio token IDs 与 audio token spans。
 - `sample.build_sample()`：根据 `Task` 把 `SpeechPair` 组装成 `ModelSample`，负责 chat
   template、BOA/EOA/EOS、global ID 映射、token labels、acoustic prompt 和 target frame
   positions。
@@ -84,7 +85,9 @@ acoustic_target: AcousticTarget | None
 - `parser.py` 只解释 raw dataset representation；`sample.py` 只实现任务序列规则；
   `types.py` 保存结构并处理局部校验、padding 和 mask。三层不反向读取彼此的私有逻辑。
 - LongCat 的第 0 个 codebook 和后续 codebooks 只在 parser 边界解释为 semantic/acoustic。
-  unified-token codec 的完整 codes 是 `semantic_codes`，`acoustic_codes=None`。
+  `full_codec_sequence` 不拆 semantic/acoustic side channel，而是把完整 codec codes 放入
+  `semantic_codes` 并设置 `acoustic_codes=None`；unified-token codec 的完整 codes 也是
+  `semantic_codes`，`acoustic_codes=None`。
 - audio tokenizer 的输出统一称为 `audio_token_ids`；codec codebook index 统一称为
   `semantic_codes` / `acoustic_codes`。只有 layout global IDs 使用 `input_ids` 和
   `token_labels`。

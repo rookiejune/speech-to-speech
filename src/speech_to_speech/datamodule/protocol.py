@@ -7,6 +7,7 @@ from typing import Protocol
 from anydataset.types import AudioView
 from anytrain.idspace import Layout
 
+from ..runtime import AudioRepresentation
 from ..runtime.protocol import DataRuntime
 from ..runtime.types import AudioTokenizer, Codec, TextTokenizer
 
@@ -59,6 +60,7 @@ class DataRuntimeSnapshot:
 
     codec_name: str
     audio_view: AudioView
+    audio_representation: AudioRepresentation
     text_tokenizer: TextTokenizer
     audio_tokenizer: AudioTokenizer
     layout_blocks: tuple[tuple[str, tuple[int, int]], ...]
@@ -72,6 +74,7 @@ class DataRuntimeSnapshot:
         return cls(
             codec_name=runtime.codec_name,
             audio_view=runtime.audio_view,
+            audio_representation=runtime.audio_representation,
             text_tokenizer=runtime.text_tokenizer,
             audio_tokenizer=runtime.audio_tokenizer,
             layout_blocks=tuple(runtime.layout.blocks.items()),

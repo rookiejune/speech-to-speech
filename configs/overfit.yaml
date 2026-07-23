@@ -1,5 +1,6 @@
 defaults:
   - stage: stage_0
+  - parameter_policy: full
   - experiment: overfit
   - callback/performance@callbacks.performance
   - _self_

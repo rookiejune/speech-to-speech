@@ -22,7 +22,7 @@ from speech_to_speech.loss import (
 )
 from speech_to_speech.loss.flow_matching import AcousticFlowLoss
 from speech_to_speech.loss.token import TokenLoss
-from speech_to_speech.loss.types import LossItem, combine_outputs
+from speech_to_speech.loss.types import combine_outputs
 from speech_to_speech.model.base import Config, TokenModel
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.pl_module import SpeechToSpeechModule

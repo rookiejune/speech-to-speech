@@ -1,0 +1,10 @@
+codec: longcat
+backbone: Qwen/Qwen3-0.6B
+audio_representation: full_codec_sequence
+audio_tokenizer:
+device: cuda
+dtype: bfloat16
+attn_implementation: flash_attention_2
+flow_method: midpoint
+flow_nfe: 20
+flow_num_steps: 10

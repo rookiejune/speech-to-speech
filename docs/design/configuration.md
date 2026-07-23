@@ -6,9 +6,10 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
 
 ## 源码模块
 
-- `runtime`：完整映射 `runtime.Config`，统一拥有 codec、backbone、audio tokenizer、device、dtype、
-  attention backend 与 flow sampling。`longcat`、`longcat_native`、`unicodec` 表示相互兼容的资源
-  snapshot；不再拆分 `codec` 和 `sampler` 组。
+- `runtime`：完整映射 `runtime.Config`，统一拥有 codec、audio representation、backbone、
+  audio tokenizer、device、dtype、attention backend 与 flow sampling。`longcat`、`longcat_native`、
+  `longcat_full_sequence`、`unicodec` 表示相互兼容的资源 snapshot；不再拆分 `codec` 和
+  `sampler` 组。
 - `model`：完整映射 `model.Config` 的三个 adapter 与可选 `ToyConfig`。`model=toy` 只替换
   backbone；`model/acoustic` 选择 flow/RVQ composition，preset package 仍是顶层 `acoustic`，
   避免把 subtype 字段混入基础 `model.Config`。
@@ -137,7 +138,9 @@ codec codes；入口显式拒绝 CodecBPE tokenizer，而不是静默忽略。
 ## 组合
 
 - `model/acoustic=none|flow|rvq` 显式选择下游 acoustic path；`none` 只训练
-  semantic audio token，flow/RVQ 才启用 acoustic objective，RVQ schema 不接受 REPA。
+  audio token，flow/RVQ 才启用 acoustic objective，RVQ schema 不接受 REPA。
+- `runtime.audio_representation=full_codec_sequence` 只允许 `model/acoustic=none`，因为完整
+  codec codes 已作为 token objective 训练，不能再同时构造 acoustic side channel。
 - unified-token codec 使用 `runtime=unicodec model/acoustic=none`；有独立 acoustic
   codebook 的 codec 也可以显式选择 `none` 作为 token-only baseline。
 - flow method、NFE 和 step 数直接覆盖 `runtime.flow_*`；RVQ/token 中保留这些字段是
@@ -147,3 +150,12 @@ codec codes；入口显式拒绝 CodecBPE tokenizer，而不是静默忽略。
   normalization 与 optimizer 位于 `codec_oracle.*`。flow objective 额外使用 runtime 的 flow
   sampling 和 normalization 字段，RVQ objective 不读取这些字段；两种 objective 的
   initialization 都只控制 semantic audio embedding。
+
+## Stage 与参数策略
+
+`configs/stage/stage_*.yaml` 只描述 loader/task schedule 与 `batches_per_step`。参数冻结和
+backbone top-fraction 抽象为顶层 `parameter_policy` 组，入口解析为
+`ParameterPolicyConfig` 后传给 `StageSwitcher`。默认 staged smoke 仍保持历史 stage 到
+policy 的映射：stage 0/4 使用 `full`，stage 1/2 使用 `speech_interface`，stage 3 使用
+`speech_interface_top_third`；需要只训练 semantic token interface 时显式选择
+`parameter_policy=semantic_only`。

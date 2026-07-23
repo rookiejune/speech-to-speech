@@ -10,17 +10,27 @@ from lightning.pytorch.callbacks import Callback
 
 from ._lightning import attached_datamodule
 from ..stage import (
+    PARAMETER_POLICY_SPECS,
     STAGE_SPECS,
+    ParameterPolicyConfig,
+    ParameterPolicyName,
+    ParameterPolicySpec,
     StageConfig,
     StageName,
-    StageSpec,
     StagedModel,
     apply_stage,
 )
 from ..task import Task
 
 
-StageRef = Union[StageName, StageConfig, StageSpec, str]
+StageRef = Union[
+    ParameterPolicyName,
+    ParameterPolicyConfig,
+    ParameterPolicySpec,
+    StageName,
+    StageConfig,
+    str,
+]
 
 
 @dataclass(frozen=True)
@@ -150,12 +160,21 @@ def _validate_stage_count(
         raise ValueError(f"{name} must contain one more item than epoch_milestones")
 
 
-def _stage_spec(value: StageRef) -> StageSpec:
-    if isinstance(value, StageSpec):
+def _stage_spec(value: StageRef) -> ParameterPolicySpec:
+    if isinstance(value, ParameterPolicySpec):
         return value
+    if isinstance(value, ParameterPolicyConfig):
+        return value.spec()
     if isinstance(value, StageConfig):
         return value.spec()
-    return STAGE_SPECS[StageName(value)]
+    if isinstance(value, ParameterPolicyName):
+        return PARAMETER_POLICY_SPECS[value]
+    if isinstance(value, StageName):
+        return STAGE_SPECS[value]
+    try:
+        return PARAMETER_POLICY_SPECS[ParameterPolicyName(value)]
+    except ValueError:
+        return STAGE_SPECS[StageName(value)]
 
 
 def _model(pl_module: LightningModule) -> StagedModel:

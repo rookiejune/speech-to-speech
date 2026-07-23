@@ -1,0 +1,10 @@
+name: speech_interface
+trainable_groups:
+  - semantic_audio_embedding
+  - semantic_audio_adapter
+  - acoustic_prompt
+  - semantic_audio_output
+  - acoustic_decoder
+frozen_groups:
+  - backbone
+backbone_top_fraction: 0.0

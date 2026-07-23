@@ -1,5 +1,6 @@
 defaults:
   - stage: stage_1
+  - parameter_policy: speech_interface
   - model: default
   - model/acoustic: rvq
   - runtime: longcat_native

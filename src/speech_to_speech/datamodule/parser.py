@@ -9,6 +9,7 @@ from torch import Tensor
 from ._tokenization import token_ids
 from .protocol import DataRuntime, TextRuntime
 from .types import Language, Speech, SpeechPair, Text, TextPair
+from ..runtime import AudioRepresentation
 
 
 def parse_sample(sample: types.Sample, runtime: DataRuntime) -> SpeechPair:
@@ -53,6 +54,11 @@ def _parse_role(
         audio_item,
         runtime.audio_view,
     )
+    if runtime.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE:
+        semantic_codes, acoustic_codes = (
+            _frame_codes(audio_item.views[runtime.audio_view]),
+            None,
+        )
     semantic_codes = _frame_codes(semantic_codes)
     acoustic_codes = (
         None if acoustic_codes is None else _frame_codes(acoustic_codes)
@@ -85,7 +91,6 @@ def _parse_text_role(
         text_token_ids=token_ids(text, runtime.text_tokenizer),
         language=Language(text_item.meta[types.TextMeta.LANG]),
     )
-
 
 def _frame_codes(codes: Tensor) -> Tensor:
     if codes.dim() == 1:

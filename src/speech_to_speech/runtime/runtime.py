@@ -11,10 +11,11 @@ from anytrain.idspace import Layout
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .audio_tokenizer import NativeAudioTokenizer, TorchCodecBPE
+from .audio_tokenizer import FlattenedAudioTokenizer, NativeAudioTokenizer, TorchCodecBPE
 from .codec import load_codec
 from .special_tokens import Qwen3SpecialToken
 from .types import AudioTokenizer, Backbone, Codec, TextTokenizer
+from .._compat import StrEnum, auto
 
 if TYPE_CHECKING:
     from anytrain.framework.flow_matching import ContinuousFlowRuntime
@@ -39,10 +40,16 @@ _FLOW_METHODS = frozenset(
 )
 
 
+class AudioRepresentation(StrEnum):
+    DECOUPLED = auto()
+    FULL_CODEC_SEQUENCE = auto()
+
+
 @dataclass(frozen=True)
 class Config:
     codec: str = "longcat"
     backbone: str = "Qwen/Qwen3-0.6B"
+    audio_representation: AudioRepresentation = AudioRepresentation.DECOUPLED
     audio_tokenizer: Optional[Union[str, Path]] = None
     device: Optional[str] = None
     dtype: Optional[str] = None
@@ -52,6 +59,15 @@ class Config:
     flow_num_steps: int = 10
 
     def __post_init__(self) -> None:
+        if not isinstance(self.audio_representation, AudioRepresentation):
+            raise TypeError("audio_representation must be an AudioRepresentation.")
+        if (
+            self.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE
+            and self.audio_tokenizer is not None
+        ):
+            raise ValueError(
+                "full codec sequence representation cannot use a BPE audio tokenizer."
+            )
         if self.flow_method not in _FLOW_METHODS:
             raise ValueError(f"unsupported flow method: {self.flow_method}")
         if self.flow_nfe <= 0:
@@ -82,6 +98,17 @@ class Runtime:
     def audio_view(self) -> AudioView:
         return self.config.audio_view
 
+    @property
+    def audio_representation(self) -> AudioRepresentation:
+        return self.config.audio_representation
+
+    @property
+    def acoustic_side_channel(self) -> bool:
+        return (
+            self.audio_representation is AudioRepresentation.DECOUPLED
+            and bool(self.codec.acoustic_codebook_sizes)
+        )
+
     @cached_property
     def text_tokenizer(self) -> TextTokenizer:
         tokenizer = AutoTokenizer.from_pretrained(self.config.backbone)
@@ -105,6 +132,11 @@ class Runtime:
 
     @cached_property
     def audio_tokenizer(self) -> AudioTokenizer:
+        if self.config.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE:
+            return FlattenedAudioTokenizer(
+                codebook_sizes=self.codec.codebook_sizes,
+                codec_name=self.codec_name,
+            )
         if self.config.audio_tokenizer is None:
             return NativeAudioTokenizer(vocab_size=int(self.codec.semantic_codebook.size(0)))
         return audio_tokenizer(self.config.audio_tokenizer)

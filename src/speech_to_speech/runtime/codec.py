@@ -37,6 +37,10 @@ class LongCatCodec:
         return self.codec.semantic_codebook
 
     @property
+    def codebook_sizes(self) -> tuple[int, ...]:
+        return tuple(int(size) for size in self.codec.codebook_sizes)
+
+    @property
     def acoustic_codebook_sizes(self) -> tuple[int, ...]:
         return tuple(int(size) for size in self.codec.codebook_sizes[1:])
 
@@ -101,6 +105,10 @@ class UnifiedCodec:
     @property
     def semantic_codebook(self) -> Tensor:
         return self._semantic_codebook
+
+    @property
+    def codebook_sizes(self) -> tuple[int, ...]:
+        return tuple(int(size) for size in self.codec.codebook_sizes)
 
     @property
     def acoustic_codebook_sizes(self) -> tuple[int, ...]:

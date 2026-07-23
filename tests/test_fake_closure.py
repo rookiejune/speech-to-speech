@@ -21,6 +21,7 @@ from speech_to_speech.generation import (
     decode_generated_audio,
     decode_generated_codes,
 )
+from speech_to_speech.runtime import AudioRepresentation
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
 from speech_to_speech.task import Task
 
@@ -111,6 +112,7 @@ class _Runtime:
         self.config = SimpleNamespace(audio_view=AudioView.LONGCAT)
         self.codec_name = "longcat"
         self.audio_view = AudioView.LONGCAT
+        self.audio_representation = AudioRepresentation.DECOUPLED
         self.text_tokenizer = _TextTokenizer()
         self.audio_tokenizer = NativeAudioTokenizer(vocab_size=8)
         self.codec = _Codec()

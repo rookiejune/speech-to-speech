@@ -11,6 +11,8 @@
   tokenizer。
 - `codec`：经本地 `Codec` Protocol adapter 暴露 sample/frame rate、codebook、feature 与
   decode 能力。
+- `audio_representation`：选择 audio token 序列契约，当前为 `decoupled` 或
+  `full_codec_sequence`。
 - `backbone`：Qwen-compatible HF causal LM。
 - `layout`：text/audio global token blocks。
 - `pad/bos/eos_token_id` 与 `boa/eoa_token_id`。
@@ -19,7 +21,8 @@
 
 `runtime.Config.codec` 是 codec identity 的唯一配置源；`audio_view` 由字符串枚举转换，未知 codec
 显式报错。Hydra runtime preset 直接映射完整 `runtime.Config`，同时选择相互兼容的 codec、audio
-tokenizer 与 backbone snapshot。ODE method、NFE 与 step 数直接使用 `flow_method`、`flow_nfe` 与
+representation、audio tokenizer 与 backbone snapshot。`full_codec_sequence` 直接把完整 codec
+codebooks 编入 token 序列，因此不能同时配置 BPE audio tokenizer。ODE method、NFE 与 step 数直接使用 `flow_method`、`flow_nfe` 与
 `flow_num_steps`，不再通过独立 sampler 组转换；`Config` 在构造时校验 method、正 NFE 和至少
 2 个 steps，因此 token/RVQ composition 也不会静默携带无效 runtime。model composition 由
 `model/acoustic` 选择。
@@ -34,6 +37,9 @@ sample builder 和 batch padding 所需资源。
 `audio_tokenizer.py` 提供：
 
 - `NativeAudioTokenizer`：单 semantic codebook identity tokenizer。
+- `FlattenedAudioTokenizer`：完整 codec codebook token 序列，先写 codec marker，再按 codebook
+  block 写 marker 和 offset 后的 code IDs；marker 的 frame span 为 0，首个 codebook token 的
+  frame span 为 1，用于 generation 统计输出帧数。
 - `TorchCodecBPE`：为 CodecBPE 增加 tensor API。
 - `semantic_codes_from_audio_tokens()`：把 audio token IDs 解码为
   `[frames, semantic_codebooks]`。

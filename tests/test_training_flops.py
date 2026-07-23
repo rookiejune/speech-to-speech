@@ -214,6 +214,7 @@ def _layout() -> Layout:
 
 
 class _Tokenizer:
+    embedding_initialization = "codec"
     vocab_size = 3
 
     def decode(self, token_ids: Any) -> list[tuple[int, ...]]:

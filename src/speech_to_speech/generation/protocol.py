@@ -19,6 +19,9 @@ class TokenGenerator(Protocol):
     @property
     def backbone(self) -> Backbone: ...
 
+    @property
+    def audio_token_frame_spans(self) -> Tensor: ...
+
     def generate_tokens(
         self,
         prompt_ids: Tensor,

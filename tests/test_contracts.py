@@ -61,7 +61,7 @@ from speech_to_speech.datamodule.types import (
 from speech_to_speech.callback.stage import Config as StageConfig
 from speech_to_speech.callback.stage import StageSwitcher
 from speech_to_speech.model import Config as ModelConfig, ToyConfig
-from speech_to_speech.runtime import Config, Runtime
+from speech_to_speech.runtime import AudioRepresentation, Config, Runtime
 from speech_to_speech.runtime.runtime import audio_tokenizer, dtype
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer, TorchCodecBPE
 from speech_to_speech.stage import ParameterGroup, STAGE_SPECS, StageName, apply_stage
@@ -169,6 +169,7 @@ class ContractTest(unittest.TestCase):
         runtime = SimpleNamespace(
             codec_name="longcat",
             audio_view=AudioView.LONGCAT,
+            audio_representation=AudioRepresentation.DECOUPLED,
             text_tokenizer=_Tokenizer(10),
             audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
             layout=Layout(text=(0, 10), audio=(10, 20)),
@@ -280,6 +281,7 @@ class ContractTest(unittest.TestCase):
         runtime = SimpleNamespace(
             layout=Mock(),
             codec=SimpleNamespace(acoustic_codebook_sizes=(1024,)),
+            acoustic_side_channel=True,
             backbone=Mock(),
             flow_matching=Mock(),
         )
@@ -451,6 +453,7 @@ class ContractTest(unittest.TestCase):
         tokenizer = _Tokenizer(10)
         runtime = SimpleNamespace(
             audio_view=AudioView.LONGCAT,
+            audio_representation=AudioRepresentation.DECOUPLED,
             text_tokenizer=tokenizer,
             audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
         )
@@ -1303,6 +1306,7 @@ def _data_runtime():
     return SimpleNamespace(
         codec_name="longcat",
         audio_view=AudioView.LONGCAT,
+        audio_representation=AudioRepresentation.DECOUPLED,
         text_tokenizer=_Tokenizer(10),
         audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
         layout=Layout(text=(0, 10), audio=(10, 20)),

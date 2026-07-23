@@ -97,7 +97,7 @@ def run(config: OverfitConfig) -> None:
     torch.manual_seed(config.train.seed)
     acoustic_type = _composition(
         config,
-        codec_has_acoustic_codebooks=bool(codec.acoustic_codebook_sizes),
+        uses_acoustic_side_channel=rt.acoustic_side_channel,
     )
     uses_acoustic_decoder = acoustic_type is not AcousticType.NONE
     evaluation: AcousticEvaluation | None = None
@@ -154,7 +154,7 @@ def run(config: OverfitConfig) -> None:
                 CallbackStageConfig(
                     task_weights_by_stage=[{task: 1.0}],
                     epoch_milestones=[],
-                    model_stages=[config.stage],
+                    model_stages=[config.parameter_policy],
                 )
             ),
             summary,
@@ -205,7 +205,7 @@ def run(config: OverfitConfig) -> None:
     )
     result = {
         "task": task.value,
-        "parameter_stage": config.stage.name.value,
+        "parameter_policy": config.parameter_policy.name.value,
         "stage": config.stage.name.value,
         "sample_index": config.data.sample_index,
         "max_steps": config.train.max_steps,
@@ -316,14 +316,15 @@ def _gradient_logger(
 ) -> GradLogger | None:
     if acoustic_type is AcousticType.NONE or config.callbacks.performance.enabled:
         return None
-    stage = config.stage.spec()
-    if ParameterGroup.BACKBONE not in stage.trainable_groups:
+    policy = config.parameter_policy.spec()
+    if ParameterGroup.BACKBONE not in policy.trainable_groups:
         return None
     if loss_pair is None:
         raise RuntimeError("acoustic composition metadata is unavailable.")
     parameter_name = (
         "model.backbone.model.norm.weight"
-        if stage.backbone_top_fraction is not None and stage.backbone_top_fraction < 1
+        if policy.backbone_top_fraction is not None
+        and policy.backbone_top_fraction < 1
         else "model.backbone.model.layers.0.self_attn.q_proj.weight"
     )
     return GradLogger(
@@ -336,12 +337,12 @@ def _gradient_logger(
 def _composition(
     config: OverfitConfig,
     *,
-    codec_has_acoustic_codebooks: bool,
+    uses_acoustic_side_channel: bool,
 ) -> AcousticType:
     return acoustic_composition(
         config,
         token_type=OverfitTokenConfig,
-        codec_has_acoustic_codebooks=codec_has_acoustic_codebooks,
+        uses_acoustic_side_channel=uses_acoustic_side_channel,
     )
 
 

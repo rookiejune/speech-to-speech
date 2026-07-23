@@ -1,0 +1,10 @@
+name: full
+trainable_groups:
+  - backbone
+  - semantic_audio_embedding
+  - semantic_audio_adapter
+  - acoustic_prompt
+  - semantic_audio_output
+  - acoustic_decoder
+frozen_groups: []
+backbone_top_fraction: 1.0

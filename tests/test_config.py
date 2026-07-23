@@ -55,7 +55,12 @@ from speech_to_speech.model import (
 )
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.runtime import Config as RuntimeConfig
-from speech_to_speech.stage import ParameterGroup, StageLoaderConfig, StageName
+from speech_to_speech.stage import (
+    ParameterGroup,
+    ParameterPolicyName,
+    StageLoaderConfig,
+    StageName,
+)
 
 
 class _DeviceRestoreModule(torch.nn.Module):
@@ -137,18 +142,18 @@ class ConfigTest(unittest.TestCase):
         token_with_acoustic_codec = overfit(_compose("overfit", "model/acoustic=none"))
 
         self.assertIs(
-            _composition(token, codec_has_acoustic_codebooks=False),
+            _composition(token, uses_acoustic_side_channel=False),
             AcousticType.NONE,
         )
         self.assertIs(
             _composition(
                 token_with_acoustic_codec,
-                codec_has_acoustic_codebooks=True,
+                uses_acoustic_side_channel=True,
             ),
             AcousticType.NONE,
         )
         with self.assertRaisesRegex(ValueError, "model/acoustic=none"):
-            _composition(flow, codec_has_acoustic_codebooks=False)
+            _composition(flow, uses_acoustic_side_channel=False)
 
     def test_root_schema_rejects_unknown_and_foreign_fields(self):
         cases = [
@@ -332,11 +337,13 @@ class ConfigTest(unittest.TestCase):
         self.assertIsNone(_gradient_logger(performance, AcousticType.FLOW, loss_pair))
         grad_logger.assert_not_called()
 
-        frozen = overfit(_compose("overfit", "stage=stage_1"))
+        frozen = overfit(_compose("overfit", "parameter_policy=speech_interface"))
         self.assertIsNone(_gradient_logger(frozen, AcousticType.RVQ, rvq_pair))
         grad_logger.assert_not_called()
 
-        partial = overfit(_compose("overfit", "stage=stage_3"))
+        partial = overfit(
+            _compose("overfit", "parameter_policy=speech_interface_top_third")
+        )
         partial_gradient = _gradient_logger(partial, AcousticType.RVQ, rvq_pair)
 
         self.assertIs(partial_gradient, grad_logger.return_value)
@@ -608,6 +615,13 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual(config.callbacks.task_sample.every_n_steps, 1)
 
     def test_rvq_native_stage_smoke_configs_cover_all_parameter_stages(self):
+        policy_names = [
+            ParameterPolicyName.FULL,
+            ParameterPolicyName.SPEECH_INTERFACE,
+            ParameterPolicyName.SPEECH_INTERFACE,
+            ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD,
+            ParameterPolicyName.FULL,
+        ]
         for index, stage in enumerate(StageName):
             with self.subTest(stage=stage):
                 config = overfit(
@@ -618,8 +632,8 @@ class ConfigTest(unittest.TestCase):
                 )
 
                 self.assertIsInstance(config, OverfitRVQConfig)
-                self.assertIs(config.parameter_stage, stage)
                 self.assertIs(config.stage.name, stage)
+                self.assertIs(config.parameter_policy.name, policy_names[index])
                 self.assertEqual(config.task, "s2st")
                 self.assertEqual(config.runtime.codec, "longcat")
                 self.assertIsNone(config.runtime.audio_tokenizer)
@@ -627,8 +641,10 @@ class ConfigTest(unittest.TestCase):
                 self.assertFalse(config.callbacks.task_sample.enabled)
                 self.assertTrue(config.callbacks.evaluation.enabled)
 
-        stage_1 = overfit(_compose("overfit", "stage=stage_1"))
-        self.assertIn(ParameterGroup.BACKBONE, stage_1.stage.frozen_groups)
+        stage_1 = overfit(
+            _compose("overfit", "stage=stage_1", "parameter_policy=speech_interface")
+        )
+        self.assertIn(ParameterGroup.BACKBONE, stage_1.parameter_policy.frozen_groups)
         self.assertEqual(set(stage_1.stage.loaders), {"asr", "tts"})
         self.assertEqual(stage_1.stage.batches_per_step, 2)
 
@@ -886,6 +902,28 @@ class ConfigTest(unittest.TestCase):
                 )
                 with self.assertRaises(ValueError):
                     overfit(raw)
+
+    def test_full_codec_sequence_requires_token_acoustic_config(self):
+        token = overfit(
+            _compose(
+                "overfit",
+                "runtime=longcat_full_sequence",
+                "model/acoustic=none",
+            )
+        )
+
+        self.assertIsInstance(token, OverfitTokenConfig)
+        self.assertEqual(token.runtime.audio_representation.value, "full_codec_sequence")
+        with self.assertRaisesRegex(ValueError, "model/acoustic=none"):
+            overfit(_compose("overfit", "runtime=longcat_full_sequence"))
+        with self.assertRaisesRegex(ValueError, "model/acoustic=none"):
+            overfit(
+                _compose(
+                    "overfit",
+                    "runtime=longcat_full_sequence",
+                    "model/acoustic=rvq",
+                )
+            )
 
     def test_overfit_run_name_preserves_composition_and_decoder_depth(self):
         cases = [

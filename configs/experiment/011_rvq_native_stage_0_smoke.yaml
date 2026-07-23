@@ -8,6 +8,7 @@ defaults:
   - /trainer: default
   - /logging: tensorboard
   - override /stage: stage_0
+  - override /parameter_policy: full
   - _self_
 
 task: s2st

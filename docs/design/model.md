@@ -98,7 +98,7 @@ text_token_ids
     -> backbone text embedding
 
 semantic-audio token IDs
-    -> semantic codec codebook initialized embedding
+    -> codec-initialized or representation-defined random audio embedding
     -> semantic audio adapter
 
 acoustic_prompt_codes
@@ -107,6 +107,8 @@ acoustic_prompt_codes
     -> acoustic prompt adapter + zero-initialized gate
 ```
 
+Native/BPE semantic tokenizers 使用 codec codebook 初始化；完整 codec sequence tokenizer
+使用随机初始化，因为它的 vocab 同时包含多 codebook offset tokens 和 codec/codebook markers。
 codec features 在模型边界转换到 backbone embedding 的 device/dtype。frame mask 在进入 codec
 前把 `-1` code padding 替换为安全值，adapter 后再清除无效位置。source acoustic prompt 与
 flow target 复用 `acoustic_code_features()`，子类不调用基类私有转换函数。
@@ -140,4 +142,5 @@ frame condition 的 `generate_sequence()` 循环位于私有
 
 具体模型不跨文件调用 `_generate()` 或 `_acoustic_features()`。KV cache 只属于一次调用；
 首步注入 source acoustic prompt，后续只输入新 token。frame span lookup 是非持久 buffer，
-condition 在设备侧累计并一次展开。
+token-only audio decode 和 acoustic feature generation 都复用该 buffer 统计帧数，避免在
+generation service 中重复调用 tokenizer。condition 在设备侧累计并一次展开。

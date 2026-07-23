@@ -20,6 +20,14 @@ class ParameterGroup(StrEnum):
     ACOUSTIC_DECODER = auto()
 
 
+class ParameterPolicyName(StrEnum):
+    FULL = auto()
+    SPEECH_INTERFACE = auto()
+    SEMANTIC_ONLY = auto()
+    ACOUSTIC_ONLY = auto()
+    SPEECH_INTERFACE_TOP_THIRD = auto()
+
+
 class StageName(StrEnum):
     STAGE_0 = auto()
     STAGE_1 = auto()
@@ -35,30 +43,64 @@ class StagedModel(Protocol):
 
 
 @dataclass(frozen=True)
-class StageSpec:
-    name: StageName
+class ParameterPolicySpec:
+    name: ParameterPolicyName
     trainable_groups: frozenset[ParameterGroup]
     frozen_groups: frozenset[ParameterGroup]
     backbone_top_fraction: Optional[float] = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, StageName):
-            raise TypeError("stage name must be a StageName.")
+        if not isinstance(self.name, ParameterPolicyName):
+            raise TypeError("parameter policy name must be a ParameterPolicyName.")
         if not self.trainable_groups:
-            raise ValueError("stage must train at least one parameter group.")
+            raise ValueError("parameter policy must train at least one group.")
         groups = self.trainable_groups | self.frozen_groups
         if groups != frozenset(ParameterGroup):
             raise ValueError(
-                "stage trainable and frozen groups must cover every parameter group."
+                "parameter policy trainable and frozen groups must cover every "
+                "parameter group."
             )
         if self.trainable_groups & self.frozen_groups:
-            raise ValueError("stage trainable and frozen groups must be disjoint.")
+            raise ValueError(
+                "parameter policy trainable and frozen groups must be disjoint."
+            )
         if any(not isinstance(group, ParameterGroup) for group in groups):
-            raise TypeError("stage parameter groups must be ParameterGroup values.")
+            raise TypeError("parameter policy groups must be ParameterGroup values.")
         if self.backbone_top_fraction is not None:
             value = self.backbone_top_fraction
             if not math.isfinite(value) or not 0 <= value <= 1:
                 raise ValueError("backbone_top_fraction must be in [0, 1].")
+
+
+StageSpec = ParameterPolicySpec
+
+
+@dataclass
+class ParameterPolicyConfig:
+    name: ParameterPolicyName = ParameterPolicyName.FULL
+    trainable_groups: list[ParameterGroup] = field(
+        default_factory=lambda: list(ParameterGroup)
+    )
+    frozen_groups: list[ParameterGroup] = field(default_factory=list)
+    backbone_top_fraction: Optional[float] = 1.0
+
+    def __post_init__(self) -> None:
+        self.spec()
+
+    def spec(self) -> ParameterPolicySpec:
+        spec = ParameterPolicySpec(
+            self.name,
+            frozenset(self.trainable_groups),
+            frozenset(self.frozen_groups),
+            backbone_top_fraction=self.backbone_top_fraction,
+        )
+        preset = PARAMETER_POLICY_SPECS.get(self.name)
+        if preset is not None and spec != preset:
+            raise ValueError(
+                "parameter_policy.name must match its trainable_groups, "
+                "frozen_groups, and backbone_top_fraction preset."
+            )
+        return spec
 
 
 @dataclass
@@ -80,11 +122,6 @@ class StageLoaderConfig:
 @dataclass
 class StageConfig:
     name: StageName = StageName.STAGE_0
-    trainable_groups: list[ParameterGroup] = field(
-        default_factory=lambda: list(ParameterGroup)
-    )
-    frozen_groups: list[ParameterGroup] = field(default_factory=list)
-    backbone_top_fraction: Optional[float] = 1.0
     loaders: dict[str, StageLoaderConfig] = field(default_factory=dict)
     batches_per_step: int = 1
 
@@ -103,15 +140,9 @@ class StageConfig:
             for name in self.loaders:
                 if not name:
                     raise ValueError("stage loader names must not be empty.")
-        self.spec()
 
-    def spec(self) -> StageSpec:
-        return StageSpec(
-            self.name,
-            frozenset(self.trainable_groups),
-            frozenset(self.frozen_groups),
-            backbone_top_fraction=self.backbone_top_fraction,
-        )
+    def spec(self) -> ParameterPolicySpec:
+        return STAGE_SPECS[self.name]
 
     def loader_weights(self) -> dict[str, float]:
         return {name: loader.weight for name, loader in self.loaders.items()}
@@ -133,53 +164,91 @@ SPEECH_INTERFACE_GROUPS = frozenset(
     }
 )
 
-STAGE_SPECS: Mapping[StageName, StageSpec] = {
-    StageName.STAGE_0: StageSpec(
-        StageName.STAGE_0,
+SEMANTIC_GROUPS = frozenset(
+    {
+        ParameterGroup.SEMANTIC_AUDIO_EMBEDDING,
+        ParameterGroup.SEMANTIC_AUDIO_ADAPTER,
+        ParameterGroup.SEMANTIC_AUDIO_OUTPUT,
+    }
+)
+
+ACOUSTIC_GROUPS = frozenset(
+    {
+        ParameterGroup.ACOUSTIC_PROMPT,
+        ParameterGroup.ACOUSTIC_DECODER,
+    }
+)
+
+PARAMETER_POLICY_SPECS: Mapping[ParameterPolicyName, ParameterPolicySpec] = {
+    ParameterPolicyName.FULL: ParameterPolicySpec(
+        ParameterPolicyName.FULL,
         frozenset(ParameterGroup),
         frozenset(),
         backbone_top_fraction=1.0,
     ),
-    StageName.STAGE_1: StageSpec(
-        StageName.STAGE_1,
+    ParameterPolicyName.SPEECH_INTERFACE: ParameterPolicySpec(
+        ParameterPolicyName.SPEECH_INTERFACE,
         SPEECH_INTERFACE_GROUPS,
         frozenset(ParameterGroup) - SPEECH_INTERFACE_GROUPS,
         backbone_top_fraction=0.0,
     ),
-    StageName.STAGE_2: StageSpec(
-        StageName.STAGE_2,
-        SPEECH_INTERFACE_GROUPS,
-        frozenset(ParameterGroup) - SPEECH_INTERFACE_GROUPS,
+    ParameterPolicyName.SEMANTIC_ONLY: ParameterPolicySpec(
+        ParameterPolicyName.SEMANTIC_ONLY,
+        SEMANTIC_GROUPS,
+        frozenset(ParameterGroup) - SEMANTIC_GROUPS,
         backbone_top_fraction=0.0,
     ),
-    StageName.STAGE_3: StageSpec(
-        StageName.STAGE_3,
+    ParameterPolicyName.ACOUSTIC_ONLY: ParameterPolicySpec(
+        ParameterPolicyName.ACOUSTIC_ONLY,
+        ACOUSTIC_GROUPS,
+        frozenset(ParameterGroup) - ACOUSTIC_GROUPS,
+        backbone_top_fraction=0.0,
+    ),
+    ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD: ParameterPolicySpec(
+        ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD,
         SPEECH_INTERFACE_GROUPS | {ParameterGroup.BACKBONE},
         frozenset(),
         backbone_top_fraction=1.0 / 3.0,
     ),
-    StageName.STAGE_4: StageSpec(
-        StageName.STAGE_4,
-        SPEECH_INTERFACE_GROUPS | {ParameterGroup.BACKBONE},
-        frozenset(),
-        backbone_top_fraction=1.0,
-    ),
+}
+
+STAGE_POLICY_NAMES: Mapping[StageName, ParameterPolicyName] = {
+    StageName.STAGE_0: ParameterPolicyName.FULL,
+    StageName.STAGE_1: ParameterPolicyName.SPEECH_INTERFACE,
+    StageName.STAGE_2: ParameterPolicyName.SPEECH_INTERFACE,
+    StageName.STAGE_3: ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD,
+    StageName.STAGE_4: ParameterPolicyName.FULL,
+}
+
+STAGE_SPECS: Mapping[StageName, ParameterPolicySpec] = {
+    name: PARAMETER_POLICY_SPECS[policy]
+    for name, policy in STAGE_POLICY_NAMES.items()
 }
 
 
 def default_stage_config(name: StageName) -> StageConfig:
-    spec = STAGE_SPECS[name]
-    return StageConfig(
+    return StageConfig(name=name)
+
+
+def default_parameter_policy_config(
+    name: ParameterPolicyName,
+) -> ParameterPolicyConfig:
+    spec = PARAMETER_POLICY_SPECS[name]
+    return ParameterPolicyConfig(
         name=spec.name,
         trainable_groups=list(spec.trainable_groups),
         frozen_groups=list(spec.frozen_groups),
         backbone_top_fraction=spec.backbone_top_fraction,
     )
 
+
 _LAYER_PATTERN = re.compile(r"^backbone\.model\.layers\.(\d+)\.")
 
 
-def apply_stage(model: StagedModel, spec: StageSpec) -> dict[ParameterGroup, int]:
+def apply_parameter_policy(
+    model: StagedModel,
+    spec: ParameterPolicySpec,
+) -> dict[ParameterGroup, int]:
     counts = {group: 0 for group in ParameterGroup}
     for name, parameter in model.named_parameters():
         group = parameter_group(name)
@@ -192,6 +261,10 @@ def apply_stage(model: StagedModel, spec: StageSpec) -> dict[ParameterGroup, int
             trainable = _backbone_trainable(name, model, spec.backbone_top_fraction)
         parameter.requires_grad_(trainable)
     return counts
+
+
+def apply_stage(model: StagedModel, spec: ParameterPolicySpec) -> dict[ParameterGroup, int]:
+    return apply_parameter_policy(model, spec)
 
 
 def parameter_group(name: str) -> ParameterGroup:
@@ -285,14 +358,23 @@ def _validate_weights(weights: Mapping[str, float], *, name: str) -> None:
 
 
 __all__ = [
-    "ParameterGroup",
+    "ACOUSTIC_GROUPS",
+    "PARAMETER_POLICY_SPECS",
+    "SEMANTIC_GROUPS",
     "SPEECH_INTERFACE_GROUPS",
+    "STAGE_POLICY_NAMES",
     "STAGE_SPECS",
+    "ParameterGroup",
+    "ParameterPolicyConfig",
+    "ParameterPolicyName",
+    "ParameterPolicySpec",
     "StageConfig",
     "StageLoaderConfig",
     "StageName",
     "StageSpec",
+    "apply_parameter_policy",
     "apply_stage",
+    "default_parameter_policy_config",
     "default_stage_config",
     "parameter_group",
 ]

@@ -29,7 +29,7 @@ from speech_to_speech.performance import TrainingFlops
 from speech_to_speech.pl_module.composition import flow, rvq, token
 from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import init_runtime
-from speech_to_speech.stage import StageLoaderConfig, apply_stage
+from speech_to_speech.stage import StageLoaderConfig, apply_parameter_policy
 from speech_to_speech.task import Task
 
 if TYPE_CHECKING:
@@ -79,7 +79,7 @@ def run(config: StagedTrainConfig) -> None:
     torch.manual_seed(config.train.seed)
     acoustic_type = _composition(
         config,
-        codec_has_acoustic_codebooks=bool(rt.codec.acoustic_codebook_sizes),
+        uses_acoustic_side_channel=rt.acoustic_side_channel,
     )
     if isinstance(config, StagedTrainTokenConfig):
         module, model = token(rt, config.pl_module, config.model)
@@ -87,7 +87,7 @@ def run(config: StagedTrainConfig) -> None:
         module, model, _ = flow(rt, config.pl_module, config.model, config.acoustic)
     else:
         module, model = rvq(rt, config.pl_module, config.model, config.acoustic)
-    apply_stage(model, config.stage.spec())
+    apply_parameter_policy(model, config.parameter_policy.spec())
 
     datamodule = build_datamodule(config, rt)
     summary = LossSummary()
@@ -101,6 +101,7 @@ def run(config: StagedTrainConfig) -> None:
 
     result = {
         "stage": config.stage.name.value,
+        "parameter_policy": config.parameter_policy.name.value,
         "loaders": {
             name: {
                 "weight": loader.weight,
@@ -232,7 +233,7 @@ def training_callbacks(
                         task_weights_by_stage=None,
                         epoch_milestones=[],
                         loader_weights_by_stage=[config.stage.loader_weights()],
-                        model_stages=[config.stage],
+                        model_stages=[config.parameter_policy],
                     )
                 ),
                 summary,
@@ -272,12 +273,12 @@ def _performance(config: StagedTrainConfig) -> Callback | None:
 def _composition(
     config: StagedTrainConfig,
     *,
-    codec_has_acoustic_codebooks: bool,
+    uses_acoustic_side_channel: bool,
 ) -> AcousticType:
     return acoustic_composition(
         config,
         token_type=StagedTrainTokenConfig,
-        codec_has_acoustic_codebooks=codec_has_acoustic_codebooks,
+        uses_acoustic_side_channel=uses_acoustic_side_channel,
     )
 
 

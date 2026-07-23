@@ -238,16 +238,16 @@ def _integer_tensor(value: object, name: str, *, dimensions: int) -> Tensor:
 def _frame_counts(token_rows: list[Tensor], model: TokenGenerator) -> Tensor:
     if any(token_ids.numel() == 0 for token_ids in token_rows):
         raise ValueError("audio generation produced no codec-decodable tokens.")
-    token_lengths = [token_ids.numel() for token_ids in token_rows]
-    local = torch.cat(token_rows) - model.runtime.codec_audio_range[0]
-    spans = torch.as_tensor(
-        model.runtime.audio_tokenizer.frame_spans(local),
-        device=local.device,
-        dtype=torch.long,
-    )
-    if spans.shape != local.shape:
-        raise ValueError("audio token frame spans must align with generated tokens.")
-    return torch.stack([values.sum() for values in spans.split(token_lengths)])
+    start, _ = model.runtime.codec_audio_range
+    counts = []
+    span_lookup = model.audio_token_frame_spans
+    for token_ids in token_rows:
+        local = token_ids - start
+        if bool((local < 0).any()) or bool((local >= span_lookup.numel()).any()):
+            raise ValueError("audio generation produced non-codec audio tokens.")
+        spans = span_lookup.index_select(0, local.to(device=span_lookup.device))
+        counts.append(spans.sum().to(device=local.device))
+    return torch.stack(counts)
 
 
 def _decode_rows(

@@ -18,8 +18,14 @@ from speech_to_speech.datamodule import (
 from speech_to_speech.model import AcousticType, AdapterType, DecoderConfig
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
-from speech_to_speech.runtime import Config as RuntimeConfig
-from speech_to_speech.stage import ParameterGroup, StageConfig, StageName
+from speech_to_speech.runtime import AudioRepresentation, Config as RuntimeConfig
+from speech_to_speech.stage import (
+    ParameterGroup,
+    ParameterPolicyConfig,
+    ParameterPolicyName,
+    StageConfig,
+    StageName,
+)
 
 
 @dataclass
@@ -169,7 +175,9 @@ class StagedCallbacksConfig:
 class _OverfitConfig:
     task: str = MISSING
     stage: StageConfig = field(default_factory=StageConfig)
-    parameter_stage: StageName = MISSING
+    parameter_policy: ParameterPolicyConfig = field(
+        default_factory=ParameterPolicyConfig
+    )
     run_name: str = MISSING
     repo_output_root: str = MISSING
     output_subdir: str = MISSING
@@ -205,6 +213,9 @@ OverfitConfig = Union[OverfitTokenConfig, OverfitFlowConfig, OverfitRVQConfig]
 @dataclass
 class _StagedTrainConfig:
     stage: StageConfig = field(default_factory=StageConfig)
+    parameter_policy: ParameterPolicyConfig = field(
+        default_factory=ParameterPolicyConfig
+    )
     run_name: str = MISSING
     repo_output_root: str = MISSING
     output_subdir: str = MISSING
@@ -289,6 +300,7 @@ def overfit(config: DictConfig) -> OverfitConfig:
         schema = OverfitRVQConfig
     result = _parse(config, schema)
     _validate_output(result)
+    _validate_audio_representation(result)
     if (
         result.callbacks.performance.enabled
         and result.callbacks.task_sample.enabled
@@ -313,6 +325,7 @@ def train(config: DictConfig) -> StagedTrainConfig:
         schema = StagedTrainRVQConfig
     result = _parse(config, schema)
     _validate_output(result)
+    _validate_audio_representation(result)
     if not result.stage.loaders:
         raise ValueError("formal train requires stage.loaders.")
     return result
@@ -335,6 +348,20 @@ def _validate_output(
     expected = Path(config.repo_output_root).expanduser() / subdir
     if Path(config.output_dir).expanduser() != expected:
         raise ValueError("output_dir must equal repo_output_root/output_subdir.")
+
+
+def _validate_audio_representation(
+    config: Union[OverfitConfig, StagedTrainConfig],
+) -> None:
+    if (
+        config.runtime.audio_representation
+        is AudioRepresentation.FULL_CODEC_SEQUENCE
+        and AcousticType(config.acoustic.type) is not AcousticType.NONE
+    ):
+        raise ValueError(
+            "runtime.audio_representation=full_codec_sequence requires "
+            "model/acoustic=none because codec codes are trained as tokens."
+        )
 
 
 def _prepare(config: DictConfig) -> DictConfig:
@@ -378,6 +405,16 @@ def _prepare(config: DictConfig) -> DictConfig:
     _normalize_dataset(result.get("data"))
     _normalize_dataset(result.get("data", {}).get("dataset"))
     _normalize_text_dataset(result.get("text_data", {}).get("dataset"))
+    runtime = result.get("runtime")
+    if runtime is not None:
+        representation = runtime.get("audio_representation")
+        if representation is not None:
+            raw = str(representation)
+            runtime.audio_representation = (
+                AudioRepresentation[raw].name
+                if raw in AudioRepresentation.__members__
+                else AudioRepresentation(raw).name
+            )
     stage = result.get("stage")
     if stage is not None:
         name = stage.get("name")
@@ -388,29 +425,26 @@ def _prepare(config: DictConfig) -> DictConfig:
                 if raw in StageName.__members__
                 else StageName(raw).name
             )
+    policy = result.get("parameter_policy")
+    if policy is not None:
+        name = policy.get("name")
+        if name is not None:
+            raw = str(name)
+            policy.name = (
+                ParameterPolicyName[raw].name
+                if raw in ParameterPolicyName.__members__
+                else ParameterPolicyName(raw).name
+            )
         for key in ("trainable_groups", "frozen_groups"):
-            groups = stage.get(key)
+            groups = policy.get(key)
             if groups is None:
                 continue
-            stage[key] = [
+            policy[key] = [
                 ParameterGroup[str(group)].name
                 if str(group) in ParameterGroup.__members__
                 else ParameterGroup(str(group)).name
                 for group in groups
             ]
-    parameter_stage = result.get("parameter_stage")
-    if parameter_stage is not None:
-        raw = str(parameter_stage)
-        stage_name = StageName[raw] if raw in StageName.__members__ else StageName(raw)
-        result.parameter_stage = stage_name.name
-        if stage is not None:
-            if result.stage.name != stage_name.name:
-                raise ValueError(
-                    "parameter_stage must match stage.name; select stage "
-                    "with the Hydra config group, e.g. stage=stage_1."
-                )
-    elif stage is not None and "task" in result:
-        result.parameter_stage = result.stage.name
     return result
 
 

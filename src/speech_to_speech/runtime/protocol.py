@@ -6,6 +6,7 @@ from typing import Protocol
 from anydataset.types import AudioView, Modality
 from anytrain.idspace import Layout
 
+from .runtime import AudioRepresentation
 from .types import AudioTokenizer, Backbone, Codec, TextTokenizer
 
 
@@ -15,6 +16,9 @@ class DataRuntime(Protocol):
 
     @property
     def audio_view(self) -> AudioView: ...
+
+    @property
+    def audio_representation(self) -> AudioRepresentation: ...
 
     @cached_property
     def text_tokenizer(self) -> TextTokenizer: ...
@@ -41,6 +45,9 @@ class DataRuntime(Protocol):
 class GenerationRuntime(DataRuntime, Protocol):
     @cached_property
     def codec(self) -> Codec: ...
+
+    @property
+    def acoustic_side_channel(self) -> bool: ...
 
     @cached_property
     def bos_token_id(self) -> int: ...
