@@ -23,6 +23,8 @@ data:
     num_workers: 4
     pin_memory: true
     persistent_workers: true
+    lba:
+      enabled: false
 
 text_data:
   dataloader:
@@ -30,6 +32,8 @@ text_data:
     num_workers: 4
     pin_memory: true
     persistent_workers: true
+    lba:
+      enabled: false
   dataset:
     name: wmt19
     split: train

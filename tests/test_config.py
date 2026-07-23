@@ -38,7 +38,14 @@ from scripts.train import build_datamodule as build_train_datamodule
 from speech_to_speech.codec_oracle import Config as OracleConfig
 from speech_to_speech.codec_oracle import DataConfig, Initialization, Objective
 from speech_to_speech.codec_oracle.factory import build_runtime as build_oracle_runtime
-from speech_to_speech.datamodule import DataModule, DatasetName, JointDataModule, TextDataModule
+from speech_to_speech.datamodule import (
+    DataModule,
+    DatasetName,
+    JointDataModule,
+    LBAConfig,
+    TextDataModule,
+    TextDatasetName,
+)
 from speech_to_speech.model import (
     AcousticType,
     AdapterType,
@@ -697,6 +704,30 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual(config.text_data.dataloader.batch_size, 4)
                 self.assertIn("013-fdu-stage-smoke", config.output_dir)
 
+    def test_fdu_stage_lba_smoke_config_uses_joint_train_lba(self):
+        config = parse_train(_compose("train", "experiment=fdu_stage_2_lba_smoke"))
+
+        self.assertIsInstance(config, StagedTrainRVQConfig)
+        self.assertIs(config.stage.name, StageName.STAGE_2)
+        self.assertEqual(config.train.max_steps, 2)
+        self.assertEqual(config.trainer.strategy, "ddp_find_unused_parameters_true")
+        self.assertFalse(config.trainer.use_distributed_sampler)
+        self.assertIs(config.text_data.dataset.name, TextDatasetName.TOY)
+        self.assertIsInstance(config.data.dataloader.lba, LBAConfig)
+        self.assertIsInstance(config.text_data.dataloader.lba, LBAConfig)
+        self.assertTrue(config.data.dataloader.lba.enabled)
+        self.assertTrue(config.text_data.dataloader.lba.enabled)
+        self.assertEqual(config.data.dataloader.lba.max_batch_cost, 2048)
+        self.assertEqual(config.text_data.dataloader.lba.max_batch_cost, 2048)
+        self.assertIn("013-fdu-stage-lba-smoke", config.output_dir)
+
+        datamodule = build_train_datamodule(config, object())
+
+        self.assertIsInstance(datamodule, JointDataModule)
+        self.assertTrue(datamodule.datamodules["asr"].config.dataloader["lba"].enabled)
+        self.assertTrue(datamodule.datamodules["tts"].config.dataloader["lba"].enabled)
+        self.assertTrue(datamodule.datamodules["mt"].config.dataloader["lba"].enabled)
+
     def test_fdu_acoustic_none_smoke_configs_cover_all_stages(self):
         stage_0 = overfit(
             _compose("overfit", "experiment=fdu_stage_0_acoustic_none_smoke")
@@ -995,6 +1026,12 @@ class ConfigTest(unittest.TestCase):
             (
                 "14_stage_4_smoke.sh",
                 "fdu_stage_4_smoke",
+                "scripts/train.py",
+                "fdu_stage_data_args data.dataset.root",
+            ),
+            (
+                "15_stage_2_lba_smoke.sh",
+                "fdu_stage_2_lba_smoke",
                 "scripts/train.py",
                 "fdu_stage_data_args data.dataset.root",
             ),

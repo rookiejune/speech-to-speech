@@ -2,12 +2,14 @@
 
 ## 适用范围
 
-本页最新真实实验是 011 的 P0 fixed-sample 子项（2026-07-21），对应远端代码快照
-`d5f6902`；它只通过真实 Qwen/native/RVQ 的单卡训练与 teacher-forced acoustic decode，
+本页最新真实实验是 013 的 FDU stage_2 joint LBA DDP smoke（2026-07-23）；它只验证
+正式 staged joint train entry 的两卡 DDP + LBA 两步执行闭环，不替代长跑 distributed sample
+partition、resume、质量或收敛验收。011 的 P0 fixed-sample 子项（2026-07-21，对应远端代码
+快照 `d5f6902`）只通过真实 Qwen/native/RVQ 的单卡训练与 teacher-forced acoustic decode，
 端到端 generation gate 仍失败，因此 011 P0 尚未完成。010 的 LongCat codec oracle 结论对应
 代码快照 `9127e62`。008/009 之后 model/runtime/data/generation 和按模态 token CE 仍有调整，
 因此相应 generation/overfit 数值作为历史基线保留，未完成项见
-[todo, lines 20-34](todo.md#L20-L34)。
+[todo, lines 20-44](todo.md#L20-L44)。
 
 ## 已验证结论
 
@@ -25,6 +27,12 @@
   2-step forward/backward/optimizer 和完整 callback；RVQ 静态 DDP 没有 unused-parameter 错误。
   该 smoke 只验证执行契约，不支持质量或收敛结论
   （[010 result, lines 20-40](results/010-codec-oracle-flow-rvq-smoke.md#L20-L40)）。
+- FDU `145` 上，真实 Qwen3/LongCat stage_2 RVQ 的正式 staged joint train entry 已完成
+  两卡 DDP + joint LBA 2-step smoke；ASR、TTS 和 toy text MT 子 loader 均写出两个 rank 的
+  LBA summary，`metrics.json` 中 total/token/RVQ 均为 finite。该 smoke 只验证 DDP/LBA 执行
+  契约，不验证长跑 partition、resume、质量或收敛
+  （[013 result, lines 7-45](results/013-fdu-codec-oracle-and-stage-smoke.md#L7-L45)，
+  [lines 55-61](results/013-fdu-codec-oracle-and-stage-smoke.md#L55-L61)）。
 - 真实 Qwen3/LongCat 变长 batch 4 的 prompt、source acoustic frames、KV cache 和
   waveform decode 在 float32 下完成逐请求 token parity；该短生成 probe 的吞吐为
   serial 的 1.78x，peak allocated 只增加约 22 MB

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from functools import partial
+from pathlib import Path
 from typing import Optional, cast
 
 from anydataset.types import Lang, Modality, Role, Sample, TextItem, TextMeta, TextView
@@ -11,6 +13,7 @@ from torch.utils.data import DataLoader, Dataset
 from .._compat import StrEnum, auto
 from ..task import Task
 from .collator import TextCollator
+from .lba import LBA, LBAConfig, PlannerMode, text_length
 from .module import DataLoaderConfig
 from .protocol import TextRuntime, TextRuntimeSnapshot
 from .types import ModelBatch
@@ -114,6 +117,9 @@ class TextConfig:
             value = self.dataloader.get(name, False)
             if not isinstance(value, bool):
                 raise TypeError(f"text dataloader {name} must be a boolean.")
+        lba = self.dataloader.get("lba")
+        if lba is not None and not isinstance(lba, LBAConfig):
+            raise TypeError("text dataloader lba must be an LBAConfig.")
 
 
 class TextDataModule(LightningDataModule):
@@ -122,11 +128,16 @@ class TextDataModule(LightningDataModule):
         config: TextConfig,
         runtime: TextRuntime,
         task_weights: Mapping[Task, float],
+        *,
+        output_dir: Path | None = None,
+        loader_name: str = "text",
     ) -> None:
         super().__init__()
         self.config = config
         self.runtime = runtime
         self.collator = TextCollator(runtime, task_weights)
+        self.output_dir = output_dir
+        self.loader_name = loader_name
         self._train_dataset = None
 
     def setup(self, stage: str | None = None) -> None:
@@ -150,6 +161,31 @@ class TextDataModule(LightningDataModule):
                 TextRuntime,
                 cast(object, TextRuntimeSnapshot.from_runtime(self.runtime)),
             )
+        lba = loader.get("lba")
+        if lba is not None and lba.enabled:
+            return LBA(
+                self._train_dataset,
+                batch_size=loader["batch_size"],
+                shuffle=True,
+                num_workers=num_workers,
+                pin_memory=loader.get("pin_memory", False),
+                persistent_workers=(
+                    loader.get("persistent_workers", False) and num_workers > 0
+                ),
+                collate_fn=self.collator,
+                len_fn=partial(
+                    text_length,
+                    runtime=self.collator.runtime,
+                    tasks=tuple(self.collator.tasks),
+                    config=lba,
+                ),
+                max_padded_length=lba.max_batch_cost,
+                max_padding_ratio=lba.max_padding_ratio,
+                prefetch_batches=lba.prefetch_batches,
+                planner_mode=cast(PlannerMode, lba.planner_mode),
+                drop_last_flush=lba.drop_last_flush,
+                log_dir=_lba_log_dir(self.output_dir, self.loader_name),
+            )
         return DataLoader(
             self._train_dataset,
             batch_size=loader["batch_size"],
@@ -170,3 +206,9 @@ __all__ = [
     "ToyTextDataset",
     "load_text_dataset",
 ]
+
+
+def _lba_log_dir(output_dir: Path | None, loader_name: str) -> Path | None:
+    if output_dir is None:
+        return None
+    return output_dir / "lba" / loader_name

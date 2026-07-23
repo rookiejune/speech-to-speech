@@ -7,6 +7,7 @@ from .dataset import (
 )
 from .fixed import FixedDataModule
 from .joint import JointDataModule, LoaderSchedule, ScheduledDataLoader, TrainDataModule
+from .lba import LBAConfig
 from .module import Config, DataLoaderConfig, DataModule
 from .protocol import (
     DataRuntime,
@@ -53,6 +54,7 @@ __all__ = [
     "FixedDataModule",
     "JointDataModule",
     "Language",
+    "LBAConfig",
     "LoaderSchedule",
     "ModelBatch",
     "ModelSample",

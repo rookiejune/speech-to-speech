@@ -79,6 +79,9 @@ FlashAttention 或其他 custom op 也可能不在通用算子计数覆盖范围
   request/result；validation、batching 和 decode 仍由 generation service 负责。
 - callback 只依赖 `Outputs`/`LossItem`、datamodule 与 pl_module 公共能力；`GradLogger` 额外要求
   LightningModule 实现 `current_loss_outputs()` 生命周期契约。
+- `OutputsLogger` 按 objective 的 `LossItem` 行粒度记录 task 指标。token loss 覆盖 joint batch
+  中所有子 batch；RVQ、Flow 和 REPA 只覆盖带 acoustic target 的子 batch。若 loss 行数与该
+  objective 对应 task 行数不一致，callback 直接报错，不把不匹配的 task mask 静默套到 loss 上。
 - `TrainingFlops` 负责解释 speech-to-speech 的模型、batch 与 objective；`PerformanceCallback` 只负责
   optimizer-step 聚合、计时、硬件峰值推断和 MFU 记录，不内置任务 batch schema。
 - overfit performance composition 不包含 `TaskSampleLogger`、`GradLogger` 或 `GradNormLogger`；前者由

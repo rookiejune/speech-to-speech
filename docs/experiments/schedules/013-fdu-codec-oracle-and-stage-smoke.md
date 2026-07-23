@@ -18,10 +18,14 @@
 | --- | --- | --- | --- |
 | `jobs/013/10_stage_0_smoke.sh` | `fdu_stage_0_smoke` | RVQ | `scripts/overfit.py` |
 | `jobs/013/11_stage_1_smoke.sh` – `14_stage_4_smoke.sh` | `fdu_stage_1_smoke` – `fdu_stage_4_smoke` | RVQ | `scripts/train.py` |
+| `jobs/013/15_stage_2_lba_smoke.sh` | `fdu_stage_2_lba_smoke` | RVQ + joint LBA | `scripts/train.py` |
 | `jobs/013/20_stage_0_acoustic_none_smoke.sh` | `fdu_stage_0_acoustic_none_smoke` | token-only | `scripts/overfit.py` |
 | `jobs/013/21_stage_1_acoustic_none_smoke.sh` – `24_stage_4_acoustic_none_smoke.sh` | `fdu_stage_1_acoustic_none_smoke` – `fdu_stage_4_acoustic_none_smoke` | token-only | `scripts/train.py` |
 
-Stage_0 没有 formal train loader，因此使用 fixed-sample overfit entry 验证参数阶段；stage_1 到 stage_4 使用正式 staged joint train entry。全部 stage smoke 使用 Qwen3-0.6B、LongCat native tokens、2 optimizer steps 和 `013-fdu-stage-smoke/...` output 目录。stage_1 到 stage_4 默认两卡 DDP，stage_0 默认单卡。
+Stage_0 没有 formal train loader，因此使用 fixed-sample overfit entry 验证参数阶段；stage_1 到 stage_4 使用正式 staged joint train entry。普通 stage smoke 使用 Qwen3-0.6B、LongCat native tokens、2 optimizer steps 和 `013-fdu-stage-smoke/...` output 目录。stage_1 到 stage_4 默认两卡 DDP，stage_0 默认单卡。
+`fdu_stage_2_lba_smoke` 专门验证正式 staged joint train entry 在 DDP 下同时启用 speech/text
+LBA，并写入 `013-fdu-stage-lba-smoke/...`；text 路径使用 toy map-style samples，因为当前
+WMT19 text preset 是 iterable dataset。
 
 ## Overrides
 

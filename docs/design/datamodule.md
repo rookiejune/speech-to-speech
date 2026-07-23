@@ -35,7 +35,11 @@
 - `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts` prepared data 或确定性的内存
   `toy` data。toy codes 根据正式 codec 的 semantic/acoustic codebook 数量和值域构造。
 - `ToyDataset`：提供完整 source/target audio+text raw sample，不读取文件、不修改全局 RNG。
-- `DataLoaderConfig(batch_size, num_workers, pin_memory, persistent_workers)` /
+- `LBAConfig`：按 `ModelSample` 的 text token 与 source/target frame 长度估算 batch cost，
+  启用后每个 homogeneous loader 使用 third-party LBA，并把 planner summary 写到
+  `output_dir/lba/{loader_name}`。speech loader 支持 prepared map-style dataset；text loader
+  也必须使用 map-style dataset，当前 FDU joint smoke 因此使用 deterministic toy text samples。
+- `DataLoaderConfig(batch_size, num_workers, pin_memory, persistent_workers, lba)` /
   `Config(codec, dataloader, dataset)`：公开的 DataLoader、dataset 与 DataModule 配置结构。
 - `DataModule(config, runtime, task_weights)`：Lightning 数据入口；`setup()` 加载所选 dataset，
   并在加载前校验 config 与 runtime 的 codec identity。重复调用不会重新加载已持有的数据集。
@@ -120,6 +124,10 @@ acoustic_target: AcousticTarget | None
   原始外层 dataset，因此 `AnyDataset` transform 或 `MergedDataset` 组合不会被绕过；正式
   `train.yaml` 关闭 Lightning 自动 distributed sampler，由该 batch sampler 按 runtime shard
   负责多进程切分。
+- 启用 `dataloader.lba.enabled` 时，LBA 直接拥有 loader 的 batching 策略，`StoreLocalBatchSampler`
+  不再同时参与。joint train 的外层 `ScheduledDataLoader` 不接受 Lightning 注入 sampler；当前
+  FDU smoke 验证 DDP 下每个子 loader 都能创建 per-rank LBA log 并完成 2-step 训练，正式 shard
+  locality 与 distributed sample partition 仍需在长跑前单独复核。
 - `DataModule.train_samples()` 是 callback 按索引读取已 setup 训练样本的公开边界；callback
   不读取私有 dataset 字段。
 - parser 生成 `Speech.audio_token_spans`，`Speech` 校验 spans 与 semantic frame 完整对齐；

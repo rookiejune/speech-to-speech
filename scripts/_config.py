@@ -11,6 +11,7 @@ from speech_to_speech.codec_oracle import Initialization, Objective
 from speech_to_speech.datamodule import (
     DatasetConfig,
     DatasetName,
+    LBAConfig,
     TextDatasetConfig,
     TextDatasetName,
 )
@@ -67,6 +68,7 @@ class TrainDataLoaderConfig:
     num_workers: int = MISSING
     pin_memory: bool = False
     persistent_workers: bool = False
+    lba: LBAConfig = field(default_factory=LBAConfig)
 
 
 @dataclass

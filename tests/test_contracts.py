@@ -35,6 +35,7 @@ from speech_to_speech.datamodule import (
     DatasetName,
     FixedDataModule,
     JointDataModule,
+    LBAConfig,
     LoaderSchedule,
     ScheduledDataLoader,
     TextConfig,
@@ -654,6 +655,75 @@ class ContractTest(unittest.TestCase):
 
         self.assertNotIsInstance(loader.batch_sampler, StoreLocalBatchSampler)
         self.assertEqual(loader.batch_size, 2)
+
+    @patch("zhuyin.datasets.wmt19_tts.wmt19_tts_codec")
+    def test_datamodule_uses_lba_when_enabled(self, load_dataset):
+        load_dataset.return_value = [_raw_sample(), _raw_sample(1)]
+        datamodule = DataModule(
+            DataConfig(
+                codec="longcat",
+                dataloader={
+                    "batch_size": 2,
+                    "num_workers": 0,
+                    "lba": LBAConfig(
+                        enabled=True,
+                        max_batch_cost=128,
+                        token_unit=4,
+                        frame_unit=2,
+                        prefetch_batches=0,
+                    ),
+                },
+            ),
+            _data_runtime(),
+            {Task.TTS: 1.0},
+            output_dir=Path(self.id()),
+            loader_name="tts",
+        )
+
+        datamodule.setup()
+        loader = cast(Any, datamodule.train_dataloader())
+
+        self.assertEqual(type(loader).__name__, "LBA")
+        self.assertEqual(loader.max_padded_length, 128)
+        self.assertEqual(loader.prefetch_batches, 0)
+        self.assertEqual(loader.log_dir, Path(self.id()) / "lba" / "tts")
+
+    def test_text_datamodule_uses_lba_when_enabled(self):
+        runtime = SimpleNamespace(
+            text_tokenizer=_ChatTokenizer(32),
+            layout=Layout(text=(0, 32), audio=(32, 36)),
+            pad_token_id=0,
+            eos_token_id=31,
+        )
+        datamodule = TextDataModule(
+            TextConfig(
+                dataloader={
+                    "batch_size": 2,
+                    "num_workers": 0,
+                    "lba": LBAConfig(
+                        enabled=True,
+                        max_batch_cost=64,
+                        token_unit=4,
+                        prefetch_batches=0,
+                    ),
+                },
+                dataset=TextDatasetConfig(
+                    name=TextDatasetName.TOY,
+                    toy_samples=2,
+                ),
+            ),
+            runtime,
+            {Task.MT: 1.0},
+            output_dir=Path(self.id()),
+            loader_name="mt",
+        )
+
+        datamodule.setup()
+        loader = cast(Any, datamodule.train_dataloader())
+
+        self.assertEqual(type(loader).__name__, "LBA")
+        self.assertEqual(loader.max_padded_length, 64)
+        self.assertEqual(loader.log_dir, Path(self.id()) / "lba" / "mt")
 
     def test_toy_dataset_uses_codec_shapes_and_value_ranges(self):
         cases = (

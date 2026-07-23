@@ -36,7 +36,9 @@
 ## 其他工程欠账
 
 - 正式多任务 DDP 使用 `find_unused_parameters=True`；路径稳定后评估冻结策略或 DDP 优化。
+- FDU stage_2 joint LBA 2-step DDP smoke 已完成；正式长跑前仍需复核 LBA 与 store shard locality、
+  distributed sample partition 和真实 text map-style dataset 的组合边界。
 - 联合 token/Flow/RVQ 的动态 batch FLOPs provider 已接入 overfit opt-in，但当前仅支持全量训练且
   不支持 REPA。正式 staged joint entry 启用 performance 前，需要为分阶段冻结定义按组件区分的
   forward/backward multiplier，补齐 REPA 口径，并在正式入口完成无 `TaskSampleLogger`/`GradLogger` 的
-  performance composition 与 DDP/LBA 验收。
+  performance composition 验收。

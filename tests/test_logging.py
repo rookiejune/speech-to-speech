@@ -6,10 +6,16 @@ from unittest.mock import Mock, patch
 
 import torch
 
-from speech_to_speech.callback.logging import FlowMatchingLogger, GradNormLogger
+from speech_to_speech.callback.logging import (
+    FlowMatchingLogger,
+    GradNormLogger,
+    OutputsLogger,
+)
+from speech_to_speech.datamodule import ModelBatch, ModelSample
 from speech_to_speech.loss import LossItem, Outputs, loss_items
 from speech_to_speech.pl_module import Config, SpeechToSpeechModule
 from speech_to_speech.reporting import window_summary
+from speech_to_speech.task import Task
 
 
 class LoggingTest(unittest.TestCase):
@@ -128,6 +134,70 @@ class LoggingTest(unittest.TestCase):
         )
         self.assertEqual(strategy.reduce.call_count, 2)
 
+    def test_outputs_logger_accepts_tuple_train_batches(self):
+        module = SimpleNamespace(log=Mock())
+        trainer = SimpleNamespace()
+        callback = OutputsLogger()
+        batch = (
+            _batch(Task.ASR),
+            _batch(Task.MT),
+        )
+        outputs = Outputs(
+            loss=torch.tensor(2.0),
+            token=LossItem(
+                torch.tensor([1.0, 3.0]),
+                details={"tokens": torch.tensor([4.0, 8.0])},
+            ),
+        )
+
+        callback.on_train_batch_end(trainer, module, outputs, batch, 0)
+
+        names = [call.args[0] for call in module.log.call_args_list]
+        self.assertEqual(
+            names,
+            [
+                "token_loss/asr",
+                "token_tokens/asr",
+                "token_loss/mt",
+                "token_tokens/mt",
+            ],
+        )
+
+    def test_outputs_logger_uses_acoustic_tasks_for_acoustic_losses(self):
+        module = SimpleNamespace(log=Mock())
+        trainer = SimpleNamespace()
+        callback = OutputsLogger()
+        batch = (
+            _batch(Task.MT),
+            _acoustic_batch(Task.TTS),
+        )
+        outputs = Outputs(
+            loss=torch.tensor(2.0),
+            token=LossItem(
+                torch.tensor([1.0, 3.0]),
+                details={"tokens": torch.tensor([4.0, 8.0])},
+            ),
+            rvq=LossItem(
+                torch.tensor([5.0]),
+                details={"frames": torch.tensor([9.0])},
+            ),
+        )
+
+        callback.on_train_batch_end(trainer, module, outputs, batch, 0)
+
+        names = [call.args[0] for call in module.log.call_args_list]
+        self.assertEqual(
+            names,
+            [
+                "token_loss/mt",
+                "token_tokens/mt",
+                "token_loss/tts",
+                "token_tokens/tts",
+                "rvq_loss/tts",
+                "rvq_frames/tts",
+            ],
+        )
+
     def test_loss_items_use_stable_objective_order(self):
         item = LossItem(torch.ones(1), details=None)
         outputs = Outputs(
@@ -144,3 +214,37 @@ class LoggingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _batch(task: Task) -> ModelBatch:
+    return ModelBatch.from_samples(
+        [
+            ModelSample(
+                input_ids=torch.tensor([1, 2]),
+                token_labels=torch.tensor([-100, 2]),
+                acoustic_prompt=None,
+                acoustic_target=None,
+                task=task,
+            )
+        ],
+        pad_token_id=0,
+    )
+
+
+def _acoustic_batch(task: Task) -> ModelBatch:
+    return ModelBatch.from_samples(
+        [
+            ModelSample(
+                input_ids=torch.tensor([1, 2]),
+                token_labels=torch.tensor([-100, 2]),
+                acoustic_prompt=None,
+                acoustic_target={
+                    "semantic_codes": torch.tensor([[1]]),
+                    "codes": torch.tensor([[2]]),
+                    "token_positions": torch.tensor([1]),
+                },
+                task=task,
+            )
+        ],
+        pad_token_id=0,
+    )
