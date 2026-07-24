@@ -298,6 +298,12 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         condition = self._input_embedding(safe_labels)
         return condition.masked_fill(~valid[..., None], 0)
 
+    def acoustic_code_features(self, acoustic_codes: torch.Tensor) -> torch.Tensor:
+        """Convert backend acoustic codes to model-device acoustic features."""
+        features = self.runtime.codec.acoustic_codes_to_features(acoustic_codes)
+        weight = self.backbone.get_input_embeddings().weight
+        return features.to(device=weight.device, dtype=weight.dtype)
+
     def _input_embedding(self, input_ids: torch.Tensor) -> torch.Tensor:
         text_start, text_end = self.layout.blocks["text"]
         audio_start, audio_end = self.layout.blocks["audio"]

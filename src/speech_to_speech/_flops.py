@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import cast
 
 import torch
+from anytrain.module.dit import SequenceAttention
 from torch import Tensor, nn
-from torch.nn.modules.linear import NonDynamicallyQuantizableLinear
 from transformers import Qwen3Model
 from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3Attention,
@@ -51,19 +52,22 @@ def flow_decoder(decoder: AcousticDiT, *, batch: int, frames: int) -> int:
         raise TypeError("Flow FLOPs require the standard AcousticDiT decoder.")
     if batch < 1 or frames < 1:
         raise ValueError("Flow FLOPs batch and frame dimensions must be positive.")
-    if decoder.repa_projection is not None or decoder.repa_student_layer is not None:
+    if decoder.feature_projection is not None or decoder.feature_layer is not None:
         raise ValueError("Flow FLOPs do not support a REPA decoder.")
 
     rows = batch * frames
     hidden = decoder.input.out_features
     latent = decoder.latent_dim
-    condition = decoder.condition.in_features
+    condition_projection = decoder.condition
+    condition = decoder.condition_dim
+    if condition_projection is None or condition is None:
+        raise RuntimeError("Flow condition projection is not configured.")
     require_linear(decoder.input, latent, hidden, "Flow input")
     require_linear(decoder.output, hidden, latent, "Flow output")
-    require_linear(decoder.condition, condition, hidden, "Flow condition")
+    require_linear(condition_projection, condition, hidden, "Flow condition")
 
     forward = linear(decoder.input, rows)
-    forward += linear(decoder.condition, rows)
+    forward += linear(condition_projection, rows)
     forward += linear(decoder.output, rows)
     forward += _time(decoder.time, batch, hidden)
     for block in decoder.blocks:
@@ -119,10 +123,13 @@ def rvq_decoder(decoder: AcousticRVQDecoder, *, valid_frames: int) -> int:
             forward += cost
 
     core = decoder.decoder
-    if core.config.hidden_size != hidden:
+    if type(core) is not Qwen3Model:
+        raise TypeError("RVQ FLOPs require a Qwen3Model decoder core.")
+    qwen_core = cast(Qwen3Model, core)
+    if qwen_core.config.hidden_size != hidden:
         raise ValueError("RVQ Qwen decoder dimensions do not match its configuration.")
     forward += qwen_backbone(
-        core,
+        qwen_core,
         batch=valid_frames,
         sequence=codebooks,
         lengths=(codebooks,) * valid_frames,
@@ -266,23 +273,23 @@ def _time(module: nn.Module, rows: int, hidden: int) -> int:
 
 def _dit_block(block: DiTBlock, batch: int, frames: int, hidden: int) -> int:
     rows = batch * frames
+    if block.cross_attention:
+        raise TypeError("Flow FLOPs support self-attention DiT blocks only.")
     require_linear(block.film, hidden, hidden * 6, "Flow FiLM")
     attention = block.attention
     if (
-        type(attention) is not nn.MultiheadAttention
-        or not attention.batch_first
-        or attention.embed_dim != hidden
-        or attention.kdim != hidden
-        or attention.vdim != hidden
-        or attention.in_proj_weight is None
-        or attention.in_proj_weight.shape != (hidden * 3, hidden)
+        type(attention) is not SequenceAttention
+        or attention.hidden_dim != hidden
+        or attention.heads * attention.head_dim != hidden
     ):
         raise TypeError("Flow FLOPs require standard dense self-attention.")
-    if type(attention.out_proj) is not NonDynamicallyQuantizableLinear or (
-        attention.out_proj.in_features,
-        attention.out_proj.out_features,
-    ) != (hidden, hidden):
-        raise ValueError(f"Flow attention output must be Linear({hidden}, {hidden}).")
+    for name, projection in (
+        ("query", attention.query),
+        ("key", attention.key),
+        ("value", attention.value),
+        ("output", attention.output),
+    ):
+        require_linear(projection, hidden, hidden, f"Flow attention {name}")
     ffn = block.ffn
     if len(ffn) != 3:
         raise TypeError("Flow FLOPs require the standard DiT feed-forward network.")
@@ -300,8 +307,10 @@ def _dit_block(block: DiTBlock, batch: int, frames: int, hidden: int) -> int:
         raise TypeError("Flow FLOPs require the standard DiT feed-forward network.")
     return (
         linear(block.film, rows)
-        + 2 * rows * attention.in_proj_weight.numel()
-        + _linear(attention.out_proj, rows)
+        + linear(attention.query, rows)
+        + linear(attention.key, rows)
+        + linear(attention.value, rows)
+        + linear(attention.output, rows)
         + linear(ffn_input, rows)
         + linear(ffn_output, rows)
         + 4 * batch * frames * frames * hidden

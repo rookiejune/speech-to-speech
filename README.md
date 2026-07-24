@@ -26,9 +26,6 @@ integration is provided by `SpeechToSpeechModule`.
 - `scripts/generation_smoke.py`: cached versus full-recompute S2ST generation
   and variable-batch generation checks using the public `generation` package;
   cache probes, benchmarks, and reporting live in separate private script modules.
-- `scripts/export_codec_oracle.py`: compatibility wrapper that exports legacy
-  codec-oracle checkpoints through `semantic-acoustic-codec`; it does not train
-  or construct oracle models in this repository.
 - `jobs/`: machine-aware wrappers for formal experiment runs. Each wrapper
   invokes one of the Python entry points directly and forwards extra arguments.
 
