@@ -8,7 +8,7 @@ import torch
 
 from speech_to_speech.generation import Request, generate_responses
 from speech_to_speech.generation.reporting import audio_output
-from speech_to_speech.model import FlowModel
+from speech_to_speech.model.acoustic import FlowModel
 
 
 def benchmark_batch(

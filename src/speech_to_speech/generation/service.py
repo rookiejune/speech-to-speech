@@ -92,12 +92,17 @@ def generate_responses(
             model,
         )
         for row, (result_index, _) in enumerate(group):
+            decoder = (
+                model.runtime.semantic_codec
+                if acoustic_generation is None
+                else model.runtime.codec
+            )
             results[result_index] = Result(
                 response_ids=responses[row],
                 audio=AudioOutput(
                     features=row_features[row],
                     waveform=waveforms[row],
-                    sample_rate=model.runtime.codec.sample_rate,
+                    sample_rate=decoder.sample_rate,
                 ),
             )
 
@@ -216,7 +221,7 @@ def _decode_rows(
         if first_features is None:
             decoded = decode_generated_semantic(
                 token_batch,
-                codec=model.runtime.codec,
+                codec=model.runtime.semantic_codec,
                 audio_tokenizer=model.runtime.audio_tokenizer,
                 audio_token_range=model.runtime.codec_audio_range,
             )

@@ -5,7 +5,7 @@ from typing import Protocol
 
 import torch
 from anydataset.types import Modality
-from anytrain.idspace import Layout
+from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 from torch.nn.utils.rnn import pad_sequence
 from transformers.modeling_outputs import CausalLMOutputWithPast

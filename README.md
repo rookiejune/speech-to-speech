@@ -133,7 +133,8 @@ environment for full-model training and audio experiments. Run from the
 repository collection root:
 
 ```bash
-PYTHONPATH=speech-to-speech/src:workspace/src basedpyright --project speech-to-speech/pyrightconfig.json --pythonpath "$(command -v python)"
-DYNAMIC_HOME=/private/tmp/speech-to-speech-test PYTHONPATH=speech-to-speech:speech-to-speech/src:workspace/src python -m unittest discover -s speech-to-speech/tests -v
-PYTHONPATH=speech-to-speech/src:workspace/src python -m compileall -q speech-to-speech/src speech-to-speech/scripts speech-to-speech/tests
+export PYTHONPATH=speech-to-speech:speech-to-speech/src:semantic-acoustic-codec/src:workspace/src:third_party/anydataset/src:third_party/anytrain/src:third_party/length-based-batching-adapter/src
+basedpyright --project speech-to-speech/pyrightconfig.json --pythonpath "$(command -v python)"
+DYNAMIC_HOME=/private/tmp/speech-to-speech-test PYTHONPYCACHEPREFIX=/private/tmp/speech-to-speech-pycache python -m unittest discover -s speech-to-speech/tests -v
+PYTHONPYCACHEPREFIX=/private/tmp/speech-to-speech-pycache python -m compileall -q speech-to-speech/src speech-to-speech/scripts speech-to-speech/tests
 ```

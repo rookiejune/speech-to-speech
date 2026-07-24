@@ -2,7 +2,7 @@ from collections.abc import Callable
 
 import torch
 from anydataset.types import Modality
-from anytrain.idspace import Layout
+from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 
 from .._tensor import is_signed_integer_dtype

@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 from anydataset.types import Modality
-from anytrain.idspace import Layout
+from anytrain.module.idspace import Layout
 from torch import Tensor
 
 from ..runtime.protocol import GenerationRuntime

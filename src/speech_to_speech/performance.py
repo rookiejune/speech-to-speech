@@ -5,7 +5,7 @@ from typing import Any, Protocol, cast
 
 import torch
 from anydataset.types import Modality
-from anytrain.perf import training_flops_from_forward
+from anytrain.lightning.perf import training_flops_from_forward
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
 from torch import Tensor, nn
@@ -21,7 +21,8 @@ from ._flops import (
 from .callback.logging import GradLogger
 from .datamodule.types import ModelBatch
 from .loss import FlowObjective, LossItem, RVQObjective, TokenObjective
-from .model import FlowModel, RVQModel, TokenModel
+from .model import TokenModel
+from .model.acoustic import FlowModel, RVQModel
 from .pl_module import SpeechToSpeechModule
 
 
@@ -128,7 +129,7 @@ def _flow_objective(objective: FlowObjective, model: nn.Module) -> None:
     if objective.repa_weight is not None or objective.repa_teacher is not None:
         raise ValueError("training FLOPs do not support REPA.")
     decoder = cast(FlowModel, model).acoustic_decoder
-    if decoder.repa_projection is not None or decoder.repa_student_layer is not None:
+    if decoder.feature_projection is not None or decoder.feature_layer is not None:
         raise ValueError("training FLOPs do not support REPA.")
 
 

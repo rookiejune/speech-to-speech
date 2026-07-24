@@ -13,8 +13,9 @@ from speech_to_speech.datamodule import (
     TextDatasetConfig,
     TextDatasetName,
 )
-from speech_to_speech.model import AcousticType, AdapterType, DecoderConfig
+from speech_to_speech.model import AdapterType
 from speech_to_speech.model import Config as ModelConfig
+from speech_to_speech.model.acoustic import AcousticType, DecoderConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.runtime import AudioRepresentation, Config as RuntimeConfig
 from speech_to_speech.stage import (
@@ -316,14 +317,22 @@ def _validate_output(
 def _validate_audio_representation(
     config: Union[OverfitConfig, StagedTrainConfig],
 ) -> None:
+    acoustic = AcousticType(config.acoustic.type)
     if (
         config.runtime.audio_representation
         is AudioRepresentation.FULL_CODEC_SEQUENCE
-        and AcousticType(config.acoustic.type) is not AcousticType.NONE
+        and acoustic is not AcousticType.NONE
     ):
         raise ValueError(
             "runtime.audio_representation=full_codec_sequence requires "
             "model/acoustic=none because codec codes are trained as tokens."
+        )
+    if (
+        config.runtime.semantic_codec_artifact is not None
+        and acoustic is not AcousticType.NONE
+    ):
+        raise ValueError(
+            "runtime.semantic_codec_artifact requires model/acoustic=none."
         )
 
 

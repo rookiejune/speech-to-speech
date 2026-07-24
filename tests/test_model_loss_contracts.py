@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import torch
 from anydataset.types import Modality
-from anytrain.idspace import Layout
+from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
@@ -419,7 +419,6 @@ class ModelLossContractTest(unittest.TestCase):
             Config(
                 semantic_audio_adapter=None,
                 semantic_audio_output_adapter=None,
-                acoustic_prompt_adapter=None,
             ),
             runtime=rt,
         )
@@ -444,7 +443,6 @@ class ModelLossContractTest(unittest.TestCase):
             Config(
                 semantic_audio_adapter=None,
                 semantic_audio_output_adapter=None,
-                acoustic_prompt_adapter=None,
             ),
             runtime=rt,
         )
@@ -472,7 +470,6 @@ class ModelLossContractTest(unittest.TestCase):
                 Config(
                     semantic_audio_adapter=None,
                     semantic_audio_output_adapter=None,
-                    acoustic_prompt_adapter=None,
                 ),
                 runtime=rt,
             )
@@ -630,7 +627,6 @@ def _batch(
     batch = ModelBatch(
         input_ids=token_labels.masked_fill(token_labels.eq(-100), 0),
         token_labels=token_labels,
-        acoustic_prompt=None,
         acoustic_target=(
             None
             if target_acoustic_codes is None or target_audio_token_positions is None

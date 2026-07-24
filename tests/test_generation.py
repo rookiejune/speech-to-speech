@@ -17,7 +17,7 @@ from anydataset.types import (
     TextMeta,
     TextView,
 )
-from anytrain.idspace import Layout
+from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
@@ -85,6 +85,10 @@ class _Runtime:
         self.eoa_token_id = 7
 
     @property
+    def semantic_codec(self):
+        return getattr(self, "_semantic_codec", self.codec)
+
+    @property
     def codec_audio_range(self) -> tuple[int, int]:
         return 4, 6
 
@@ -148,7 +152,7 @@ class _GenerationModel(FlowModel):
         self.backbone = SimpleNamespace(
             get_input_embeddings=lambda: SimpleNamespace(weight=torch.empty(0))
         )
-        self.calls: list[tuple[int, bool, int, int]] = []
+        self.calls: list[tuple[int, int]] = []
         self.condition: Tensor | None = None
         self.sample_calls = 0
 
@@ -156,7 +160,6 @@ class _GenerationModel(FlowModel):
         self,
         input_ids: Tensor,
         *,
-        acoustic_prompt_codes: Tensor | None = None,
         output_hidden_states: bool = False,
         past_key_values=None,
         use_cache: bool = False,
@@ -166,22 +169,9 @@ class _GenerationModel(FlowModel):
     ) -> CausalLMOutputWithPast:
         del kwargs
         cached_length = 0 if past_key_values is None else past_key_values.length
-        source = (
-            int(acoustic_prompt_codes.sum().item())
-            if acoustic_prompt_codes is not None
-            else 0
-            if past_key_values is None
-            else past_key_values.source
-        )
+        source = 0 if past_key_values is None else past_key_values.source
         length = cached_length + input_ids.size(1)
-        self.calls.append(
-            (
-                input_ids.size(1),
-                acoustic_prompt_codes is not None,
-                source,
-                input_ids.size(0),
-            )
-        )
+        self.calls.append((input_ids.size(1), input_ids.size(0)))
 
         next_id = {2: 4, 3: 5}.get(length, self.runtime.eoa_token_id)
         logits = torch.full(
@@ -262,6 +252,10 @@ class _FullSequenceRuntime:
         self.bos_token_id = 1
         self.boa_token_id = self.codec_audio_range[1]
         self.eoa_token_id = self.boa_token_id + 1
+
+    @property
+    def semantic_codec(self):
+        return self.codec
 
     @property
     def acoustic_side_channel(self) -> bool:
@@ -561,6 +555,22 @@ class GenerationTest(unittest.TestCase):
         self.assertIsNone(audio["features"])
         torch.testing.assert_close(audio["waveform"], torch.tensor([0.0, 1.0]))
 
+    def test_token_only_generation_uses_independent_semantic_codec(self):
+        model = _TokenGenerationModel()
+        semantic_codec = _UnifiedCodec()
+        model.runtime._semantic_codec = semantic_codec
+
+        result = generate_responses(
+            [_request()],
+            model,
+            max_new_tokens=3,
+            do_sample=False,
+        )[0]
+
+        self.assertEqual(semantic_codec.decode_calls, 1)
+        self.assertEqual(model.runtime.codec.decode_calls, 0)
+        self.assertEqual(result["audio"]["sample_rate"], semantic_codec.sample_rate)
+
     def test_generated_audio_decode_validates_token_ids_before_codec_work(self):
         codec = Mock()
         tokenizer = NativeAudioTokenizer(vocab_size=2)
@@ -803,7 +813,7 @@ class GenerationTest(unittest.TestCase):
         )
 
         self.assertEqual(len(results), 2)
-        self.assertEqual([call[3] for call in model.calls], [2, 2])
+        self.assertEqual([call[1] for call in model.calls], [2, 2])
         self.assertEqual(model.runtime.audio_tokenizer.frame_spans.call_count, 0)
         self.assertEqual(model.runtime.codec.decode_calls, 1)
 
@@ -851,7 +861,7 @@ class GenerationTest(unittest.TestCase):
                 self.assertEqual(model.batch_sizes, [2, 1])
                 self.assertEqual(model.cache_selections, [[1]] if use_cache else [])
 
-    def test_cache_preserves_source_condition_and_collects_hidden_online(self):
+    def test_cache_collects_audio_condition_online(self):
         model = _GenerationModel()
 
         result = generate_responses(
@@ -861,8 +871,6 @@ class GenerationTest(unittest.TestCase):
             do_sample=False,
         )[0]
 
-        self.assertEqual([call[1] for call in model.calls], [False, False, False])
-        self.assertEqual([call[2] for call in model.calls], [0, 0, 0])
         self.assertTrue(
             torch.equal(
                 model.condition,

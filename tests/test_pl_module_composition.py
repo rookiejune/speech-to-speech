@@ -4,7 +4,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, patch
 
-from speech_to_speech.model import Config as ModelConfig, DecoderConfig
+from speech_to_speech.model import Config as ModelConfig
+from speech_to_speech.model.acoustic import DecoderConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.pl_module.composition import flow, rvq, token
 

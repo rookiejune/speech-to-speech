@@ -5,7 +5,7 @@ from functools import cached_property
 from typing import Protocol
 
 from anydataset.types import AudioView
-from anytrain.idspace import Layout
+from anytrain.module.idspace import Layout
 
 from ..runtime import AudioRepresentation
 from ..runtime.protocol import DataRuntime

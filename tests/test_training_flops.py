@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import torch
-from anytrain.idspace import Layout
+from anytrain.module.idspace import Layout
 from lightning import pytorch as pl
 from lightning.fabric.utilities.throughput import measure_flops
 from torch import Tensor, nn
@@ -17,17 +17,15 @@ from speech_to_speech._flops import (
     qwen_backbone,
     rvq_decoder,
 )
-from speech_to_speech.datamodule.types import AcousticPrompt, AcousticTarget, ModelBatch
+from speech_to_speech.datamodule.types import AcousticTarget, ModelBatch
 from speech_to_speech.loss import FlowObjective, LossItem, RVQObjective, TokenObjective
 from speech_to_speech.model import (
     AdapterType,
     Config as ModelConfig,
-    DecoderConfig,
-    FlowModel,
-    RVQModel,
     TokenModel,
     ToyConfig,
 )
+from speech_to_speech.model.acoustic import DecoderConfig, FlowModel, RVQModel
 from speech_to_speech.performance import TrainingFlops
 from speech_to_speech.pl_module import Config as ModuleConfig, SpeechToSpeechModule
 from speech_to_speech.task import Task
@@ -75,31 +73,6 @@ class TrainingFlopsTest(unittest.TestCase):
             tasks=[Task.TTS, Task.TTS],
         )
         self.assertGreater(_flops(module, batch), _flops(module, fewer_labels))
-
-    def test_acoustic_prompt_adapter_uses_padded_token_shape(self):
-        model = _token_model()
-        module = _module(model, TokenObjective(_layout()))
-        base = _batch(
-            input_ids=torch.tensor([[1, 7, 8, 2], [1, 7, 0, 0]]),
-            labels=torch.tensor([[-100, 7, 8, -100], [-100, 9, -100, -100]]),
-            tasks=[Task.S2ST, Task.S2ST],
-        )
-        prompt = _prompt()
-        with_prompt = _batch(
-            input_ids=base.input_ids,
-            labels=base.token_labels,
-            tasks=base.tasks,
-            acoustic_prompt=prompt,
-        )
-        difference = _flops(module, with_prompt) - _flops(module, base)
-        expected = 3 * adapter(
-            model.acoustic_prompt_adapter,
-            rows=8,
-            in_features=4,
-            out_features=4,
-            name="test prompt",
-        )
-        self.assertEqual(difference, expected)
 
     def test_text_head_counts_only_the_layout_slice(self):
         model = _token_model()
@@ -197,7 +170,7 @@ class TrainingFlopsTest(unittest.TestCase):
             )
 
         flow_model = _flow_model()
-        flow_model.acoustic_decoder.repa_student_layer = 1
+        flow_model.acoustic_decoder.feature_layer = 1
         flow_module = _module(flow_model, FlowObjective(_layout(), _flow_runtime()))
         flow_batch = _batch(
             input_ids=batch.input_ids,
@@ -251,7 +224,6 @@ def _model_config() -> ModelConfig:
     return ModelConfig(
         semantic_audio_adapter=AdapterType.LINEAR,
         semantic_audio_output_adapter=AdapterType.LINEAR,
-        acoustic_prompt_adapter=AdapterType.LINEAR,
         toy=ToyConfig(
             hidden_size=4,
             intermediate_size=8,
@@ -301,27 +273,15 @@ def _batch(
     input_ids: Tensor,
     labels: Tensor,
     tasks: list[Task],
-    acoustic_prompt: AcousticPrompt | None = None,
     acoustic_target: AcousticTarget | None = None,
 ) -> ModelBatch:
     return ModelBatch(
         input_ids=input_ids,
         token_labels=labels,
-        acoustic_prompt=acoustic_prompt,
         acoustic_target=acoustic_target,
         tasks=tasks,
         pad_token_id=0,
     )
-
-
-def _prompt() -> AcousticPrompt:
-    positions = torch.tensor([[1, 2], [1, -1]])
-    codes = torch.zeros((2, 2, 2), dtype=torch.long)
-    codes[positions < 0] = -1
-    return {
-        "codes": codes,
-        "token_positions": positions,
-    }
 
 
 def _target(mask: Tensor) -> AcousticTarget:
@@ -351,14 +311,6 @@ def _token_expected(model: TokenModel, batch: ModelBatch) -> int:
         out_features=hidden,
         name="test semantic",
     )
-    if batch.acoustic_prompt is not None:
-        forward += adapter(
-            model.acoustic_prompt_adapter,
-            rows=input_ids.numel(),
-            in_features=4,
-            out_features=hidden,
-            name="test prompt",
-        )
     forward += qwen_backbone(
         core,
         batch=input_ids.size(0),

@@ -249,7 +249,6 @@ def _batch(task: Task, audio_seconds: float = 0.0) -> ModelBatch:
             ModelSample(
                 input_ids=torch.tensor([1, 2]),
                 token_labels=torch.tensor([-100, 2]),
-                acoustic_prompt=None,
                 acoustic_target=None,
                 task=task,
                 audio_seconds=audio_seconds,
@@ -265,7 +264,6 @@ def _acoustic_batch(task: Task) -> ModelBatch:
             ModelSample(
                 input_ids=torch.tensor([1, 2]),
                 token_labels=torch.tensor([-100, 2]),
-                acoustic_prompt=None,
                 acoustic_target={
                     "semantic_codes": torch.tensor([[1]]),
                     "codes": torch.tensor([[2]]),

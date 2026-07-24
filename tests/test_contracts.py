@@ -25,7 +25,7 @@ from anydataset.types import (
     TextView,
 )
 from hydra import compose, initialize_config_dir
-from anytrain.idspace import Layout
+from anytrain.module.idspace import Layout
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig, OmegaConf
 from torch import nn
@@ -152,8 +152,6 @@ class _StageModel(nn.Module):
         self.backbone = _StageBackbone()
         self.semantic_audio_embedding = nn.Embedding(1, 1)
         self.semantic_audio_adapter = nn.Linear(1, 1)
-        self.acoustic_prompt_adapter = nn.Linear(1, 1)
-        self.acoustic_prompt_gate = nn.Parameter(torch.zeros(1))
         self.semantic_audio_output_adapter = nn.Linear(1, 1)
         self.acoustic_decoder = _StageAcousticDecoder()
 
@@ -171,6 +169,40 @@ def _observe_task_updates(
 
 
 class ContractTest(unittest.TestCase):
+    def test_runtime_loads_semantic_codec_artifact_with_existing_backend(self):
+        backend = SimpleNamespace(name="longcat")
+        support = SimpleNamespace()
+        semantic_runtime = SimpleNamespace(sample_rate=24_000, frame_rate=50.0, decode=Mock())
+        runtime = Runtime(
+            Config(
+                codec="longcat",
+                semantic_codec_artifact="/tmp/semantic-codec",
+            )
+        )
+
+        with (
+            patch(
+                "speech_to_speech.runtime.runtime.load_codec",
+                return_value=backend,
+            ),
+            patch(
+                "semantic_acoustic_codec.runtime.load_artifact",
+                return_value=support,
+            ) as load,
+            patch(
+                "semantic_acoustic_codec.runtime.SemanticCodecRuntime",
+                return_value=semantic_runtime,
+            ) as bind,
+        ):
+            loaded = runtime.semantic_codec
+
+        self.assertIs(loaded, semantic_runtime)
+        load.assert_called_once_with(
+            Path("/tmp/semantic-codec"),
+            device=None,
+        )
+        bind.assert_called_once_with(support, backend)
+
     def test_worker_runtime_snapshot_excludes_model_and_codec(self):
         runtime = SimpleNamespace(
             codec_name="longcat",
@@ -262,7 +294,7 @@ class ContractTest(unittest.TestCase):
         self.assertIsNone(runtime_config.audio_tokenizer)
         self.assertIsNone(runtime_config.device)
         self.assertEqual(model_config.semantic_audio_adapter, "linear")
-        self.assertEqual(model_config.acoustic_prompt_adapter, "linear")
+        self.assertEqual(model_config.semantic_audio_output_adapter, "linear")
 
     def test_acoustic_presets_expose_only_supported_options(self):
         flow = _compose()
@@ -543,7 +575,6 @@ class ContractTest(unittest.TestCase):
         batch = TextCollator(runtime, {Task.MT: 1.0})([_raw_text_sample()])
 
         self.assertEqual(batch.tasks, [Task.MT])
-        self.assertIsNone(batch.acoustic_prompt)
         self.assertIsNone(batch.acoustic_target)
         self.assertTrue(batch.token_labels.ne(-100).any())
         labels = batch.token_labels[batch.token_labels.ne(-100)]
@@ -603,7 +634,6 @@ class ContractTest(unittest.TestCase):
 
         self.assertEqual(batch.input_ids.size(0), 2)
         self.assertEqual(batch.tasks, [Task.MT, Task.MT])
-        self.assertIsNone(batch.acoustic_prompt)
         self.assertIsNone(batch.acoustic_target)
 
     def test_scheduled_dataloader_rotates_homogeneous_loaders_by_weight(self):
@@ -1045,7 +1075,6 @@ class ContractTest(unittest.TestCase):
             return ModelBatch(
                 input_ids=torch.ones(2, 2, dtype=torch.long),
                 token_labels=torch.ones(2, 2, dtype=torch.long),
-                acoustic_prompt=None,
                 acoustic_target=None,
                 tasks=tasks,
                 pad_token_id=99,
@@ -1072,7 +1101,6 @@ class ContractTest(unittest.TestCase):
             ModelBatch(
                 input_ids=torch.empty(0, 2, dtype=torch.long),
                 token_labels=torch.empty(0, 2, dtype=torch.long),
-                acoustic_prompt=None,
                 acoustic_target=None,
                 tasks=[],
                 pad_token_id=99,
@@ -1082,7 +1110,6 @@ class ContractTest(unittest.TestCase):
             ModelBatch(
                 input_ids=torch.ones(1, 2, dtype=torch.uint64),
                 token_labels=torch.ones(1, 2, dtype=torch.long),
-                acoustic_prompt=None,
                 acoustic_target=None,
                 tasks=[Task.ASR],
                 pad_token_id=99,
@@ -1098,7 +1125,6 @@ class ContractTest(unittest.TestCase):
             return ModelBatch(
                 input_ids=torch.tensor([[1, 4]]),
                 token_labels=torch.tensor([[-100, 4]]),
-                acoustic_prompt=None,
                 acoustic_target={
                     "semantic_codes": torch.tensor([[[1]]]),
                     "codes": (torch.tensor([[[1, 2]]]) if codes is None else codes),
@@ -1117,16 +1143,6 @@ class ContractTest(unittest.TestCase):
 
     def test_model_batch_rejects_padding_ids_inside_unpadded_acoustic_fields(self):
         samples = {
-            "acoustic prompt codes": ModelSample(
-                input_ids=torch.tensor([1, 4]),
-                token_labels=torch.tensor([-100, 4]),
-                acoustic_prompt={
-                    "codes": torch.tensor([[-1, 2]]),
-                    "token_positions": torch.tensor([0]),
-                },
-                acoustic_target=None,
-                task=Task.ASR,
-            ),
             "acoustic target codes": _target_sample(torch.tensor([[-1, 2]])),
             "target semantic codes": _target_sample(
                 torch.tensor([[1, 2]]),
@@ -1297,7 +1313,6 @@ class ContractTest(unittest.TestCase):
         self.assertGreater(counts[ParameterGroup.BACKBONE], 0)
         self.assertFalse(model.backbone.model.layers[0].weight.requires_grad)
         self.assertTrue(model.semantic_audio_embedding.weight.requires_grad)
-        self.assertTrue(model.acoustic_prompt_gate.requires_grad)
         self.assertTrue(model.acoustic_decoder.head.weight.requires_grad)
         self.assertFalse(model.acoustic_decoder.decoder.embed_tokens.weight.requires_grad)
         self.assertFalse(model.acoustic_decoder.codebook_embeddings[-1].weight.requires_grad)
@@ -1318,7 +1333,6 @@ def _sample(task: Task) -> ModelSample:
     return ModelSample(
         input_ids=torch.tensor([1, 2]),
         token_labels=torch.tensor([-100, 2]),
-        acoustic_prompt=None,
         acoustic_target=None,
         task=task,
     )
@@ -1333,7 +1347,6 @@ def _target_sample(
     return ModelSample(
         input_ids=torch.tensor([1, 4]),
         token_labels=torch.tensor([-100, 4]),
-        acoustic_prompt=None,
         acoustic_target={
             "semantic_codes": (
                 torch.ones((frames, 1), dtype=torch.long)

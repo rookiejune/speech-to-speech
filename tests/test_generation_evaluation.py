@@ -7,7 +7,7 @@ import torch
 from speech_to_speech.generation.evaluation import mono, stft_distance
 
 
-class AcousticEvaluationTest(unittest.TestCase):
+class GenerationEvaluationTest(unittest.TestCase):
     def test_identical_waveforms_have_zero_stft_distance(self):
         waveform = torch.randn(4096)
 

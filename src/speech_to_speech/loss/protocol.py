@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from anydataset.types import Modality
-from anytrain.idspace import Layout
+from anytrain.module.idspace import Layout
 from torch import Tensor
 
 

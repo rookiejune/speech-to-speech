@@ -7,12 +7,17 @@ from torch import Tensor, nn
 from transformers.cache_utils import Cache
 
 
-class Codec(Protocol):
+class SemanticCodec(Protocol):
     @property
     def sample_rate(self) -> int: ...
 
     @property
     def frame_rate(self) -> float: ...
+
+    def decode(self, semantic_codes: Tensor) -> Tensor: ...
+
+
+class Codec(SemanticCodec, Protocol):
 
     @property
     def acoustic_feature_dim(self) -> int: ...
@@ -27,8 +32,6 @@ class Codec(Protocol):
     def acoustic_codebook_sizes(self) -> tuple[int, ...]: ...
 
     def encode(self, audio: Tensor, sample_rate: int) -> Tensor: ...
-
-    def decode(self, codes: Tensor) -> Tensor: ...
 
     def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor: ...
 

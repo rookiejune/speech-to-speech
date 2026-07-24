@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 import hydra
 import torch
@@ -24,11 +24,11 @@ from speech_to_speech.datamodule import (
     TextConfig,
     TextDataModule,
 )
-from speech_to_speech.model import AcousticType
+from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.performance import TrainingFlops
 from speech_to_speech.pl_module.composition import flow, rvq, token
 from speech_to_speech.runtime import Config as RuntimeConfig
-from speech_to_speech.runtime import init_runtime
+from speech_to_speech.runtime import Runtime, init_runtime
 from speech_to_speech.stage import StageLoaderConfig, apply_parameter_policy
 from speech_to_speech.task import Task
 
@@ -128,7 +128,7 @@ def run(config: StagedTrainConfig) -> None:
     print(json.dumps(result, sort_keys=True))
 
 
-def build_datamodule(config: StagedTrainConfig, runtime: object) -> JointDataModule:
+def build_datamodule(config: StagedTrainConfig, runtime: Runtime) -> JointDataModule:
     datamodules = {
         name: _loader_datamodule(config, runtime, name, loader)
         for name, loader in config.stage.loaders.items()
@@ -144,7 +144,7 @@ def build_datamodule(config: StagedTrainConfig, runtime: object) -> JointDataMod
 
 def _loader_datamodule(
     config: StagedTrainConfig,
-    runtime: object,
+    runtime: Runtime,
     name: str,
     loader: StageLoaderConfig,
 ):
@@ -155,7 +155,7 @@ def _loader_datamodule(
                 dataloader=_dataloader(config.text_data.dataloader),
                 dataset=config.text_data.dataset,
             ),
-            cast(Any, runtime),
+            runtime,
             task_weights,
             output_dir=Path(config.output_dir).expanduser(),
             loader_name=name,
@@ -166,7 +166,7 @@ def _loader_datamodule(
             dataloader=_dataloader(config.data.dataloader),
             dataset=config.data.dataset,
         ),
-        cast(Any, runtime),
+        runtime,
         task_weights,
         output_dir=Path(config.output_dir).expanduser(),
         loader_name=name,

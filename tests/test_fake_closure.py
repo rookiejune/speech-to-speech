@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import torch
 from anydataset.types import AudioView, Modality
-from anytrain.idspace import Layout
+from anytrain.module.idspace import Layout
 from semantic_acoustic_codec.model import AcousticDiT as SharedAcousticDiT
 from semantic_acoustic_codec.model import AcousticRVQDecoder as SharedRVQDecoder
 from torch import Tensor, nn
@@ -167,8 +167,8 @@ class FakeClosureTest(unittest.TestCase):
 
         self.assertIn("repa", outputs)
         self.assertTrue(torch.isfinite(outputs["loss"]))
-        self.assertEqual(model.acoustic_decoder.repa_student_layer, 1)
-        self.assertIsNotNone(model.acoustic_decoder.repa_projection)
+        self.assertEqual(model.acoustic_decoder.feature_layer, 1)
+        self.assertIsNotNone(model.acoustic_decoder.feature_projection)
         self.assertIsInstance(model.acoustic_decoder, SharedAcousticDiT)
 
     def test_rvq_model_generates_acoustic_features(self):
@@ -222,10 +222,6 @@ class FakeClosureTest(unittest.TestCase):
 
                 self.assertEqual(batch.tasks, [task, task])
                 self.assertEqual(batch.input_ids.shape, batch.token_labels.shape)
-                self.assertEqual(
-                    batch.acoustic_prompt is not None,
-                    task.source_modality is Modality.AUDIO,
-                )
                 self.assertEqual(
                     batch.acoustic_target is not None,
                     task.target_modality is Modality.AUDIO,
@@ -314,7 +310,6 @@ def _model_config() -> ModelConfig:
     return ModelConfig(
         semantic_audio_adapter=None,
         semantic_audio_output_adapter=None,
-        acoustic_prompt_adapter=None,
         toy=ToyConfig(
             hidden_size=4,
             intermediate_size=8,

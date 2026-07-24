@@ -4,10 +4,10 @@ from functools import cached_property
 from typing import Protocol
 
 from anydataset.types import AudioView, Modality
-from anytrain.idspace import Layout
+from anytrain.module.idspace import Layout
 
 from .runtime import AudioRepresentation
-from .types import AudioTokenizer, Backbone, Codec, TextTokenizer
+from .types import AudioTokenizer, Backbone, Codec, SemanticCodec, TextTokenizer
 
 
 class DataRuntime(Protocol):
@@ -45,6 +45,9 @@ class DataRuntime(Protocol):
 class GenerationRuntime(DataRuntime, Protocol):
     @cached_property
     def codec(self) -> Codec: ...
+
+    @cached_property
+    def semantic_codec(self) -> SemanticCodec: ...
 
     @property
     def acoustic_side_channel(self) -> bool: ...

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TypedDict
 
-from anytrain.idspace import Layout
+from anytrain.module.idspace import Layout
 from torch import Tensor
 
 from ..datamodule.types import ModelBatch

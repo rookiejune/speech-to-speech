@@ -11,7 +11,7 @@ from torch import Tensor
 
 from ...datamodule import ModelBatch
 from ...generation.evaluation import evaluate
-from ...model import FlowModel, RVQModel
+from ...model.acoustic import FlowModel, RVQModel
 from ...runtime.types import Codec
 from ..interval import TrainInterval
 

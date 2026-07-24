@@ -65,15 +65,14 @@ raw Sample
 ```python
 input_ids: Tensor
 token_labels: Tensor
-acoustic_prompt: AcousticPrompt | None
 acoustic_target: AcousticTarget | None
 ```
 
-`AcousticPrompt` 包含 `codes`、`token_positions`；`AcousticTarget` 包含
-`semantic_codes`、`codes`、`token_positions`。分组使必须共同存在的 tensor 不能形成半完整状态。
+`AcousticTarget` 包含 `semantic_codes`、`codes`、`token_positions`。分组使必须共同存在的 tensor
+不能形成半完整状态。
 
 `ModelBatch` 额外保存 `tasks: list[Task]` 和 `pad_token_id`，并公开
-`attention_mask`、`acoustic_prompt_mask` 与 `acoustic_target_mask`。speech batch 还保存
+`attention_mask` 与 `acoustic_target_mask`。speech batch 还保存
 `audio_seconds: Tensor[B]`，表示每条训练样本按当前 task 实际消费的 source/target 音频秒数之和；
 纯文本样本为 0。
 
@@ -98,13 +97,12 @@ acoustic_target: AcousticTarget | None
   影响。
 - target 为 audio 时，BOA 是结构性 response prefix，不参与监督：
   `token_labels[len(input_ids) + 1:] = response_ids[1:]`，只监督 audio tokens 和 EOA。
-- `acoustic_prompt` 整体表示 source acoustic frames 及其 token sequence 注入位置。
 - `acoustic_target` 内各 tensor 共享 frame 轴；`token_positions` 将每个 acoustic frame
   对齐到 target audio token。它只表达
   codec target，不保存或预计算 REPA teacher features。unified-token codec 没有独立
   acoustic side channel，因此这些 target code 字段为 `None`。
 - `ModelBatch.from_samples()` 显式接收 `pad_token_id`，在 padding 前要求 acoustic/semantic
-  codes 是非空、二维、非负有符号整数 tensor，并检查 prompt/target 内部 frame 轴；
+  codes 是非空、二维、非负有符号整数 tensor，并检查 target 内部 frame 轴；
   acoustic target 的 `token_positions` 必须至少为 1，保证每个 frame 都有 causal predictor；
   `ModelBatch` 自身要求 input/label 是非空、对齐的有符号整数二维 batch、每行恰有一个
   `Task`，并维护单一 task execution signature。codebook 上界由持有具体 codec size 的下游

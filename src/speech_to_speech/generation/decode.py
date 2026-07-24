@@ -5,7 +5,7 @@ from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
 from ..runtime.audio_tokenizer import semantic_codes_from_audio_tokens
-from ..runtime.types import AudioTokenizer, Codec
+from ..runtime.types import AudioTokenizer, Codec, SemanticCodec
 
 
 def decode_generated_audio(
@@ -49,7 +49,7 @@ def _decode_audio(
 def decode_generated_semantic(
     audio_token_ids: Tensor,
     *,
-    codec: Codec,
+    codec: SemanticCodec,
     audio_tokenizer: AudioTokenizer,
     audio_token_range: tuple[int, int],
 ) -> Tensor:

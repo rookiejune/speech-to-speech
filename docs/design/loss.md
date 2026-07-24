@@ -31,13 +31,9 @@ position 语义见 [总览 §2.4](../model-design.md)。
 三个组合入口共享 token forward：
 
 ```python
-prompt = batch.acoustic_prompt
 hidden_states = model.token_hidden_states(
     batch.input_ids,
     attention_mask=batch.attention_mask,
-    acoustic_prompt_codes=None if prompt is None else prompt["codes"],
-    acoustic_prompt_positions=None if prompt is None else prompt["token_positions"],
-    acoustic_prompt_mask=batch.acoustic_prompt_mask,
 )
 token = self.token(
     hidden_states,

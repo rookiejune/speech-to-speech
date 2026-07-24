@@ -117,6 +117,9 @@ schema，不重复声明字段。OmegaConf 对字符串枚举只接受成员
   audio token，flow/RVQ 才启用 acoustic objective，RVQ schema 不接受 REPA。
 - `runtime.audio_representation=full_codec_sequence` 只允许 `model/acoustic=none`，因为完整
   codec codes 已作为 token objective 训练，不能再同时构造 acoustic side channel。
+- `runtime.semantic_codec_artifact` 为 LongCat semantic-only waveform support artifact；当前只允许
+  `runtime=longcat|longcat_native model/acoustic=none`，并拒绝 full codec sequence、UniCodec、Flow
+  和 RVQ composition。
 - unified-token codec 使用 `runtime=unicodec model/acoustic=none`；有独立 acoustic
   codebook 的 codec 也可以显式选择 `none` 作为 token-only baseline。
 - flow method、NFE 和 step 数直接覆盖 `runtime.flow_*`；RVQ/token 中保留这些字段是

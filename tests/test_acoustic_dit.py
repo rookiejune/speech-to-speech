@@ -38,7 +38,7 @@ class AcousticDiTTest(unittest.TestCase):
     def test_repa_projection_is_only_registered_when_configured(self):
         model = AcousticDiT(6, 4, hidden_dim=8, layers=2, heads=2)
 
-        self.assertIsNone(model.repa_projection)
+        self.assertIsNone(model.feature_projection)
         with self.assertRaisesRegex(RuntimeError, "not configured"):
             model.forward_with_features(
                 torch.randn(1, 2, 4),
@@ -194,7 +194,7 @@ class AcousticDiTTest(unittest.TestCase):
 
         torch.testing.assert_close(
             representation,
-            model.repa_projection(captured[0]),
+            model.feature_projection(captured[0]),
         )
 
     def test_wavlm_teacher_uses_layer_nine_and_preserves_mask_positions(self):

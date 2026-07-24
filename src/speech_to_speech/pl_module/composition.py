@@ -3,13 +3,13 @@ from __future__ import annotations
 from typing import Optional, Protocol
 
 from speech_to_speech.loss import FlowObjective, RVQObjective, TokenObjective, WavLMTeacher
-from speech_to_speech.model import (
-    Config as ModelConfig,
+from speech_to_speech.model import Config as ModelConfig
+from speech_to_speech.model import TokenModel
+from speech_to_speech.model.acoustic import (
     DecoderConfig,
     FlowRepaConfig,
     FlowModel,
     RVQModel,
-    TokenModel,
 )
 from speech_to_speech.runtime import Runtime
 

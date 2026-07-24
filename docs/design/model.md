@@ -6,7 +6,7 @@
 ## 对外能力
 
 - `base.TokenModel`：接收显式 runtime，提供 text/semantic-audio embedding、token
-  logits、acoustic prompt 注入、frame condition 对齐与 token generation 原语。
+  logits、frame condition 对齐与 token generation 原语。
 - `acoustic.FlowModel`：在基础模型上组合 SAC 维护的 `AcousticDiT`，提供
   flow target、sampling 和 `generate_audio_features()`。
 - `acoustic.RVQModel`：组合 SAC 维护的 `AcousticRVQDecoder`，提供 teacher-forced
@@ -31,9 +31,6 @@ def forward(
     input_ids: Tensor,
     *,
     attention_mask: Tensor | None = None,
-    acoustic_prompt_codes: Tensor | None = None,
-    acoustic_prompt_positions: Tensor | None = None,
-    acoustic_prompt_mask: Tensor | None = None,
     output_hidden_states: bool = False,
     past_key_values: Cache | None = None,
     use_cache: bool = False,
@@ -73,7 +70,6 @@ def generate_tokens(...) -> Tensor: ...
 
 - `semantic_audio_adapter`
 - `semantic_audio_output_adapter`
-- `acoustic_prompt_adapter`
 - `toy`
 
 三个字段都使用公开 `AdapterType`；`linear` 是默认值，`mlp` 使用 gated SiLU adapter，`None`
@@ -104,24 +100,17 @@ semantic-audio token IDs
     -> codec-initialized or representation-defined random audio embedding
     -> semantic audio adapter
 
-acoustic_prompt_codes
-    -> codec.acoustic_codes_to_features()
-    -> grouped frame-to-token merge at acoustic_prompt_positions
-    -> acoustic prompt adapter + zero-initialized gate
-```
-
 Native/BPE semantic tokenizers 使用 codec codebook 初始化；完整 codec sequence tokenizer
 使用随机初始化，因为它的 vocab 同时包含多 codebook offset tokens 和 codec/codebook markers。
-codec features 在模型边界转换到 backbone embedding 的 device/dtype。frame mask 在进入 codec
-前把 `-1` code padding 替换为安全值，adapter 后再清除无效位置。source acoustic prompt 与
-flow target 复用 `acoustic_code_features()`，子类不调用基类私有转换函数。
+codec features 在 acoustic decoder 路径转换到对应 device/dtype。frame mask 在进入 codec
+前把 `-1` code padding 替换为安全值，adapter 后再清除无效位置。
 
 ## Acoustic decoder
 
 - flow decoder 沿 frame 轴做 self-attention；condition 与 timestep embedding 产生逐层 FiLM
   scale、shift 和 residual gate。frame mask 同时约束 attention、decoder 输出与最终 sampled
   features，padding frame 固定为零。
-- REPA 启用时，`repa_projection` 把 `repa_student_layer` 的表示映射到 teacher feature 维度；
+- REPA 启用时，`feature_projection` 把 `feature_layer` 的表示映射到 teacher feature 维度；
   未启用时不注册 projector。
 - RVQ decoder 在 frame 间并行、在 codebook 轴自回归。训练和 sampling 先打包有效 frame，
   只让有效 frame 进入 Qwen decoder/head，再 scatter 回原 batch 形状；padding logits/code 为零且

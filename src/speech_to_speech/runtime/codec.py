@@ -12,6 +12,8 @@ from .types import Codec
 class LongCatCodec:
     """Adapt LongCat to the model-facing codec contract."""
 
+    name = "longcat"
+
     def __init__(self, codec: LongCat) -> None:
         self.codec = codec
         decoders = list(codec.decoders.values())

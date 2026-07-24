@@ -10,7 +10,7 @@ import torch
 from speech_to_speech.datamodule import Collator
 from speech_to_speech.generation.batch import requests_from_batch
 from speech_to_speech.generation.reporting import compare, summary
-from speech_to_speech.model import FlowModel
+from speech_to_speech.model.acoustic import FlowModel
 from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import init_runtime
 from speech_to_speech.task import Task

@@ -91,7 +91,6 @@ text generation 使用 text head，屏蔽 PAD/BOS 并保留 EOS。集合与 rang
 class ModelBatch:
     input_ids: Tensor
     token_labels: Tensor
-    acoustic_prompt: AcousticPrompt | None
     acoustic_target: AcousticTarget | None
     tasks: list[Task]
     pad_token_id: int
@@ -99,7 +98,6 @@ class ModelBatch:
 
 字段职责：
 
-- `acoustic_prompt`：`codes` 与 `token_positions` 共同表示 source acoustic condition。
 - `acoustic_target`：`semantic_codes`、`codes` 与 `token_positions` 共同表示 decoder target、
   codec/REPA 输入和逐帧全局 audio token 位置。
 
@@ -107,13 +105,13 @@ padding 与 mask：
 
 - `input_ids` 使用 batch 自带的 `pad_token_id`；`token_labels` 使用 `-100`，shift 由 token loss 完成。
 - codec codes 与 frame positions 使用 `ACOUSTIC_PAD_ID=-1`。
-- `attention_mask`、`acoustic_prompt_mask` 和 `acoustic_target_mask` 由 padding 值派生并缓存。
+- `attention_mask` 和 `acoustic_target_mask` 由 padding 值派生并缓存。
 - codec 接口只接收合法 code；调用前把 padding 替换为安全值，得到 feature 后重新应用 mask。
 
 `ModelBatch.from_samples(samples, pad_token_id=...)` 是跨字段校验边界：
 
 - input 与 token label 必须是对齐的一维序列。
-- acoustic prompt/target 以完整结构出现；未 padding 的 codes 必须是非空二维非负整数 tensor，
+- acoustic target 以完整结构出现；未 padding 的 codes 必须是非空二维非负整数 tensor，
   内部 tensor 共用 frame 轴。
 - position 必须指向序列内非 padding token。
 - 同一 batch 的 task 必须具有相同 source/target modality 执行签名。
@@ -124,7 +122,6 @@ padding 与 mask：
 
 设 target audio token 在完整序列中的位置为 `p`，则 `token_labels[p]` 是该 token，label 未移位。
 
-- `acoustic_prompt["token_positions"]` 指向 source frame 所属的可见 prompt token。
 - `acoustic_target["token_positions"]` 记录 target frame 所属 token 自身的位置 `p`。
 
 所有调用方统一传 token 自身位置：
@@ -206,6 +203,14 @@ token CE 的 softmax 只覆盖 task 的 target modality，不让 text/audio head
 
 - `ModelBatch -> token_hidden_states -> sparse modality token_logits -> objective`
 - `Request -> generation service -> token/audio generation -> decode -> Result`
+
+语义 seq2seq 是基础且完整的模型能力：`model/acoustic=none` 只预测 text token 或 semantic-audio
+token，不在 S2S model 内生成 acoustic feature/codebook。audio response 的 waveform reconstruction
+属于 runtime codec 的 `decode(semantic_codes)` 能力；generation service 只负责把生成的 global audio
+token 还原为 semantic codes 并调用该能力。当前 runtime codec 可以直接实现该能力，后续也可以由独立的
+semantic-only support artifact 提供，但两者不能改变 token model、objective 或 `Request -> Result` 契约。
+该最小能力由 `runtime.types.SemanticCodec` 表达；训练数据、Flow/RVQ 和 feature decode 继续依赖扩展它的
+完整 `Codec`，避免 semantic-only support 被迫伪造 acoustic codebook 能力。
 
 `speech_to_speech.generation` 拥有 `Request`、`Result`、service、decode 与 text evaluation；`pl_module` 只负责 Lightning 集成。
 

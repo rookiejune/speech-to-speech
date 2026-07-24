@@ -16,7 +16,7 @@ from speech_to_speech.generation.reporting import (
     tensor_max_abs,
     top_logits,
 )
-from speech_to_speech.model import FlowModel
+from speech_to_speech.model.acoustic import FlowModel
 
 
 def run(

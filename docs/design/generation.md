@@ -7,9 +7,8 @@
 
 包级 API 公开以下结构和入口：
 
-- `Request(prompt_ids, task, acoustic_prompt)`：无 target、无 batch padding 的单条推理输入。
-  `prompt_ids` 是一维 layout global token IDs；`acoustic_prompt` 保存 source codec-local
-  acoustic codes 及其 prompt token 位置。
+- `Request(prompt_ids, task)`：无 target、无 batch padding 的单条推理输入。
+  `prompt_ids` 是一维 layout global token IDs。
 - `Result(response_ids, audio)`：按原请求顺序返回的单条结果。`response_ids` 是不含 EOS/EOA
   的 layout global token IDs；text task 的 `audio=None`。
 - `AudioOutput(features, waveform, sample_rate)`：audio task 的 decode 结果。unified-token codec
@@ -40,20 +39,11 @@
 class Request(TypedDict):
     prompt_ids: Tensor
     task: Task
-    acoustic_prompt: AcousticPrompt | None
-
-class AcousticPrompt(TypedDict):
-    codes: Tensor
-    token_positions: Tensor
 
 class Result(TypedDict):
     response_ids: Tensor
     audio: AudioOutput | None
 ```
-
-`AcousticPrompt.codes` 的形状是 `[frames, acoustic_codebooks]`；`token_positions` 的形状是
-`[frames]`，位置基于该 request 的未 padding prompt。它只允许出现在 audio-source task，且只在
-codec 确实有独立 acoustic codebooks 时使用。
 
 `prompt_ids` 必须是调用方已经准备好的完整 generation prompt。service 不渲染 chat template、
 不插入 instruction，也不追加或校验 response prefix；按 task builder 契约构造的 audio-target
@@ -64,17 +54,9 @@ service 在 padding 前校验每条 request：
 
 - task 必须是 `Task`；prompt 必须是非空一维有符号整数 Tensor，且所有 ID 都属于 runtime
   layout。
-- acoustic codes 必须是非空二维有符号整数 Tensor，codebook 数量和每列范围必须匹配 codec。
-- frame positions 必须是一维有符号整数 Tensor，与 codes 共用 frame 轴，并指向 prompt 内
-  codec-decodable audio token。
-
-`-1` 只由 service 用于 acoustic batch padding，不是合法的 request 输入。非法输入直接报错，
-不会删除 frame、裁剪 code 或降级为无 acoustic prompt 的请求。
-
 ## 执行流程
 
-`generate_responses()` 按 `(target_modality, has_acoustic_prompt)` 分组。每组 prompt 左 padding，
-source frame position 随 padding 宽度平移；输出仍按原始请求顺序排列。
+`generate_responses()` 按 target modality 分组。每组 prompt 左 padding，输出仍按原始请求顺序排列。
 
 ```text
 text target
@@ -85,7 +67,7 @@ text target
 audio target + token-only model
     -> generate_tokens(stop=EOA)
     -> expand token frame spans
-    -> codec.decode(codec codes decoded from audio tokens)
+    -> semantic_codec.decode(semantic codes decoded from audio tokens)
 
 audio target + runtime acoustic side channel + acoustic feature generator
     -> generate_audio_features()
@@ -100,6 +82,8 @@ codec 保留 batch 轴。`full_codec_sequence` 通过 `FlattenedAudioTokenizer` 
 codebooks 而进入 Flow/RVQ acoustic feature generation。flow 与 RVQ 都返回相同的
 `AcousticGeneration`；`model/acoustic=none` 即使搭配 LongCat 这类带 acoustic codebook 的
 codec，也走 token-only decode。
+未配置 `runtime.semantic_codec_artifact` 时 `semantic_codec` 就是原 codec；配置 artifact 后，service
+只替换该 token-only decode 能力，训练数据、tokenizer、layout 和 codec identity 仍来自原 codec。
 
 自回归 cache、sampling、allowed IDs、逐行 stop 状态和 frame condition 收集属于 model。已有行
 生成 stop token 后，后续步骤只对剩余 active rows 执行 backbone 与 sampling；cache 同步收缩，
@@ -110,8 +94,7 @@ runtime。三层不重复推导同一约束。
 ## 训练桥接与文本评估
 
 `generation.batch.requests_from_batch()` 仅供 teacher-forcing 日志使用：它以每行第一个非
-`-100` label 为 prompt 边界，去掉 batch padding，并把可选 source acoustic prompt 恢复为单条
-request。核心 service 不依赖 `ModelBatch`。
+`-100` label 为 prompt 边界并去掉 batch padding。核心 service 不依赖 `ModelBatch`。
 
 `evaluate_text()` 使用 `Task.T2TT` 构造 request，执行 greedy generation；reference NLL 则以
 text modality-local logits 计算，并包含 EOS target。`SpeechToSpeechModule.generate()` 与

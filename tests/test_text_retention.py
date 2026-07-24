@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 import torch
 from anydataset.types import Modality
-from anytrain.idspace import Layout
+from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 
 from speech_to_speech.callback.logging import TextRetentionLogger

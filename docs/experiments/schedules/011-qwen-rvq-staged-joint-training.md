@@ -61,7 +61,6 @@
   并显式统计，不能静默裁剪或丢弃。
 - 不重叠的 model-relative state-dict prefix 组：`backbone.*`、
   `semantic_audio_embedding.*`、`semantic_audio_adapter.*`、
-  `acoustic_prompt_adapter.*` 加裸 `acoustic_prompt_gate`、
   `semantic_audio_output_adapter.*`、`acoustic_decoder.*`。入口断言每个
   `requires_grad` parameter 恰好归属一组；其中 semantic embedding 同时是 audio 输入与 head 权重。
 - 每组 freeze/LR scale、Qwen `top_fraction` 解冻，以及 RVQ 结构性 unused 参数冻结。

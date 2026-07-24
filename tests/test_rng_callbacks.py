@@ -112,8 +112,6 @@ class RNGCallbackTest(unittest.TestCase):
         batch = SimpleNamespace(
             input_ids=torch.ones(1, 2, dtype=torch.long),
             attention_mask=torch.ones(1, 2, dtype=torch.bool),
-            acoustic_prompt=None,
-            acoustic_prompt_mask=None,
             acoustic_target={
                 "semantic_codes": torch.zeros(1, 2, 1, dtype=torch.long),
                 "codes": torch.zeros(1, 2, 1, dtype=torch.long),
@@ -164,7 +162,6 @@ def task_sample_logger_fixture() -> tuple[TaskSampleLogger, object]:
     batch = ModelBatch(
         input_ids=torch.tensor([[1, 2]]),
         token_labels=torch.tensor([[-100, 2]]),
-        acoustic_prompt=None,
         acoustic_target=None,
         tasks=[Task.T2TT],
         pad_token_id=0,

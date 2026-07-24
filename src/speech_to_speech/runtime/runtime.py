@@ -7,18 +7,19 @@ from typing import TYPE_CHECKING, Optional, Union, cast
 
 import torch
 from anydataset.types import AudioView, Modality
-from anytrain.idspace import Layout
+from anytrain.module.idspace import Layout
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .audio_tokenizer import FlattenedAudioTokenizer, NativeAudioTokenizer, TorchCodecBPE
 from .codec import load_codec
 from .special_tokens import Qwen3SpecialToken
-from .types import AudioTokenizer, Backbone, Codec, TextTokenizer
+from .types import AudioTokenizer, Backbone, Codec, SemanticCodec, TextTokenizer
 from .._compat import StrEnum, auto
 
 if TYPE_CHECKING:
     from anytrain.framework.flow_matching import ContinuousFlowRuntime
+    from semantic_acoustic_codec.runtime import CodecBackend
 
 _FLOW_METHODS = frozenset(
     {
@@ -51,6 +52,7 @@ class Config:
     backbone: str = "Qwen/Qwen3-0.6B"
     audio_representation: AudioRepresentation = AudioRepresentation.DECOUPLED
     audio_tokenizer: Optional[Union[str, Path]] = None
+    semantic_codec_artifact: Optional[str] = None
     device: Optional[str] = None
     dtype: Optional[str] = None
     attn_implementation: Optional[str] = None
@@ -68,6 +70,17 @@ class Config:
             raise ValueError(
                 "full codec sequence representation cannot use a BPE audio tokenizer."
             )
+        if self.semantic_codec_artifact is not None:
+            if not self.semantic_codec_artifact:
+                raise ValueError("semantic_codec_artifact must not be empty.")
+            if self.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE:
+                raise ValueError(
+                    "semantic codec artifacts require the decoupled audio representation."
+                )
+            if self.codec != "longcat":
+                raise ValueError(
+                    "semantic codec artifacts currently require the longcat codec."
+                )
         if self.flow_method not in _FLOW_METHODS:
             raise ValueError(f"unsupported flow method: {self.flow_method}")
         if self.flow_nfe <= 0:
@@ -129,6 +142,23 @@ class Runtime:
     @cached_property
     def codec(self) -> Codec:
         return load_codec(self.config.codec, self.config.device)
+
+    @cached_property
+    def semantic_codec(self) -> SemanticCodec:
+        artifact = self.config.semantic_codec_artifact
+        if artifact is None:
+            return self.codec
+        from semantic_acoustic_codec.runtime import SemanticCodecRuntime, load_artifact
+
+        support = load_artifact(
+            Path(artifact).expanduser(),
+            device=self.config.device,
+        )
+        runtime = SemanticCodecRuntime(
+            support,
+            cast("CodecBackend", cast(object, self.codec)),
+        )
+        return cast(SemanticCodec, cast(object, runtime))
 
     @cached_property
     def audio_tokenizer(self) -> AudioTokenizer:

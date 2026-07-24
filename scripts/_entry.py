@@ -9,7 +9,7 @@ from typing import Any, Protocol, TypeVar, cast
 import torch
 from lightning.pytorch.callbacks import Callback
 
-from speech_to_speech.model import AcousticType
+from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.runtime import Config as RuntimeConfig
 
 if __package__:

@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import time
+from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor
 
 from ..datamodule import ModelBatch
-from ..model import FlowModel, RVQModel
 from ..runtime.types import Codec
+
+if TYPE_CHECKING:
+    from ..model.acoustic import FlowModel, RVQModel
 
 
 @torch.no_grad()

@@ -42,12 +42,11 @@ from speech_to_speech.datamodule import (
     TextDatasetName,
 )
 from speech_to_speech.model import (
-    AcousticType,
     AdapterType,
     Config as ModelConfig,
-    DecoderConfig,
     ToyConfig,
 )
+from speech_to_speech.model.acoustic import AcousticType, DecoderConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.stage import (
@@ -702,6 +701,47 @@ class ConfigTest(unittest.TestCase):
                     "overfit",
                     "runtime=longcat_full_sequence",
                     "model/acoustic=rvq",
+                )
+            )
+
+    def test_semantic_codec_artifact_requires_token_only_longcat(self):
+        token = overfit(
+            _compose(
+                "overfit",
+                "runtime=longcat_native",
+                "model/acoustic=none",
+                "runtime.semantic_codec_artifact=/tmp/semantic-codec",
+            )
+        )
+
+        self.assertEqual(
+            token.runtime.semantic_codec_artifact,
+            "/tmp/semantic-codec",
+        )
+        with self.assertRaisesRegex(ValueError, "model/acoustic=none"):
+            overfit(
+                _compose(
+                    "overfit",
+                    "runtime=longcat_native",
+                    "runtime.semantic_codec_artifact=/tmp/semantic-codec",
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "longcat"):
+            overfit(
+                _compose(
+                    "overfit",
+                    "runtime=unicodec",
+                    "model/acoustic=none",
+                    "runtime.semantic_codec_artifact=/tmp/semantic-codec",
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "decoupled"):
+            overfit(
+                _compose(
+                    "overfit",
+                    "runtime=longcat_full_sequence",
+                    "model/acoustic=none",
+                    "runtime.semantic_codec_artifact=/tmp/semantic-codec",
                 )
             )
 
