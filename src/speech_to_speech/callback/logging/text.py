@@ -6,6 +6,7 @@ from typing import Any, Protocol, cast
 from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 
+from ..interval import TrainInterval
 from .._lightning import scalar_experiment, text_experiment
 from ...generation import TextProbe, TextProbeResult
 
@@ -26,17 +27,20 @@ class TextRetentionLogger(Callback):
         self,
         probes: Mapping[str, TextProbe],
         *,
-        every_n_steps: int = 1_000,
+        every_n_steps: int | None = 1_000,
+        every_audio_seconds: float | None = None,
         max_new_tokens: int = 128,
     ) -> None:
         super().__init__()
-        if every_n_steps < 1:
-            raise ValueError("every_n_steps must be positive")
         if max_new_tokens < 1:
             raise ValueError("max_new_tokens must be positive")
 
         self.probes = dict(probes)
         self.every_n_steps = every_n_steps
+        self.interval = TrainInterval(
+            every_n_steps=every_n_steps,
+            every_audio_seconds=every_audio_seconds,
+        )
         self.max_new_tokens = max_new_tokens
         self._baseline_nll: dict[str, float] = {}
 
@@ -52,11 +56,28 @@ class TextRetentionLogger(Callback):
         batch: Any,
         batch_idx: int,
     ) -> None:
-        del outputs, batch, batch_idx
-        if trainer.global_step % self.every_n_steps != 0:
+        del outputs, batch_idx
+        if not self.interval.should_run(trainer, pl_module, batch):
             return
         module = cast(_Module, cast(object, pl_module))
         self._log(trainer, module, baseline=False)
+
+    def state_dict(self) -> dict[str, dict[str, float] | dict[str, float]]:
+        return {
+            "interval": self.interval.state_dict(),
+            "baseline_nll": dict(self._baseline_nll),
+        }
+
+    def load_state_dict(
+        self,
+        state_dict: dict[str, dict[str, float] | dict[str, float]],
+    ) -> None:
+        self.interval.load_state_dict(
+            cast(dict[str, float], state_dict.get("interval", {}))
+        )
+        self._baseline_nll = dict(
+            cast(dict[str, float], state_dict.get("baseline_nll", {}))
+        )
 
     def _log(self, trainer: Trainer, module: _Module, *, baseline: bool) -> None:
         if not trainer.is_global_zero:

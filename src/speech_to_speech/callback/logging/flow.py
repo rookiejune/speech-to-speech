@@ -8,6 +8,7 @@ from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 from torch import Tensor
 
+from ..interval import TrainInterval
 from .._lightning import histogram_experiment, scalar_experiment, text_experiment
 from ...loss.types import LossItem
 
@@ -23,16 +24,19 @@ class FlowMatchingLogger(Callback):
     def __init__(
         self,
         runtime: _FlowRuntime,
-        every_n_steps: int = 100,
+        every_n_steps: int | None = 100,
+        every_audio_seconds: float | None = None,
         time_bucket_count: int = 10,
     ) -> None:
         super().__init__()
-        if every_n_steps < 1:
-            raise ValueError("every_n_steps must be positive")
         if time_bucket_count < 1:
             raise ValueError("time_bucket_count must be positive")
         self.runtime = runtime
         self.every_n_steps = every_n_steps
+        self.interval = TrainInterval(
+            every_n_steps=every_n_steps,
+            every_audio_seconds=every_audio_seconds,
+        )
         self.time_bucket_count = time_bucket_count
 
     def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
@@ -58,8 +62,8 @@ class FlowMatchingLogger(Callback):
         batch: Any,
         batch_idx: int,
     ) -> None:
-        del batch, batch_idx
-        if trainer.global_step % self.every_n_steps != 0:
+        del batch_idx
+        if not self.interval.should_run(trainer, pl_module, batch):
             return
         if not isinstance(outputs, Mapping):
             return
@@ -107,6 +111,12 @@ class FlowMatchingLogger(Callback):
                 float(mean[index]),
                 trainer.global_step,
             )
+
+    def state_dict(self) -> dict[str, dict[str, float]]:
+        return {"interval": self.interval.state_dict()}
+
+    def load_state_dict(self, state_dict: dict[str, dict[str, float]]) -> None:
+        self.interval.load_state_dict(state_dict.get("interval", {}))
 
 
 def _sampler_bound(sampler: object, name: str, default: float) -> float:

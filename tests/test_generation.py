@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 import torch
 from anydataset.types import (
     AudioItem,
+    AudioMeta,
     AudioView,
     Lang,
     Modality,
@@ -24,7 +25,7 @@ from speech_to_speech.callback.logging.task_sample import TaskSampleLogger
 from speech_to_speech.datamodule.module import Config as DataConfig
 from speech_to_speech.datamodule.module import DataModule
 from speech_to_speech.datamodule.types import ACOUSTIC_PAD_ID, ModelBatch
-from speech_to_speech.model import AdapterType, ToyConfig
+from speech_to_speech.model import ToyConfig
 from speech_to_speech.model.acoustic import FlowModel
 from speech_to_speech.model.base import Config as ModelConfig
 from speech_to_speech.model.base import TokenModel
@@ -36,7 +37,10 @@ from speech_to_speech.generation import (
     generate_responses,
 )
 from speech_to_speech.generation.batch import requests_from_batch
-from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
+from speech_to_speech.runtime.audio_tokenizer import (
+    FlattenedAudioTokenizer,
+    NativeAudioTokenizer,
+)
 from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import Runtime
 from speech_to_speech.task import Task
@@ -83,6 +87,10 @@ class _Runtime:
     @property
     def codec_audio_range(self) -> tuple[int, int]:
         return 4, 6
+
+    @property
+    def acoustic_side_channel(self) -> bool:
+        return bool(self.codec.acoustic_codebook_sizes)
 
     @property
     def audio_generation_allowed_ids(self) -> tuple[int, ...]:
@@ -225,6 +233,114 @@ class _UnifiedGenerationModel(_GenerationModel):
     def __init__(self) -> None:
         super().__init__()
         self.runtime.codec = _UnifiedCodec()
+
+
+class _FullSequenceCodec:
+    acoustic_codebook_sizes = (10,)
+    sample_rate = 16_000
+
+    def __init__(self) -> None:
+        self.decode_calls = 0
+        self.decoded_codes: Tensor | None = None
+
+    def decode(self, codes: Tensor) -> Tensor:
+        self.decode_calls += 1
+        self.decoded_codes = codes.clone()
+        return codes.sum(dim=-1).float()
+
+
+class _FullSequenceRuntime:
+    def __init__(self) -> None:
+        self.audio_tokenizer = FlattenedAudioTokenizer(
+            codebook_sizes=(4, 10),
+            codec_name="longcat",
+        )
+        self.codec = _FullSequenceCodec()
+        self.layout = Layout(text=(0, 4), audio=(4, 4 + self.audio_tokenizer.vocab_size + 2))
+        self.pad_token_id = 0
+        self.eos_token_id = 3
+        self.bos_token_id = 1
+        self.boa_token_id = self.codec_audio_range[1]
+        self.eoa_token_id = self.boa_token_id + 1
+
+    @property
+    def acoustic_side_channel(self) -> bool:
+        return False
+
+    @property
+    def codec_audio_range(self) -> tuple[int, int]:
+        start, _ = self.layout.blocks["audio"]
+        return start, start + self.audio_tokenizer.vocab_size
+
+    @property
+    def audio_generation_allowed_ids(self) -> tuple[int, ...]:
+        start, end = self.codec_audio_range
+        return (*range(start, end), self.eoa_token_id)
+
+    def generation_allowed_ids(self, modality: Modality) -> tuple[int, ...]:
+        if modality is Modality.TEXT:
+            return 0, 1, 2, 3
+        return self.audio_generation_allowed_ids
+
+    def is_codec_audio_id(self, token_id: int) -> bool:
+        start, end = self.codec_audio_range
+        return start <= token_id < end
+
+
+class _FullSequenceGenerationModel(TokenModel):
+    def __init__(self) -> None:
+        nn.Module.__init__(self)
+        self.runtime = _FullSequenceRuntime()
+        self.layout = self.runtime.layout
+        self.audio_token_frame_spans = torch.tensor(
+            self.runtime.audio_tokenizer.frame_spans(
+                range(self.runtime.audio_tokenizer.vocab_size)
+            )
+        )
+        self.backbone = SimpleNamespace(
+            get_input_embeddings=lambda: SimpleNamespace(weight=torch.empty(0))
+        )
+        start, _ = self.runtime.codec_audio_range
+        self._tokens = [
+            start + token_id
+            for token_id in self.runtime.audio_tokenizer.encode(
+                torch.tensor([[1, 5], [2, 6]])
+            ).tolist()
+        ]
+        self._tokens.append(self.runtime.eoa_token_id)
+        self._step = 0
+        self.sample_calls = 0
+
+    def generation_step(
+        self,
+        input_ids: Tensor,
+        *,
+        output_hidden_states: bool = False,
+        past_key_values=None,
+        use_cache: bool = False,
+        token_ids: Tensor | None = None,
+        modality: Modality | None = None,
+        **kwargs,
+    ) -> CausalLMOutputWithPast:
+        del kwargs, output_hidden_states, past_key_values, use_cache, token_ids
+        next_id = self._tokens[min(self._step, len(self._tokens) - 1)]
+        self._step += 1
+        if modality is Modality.AUDIO:
+            start, end = self.layout.blocks[Modality.AUDIO.value]
+            logits = torch.full((input_ids.size(0), input_ids.size(1), end - start), float("-inf"))
+            logits[:, -1, next_id - start] = 0
+        else:
+            logits = torch.full(
+                (input_ids.size(0), input_ids.size(1), self.layout.vocab_size),
+                float("-inf"),
+            )
+            logits[:, -1, next_id] = 0
+        return CausalLMOutputWithPast(logits=logits)
+
+    def generate_audio_features(self, **kwargs) -> None:
+        del kwargs
+        self.sample_calls += 1
+        raise AssertionError("full codec sequence must not use acoustic generation")
 
 
 class _RegisteredBackbone(nn.Module):
@@ -423,16 +539,6 @@ class GenerationTest(unittest.TestCase):
             )
 
         request = _request()
-        request["task"] = Task.T2TT
-        with self.assertRaisesRegex(ValueError, "source acoustic prompt"):
-            generate_responses([request], _GenerationModel(), max_new_tokens=1)
-
-        with self.assertRaisesRegex(ValueError, "without acoustic codebooks"):
-            generate_responses(
-                [_request()], _UnifiedGenerationModel(), max_new_tokens=1
-            )
-
-        request = _request()
         request["task"] = cast(Task, "tts")
         with self.assertRaisesRegex(TypeError, "must be a Task"):
             generate_responses([request], _GenerationModel(), max_new_tokens=1)
@@ -512,72 +618,6 @@ class GenerationTest(unittest.TestCase):
                 with self.assertRaisesRegex((TypeError, ValueError), message):
                     generate_responses([request], _GenerationModel(), max_new_tokens=1)
 
-    def test_generation_validates_acoustic_prompt_before_padding(self):
-        invalid = (
-            (
-                {
-                    "codes": torch.empty(0, 1, dtype=torch.long),
-                    "token_positions": torch.empty(0, dtype=torch.long),
-                },
-                "at least one frame",
-            ),
-            (
-                {"codes": torch.tensor([[1, 2]]), "token_positions": torch.tensor([0])},
-                "codec codebooks",
-            ),
-            (
-                {"codes": torch.tensor([[8]]), "token_positions": torch.tensor([0])},
-                "outside its codec codebook",
-            ),
-            (
-                {"codes": torch.tensor([[1.0]]), "token_positions": torch.tensor([0])},
-                "integer ids",
-            ),
-            (
-                {
-                    "codes": torch.tensor([[1]], dtype=torch.uint16),
-                    "token_positions": torch.tensor([0]),
-                },
-                "signed dtype",
-            ),
-            (
-                {
-                    "codes": torch.tensor([[1], [2]]),
-                    "token_positions": torch.tensor([0]),
-                },
-                "frame axis",
-            ),
-            (
-                {
-                    "codes": torch.tensor([[1]]),
-                    "token_positions": torch.tensor([0.0]),
-                },
-                "integer ids",
-            ),
-            (
-                {
-                    "codes": torch.tensor([[1]]),
-                    "token_positions": torch.tensor([0], dtype=torch.uint64),
-                },
-                "signed dtype",
-            ),
-            (
-                {"codes": torch.tensor([[1]]), "token_positions": torch.tensor([-1])},
-                "inside the prompt",
-            ),
-        )
-        for acoustic_prompt, message in invalid:
-            request = _request()
-            request["acoustic_prompt"] = acoustic_prompt
-            with self.subTest(message=message):
-                with self.assertRaisesRegex((TypeError, ValueError), message):
-                    generate_responses([request], _GenerationModel(), max_new_tokens=1)
-
-        request = _request()
-        request["prompt_ids"] = torch.tensor([1, 6])
-        with self.assertRaisesRegex(ValueError, "codec-decodable audio tokens"):
-            generate_responses([request], _GenerationModel(), max_new_tokens=1)
-
     def test_acoustic_codec_without_audio_model_decodes_semantic_tokens(self):
         model = TokenModel(
             _model_config(),
@@ -587,7 +627,6 @@ class GenerationTest(unittest.TestCase):
         request = Request(
             prompt_ids=torch.tensor([1, 2]),
             task=Task.TTS,
-            acoustic_prompt=None,
         )
 
         with patch.object(model, "generate_tokens", return_value=sequence):
@@ -614,28 +653,6 @@ class GenerationTest(unittest.TestCase):
         self.assertIsNotNone(result["audio"])
         self.assertEqual(model.sample_calls, 1)
 
-    def test_acoustic_prompt_adapter_bias_only_affects_prompt_positions(self):
-        rt = _TinyRuntime()
-        model = TokenModel(
-            _model_config(acoustic_prompt_adapter=AdapterType.LINEAR),
-            runtime=rt,
-        ).eval()
-        with torch.no_grad():
-            model.acoustic_prompt_adapter.weight.zero_()
-            model.acoustic_prompt_adapter.bias.fill_(0.25)
-            model.acoustic_prompt_gate.fill_(1)
-
-        acoustic = model._acoustic_prompt_embedding(
-            torch.tensor([[1, 2, 3]]),
-            torch.tensor([[[2], [1]]]),
-            torch.tensor([[1, 1]]),
-            None,
-        )
-
-        self.assertTrue(torch.equal(acoustic[0, 0], torch.zeros(8)))
-        self.assertTrue(torch.equal(acoustic[0, 1], torch.full((8,), 0.25)))
-        self.assertTrue(torch.equal(acoustic[0, 2], torch.zeros(8)))
-
     def test_tiny_qwen_cache_matches_full_recompute(self):
         torch.manual_seed(0)
         rt = _TinyRuntime()
@@ -643,11 +660,8 @@ class GenerationTest(unittest.TestCase):
             _model_config(),
             runtime=rt,
         ).eval()
-        model.acoustic_prompt_gate.data.fill_(1)
         kwargs = {
             "max_new_tokens": 3,
-            "acoustic_prompt_codes": torch.tensor([[[2]]]),
-            "acoustic_prompt_positions": torch.tensor([[0]]),
             "allowed_token_ids": tuple(range(8)),
             "do_sample": False,
         }
@@ -729,11 +743,8 @@ class GenerationTest(unittest.TestCase):
 
     def test_unified_audio_generation_decodes_semantic_tokens_directly(self):
         model = _UnifiedGenerationModel()
-        request = _request()
-        request["acoustic_prompt"] = None
-
         result = generate_responses(
-            [request],
+            [_request()],
             model,
             max_new_tokens=3,
             do_sample=False,
@@ -746,15 +757,46 @@ class GenerationTest(unittest.TestCase):
         self.assertEqual(model.sample_calls, 0)
         self.assertEqual(model.runtime.codec.decode_calls, 1)
 
+    def test_full_codec_sequence_generation_decodes_complete_codes(self):
+        model = _FullSequenceGenerationModel()
+        request = Request(prompt_ids=torch.tensor([1]), task=Task.TTS)
+
+        result = generate_responses(
+            [request],
+            model,
+            max_new_tokens=8,
+            do_sample=False,
+            use_cache=False,
+        )[0]
+
+        start, _ = model.runtime.codec_audio_range
+        expected_local = model.runtime.audio_tokenizer.encode(
+            torch.tensor([[1, 5], [2, 6]])
+        )
+        expected_response = expected_local + start
+        self.assertTrue(torch.equal(result["response_ids"], expected_response))
+        self.assertIsNotNone(result["audio"])
+        audio = result["audio"]
+        if audio is None:
+            self.fail("audio generation did not return an audio payload")
+        self.assertIsNone(audio["features"])
+        self.assertEqual(model.sample_calls, 0)
+        self.assertEqual(model.runtime.codec.decode_calls, 1)
+        self.assertTrue(
+            torch.equal(
+                model.runtime.codec.decoded_codes,
+                torch.tensor([[[1, 5], [2, 6]]]),
+            )
+        )
+        self.assertTrue(torch.equal(audio["waveform"], torch.tensor([6.0, 8.0])))
+
     def test_generation_batches_variable_length_requests(self):
         model = _UnifiedGenerationModel()
         frame_spans = model.runtime.audio_tokenizer.frame_spans
         model.runtime.audio_tokenizer.frame_spans = Mock(wraps=frame_spans)
         first = _request()
-        first["acoustic_prompt"] = None
         second = _request()
         second["prompt_ids"] = torch.tensor([2, 1, 6])
-        second["acoustic_prompt"] = None
 
         results = generate_responses(
             [first, second], model, max_new_tokens=3, do_sample=False
@@ -787,10 +829,8 @@ class GenerationTest(unittest.TestCase):
 
     def test_batch_generation_tracks_stop_per_row(self):
         requests = [
-            Request(prompt_ids=torch.tensor([1]), task=Task.T2TT, acoustic_prompt=None),
-            Request(
-                prompt_ids=torch.tensor([2, 1]), task=Task.T2TT, acoustic_prompt=None
-            ),
+            Request(prompt_ids=torch.tensor([1]), task=Task.T2TT),
+            Request(prompt_ids=torch.tensor([2, 1]), task=Task.T2TT),
         ]
 
         for use_cache in (False, True):
@@ -821,26 +861,22 @@ class GenerationTest(unittest.TestCase):
             do_sample=False,
         )[0]
 
-        self.assertEqual([call[1] for call in model.calls], [True, False, False])
-        self.assertEqual([call[2] for call in model.calls], [3, 3, 3])
+        self.assertEqual([call[1] for call in model.calls], [False, False, False])
+        self.assertEqual([call[2] for call in model.calls], [0, 0, 0])
         self.assertTrue(
             torch.equal(
                 model.condition,
-                torch.tensor([[[3.0, 2.0], [3.0, 3.0]]]),
+                torch.tensor([[[0.0, 2.0], [0.0, 3.0]]]),
             )
         )
         self.assertEqual(model.sample_calls, 1)
         self.assertEqual(model.runtime.codec.decode_calls, 1)
         self.assertIsNotNone(result["audio"])
 
-    def test_teacher_forcing_adapter_removes_target_and_acoustic_padding(self):
+    def test_teacher_forcing_adapter_removes_target_padding(self):
         batch = ModelBatch(
             input_ids=torch.tensor([[1, 6, 4, 7], [2, 6, 5, 7]]),
             token_labels=torch.tensor([[-100, -100, 4, 7], [-100, -100, 5, 7]]),
-            acoustic_prompt={
-                "codes": torch.tensor([[[3], [ACOUSTIC_PAD_ID]], [[2], [1]]]),
-                "token_positions": torch.tensor([[0, ACOUSTIC_PAD_ID], [0, 1]]),
-            },
             acoustic_target=None,
             tasks=[Task.S2ST, Task.S2ST],
             pad_token_id=0,
@@ -849,18 +885,12 @@ class GenerationTest(unittest.TestCase):
         requests = requests_from_batch(batch)
 
         self.assertTrue(torch.equal(requests[0]["prompt_ids"], torch.tensor([1, 6])))
-        first_acoustic = requests[0]["acoustic_prompt"]
-        second_acoustic = requests[1]["acoustic_prompt"]
-        self.assertIsNotNone(first_acoustic)
-        self.assertIsNotNone(second_acoustic)
-        self.assertTrue(torch.equal(first_acoustic["codes"], torch.tensor([[3]])))
-        self.assertTrue(torch.equal(second_acoustic["codes"], torch.tensor([[2], [1]])))
+        self.assertTrue(torch.equal(requests[1]["prompt_ids"], torch.tensor([2, 6])))
 
     def test_task_sample_logger_reuses_one_generation_result(self):
         batch = ModelBatch(
             input_ids=torch.tensor([[1, 6, 4, 7]]),
             token_labels=torch.tensor([[-100, -100, 4, 7]]),
-            acoustic_prompt=None,
             acoustic_target=None,
             tasks=[Task.TTS],
             pad_token_id=0,
@@ -893,7 +923,8 @@ class GenerationTest(unittest.TestCase):
                     meta={TextMeta.LANG: Lang.EN},
                 ),
                 (Role.TARGET, Modality.AUDIO): AudioItem(
-                    views={AudioView.LONGCAT: torch.zeros(1, 2, dtype=torch.long)}
+                    views={AudioView.LONGCAT: torch.zeros(1, 2, dtype=torch.long)},
+                    meta={AudioMeta.DURATION: 0.02},
                 ),
             }
         ]
@@ -928,7 +959,7 @@ class GenerationTest(unittest.TestCase):
             SimpleNamespace(codec_name="longcat"),
             {Task.TTS: 1.0},
         )
-        with patch("zhuyin.datasets.wmt19_tts.wmt19_tts_codec", return_value=samples):
+        with patch("speech_to_speech.datamodule.module.load_dataset", return_value=samples):
             datamodule.setup()
         trainer = SimpleNamespace(is_global_zero=True, datamodule=datamodule)
         logger = TaskSampleLogger([1, 0], every_n_steps=1)
@@ -941,7 +972,6 @@ class GenerationTest(unittest.TestCase):
         batch = ModelBatch(
             input_ids=torch.tensor([[1, 2]]),
             token_labels=torch.tensor([[-100, 2]]),
-            acoustic_prompt=None,
             acoustic_target=None,
             tasks=[Task.T2TT],
             pad_token_id=0,
@@ -969,7 +999,6 @@ class GenerationTest(unittest.TestCase):
         batch = ModelBatch(
             input_ids=torch.tensor([[1, 2]]),
             token_labels=torch.tensor([[-100, 2]]),
-            acoustic_prompt=None,
             acoustic_target=None,
             tasks=[Task.T2TT],
             pad_token_id=0,
@@ -1002,14 +1031,10 @@ class GenerationTest(unittest.TestCase):
         module.generate.assert_not_called()
 
 
-def _model_config(
-    *,
-    acoustic_prompt_adapter: AdapterType | None = None,
-) -> ModelConfig:
+def _model_config() -> ModelConfig:
     return ModelConfig(
         semantic_audio_adapter=None,
         semantic_audio_output_adapter=None,
-        acoustic_prompt_adapter=acoustic_prompt_adapter,
         toy=ToyConfig(
             hidden_size=8,
             intermediate_size=16,
@@ -1024,10 +1049,6 @@ def _request() -> Request:
     return Request(
         prompt_ids=torch.tensor([4, 6]),
         task=Task.S2ST,
-        acoustic_prompt={
-            "codes": torch.tensor([[3]]),
-            "token_positions": torch.tensor([0]),
-        },
     )
 
 
@@ -1038,7 +1059,8 @@ def _raw_sample():
                 AudioView.LONGCAT: torch.tensor(
                     [[offset, offset + 1], [offset + 2, offset + 3]]
                 )
-            }
+            },
+            meta={AudioMeta.DURATION: 0.04},
         )
 
     return {

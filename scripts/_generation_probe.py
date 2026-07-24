@@ -38,7 +38,6 @@ def run(
                 "input_tokens": int(input_ids.size(1)),
                 "attention_tokens": int(attention_mask.size(1)),
                 "has_past": kwargs.get("past_key_values") is not None,
-                "has_acoustic_prompt": kwargs.get("acoustic_prompt_codes") is not None,
             }
         )
         output = original_step(input_ids, **kwargs)
@@ -94,18 +93,11 @@ def second_step(
 ) -> dict[str, Any]:
     device = model.backbone.get_input_embeddings().weight.device
     prompt = request["prompt_ids"].to(device=device)[None]
-    acoustic_prompt = request["acoustic_prompt"]
-    if acoustic_prompt is None:
-        raise RuntimeError("generation request has no source acoustic prompt.")
-    acoustic_codes = acoustic_prompt["codes"].to(device=device)[None]
-    acoustic_positions = acoustic_prompt["token_positions"].to(device=device)[None]
 
     def first_output():
         return model(
             prompt,
             attention_mask=torch.ones_like(prompt, dtype=torch.bool),
-            acoustic_prompt_codes=acoustic_codes,
-            acoustic_prompt_positions=acoustic_positions,
             output_hidden_states=True,
             use_cache=True,
         )
@@ -163,16 +155,12 @@ def second_step(
     full_with_cache = model(
         sequence,
         attention_mask=attention_mask,
-        acoustic_prompt_codes=acoustic_codes,
-        acoustic_prompt_positions=acoustic_positions,
         output_hidden_states=True,
         use_cache=True,
     )
     full_without_cache = model(
         sequence,
         attention_mask=attention_mask,
-        acoustic_prompt_codes=acoustic_codes,
-        acoustic_prompt_positions=acoustic_positions,
         output_hidden_states=True,
         use_cache=False,
     )

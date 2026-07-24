@@ -25,9 +25,6 @@ class GenerationStepModel(Protocol):
         input_ids: Tensor,
         *,
         attention_mask: Tensor,
-        acoustic_prompt_codes: Tensor | None,
-        acoustic_prompt_positions: Tensor | None,
-        acoustic_prompt_mask: Tensor | None,
         output_hidden_states: bool,
         token_ids: Tensor | None,
         modality: Modality | None,
@@ -43,9 +40,6 @@ def generate_sequence(
     max_new_tokens: int,
     temperature: float,
     top_p: float,
-    acoustic_prompt_codes: Tensor | None,
-    acoustic_prompt_positions: Tensor | None,
-    acoustic_prompt_mask: Tensor | None,
     prompt_attention_mask: Tensor | None,
     stop_token_id: int | None,
     generation_modality: Modality | None,
@@ -95,7 +89,6 @@ def generate_sequence(
     batch_size = prompt_ids.size(0)
     active_rows = torch.arange(batch_size, dtype=torch.long, device=prompt_ids.device)
     for _ in range(max_new_tokens):
-        inject_acoustic = past_key_values is None
         active_attention_mask = (
             attention_mask
             if active_rows.numel() == batch_size
@@ -104,17 +97,6 @@ def generate_sequence(
         output = model.generation_step(
             input_ids,
             attention_mask=active_attention_mask[:, :length],
-            acoustic_prompt_codes=(
-                _rows(acoustic_prompt_codes, active_rows) if inject_acoustic else None
-            ),
-            acoustic_prompt_positions=(
-                _rows(acoustic_prompt_positions, active_rows)
-                if inject_acoustic
-                else None
-            ),
-            acoustic_prompt_mask=(
-                _rows(acoustic_prompt_mask, active_rows) if inject_acoustic else None
-            ),
             output_hidden_states=collect_audio_condition,
             token_ids=generation_token_ids,
             modality=generation_modality,

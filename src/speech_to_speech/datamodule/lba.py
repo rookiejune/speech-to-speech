@@ -3,16 +3,17 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, Optional, Union
+from typing import Literal, Optional
 
 from anydataset.types import Sample as RawSample
+from anydataset.types import AudioItem, AudioMeta, Modality, Role
 from lba import LBA
 
 from ..task import Task
 from .parser import parse_sample, parse_text_sample
 from .protocol import DataRuntime, TextRuntime
 from .sample import build_sample, build_text_sample
-from .types import AcousticPrompt, AcousticTarget, ModelSample
+from .types import AcousticTarget, ModelSample
 
 PlannerMode = Literal["quality", "throughput", "latency"]
 
@@ -87,6 +88,34 @@ def speech_length(
     return max(_cost(build_sample(pair, task, runtime), config) for task in tasks)
 
 
+def metadata_speech_length(
+    sample: RawSample,
+    *,
+    frame_rate: float,
+    tasks: Sequence[Task],
+    config: LBAConfig,
+) -> int:
+    if isinstance(frame_rate, bool) or not isinstance(frame_rate, (int, float)):
+        raise TypeError("frame_rate must be a number.")
+    if not math.isfinite(frame_rate) or frame_rate <= 0:
+        raise ValueError("frame_rate must be finite and positive.")
+    if config.max_sequence_tokens is not None:
+        raise ValueError(
+            "metadata LBA length cannot enforce max_sequence_tokens; unset it "
+            "or use the parsing-based speech_length path."
+        )
+    costs: list[int] = []
+    for task in tasks:
+        source_frames = _task_frames(sample, task, source=True, frame_rate=frame_rate)
+        target_frames = _task_frames(sample, task, source=False, frame_rate=frame_rate)
+        _cap(source_frames, config.max_source_frames, name="source frames")
+        _cap(target_frames, config.max_target_frames, name="target frames")
+        costs.append(math.ceil((source_frames + target_frames) / config.frame_unit))
+    if not costs:
+        raise ValueError("LBA speech length requires at least one task.")
+    return max(costs)
+
+
 def text_length(
     sample: RawSample,
     *,
@@ -100,7 +129,7 @@ def text_length(
 
 def _cost(sample: ModelSample, config: LBAConfig) -> int:
     tokens = sample.input_ids.numel()
-    source_frames = _frames(sample.acoustic_prompt)
+    source_frames = 0
     target_frames = _frames(sample.acoustic_target)
     _cap(tokens, config.max_sequence_tokens, name="sequence tokens")
     _cap(source_frames, config.max_source_frames, name="source frames")
@@ -110,10 +139,48 @@ def _cost(sample: ModelSample, config: LBAConfig) -> int:
     )
 
 
-def _frames(value: Union[AcousticPrompt, AcousticTarget, None]) -> int:
+def _frames(value: AcousticTarget | None) -> int:
     if value is None:
         return 0
     return value["codes"].size(0)
+
+
+def _task_frames(
+    sample: RawSample,
+    task: Task,
+    *,
+    source: bool,
+    frame_rate: float,
+) -> int:
+    if source:
+        if task.source_modality is not Modality.AUDIO:
+            return 0
+        role = Role.SOURCE if task.uses_source_role else Role.TARGET
+    else:
+        if task.target_modality is not Modality.AUDIO:
+            return 0
+        role = Role.TARGET
+    return _audio_frames(sample, role, frame_rate=frame_rate)
+
+
+def _audio_frames(sample: RawSample, role: Role, *, frame_rate: float) -> int:
+    item = sample.get((role, Modality.AUDIO))
+    if item is None:
+        return 0
+    if not isinstance(item, AudioItem):
+        raise TypeError(f"{role.value} audio sample item must be an AudioItem.")
+    value = item.meta.get(AudioMeta.DURATION)
+    if value is None:
+        raise ValueError(
+            f"{role.value} audio sample is missing AudioMeta.DURATION; "
+            "migrate the prepared audio store with duration metadata."
+        )
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("AudioMeta.DURATION must be a number of seconds.")
+    duration = float(value)
+    if not math.isfinite(duration) or duration < 0:
+        raise ValueError("AudioMeta.DURATION must be finite and non-negative.")
+    return round(duration * frame_rate)
 
 
 def _cap(value: int, limit: int | None, *, name: str) -> None:
@@ -123,4 +190,11 @@ def _cap(value: int, limit: int | None, *, name: str) -> None:
         )
 
 
-__all__ = ["LBA", "LBAConfig", "PlannerMode", "speech_length", "text_length"]
+__all__ = [
+    "LBA",
+    "LBAConfig",
+    "PlannerMode",
+    "metadata_speech_length",
+    "speech_length",
+    "text_length",
+]

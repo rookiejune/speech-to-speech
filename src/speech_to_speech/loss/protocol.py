@@ -16,9 +16,6 @@ class TokenObjectiveModel(Protocol):
         input_ids: Tensor,
         *,
         attention_mask: Tensor | None = None,
-        acoustic_prompt_codes: Tensor | None = None,
-        acoustic_prompt_positions: Tensor | None = None,
-        acoustic_prompt_mask: Tensor | None = None,
     ) -> Tensor: ...
 
     def token_logits(

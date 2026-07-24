@@ -1,6 +1,5 @@
 semantic_audio_adapter: linear
 semantic_audio_output_adapter: linear
-acoustic_prompt_adapter: linear
 toy:
   hidden_size: 32
   intermediate_size: 64

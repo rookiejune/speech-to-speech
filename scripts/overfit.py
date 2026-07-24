@@ -124,6 +124,7 @@ def run(config: OverfitConfig) -> None:
             codec,
             output_dir,
             every_n_steps=max(1, config.train.max_steps // 5),
+            every_audio_seconds=config.callbacks.evaluation.every_audio_seconds,
             seeds=range(4),
         )
     summary = LossSummary()
@@ -168,6 +169,7 @@ def run(config: OverfitConfig) -> None:
             TaskSampleLogger(
                 [config.data.sample_index],
                 every_n_steps=config.callbacks.task_sample.every_n_steps,
+                every_audio_seconds=config.callbacks.task_sample.every_audio_seconds,
             ),
         )
     if evaluation is not None:

@@ -36,12 +36,7 @@ def benchmark_batch(
     return {
         "batch_size": len(requests),
         "prompt_tokens": [int(request["prompt_ids"].numel()) for request in requests],
-        "source_acoustic_frames": [
-            0
-            if request["acoustic_prompt"] is None
-            else int(request["acoustic_prompt"]["codes"].size(0))
-            for request in requests
-        ],
+        "source_acoustic_frames": [0 for _ in requests],
         "response_tokens": [
             int(result["response_ids"].numel()) for result in batch_results
         ],

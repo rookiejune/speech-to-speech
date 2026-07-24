@@ -7,6 +7,7 @@ from typing import Optional, cast
 import torch
 from anydataset.types import (
     AudioItem,
+    AudioMeta,
     AudioView,
     Lang,
     Modality,
@@ -78,6 +79,7 @@ class ToyDataset(Dataset[Sample]):
             raise ValueError(f"unsupported toy dataset codec: {codec_name}") from error
         self.samples = config.toy_samples
         self.frames = config.toy_frames
+        self.frame_rate = codec.frame_rate
         self.codebook_sizes = _codebook_sizes(self.view, codec)
 
     def __len__(self) -> int:
@@ -107,7 +109,10 @@ class ToyDataset(Dataset[Sample]):
             (steps + offset + codebook) % size
             for codebook, size in enumerate(self.codebook_sizes)
         ]
-        return AudioItem(views={self.view: torch.stack(columns, dim=-1)})
+        return AudioItem(
+            views={self.view: torch.stack(columns, dim=-1)},
+            meta={AudioMeta.DURATION: self.frames / self.frame_rate},
+        )
 
 
 def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Sample]:

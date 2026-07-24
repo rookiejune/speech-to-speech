@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from functools import cached_property
 from typing import TypeVar, TypedDict, Union
@@ -40,6 +41,7 @@ class Speech:
     audio_token_ids: Tensor
     audio_token_spans: Tensor
     language: Language
+    duration_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if self.semantic_codes.dim() != 2:
@@ -57,6 +59,14 @@ class Speech:
             raise ValueError("audio token ids and spans must be aligned 1D tensors.")
         if int(self.audio_token_spans.sum().item()) != self.semantic_codes.size(0):
             raise ValueError("audio token spans must cover all semantic frames.")
+        if self.duration_seconds is not None:
+            if isinstance(self.duration_seconds, bool) or not isinstance(
+                self.duration_seconds,
+                (int, float),
+            ):
+                raise TypeError("speech duration_seconds must be a number or None.")
+            if not math.isfinite(float(self.duration_seconds)) or self.duration_seconds < 0:
+                raise ValueError("speech duration_seconds must be finite and non-negative.")
 
 
 @dataclass
@@ -83,11 +93,6 @@ class TextPair:
     target: Text
 
 
-class AcousticPrompt(TypedDict):
-    codes: Tensor
-    token_positions: Tensor
-
-
 class AcousticTarget(TypedDict):
     semantic_codes: Tensor
     codes: Tensor
@@ -98,19 +103,19 @@ class AcousticTarget(TypedDict):
 class ModelSample:
     input_ids: Tensor
     token_labels: Tensor
-    acoustic_prompt: AcousticPrompt | None
     acoustic_target: AcousticTarget | None
     task: Task
+    audio_seconds: float = 0.0
 
 
 @dataclass
 class ModelBatch:
     input_ids: Tensor
     token_labels: Tensor
-    acoustic_prompt: AcousticPrompt | None
     acoustic_target: AcousticTarget | None
     tasks: list[Task]
     pad_token_id: int
+    audio_seconds: Tensor | None = None
 
     def __post_init__(self) -> None:
         if self.input_ids.dim() != 2 or self.token_labels.shape != self.input_ids.shape:
@@ -128,6 +133,12 @@ class ModelBatch:
             raise ValueError("ModelBatch requires at least one row.")
         if len(self.tasks) != batch_size:
             raise ValueError("ModelBatch tasks must provide one Task per row.")
+        if self.audio_seconds is None:
+            self.audio_seconds = self.input_ids.new_zeros(
+                batch_size,
+                dtype=torch.float32,
+            )
+        _validate_audio_seconds(self.audio_seconds, batch_size)
         if any(not isinstance(task, Task) for task in self.tasks):
             raise TypeError("ModelBatch tasks must contain Task values.")
         signatures = {
@@ -137,21 +148,11 @@ class ModelBatch:
             raise ValueError(
                 "all samples in a batch must use the same source and target modalities."
             )
-        source_modality, target_modality = next(iter(signatures))
-        if source_modality is not Modality.AUDIO and self.acoustic_prompt is not None:
-            raise ValueError(
-                "only audio-source tasks may provide acoustic prompt fields."
-            )
+        _, target_modality = next(iter(signatures))
         if target_modality is Modality.TEXT and self.acoustic_target is not None:
             raise ValueError(
                 "text-target tasks must not provide acoustic target fields."
             )
-        _validate_batch_acoustic(
-            self.input_ids,
-            self.acoustic_prompt,
-            name="acoustic prompt",
-            minimum_position=0,
-        )
         _validate_batch_acoustic(
             self.input_ids,
             self.acoustic_target,
@@ -174,23 +175,15 @@ class ModelBatch:
         return cls(
             input_ids=_pad([sample.input_ids for sample in samples], pad_token_id),
             token_labels=_pad([sample.token_labels for sample in samples], -100),
-            acoustic_prompt=_prompt([sample.acoustic_prompt for sample in samples]),
             acoustic_target=_target([sample.acoustic_target for sample in samples]),
             tasks=[sample.task for sample in samples],
             pad_token_id=pad_token_id,
+            audio_seconds=_audio_seconds(samples),
         )
 
     @cached_property
     def attention_mask(self) -> Tensor:
         return self.input_ids != self.pad_token_id
-
-    @cached_property
-    def acoustic_prompt_mask(self) -> Tensor | None:
-        if self.acoustic_prompt is None:
-            return None
-        return (self.acoustic_prompt["codes"] != ACOUSTIC_PAD_ID).all(dim=-1) & (
-            self.acoustic_prompt["token_positions"] >= 0
-        )
 
     @cached_property
     def acoustic_target_mask(self) -> Tensor | None:
@@ -200,13 +193,16 @@ class ModelBatch:
         return (self.acoustic_target["token_positions"] >= 0) & code_mask
 
     def pin_memory(self) -> ModelBatch:
+        audio_seconds = self.audio_seconds
+        if audio_seconds is None:
+            raise RuntimeError("ModelBatch audio_seconds is unavailable after validation.")
         return ModelBatch(
             input_ids=self.input_ids.pin_memory(),
             token_labels=self.token_labels.pin_memory(),
-            acoustic_prompt=_pin_prompt(self.acoustic_prompt),
             acoustic_target=_pin_target(self.acoustic_target),
             tasks=list(self.tasks),
             pad_token_id=self.pad_token_id,
+            audio_seconds=audio_seconds.pin_memory(),
         )
 
 
@@ -218,18 +214,6 @@ def _pad(values: list[Tensor], padding_value: int) -> Tensor:
         values,
         batch_first=True,
         padding_value=padding_value,
-    )
-
-
-def _prompt(values: list[AcousticPrompt | None]) -> AcousticPrompt | None:
-    prompts = _present(values)
-    if prompts is None:
-        return None
-    return AcousticPrompt(
-        codes=_pad([value["codes"] for value in prompts], ACOUSTIC_PAD_ID),
-        token_positions=_pad(
-            [value["token_positions"] for value in prompts], ACOUSTIC_PAD_ID
-        ),
     )
 
 
@@ -248,15 +232,6 @@ def _target(values: list[AcousticTarget | None]) -> AcousticTarget | None:
     )
 
 
-def _pin_prompt(value: AcousticPrompt | None) -> AcousticPrompt | None:
-    if value is None:
-        return None
-    return AcousticPrompt(
-        codes=value["codes"].pin_memory(),
-        token_positions=value["token_positions"].pin_memory(),
-    )
-
-
 def _pin_target(value: AcousticTarget | None) -> AcousticTarget | None:
     if value is None:
         return None
@@ -265,6 +240,24 @@ def _pin_target(value: AcousticTarget | None) -> AcousticTarget | None:
         codes=value["codes"].pin_memory(),
         token_positions=value["token_positions"].pin_memory(),
     )
+
+
+def _audio_seconds(samples: list[ModelSample]) -> Tensor:
+    return samples[0].input_ids.new_tensor(
+        [sample.audio_seconds for sample in samples],
+        dtype=torch.float32,
+    )
+
+
+def _validate_audio_seconds(value: Tensor, batch_size: int) -> None:
+    if not isinstance(value, Tensor):
+        raise TypeError("ModelBatch audio_seconds must be a Tensor.")
+    if value.shape != (batch_size,):
+        raise ValueError("ModelBatch audio_seconds must have shape [batch].")
+    if value.dtype == torch.bool or value.is_complex():
+        raise TypeError("ModelBatch audio_seconds must use a real numeric dtype.")
+    if not bool(torch.isfinite(value).all().item()) or bool(value.lt(0).any().item()):
+        raise ValueError("ModelBatch audio_seconds must be finite and non-negative.")
 
 
 T = TypeVar("T")
@@ -286,15 +279,6 @@ def _validate_sample(sample: ModelSample, pad_token_id: int) -> None:
     ):
         raise ValueError(
             "sample input ids and token labels must be aligned 1D tensors."
-        )
-
-    if sample.acoustic_prompt is not None:
-        _validate_acoustic_pair(
-            sample.input_ids,
-            sample.acoustic_prompt["codes"],
-            sample.acoustic_prompt["token_positions"],
-            name="acoustic prompt",
-            pad_token_id=pad_token_id,
         )
 
     target = sample.acoustic_target
@@ -331,7 +315,7 @@ def _validate_sample(sample: ModelSample, pad_token_id: int) -> None:
 
 def _validate_batch_acoustic(
     input_ids: Tensor,
-    value: AcousticPrompt | AcousticTarget | None,
+    value: AcousticTarget | None,
     *,
     name: str,
     minimum_position: int,

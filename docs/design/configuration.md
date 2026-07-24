@@ -17,38 +17,26 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
   production/fixed-sample experiment 默认仍使用 WMT19 TTS prepared data。
 - `pl_module`：完整映射 `pl_module.Config` 的 learning rate 与 weight decay；不再使用含义重复的
   `optimizer` 组。
-- `codec_oracle`：完整映射 `codec_oracle.Config`，统一拥有 objective、initialization、target
-  normalization、decoder、optimizer 参数和 `codec_oracle.DataConfig`。LBA 是该模块的 data 能力，
-  不再使用顶层 `oracle`、`init` 或 `data/oracle` 组。
+
+Acoustic-only codec screening 已迁入 `semantic-acoustic-codec`。本仓库不再维护对应的 Hydra root、
+job wrapper 或 config schema；历史实验记录仍保存在 `docs/experiments/` 中。
 
 `trainer`、`logging`、`callback` 与 `experiment` 属于 Lightning/Hydra 运行编排，可以没有同名
 `src` 包。overfit 的 sample index 和 train budget 位于 experiment；数据源通过公开
 `DatasetConfig` 选择。overfit 的 `callbacks.evaluation.enabled` 控制声学生成评估；真实
-fixed-sample experiment 默认启用，随机输出不构成质量结论的 `toy_smoke` 显式关闭。oracle
-callbacks 总是成套使用，因此合并为单个 preset。共享 `callback/performance` preset 只暴露开关、
+fixed-sample experiment 默认启用，随机输出不构成质量结论的 `toy_smoke` 显式关闭。共享
+`callback/performance` preset 只暴露开关、
 硬件峰值 override、记录 cadence、warmup、窗口、CUDA 同步和分布式起点对齐；训练 dtype 与 FLOPs
 口径由实际入口和 provider 决定，不作为可脱离模型配置的 Hydra 字段。
+speech-to-speech 自有日志 callback 默认仍按 `every_n_steps` 触发；需要让 expensive callback 跟随
+实际处理音频量时，配置对应的 `every_audio_seconds`，入口会用 `ModelBatch.audio_seconds` 统计 DDP
+全局 processed audio seconds。该字段只适用于消费 `ModelBatch` 的项目 callback，不进入 anytrain
+的 task-agnostic callback 契约。
 
 ## 生产默认与完整链路测试
 
-裸 `scripts/codec_oracle.py` 组合 `configs/codec_oracle.yaml` 的生产训练默认：prepared dataset
-不设 `sample_limit` 或额外的 `max_seconds`，启用 LBA，训练 1,000,000 steps，并由默认 trainer 使用
-`bf16-mixed`；LBA 的 8 秒 batch budget 同时是单样本硬上限，默认 `overlong=error` 明确暴露未清洗
-样本，调用方可显式选择 `filter` 或 `truncate`。入口使用 8 个持久 worker、pinned memory 和
-4-batch LBA prefetch；oracle sample logging 与 checkpoint archive 都每 10,000 steps 触发。该入口不是 smoke test；
-需要短验收时必须显式选择 experiment，避免生产默认被测试预算污染。
-
-codec oracle 默认组合 `runtime=longcat_native`，即 prepared semantic code 直接作为 frame-level
-condition。需要筛选 CodecBPE token 条件时，显式覆写 `runtime.audio_tokenizer=/path/to/bpe` 或选择
-等价 runtime preset；入口会保留 native prepared codes 作为 acoustic target，并将 BPE token embedding
-按 `frame_spans()` repeat 到同一 frame 轴。BPE artifact 路径不应直接拼进 `output_subdir`；正式实验应
-显式给出可读的 tokenizer flavor 子目录，避免与 native oracle 输出相互覆盖。
-
-codec oracle 默认启用 `anytrain.PerformanceCallback`，通过
-`codec_oracle.TrainingFlops` 按当前 local-rank batch 估算训练 FLOPs；硬件峰值默认由 anytrain 按
-设备和实际 compute dtype 推断，特殊机器可覆盖 `callbacks.performance.hardware_peak_flops`。生产
-配置每 100 optimizer steps 记录一次，跳过前 20 steps，并使用最近 100 steps 的 FLOPs/time 总和
-计算 MFU。四个 oracle smoke experiment 显式改为逐步记录、无 warmup、2-step 窗口。
+Acoustic-only codec screening 的生产默认、smoke budget 和 MFU provider 由
+`semantic-acoustic-codec` 维护。本仓库的生产默认只覆盖 joint token/Flow/RVQ 训练入口。
 
 联合 token/Flow/RVQ 训练的 overfit root config 保持 `callbacks.performance.enabled: false`，避免短
 fixed-sample 验收默认承担性能测试。显式启用时必须同时关闭 task sample logging，例如
@@ -80,10 +68,6 @@ Hydra metadata 与 `metrics.json` 写入 `output_dir`；TensorBoard/CSV logger �
 
 完整链路实验分别负责其 composition、数据范围、trainer、callback 和 step budget：
 
-- `acoustic_oracle_smoke`：LongCat 默认策略两步验收。
-- `acoustic_oracle_ddp_lba_smoke`：LongCat 显式 DDP LBA 两步验收。
-- `acoustic_oracle_rvq_smoke`：LongCat RVQ oracle 默认策略两步验收。
-- `acoustic_oracle_rvq_ddp_lba_smoke`：LongCat RVQ oracle 显式 DDP LBA 两步验收。
 - `unicodec_overfit`：UniCodec fixed-sample 100-step overfit。
 - `unicodec_ddp_smoke`：UniCodec 显式 DDP 两步验收。
 - `overfit`：TTS/S2ST fixed-sample 完整链路实验。
@@ -109,31 +93,23 @@ training job 传递 `repo_output_root`、相对 `output_subdir` 和 `"$@"` 参�
 training wrapper，调用 `scripts/train.py`，默认 `trainer=static_ddp`，并可用
 `SPEECH_TO_SPEECH_STAGE=stage_1..stage_4` 选择阶段。
 
-`jobs/005/08-11` 是 LongCat Flow/RVQ 的正式默认策略与显式 DDP 入口。它们不选择 experiment，
-直接继承 root config 的完整数据、LBA、1,000,000-step 预算和生产 callback 间隔；只选择
-objective、trainer 和隔离的输出目录。wrapper 分别提供单卡、两卡可见设备默认值，DDP 入口显式
-使用已验收的静态 `ddp` strategy。
-
 ## 入口边界
 
 `scripts/_config.py` 只定义入口专属结构，例如 task、Trainer、logging、callback 与 flow/RVQ
 acoustic config；`speech_to_speech.pl_module.composition` 负责 token/flow/RVQ 的
-model/objective/module 组装；`speech_to_speech.codec_oracle.factory` 负责 oracle runtime、
-model、screening wrapper 与 metadata 构造；`scripts/_entry.py` 只放 overfit/train 共享的
+model/objective/module 组装；`scripts/_entry.py` 只放 overfit/train 共享的
 runtime device、Trainer、performance callback 与 acoustic composition 边界校验。
-`runtime.Config`、`model.Config`、`pl_module.Config`、`model.DecoderConfig` 和
-`codec_oracle.Config` 直接进入 root schema，不重复声明字段。OmegaConf 对字符串枚举只接受成员
+`runtime.Config`、`model.Config`、`pl_module.Config` 和 `model.DecoderConfig` 直接进入 root
+schema，不重复声明字段。OmegaConf 对字符串枚举只接受成员
 名，入口在合并前把公开的小写 value 转成 enum member name；除此之外不做兼容重写。
 
 两个入口分别解析为：
 
 - `OverfitTokenConfig | OverfitFlowConfig | OverfitRVQConfig`
 - `StagedTrainTokenConfig | StagedTrainFlowConfig | StagedTrainRVQConfig`
-- `CodecOracleConfig`
 
 未知字段和错误 composition 在进入执行逻辑前失败，解析后的 dataclass 不再向 `src` 传递
-`DictConfig`。oracle 额外要求 `runtime.audio_tokenizer is None`，因为 prepared semantic IDs 是 raw
-codec codes；入口显式拒绝 CodecBPE tokenizer，而不是静默忽略。
+`DictConfig`。
 
 ## 组合
 
@@ -146,10 +122,6 @@ codec codes；入口显式拒绝 CodecBPE tokenizer，而不是静默忽略。
 - flow method、NFE 和 step 数直接覆盖 `runtime.flow_*`；RVQ/token 中保留这些字段是
   `runtime.Config` 的稳定 shape，不需要再为未使用字段创建 variant schema。
 - flow/RVQ 必须有独立 acoustic codebook；`none` 不要求 codec 缺少 acoustic codebook，入口不自动改写 composition。
-- codec oracle 通过 `codec_oracle.objective=flow|rvq` 选择 acoustic screening model；decoder、
-  normalization 与 optimizer 位于 `codec_oracle.*`。flow objective 额外使用 runtime 的 flow
-  sampling 和 normalization 字段，RVQ objective 不读取这些字段；两种 objective 的
-  initialization 都只控制 semantic audio embedding。
 
 ## Stage 与参数策略
 

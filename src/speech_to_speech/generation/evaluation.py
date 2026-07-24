@@ -29,13 +29,9 @@ def evaluate(
     was_training = model.training
     model.eval()
     try:
-        prompt = batch.acoustic_prompt
         hidden_states = model.token_hidden_states(
             batch.input_ids,
             attention_mask=batch.attention_mask,
-            acoustic_prompt_codes=None if prompt is None else prompt["codes"],
-            acoustic_prompt_positions=None if prompt is None else prompt["token_positions"],
-            acoustic_prompt_mask=batch.acoustic_prompt_mask,
         )
         condition = model.target_frame_condition(
             hidden_states, target_data["token_positions"]
@@ -85,19 +81,10 @@ def device_batch(batch: ModelBatch, device: torch.device) -> ModelBatch:
     def move(value: Tensor | None) -> Tensor | None:
         return None if value is None else value.to(device)
 
-    prompt = batch.acoustic_prompt
     target = batch.acoustic_target
     return ModelBatch(
         input_ids=cast_tensor(move(batch.input_ids)),
         token_labels=cast_tensor(move(batch.token_labels)),
-        acoustic_prompt=(
-            None
-            if prompt is None
-            else {
-                "codes": cast_tensor(move(prompt["codes"])),
-                "token_positions": cast_tensor(move(prompt["token_positions"])),
-            }
-        ),
         acoustic_target=(
             None
             if target is None
@@ -109,6 +96,7 @@ def device_batch(batch: ModelBatch, device: torch.device) -> ModelBatch:
         ),
         tasks=batch.tasks,
         pad_token_id=batch.pad_token_id,
+        audio_seconds=cast_tensor(move(batch.audio_seconds)),
     )
 
 

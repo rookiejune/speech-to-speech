@@ -7,6 +7,7 @@ from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 from torch import Tensor
 
+from ..interval import TrainInterval
 from ...loss.types import LossItem, Outputs
 
 
@@ -19,20 +20,38 @@ class GradLogger(Callback):
         self,
         loss_pair: tuple[str, str],
         parameter_name: str,
-        every_n_steps: int = 5_000,
+        every_n_steps: int | None = 5_000,
+        every_audio_seconds: float | None = None,
         eps: float = 1e-12,
     ) -> None:
         super().__init__()
 
-        if every_n_steps < 1:
-            raise ValueError("every_n_steps must be positive")
         if eps <= 0:
             raise ValueError("eps must be positive")
 
         self.loss_pair = loss_pair
         self.parameter_name = parameter_name
         self.every_n_steps = every_n_steps
+        self.interval = TrainInterval(
+            every_n_steps=every_n_steps,
+            every_audio_seconds=every_audio_seconds,
+        )
         self.eps = eps
+        self._run_current_batch = False
+
+    def on_train_batch_start(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        batch: object,
+        batch_idx: int,
+    ) -> None:
+        del batch_idx
+        self._run_current_batch = self.interval.should_run(
+            trainer,
+            pl_module,
+            batch,
+        )
 
     def on_before_backward(
         self,
@@ -41,7 +60,12 @@ class GradLogger(Callback):
         loss: Tensor,
     ) -> None:
         del loss
-        if trainer.global_step % self.every_n_steps != 0:
+        if self.interval.uses_audio_seconds:
+            should_run = self._run_current_batch
+        else:
+            assert self.every_n_steps is not None
+            should_run = int(trainer.global_step) % self.every_n_steps == 0
+        if not should_run:
             return
 
         parameter = dict(pl_module.named_parameters()).get(self.parameter_name)
@@ -91,18 +115,42 @@ class GradLogger(Callback):
                 sync_dist=True,
             )
 
+    def state_dict(self) -> dict[str, dict[str, float]]:
+        return {"interval": self.interval.state_dict()}
+
+    def load_state_dict(self, state_dict: dict[str, dict[str, float]]) -> None:
+        self.interval.load_state_dict(state_dict.get("interval", {}))
+
 
 class GradNormLogger(Callback):
     def __init__(
         self,
         tag: str = "train/grad_norm",
-        every_n_steps: int = 100,
+        every_n_steps: int | None = 100,
+        every_audio_seconds: float | None = None,
     ) -> None:
         super().__init__()
-        if every_n_steps < 1:
-            raise ValueError("every_n_steps must be positive")
         self.tag = tag
         self.every_n_steps = every_n_steps
+        self.interval = TrainInterval(
+            every_n_steps=every_n_steps,
+            every_audio_seconds=every_audio_seconds,
+        )
+        self._pending_log = False
+
+    def on_train_batch_start(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        batch: object,
+        batch_idx: int,
+    ) -> None:
+        del batch_idx
+        self._pending_log = self._pending_log or self.interval.should_run(
+            trainer,
+            pl_module,
+            batch,
+        )
 
     def on_before_optimizer_step(
         self,
@@ -111,8 +159,14 @@ class GradNormLogger(Callback):
         optimizer: torch.optim.Optimizer,
     ) -> None:
         del optimizer
-        if trainer.global_step % self.every_n_steps != 0:
+        if self.interval.uses_audio_seconds:
+            should_run = self._pending_log
+        else:
+            assert self.every_n_steps is not None
+            should_run = int(trainer.global_step) % self.every_n_steps == 0
+        if not should_run:
             return
+        self._pending_log = False
         gradients = [
             parameter.grad.detach().norm(2)
             for parameter in pl_module.parameters()
@@ -125,6 +179,12 @@ class GradNormLogger(Callback):
                 on_step=True,
                 sync_dist=True,
             )
+
+    def state_dict(self) -> dict[str, dict[str, float]]:
+        return {"interval": self.interval.state_dict()}
+
+    def load_state_dict(self, state_dict: dict[str, dict[str, float]]) -> None:
+        self.interval.load_state_dict(state_dict.get("interval", {}))
 
 
 def _gradient_norm(grad: Tensor | None, parameter: Tensor) -> Tensor:

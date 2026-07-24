@@ -7,15 +7,9 @@ from torch import Tensor
 from ..task import Task
 
 
-class AcousticPrompt(TypedDict):
-    codes: Tensor
-    token_positions: Tensor
-
-
 class Request(TypedDict):
     prompt_ids: Tensor
     task: Task
-    acoustic_prompt: AcousticPrompt | None
 
 
 class AudioOutput(TypedDict):

@@ -85,9 +85,9 @@ text target
 audio target + token-only model
     -> generate_tokens(stop=EOA)
     -> expand token frame spans
-    -> codec.decode(semantic_codes)
+    -> codec.decode(codec codes decoded from audio tokens)
 
-audio target + acoustic codebooks + acoustic feature generator
+audio target + runtime acoustic side channel + acoustic feature generator
     -> generate_audio_features()
     -> trim EOA and padded features by frame_counts
     -> codec.decode_features(semantic_codes, features)
@@ -95,8 +95,11 @@ audio target + acoustic codebooks + acoustic feature generator
 
 audio 路径至少要生成一个 codec-decodable token。service 按
 `(generated_token_count, generated_frame_count)` 合并 shape 相同的行执行 codec decode，并要求
-codec 保留 batch 轴。flow 与 RVQ 都返回相同的 `AcousticGeneration`；`model/acoustic=none`
-即使搭配 LongCat 这类带 acoustic codebook 的 codec，也走 semantic-only decode。
+codec 保留 batch 轴。`full_codec_sequence` 通过 `FlattenedAudioTokenizer` 把完整
+`[frames, codebooks]` 还原后直接调用 `codec.decode()`，不会因为 LongCat codec 暴露 acoustic
+codebooks 而进入 Flow/RVQ acoustic feature generation。flow 与 RVQ 都返回相同的
+`AcousticGeneration`；`model/acoustic=none` 即使搭配 LongCat 这类带 acoustic codebook 的
+codec，也走 token-only decode。
 
 自回归 cache、sampling、allowed IDs、逐行 stop 状态和 frame condition 收集属于 model。已有行
 生成 stop token 后，后续步骤只对剩余 active rows 执行 backbone 与 sampling；cache 同步收缩，

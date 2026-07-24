@@ -1,6 +1,6 @@
 # reporting
 
-提供训练入口和 codec oracle 共用的纯汇总函数，不持有 logger、文件或模型状态。
+提供实验入口共用的纯汇总函数，不持有 logger、文件或模型状态。
 
 ## 对外能力
 
@@ -33,5 +33,5 @@ NaN/Inf；监督指标的 finite 约束由产生这些数值的训练或实验�
 ## 边界
 
 - `reporting` 只计算稳定 mapping，不决定指标名称、输出路径、序列采集或日志后端。
-- codec oracle 与 overfit summary 复用同一函数，不能分别实现不同的窗口/比例语义。
+- overfit summary 与 probe/benchmark summary 复用同一函数，不能分别实现不同的窗口/比例语义。
 - `first`/`last` 是单点值，`last_to_first` 是首尾窗口均值之比，调用方不能把两者混为单步比值。

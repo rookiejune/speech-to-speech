@@ -73,7 +73,9 @@ acoustic_target: AcousticTarget | None
 `semantic_codes`、`codes`、`token_positions`。分组使必须共同存在的 tensor 不能形成半完整状态。
 
 `ModelBatch` 额外保存 `tasks: list[Task]` 和 `pad_token_id`，并公开
-`attention_mask`、`acoustic_prompt_mask` 与 `acoustic_target_mask`。
+`attention_mask`、`acoustic_prompt_mask` 与 `acoustic_target_mask`。speech batch 还保存
+`audio_seconds: Tensor[B]`，表示每条训练样本按当前 task 实际消费的 source/target 音频秒数之和；
+纯文本样本为 0。
 
 ## 边界
 
@@ -110,6 +112,10 @@ acoustic_target: AcousticTarget | None
 - `ACOUSTIC_PAD_ID=-1` 只由 batch padding 引入，不能出现在未 padding 的 `ModelSample`
   中；因此派生的 frame mask 只包含右侧 padding，不会形成内部空洞。
 - `ModelBatch` 只表达训练或 teacher-forcing evaluation，不表达缺少 target 的真实推理请求。
+- `AudioMeta.DURATION` 的单位是秒，不是 codec frame 或 waveform sample。parser 只校验并传递该
+  元数据；task sample builder 按 source/target modality 决定哪些角色计入
+  `ModelBatch.audio_seconds`。缺少 duration 的 audio task 直接报错，避免 callback cadence 和 LBA
+  使用错误单位。
 - 同一 `task_weights` 中的任务必须具有相同 source/target modality，保证 DDP 各 rank 走相同
   模型路径。0 权重任务不会参与 batch 分配；每项权重必须有限且非负，总和必须有限且为正；
   按 batch size 固定分配时，任一非 0 权重任务拿不到至少 1 条 sample 会直接报错。非法 stage

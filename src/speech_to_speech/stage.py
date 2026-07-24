@@ -15,7 +15,6 @@ class ParameterGroup(StrEnum):
     BACKBONE = auto()
     SEMANTIC_AUDIO_EMBEDDING = auto()
     SEMANTIC_AUDIO_ADAPTER = auto()
-    ACOUSTIC_PROMPT = auto()
     SEMANTIC_AUDIO_OUTPUT = auto()
     ACOUSTIC_DECODER = auto()
 
@@ -158,7 +157,6 @@ SPEECH_INTERFACE_GROUPS = frozenset(
     {
         ParameterGroup.SEMANTIC_AUDIO_EMBEDDING,
         ParameterGroup.SEMANTIC_AUDIO_ADAPTER,
-        ParameterGroup.ACOUSTIC_PROMPT,
         ParameterGroup.SEMANTIC_AUDIO_OUTPUT,
         ParameterGroup.ACOUSTIC_DECODER,
     }
@@ -174,7 +172,6 @@ SEMANTIC_GROUPS = frozenset(
 
 ACOUSTIC_GROUPS = frozenset(
     {
-        ParameterGroup.ACOUSTIC_PROMPT,
         ParameterGroup.ACOUSTIC_DECODER,
     }
 )
@@ -274,8 +271,6 @@ def parameter_group(name: str) -> ParameterGroup:
         return ParameterGroup.SEMANTIC_AUDIO_EMBEDDING
     if name.startswith("semantic_audio_adapter."):
         return ParameterGroup.SEMANTIC_AUDIO_ADAPTER
-    if name.startswith("acoustic_prompt_adapter.") or name == "acoustic_prompt_gate":
-        return ParameterGroup.ACOUSTIC_PROMPT
     if name.startswith("semantic_audio_output_adapter."):
         return ParameterGroup.SEMANTIC_AUDIO_OUTPUT
     if name.startswith("acoustic_decoder.") or name.startswith("acoustic_flow."):

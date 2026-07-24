@@ -7,6 +7,8 @@ from unittest.mock import patch
 import torch
 from anydataset.types import AudioView, Modality
 from anytrain.idspace import Layout
+from semantic_acoustic_codec.model import AcousticDiT as SharedAcousticDiT
+from semantic_acoustic_codec.model import AcousticRVQDecoder as SharedRVQDecoder
 from torch import Tensor, nn
 
 from speech_to_speech.datamodule import Collator, ToyDataset
@@ -51,6 +53,7 @@ class _TextTokenizer:
 class _Codec:
     acoustic_feature_dim = 4
     acoustic_codebook_sizes = (16,)
+    frame_rate = 50.0
 
     def __init__(self) -> None:
         generator = torch.Generator().manual_seed(0)
@@ -166,6 +169,7 @@ class FakeClosureTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(outputs["loss"]))
         self.assertEqual(model.acoustic_decoder.repa_student_layer, 1)
         self.assertIsNotNone(model.acoustic_decoder.repa_projection)
+        self.assertIsInstance(model.acoustic_decoder, SharedAcousticDiT)
 
     def test_rvq_model_generates_acoustic_features(self):
         torch.manual_seed(0)
@@ -180,6 +184,7 @@ class FakeClosureTest(unittest.TestCase):
                 "ffn_ratio": 2,
             },
         ).eval()
+        self.assertIsInstance(model.acoustic_decoder, SharedRVQDecoder)
 
         def audio_logits(hidden_states: Tensor, local_ids=None) -> Tensor:
             self.assertIsNone(local_ids)

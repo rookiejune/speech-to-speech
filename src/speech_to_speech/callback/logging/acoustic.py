@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
@@ -13,6 +13,7 @@ from ...datamodule import ModelBatch
 from ...generation.evaluation import evaluate
 from ...model import FlowModel, RVQModel
 from ...runtime.types import Codec
+from ..interval import TrainInterval
 
 
 class AcousticEvaluation(Callback):
@@ -23,7 +24,8 @@ class AcousticEvaluation(Callback):
         codec: Codec,
         output_dir: Path,
         *,
-        every_n_steps: int,
+        every_n_steps: int | None,
+        every_audio_seconds: float | None = None,
         seeds: Sequence[int],
     ) -> None:
         super().__init__()
@@ -32,6 +34,10 @@ class AcousticEvaluation(Callback):
         self.codec = codec
         self.path = output_dir / "evaluation.json"
         self.every_n_steps = every_n_steps
+        self.interval = TrainInterval(
+            every_n_steps=every_n_steps,
+            every_audio_seconds=every_audio_seconds,
+        )
         self.seeds = tuple(seeds)
         self.values: dict[int, dict[str, float]] = {}
 
@@ -48,8 +54,9 @@ class AcousticEvaluation(Callback):
         batch: Any,
         batch_idx: int,
     ) -> None:
-        del pl_module, outputs, batch, batch_idx
-        if trainer.is_global_zero and trainer.global_step % self.every_n_steps == 0:
+        del outputs, batch_idx
+        should_run = self.interval.should_run(trainer, pl_module, batch)
+        if trainer.is_global_zero and should_run:
             self.evaluate(trainer, trainer.global_step)
 
     def on_train_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
@@ -75,3 +82,20 @@ class AcousticEvaluation(Callback):
             )
             + "\n"
         )
+
+    def state_dict(self) -> dict[str, object]:
+        return {
+            "interval": self.interval.state_dict(),
+            "values": {str(key): value for key, value in self.values.items()},
+        }
+
+    def load_state_dict(self, state_dict: dict[str, object]) -> None:
+        interval = state_dict.get("interval", {})
+        if isinstance(interval, dict):
+            self.interval.load_state_dict(cast(dict[str, float], interval))
+        values = state_dict.get("values", {})
+        if isinstance(values, dict):
+            self.values = {
+                int(key): cast(dict[str, float], value)
+                for key, value in values.items()
+            }

@@ -14,7 +14,6 @@ from ._generation import generate_sequence
 from ._head import VocabularyHeadMixin
 from .adapter import AdapterType, create_adapter
 from .embedding import create_semantic_audio_modules
-from .embedding.audio import merge_by_positions
 from .protocol import TokenModelRuntime
 from .toy import ToyConfig, create_toy_backbone
 from ..runtime.types import BackboneOutput
@@ -24,7 +23,6 @@ from ..runtime.types import BackboneOutput
 class Config:
     semantic_audio_adapter: Optional[AdapterType] = AdapterType.LINEAR
     semantic_audio_output_adapter: Optional[AdapterType] = AdapterType.LINEAR
-    acoustic_prompt_adapter: Optional[AdapterType] = AdapterType.LINEAR
     toy: Optional[ToyConfig] = None
 
 
@@ -73,23 +71,6 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             _frame_span_lookup(self.runtime).to(device=backbone_weight.device),
             persistent=False,
         )
-        self.acoustic_prompt_adapter = (
-            create_adapter(
-                self.config.acoustic_prompt_adapter,
-                self.runtime.codec.acoustic_feature_dim,
-                hidden_size,
-            )
-            if self.runtime.codec.acoustic_codebook_sizes
-            else nn.Identity()
-        ).to(device=backbone_weight.device, dtype=backbone_weight.dtype)
-        acoustic_prompt_gate = torch.zeros(
-            hidden_size, device=backbone_weight.device, dtype=backbone_weight.dtype
-        )
-        self.acoustic_prompt_gate = (
-            nn.Parameter(acoustic_prompt_gate)
-            if self.runtime.codec.acoustic_codebook_sizes
-            else nn.Buffer(acoustic_prompt_gate, persistent=False)
-        )
         semantic_audio_weight = self.semantic_audio_embedding.weight
         self.semantic_audio_output_adapter = create_adapter(
             self.config.semantic_audio_output_adapter,
@@ -102,9 +83,6 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         input_ids: torch.Tensor,
         *,
         attention_mask: torch.Tensor | None = None,
-        acoustic_prompt_codes: torch.Tensor | None = None,
-        acoustic_prompt_positions: torch.Tensor | None = None,
-        acoustic_prompt_mask: torch.Tensor | None = None,
         output_hidden_states: bool = False,
         past_key_values: Cache | None = None,
         use_cache: bool = False,
@@ -114,9 +92,6 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         backbone_output = self._backbone_output(
             input_ids,
             attention_mask=attention_mask,
-            acoustic_prompt_codes=acoustic_prompt_codes,
-            acoustic_prompt_positions=acoustic_prompt_positions,
-            acoustic_prompt_mask=acoustic_prompt_mask,
             past_key_values=past_key_values,
             use_cache=use_cache,
             position_ids=position_ids,
@@ -133,9 +108,6 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         input_ids: torch.Tensor,
         *,
         attention_mask: torch.Tensor,
-        acoustic_prompt_codes: torch.Tensor | None,
-        acoustic_prompt_positions: torch.Tensor | None,
-        acoustic_prompt_mask: torch.Tensor | None,
         output_hidden_states: bool,
         token_ids: torch.Tensor | None,
         modality: Modality | None,
@@ -150,9 +122,6 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         backbone_output = self._backbone_output(
             input_ids,
             attention_mask=attention_mask,
-            acoustic_prompt_codes=acoustic_prompt_codes,
-            acoustic_prompt_positions=acoustic_prompt_positions,
-            acoustic_prompt_mask=acoustic_prompt_mask,
             past_key_values=past_key_values,
             use_cache=use_cache,
         )
@@ -190,17 +159,11 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         input_ids: torch.Tensor,
         *,
         attention_mask: torch.Tensor | None = None,
-        acoustic_prompt_codes: torch.Tensor | None = None,
-        acoustic_prompt_positions: torch.Tensor | None = None,
-        acoustic_prompt_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Encode one training batch without constructing vocabulary logits."""
         return self._backbone_output(
             input_ids,
             attention_mask=attention_mask,
-            acoustic_prompt_codes=acoustic_prompt_codes,
-            acoustic_prompt_positions=acoustic_prompt_positions,
-            acoustic_prompt_mask=acoustic_prompt_mask,
             use_cache=False,
         ).last_hidden_state
 
@@ -209,9 +172,6 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         input_ids: torch.Tensor,
         *,
         attention_mask: torch.Tensor | None,
-        acoustic_prompt_codes: torch.Tensor | None,
-        acoustic_prompt_positions: torch.Tensor | None,
-        acoustic_prompt_mask: torch.Tensor | None,
         past_key_values: Cache | None = None,
         use_cache: bool = False,
         position_ids: torch.Tensor | None = None,
@@ -220,18 +180,6 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         if input_ids.dim() != 2:
             raise ValueError("input_ids must have shape [batch, sequence].")
         inputs_embeds = self._input_embedding(input_ids)
-        if acoustic_prompt_codes is not None:
-            if acoustic_prompt_positions is None:
-                raise ValueError(
-                    "acoustic_prompt_positions is required with acoustic_prompt_codes."
-                )
-            acoustic = self._acoustic_prompt_embedding(
-                input_ids,
-                acoustic_prompt_codes,
-                acoustic_prompt_positions,
-                acoustic_prompt_mask,
-            )
-            inputs_embeds = inputs_embeds + acoustic
 
         return self.backbone.base_model(
             inputs_embeds=inputs_embeds,
@@ -250,9 +198,6 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         max_new_tokens: int,
         temperature: float = 1.0,
         top_p: float = 1.0,
-        acoustic_prompt_codes: torch.Tensor | None = None,
-        acoustic_prompt_positions: torch.Tensor | None = None,
-        acoustic_prompt_mask: torch.Tensor | None = None,
         prompt_attention_mask: torch.Tensor | None = None,
         stop_token_id: int | None = None,
         generation_modality: Modality | None = None,
@@ -266,9 +211,6 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
-            acoustic_prompt_codes=acoustic_prompt_codes,
-            acoustic_prompt_positions=acoustic_prompt_positions,
-            acoustic_prompt_mask=acoustic_prompt_mask,
             prompt_attention_mask=prompt_attention_mask,
             stop_token_id=stop_token_id,
             generation_modality=generation_modality,
@@ -286,9 +228,6 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         max_new_tokens: int,
         temperature: float = 1.0,
         top_p: float = 1.0,
-        acoustic_prompt_codes: torch.Tensor | None = None,
-        acoustic_prompt_positions: torch.Tensor | None = None,
-        acoustic_prompt_mask: torch.Tensor | None = None,
         prompt_attention_mask: torch.Tensor | None = None,
         do_sample: bool = True,
         use_cache: bool = True,
@@ -300,9 +239,6 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
-            acoustic_prompt_codes=acoustic_prompt_codes,
-            acoustic_prompt_positions=acoustic_prompt_positions,
-            acoustic_prompt_mask=acoustic_prompt_mask,
             prompt_attention_mask=prompt_attention_mask,
             stop_token_id=self.runtime.eoa_token_id,
             generation_modality=Modality.AUDIO,
@@ -379,41 +315,6 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             self.semantic_audio_embedding(audio_token_ids)
         )
         return output
-
-    def _acoustic_prompt_embedding(
-        self,
-        input_ids: torch.Tensor,
-        acoustic_prompt_codes: torch.Tensor,
-        token_positions: torch.Tensor,
-        frame_mask: torch.Tensor | None,
-    ) -> torch.Tensor:
-        if acoustic_prompt_codes.dim() != 3 or token_positions.dim() != 2:
-            raise ValueError("acoustic inputs must have shapes [B, F, M] and [B, F].")
-        if acoustic_prompt_codes.shape[:2] != token_positions.shape:
-            raise ValueError(
-                "acoustic codes and token positions must align on batch and frame."
-            )
-        if frame_mask is None:
-            frame_mask = (acoustic_prompt_codes != -1).all(dim=-1)
-        if frame_mask.shape != token_positions.shape:
-            raise ValueError("acoustic frame mask must align with token positions.")
-        safe_codes = acoustic_prompt_codes.masked_fill(acoustic_prompt_codes == -1, 0)
-        frame_features = self.acoustic_code_features(safe_codes)
-        frame_features, token_mask = merge_by_positions(
-            frame_features,
-            token_positions,
-            input_ids.size(1),
-            frame_mask,
-        )
-        frame_features = self.acoustic_prompt_adapter(frame_features)
-        frame_features = frame_features.masked_fill(~token_mask[..., None], 0)
-        return frame_features * self.acoustic_prompt_gate.to(dtype=frame_features.dtype)
-
-    def acoustic_code_features(self, codes: torch.Tensor) -> torch.Tensor:
-        """Convert codec-local acoustic codes to model-aligned features."""
-        features = self.runtime.codec.acoustic_codes_to_features(codes)
-        weight = self.backbone.get_input_embeddings().weight
-        return features.to(device=weight.device, dtype=weight.dtype)
 
 
 def _frame_span_lookup(runtime: TokenModelRuntime) -> torch.Tensor:

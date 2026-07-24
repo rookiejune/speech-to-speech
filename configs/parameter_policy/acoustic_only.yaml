@@ -1,6 +1,5 @@
 name: acoustic_only
 trainable_groups:
-  - acoustic_prompt
   - acoustic_decoder
 frozen_groups:
   - backbone

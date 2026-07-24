@@ -10,7 +10,6 @@ from ..task import Task
 from ._tokenization import token_ids
 from .protocol import DataRuntime, TextRuntime
 from .types import (
-    AcousticPrompt,
     AcousticTarget,
     Language,
     ModelSample,
@@ -31,8 +30,6 @@ def build_sample(
     prompt = _prompt(speech_pair, task, runtime)
     source, target = _source_target(speech_pair, task)
 
-    source_acoustic_codes = None
-    source_audio_token_positions = None
     source_modality = task.source_modality
     target_modality = task.target_modality
     if source_modality is not None:
@@ -44,16 +41,6 @@ def build_sample(
 
         if source_modality is Modality.AUDIO:
             source_ids = _boa_eoa(source_ids, runtime)
-            source_acoustic_codes = source.acoustic_codes
-            if source_acoustic_codes is not None:
-                source_audio_token_positions = torch.repeat_interleave(
-                    torch.arange(
-                        len(prefix) + 1,
-                        len(prefix) + 1 + source.audio_token_ids.numel(),
-                        dtype=torch.long,
-                    ),
-                    source.audio_token_spans,
-                )
 
         input_ids = torch.cat([prefix, source_ids, suffix])
     else:
@@ -92,14 +79,6 @@ def build_sample(
         if target_audio_token_positions.numel() != target_acoustic_codes.size(0):
             raise ValueError("target acoustic frames and audio tokens must align.")
 
-    acoustic_prompt = (
-        None
-        if source_acoustic_codes is None or source_audio_token_positions is None
-        else AcousticPrompt(
-            codes=source_acoustic_codes,
-            token_positions=source_audio_token_positions,
-        )
-    )
     acoustic_target = (
         None
         if target_acoustic_codes is None or target_audio_token_positions is None
@@ -112,9 +91,9 @@ def build_sample(
     return ModelSample(
         input_ids=full_ids,
         token_labels=token_labels,
-        acoustic_prompt=acoustic_prompt,
         acoustic_target=acoustic_target,
         task=task,
+        audio_seconds=_audio_seconds(source, target, task),
     )
 
 
@@ -148,7 +127,6 @@ def build_text_sample(
     return ModelSample(
         input_ids=full_ids,
         token_labels=token_labels,
-        acoustic_prompt=None,
         acoustic_target=None,
         task=task,
     )
@@ -200,6 +178,24 @@ def _source_target(speech_pair: SpeechPair, task: Task) -> tuple[Speech, Speech]
     if task.uses_source_role:
         return speech_pair.source, speech_pair.target
     return speech_pair.target, speech_pair.target
+
+
+def _audio_seconds(source: Speech, target: Speech, task: Task) -> float:
+    seconds = 0.0
+    if task.source_modality is Modality.AUDIO:
+        seconds += _duration(source, role="source")
+    if task.target_modality is Modality.AUDIO:
+        seconds += _duration(target, role="target")
+    return seconds
+
+
+def _duration(speech: Speech, *, role: str) -> float:
+    if speech.duration_seconds is None:
+        raise ValueError(
+            f"{role} audio sample is missing AudioMeta.DURATION; "
+            "migrate the prepared audio store with duration metadata."
+        )
+    return float(speech.duration_seconds)
 
 
 def _text_source_target(text_pair: TextPair, task: Task) -> tuple[Text, Text]:

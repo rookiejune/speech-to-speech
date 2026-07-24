@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import cast
 
 import torch
@@ -77,6 +78,7 @@ def _parse_role(
         audio_token_ids=audio_token_ids,
         audio_token_spans=audio_token_spans,
         language=Language(text_item.meta[types.TextMeta.LANG]),
+        duration_seconds=_duration_seconds(audio_item),
     )
 
 
@@ -98,6 +100,18 @@ def _frame_codes(codes: Tensor) -> Tensor:
     if codes.dim() != 2:
         raise ValueError("audio codes must have shape [frames, codebooks].")
     return codes
+
+
+def _duration_seconds(audio_item: types.AudioItem) -> float | None:
+    value = audio_item.meta.get(types.AudioMeta.DURATION)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("AudioMeta.DURATION must be a number of seconds.")
+    duration = float(value)
+    if not math.isfinite(duration) or duration < 0:
+        raise ValueError("AudioMeta.DURATION must be finite and non-negative.")
+    return duration
 
 
 def _as_tensor(value: Tensor | list[int]) -> Tensor:

@@ -6,13 +6,12 @@ from typing import cast
 import torch
 from anydataset.types import Modality
 from torch import Tensor
-from torch.nn.utils.rnn import pad_sequence
 
 from .._tensor import is_signed_integer_dtype
 from ..task import Task
 from .decode import decode_generated_audio, decode_generated_semantic
 from .protocol import AcousticFeatureGeneration, TokenGenerator
-from .types import AcousticGeneration, AcousticPrompt, AudioOutput, Request, Result
+from .types import AcousticGeneration, AudioOutput, Request, Result
 
 
 @torch.no_grad()
@@ -29,18 +28,14 @@ def generate_responses(
     """Generate batched responses grouped by target modality."""
     results: list[Result | None] = [None] * len(requests)
     device = model.backbone.get_input_embeddings().weight.device
-    groups: dict[tuple[Modality, bool], list[tuple[int, Request]]] = {}
+    groups: dict[Modality, list[tuple[int, Request]]] = {}
     for index, request in enumerate(requests):
         _validate_request(request, model)
         task = request["task"]
-        acoustic_prompt = request["acoustic_prompt"]
-        key = task.target_modality, acoustic_prompt is not None
-        groups.setdefault(key, []).append((index, request))
+        groups.setdefault(task.target_modality, []).append((index, request))
 
-    for (modality, _), group in groups.items():
-        prompt, prompt_mask, acoustic_codes, token_positions, acoustic_mask = _inputs(
-            [request for _, request in group], model, device
-        )
+    for modality, group in groups.items():
+        prompt, prompt_mask = _inputs([request for _, request in group], model, device)
         stop_token_id = (
             model.runtime.eoa_token_id
             if modality is Modality.AUDIO
@@ -49,7 +44,7 @@ def generate_responses(
         acoustic_generation: AcousticGeneration | None = None
         if (
             modality is Modality.AUDIO
-            and model.runtime.codec.acoustic_codebook_sizes
+            and model.runtime.acoustic_side_channel
             and isinstance(model, AcousticFeatureGeneration)
         ):
             acoustic_generation = model.generate_audio_features(
@@ -57,9 +52,6 @@ def generate_responses(
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_p=top_p,
-                acoustic_prompt_codes=acoustic_codes,
-                acoustic_prompt_positions=token_positions,
-                acoustic_prompt_mask=acoustic_mask,
                 prompt_attention_mask=prompt_mask,
                 do_sample=do_sample,
                 use_cache=use_cache,
@@ -71,9 +63,6 @@ def generate_responses(
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_p=top_p,
-                acoustic_prompt_codes=acoustic_codes,
-                acoustic_prompt_positions=token_positions,
-                acoustic_prompt_mask=acoustic_mask,
                 prompt_attention_mask=prompt_mask,
                 stop_token_id=stop_token_id,
                 generation_modality=modality,
@@ -129,7 +118,7 @@ def _inputs(
     requests: list[Request],
     model: TokenGenerator,
     device: torch.device,
-) -> tuple[Tensor, Tensor, Tensor | None, Tensor | None, Tensor | None]:
+) -> tuple[Tensor, Tensor]:
     prompts = [request["prompt_ids"].to(device=device) for request in requests]
     width = max(prompt.numel() for prompt in prompts)
     prompt = torch.full(
@@ -143,29 +132,7 @@ def _inputs(
         prompt[row, -value.numel() :] = value
         prompt_mask[row, -value.numel() :] = True
 
-    acoustic = [request["acoustic_prompt"] for request in requests]
-    if all(value is None for value in acoustic):
-        return prompt, prompt_mask, None, None, None
-    if any(value is None for value in acoustic):
-        raise ValueError("a generation batch must use one source modality.")
-    values = cast(list[AcousticPrompt], acoustic)
-    codes = pad_sequence(
-        [value["codes"].to(device=device, dtype=torch.long) for value in values],
-        batch_first=True,
-        padding_value=-1,
-    )
-    token_positions = pad_sequence(
-        [
-            value["token_positions"].to(device=device, dtype=torch.long)
-            + width
-            - prompts[row].numel()
-            for row, value in enumerate(values)
-        ],
-        batch_first=True,
-        padding_value=-1,
-    )
-    mask = token_positions.ge(0)
-    return prompt, prompt_mask, codes, token_positions, mask
+    return prompt, prompt_mask
 
 
 def _validate_request(request: Request, model: TokenGenerator) -> None:
@@ -181,48 +148,6 @@ def _validate_request(request: Request, model: TokenGenerator) -> None:
     if not bool(inside.all()):
         raise ValueError("prompt ids must belong to the runtime layout.")
 
-    acoustic_prompt = request["acoustic_prompt"]
-    if acoustic_prompt is None:
-        return
-    if task.source_modality is not Modality.AUDIO:
-        raise ValueError(f"{task.value} does not accept a source acoustic prompt.")
-
-    sizes = model.runtime.codec.acoustic_codebook_sizes
-    if not sizes:
-        raise ValueError(
-            "a codec without acoustic codebooks does not accept an acoustic prompt."
-        )
-    codes = _integer_tensor(
-        acoustic_prompt["codes"], "acoustic prompt codes", dimensions=2
-    )
-    if codes.size(0) == 0:
-        raise ValueError("acoustic prompt codes must contain at least one frame.")
-    if codes.size(1) != len(sizes):
-        raise ValueError("acoustic prompt codes must match the codec codebooks.")
-    limits = torch.tensor(sizes, device=codes.device, dtype=torch.long)
-    if bool(((codes < 0) | (codes >= limits)).any()):
-        raise ValueError("acoustic prompt code is outside its codec codebook.")
-
-    positions = _integer_tensor(
-        acoustic_prompt["token_positions"],
-        "acoustic prompt positions",
-        dimensions=1,
-    )
-    if positions.numel() != codes.size(0):
-        raise ValueError(
-            "acoustic prompt codes and positions must share the frame axis."
-        )
-    if bool(((positions < 0) | (positions >= prompt.numel())).any()):
-        raise ValueError("acoustic prompt positions must point inside the prompt.")
-    source_ids = prompt.index_select(
-        0,
-        positions.to(device=prompt.device, dtype=torch.long),
-    )
-    start, end = model.runtime.codec_audio_range
-    if bool(((source_ids < start) | (source_ids >= end)).any()):
-        raise ValueError(
-            "acoustic prompt positions must point to codec-decodable audio tokens."
-        )
 
 
 def _integer_tensor(value: object, name: str, *, dimensions: int) -> Tensor:

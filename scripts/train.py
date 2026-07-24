@@ -242,7 +242,10 @@ def training_callbacks(
     )
     if config.callbacks.grad_norm.enabled and performance is None:
         callbacks.append(
-            GradNormLogger(every_n_steps=config.callbacks.grad_norm.every_n_steps)
+            GradNormLogger(
+                every_n_steps=config.callbacks.grad_norm.every_n_steps,
+                every_audio_seconds=config.callbacks.grad_norm.every_audio_seconds,
+            )
         )
     if config.trainer.enable_checkpointing:
         callbacks.append(

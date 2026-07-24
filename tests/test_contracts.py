@@ -15,6 +15,7 @@ from anydataset import AnyDataset, Source, Spec
 from anydataset.store import DatasetWriter, StoreLocalBatchSampler
 from anydataset.types import (
     AudioItem,
+    AudioMeta,
     AudioView,
     Lang,
     Modality,
@@ -52,6 +53,7 @@ from speech_to_speech.datamodule.parser import (
     parse_sample,
     parse_text_sample,
 )
+from speech_to_speech.datamodule.sample import build_sample
 from speech_to_speech.datamodule.protocol import DataRuntime, DataRuntimeSnapshot
 from speech_to_speech.datamodule.types import (
     Language,
@@ -63,7 +65,11 @@ from speech_to_speech.callback.stage import StageSwitcher
 from speech_to_speech.model import Config as ModelConfig, ToyConfig
 from speech_to_speech.runtime import AudioRepresentation, Config, Runtime
 from speech_to_speech.runtime.runtime import audio_tokenizer, dtype
-from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer, TorchCodecBPE
+from speech_to_speech.runtime.audio_tokenizer import (
+    FlattenedAudioTokenizer,
+    NativeAudioTokenizer,
+    TorchCodecBPE,
+)
 from speech_to_speech.stage import ParameterGroup, STAGE_SPECS, StageName, apply_stage
 from speech_to_speech.task import Task
 from scripts._config import overfit as parse_overfit
@@ -190,12 +196,10 @@ class ContractTest(unittest.TestCase):
 
     def test_trainer_presets_have_one_composable_schema(self):
         configs = [
-            _compose(config_name="codec_oracle"),
             _compose(),
             _compose("trainer=ddp"),
             _compose(
-                "experiment=acoustic_oracle_ddp_lba_smoke",
-                config_name="codec_oracle",
+                "experiment=unicodec_ddp_smoke",
             ),
         ]
         expected = {
@@ -215,13 +219,16 @@ class ContractTest(unittest.TestCase):
             self.assertEqual(config.trainer.devices, "auto")
 
         self.assertEqual(
+            configs[1].trainer.strategy,
+            "ddp_find_unused_parameters_true",
+        )
+        self.assertEqual(
             configs[2].trainer.strategy,
             "ddp_find_unused_parameters_true",
         )
-        self.assertEqual(configs[3].trainer.strategy, "ddp")
-        self.assertEqual(configs[3].trainer.precision, "bf16-mixed")
-        self.assertTrue(configs[2].trainer.use_distributed_sampler)
-        self.assertTrue(configs[3].trainer.use_distributed_sampler)
+        self.assertEqual(configs[2].trainer.precision, "bf16-mixed")
+        self.assertTrue(configs[1].trainer.use_distributed_sampler)
+        self.assertFalse(configs[2].trainer.use_distributed_sampler)
 
     @patch("scripts.overfit.pl.Trainer")
     @patch("scripts.overfit.build_logger")
@@ -280,7 +287,7 @@ class ContractTest(unittest.TestCase):
 
         runtime = SimpleNamespace(
             layout=Mock(),
-            codec=SimpleNamespace(acoustic_codebook_sizes=(1024,)),
+            codec=SimpleNamespace(acoustic_codebook_sizes=(1024,), frame_rate=50.0),
             acoustic_side_channel=True,
             backbone=Mock(),
             flow_matching=Mock(),
@@ -469,6 +476,50 @@ class ContractTest(unittest.TestCase):
             torch.equal(pair.source.acoustic_codes, torch.tensor([[2], [3]]))
         )
         self.assertEqual(tokenizer.encoded, ("target text", False))
+
+    def test_full_codec_sequence_flattens_complete_codes_without_acoustic_target(self):
+        tokenizer = FlattenedAudioTokenizer(
+            codebook_sizes=(8, 10),
+            codec_name="longcat",
+        )
+        audio_start = 10
+        runtime = SimpleNamespace(
+            audio_view=AudioView.LONGCAT,
+            audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
+            text_tokenizer=_ChatTokenizer(10),
+            audio_tokenizer=tokenizer,
+            layout=Layout(
+                text=(0, audio_start),
+                audio=(audio_start, audio_start + tokenizer.vocab_size + 2),
+            ),
+            pad_token_id=0,
+            eos_token_id=1,
+            boa_token_id=audio_start + tokenizer.vocab_size,
+            eoa_token_id=audio_start + tokenizer.vocab_size + 1,
+        )
+        raw = _raw_sample()
+
+        pair = parse_sample(raw, runtime)
+        sample = build_sample(pair, Task.S2ST, runtime)
+
+        source_codes = raw[(Role.SOURCE, Modality.AUDIO)].views[AudioView.LONGCAT]
+        target_codes = raw[(Role.TARGET, Modality.AUDIO)].views[AudioView.LONGCAT]
+        self.assertTrue(torch.equal(pair.source.semantic_codes, source_codes))
+        self.assertIsNone(pair.source.acoustic_codes)
+        self.assertTrue(torch.equal(pair.target.semantic_codes, target_codes))
+        self.assertIsNone(pair.target.acoustic_codes)
+        self.assertTrue(torch.equal(pair.target.audio_token_ids, tokenizer.encode(target_codes)))
+        self.assertEqual(int(pair.target.audio_token_spans.sum().item()), target_codes.size(0))
+        self.assertIsNone(sample.acoustic_target)
+
+        supervised = sample.token_labels[sample.token_labels.ne(-100)]
+        expected = torch.cat(
+            [
+                pair.target.audio_token_ids + audio_start,
+                torch.tensor([runtime.eoa_token_id]),
+            ]
+        )
+        self.assertTrue(torch.equal(supervised, expected))
 
     def test_text_parser_ignores_audio_fields(self):
         tokenizer = _Tokenizer(10)
@@ -784,6 +835,7 @@ class ContractTest(unittest.TestCase):
                 SimpleNamespace(
                     semantic_codebook=torch.zeros(5, 4),
                     acoustic_codebook_sizes=(3, 7),
+                    frame_rate=50.0,
                 ),
                 AudioView.LONGCAT,
                 (5, 3, 7),
@@ -793,6 +845,7 @@ class ContractTest(unittest.TestCase):
                 SimpleNamespace(
                     semantic_codebook=torch.zeros(11, 4),
                     acoustic_codebook_sizes=(),
+                    frame_rate=50.0,
                 ),
                 AudioView.UNICODEC,
                 (11,),
@@ -926,6 +979,7 @@ class ContractTest(unittest.TestCase):
         codec = SimpleNamespace(
             semantic_codebook=torch.zeros(5, 4),
             acoustic_codebook_sizes=(),
+            frame_rate=50.0,
         )
         with self.assertRaisesRegex(ValueError, "LongCat"):
             ToyDataset("longcat", codec)
@@ -1322,6 +1376,7 @@ def _longcat_codec():
     return SimpleNamespace(
         semantic_codebook=torch.zeros(5, 4),
         acoustic_codebook_sizes=(3,),
+        frame_rate=50.0,
     )
 
 
@@ -1332,7 +1387,8 @@ def _raw_sample(index: int = 0):
                 AudioView.LONGCAT: torch.tensor(
                     [[offset, offset + 2], [offset + 1, offset + 3]]
                 )
-            }
+            },
+            meta={AudioMeta.DURATION: 0.04},
         )
 
     return {

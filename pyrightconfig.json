@@ -3,6 +3,7 @@
   "include": ["src", "scripts"],
   "extraPaths": [
     "src",
+    "../semantic-acoustic-codec/src",
     "../workspace/src",
     "../third_party/anydataset/src",
     "../third_party/anytrain/src",

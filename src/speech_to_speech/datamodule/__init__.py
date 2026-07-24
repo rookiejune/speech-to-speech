@@ -26,7 +26,6 @@ from .text import (
 )
 from .types import (
     ACOUSTIC_PAD_ID,
-    AcousticPrompt,
     AcousticTarget,
     Language,
     ModelBatch,
@@ -40,7 +39,6 @@ from .types import (
 
 __all__ = [
     "ACOUSTIC_PAD_ID",
-    "AcousticPrompt",
     "AcousticTarget",
     "Collator",
     "Config",

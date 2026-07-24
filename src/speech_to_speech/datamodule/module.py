@@ -17,7 +17,7 @@ from typing_extensions import NotRequired
 from ..task import Task
 from .collator import Collator
 from .dataset import DatasetConfig, load_dataset
-from .lba import LBA, LBAConfig, PlannerMode, speech_length
+from .lba import LBA, LBAConfig, PlannerMode, metadata_speech_length, speech_length
 from .protocol import DataRuntime, DataRuntimeSnapshot, DatasetRuntime
 from .types import ModelBatch
 
@@ -121,8 +121,8 @@ class DataModule(LightningDataModule):
                     ),
                     collate_fn=self.collator,
                     len_fn=partial(
-                        speech_length,
-                        runtime=cast(DataRuntime, self.collator.runtime),
+                        metadata_speech_length,
+                        frame_rate=self.runtime.codec.frame_rate,
                         tasks=tuple(self.collator.tasks),
                         config=lba,
                     ),

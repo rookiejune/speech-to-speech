@@ -231,14 +231,6 @@ def _token_path(model: TokenModel, core: Qwen3Model, batch: ModelBatch) -> int:
         out_features=hidden,
         name="semantic audio adapter",
     )
-    if batch.acoustic_prompt is not None:
-        forward += adapter(
-            model.acoustic_prompt_adapter,
-            rows=batch_size * sequence,
-            in_features=model.runtime.codec.acoustic_feature_dim,
-            out_features=hidden,
-            name="acoustic prompt adapter",
-        )
     forward += qwen_backbone(
         core,
         batch=batch_size,

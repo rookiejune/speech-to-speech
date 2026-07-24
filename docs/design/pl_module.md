@@ -24,7 +24,7 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
 
 ## callback
 
-`speech_to_speech.callback` 只导出 `StageConfig` 与 `StageSwitcher`；以下日志 callback 从
+`speech_to_speech.callback` 导出 `StageConfig`、`StageSwitcher` 与 train-batch interval helper；以下日志 callback 从
 `speech_to_speech.callback.logging` 导入：
 
 - `StageSwitcher`：按 `epoch_milestones` 切换 task 权重、loader 权重和参数冻结，并从
@@ -39,6 +39,11 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
   按真实 task 记录 source/reference/generated metadata，并复用一次 generation 的 token、features
   与 waveform；它不运行额外神经网络评估器，也不重复计算 loss。
 - `TextRetentionLogger`：记录 text probe generation、reference NLL 与相对基线漂移。
+
+`TrainInterval` 是项目内 callback cadence 接口。默认保留历史 `every_n_steps` optimizer-step 行为；
+配置 `every_audio_seconds` 时改为按 `ModelBatch.audio_seconds` 累计全局 processed audio seconds
+触发，DDP 下通过 strategy sum 聚合各 rank，gradient accumulation 下每个 train batch 都计入。
+`anytrain` 不接收这个契约，因为它不拥有下游 batch schema 或 `AudioMeta.DURATION` 语义。
 
 Task sample/evaluation callback 在隔离 RNG context 内运行，不改变后续训练的 CPU 或当前 CUDA
 random state。

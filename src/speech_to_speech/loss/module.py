@@ -40,15 +40,9 @@ class TokenObjective(Objective[TokenObjectiveModel]):
     def forward(self, batch: ModelBatch, model: TokenObjectiveModel) -> Outputs:
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
-        prompt = batch.acoustic_prompt
         hidden_states = model.token_hidden_states(
             batch.input_ids,
             attention_mask=batch.attention_mask,
-            acoustic_prompt_codes=None if prompt is None else prompt["codes"],
-            acoustic_prompt_positions=None
-            if prompt is None
-            else prompt["token_positions"],
-            acoustic_prompt_mask=batch.acoustic_prompt_mask,
         )
         token = self.token(
             hidden_states,
@@ -81,16 +75,10 @@ class FlowObjective(Objective[FlowObjectiveModel]):
     def forward(self, batch: ModelBatch, model: FlowObjectiveModel) -> Outputs:
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
-        prompt = batch.acoustic_prompt
         target_data = batch.acoustic_target
         hidden_states = model.token_hidden_states(
             batch.input_ids,
             attention_mask=batch.attention_mask,
-            acoustic_prompt_codes=None if prompt is None else prompt["codes"],
-            acoustic_prompt_positions=None
-            if prompt is None
-            else prompt["token_positions"],
-            acoustic_prompt_mask=batch.acoustic_prompt_mask,
         )
         token = self.token(
             hidden_states,
@@ -159,16 +147,10 @@ class RVQObjective(Objective[RVQObjectiveModel]):
     def forward(self, batch: ModelBatch, model: RVQObjectiveModel) -> Outputs:
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
-        prompt = batch.acoustic_prompt
         target_data = batch.acoustic_target
         hidden_states = model.token_hidden_states(
             batch.input_ids,
             attention_mask=batch.attention_mask,
-            acoustic_prompt_codes=None if prompt is None else prompt["codes"],
-            acoustic_prompt_positions=None
-            if prompt is None
-            else prompt["token_positions"],
-            acoustic_prompt_mask=batch.acoustic_prompt_mask,
         )
         token = self.token(
             hidden_states,

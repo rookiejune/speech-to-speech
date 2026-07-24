@@ -7,9 +7,9 @@
 
 - `base.TokenModel`：接收显式 runtime，提供 text/semantic-audio embedding、token
   logits、acoustic prompt 注入、frame condition 对齐与 token generation 原语。
-- `acoustic.FlowModel`：在基础模型上组合 `AcousticFlow`/`AcousticDiT`，提供
+- `acoustic.FlowModel`：在基础模型上组合 SAC 维护的 `AcousticDiT`，提供
   flow target、sampling 和 `generate_audio_features()`。
-- `acoustic.RVQModel`：组合 `AcousticRVQDecoder`，提供 teacher-forced
+- `acoustic.RVQModel`：组合 SAC 维护的 `AcousticRVQDecoder`，提供 teacher-forced
   codebook logits、sampling 和 `generate_audio_features()`。
 - `loss.protocol.TokenObjectiveModel` / `FlowObjectiveModel` / `RVQObjectiveModel`：objective
   所依赖的训练能力。
@@ -79,7 +79,7 @@ def generate_tokens(...) -> Tensor: ...
 三个字段都使用公开 `AdapterType`；`linear` 是默认值，`mlp` 使用 gated SiLU adapter，`None`
 只在输入输出 dimension 相同时合法。`toy=None` 时模型使用 `runtime.backbone`；非空时由
 `ToyConfig` 构造随机 tiny Qwen，runtime 仍负责 tokenizer、codec、layout、special IDs 与 flow
-sampler。Hydra `model` preset 与这些字段一一对应，overfit 与 codec-oracle root schema 直接复用
+sampler。Hydra `model` preset 与这些字段一一对应，overfit/train root schema 直接复用
 `model.Config`。
 
 decoder 使用独立 `DecoderConfig(hidden_dim, layers, heads, ffn_ratio)`。flow 可额外接收
@@ -89,7 +89,10 @@ codebook 的 `codebook_embeddings`，但没有 REPA 参数。Hydra 使用
 与 student REPA 配置。ODE sampling 由 `runtime.Config.flow_*` 拥有。没有独立 acoustic
 codebooks 的 unified-token codec 必须使用 `model/acoustic=none`；有独立 acoustic codebook 的
 codec 也可以显式选择 `none` 作为 token-only baseline。入口不根据 codec 静默覆盖用户选择。
-固定 flow 的 codec-oracle 使用 `codec_oracle.decoder`，不读取 REPA 配置。
+
+底层 acoustic decoder 的所有权在 `semantic-acoustic-codec`：S2S 的 Flow/RVQ model 只负责
+从 backbone hidden state 取 frame-aligned condition，并把 condition 送入 SAC 的 DiT/DiT+REPA/RVQ
+decoder。S2S 不维护 acoustic-only codec oracle，也不复制底层 decoder 实现。
 
 ## Embedding
 

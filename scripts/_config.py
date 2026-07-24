@@ -6,8 +6,6 @@ from typing import Optional, Type, TypeVar, Union, cast
 
 from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf
 
-from speech_to_speech.codec_oracle import Config as OracleConfig
-from speech_to_speech.codec_oracle import Initialization, Objective
 from speech_to_speech.datamodule import (
     DatasetConfig,
     DatasetName,
@@ -114,11 +112,13 @@ class LoggingConfig:
 class TaskSampleCallbackConfig:
     enabled: bool = MISSING
     every_n_steps: int = MISSING
+    every_audio_seconds: Optional[float] = None
 
 
 @dataclass
 class EvaluationCallbackConfig:
     enabled: bool = True
+    every_audio_seconds: Optional[float] = None
 
 
 @dataclass
@@ -136,6 +136,7 @@ class PerformanceConfig:
 class GradNormCallbackConfig:
     enabled: bool = MISSING
     every_n_steps: int = MISSING
+    every_audio_seconds: Optional[float] = None
 
 
 @dataclass
@@ -253,38 +254,6 @@ StagedTrainConfig = Union[
 ]
 
 
-@dataclass
-class OracleCallbackConfig:
-    sample_every_n_steps: int = MISSING
-    histogram_every_n_steps: int = MISSING
-    save_audio: bool = MISSING
-
-
-@dataclass
-class OracleCallbacksConfig:
-    oracle: OracleCallbackConfig = field(default_factory=OracleCallbackConfig)
-    grad_norm: GradNormCallbackConfig = field(default_factory=GradNormCallbackConfig)
-    nonfinite: NonfiniteCallbackConfig = field(default_factory=NonfiniteCallbackConfig)
-    checkpoint: CheckpointCallbackConfig = field(
-        default_factory=CheckpointCallbackConfig
-    )
-    performance: PerformanceConfig = field(default_factory=PerformanceConfig)
-
-
-@dataclass
-class CodecOracleConfig:
-    repo_output_root: str = MISSING
-    output_subdir: str = MISSING
-    output_dir: str = MISSING
-    model: ModelConfig = field(default_factory=ModelConfig)
-    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
-    codec_oracle: OracleConfig = field(default_factory=OracleConfig)
-    train: TrainConfig = field(default_factory=TrainConfig)
-    trainer: TrainerConfig = field(default_factory=TrainerConfig)
-    logging: LoggingConfig = field(default_factory=LoggingConfig)
-    callbacks: OracleCallbacksConfig = field(default_factory=OracleCallbacksConfig)
-
-
 ConfigT = TypeVar("ConfigT")
 
 
@@ -331,14 +300,8 @@ def train(config: DictConfig) -> StagedTrainConfig:
     return result
 
 
-def codec_oracle(config: DictConfig) -> CodecOracleConfig:
-    result = _parse(_prepare(config), CodecOracleConfig)
-    _validate_output(result)
-    return result
-
-
 def _validate_output(
-    config: Union[_OverfitConfig, _StagedTrainConfig, CodecOracleConfig],
+    config: Union[_OverfitConfig, _StagedTrainConfig],
 ) -> None:
     subdir = Path(config.output_subdir)
     if subdir == Path(".") or subdir.is_absolute() or ".." in subdir.parts:
@@ -366,29 +329,10 @@ def _validate_audio_representation(
 
 def _prepare(config: DictConfig) -> DictConfig:
     result = cast(DictConfig, OmegaConf.create(OmegaConf.to_container(config)))
-    initialization = result.get("codec_oracle", {}).get("initialization")
-    normalized_initialization = None
-    if initialization is not None:
-        raw = str(initialization)
-        normalized_initialization = (
-            Initialization[raw]
-            if raw in Initialization.__members__
-            else Initialization(raw)
-        )
-        result.codec_oracle.initialization = normalized_initialization.value
-    objective = result.get("codec_oracle", {}).get("objective")
-    normalized_objective = None
-    if objective is not None:
-        raw = str(objective)
-        normalized_objective = (
-            Objective[raw] if raw in Objective.__members__ else Objective(raw)
-        )
-        result.codec_oracle.objective = normalized_objective.value
     OmegaConf.resolve(result)
     for key in (
         "semantic_audio_adapter",
         "semantic_audio_output_adapter",
-        "acoustic_prompt_adapter",
     ):
         value = result.model[key]
         if value is not None:
@@ -398,10 +342,6 @@ def _prepare(config: DictConfig) -> DictConfig:
                 if raw in AdapterType.__members__
                 else AdapterType(raw).name
             )
-    if normalized_initialization is not None:
-        result.codec_oracle.initialization = normalized_initialization.name
-    if normalized_objective is not None:
-        result.codec_oracle.objective = normalized_objective.name
     _normalize_dataset(result.get("data"))
     _normalize_dataset(result.get("data", {}).get("dataset"))
     _normalize_text_dataset(result.get("text_data", {}).get("dataset"))

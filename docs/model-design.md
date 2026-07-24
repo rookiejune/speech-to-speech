@@ -9,7 +9,6 @@
 - [generation](design/generation.md)：独立 `Request -> Result` 推理、batching、评估与 decode。
 - [pl_module 与 callback](design/pl_module.md)：Lightning 训练集成与日志。
 - [reporting](design/reporting.md)：实验入口共用的无状态窗口摘要。
-- [codec oracle](design/codec_oracle.md)：codec screening 的实验边界。
 
 已验证结论见 [experiments/conclusion](experiments/conclusion.md)，尚未完成的复验与工程欠账见
 [experiments/todo](experiments/todo.md)。
@@ -182,9 +181,7 @@ class FlowRepaConfig(TypedDict):
 `decoder` 与可选 `codebook_embeddings`，但无法接收后被忽略的 REPA 字段。Hydra 使用
 `model/acoustic=none|flow|rvq`，`none` 只训练 semantic audio token，flow preset 独占
 teacher 与 student REPA 配置；训练组装由 `speech_to_speech.pl_module.composition` 持有，
-入口脚本只传入解析后的配置；root schema 直接复用基础 `model.Config`。codec oracle 由
-`codec_oracle.Config` 显式选择 Flow/RVQ objective，并配置 decoder 与 target normalization，
-不复用带 REPA 的 acoustic preset。unified-token codec 必须使用
+入口脚本只传入解析后的配置；root schema 直接复用基础 `model.Config`。unified-token codec 必须使用
 `runtime=unicodec model/acoustic=none`；有独立 acoustic codebook 的 codec 也可以显式选择
 `none` 作为 token-only baseline。ODE sampler 由 `runtime.Config.flow_*` 统一拥有；
 入口只校验 flow/RVQ 所需的 codec capability，不自动改写 composition。
@@ -245,7 +242,6 @@ DataModule 显式持有 runtime 与一个可更新的 Collator。初始 `task_we
 同一组 task weights 只能包含相同 source/target modality 的任务，权重必须有限、非负且总和为
 正，以保证每个子 batch 的执行签名稳定。task 与 loader 权重只控制进入训练 step 的数据频率，
 不额外乘到 loss 上；token、flow、RVQ 与 REPA loss 跨联合子 batch 按有效 token/frame 数聚合。
-静态 codec oracle 冻结目标路径外参数并使用静态 DDP 契约。
 
 `scripts/overfit.py` 只用于 fixed-sample overfit、smoke 和 stage freeze 合同验收；正式训练入口是
 `scripts/train.py`。`configs/stage/stage_*.yaml` 是 Stage 0-4 的默认训练契约：每个 stage 显式声明 loader

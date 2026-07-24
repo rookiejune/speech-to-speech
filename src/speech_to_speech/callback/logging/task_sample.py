@@ -12,6 +12,7 @@ from torch import Tensor
 
 from ...generation import Request, Result
 from ...generation.batch import requests_from_batch
+from ..interval import TrainInterval
 from .._lightning import attached_datamodule, audio_experiment, text_experiment
 
 
@@ -46,8 +47,9 @@ class TaskSampleLogger(Callback):
     def __init__(
         self,
         indices: Sequence[int],
-        every_n_steps: int,
+        every_n_steps: int | None,
         *,
+        every_audio_seconds: float | None = None,
         max_new_tokens: int = 256,
         temperature: float = 1.0,
         top_p: float = 1.0,
@@ -55,8 +57,6 @@ class TaskSampleLogger(Callback):
         use_cache: bool = True,
     ) -> None:
         super().__init__()
-        if every_n_steps < 1:
-            raise ValueError("every_n_steps must be positive.")
         if max_new_tokens < 1:
             raise ValueError("max_new_tokens must be positive.")
         if not indices:
@@ -65,6 +65,10 @@ class TaskSampleLogger(Callback):
             raise TypeError("indices must contain integer sample indices.")
         self.indices = list(indices)
         self.every_n_steps = every_n_steps
+        self.interval = TrainInterval(
+            every_n_steps=every_n_steps,
+            every_audio_seconds=every_audio_seconds,
+        )
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.top_p = top_p
@@ -82,10 +86,10 @@ class TaskSampleLogger(Callback):
     def on_train_batch_start(
         self, trainer: Trainer, pl_module: LightningModule, batch: Any, batch_idx: int
     ) -> None:
-        del batch, batch_idx
-        if not trainer.is_global_zero:
+        del batch_idx
+        if not self.interval.should_run(trainer, pl_module, batch):
             return
-        if trainer.global_step % self.every_n_steps != 0:
+        if not trainer.is_global_zero:
             return
         audio_writer = audio_experiment(trainer)
         text_writer = text_experiment(trainer)
@@ -187,6 +191,12 @@ class TaskSampleLogger(Callback):
             "use_cache": self.use_cache,
         }
 
+    def state_dict(self) -> dict[str, dict[str, float]]:
+        return {"interval": self.interval.state_dict()}
+
+    def load_state_dict(self, state_dict: dict[str, dict[str, float]]) -> None:
+        self.interval.load_state_dict(state_dict.get("interval", {}))
+
 
 def _request_metadata(
     dataset_index: int,
@@ -237,10 +247,7 @@ def _modality_metadata(
 
 
 def _acoustic_frames(request: Request) -> int:
-    acoustic = request["acoustic_prompt"]
-    if acoustic is None:
-        return 0
-    return int(acoustic["codes"].size(0))
+    return 0
 
 
 def _result_metadata(result: Result, *, max_new_tokens: int) -> dict[str, Any]:

@@ -26,15 +26,15 @@ integration is provided by `SpeechToSpeechModule`.
 - `scripts/generation_smoke.py`: cached versus full-recompute S2ST generation
   and variable-batch generation checks using the public `generation` package;
   cache probes, benchmarks, and reporting live in separate private script modules.
-- `scripts/codec_oracle.py`: Hydra entry point for codec oracle training. With
-  no experiment override, `configs/codec_oracle.yaml` uses the full prepared
-  dataset through LBA for 1,000,000 steps at `bf16-mixed` precision, logging a
-  sample and archiving a checkpoint every 10,000 steps. The default runtime is
-  LongCat native semantic IDs; explicit `runtime.audio_tokenizer=/path/to/bpe`
-  enables CodecBPE conditioning, with token embeddings repeated by BPE span to
-  align with prepared acoustic frames.
+- `scripts/export_codec_oracle.py`: compatibility wrapper that exports legacy
+  codec-oracle checkpoints through `semantic-acoustic-codec`; it does not train
+  or construct oracle models in this repository.
 - `jobs/`: machine-aware wrappers for formal experiment runs. Each wrapper
   invokes one of the Python entry points directly and forwards extra arguments.
+
+Acoustic-only codec screening and the former codec-oracle training entry have
+moved to `semantic-acoustic-codec`; this repository keeps the joint S2ST
+training and generation path.
 
 ## Experiment Runs
 
@@ -46,23 +46,14 @@ while the generation smoke accepts normal command-line flags:
 jobs/002/01_tts.sh train.max_steps=2
 jobs/002/02_s2st.sh train.max_steps=2 model/acoustic=rvq
 jobs/004/01_s2st.sh --batch-sizes 1,2,4
-jobs/005/01_longcat.sh codec_oracle.initialization=codec
-jobs/005/06_longcat_rvq.sh
 jobs/005/02_unicodec.sh
-jobs/005/08_longcat_flow_formal.sh codec_oracle.data.root=/path/to/data
-jobs/005/09_longcat_flow_ddp_lba_formal.sh codec_oracle.data.root=/path/to/data
-jobs/005/10_longcat_rvq_formal.sh codec_oracle.data.root=/path/to/data
-jobs/005/11_longcat_rvq_ddp_lba_formal.sh codec_oracle.data.root=/path/to/data
+jobs/005/05_unicodec_ddp.sh
 ```
 
-The 01-07 wrappers under 005 are full-path validation runs. They select explicit
-experiments containing their data, trainer, callback, and step budgets: LongCat
-single-GPU and DDP smoke runs use two steps, UniCodec fixed-sample overfit uses
-100 steps, and UniCodec DDP smoke uses two steps. The 08-11 LongCat formal
-wrappers deliberately omit `experiment=...` and retain the production-oriented
-1,000,000-step full-data LBA configuration. Their DDP variants select the
-validated static DDP strategy and write to a separate output root from the
-single-GPU runs.
+The 005 wrappers are UniCodec full-path validation runs. They select explicit
+experiments containing their data, trainer, callback, and step budgets:
+UniCodec fixed-sample overfit uses 100 steps, and UniCodec DDP smoke uses two
+steps.
 The 002 wrappers likewise select `experiment=overfit` explicitly.
 
 For the source-level model/data contract smoke, select
@@ -72,6 +63,12 @@ runtime for the tokenizer, codec, layout, special IDs, and flow sampler. It
 therefore avoids the pretrained language-model weights and prepared WMT19
 dataset, but it is not an offline fake runtime and does not replace the real
 LongCat/UniCodec acceptance runs.
+
+For the flattened-code comparison path, select
+`experiment=longcat_full_sequence_smoke`. It uses the LongCat codec with
+`runtime=longcat_full_sequence model/acoustic=none`, so the full codec
+codebook sequence is trained as audio tokens and the Flow/RVQ acoustic side
+channel stays disabled.
 
 Hydra roots are parsed into strict entry-specific dataclasses before execution.
 Both trainer presets use `devices: auto`, so Lightning consumes every device
@@ -84,17 +81,14 @@ fields. `model=toy` replaces only the model-owned backbone; it does not select
 or construct a runtime. `data=toy` selects deterministic in-memory prepared-code
 samples. `model/acoustic=none|flow|rvq` selects whether training uses only
 semantic audio tokens or also a downstream Flow/RVQ acoustic path; unified-token
-experiments select `runtime=unicodec model/acoustic=none`.
-`pl_module` owns overfit optimizer settings, while `codec_oracle` owns its
-decoder, data, initialization, normalization, and optimizer settings. Entry
-points reject codec/composition mismatches.
+experiments select `runtime=unicodec model/acoustic=none`, and flattened
+LongCat comparison runs select `runtime=longcat_full_sequence model/acoustic=none`.
+`pl_module` owns optimizer settings for the training entries. Entry points
+reject codec/composition mismatches.
 
-Two-GPU DDP runs use `jobs/005/04_longcat_ddp_lba.sh` for Flow,
-`jobs/005/07_longcat_rvq_ddp_lba.sh` for RVQ, and `jobs/005/05_unicodec_ddp.sh`
-for unified-token training. Formal LongCat DDP runs use
-`jobs/005/09_longcat_flow_ddp_lba_formal.sh` and
-`jobs/005/11_longcat_rvq_ddp_lba_formal.sh`. Override machine-facing values such
-as `CUDA_VISIBLE_DEVICES`, `SPEECH_TO_SPEECH_PYTHON`,
+Two-GPU DDP smoke for unified-token training uses
+`jobs/005/05_unicodec_ddp.sh`. Override machine-facing values such as
+`CUDA_VISIBLE_DEVICES`, `SPEECH_TO_SPEECH_PYTHON`,
 `SPEECH_TO_SPEECH_UNICODEC_PYTHON`, or `SPEECH_TO_SPEECH_TRAIN_ROOT` only at
 submission time. Jobs default `SPEECH_TO_SPEECH_TRAIN_ROOT` to
 `$DYNAMIC_HOME/train/speech-to-speech`; training entries write checkpoints and

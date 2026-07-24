@@ -11,6 +11,7 @@ from speech_to_speech.callback.logging import (
     GradNormLogger,
     OutputsLogger,
 )
+from speech_to_speech.callback import TrainInterval, processed_audio_seconds
 from speech_to_speech.datamodule import ModelBatch, ModelSample
 from speech_to_speech.loss import LossItem, Outputs, loss_items
 from speech_to_speech.pl_module import Config, SpeechToSpeechModule
@@ -59,6 +60,32 @@ class LoggingTest(unittest.TestCase):
 
         self.assertEqual(module.log.call_args.args[0], "train/grad_norm")
         torch.testing.assert_close(module.log.call_args.args[1], torch.tensor(13.0))
+
+    def test_audio_interval_counts_processed_batch_seconds(self):
+        interval = TrainInterval(every_n_steps=100, every_audio_seconds=2.0)
+        trainer = SimpleNamespace(global_step=0, world_size=1)
+        module = SimpleNamespace(device=torch.device("cpu"))
+        first = _batch(Task.TTS, audio_seconds=1.5)
+        second = _batch(Task.TTS, audio_seconds=0.75)
+
+        self.assertFalse(interval.should_run(trainer, module, first))
+        self.assertTrue(interval.should_run(trainer, module, second))
+        self.assertEqual(processed_audio_seconds((first, second)), 2.25)
+
+    def test_audio_interval_sums_distributed_rank_seconds(self):
+        reduce_ops = []
+
+        class Strategy:
+            def reduce(self, value, *, reduce_op):
+                reduce_ops.append(reduce_op)
+                return value + value.new_tensor(2.0)
+
+        interval = TrainInterval(every_n_steps=100, every_audio_seconds=3.0)
+        trainer = SimpleNamespace(global_step=0, world_size=2, strategy=Strategy())
+        module = SimpleNamespace(device=torch.device("cpu"))
+
+        self.assertTrue(interval.should_run(trainer, module, _batch(Task.TTS, 1.0)))
+        self.assertEqual(reduce_ops, ["sum"])
 
     def test_window_summary_reports_edges_and_window_means(self):
         summary = window_summary([1.0, 2.0, 4.0], window=2)
@@ -216,7 +243,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-def _batch(task: Task) -> ModelBatch:
+def _batch(task: Task, audio_seconds: float = 0.0) -> ModelBatch:
     return ModelBatch.from_samples(
         [
             ModelSample(
@@ -225,6 +252,7 @@ def _batch(task: Task) -> ModelBatch:
                 acoustic_prompt=None,
                 acoustic_target=None,
                 task=task,
+                audio_seconds=audio_seconds,
             )
         ],
         pad_token_id=0,

@@ -5,6 +5,5 @@ trainable_groups:
   - semantic_audio_output
 frozen_groups:
   - backbone
-  - acoustic_prompt
   - acoustic_decoder
 backbone_top_fraction: 0.0

@@ -45,8 +45,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     request = requests_from_batch(batch)[0]
 
     model = FlowModel(runtime=runtime).eval()
-    with torch.no_grad():
-        model.acoustic_prompt_gate.fill_(args.acoustic_prompt_gate)
 
     probe = second_step(model, request)
     cached = run(
@@ -78,9 +76,6 @@ def main(argv: Sequence[str] | None = None) -> None:
             (prefix_length,), runtime.bos_token_id
         )
         batch_request["prompt_ids"] = torch.cat((prefix, batch_request["prompt_ids"]))
-        acoustic_prompt = batch_request["acoustic_prompt"]
-        if acoustic_prompt is not None:
-            acoustic_prompt["token_positions"] += prefix_length
     batch_benchmark = [
         benchmark_batch(
             model,
@@ -97,12 +92,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "max_new_tokens": args.max_new_tokens,
         "seed": args.seed,
         "prompt_tokens": int(request["prompt_ids"].numel()),
-        "source_acoustic_frames": (
-            0
-            if request["acoustic_prompt"] is None
-            else int(request["acoustic_prompt"]["codes"].size(0))
-        ),
-        "acoustic_prompt_gate": args.acoustic_prompt_gate,
+        "source_acoustic_frames": 0,
         "second_step_probe": probe,
         "cached": summary(cached),
         "full_recompute": summary(full),
@@ -137,7 +127,6 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--split", default="train")
     parser.add_argument("--max-new-tokens", type=int, default=2)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--acoustic-prompt-gate", type=float, default=1.0)
     parser.add_argument("--codec", default="longcat")
     parser.add_argument("--backbone", default="Qwen/Qwen3-0.6B")
     parser.add_argument("--device", default="cuda")
