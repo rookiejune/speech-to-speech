@@ -7,7 +7,7 @@ from pathlib import Path
 
 import torch
 
-from speech_to_speech.datamodule import Collator
+from speech_to_speech.datamodule.collator import Collator
 from speech_to_speech.generation.batch import requests_from_batch
 from speech_to_speech.generation.reporting import compare, summary
 from speech_to_speech.model.acoustic import FlowModel

@@ -11,7 +11,8 @@ from semantic_acoustic_codec.model import AcousticDiT as SharedAcousticDiT
 from semantic_acoustic_codec.model import AcousticRVQDecoder as SharedRVQDecoder
 from torch import Tensor, nn
 
-from speech_to_speech.datamodule import Collator, ToyDataset
+from speech_to_speech.datamodule.collator import Collator
+from speech_to_speech.datamodule.dataset import ToyDataset
 from speech_to_speech.loss import FlowObjective
 from speech_to_speech.model import ToyConfig
 from speech_to_speech.model.acoustic import (

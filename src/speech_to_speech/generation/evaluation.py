@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 from torch import Tensor
 
-from ..datamodule import ModelBatch
+from ..datamodule.types import ModelBatch
 from ..runtime.types import AcousticCodec
 
 if TYPE_CHECKING:

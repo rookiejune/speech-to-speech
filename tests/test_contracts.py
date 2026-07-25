@@ -32,24 +32,23 @@ from torch import nn
 
 from speech_to_speech.callback import OnDeviceCodecMaterializer
 from speech_to_speech.datamodule.collator import Collator, TextCollator, _allocate_tasks
-from speech_to_speech.datamodule import (
-    DataShape,
-    DatasetConfig,
-    DatasetName,
-    FixedDataModule,
+from speech_to_speech.datamodule.dataset import DatasetConfig, DatasetName, ToyDataset
+from speech_to_speech.datamodule.joint import (
     JointDataModule,
     LoaderSchedule,
     ScheduledDataLoader,
+)
+from speech_to_speech.datamodule.module import Config as DataConfig
+from speech_to_speech.datamodule.module import DataModule, FixedDataModule
+from speech_to_speech.datamodule.single import SingleCollator
+from speech_to_speech.datamodule.text import (
     TextConfig,
     TextDataModule,
     TextDatasetConfig,
     TextDatasetName,
-    ToyDataset,
     load_text_dataset,
 )
-from speech_to_speech.datamodule import SingleCollator
-from speech_to_speech.datamodule.module import Config as DataConfig
-from speech_to_speech.datamodule.module import DataModule
+from speech_to_speech.datamodule.types import DataShape
 from speech_to_speech.datamodule.parser import (
     _parse_audio_item,
     parse_sample,

@@ -33,12 +33,8 @@ from scripts.overfit import (
     runtime_config,
 )
 from scripts.train import build_datamodule as build_train_datamodule
-from speech_to_speech.datamodule import (
-    DataModule,
-    DatasetName,
-    JointDataModule,
-    TextDataModule,
-)
+from speech_to_speech.datamodule import DataModule, JointDataModule, TextDataModule
+from speech_to_speech.datamodule.dataset import DatasetName
 from speech_to_speech.model import (
     AdapterType,
     Config as ModelConfig,

@@ -13,7 +13,7 @@ from speech_to_speech.callback.logging import (
     OutputsLogger,
 )
 from speech_to_speech.callback import TrainInterval, processed_audio_seconds
-from speech_to_speech.datamodule import ModelBatch, ModelSample
+from speech_to_speech.datamodule.types import ModelBatch, ModelSample
 from speech_to_speech.loss import LossItem, Outputs, loss_items
 from speech_to_speech.pl_module import Config, SpeechToSpeechModule
 from speech_to_speech.task import Task

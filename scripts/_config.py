@@ -6,13 +6,9 @@ from typing import Optional, Type, TypeVar, Union, cast
 
 from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf
 
-from speech_to_speech.datamodule import (
-    DataShape,
-    DatasetConfig,
-    DatasetName,
-    TextDatasetConfig,
-    TextDatasetName,
-)
+from speech_to_speech.datamodule.dataset import DatasetConfig, DatasetName
+from speech_to_speech.datamodule.text import TextDatasetConfig, TextDatasetName
+from speech_to_speech.datamodule.types import DataShape
 from speech_to_speech.model import AdapterType
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model.acoustic import AcousticType, DecoderConfig

@@ -9,7 +9,7 @@ from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 from torch import Tensor
 
-from ...datamodule import ModelBatch
+from ...datamodule.types import ModelBatch
 from ...generation.evaluation import evaluate
 from ...model.acoustic import FlowModel, RVQModel
 from ...runtime.types import AcousticCodec
