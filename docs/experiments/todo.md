@@ -10,7 +10,7 @@ P0 已在 debug-migrated copy 上通过，证据见
 codec frame count 和 runtime frame rate 推导音频秒数，不再要求正式 root 先补写
 `AudioMeta.DURATION`；正式 stable data root 仍需完成 fingerprint、split 与分布验收。
 
-- 验证正式 stable data root 在无 duration metadata 时可直接 parse、LBA 和训练；禁止把真实音频静默
+- 验证正式 stable data root 在无 duration metadata 时可直接 parse、map-style dataloader 和训练；禁止把真实音频静默
   计为 0。
 - 固化正式 stable data root、split manifest、LongCat view fingerprint 和 native token/RVQ
   分布；禁止依赖 `/tmp` 或 debug copy 进入 stage 1 长跑。

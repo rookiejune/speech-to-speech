@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPOS_ROOT="${REPOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
-source "${REPOS_ROOT}/workspace/jobs/fudan/speech_to_speech_env.sh"
+source "${REPOS_ROOT}/workspace/jobs/env.sh"
 
 qwen_root="$(fdu_qwen_root SPEECH_TO_SPEECH_P0_QWEN_ROOT)"
 fdu_p0_data_args data.root

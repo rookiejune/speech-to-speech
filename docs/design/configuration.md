@@ -62,8 +62,9 @@ Hydra metadata 与 `metrics.json` 写入 `output_dir`；TensorBoard/CSV logger �
 
 两个 trainer preset 都使用 `devices: auto`，由 Lightning 使用 `CUDA_VISIBLE_DEVICES` 中的全部
 可见设备；设备数量不再作为运行时配置契约重复校验。job wrapper 只提供机器相关的默认可见设备，
-提交时可显式覆盖。共享 `trainer=ddp` 使用 Lightning 默认 distributed sampler。LongCat LBA
-直接暴露 dataset 与 DataLoader 构造参数供 Lightning 重建；UniCodec DDP smoke 则要求每个 rank
+提交时可显式覆盖。共享 `trainer=ddp` 使用 Lightning 默认 distributed sampler。LongCat prepared
+map-style dataset 通过 `MapStyleABC.dataloader()` 暴露 deterministic shuffle 与 batch planning；
+UniCodec DDP smoke 则要求每个 rank
 重复读取同一个固定样本，因此仅该 experiment 显式设置 `use_distributed_sampler: false`。
 
 完整链路实验分别负责其 composition、数据范围、trainer、callback 和 step budget：

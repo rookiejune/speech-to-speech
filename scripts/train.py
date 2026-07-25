@@ -131,7 +131,7 @@ def run(config: StagedTrainConfig) -> None:
 
 def build_datamodule(config: StagedTrainConfig, runtime: Runtime) -> JointDataModule:
     datamodules = {
-        name: _loader_datamodule(config, runtime, name, loader)
+        name: _loader_datamodule(config, runtime, loader)
         for name, loader in config.stage.loaders.items()
     }
     return JointDataModule(
@@ -146,7 +146,6 @@ def build_datamodule(config: StagedTrainConfig, runtime: Runtime) -> JointDataMo
 def _loader_datamodule(
     config: StagedTrainConfig,
     runtime: Runtime,
-    name: str,
     loader: StageLoaderConfig,
 ):
     task_weights = _task_weights(loader)
@@ -158,8 +157,6 @@ def _loader_datamodule(
             ),
             runtime,
             task_weights,
-            output_dir=Path(config.output_dir).expanduser(),
-            loader_name=name,
         )
     return DataModule(
         SpeechDataModuleConfig(
@@ -171,8 +168,6 @@ def _loader_datamodule(
         ),
         runtime,
         task_weights,
-        output_dir=Path(config.output_dir).expanduser(),
-        loader_name=name,
     )
 
 
@@ -196,7 +191,6 @@ def _dataloader(config: TrainDataLoaderConfig) -> DataLoaderConfig:
         "num_workers": config.num_workers,
         "pin_memory": config.pin_memory,
         "persistent_workers": config.persistent_workers,
-        "lba": config.lba,
     }
 
 

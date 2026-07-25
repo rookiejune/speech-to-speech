@@ -40,18 +40,14 @@
   optimizer step 确定性轮转；配置 `batches_per_step > 1` 时，一个 optimizer step 返回多个子
   batch，供静态 DDP 覆盖多条可训练执行路径。每个子 dataloader 自己保持单一 execution
   signature。
-- `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts` prepared data、Qwen-TTS
-  BiCodec sidecar single data 或确定性的内存 `toy` data。toy codes 根据正式 codec 的
-  semantic/acoustic/full-sequence codebook 数量和值域构造。
+- `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts` prepared data 或确定性的内存
+  `toy` data。toy codes 根据正式 codec 的 semantic/acoustic/full-sequence codebook 数量和值域构造。
 - `ToyDataset`：提供完整 source/target audio+text raw sample，不读取文件、不修改全局 RNG。
-- `LBAConfig`：按 `ModelSample` 的 text token 与 source/target frame 长度估算 batch cost，
-  启用后每个 homogeneous loader 使用 third-party LBA，并把 planner summary 写到
-  `output_dir/lba/{loader_name}`。speech loader 支持 prepared map-style dataset；text loader
-  也必须使用 map-style dataset，当前 FDU joint smoke 因此使用 deterministic toy text samples。
-- `DataLoaderConfig(batch_size, num_workers, pin_memory, persistent_workers, lba)` /
+- `DataLoaderConfig(batch_size, num_workers, pin_memory, persistent_workers)` /
   `Config(codec, dataloader, shape, encode_missing_codes, dataset)`：公开的 DataLoader、
-  dataset 与 DataModule 配置结构。`shape=pair` 是默认旧路径；`shape=single` 显式选择
-  single utterance path。
+  dataset 与 DataModule 配置结构。prepared speech 的 map-style dataset 通过
+  `MapStyleABC.dataloader()` 使用 anydataset 的 cost planner；普通或 iterable dataset 使用
+  PyTorch `DataLoader`。`shape=pair` 是默认路径；`shape=single` 显式选择 single utterance path。
 - `DataModule(config, runtime, task_weights)`：Lightning 数据入口；`setup()` 加载所选 dataset，
   并在加载前校验 config 与 runtime 的 codec identity。重复调用不会重新加载已持有的数据集。
 - `FixedDataModule(codec, runtime, task_weights, sample_index, dataset=...)`：fixed-sample
@@ -84,10 +80,6 @@ debug fallback 可显式设置 `encode_missing_codes=true`，在缺少 codec cod
 `AudioView.WAVEFORM` 时让 collator 返回 `RawSingleBatch`。该 batch 不能直接进入 objective；
 训练入口必须给 `SpeechToSpeechModule` 挂 `OnDeviceCodecMaterializer`，在 GPU/device 上调用
 runtime codec encode 后再构造标准 `ModelBatch`。
-
-BiCodec 正式路径读取 workspace 生成的 sidecar：`semantic` token 与 `global_tokens` 保留在
-`AudioView.BICODEC` 的完整 code tensor 中，其中第 0 列是逐帧 semantic token，后续列是按帧重复的
-global speaker token。runtime decode 时只取首帧 global token 还原给 Spark-TTS BiCodec。
 
 `ModelSample` 和 `ModelBatch` 使用同一组核心字段：
 
@@ -123,8 +115,8 @@ acoustic_target: AcousticTarget | None
 - LongCat 的第 0 个 codebook 和后续 codebooks 只在 parser 边界解释为 semantic/acoustic。
   `full_codec_sequence` 不拆 semantic/acoustic side channel，而是把完整 codec codes 放入
   `semantic_codes` 并设置 `acoustic_codes=None`；unified-token codec 的完整 codes 也是
-  `semantic_codes`，`acoustic_codes=None`。BiCodec 也必须走 `full_codec_sequence`，因为它的
-  global speaker token 不是独立 acoustic side channel。
+  `semantic_codes`，`acoustic_codes=None`。fixed-length structured codec 不属于这条 frame-code
+  parser 路径。
 - audio tokenizer 的输出统一称为 `audio_token_ids`；codec codebook index 统一称为
   `semantic_codes` / `acoustic_codes`。只有 layout global IDs 使用 `input_ids` 和
   `token_labels`。
@@ -149,8 +141,7 @@ acoustic_target: AcousticTarget | None
 - `AudioMeta.DURATION` 的单位是秒，不是 codec frame 或 waveform sample。parser 优先读取并校验
   该元数据；缺失时用当前 codec view 的 frame count 除以 `runtime.codec_frame_rate` 推导
   `Speech.duration_seconds`。task sample builder 按 source/target modality 决定哪些角色计入
-  `ModelBatch.audio_seconds`。LBA 的 metadata 快路径同样优先使用 duration；缺失时读取对应 codec
-  view 的 frame count，不能把真实音频静默计为 0。
+  `ModelBatch.audio_seconds`；不能把真实音频静默计为 0。
 - 同一 `task_weights` 中的任务必须具有相同 source/target modality，保证 DDP 各 rank 走相同
   模型路径。0 权重任务不会参与 batch 分配；每项权重必须有限且非负，总和必须有限且为正；
   按 batch size 固定分配时，任一非 0 权重任务拿不到至少 1 条 sample 会直接报错。非法权重
@@ -167,15 +158,11 @@ acoustic_target: AcousticTarget | None
   仍持有正式 runtime 供 dataset setup 使用。`persistent_workers` 只在 `num_workers > 0` 时启用，
   `pin_memory` 由入口显式配置。
 - 对 anydataset `MapStyleABC`，`DataModule` 使用其 `dataloader()` 公开入口负责 deterministic
-  shuffle 与 runtime shard；store-backed dataset 会额外保留 payload locality。DataLoader 仍索引
-  原始外层 dataset，因此 `AnyDataset` transform 不会被绕过。正式 `train.yaml` 关闭 Lightning
-  自动 distributed sampler，避免重复切分。
-- 启用 `dataloader.lba.enabled` 时，LBA 消费 anydataset dataloader 的 batch sampler 产出的
-  index 流并在其上做长度规划，不再用自己的 `shuffle=True` 覆盖 source shuffle。非 anydataset
-  map-style dataset 才使用 LBA/DataLoader 自己的 sample shuffle。joint train 的外层
-  `ScheduledDataLoader` 不接受 Lightning 注入 sampler；当前
-  FDU smoke 验证 DDP 下每个子 loader 都能创建 per-rank LBA log 并完成 2-step 训练，正式
-  distributed sample partition 仍需在长跑前单独复核。
+  shuffle、runtime shard 和固定的 sample-cost batch 规划；store-backed dataset 会额外保留
+  payload locality。DataLoader 仍索引原始外层 dataset，因此 `AnyDataset` transform 不会被绕过。
+  普通或 iterable dataset 使用 PyTorch `DataLoader`。joint train 的外层
+  `ScheduledDataLoader` 不接受 Lightning 注入 sampler；正式 distributed sample partition
+  由各 loader 的公开 dataloader 契约负责。
 - `DataModule.train_samples()` 是 callback 按索引读取已 setup 训练样本的公开边界；callback
   不读取私有 dataset 字段。
 - parser 生成 `Speech.audio_token_spans`，`Speech` 校验 spans 与 semantic frame 完整对齐；

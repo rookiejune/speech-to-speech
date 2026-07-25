@@ -26,8 +26,8 @@ from .types import (
 from .._compat import StrEnum, auto
 
 if TYPE_CHECKING:
+    from anytrain.codec import SemanticAcousticFeatureCodec
     from anytrain.framework.flow_matching import ContinuousFlowRuntime
-    from semantic_acoustic_codec.runtime import CodecBackend
 
 _FLOW_METHODS = frozenset(
     {
@@ -71,6 +71,10 @@ class Config:
     def __post_init__(self) -> None:
         if not isinstance(self.audio_representation, AudioRepresentation):
             raise TypeError("audio_representation must be an AudioRepresentation.")
+        if self.codec == "bicodec":
+            raise ValueError(
+                "speech-to-speech does not support the fixed-length structured codec 'bicodec'."
+            )
         if (
             self.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE
             and self.audio_tokenizer is not None
@@ -78,11 +82,6 @@ class Config:
             raise ValueError(
                 "full codec sequence representation cannot use a BPE audio tokenizer."
             )
-        if (
-            self.codec == "bicodec"
-            and self.audio_representation is not AudioRepresentation.FULL_CODEC_SEQUENCE
-        ):
-            raise ValueError("BiCodec requires the full codec sequence representation.")
         if self.semantic_codec_artifact is not None:
             if not self.semantic_codec_artifact:
                 raise ValueError("semantic_codec_artifact must not be empty.")
@@ -176,7 +175,7 @@ class Runtime:
         )
         runtime = SemanticCodecRuntime(
             support,
-            cast("CodecBackend", cast(object, self.codec)),
+            cast("SemanticAcousticFeatureCodec", cast(object, self.codec)),
         )
         return cast(SemanticCodec, cast(object, runtime))
 

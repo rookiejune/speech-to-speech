@@ -211,7 +211,8 @@ token 还原为 semantic codes 并调用该能力。当前 runtime codec 可以�
 semantic-only support artifact 提供，但两者不能改变 token model、objective 或 `Request -> Result` 契约。
 该最小能力由 `runtime.types.SemanticCodec` 表达；训练数据只要求基础 `Codec`，codec table 初始化
 要求 `CodebookCodec`，Flow/RVQ 和 feature decode 显式要求 `AcousticCodec`。因此 unified-token
-与 full-sequence backend 不需要伪造 acoustic API，BiCodec 也不需要构造全零 semantic codebook。
+与 full-sequence backend 不需要伪造 acoustic API；fixed-length structured codec 也不进入该 frame-code
+runtime contract。
 
 `speech_to_speech.generation` 拥有 `Request`、`Result`、service、decode 与 text evaluation；`pl_module` 只负责 Lightning 集成。
 

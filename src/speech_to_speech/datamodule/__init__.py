@@ -5,10 +5,8 @@ from .dataset import (
     ToyDataset,
     load_dataset,
 )
-from .fixed import FixedDataModule
 from .joint import JointDataModule, LoaderSchedule, ScheduledDataLoader, TrainDataModule
-from .lba import LBAConfig
-from .module import Config, DataLoaderConfig, DataModule
+from .module import Config, DataLoaderConfig, DataModule, FixedDataModule
 from .protocol import (
     DataRuntime,
     DataRuntimeSnapshot,
@@ -61,7 +59,6 @@ __all__ = [
     "FixedDataModule",
     "JointDataModule",
     "Language",
-    "LBAConfig",
     "LoaderSchedule",
     "ModelBatch",
     "ModelSample",

@@ -85,8 +85,6 @@ def _split_audio_codes(
         return codes[:, :1], codes[:, 1:]
     if view is types.AudioView.UNICODEC:
         return codes, None
-    if view is types.AudioView.BICODEC:
-        return codes, None
     raise ValueError(f"unsupported codec audio view: {view.value}")
 
 

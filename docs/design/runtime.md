@@ -41,8 +41,8 @@ sample builder 和 batch padding 所需资源。
 `codebook_sizes` 与随机 audio embedding 所需的 `semantic_feature_dim`。`CodebookCodec` 进一步
 提供真实 `semantic_codebook`，供 native/BPE tokenizer 初始化 embedding；`AcousticCodec` 再增加
 独立 acoustic codebooks、code-to-feature 与 feature decode。LongCat 实现 `AcousticCodec`，
-UniCodec 实现 `CodebookCodec`，BiCodec full-sequence adapter 只实现基础 `Codec`，不伪造全零
-semantic codebook 或不可用 acoustic API。artifact 当前只支持 LongCat decoupled representation，
+UniCodec 实现 `CodebookCodec`。`SemanticAcousticCodec` 这类 fixed-length structured codec
+（例如 BiCodec）目前没有 S2S adapter；不得把它伪装成基础 `Codec`。artifact 当前只支持 LongCat decoupled representation，
 且入口只允许与 `model/acoustic=none` 组合，避免同一次生成同时启用 S2S acoustic decoder 和外部
 semantic support。
 
@@ -78,8 +78,7 @@ padding、objective 与 generation service 不读取全局 runtime 状态。
 - device、dtype 与 attention backend 来自显式配置，不依赖 Transformers 环境默认值。
 - layout、backbone/tokenizer vocabulary 与 codec/audio-tokenizer vocabulary 属于同一 snapshot。
 - Runtime 不是 `nn.Module`；optimizer/checkpoint ownership 只由 model 属性决定。
-- `LongCatCodec`、`UnifiedCodec` 与 `BiCodecCodec` 隔离具体第三方类型，消费者只依赖所需的最窄
-  codec capability；
+- `LongCatCodec` 与 `UnifiedCodec` 隔离具体第三方类型，消费者只依赖所需的最窄 codec capability；
   UniCodec loader 只在边界转换为窄 `UnifiedCodecSource`，adapter 内不使用 `Any`。
 - text special tokens 与 chat template 当前属于 Qwen3 contract；替换 backbone 前需提供对应
   tokenizer/chat adapter。

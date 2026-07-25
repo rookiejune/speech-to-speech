@@ -37,8 +37,7 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
   `anytrain.lightning`。
 - `OnDeviceCodecMaterializer`：训练时 wav->codes 的显式 fallback。正式数据仍应提前 materialize
   codec codes；该 fallback 只把 `RawSingleBatch` 规范化为 `ModelBatch`，不改变 objective 或 task
-  loss contract。BiCodec fallback 通过 runtime adapter 输出完整 codec sequence，与 sidecar
-  prepared codes 使用同一 `ModelBatch` contract。
+  loss contract。
 - `FlowMatchingLogger`：显式接收 flow runtime，不向下读取 model runtime；time histogram 和 bucketed
   loss 日志来自 `anytrain.lightning.LossTimeBucketLoggerCallback`。
 - `LossSummary`：只注入 S2S objective 顺序；训练输出 total loss 与分项 `LossItem` 窗口摘要来自
@@ -83,7 +82,7 @@ scatter、normalization、activation、loss 和冻结 codec feature extraction �
 
 生产统计不从单个 `example_input_array` 推导固定 FLOPs；该字段只提供一个 forward 示例，供 summary、
 tracing 或 graph logging 使用，也不直接使用 `lightning.fabric.utilities.throughput.measure_flops()`。
-实际 batch 的有效序列/帧长度、padded shape、objective 分支和各 rank 的 LBA 工作量都可能不同，
+实际 batch 的有效序列/帧长度、padded shape、objective 分支和各 rank 的 dataloader 工作量都可能不同，
 FlashAttention 或其他 custom op 也可能不在通用算子计数覆盖范围内；生产 provider 因此使用动态
 解析计数，DDP 聚合与 step timing 由 anytrain 负责。Lightning 的 `measure_flops()` 只用于测试或
 校准受支持的基础算子公式，不能替代该生产口径。

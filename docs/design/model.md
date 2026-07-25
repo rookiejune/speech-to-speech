@@ -85,8 +85,8 @@ codebook 的 `codebook_embeddings`，但没有 REPA 参数。Hydra 使用
 与 student REPA 配置。ODE sampling 由 `runtime.Config.flow_*` 拥有。没有独立 acoustic
 codebooks 的 unified-token codec 必须使用 `model/acoustic=none`；有独立 acoustic codebook 的
 codec 也可以显式选择 `none` 作为 token-only baseline。入口不根据 codec 静默覆盖用户选择。
-BiCodec 只支持 `runtime.audio_representation=full_codec_sequence` 与 `model/acoustic=none`：
-S2S 训练完整 codec token 序列，decode 时再拆回 Spark-TTS 的 semantic/global token 结构。
+fixed-length structured codec（例如 BiCodec）没有对应的 S2S model-facing adapter，不能选择为
+当前 runtime codec。
 
 底层 acoustic decoder 的所有权在 `semantic-acoustic-codec`：S2S 的 Flow/RVQ model 只负责
 从 backbone hidden state 取 frame-aligned condition，并把 condition 送入 SAC 的 DiT/DiT+REPA/RVQ

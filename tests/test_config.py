@@ -34,13 +34,10 @@ from scripts.overfit import (
 )
 from scripts.train import build_datamodule as build_train_datamodule
 from speech_to_speech.datamodule import (
-    DataShape,
     DataModule,
     DatasetName,
     JointDataModule,
-    LBAConfig,
     TextDataModule,
-    TextDatasetName,
 )
 from speech_to_speech.model import (
     AdapterType,
@@ -130,20 +127,6 @@ class ConfigTest(unittest.TestCase):
         self.assertIsInstance(config.model.toy, ToyConfig)
         self.assertIs(config.data.name, DatasetName.TOY)
         self.assertEqual(config.run_name, "longcat-full-sequence-token")
-        self.assertEqual(config.train.max_steps, 2)
-        self.assertFalse(config.callbacks.task_sample.enabled)
-        self.assertFalse(config.callbacks.evaluation.enabled)
-
-    def test_bicodec_tts_overfit_is_single_token_only(self):
-        config = overfit(_compose("overfit", "experiment=bicodec_tts_overfit"))
-
-        self.assertIsInstance(config, OverfitTokenConfig)
-        self.assertEqual(config.runtime.codec, "bicodec")
-        self.assertEqual(config.runtime.audio_representation.value, "full_codec_sequence")
-        self.assertEqual(config.acoustic.type, AcousticType.NONE.value)
-        self.assertIs(config.data.name, DatasetName.QWEN_TTS_BICODEC)
-        self.assertIs(config.data.shape, DataShape.SINGLE)
-        self.assertEqual(config.task, "tts")
         self.assertEqual(config.train.max_steps, 2)
         self.assertFalse(config.callbacks.task_sample.enabled)
         self.assertFalse(config.callbacks.evaluation.enabled)
@@ -533,30 +516,6 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual(config.text_data.dataloader.batch_size, 4)
                 self.assertIn("013-fdu-stage-smoke", config.output_dir)
 
-    def test_fdu_stage_lba_smoke_config_uses_joint_train_lba(self):
-        config = parse_train(_compose("train", "experiment=fdu_stage_2_lba_smoke"))
-
-        self.assertIsInstance(config, StagedTrainRVQConfig)
-        self.assertIs(config.stage.name, StageName.STAGE_2)
-        self.assertEqual(config.train.max_steps, 2)
-        self.assertEqual(config.trainer.strategy, "ddp_find_unused_parameters_true")
-        self.assertFalse(config.trainer.use_distributed_sampler)
-        self.assertIs(config.text_data.dataset.name, TextDatasetName.TOY)
-        self.assertIsInstance(config.data.dataloader.lba, LBAConfig)
-        self.assertIsInstance(config.text_data.dataloader.lba, LBAConfig)
-        self.assertTrue(config.data.dataloader.lba.enabled)
-        self.assertTrue(config.text_data.dataloader.lba.enabled)
-        self.assertEqual(config.data.dataloader.lba.max_batch_cost, 2048)
-        self.assertEqual(config.text_data.dataloader.lba.max_batch_cost, 2048)
-        self.assertIn("013-fdu-stage-lba-smoke", config.output_dir)
-
-        datamodule = build_train_datamodule(config, object())
-
-        self.assertIsInstance(datamodule, JointDataModule)
-        self.assertTrue(datamodule.datamodules["asr"].config.dataloader["lba"].enabled)
-        self.assertTrue(datamodule.datamodules["tts"].config.dataloader["lba"].enabled)
-        self.assertTrue(datamodule.datamodules["mt"].config.dataloader["lba"].enabled)
-
     def test_fdu_acoustic_none_smoke_configs_cover_all_stages(self):
         stage_0 = overfit(
             _compose("overfit", "experiment=fdu_stage_0_acoustic_none_smoke")
@@ -846,7 +805,7 @@ class ConfigTest(unittest.TestCase):
             with self.subTest(job=str(path.relative_to(root))):
                 source = path.read_text()
 
-                self.assertIn("workspace/jobs/fudan/speech_to_speech_env.sh", source)
+                self.assertIn("workspace/jobs/env.sh", source)
                 self.assertNotRegex(
                     source,
                     r"/(?:home|mnt|Users)/|hf-mirror|Qwen3-0\.6B|HF_HOME|ANYTRAIN_HOME",
@@ -886,12 +845,6 @@ class ConfigTest(unittest.TestCase):
                 "fdu_stage_data_args data.dataset.root",
             ),
             (
-                "15_stage_2_lba_smoke.sh",
-                "fdu_stage_2_lba_smoke",
-                "scripts/train.py",
-                "fdu_stage_data_args data.dataset.root",
-            ),
-            (
                 "20_stage_0_acoustic_none_smoke.sh",
                 "fdu_stage_0_acoustic_none_smoke",
                 "scripts/overfit.py",
@@ -927,7 +880,7 @@ class ConfigTest(unittest.TestCase):
             with self.subTest(job=filename):
                 source = (root / "jobs" / "013" / filename).read_text()
 
-                self.assertIn("workspace/jobs/fudan/speech_to_speech_env.sh", source)
+                self.assertIn("workspace/jobs/env.sh", source)
                 self.assertIn(entry, source)
                 self.assertEqual(
                     re.findall(r"\bexperiment=([a-z0-9_]+)", source),
@@ -942,20 +895,16 @@ class ConfigTest(unittest.TestCase):
 
     def test_jobs_default_the_training_root_to_dynamic_home_train(self):
         root = Path(__file__).parents[1]
-        source = (root / "jobs" / "env.sh").read_text()
+        source = (root / "../workspace" / "jobs" / "env.sh").resolve().read_text()
 
         self.assertIn(
-            'SPEECH_TO_SPEECH_TRAIN_ROOT="${DYNAMIC_HOME}/train/speech-to-speech"',
-            source,
-        )
-        self.assertIn(
-            "DYNAMIC_HOME:?Set DYNAMIC_HOME or SPEECH_TO_SPEECH_TRAIN_ROOT",
+            'SPEECH_TO_SPEECH_TRAIN_ROOT="${SPEECH_TO_SPEECH_TRAIN_ROOT:-${DYNAMIC_HOME}/train/speech-to-speech}"',
             source,
         )
 
     def test_unicodec_jobs_require_a_compatible_python(self):
         root = Path(__file__).parents[1]
-        env = (root / "jobs" / "env.sh").read_text()
+        env = (root / "../workspace" / "jobs" / "env.sh").resolve().read_text()
         jobs = {
             "02_unicodec.sh": ("unicodec_overfit", "overfit"),
             "05_unicodec_ddp.sh": ("unicodec_ddp_smoke", "ddp-smoke"),
@@ -993,23 +942,6 @@ class ConfigTest(unittest.TestCase):
                     re.findall(r"\bexperiment=([a-z0-9_]+)", source),
                     [expected],
                 )
-
-    def test_bicodec_tts_job_is_tts_only_and_configurable(self):
-        root = Path(__file__).parents[1]
-        source = (root / "jobs" / "015" / "01_bicodec_tts_overfit.sh").read_text()
-
-        self.assertIn("workspace/jobs/fudan/speech_to_speech_env.sh", source)
-        self.assertIn("scripts/overfit.py", source)
-        self.assertEqual(
-            re.findall(r"\bexperiment=([a-z0-9_]+)", source),
-            ["bicodec_tts_overfit"],
-        )
-        self.assertIn('"data.root=${bicodec_data_root}"', source)
-        self.assertNotIn("runtime.bicodec_", source)
-        self.assertIn("SPARK_TTS_ROOT", source)
-        self.assertNotIn("asr", source.lower())
-        self.assertIn('"$@"', source)
-
 
 def _compose(config_name: str, *overrides: str) -> DictConfig:
     root = Path(__file__).parents[1]

@@ -2,20 +2,17 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from functools import partial
-from pathlib import Path
 from typing import Any, TypedDict, cast
 
 from anydataset.dataset import MapStyleABC
-from anydataset.types import AudioView, Sample as RawSample
+from anydataset.types import Sample as RawSample
 from lightning.pytorch import LightningDataModule
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset, Subset
 from typing_extensions import NotRequired
 
 from ..task import Task
 from .collator import Collator
 from .dataset import DatasetConfig, load_dataset
-from .lba import LBA, LBAConfig, PlannerMode, metadata_speech_length, speech_length
 from .protocol import DataRuntime, DataRuntimeSnapshot, DatasetRuntime
 from .single import SingleCollator
 from .types import ConcreteTrainInput, DataShape
@@ -26,7 +23,6 @@ class DataLoaderConfig(TypedDict):
     num_workers: int
     pin_memory: NotRequired[bool]
     persistent_workers: NotRequired[bool]
-    lba: NotRequired[LBAConfig]
 
 
 @dataclass
@@ -58,9 +54,6 @@ class Config:
             value = self.dataloader.get(name, False)
             if not isinstance(value, bool):
                 raise TypeError(f"dataloader {name} must be a boolean.")
-        lba = self.dataloader.get("lba")
-        if lba is not None and not isinstance(lba, LBAConfig):
-            raise TypeError("dataloader lba must be an LBAConfig.")
 
 
 class DataModule(LightningDataModule):
@@ -69,17 +62,17 @@ class DataModule(LightningDataModule):
         config: Config,
         runtime: DatasetRuntime,
         task_weights: Mapping[Task, float],
-        *,
-        output_dir: Path | None = None,
-        loader_name: str = "speech",
     ) -> None:
         super().__init__()
 
         self.config = config
         self.runtime = runtime
-        self.collator = _collator(config, runtime, task_weights)
-        self.output_dir = output_dir
-        self.loader_name = loader_name
+        self.collator = _collator(
+            config.shape,
+            runtime,
+            task_weights,
+            encode_missing_codes=config.encode_missing_codes,
+        )
         self._train_dataset = None
 
     def setup(self, stage: str | None = None) -> None:
@@ -110,62 +103,6 @@ class DataModule(LightningDataModule):
         if not isinstance(self.collator.runtime, DataRuntimeSnapshot):
             snapshot = DataRuntimeSnapshot.from_runtime(self.runtime)
             self.collator.runtime = cast(DataRuntime, cast(object, snapshot))
-        lba = loader.get("lba")
-        if lba is not None and lba.enabled:
-            if self.config.shape is DataShape.SINGLE:
-                raise ValueError("single data shape does not support LBA yet.")
-            source_loader = _source_loader(
-                self._train_dataset,
-                loader=loader,
-                collate_fn=self.collator,
-            )
-            if source_loader is not None:
-                return LBA(
-                    self._train_dataset,
-                    batch_sampler=source_loader.batch_sampler,
-                    num_workers=num_workers,
-                    pin_memory=loader.get("pin_memory", False),
-                    persistent_workers=(
-                        loader.get("persistent_workers", False) and num_workers > 0
-                    ),
-                    collate_fn=self.collator,
-                    len_fn=partial(
-                        metadata_speech_length,
-                        audio_view=self.runtime.audio_view,
-                        frame_rate=self.runtime.codec_frame_rate,
-                        tasks=tuple(self.collator.tasks),
-                        config=lba,
-                    ),
-                    max_padded_length=lba.max_batch_cost,
-                    max_padding_ratio=lba.max_padding_ratio,
-                    prefetch_batches=lba.prefetch_batches,
-                    planner_mode=cast(PlannerMode, lba.planner_mode),
-                    drop_last_flush=lba.drop_last_flush,
-                    log_dir=_lba_log_dir(self.output_dir, self.loader_name),
-                )
-            return LBA(
-                self._train_dataset,
-                batch_size=loader["batch_size"],
-                shuffle=True,
-                num_workers=num_workers,
-                pin_memory=loader.get("pin_memory", False),
-                persistent_workers=(
-                    loader.get("persistent_workers", False) and num_workers > 0
-                ),
-                collate_fn=self.collator,
-                len_fn=partial(
-                    speech_length,
-                    runtime=cast(DataRuntime, self.collator.runtime),
-                    tasks=tuple(self.collator.tasks),
-                    config=lba,
-                ),
-                max_padded_length=lba.max_batch_cost,
-                max_padding_ratio=lba.max_padding_ratio,
-                prefetch_batches=lba.prefetch_batches,
-                planner_mode=cast(PlannerMode, lba.planner_mode),
-                drop_last_flush=lba.drop_last_flush,
-                log_dir=_lba_log_dir(self.output_dir, self.loader_name),
-            )
         source_loader = _source_loader(
             self._train_dataset,
             loader=loader,
@@ -192,6 +129,68 @@ class DataModule(LightningDataModule):
             persistent_workers=(
                 loader.get("persistent_workers", False) and num_workers > 0
             ),
+            collate_fn=self.collator,
+        )
+
+
+class FixedDataModule(LightningDataModule):
+    def __init__(
+        self,
+        codec: str,
+        runtime: DatasetRuntime,
+        task_weights: Mapping[Task, float],
+        sample_index: int,
+        *,
+        shape: DataShape = DataShape.PAIR,
+        encode_missing_codes: bool = False,
+        dataset: DatasetConfig | None = None,
+    ) -> None:
+        super().__init__()
+        self.codec = codec
+        self.runtime = runtime
+        self.shape = shape
+        self.encode_missing_codes = encode_missing_codes
+        self.collator = _collator(
+            shape,
+            runtime,
+            task_weights,
+            encode_missing_codes=encode_missing_codes,
+        )
+        self.sample_index = sample_index
+        self.dataset_config = dataset or DatasetConfig()
+        self._dataset: Dataset[RawSample] | None = None
+        self._training: Subset[RawSample] | None = None
+
+    def setup(self, stage: str | None = None) -> None:
+        del stage
+        if self._dataset is not None:
+            return
+        if self.codec != self.runtime.codec_name:
+            raise ValueError(
+                "fixed datamodule and runtime must use the same codec: "
+                f"{self.codec!r} != {self.runtime.codec_name!r}."
+            )
+        self._dataset = cast(
+            Dataset[RawSample],
+            cast(object, load_dataset(self.dataset_config, self.runtime)),
+        )
+        self._training = Subset(self._dataset, [self.sample_index])
+
+    def set_task_weights(self, task_weights: Mapping[Task, float]) -> None:
+        self.collator.set_task_weights(task_weights)
+
+    def train_samples(self, indices: Sequence[int]) -> list[RawSample]:
+        if self._dataset is None:
+            raise RuntimeError("FixedDataModule.setup() must run before reading samples.")
+        return [self._dataset[index] for index in indices]
+
+    def train_dataloader(self) -> Iterable[ConcreteTrainInput]:
+        if self._training is None:
+            raise RuntimeError("FixedDataModule.setup() must run before training.")
+        return DataLoader(
+            self._training,
+            batch_size=1,
+            num_workers=0,
             collate_fn=self.collator,
         )
 
@@ -225,26 +224,24 @@ def _source_dataset(dataset: object) -> MapStyleABC | None:
 
 
 def _collator(
-    config: Config,
+    shape: DataShape,
     runtime: DatasetRuntime,
     task_weights: Mapping[Task, float],
+    *,
+    encode_missing_codes: bool = False,
 ):
-    if config.shape is DataShape.PAIR:
+    if encode_missing_codes and shape is not DataShape.SINGLE:
+        raise ValueError("encode_missing_codes requires data shape single.")
+    if shape is DataShape.PAIR:
         return Collator(runtime, task_weights)
-    if config.shape is DataShape.SINGLE:
+    if shape is DataShape.SINGLE:
         return SingleCollator(
             runtime,
             task_weights,
-            encode_missing_codes=config.encode_missing_codes,
+            encode_missing_codes=encode_missing_codes,
         )
-    raise AssertionError(f"unsupported data shape: {config.shape}")
+    raise AssertionError(f"unsupported data shape: {shape}")
 
 
 def _unit_cost(_index: int) -> int:
     return 1
-
-
-def _lba_log_dir(output_dir: Path | None, loader_name: str) -> Path | None:
-    if output_dir is None:
-        return None
-    return output_dir / "lba" / loader_name

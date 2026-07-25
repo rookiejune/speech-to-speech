@@ -38,7 +38,6 @@ from speech_to_speech.datamodule import (
     DatasetName,
     FixedDataModule,
     JointDataModule,
-    LBAConfig,
     LoaderSchedule,
     ScheduledDataLoader,
     TextConfig,
@@ -56,7 +55,6 @@ from speech_to_speech.datamodule.parser import (
     parse_sample,
     parse_text_sample,
 )
-from speech_to_speech.datamodule.lba import metadata_speech_length
 from speech_to_speech.datamodule.sample import build_sample
 from speech_to_speech.datamodule.single import build_single_sample, parse_single_sample
 from speech_to_speech.datamodule.protocol import DataRuntime, DataRuntimeSnapshot
@@ -68,12 +66,6 @@ from speech_to_speech.datamodule.types import (
 )
 from speech_to_speech.model import Config as ModelConfig, ToyConfig
 from speech_to_speech.runtime import AudioRepresentation, Config, Runtime
-from speech_to_speech.runtime.codec import BiCodecCodec
-from speech_to_speech.runtime.types import (
-    acoustic_codec,
-    codebook_codec,
-    supports_acoustic,
-)
 from speech_to_speech.runtime.runtime import audio_tokenizer, dtype
 from speech_to_speech.runtime.audio_tokenizer import (
     FlattenedAudioTokenizer,
@@ -217,24 +209,6 @@ class ContractTest(unittest.TestCase):
             device=None,
         )
         bind.assert_called_once_with(support, backend)
-
-    def test_runtime_loads_bicodec_through_codec_boundary(self):
-        codec = SimpleNamespace(sample_rate=16_000, frame_rate=50.0)
-        runtime = Runtime(
-            Config(
-                codec="bicodec",
-                audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
-            )
-        )
-
-        with patch(
-            "speech_to_speech.runtime.runtime.load_codec",
-            return_value=codec,
-        ) as load:
-            loaded = runtime.codec
-
-        self.assertIs(loaded, codec)
-        load.assert_called_once_with("bicodec", None)
 
     def test_worker_runtime_snapshot_excludes_model_and_codec(self):
         runtime = SimpleNamespace(
@@ -435,48 +409,9 @@ class ContractTest(unittest.TestCase):
         self.assertTrue(torch.equal(semantic, torch.tensor([[1], [2], [3]])))
         self.assertIsNone(acoustic)
 
-    def test_bicodec_view_uses_full_sequence_codes(self):
-        codes = torch.tensor([[1, 4, 7, 10], [2, 5, 8, 11]])
-        item = AudioItem(views={AudioView.BICODEC: codes})
-
-        semantic, acoustic = _parse_audio_item(item, AudioView.BICODEC)
-
-        self.assertTrue(torch.equal(semantic, codes))
-        self.assertIsNone(acoustic)
-
-    def test_bicodec_runtime_requires_full_codec_sequence(self):
-        with self.assertRaisesRegex(ValueError, "full codec sequence"):
+    def test_bicodec_runtime_rejects_fixed_length_structured_codec(self):
+        with self.assertRaisesRegex(ValueError, "fixed-length structured codec"):
             Config(codec="bicodec")
-
-        config = Config(
-            codec="bicodec",
-            audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
-        )
-
-        self.assertIs(config.audio_view, AudioView.BICODEC)
-
-    def test_bicodec_adapter_preserves_semantic_and_global_tokens(self):
-        source = _BiCodecSource()
-        codec = BiCodecCodec(cast(Any, source))
-
-        codes = codec.encode(torch.zeros(2, 1, 8), 16_000)
-        decoded = codec.decode(codes)
-
-        self.assertEqual(codec.sample_rate, 16_000)
-        self.assertEqual(codec.frame_rate, 50.0)
-        self.assertEqual(codec.semantic_feature_dim, 1024)
-        self.assertEqual(codec.codebook_sizes, (5, 7, 7, 7))
-        self.assertFalse(supports_acoustic(codec))
-        with self.assertRaisesRegex(TypeError, "semantic codebook"):
-            codebook_codec(codec)
-        with self.assertRaisesRegex(TypeError, "acoustic codec capability"):
-            acoustic_codec(codec)
-        self.assertEqual(tuple(codes.shape), (2, 4, 4))
-        self.assertTrue(torch.equal(codes[..., 0], source.semantic))
-        self.assertTrue(torch.equal(codes[:, :, 1:], source.global_tokens.expand(-1, 4, -1)))
-        self.assertTrue(torch.equal(source.detokenized_semantic, source.semantic))
-        self.assertTrue(torch.equal(source.detokenized_global_tokens, source.global_tokens))
-        self.assertEqual(tuple(decoded.shape), (2, 1, 8))
 
     def test_parser_rejects_non_codec_audio_views(self):
         item = AudioItem(
@@ -928,142 +863,6 @@ class ContractTest(unittest.TestCase):
         self.assertIs(loader.dataset, load_dataset.return_value)
         self.assertEqual(loader.batch_size, 2)
 
-    @patch("zhuyin.datasets.wmt19_tts.wmt19_tts_codec")
-    def test_datamodule_uses_lba_when_enabled(self, load_dataset):
-        load_dataset.return_value = [_raw_sample(), _raw_sample(1)]
-        datamodule = DataModule(
-            DataConfig(
-                codec="longcat",
-                dataloader={
-                    "batch_size": 2,
-                    "num_workers": 0,
-                    "lba": LBAConfig(
-                        enabled=True,
-                        max_batch_cost=128,
-                        token_unit=4,
-                        frame_unit=2,
-                        prefetch_batches=0,
-                    ),
-                },
-            ),
-            _data_runtime(),
-            {Task.TTS: 1.0},
-            output_dir=Path(self.id()),
-            loader_name="tts",
-        )
-
-        datamodule.setup()
-        loader = cast(Any, datamodule.train_dataloader())
-
-        self.assertEqual(type(loader).__name__, "LBA")
-        self.assertEqual(loader.max_padded_length, 128)
-        self.assertEqual(loader.prefetch_batches, 0)
-        self.assertEqual(loader.log_dir, Path(self.id()) / "lba" / "tts")
-
-    def test_datamodule_lba_uses_anydataset_batches_for_store_backed_data(self):
-        with TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            with patch.dict("os.environ", {"ANYDATASET_HOME": str(root / "cache")}):
-                output = root / "dataset"
-                DatasetWriter(
-                    output,
-                    dataset_id="toy-speech",
-                    split="train",
-                    max_shard_samples=2,
-                ).write([_raw_sample(index) for index in range(4)])
-                dataset = AnyDataset(
-                    Spec(source=Source.STORE, path=str(output), split="train")
-                )
-                datamodule = DataModule(
-                    DataConfig(
-                        codec="longcat",
-                        dataloader={
-                            "batch_size": 2,
-                            "num_workers": 0,
-                            "lba": LBAConfig(enabled=True, prefetch_batches=0),
-                        },
-                    ),
-                    _data_runtime(),
-                    {Task.TTS: 1.0},
-                )
-
-                with patch(
-                    "speech_to_speech.datamodule.module.load_dataset",
-                    return_value=dataset,
-                ):
-                    datamodule.setup()
-                    loader = cast(Any, datamodule.train_dataloader())
-
-                self.assertEqual(type(loader).__name__, "LBA")
-                self.assertIs(loader.dataset, dataset)
-                sampler = loader.batch_sampler
-                self.assertIs(sampler.dataset, dataset)
-                self.assertEqual(sampler.max_batch_memory, 2)
-                self.assertEqual(sampler.max_batch_samples, 2)
-                self.assertTrue(sampler.shuffle)
-                _assert_store_local_batches(self, sampler)
-
-    def test_metadata_speech_length_uses_codec_frames_without_duration(self):
-        length = metadata_speech_length(
-            _raw_sample_without_duration(),
-            audio_view=AudioView.LONGCAT,
-            frame_rate=50.0,
-            tasks=[Task.S2ST],
-            config=LBAConfig(frame_unit=2),
-        )
-
-        self.assertEqual(length, 2)
-
-    def test_metadata_speech_length_requires_codec_view_without_duration(self):
-        raw = _raw_sample_without_duration()
-        del raw[(Role.SOURCE, Modality.AUDIO)].views[AudioView.LONGCAT]
-
-        with self.assertRaisesRegex(ValueError, "missing AudioMeta.DURATION"):
-            metadata_speech_length(
-                raw,
-                audio_view=AudioView.LONGCAT,
-                frame_rate=50.0,
-                tasks=[Task.S2ST],
-                config=LBAConfig(frame_unit=2),
-            )
-
-    def test_text_datamodule_uses_lba_when_enabled(self):
-        runtime = SimpleNamespace(
-            text_tokenizer=_ChatTokenizer(32),
-            layout=Layout(text=(0, 32), audio=(32, 36)),
-            pad_token_id=0,
-            eos_token_id=31,
-        )
-        datamodule = TextDataModule(
-            TextConfig(
-                dataloader={
-                    "batch_size": 2,
-                    "num_workers": 0,
-                    "lba": LBAConfig(
-                        enabled=True,
-                        max_batch_cost=64,
-                        token_unit=4,
-                        prefetch_batches=0,
-                    ),
-                },
-                dataset=TextDatasetConfig(
-                    name=TextDatasetName.TOY,
-                    toy_samples=2,
-                ),
-            ),
-            runtime,
-            {Task.MT: 1.0},
-            output_dir=Path(self.id()),
-            loader_name="mt",
-        )
-
-        datamodule.setup()
-        loader = cast(Any, datamodule.train_dataloader())
-
-        self.assertEqual(type(loader).__name__, "LBA")
-        self.assertEqual(loader.max_padded_length, 64)
-        self.assertEqual(loader.log_dir, Path(self.id()) / "lba" / "mt")
-
     def test_toy_dataset_uses_codec_shapes_and_value_ranges(self):
         cases = (
             (
@@ -1091,16 +890,6 @@ class ContractTest(unittest.TestCase):
                 ),
                 AudioView.UNICODEC,
                 (11,),
-            ),
-            (
-                "bicodec",
-                SimpleNamespace(
-                    semantic_feature_dim=1024,
-                    codebook_sizes=(13, 17, 17, 17),
-                    frame_rate=50.0,
-                ),
-                AudioView.BICODEC,
-                (13, 17, 17, 17),
             ),
         )
 
@@ -1484,42 +1273,6 @@ class ContractTest(unittest.TestCase):
         self.assertFalse(model.backbone.model.layers[1].weight.requires_grad)
         self.assertTrue(model.backbone.model.layers[2].weight.requires_grad)
         self.assertTrue(model.backbone.model.norm.weight.requires_grad)
-
-
-class _BiCodecSource:
-    config = {"sample_rate": 16_000, "latent_hop_length": 320}
-    global_codebook_sizes = (7,)
-    sample_rate = 16_000
-    semantic_codebook_sizes = (5,)
-
-    def __init__(self) -> None:
-        self.semantic = torch.tensor(
-            [[1, 2, 3, 4], [4, 3, 2, 1]],
-            dtype=torch.long,
-        )
-        self.global_tokens = torch.tensor(
-            [[[1, 2, 3]], [[4, 5, 6]]],
-            dtype=torch.long,
-        )
-        self.detokenized_semantic = torch.empty(0, dtype=torch.long)
-        self.detokenized_global_tokens = torch.empty(0, dtype=torch.long)
-
-    def encode(self, audio: torch.Tensor, sample_rate: int):
-        self.encoded_audio = audio
-        self.encoded_sample_rate = sample_rate
-        return SimpleNamespace(
-            semantic=self.semantic,
-            global_tokens=self.global_tokens,
-        )
-
-    def detokenize(
-        self,
-        semantic: torch.Tensor,
-        global_tokens: torch.Tensor,
-    ) -> torch.Tensor:
-        self.detokenized_semantic = semantic
-        self.detokenized_global_tokens = global_tokens
-        return torch.ones(semantic.size(0), 1, 8)
 
 
 def _sample(task: Task) -> ModelSample:

@@ -1,5 +1,0 @@
-name: qwen_tts_bicodec
-root: ${oc.env:WMT19_QWEN_TTS_ROLE_SPEAKER_BICODEC_ROOT,''}
-split: train
-toy_samples: 8
-toy_frames: 4
