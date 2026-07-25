@@ -333,6 +333,16 @@ def _validate_audio_representation(
         raise ValueError(
             "runtime.semantic_codec_artifact requires model/acoustic=none."
         )
+    if (
+        acoustic is AcousticType.NONE
+        and config.runtime.codec == "longcat"
+        and config.runtime.audio_representation is AudioRepresentation.DECOUPLED
+        and config.runtime.semantic_codec_artifact is None
+    ):
+        raise ValueError(
+            "LongCat decoupled model/acoustic=none requires runtime.semantic_codec_artifact; "
+            "use runtime=longcat_full_sequence for FrameCodec token-only training."
+        )
 
 
 def _prepare(config: DictConfig) -> DictConfig:

@@ -46,8 +46,10 @@ semantic-only decoder。`FULL_CODEC_SEQUENCE` 对 `FrameCodec` 展开全部 code
 `semantic_acoustic_codec.runtime.SemanticCodecRuntime` 负责。semantic-only decoder 不放回
 anytrain，也不通过普通 codec 的 `decode()` 伪装。
 
-`DECOUPLED + Flow/RVQ` 是现有 S2S 内部 acoustic-feature 训练路径，仍由
-`Codec.decode_features()` 消费生成的 features；它不代表 anytrain 提供 semantic-only decoder。
+LongCat 的 `DECOUPLED + model/acoustic=none` 必须配置 `semantic_codec_artifact`；没有 artifact
+时应选择 `FULL_CODEC_SEQUENCE`。`DECOUPLED + Flow/RVQ` 是现有 S2S 内部 acoustic-feature
+训练路径，仍由 `Codec.decode_features()` 消费生成的 features；它不代表 anytrain 提供
+semantic-only decoder。
 
 当前 artifact 接入仍要求 LongCat backend；固定长度 structured backend 的 S2S 数据视图和
 token-layout adapter 尚未加入，因此不能把 BiCodec 强行当成 frame codec。

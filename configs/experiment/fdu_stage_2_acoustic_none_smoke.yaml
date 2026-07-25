@@ -3,6 +3,7 @@ defaults:
   - override /stage: stage_2
   - override /parameter_policy: speech_interface
   - override /model/acoustic: none
+  - override /runtime: longcat_full_sequence
   - override /trainer: static_ddp
   - _self_
 

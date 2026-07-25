@@ -190,6 +190,12 @@ class ContractTest(unittest.TestCase):
         )
         bind.assert_called_once_with(support, backend)
 
+    def test_runtime_rejects_semantic_codec_without_artifact(self):
+        runtime = Runtime(Config(codec="longcat"))
+
+        with self.assertRaisesRegex(RuntimeError, "semantic_codec_artifact"):
+            _ = runtime.semantic_codec
+
     def test_semantic_codec_artifact_disables_acoustic_side_channel(self):
         runtime = Runtime(
             Config(

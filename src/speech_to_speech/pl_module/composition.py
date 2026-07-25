@@ -70,7 +70,7 @@ def flow(
     weight = acoustic.repa.weight
     if weight is not None:
         teacher = WavLMTeacher(
-            runtime.semantic_codec,
+            runtime.codec,
             checkpoint=acoustic.repa.teacher_checkpoint,
             layer=acoustic.repa.teacher_layer,
             device=runtime.backbone.get_input_embeddings().weight.device,

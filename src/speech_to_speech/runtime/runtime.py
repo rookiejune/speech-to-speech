@@ -167,7 +167,10 @@ class Runtime:
     def semantic_codec(self) -> SemanticCodec:
         artifact = self.config.semantic_codec_artifact
         if artifact is None:
-            return cast(SemanticCodec, cast(object, self.codec))
+            raise RuntimeError(
+                "semantic-only waveform decoding requires runtime.semantic_codec_artifact; "
+                "use full_codec_sequence for FrameCodec token generation."
+            )
         from semantic_acoustic_codec.runtime import SemanticCodecRuntime, load_artifact
 
         support = load_artifact(

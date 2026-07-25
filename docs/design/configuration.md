@@ -123,10 +123,12 @@ schema，不重复声明字段。OmegaConf 对字符串枚举只接受成员
   support artifact；当前 S2S 只接入 LongCat structured backend，因此只允许
   `runtime=longcat|longcat_native model/acoustic=none`，并拒绝 full codec sequence、UniCodec、Flow
   和 RVQ composition。FrameCodec 的 token-only 路径使用 full-code sequence；artifact 路径只生成
-  structured backend 的 semantic units。已有 `DECOUPLED + Flow/RVQ` 组合仍表示 S2S 内部的
-  acoustic feature 训练路径，不是 semantic-only artifact 路径。
-- unified-token codec 使用 `runtime=unicodec model/acoustic=none`；有独立 acoustic
-  codebook 的 codec 也可以显式选择 `none` 作为 token-only baseline。
+  structured backend 的 semantic units。LongCat decoupled `model/acoustic=none` 必须配置该
+  artifact；否则应改用 `runtime=longcat_full_sequence`。已有 `DECOUPLED + Flow/RVQ` 组合仍表示
+  S2S 内部的 acoustic feature 训练路径，不是 semantic-only artifact 路径。
+- UniCodec 也是 `FrameCodec`，`runtime=unicodec model/acoustic=none` 使用
+  `full_codec_sequence`，只是完整 frame 里只有一个 codebook。有独立 acoustic codebook 的 codec
+  只有在提供 semantic-only artifact 或选择 full-code sequence 时才可以作为 token-only baseline。
 - flow method、NFE 和 step 数直接覆盖 `runtime.flow_*`；RVQ/token 中保留这些字段是
   `runtime.Config` 的稳定 shape，不需要再为未使用字段创建 variant schema。
 - flow/RVQ 必须有独立 acoustic codebook；`none` 不要求 codec 缺少 acoustic codebook，入口不自动改写 composition。

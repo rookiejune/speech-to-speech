@@ -97,7 +97,10 @@ class _Runtime:
 
     @property
     def semantic_codec(self):
-        return getattr(self, "_semantic_codec", self.codec)
+        try:
+            return self._semantic_codec
+        except AttributeError as exc:
+            raise RuntimeError("test runtime requires an explicit semantic codec") from exc
 
     @property
     def codec_audio_range(self) -> tuple[int, int]:
@@ -159,6 +162,41 @@ class _TinyRuntime(_Runtime):
     @property
     def audio_generation_allowed_ids(self) -> tuple[int, ...]:
         return 8, 9, 11
+
+
+class _UnifiedRuntime(_Runtime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.codec = _UnifiedCodec()
+        self.audio_representation = AudioRepresentation.FULL_CODEC_SEQUENCE
+        self.audio_tokenizer = FlattenedAudioTokenizer(
+            codebook_sizes=(2,),
+            codec_name="unicodec",
+        )
+        self.layout = Layout(
+            text=(0, 4),
+            audio=(4, 4 + self.audio_tokenizer.vocab_size + 2),
+        )
+        self.boa_token_id = self.codec_audio_range[1]
+        self.eoa_token_id = self.boa_token_id + 1
+
+    @property
+    def semantic_codec(self):
+        raise RuntimeError("full codec sequence does not expose semantic-only decode")
+
+    @property
+    def acoustic_side_channel(self) -> bool:
+        return False
+
+    @property
+    def codec_audio_range(self) -> tuple[int, int]:
+        start, _ = self.layout.blocks[Modality.AUDIO.value]
+        return start, start + self.audio_tokenizer.vocab_size
+
+    @property
+    def audio_generation_allowed_ids(self) -> tuple[int, ...]:
+        start, end = self.codec_audio_range
+        return (*range(start, end), self.eoa_token_id)
 
 
 class _GenerationModel(FlowModel):
@@ -237,10 +275,75 @@ class _TokenGenerationModel(TokenModel):
     generation_step = _GenerationModel.generation_step
 
 
-class _UnifiedGenerationModel(_GenerationModel):
+class _UnifiedGenerationModel(TokenModel):
     def __init__(self) -> None:
-        super().__init__()
-        self.runtime.codec = _UnifiedCodec()
+        nn.Module.__init__(self)
+        self.runtime = _UnifiedRuntime()
+        self.layout = self.runtime.layout
+        self.audio_token_frame_spans = torch.tensor(
+            self.runtime.audio_tokenizer.frame_spans(
+                range(self.runtime.audio_tokenizer.vocab_size)
+            )
+        )
+        self.backbone = SimpleNamespace(
+            get_input_embeddings=lambda: SimpleNamespace(weight=torch.empty(0))
+        )
+        start, _ = self.runtime.codec_audio_range
+        self._tokens = [
+            start + token_id
+            for token_id in self.runtime.audio_tokenizer.encode(
+                torch.tensor([[0], [1]])
+            ).tolist()
+        ]
+        self._tokens.append(self.runtime.eoa_token_id)
+        self._step = 0
+        self.calls: list[tuple[int, int]] = []
+        self.sample_calls = 0
+
+    def generation_step(
+        self,
+        input_ids: Tensor,
+        *,
+        output_hidden_states: bool = False,
+        past_key_values=None,
+        use_cache: bool = False,
+        token_ids: Tensor | None = None,
+        modality: Modality | None = None,
+        **kwargs,
+    ) -> CausalLMOutputWithPast:
+        del kwargs, output_hidden_states, past_key_values
+        self.calls.append((input_ids.size(1), input_ids.size(0)))
+        next_id = self._tokens[min(self._step, len(self._tokens) - 1)]
+        self._step += 1
+        if token_ids is not None:
+            matches = (token_ids == next_id).nonzero()
+            if matches.numel() == 0:
+                raise AssertionError("generated id is outside allowed token_ids")
+            logits = torch.full(
+                (input_ids.size(0), input_ids.size(1), token_ids.numel()),
+                float("-inf"),
+            )
+            logits[:, -1, int(matches[0, 0])] = 0
+        elif modality is not None:
+            start, end = self.layout.blocks[modality.value]
+            logits = torch.full((input_ids.size(0), input_ids.size(1), end - start), float("-inf"))
+            logits[:, -1, next_id - start] = 0
+        else:
+            logits = torch.full(
+                (input_ids.size(0), input_ids.size(1), self.layout.vocab_size),
+                float("-inf"),
+            )
+            logits[:, -1, next_id] = 0
+        cache = (
+            SimpleNamespace(
+                length=self._step,
+                source=0,
+                batch_select_indices=lambda indices: None,
+            )
+            if use_cache
+            else None
+        )
+        return CausalLMOutputWithPast(logits=logits, past_key_values=cache)
 
 
 class _FullSequenceCodec:
@@ -273,7 +376,7 @@ class _FullSequenceRuntime:
 
     @property
     def semantic_codec(self):
-        return self.codec
+        raise RuntimeError("full codec sequence does not expose semantic-only decode")
 
     @property
     def acoustic_side_channel(self) -> bool:
@@ -555,23 +658,18 @@ class GenerationTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "must be a Task"):
             generate_responses([request], _GenerationModel(), max_new_tokens=1)
 
-    def test_token_only_generation_with_acoustic_codec_uses_semantic_decode(self):
+    def test_token_only_generation_requires_explicit_semantic_codec(self):
         model = _TokenGenerationModel()
 
-        result = generate_responses(
-            [_request()],
-            model,
-            max_new_tokens=3,
-            do_sample=False,
-        )[0]
+        with self.assertRaisesRegex(RuntimeError, "semantic codec"):
+            generate_responses(
+                [_request()],
+                model,
+                max_new_tokens=3,
+                do_sample=False,
+            )
 
-        self.assertEqual(model.runtime.codec.decode_calls, 1)
-        self.assertIsNotNone(result["audio"])
-        audio = result["audio"]
-        if audio is None:
-            self.fail("audio generation did not return an audio payload")
-        self.assertIsNone(audio["features"])
-        torch.testing.assert_close(audio["waveform"], torch.tensor([0.0, 1.0]))
+        self.assertEqual(model.runtime.codec.decode_calls, 0)
 
     def test_token_only_generation_uses_independent_semantic_codec(self):
         model = _TokenGenerationModel()
@@ -668,9 +766,11 @@ class GenerationTest(unittest.TestCase):
                     generate_responses([request], _GenerationModel(), max_new_tokens=1)
 
     def test_acoustic_codec_without_audio_model_decodes_semantic_tokens(self):
+        runtime = _TinyRuntime()
+        runtime._semantic_codec = _UnifiedCodec()
         model = TokenModel(
             _model_config(),
-            runtime=_TinyRuntime(),
+            runtime=runtime,
         ).eval()
         sequence = torch.tensor([[1, 2, 8, 9, 11]])
         request = Request(
@@ -790,17 +890,19 @@ class GenerationTest(unittest.TestCase):
         self.assertEqual([call[0] for call in cached_model.calls], [2, 1, 1])
         self.assertEqual([call[0] for call in full_model.calls], [2, 3, 4])
 
-    def test_unified_audio_generation_decodes_semantic_tokens_directly(self):
+    def test_unified_audio_generation_decodes_full_frame_codes(self):
         model = _UnifiedGenerationModel()
         result = generate_responses(
             [_request()],
             model,
-            max_new_tokens=3,
+            max_new_tokens=6,
             do_sample=False,
             use_cache=True,
         )[0]
 
-        self.assertTrue(torch.equal(result["response_ids"], torch.tensor([4, 5])))
+        start, _ = model.runtime.codec_audio_range
+        expected_response = model.runtime.audio_tokenizer.encode(torch.tensor([[0], [1]])) + start
+        self.assertTrue(torch.equal(result["response_ids"], expected_response))
         self.assertIsNotNone(result["audio"])
         self.assertIsNone(result["audio"]["features"])
         self.assertEqual(model.sample_calls, 0)
@@ -848,11 +950,11 @@ class GenerationTest(unittest.TestCase):
         second["prompt_ids"] = torch.tensor([2, 1, 6])
 
         results = generate_responses(
-            [first, second], model, max_new_tokens=3, do_sample=False
+            [first, second], model, max_new_tokens=6, do_sample=False
         )
 
         self.assertEqual(len(results), 2)
-        self.assertEqual([call[1] for call in model.calls], [2, 2])
+        self.assertEqual([call[1] for call in model.calls], [2, 2, 2, 2, 2])
         self.assertEqual(model.runtime.audio_tokenizer.frame_spans.call_count, 0)
         self.assertEqual(model.runtime.codec.decode_calls, 1)
 

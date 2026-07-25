@@ -2,7 +2,7 @@
 defaults:
   - /model: default
   - /model/acoustic: none
-  - /runtime: longcat_native
+  - /runtime: longcat_full_sequence
   - /data: wmt19_tts
   - /pl_module: sft
   - /trainer: default

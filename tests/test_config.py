@@ -134,7 +134,14 @@ class ConfigTest(unittest.TestCase):
     def test_composition_must_match_codec_capabilities(self):
         flow = overfit(_compose("overfit"))
         token = overfit(_compose("overfit", "runtime=unicodec", "model/acoustic=none"))
-        token_with_acoustic_codec = overfit(_compose("overfit", "model/acoustic=none"))
+        token_with_semantic_support = overfit(
+            _compose(
+                "overfit",
+                "runtime=longcat_native",
+                "model/acoustic=none",
+                "runtime.semantic_codec_artifact=/tmp/semantic-codec",
+            )
+        )
 
         self.assertIs(
             _composition(token, uses_acoustic_side_channel=False),
@@ -142,8 +149,8 @@ class ConfigTest(unittest.TestCase):
         )
         self.assertIs(
             _composition(
-                token_with_acoustic_codec,
-                uses_acoustic_side_channel=True,
+                token_with_semantic_support,
+                uses_acoustic_side_channel=False,
             ),
             AcousticType.NONE,
         )
@@ -480,11 +487,15 @@ class ConfigTest(unittest.TestCase):
         self.assertFalse(ddp.trainer.use_distributed_sampler)
         self.assertEqual(set(ddp.stage.loaders), {"asr_s2tt", "tts_t2st", "s2st", "mt"})
 
-        token = parse_train(_compose("train", "model/acoustic=none"))
+        token = parse_train(
+            _compose("train", "runtime=longcat_full_sequence", "model/acoustic=none")
+        )
 
         self.assertIsInstance(token, StagedTrainTokenConfig)
         self.assertEqual(token.acoustic.type, AcousticType.NONE.value)
         self.assertEqual(token.run_name, "stage_1-token")
+        with self.assertRaisesRegex(ValueError, "semantic_codec_artifact"):
+            parse_train(_compose("train", "model/acoustic=none"))
 
     def test_fdu_stage_smoke_configs_cover_formal_train_stages(self):
         stage_0 = overfit(_compose("overfit", "experiment=fdu_stage_0_smoke"))
@@ -524,6 +535,7 @@ class ConfigTest(unittest.TestCase):
         self.assertIs(stage_0.stage.name, StageName.STAGE_0)
         self.assertEqual(stage_0.task, "s2st")
         self.assertEqual(stage_0.acoustic.type, AcousticType.NONE.value)
+        self.assertEqual(stage_0.runtime.audio_representation.value, "full_codec_sequence")
         self.assertEqual(stage_0.run_name, "stage_0-token")
         self.assertFalse(stage_0.callbacks.evaluation.enabled)
         self.assertEqual(stage_0.train.max_steps, 2)
@@ -540,6 +552,7 @@ class ConfigTest(unittest.TestCase):
                 self.assertIsInstance(config, StagedTrainTokenConfig)
                 self.assertIs(config.stage.name, StageName(f"stage_{index}"))
                 self.assertEqual(config.acoustic.type, AcousticType.NONE.value)
+                self.assertEqual(config.runtime.audio_representation.value, "full_codec_sequence")
                 self.assertEqual(config.run_name, f"stage_{index}-token")
                 self.assertEqual(config.train.max_steps, 2)
                 self.assertEqual(
@@ -707,6 +720,14 @@ class ConfigTest(unittest.TestCase):
             token.runtime.semantic_codec_artifact,
             "/tmp/semantic-codec",
         )
+        with self.assertRaisesRegex(ValueError, "semantic_codec_artifact"):
+            overfit(
+                _compose(
+                    "overfit",
+                    "runtime=longcat_native",
+                    "model/acoustic=none",
+                )
+            )
         with self.assertRaisesRegex(ValueError, "model/acoustic=none"):
             overfit(
                 _compose(
@@ -715,7 +736,7 @@ class ConfigTest(unittest.TestCase):
                     "runtime.semantic_codec_artifact=/tmp/semantic-codec",
                 )
             )
-        with self.assertRaisesRegex(ValueError, "longcat"):
+        with self.assertRaisesRegex(ValueError, "decoupled"):
             overfit(
                 _compose(
                     "overfit",

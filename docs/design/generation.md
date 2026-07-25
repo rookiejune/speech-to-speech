@@ -87,7 +87,8 @@ codec，也走 token-only decode。
 `FULL_CODEC_SEQUENCE` 只调用原 `FrameCodec.decode(full_codes)`。配置
 `runtime.semantic_codec_artifact` 后，service 只处理 structured backend 的 semantic tokens，
 并把 token-only decode 交给 `SemanticCodecRuntime`；普通 frame codec 的 `decode()` 不再接收
-semantic-only codes。训练数据、tokenizer、layout 和 codec identity 仍来自原 backend。
+semantic-only codes。未配置 artifact 的 LongCat decoupled token-only composition 在配置阶段失败；
+训练数据、tokenizer、layout 和 codec identity 仍来自原 backend。
 
 自回归 cache、sampling、allowed IDs、逐行 stop 状态和 frame condition 收集属于 model。已有行
 生成 stop token 后，后续步骤只对剩余 active rows 执行 backbone 与 sampling；cache 同步收缩，

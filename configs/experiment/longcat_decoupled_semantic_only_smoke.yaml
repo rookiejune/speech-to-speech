@@ -15,6 +15,9 @@ task: tts
 run_name: longcat-decoupled-semantic-only
 output_subdir: longcat-decoupled-semantic-only-smoke/${task}/${run_name}
 
+runtime:
+  semantic_codec_artifact: ${oc.env:SPEECH_TO_SPEECH_SEMANTIC_CODEC_ARTIFACT}
+
 data:
   sample_index: 0
 

@@ -211,7 +211,8 @@ SemanticAcousticCodec 只生成 semantic units，再由 `semantic-acoustic-codec
 `SemanticCodecRuntime` 预测缺失 acoustic units 并重建波形。普通 FrameCodec 的 `decode()`
 不接收 semantic-only codes。两条路径不改变 token model、objective 或 `Request -> Result` 契约。
 训练数据只要求基础 `Codec`，codec table 初始化要求 `CodebookCodec`，Flow/RVQ 的 acoustic feature
-训练显式要求 `AcousticCodec`；semantic-only waveform decoder 不属于 anytrain。
+训练显式要求 `AcousticCodec`；semantic-only waveform decoder 不属于 anytrain。UniCodec 虽然只有
+一个 codebook，也按 `FrameCodec` 的 full-code path 解码。
 
 `speech_to_speech.generation` 拥有 `Request`、`Result`、service、decode 与 text evaluation；`pl_module` 只负责 Lightning 集成。
 

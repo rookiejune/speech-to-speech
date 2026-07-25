@@ -9,7 +9,7 @@ from torch import Tensor, nn
 from torch.nn.utils.rnn import pad_sequence
 from transformers import WavLMModel
 
-from ..runtime.types import SemanticCodec
+from ..runtime.types import Codec
 from .types import LossItem
 
 
@@ -30,7 +30,7 @@ class WavLMTeacher(nn.Module):
 
     def __init__(
         self,
-        codec: SemanticCodec,
+        codec: Codec,
         *,
         checkpoint: str = "microsoft/wavlm-base",
         layer: int = 9,
