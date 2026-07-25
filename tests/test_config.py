@@ -32,8 +32,12 @@ from scripts.overfit import (
     _prepare_generation_module,
     runtime_config,
 )
-from scripts.train import build_datamodule as build_train_datamodule
-from speech_to_speech.datamodule import DataModule, JointDataModule, TextDataModule
+from scripts.train import (
+    _is_text_loader,
+    build_datamodule as build_train_datamodule,
+)
+from speech_to_speech.datamodule import DataModule
+from speech_to_speech.datamodule.module import LoaderKind
 from speech_to_speech.datamodule.dataset import DatasetName
 from speech_to_speech.model import (
     AdapterType,
@@ -553,10 +557,20 @@ class ConfigTest(unittest.TestCase):
 
         datamodule = build_train_datamodule(config, object())
 
-        self.assertIsInstance(datamodule, JointDataModule)
-        self.assertIsInstance(datamodule.datamodules["asr"], DataModule)
-        self.assertIsInstance(datamodule.datamodules["tts"], DataModule)
-        self.assertIsInstance(datamodule.datamodules["mt"], TextDataModule)
+        self.assertIsInstance(datamodule, DataModule)
+        self.assertEqual(datamodule.loader_names, ("asr", "tts", "mt"))
+        self.assertEqual(
+            datamodule.loader_specs["asr"].kind,
+            LoaderKind.SPEECH,
+        )
+        self.assertEqual(
+            datamodule.loader_specs["tts"].kind,
+            LoaderKind.SPEECH,
+        )
+        self.assertEqual(
+            datamodule.loader_specs["mt"].kind,
+            LoaderKind.TEXT,
+        )
         self.assertEqual(datamodule.schedule.weights, config.stage.loader_weights())
         self.assertEqual(datamodule.schedule.batches_per_step, 10)
 
@@ -566,6 +580,11 @@ class ConfigTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "cannot mix pure text and speech"):
             build_train_datamodule(config, object())
+
+    def test_text_ar_uses_the_text_loader(self):
+        from speech_to_speech.task import Task
+
+        self.assertTrue(_is_text_loader({Task.TEXT_AR: 1.0}))
 
     def test_removed_parallel_groups_are_not_composable(self):
         cases = [

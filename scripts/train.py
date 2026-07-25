@@ -14,11 +14,12 @@ from omegaconf import DictConfig
 
 from speech_to_speech.callback import OnDeviceCodecMaterializer
 from speech_to_speech.callback.logging import GradNormLogger, LossSummary, OutputsLogger
-from speech_to_speech.datamodule import DataModule, JointDataModule, TextDataModule
+from speech_to_speech.datamodule import DataModule
 from speech_to_speech.datamodule.joint import LoaderSchedule
 from speech_to_speech.datamodule.module import (
     Config as SpeechDataModuleConfig,
     DataLoaderConfig,
+    LoaderSpec,
 )
 from speech_to_speech.datamodule.text import TextConfig
 from speech_to_speech.model.acoustic import AcousticType
@@ -127,13 +128,14 @@ def run(config: StagedTrainConfig) -> None:
     print(json.dumps(result, sort_keys=True))
 
 
-def build_datamodule(config: StagedTrainConfig, runtime: Runtime) -> JointDataModule:
-    datamodules = {
-        name: _loader_datamodule(config, runtime, loader)
+def build_datamodule(config: StagedTrainConfig, runtime: Runtime) -> DataModule:
+    loaders = {
+        name: _loader_spec(config, loader)
         for name, loader in config.stage.loaders.items()
     }
-    return JointDataModule(
-        datamodules,
+    return DataModule(
+        runtime,
+        loaders,
         LoaderSchedule(
             config.stage.loader_weights(),
             batches_per_step=config.stage.batches_per_step,
@@ -141,22 +143,20 @@ def build_datamodule(config: StagedTrainConfig, runtime: Runtime) -> JointDataMo
     )
 
 
-def _loader_datamodule(
+def _loader_spec(
     config: StagedTrainConfig,
-    runtime: Runtime,
     loader: StageLoaderConfig,
 ):
     task_weights = _task_weights(loader)
     if _is_text_loader(task_weights):
-        return TextDataModule(
+        return LoaderSpec.text(
             TextConfig(
                 dataloader=_dataloader(config.text_data.dataloader),
                 dataset=config.text_data.dataset,
             ),
-            runtime,
             task_weights,
         )
-    return DataModule(
+    return LoaderSpec.speech(
         SpeechDataModuleConfig(
             codec=config.data.codec,
             dataloader=_dataloader(config.data.dataloader),
@@ -164,7 +164,6 @@ def _loader_datamodule(
             encode_missing_codes=config.data.encode_missing_codes,
             dataset=config.data.dataset,
         ),
-        runtime,
         task_weights,
     )
 
@@ -175,7 +174,8 @@ def _task_weights(loader: StageLoaderConfig) -> dict[Task, float]:
 
 def _is_text_loader(task_weights: dict[Task, float]) -> bool:
     text_tasks = [
-        task.source_modality is Modality.TEXT and task.target_modality is Modality.TEXT
+        task.source_modality is not Modality.AUDIO
+        and task.target_modality is Modality.TEXT
         for task in task_weights
     ]
     if any(text_tasks) and not all(text_tasks):

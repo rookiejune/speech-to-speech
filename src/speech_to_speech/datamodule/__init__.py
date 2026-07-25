@@ -1,10 +1,3 @@
-from .joint import JointDataModule
-from .module import DataModule, FixedDataModule
-from .text import TextDataModule
+from .module import DataModule
 
-__all__ = [
-    "DataModule",
-    "FixedDataModule",
-    "JointDataModule",
-    "TextDataModule",
-]
+__all__ = ["DataModule"]

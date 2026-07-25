@@ -44,6 +44,7 @@ class PlModuleCompositionTest(unittest.TestCase):
         teacher.return_value.feature_dim = 7
         runtime = SimpleNamespace(
             codec=Mock(),
+            semantic_codec=Mock(),
             layout=Mock(),
             flow_matching=Mock(),
             backbone=SimpleNamespace(

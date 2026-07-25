@@ -76,8 +76,9 @@ UniCodec DDP smoke 则要求每个 rank
   P0 TTS/S2ST 2-step fixed-sample 合同验收；该 experiment 只固化当前 P0 子项，不替代 011
   的正式 staged joint entry。
 - `train`：正式 staged joint training root。它直接消费 `configs/stage/stage_*.yaml` 中的
-  loader/task/freeze 契约，构造 `JointDataModule`；纯文本 MT loader 走 `TextDataModule`，
-  speech loader 走 prepared speech `DataModule`。
+  loader/task/freeze 契约，构造唯一 `DataModule`；每个 speech loader 使用
+  `LoaderSpec.speech(...)`，纯文本 MT loader 使用 `LoaderSpec.text(...)`，多 loader 调度由
+  `LoaderSchedule` 持有。
 - `toy_smoke`：正式 LongCat runtime 加 tiny model/in-memory dataset 的 CPU 两步训练契约测试；
   不读取真实 backbone 权重或 WMT19 prepared dataset，也不替代真实资源验收。
 
@@ -118,9 +119,12 @@ schema，不重复声明字段。OmegaConf 对字符串枚举只接受成员
   audio token，flow/RVQ 才启用 acoustic objective，RVQ schema 不接受 REPA。
 - `runtime.audio_representation=full_codec_sequence` 只允许 `model/acoustic=none`，因为完整
   codec codes 已作为 token objective 训练，不能再同时构造 acoustic side channel。
-- `runtime.semantic_codec_artifact` 为 LongCat semantic-only waveform support artifact；当前只允许
+- `runtime.semantic_codec_artifact` 为 `semantic-acoustic-codec` 的 semantic-only waveform
+  support artifact；当前 S2S 只接入 LongCat structured backend，因此只允许
   `runtime=longcat|longcat_native model/acoustic=none`，并拒绝 full codec sequence、UniCodec、Flow
-  和 RVQ composition。
+  和 RVQ composition。FrameCodec 的 token-only 路径使用 full-code sequence；artifact 路径只生成
+  structured backend 的 semantic units。已有 `DECOUPLED + Flow/RVQ` 组合仍表示 S2S 内部的
+  acoustic feature 训练路径，不是 semantic-only artifact 路径。
 - unified-token codec 使用 `runtime=unicodec model/acoustic=none`；有独立 acoustic
   codebook 的 codec 也可以显式选择 `none` 作为 token-only baseline。
 - flow method、NFE 和 step 数直接覆盖 `runtime.flow_*`；RVQ/token 中保留这些字段是

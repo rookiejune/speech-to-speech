@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from typing import Optional, cast
 
 from anydataset.types import Lang, Modality, Role, Sample, TextItem, TextMeta, TextView
-from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader, Dataset
 
 from .._compat import StrEnum, auto
@@ -116,14 +115,13 @@ class TextConfig:
                 raise TypeError(f"text dataloader {name} must be a boolean.")
 
 
-class TextDataModule(LightningDataModule):
+class _TextLoader:
     def __init__(
         self,
         config: TextConfig,
         runtime: TextRuntime,
         task_weights: Mapping[Task, float],
     ) -> None:
-        super().__init__()
         self.config = config
         self.runtime = runtime
         self.collator = TextCollator(runtime, task_weights)
@@ -141,7 +139,7 @@ class TextDataModule(LightningDataModule):
     def train_dataloader(self) -> Iterable[ModelBatch]:
         if self._train_dataset is None:
             raise RuntimeError(
-                "TextDataModule.setup() must run before train_dataloader()."
+                "text loader setup() must run before train_dataloader()."
             )
         loader = self.config.dataloader
         num_workers = loader["num_workers"]
@@ -164,7 +162,6 @@ class TextDataModule(LightningDataModule):
 
 __all__ = [
     "TextConfig",
-    "TextDataModule",
     "TextDatasetConfig",
     "TextDatasetName",
     "ToyTextDataset",

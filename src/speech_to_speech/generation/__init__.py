@@ -1,4 +1,8 @@
-from .decode import decode_generated_audio, decode_generated_codes
+from .decode import (
+    decode_generated_audio,
+    decode_generated_codes,
+    decode_generated_frame_codes,
+)
 from .service import generate_responses
 from .text import TextProbe, TextProbeResult, evaluate_text
 from .types import AcousticGeneration, AudioOutput, Request, Result
@@ -12,6 +16,7 @@ __all__ = [
     "TextProbeResult",
     "decode_generated_audio",
     "decode_generated_codes",
+    "decode_generated_frame_codes",
     "evaluate_text",
     "generate_responses",
 ]

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
-from anytrain.codec.longcat import LongCat
+from anytrain.codec import AcousticLayout, SemanticAcousticCodes, load_frame
 from torch import Tensor
 
 from .types import Codec
+
+if TYPE_CHECKING:
+    from anytrain.codec.longcat import LongCat
 
 
 class LongCatCodec:
@@ -28,7 +31,19 @@ class LongCatCodec:
 
     @property
     def frame_rate(self) -> float:
-        return float(self.codec.encoder.input_sample_rate / self.codec.encoder.hop_length)
+        return float(self.codec.frame_rate)
+
+    @property
+    def semantic_frame_rate(self) -> float:
+        return float(self.codec.semantic_frame_rate)
+
+    @property
+    def acoustic_layout(self) -> AcousticLayout:
+        return self.codec.acoustic_layout
+
+    @property
+    def acoustic_unit_length(self) -> int | None:
+        return self.codec.acoustic_unit_length
 
     @property
     def acoustic_feature_dim(self) -> int:
@@ -50,8 +65,18 @@ class LongCatCodec:
     def acoustic_codebook_sizes(self) -> tuple[int, ...]:
         return tuple(int(size) for size in self.codec.codebook_sizes[1:])
 
+    @property
+    def semantic_codebook_sizes(self) -> tuple[int, ...]:
+        return tuple(int(size) for size in self.codec.semantic_codebook_sizes)
+
     def encode(self, audio: Tensor, sample_rate: int) -> Tensor:
         return self.codec.encode(audio, sample_rate)
+
+    def tokenize(self, audio: Tensor, sample_rate: int) -> SemanticAcousticCodes:
+        return self.codec.tokenize(audio, sample_rate)
+
+    def detokenize(self, codes: SemanticAcousticCodes) -> Tensor:
+        return self.codec.detokenize(codes)
 
     def decode(self, codes: Tensor) -> Tensor:
         return self.codec.decode(codes)
@@ -125,13 +150,11 @@ class UnifiedCodec:
 
 def load_codec(name: str, device: str | None) -> Codec:
     if name == "longcat":
-        return cast(Codec, LongCatCodec(LongCat.from_pretrained(device=device)))
+        return cast(Codec, LongCatCodec(cast(LongCat, load_frame("longcat", device=device))))
     if name == "unicodec":
-        from anytrain.codec.unicodec import UniCodec
-
         source = cast(
             UnifiedCodecSource,
-            cast(object, UniCodec.from_pretrained(device=device)),
+            cast(object, load_frame("unicodec", device=device)),
         )
         return cast(Codec, UnifiedCodec(source))
     raise NotImplementedError(f"unsupported codec: {name}")

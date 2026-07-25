@@ -17,7 +17,13 @@ class SemanticCodec(Protocol):
     def decode(self, semantic_codes: Tensor) -> Tensor: ...
 
 
-class Codec(SemanticCodec, Protocol):
+class Codec(Protocol):
+    @property
+    def sample_rate(self) -> int: ...
+
+    @property
+    def frame_rate(self) -> float: ...
+
     @property
     def semantic_feature_dim(self) -> int: ...
 
@@ -25,6 +31,8 @@ class Codec(SemanticCodec, Protocol):
     def codebook_sizes(self) -> tuple[int, ...]: ...
 
     def encode(self, audio: Tensor, sample_rate: int) -> Tensor: ...
+
+    def decode(self, codes: Tensor) -> Tensor: ...
 
 
 class CodebookCodec(Codec, Protocol):

@@ -26,7 +26,7 @@ from .types import (
 from .._compat import StrEnum, auto
 
 if TYPE_CHECKING:
-    from anytrain.codec import SemanticAcousticFeatureCodec
+    from anytrain.codec import SemanticAcousticCodec
     from anytrain.framework.flow_matching import ContinuousFlowRuntime
 
 _FLOW_METHODS = frozenset(
@@ -138,6 +138,7 @@ class Runtime:
     def acoustic_side_channel(self) -> bool:
         return (
             self.audio_representation is AudioRepresentation.DECOUPLED
+            and self.config.semantic_codec_artifact is None
             and supports_acoustic(self.codec)
         )
 
@@ -166,7 +167,7 @@ class Runtime:
     def semantic_codec(self) -> SemanticCodec:
         artifact = self.config.semantic_codec_artifact
         if artifact is None:
-            return self.codec
+            return cast(SemanticCodec, cast(object, self.codec))
         from semantic_acoustic_codec.runtime import SemanticCodecRuntime, load_artifact
 
         support = load_artifact(
@@ -175,7 +176,7 @@ class Runtime:
         )
         runtime = SemanticCodecRuntime(
             support,
-            cast("SemanticAcousticFeatureCodec", cast(object, self.codec)),
+            cast("SemanticAcousticCodec", cast(object, self.codec)),
         )
         return cast(SemanticCodec, cast(object, runtime))
 

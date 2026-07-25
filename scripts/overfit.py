@@ -23,7 +23,9 @@ from speech_to_speech.callback.logging import (
     TaskSampleLogger,
     TextRetentionLogger,
 )
-from speech_to_speech.datamodule import FixedDataModule
+from speech_to_speech.datamodule import DataModule
+from speech_to_speech.datamodule.module import Config as SpeechDataModuleConfig
+from speech_to_speech.datamodule.module import LoaderSpec
 from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.generation.batch import requests_from_batch
 from speech_to_speech.model.acoustic import AcousticType, FlowModel, RVQModel
@@ -81,14 +83,21 @@ def run(config: OverfitConfig) -> None:
     rt = Runtime(rt_config)
     codec = rt.codec
     task = Task(config.task)
-    datamodule = FixedDataModule(
-        config.runtime.codec,
+    datamodule = DataModule(
         rt,
-        {task: 1.0},
-        config.data.sample_index,
-        shape=config.data.shape,
-        encode_missing_codes=config.data.encode_missing_codes,
-        dataset=config.data,
+        {
+            "train": LoaderSpec.speech(
+                SpeechDataModuleConfig(
+                    codec=config.runtime.codec,
+                    dataloader={"batch_size": 1, "num_workers": 0},
+                    shape=config.data.shape,
+                    encode_missing_codes=config.data.encode_missing_codes,
+                    dataset=config.data,
+                ),
+                {task: 1.0},
+                sample_index=config.data.sample_index,
+            )
+        },
     )
 
     repa_weight = None

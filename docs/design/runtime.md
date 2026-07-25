@@ -11,8 +11,9 @@
   tokenizer。
 - `codec`：经本地 capability Protocol adapter 暴露当前 backend 实际拥有的 encode/decode、
   codebook table 或 acoustic feature 能力，不为缺失能力提供占位属性。
-- `semantic_codec`：semantic token generation 的 waveform decoder。默认与 `codec` 相同；配置
-  `semantic_codec_artifact` 时惰性加载 `semantic-acoustic-codec` artifact，并复用同一个 backend。
+- `semantic_codec`：semantic token generation 的 waveform decoder。配置
+  `semantic_codec_artifact` 时惰性加载 `semantic-acoustic-codec` artifact，并复用同一个
+  structured backend；FrameCodec 不把 semantic-only codes 传给自身 `decode()`。
 - `audio_representation`：选择 audio token 序列契约，当前为 `decoupled` 或
   `full_codec_sequence`。
 - `backbone`：Qwen-compatible HF causal LM。
@@ -37,14 +38,19 @@ codebooks 编入 token 序列，因此不能同时配置 BPE audio tokenizer。O
 `TokenModelRuntime` capability；消费模块不重复声明相同属性。`DataRuntime` 只公开 parser、
 sample builder 和 batch padding 所需资源。
 
-`SemanticCodec` 只要求 sample/frame rate 与 `decode(codes)`；`Codec` 增加 encode、完整
-`codebook_sizes` 与随机 audio embedding 所需的 `semantic_feature_dim`。`CodebookCodec` 进一步
-提供真实 `semantic_codebook`，供 native/BPE tokenizer 初始化 embedding；`AcousticCodec` 再增加
-独立 acoustic codebooks、code-to-feature 与 feature decode。LongCat 实现 `AcousticCodec`，
-UniCodec 实现 `CodebookCodec`。`SemanticAcousticCodec` 这类 fixed-length structured codec
-（例如 BiCodec）目前没有 S2S adapter；不得把它伪装成基础 `Codec`。artifact 当前只支持 LongCat decoupled representation，
-且入口只允许与 `model/acoustic=none` 组合，避免同一次生成同时启用 S2S acoustic decoder 和外部
-semantic support。
+`anytrain.codec` 只提供两种 backend capability：`FrameCodec` 和
+`SemanticAcousticCodec`。S2S 的 `Codec` 只表示完整 frame-code 路径，不能再继承
+semantic-only decoder。`FULL_CODEC_SEQUENCE` 对 `FrameCodec` 展开全部 codebooks，生成后调用
+完整 `decode(codes)`；配置 `semantic_codec_artifact` 时，S2S 只处理
+`SemanticAcousticCodec` 的 semantic units，waveform 由
+`semantic_acoustic_codec.runtime.SemanticCodecRuntime` 负责。semantic-only decoder 不放回
+anytrain，也不通过普通 codec 的 `decode()` 伪装。
+
+`DECOUPLED + Flow/RVQ` 是现有 S2S 内部 acoustic-feature 训练路径，仍由
+`Codec.decode_features()` 消费生成的 features；它不代表 anytrain 提供 semantic-only decoder。
+
+当前 artifact 接入仍要求 LongCat backend；固定长度 structured backend 的 S2S 数据视图和
+token-layout adapter 尚未加入，因此不能把 BiCodec 强行当成 frame codec。
 
 `audio_tokenizer.py` 提供：
 

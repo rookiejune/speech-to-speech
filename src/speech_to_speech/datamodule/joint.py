@@ -5,15 +5,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from lightning.pytorch import LightningDataModule
-
 from .types import ConcreteTrainInput, TrainInputBatch
-
-
-class TrainDataModule(Protocol):
-    def setup(self, stage: str | None = None) -> None: ...
-
-    def train_dataloader(self) -> Iterable[ConcreteTrainInput]: ...
 
 
 @runtime_checkable
@@ -81,48 +73,6 @@ class ScheduledDataLoader:
             yield _next_batch(selected, iterators, self.loaders, cycles)
 
 
-class JointDataModule(LightningDataModule):
-    def __init__(
-        self,
-        datamodules: Mapping[str, TrainDataModule],
-        schedule: LoaderSchedule,
-    ) -> None:
-        super().__init__()
-        missing = set(schedule.weights) - set(datamodules)
-        if missing:
-            raise ValueError(
-                "scheduled datamodules are missing: " + ", ".join(sorted(missing))
-            )
-        extra = set(datamodules) - set(schedule.weights)
-        if extra:
-            raise ValueError(
-                "datamodule weights are missing: " + ", ".join(sorted(extra))
-            )
-        self.datamodules = dict(datamodules)
-        self.schedule = schedule
-
-    def setup(self, stage: str | None = None) -> None:
-        for datamodule in self.datamodules.values():
-            datamodule.setup(stage)
-
-    def set_loader_weights(self, weights: Mapping[str, float]) -> None:
-        schedule = LoaderSchedule(
-            dict(weights),
-            batches_per_step=self.schedule.batches_per_step,
-        )
-        _validate_names(self.datamodules, schedule.weights, kind="datamodule")
-        self.schedule = schedule
-
-    def train_dataloader(self) -> ScheduledDataLoader:
-        return ScheduledDataLoader(
-            {
-                name: datamodule.train_dataloader()
-                for name, datamodule in self.datamodules.items()
-            },
-            self.schedule,
-        )
-
-
 def _validate_weights(weights: Mapping[str, float]) -> None:
     if not weights:
         raise ValueError("loader weights must contain at least one loader.")
@@ -134,24 +84,6 @@ def _validate_weights(weights: Mapping[str, float]) -> None:
         raise ValueError("loader weights must have a finite positive total.")
     if any(not key for key in weights):
         raise ValueError("loader names must not be empty.")
-
-
-def _validate_names(
-    available: Mapping[str, object],
-    scheduled: Mapping[str, object],
-    *,
-    kind: str,
-) -> None:
-    missing = set(scheduled) - set(available)
-    if missing:
-        raise ValueError(
-            f"scheduled {kind}s are missing: " + ", ".join(sorted(missing))
-        )
-    extra = set(available) - set(scheduled)
-    if extra:
-        raise ValueError(
-            f"{kind} weights are missing: " + ", ".join(sorted(extra))
-        )
 
 
 def _allocate_loaders(
@@ -206,8 +138,6 @@ def _set_epoch(loader: Iterable[ConcreteTrainInput], epoch: int) -> None:
 
 
 __all__ = [
-    "JointDataModule",
     "LoaderSchedule",
     "ScheduledDataLoader",
-    "TrainDataModule",
 ]

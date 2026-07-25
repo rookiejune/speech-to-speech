@@ -33,17 +33,12 @@ from torch import nn
 from speech_to_speech.callback import OnDeviceCodecMaterializer
 from speech_to_speech.datamodule.collator import Collator, TextCollator, _allocate_tasks
 from speech_to_speech.datamodule.dataset import DatasetConfig, DatasetName, ToyDataset
-from speech_to_speech.datamodule.joint import (
-    JointDataModule,
-    LoaderSchedule,
-    ScheduledDataLoader,
-)
+from speech_to_speech.datamodule.joint import LoaderSchedule, ScheduledDataLoader
 from speech_to_speech.datamodule.module import Config as DataConfig
-from speech_to_speech.datamodule.module import DataModule, FixedDataModule
+from speech_to_speech.datamodule.module import DataModule, LoaderSpec
 from speech_to_speech.datamodule.single import SingleCollator
 from speech_to_speech.datamodule.text import (
     TextConfig,
-    TextDataModule,
     TextDatasetConfig,
     TextDatasetName,
     load_text_dataset,
@@ -117,20 +112,6 @@ class _Queue(Protocol):
     def get(self, *, timeout: float) -> list[Task]: ...
 
     def close(self) -> None: ...
-
-
-class _FakeTrainDataModule:
-    def __init__(self, task: Task) -> None:
-        self.task = task
-        self.setup_stages: list[str | None] = []
-        self.train_dataloader_calls = 0
-
-    def setup(self, stage: str | None = None) -> None:
-        self.setup_stages.append(stage)
-
-    def train_dataloader(self):
-        self.train_dataloader_calls += 1
-        return [ModelBatch.from_samples([_sample(self.task)], pad_token_id=99)]
 
 
 class _StageBackbone(nn.Module):
@@ -208,6 +189,19 @@ class ContractTest(unittest.TestCase):
             device=None,
         )
         bind.assert_called_once_with(support, backend)
+
+    def test_semantic_codec_artifact_disables_acoustic_side_channel(self):
+        runtime = Runtime(
+            Config(
+                codec="longcat",
+                semantic_codec_artifact="/tmp/semantic-codec",
+            )
+        )
+
+        with patch("speech_to_speech.runtime.runtime.load_codec") as load:
+            self.assertFalse(runtime.acoustic_side_channel)
+
+        load.assert_not_called()
 
     def test_worker_runtime_snapshot_excludes_model_and_codec(self):
         runtime = SimpleNamespace(
@@ -351,7 +345,7 @@ class ContractTest(unittest.TestCase):
                 patch("scripts.overfit.pl.seed_everything"),
                 patch("scripts.overfit.runtime_config", return_value=Mock()),
                 patch("scripts.overfit.Runtime", return_value=runtime),
-                patch("scripts.overfit.FixedDataModule", return_value=datamodule),
+                patch("scripts.overfit.DataModule", return_value=datamodule),
                 patch("scripts.overfit.flow", return_value=(Mock(), model, None)),
                 patch("scripts.overfit.apply_parameter_policy") as apply_policy,
                 patch(
@@ -618,7 +612,10 @@ class ContractTest(unittest.TestCase):
             shape=DataShape.SINGLE,
             encode_missing_codes=True,
         )
-        datamodule = DataModule(config, runtime, {Task.TTS: 1.0})
+        datamodule = DataModule(
+            runtime,
+            {"train": LoaderSpec.speech(config, {Task.TTS: 1.0})},
+        )
 
         with patch(
             "speech_to_speech.datamodule.module.load_dataset",
@@ -628,7 +625,10 @@ class ContractTest(unittest.TestCase):
             batch = next(iter(datamodule.train_dataloader()))
 
         self.assertIsInstance(batch, RawSingleBatch)
-        self.assertEqual(datamodule.config.shape, DataShape.SINGLE)
+        self.assertEqual(
+            datamodule.loader_specs["train"].speech_config.shape,
+            DataShape.SINGLE,
+        )
 
     def test_full_codec_sequence_flattens_complete_codes_without_acoustic_target(self):
         tokenizer = FlattenedAudioTokenizer(
@@ -739,16 +739,20 @@ class ContractTest(unittest.TestCase):
             pad_token_id=0,
             eos_token_id=31,
         )
-        datamodule = TextDataModule(
-            TextConfig(
-                dataloader={"batch_size": 2, "num_workers": 0},
-                dataset=TextDatasetConfig(
-                    name=TextDatasetName.TOY,
-                    toy_samples=2,
-                ),
-            ),
+        datamodule = DataModule(
             runtime,
-            {Task.MT: 1.0},
+            {
+                "mt": LoaderSpec.text(
+                    TextConfig(
+                        dataloader={"batch_size": 2, "num_workers": 0},
+                        dataset=TextDatasetConfig(
+                            name=TextDatasetName.TOY,
+                            toy_samples=2,
+                        ),
+                    ),
+                    {Task.MT: 1.0},
+                )
+            },
         )
 
         datamodule.setup()
@@ -789,71 +793,116 @@ class ContractTest(unittest.TestCase):
         self.assertIsInstance(batch, tuple)
         self.assertEqual([item.tasks[0] for item in batch], [Task.TTS, Task.TTS, Task.MT])
 
-    def test_joint_datamodule_sets_up_children_and_returns_scheduled_loader(self):
-        speech = _FakeTrainDataModule(Task.TTS)
-        mt = _FakeTrainDataModule(Task.MT)
-        joint = JointDataModule(
+    def test_datamodule_sets_up_loaders_and_returns_scheduled_loader(self):
+        runtime = _data_runtime()
+        runtime.text_tokenizer = _ChatTokenizer(32)
+        speech = LoaderSpec.speech(
+            DataConfig(
+                codec="longcat",
+                dataloader={"batch_size": 1, "num_workers": 0},
+                dataset=DatasetConfig(
+                    name=DatasetName.TOY,
+                    toy_samples=1,
+                    toy_frames=2,
+                ),
+            ),
+            {Task.TTS: 1.0},
+        )
+        mt = LoaderSpec.text(
+            TextConfig(
+                dataloader={"batch_size": 1, "num_workers": 0},
+                dataset=TextDatasetConfig(
+                    name=TextDatasetName.TOY,
+                    toy_samples=1,
+                ),
+            ),
+            {Task.MT: 1.0},
+        )
+        datamodule = DataModule(
+            runtime,
             {"speech": speech, "mt": mt},
             LoaderSchedule({"speech": 1.0, "mt": 1.0}, batches_per_step=2),
         )
 
-        joint.set_loader_weights({"speech": 1.0, "mt": 1.0})
-        joint.setup("fit")
-        loader = joint.train_dataloader()
+        datamodule.set_loader_weights({"speech": 1.0, "mt": 1.0})
+        datamodule.setup("fit")
+        loader = datamodule.train_dataloader()
         iterator = iter(loader)
 
-        self.assertEqual(joint.schedule.batches_per_step, 2)
-        self.assertEqual(speech.setup_stages, ["fit"])
-        self.assertEqual(mt.setup_stages, ["fit"])
-        self.assertEqual(speech.train_dataloader_calls, 1)
-        self.assertEqual(mt.train_dataloader_calls, 1)
+        self.assertEqual(datamodule.schedule.batches_per_step, 2)
         batch = next(iterator)
         self.assertIsInstance(batch, tuple)
         self.assertEqual([item.tasks[0] for item in batch], [Task.TTS, Task.MT])
 
-    def test_joint_datamodule_validates_loader_names(self):
+    def test_datamodule_validates_loader_names(self):
+        runtime = _data_runtime()
+        speech = LoaderSpec.speech(
+            DataConfig(
+                codec="longcat",
+                dataloader={"batch_size": 1, "num_workers": 0},
+                dataset=DatasetConfig(name=DatasetName.TOY),
+            ),
+            {Task.TTS: 1.0},
+        )
         with self.assertRaisesRegex(ValueError, "missing"):
-            JointDataModule(
-                {"speech": _FakeTrainDataModule(Task.TTS)},
+            DataModule(
+                runtime,
+                {"speech": speech},
                 LoaderSchedule({"speech": 1.0, "mt": 1.0}),
             )
         with self.assertRaisesRegex(ValueError, "finite positive"):
             LoaderSchedule({"speech": 0.0, "mt": 0.0})
 
-    @patch("zhuyin.datasets.wmt19_tts.wmt19_tts_codec")
+    def test_datamodule_keeps_schedule_when_loader_weight_update_is_invalid(self):
+        runtime = _data_runtime()
+        config = DataConfig(
+            codec="longcat",
+            dataloader={"batch_size": 1, "num_workers": 0},
+            dataset=DatasetConfig(name=DatasetName.TOY),
+        )
+        datamodule = DataModule(
+            runtime,
+            {"speech": LoaderSpec.speech(config, {Task.TTS: 1.0})},
+        )
+        original = datamodule.schedule
+
+        with self.assertRaisesRegex(ValueError, "missing"):
+            datamodule.set_loader_weights({"other": 1.0})
+
+        self.assertIs(datamodule.schedule, original)
+
+    @patch("speech_to_speech.datamodule.module.load_dataset")
     def test_datamodule_setup_loads_dataset_once(self, load_dataset):
         load_dataset.return_value = []
-        datamodule = DataModule(
-            DataConfig(
-                codec="longcat",
-                dataloader={"batch_size": 1, "num_workers": 0},
-            ),
-            SimpleNamespace(codec_name="longcat"),
-            {Task.TTS: 1.0},
-        )
-
-        datamodule.setup()
-        datamodule.setup()
-
-        load_dataset.assert_called_once_with(
+        runtime = _data_runtime()
+        config = DataConfig(
             codec="longcat",
-            root=None,
-            split="train",
+            dataloader={"batch_size": 1, "num_workers": 0},
+        )
+        datamodule = DataModule(
+            runtime,
+            {"train": LoaderSpec.speech(config, {Task.TTS: 1.0})},
         )
 
-    @patch("zhuyin.datasets.wmt19_tts.wmt19_tts_codec")
+        datamodule.setup()
+        datamodule.setup()
+
+        load_dataset.assert_called_once_with(config.dataset, runtime)
+
+    @patch("speech_to_speech.datamodule.module.load_dataset")
     def test_datamodule_keeps_standard_loader_for_non_store_dataset(
         self,
         load_dataset,
     ):
         load_dataset.return_value = [_raw_sample(), _raw_sample()]
+        runtime = _data_runtime()
+        config = DataConfig(
+            codec="longcat",
+            dataloader={"batch_size": 2, "num_workers": 0},
+        )
         datamodule = DataModule(
-            DataConfig(
-                codec="longcat",
-                dataloader={"batch_size": 2, "num_workers": 0},
-            ),
-            _data_runtime(),
-            {Task.TTS: 1.0},
+            runtime,
+            {"train": LoaderSpec.speech(config, {Task.TTS: 1.0})},
         )
 
         datamodule.setup()
@@ -909,25 +958,24 @@ class ContractTest(unittest.TestCase):
                         torch.equal(codes, again[(role, Modality.AUDIO)].views[view])
                     )
 
-    @patch("zhuyin.datasets.wmt19_tts.wmt19_tts_codec")
-    def test_datamodule_loads_toy_data_without_prepared_dataset(self, prepared):
-        datamodule = DataModule(
-            DataConfig(
-                codec="longcat",
-                dataloader={"batch_size": 1, "num_workers": 0},
-                dataset=DatasetConfig(
-                    name=DatasetName.TOY,
-                    toy_samples=2,
-                    toy_frames=3,
-                ),
+    def test_datamodule_loads_toy_data_without_prepared_dataset(self):
+        runtime = _data_runtime()
+        config = DataConfig(
+            codec="longcat",
+            dataloader={"batch_size": 1, "num_workers": 0},
+            dataset=DatasetConfig(
+                name=DatasetName.TOY,
+                toy_samples=2,
+                toy_frames=3,
             ),
-            _data_runtime(),
-            {Task.TTS: 1.0},
+        )
+        datamodule = DataModule(
+            runtime,
+            {"train": LoaderSpec.speech(config, {Task.TTS: 1.0})},
         )
 
         datamodule.setup()
 
-        prepared.assert_not_called()
         self.assertEqual(len(datamodule.train_samples([0, 1])), 2)
         loader = cast(Any, datamodule.train_dataloader())
         self.assertEqual(loader.batch_size, 1)
@@ -946,13 +994,14 @@ class ContractTest(unittest.TestCase):
                 dataset = AnyDataset(
                     Spec(source=Source.STORE, path=str(output), split="train")
                 )
+                runtime = _data_runtime()
+                config = DataConfig(
+                    codec="longcat",
+                    dataloader={"batch_size": 2, "num_workers": 0},
+                )
                 datamodule = DataModule(
-                    DataConfig(
-                        codec="longcat",
-                        dataloader={"batch_size": 2, "num_workers": 0},
-                    ),
-                    _data_runtime(),
-                    {Task.TTS: 1.0},
+                    runtime,
+                    {"train": LoaderSpec.speech(config, {Task.TTS: 1.0})},
                 )
 
                 with patch(
@@ -991,48 +1040,65 @@ class ContractTest(unittest.TestCase):
             ToyDataset("longcat", codec)
 
     def test_datamodule_rejects_runtime_codec_mismatch(self):
+        config = DataConfig(
+            codec="unicodec",
+            dataloader={"batch_size": 1, "num_workers": 0},
+        )
         datamodule = DataModule(
-            DataConfig(
-                codec="unicodec",
-                dataloader={"batch_size": 1, "num_workers": 0},
-            ),
-            SimpleNamespace(codec_name="longcat"),
-            {Task.TTS: 1.0},
+            _data_runtime(),
+            {"train": LoaderSpec.speech(config, {Task.TTS: 1.0})},
         )
 
         with self.assertRaisesRegex(ValueError, "same codec"):
             datamodule.setup()
 
-    @patch("zhuyin.datasets.wmt19_tts.wmt19_tts_codec")
-    def test_overfit_datamodule_repeats_only_the_selected_sample(self, load_dataset):
+    def test_overfit_datamodule_repeats_only_the_selected_sample(self):
         samples = [object(), object()]
-        load_dataset.return_value = samples
-        datamodule = FixedDataModule(
-            "longcat",
-            SimpleNamespace(codec_name="longcat"),
-            {Task.TTS: 1.0},
-            sample_index=1,
-        )
-        datamodule.collator = Mock(side_effect=lambda batch: batch)
-
-        datamodule.setup()
-        first_epoch = list(datamodule.train_dataloader())
-        second_epoch = list(datamodule.train_dataloader())
-
-        load_dataset.assert_called_once_with(
+        config = DataConfig(
             codec="longcat",
-            root=None,
-            split="train",
+            dataloader={"batch_size": 1, "num_workers": 0},
         )
+        collator = Mock(side_effect=lambda batch: batch)
+        with (
+            patch(
+                "speech_to_speech.datamodule.module.load_dataset",
+                return_value=samples,
+            ) as load_dataset,
+            patch("speech_to_speech.datamodule.module._collator", return_value=collator),
+        ):
+            datamodule = DataModule(
+                _data_runtime(),
+                {
+                    "train": LoaderSpec.speech(
+                        config,
+                        {Task.TTS: 1.0},
+                        sample_index=1,
+                    )
+                },
+            )
+
+            datamodule.setup()
+            first_epoch = list(datamodule.train_dataloader())
+            second_epoch = list(datamodule.train_dataloader())
+
+        load_dataset.assert_called_once()
         self.assertEqual(first_epoch, [[samples[1]]])
         self.assertEqual(second_epoch, [[samples[1]]])
 
     def test_overfit_datamodule_rejects_runtime_codec_mismatch(self):
-        datamodule = FixedDataModule(
-            "unicodec",
-            SimpleNamespace(codec_name="longcat"),
-            {Task.TTS: 1.0},
-            sample_index=0,
+        config = DataConfig(
+            codec="unicodec",
+            dataloader={"batch_size": 1, "num_workers": 0},
+        )
+        datamodule = DataModule(
+            _data_runtime(),
+            {
+                "train": LoaderSpec.speech(
+                    config,
+                    {Task.TTS: 1.0},
+                    sample_index=0,
+                )
+            },
         )
 
         with self.assertRaisesRegex(ValueError, "same codec"):

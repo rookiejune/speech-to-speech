@@ -84,8 +84,10 @@ codec 保留 batch 轴。`full_codec_sequence` 通过 `FlattenedAudioTokenizer` 
 codebooks 而进入 Flow/RVQ acoustic feature generation。flow 与 RVQ 都返回相同的
 `AcousticGeneration`；`model/acoustic=none` 即使搭配 LongCat 这类带 acoustic codebook 的
 codec，也走 token-only decode。
-未配置 `runtime.semantic_codec_artifact` 时 `semantic_codec` 就是原 codec；配置 artifact 后，service
-只替换该 token-only decode 能力，训练数据、tokenizer、layout 和 codec identity 仍来自原 codec。
+`FULL_CODEC_SEQUENCE` 只调用原 `FrameCodec.decode(full_codes)`。配置
+`runtime.semantic_codec_artifact` 后，service 只处理 structured backend 的 semantic tokens，
+并把 token-only decode 交给 `SemanticCodecRuntime`；普通 frame codec 的 `decode()` 不再接收
+semantic-only codes。训练数据、tokenizer、layout 和 codec identity 仍来自原 backend。
 
 自回归 cache、sampling、allowed IDs、逐行 stop 状态和 frame condition 收集属于 model。已有行
 生成 stop token 后，后续步骤只对剩余 active rows 执行 backbone 与 sampling；cache 同步收缩，

@@ -8,9 +8,14 @@ from anydataset.types import Modality
 from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
+from ..runtime import AudioRepresentation
 from ..runtime.types import acoustic_codec
 from ..task import Task
-from .decode import decode_generated_audio, decode_generated_semantic
+from .decode import (
+    decode_generated_audio,
+    decode_generated_frame_codes,
+    decode_generated_semantic,
+)
 from .protocol import AcousticFeatureGeneration, TokenGenerator
 from .types import AcousticGeneration, AudioOutput, Request, Result
 
@@ -94,7 +99,9 @@ def generate_responses(
         )
         for row, (result_index, _) in enumerate(group):
             decoder = (
-                model.runtime.semantic_codec
+                model.runtime.codec
+                if model.runtime.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE
+                else model.runtime.semantic_codec
                 if acoustic_generation is None
                 else model.runtime.codec
             )
@@ -220,12 +227,20 @@ def _decode_rows(
         token_batch = torch.stack([token_rows[row] for row in rows])
         first_features = row_features[rows[0]]
         if first_features is None:
-            decoded = decode_generated_semantic(
-                token_batch,
-                codec=model.runtime.semantic_codec,
-                audio_tokenizer=model.runtime.audio_tokenizer,
-                audio_token_range=model.runtime.codec_audio_range,
-            )
+            if model.runtime.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE:
+                decoded = decode_generated_frame_codes(
+                    token_batch,
+                    codec=model.runtime.codec,
+                    audio_tokenizer=model.runtime.audio_tokenizer,
+                    audio_token_range=model.runtime.codec_audio_range,
+                )
+            else:
+                decoded = decode_generated_semantic(
+                    token_batch,
+                    codec=model.runtime.semantic_codec,
+                    audio_tokenizer=model.runtime.audio_tokenizer,
+                    audio_token_range=model.runtime.codec_audio_range,
+                )
         else:
             feature_batch = torch.stack(
                 [cast(Tensor, row_features[row]) for row in rows]

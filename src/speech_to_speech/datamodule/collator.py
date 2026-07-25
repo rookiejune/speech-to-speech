@@ -81,12 +81,12 @@ class TextCollator:
         task_weights: Mapping[Task, float],
     ) -> None:
         self.runtime = runtime
+        _validate_text_tasks(_positive_tasks(task_weights))
         self._task_weights = _TaskWeights(task_weights)
-        _validate_text_tasks(self.tasks)
 
     def set_task_weights(self, task_weights: Mapping[Task, float]) -> None:
+        _validate_text_tasks(_positive_tasks(task_weights))
         self._task_weights.set(task_weights)
-        _validate_text_tasks(self.tasks)
 
     @property
     def tasks(self) -> list[Task]:
@@ -137,6 +137,10 @@ def _validate_text_tasks(tasks: list[Task]) -> None:
             raise ValueError("text-only task weights must not require audio input.")
         if task.target_modality is not Task.MT.target_modality:
             raise ValueError("text-only task weights must target text.")
+
+
+def _positive_tasks(values: Mapping[Task, float]) -> list[Task]:
+    return [task for task, weight in values.items() if weight > 0]
 
 
 def _allocate_tasks(

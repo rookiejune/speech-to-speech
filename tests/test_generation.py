@@ -23,7 +23,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from speech_to_speech.callback.logging.task_sample import TaskSampleLogger
 from speech_to_speech.datamodule.module import Config as DataConfig
-from speech_to_speech.datamodule.module import DataModule
+from speech_to_speech.datamodule.module import DataModule, LoaderSpec
 from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.model import ToyConfig
 from speech_to_speech.model.acoustic import FlowModel
@@ -34,6 +34,7 @@ from speech_to_speech.generation import (
     Result,
     decode_generated_audio,
     decode_generated_codes,
+    decode_generated_frame_codes,
     generate_responses,
 )
 from speech_to_speech.generation.batch import requests_from_batch
@@ -41,7 +42,7 @@ from speech_to_speech.runtime.audio_tokenizer import (
     FlattenedAudioTokenizer,
     NativeAudioTokenizer,
 )
-from speech_to_speech.runtime import Config as RuntimeConfig
+from speech_to_speech.runtime import AudioRepresentation, Config as RuntimeConfig
 from speech_to_speech.runtime import Runtime
 from speech_to_speech.runtime.types import supports_acoustic
 from speech_to_speech.task import Task
@@ -84,6 +85,7 @@ class _UnifiedCodec:
 
 class _Runtime:
     def __init__(self) -> None:
+        self.audio_representation = AudioRepresentation.DECOUPLED
         self.layout = Layout(text=(0, 4), audio=(4, 8))
         self.audio_tokenizer = NativeAudioTokenizer(vocab_size=2)
         self.codec = _Codec()
@@ -256,6 +258,7 @@ class _FullSequenceCodec:
 
 class _FullSequenceRuntime:
     def __init__(self) -> None:
+        self.audio_representation = AudioRepresentation.FULL_CODEC_SEQUENCE
         self.audio_tokenizer = FlattenedAudioTokenizer(
             codebook_sizes=(4, 10),
             codec_name="longcat",
@@ -585,6 +588,27 @@ class GenerationTest(unittest.TestCase):
         self.assertEqual(semantic_codec.decode_calls, 1)
         self.assertEqual(model.runtime.codec.decode_calls, 0)
         self.assertEqual(result["audio"]["sample_rate"], semantic_codec.sample_rate)
+
+    def test_full_codec_sequence_decodes_all_codebooks(self):
+        tokenizer = FlattenedAudioTokenizer(
+            codebook_sizes=(4, 10),
+            codec_name="longcat",
+        )
+        frames = torch.tensor([[1, 5], [2, 6]], dtype=torch.long)
+        codec = Mock()
+        codec.decode.side_effect = lambda codes: codes
+        start = 20
+
+        decoded = decode_generated_frame_codes(
+            tokenizer.encode(frames)[None] + start,
+            codec=codec,
+            audio_tokenizer=tokenizer,
+            audio_token_range=(start, start + tokenizer.vocab_size),
+        )
+
+        torch.testing.assert_close(decoded, frames[None])
+        codec.decode.assert_called_once()
+        torch.testing.assert_close(codec.decode.call_args.args[0], frames[None])
 
     def test_generated_audio_decode_validates_token_ids_before_codec_work(self):
         codec = Mock()
@@ -978,9 +1002,8 @@ class GenerationTest(unittest.TestCase):
             dataloader={"batch_size": 1, "num_workers": 0},
         )
         datamodule = DataModule(
-            config,
             SimpleNamespace(codec_name="longcat"),
-            {Task.TTS: 1.0},
+            {"train": LoaderSpec.speech(config, {Task.TTS: 1.0})},
         )
         with patch("speech_to_speech.datamodule.module.load_dataset", return_value=samples):
             datamodule.setup()

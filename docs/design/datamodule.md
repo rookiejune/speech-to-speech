@@ -34,11 +34,12 @@
 - `Collator(runtime, task_weights)`：按任务权重为 raw samples 选择任务，依次调用 parser、
   sample builder 和 batch padding；正式训练在构造时固定 task weights，`set_task_weights()` 只保留
   为显式的低层控制入口。
-- `TextDataModule` / `TextCollator`：纯文本 MT 数据路径，只读取 source/target text，当前可配置为
-  anydataset `WMT19` preset 或 deterministic toy text samples，不消费 codec/audio tokenizer。
-- `JointDataModule` / `ScheduledDataLoader`：组织多个 homogeneous dataloader。默认按
-  optimizer step 确定性轮转；配置 `batches_per_step > 1` 时，一个 optimizer step 返回多个子
-  batch，供静态 DDP 覆盖多条可训练执行路径。每个子 dataloader 自己保持单一 execution
+- `LoaderSpec.text(...)` / `TextCollator`：纯文本 MT loader，只读取 source/target text，当前可
+  配置为 anydataset `WMT19` preset 或 deterministic toy text samples，不消费 codec/audio
+  tokenizer。
+- `LoaderSchedule` / `ScheduledDataLoader`：为唯一 `DataModule` 组织多个 homogeneous loader。
+  默认按 optimizer step 确定性轮转；配置 `batches_per_step > 1` 时，一个 optimizer step 返回
+  多个子 batch，供静态 DDP 覆盖多条可训练执行路径。每个子 loader 自己保持单一 execution
   signature。
 - `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts` prepared data 或确定性的内存
   `toy` data。toy codes 根据正式 codec 的 semantic/acoustic/full-sequence codebook 数量和值域构造。
@@ -48,10 +49,11 @@
   dataset 与 DataModule 配置结构。prepared speech 的 map-style dataset 通过
   `MapStyleABC.dataloader()` 使用 anydataset 的 cost planner；普通或 iterable dataset 使用
   PyTorch `DataLoader`。`shape=pair` 是默认路径；`shape=single` 显式选择 single utterance path。
-- `DataModule(config, runtime, task_weights)`：Lightning 数据入口；`setup()` 加载所选 dataset，
-  并在加载前校验 config 与 runtime 的 codec identity。重复调用不会重新加载已持有的数据集。
-- `FixedDataModule(codec, runtime, task_weights, sample_index, dataset=...)`：fixed-sample
-  overfit/验收数据入口，只暴露一个 selected sample 的训练 loader，并复用同一公开
+- `DataModule(runtime, loaders, schedule=None)`：唯一 Lightning 数据入口。`loaders` 是
+  `name -> LoaderSpec` 映射；speech loader 使用 `LoaderSpec.speech(config, task_weights,
+  sample_index=...)`，纯文本 loader 使用 `LoaderSpec.text(config, task_weights)`。`setup()` 加载
+  所选 dataset，并在加载前校验 speech config 与 runtime 的 codec identity；重复调用不会重新
+  加载已持有的数据集。fixed-sample overfit 只是 speech spec 的 `sample_index` 变体，仍复用
   `train_samples()` 边界供 callback 读取 raw sample。
 
 ## 输入输出
@@ -99,12 +101,12 @@ acoustic_target: AcousticTarget | None
 
 ## 边界
 
-- 包级 `speech_to_speech.datamodule` 只导出 DataModule、FixedDataModule、JointDataModule、
-  TextDataModule 四个运行入口。配置结构、schedule、parser、sample、types、protocol、collator、
-  dataset factory 等契约从对应子模块导入，不提升为包级稳定 API。
-- runtime 必须由组合入口显式传入：`DataModule` 接收 `DatasetRuntime`，`Collator` 及下游 parser
-  和 sample builder 只消费较小的 `DataRuntime`；datamodule 不自行选择 tokenizer、layout 或
-  special tokens。
+- 包级 `speech_to_speech.datamodule` 只导出唯一运行入口 `DataModule`。`LoaderSpec`、配置结构、
+  schedule、parser、sample、types、protocol、collator、dataset factory 等契约从对应子模块导入，
+  不提升为包级稳定 API。
+- runtime 必须由组合入口显式传入：含 speech loader 的 `DataModule` 接收 `DatasetRuntime`，纯文本
+  loader 只需要 `TextRuntime`；`Collator` 及下游 parser 和 sample builder 只消费更小的 runtime
+  协议。datamodule 不自行选择 tokenizer、layout 或 special tokens。
 - datamodule 按数据形态拆分 pair/single，而不是按 TTS/ASR 拆分。pair path 拥有 source/target
   role 选择；single path 拥有同一 utterance 内 text/audio 的方向选择。`Task.uses_source_role`
   只服务 pair path，single path 不用它推断 dataset role。
@@ -163,7 +165,7 @@ acoustic_target: AcousticTarget | None
 - 对 anydataset `MapStyleABC`，`DataModule` 使用其 `dataloader()` 公开入口负责 deterministic
   shuffle、runtime shard 和固定的 sample-cost batch 规划；store-backed dataset 会额外保留
   payload locality。DataLoader 仍索引原始外层 dataset，因此 `AnyDataset` transform 不会被绕过。
-  普通或 iterable dataset 使用 PyTorch `DataLoader`。joint train 的外层
+  普通或 iterable dataset 使用 PyTorch `DataLoader`。多 loader train 的外层
   `ScheduledDataLoader` 不接受 Lightning 注入 sampler；正式 distributed sample partition
   由各 loader 的公开 dataloader 契约负责。
 - `DataModule.train_samples()` 是 callback 按索引读取已 setup 训练样本的公开边界；callback

@@ -204,15 +204,14 @@ token CE 的 softmax 只覆盖 task 的 target modality，不让 text/audio head
 - `ModelBatch -> token_hidden_states -> sparse modality token_logits -> objective`
 - `Request -> generation service -> token/audio generation -> decode -> Result`
 
-语义 seq2seq 是基础且完整的模型能力：`model/acoustic=none` 只预测 text token 或 semantic-audio
-token，不在 S2S model 内生成 acoustic feature/codebook。audio response 的 waveform reconstruction
-属于 runtime codec 的 `decode(semantic_codes)` 能力；generation service 只负责把生成的 global audio
-token 还原为 semantic codes 并调用该能力。当前 runtime codec 可以直接实现该能力，后续也可以由独立的
-semantic-only support artifact 提供，但两者不能改变 token model、objective 或 `Request -> Result` 契约。
-该最小能力由 `runtime.types.SemanticCodec` 表达；训练数据只要求基础 `Codec`，codec table 初始化
-要求 `CodebookCodec`，Flow/RVQ 和 feature decode 显式要求 `AcousticCodec`。因此 unified-token
-与 full-sequence backend 不需要伪造 acoustic API；fixed-length structured codec 也不进入该 frame-code
-runtime contract。
+语义 seq2seq 是基础且完整的模型能力：`model/acoustic=none` 只预测 text token 或 audio token。
+音频重建按 backend capability 分成两条路径：FrameCodec 使用
+`FULL_CODEC_SEQUENCE` 展开全部 codebooks，生成后调用 `FrameCodec.decode(full_codes)`；
+SemanticAcousticCodec 只生成 semantic units，再由 `semantic-acoustic-codec` 的
+`SemanticCodecRuntime` 预测缺失 acoustic units 并重建波形。普通 FrameCodec 的 `decode()`
+不接收 semantic-only codes。两条路径不改变 token model、objective 或 `Request -> Result` 契约。
+训练数据只要求基础 `Codec`，codec table 初始化要求 `CodebookCodec`，Flow/RVQ 的 acoustic feature
+训练显式要求 `AcousticCodec`；semantic-only waveform decoder 不属于 anytrain。
 
 `speech_to_speech.generation` 拥有 `Request`、`Result`、service、decode 与 text evaluation；`pl_module` 只负责 Lightning 集成。
 

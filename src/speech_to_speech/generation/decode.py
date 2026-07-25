@@ -5,7 +5,7 @@ from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
 from ..runtime.audio_tokenizer import semantic_codes_from_audio_tokens
-from ..runtime.types import AcousticCodec, AudioTokenizer, SemanticCodec
+from ..runtime.types import AcousticCodec, AudioTokenizer, Codec, SemanticCodec
 
 
 def decode_generated_audio(
@@ -61,6 +61,23 @@ def decode_generated_semantic(
     return codec.decode(semantic_codes)
 
 
+def decode_generated_frame_codes(
+    audio_token_ids: Tensor,
+    *,
+    codec: Codec,
+    audio_tokenizer: AudioTokenizer,
+    audio_token_range: tuple[int, int],
+) -> Tensor:
+    """Decode generated full frame-code tokens with a ``FrameCodec`` backend."""
+    local_ids = _local_ids(audio_token_ids, audio_token_range)
+    rows = [_decoded_frames(audio_tokenizer, row) for row in local_ids]
+    if not rows or len({tuple(row.shape) for row in rows}) != 1:
+        raise ValueError(
+            "full codec token rows must expand to the same frame and codebook shape."
+        )
+    return codec.decode(torch.stack(rows))
+
+
 def decode_generated_codes(
     audio_token_ids: Tensor,
     acoustic_codes: Tensor,
@@ -97,3 +114,16 @@ def _local_ids(audio_token_ids: Tensor, audio_token_range: tuple[int, int]) -> T
     ):
         raise ValueError("audio token ids must be codec-decodable global audio ids.")
     return audio_token_ids.to(dtype=torch.long) - global_start
+
+
+def _decoded_frames(tokenizer: AudioTokenizer, token_ids: Tensor) -> Tensor:
+    decoded = tokenizer.decode(token_ids)
+    if isinstance(decoded, Tensor):
+        frames = decoded
+    else:
+        frames = torch.as_tensor(decoded, device=token_ids.device)
+    if frames.dim() != 2:
+        raise ValueError("full codec tokens must decode to [frames, codebooks].")
+    if not is_signed_integer_dtype(frames.dtype):
+        raise TypeError("decoded full codec codes must use a signed integer dtype.")
+    return frames.to(device=token_ids.device, dtype=torch.long)

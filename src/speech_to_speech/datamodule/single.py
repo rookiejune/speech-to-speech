@@ -26,12 +26,12 @@ class SingleCollator:
     ) -> None:
         self.runtime = runtime
         self.encode_missing_codes = encode_missing_codes
+        _validate_single_tasks(_positive_tasks(task_weights))
         self._task_weights = _TaskWeights(task_weights)
-        _validate_single_tasks(self.tasks)
 
     def set_task_weights(self, task_weights: Mapping[Task, float]) -> None:
+        _validate_single_tasks(_positive_tasks(task_weights))
         self._task_weights.set(task_weights)
-        _validate_single_tasks(self.tasks)
 
     @property
     def tasks(self) -> list[Task]:
@@ -245,3 +245,7 @@ def _validate_single_tasks(tasks: list[Task]) -> None:
     for task in tasks:
         if task not in _SINGLE_TASKS:
             raise ValueError(f"{task.value} is not supported by the single data path.")
+
+
+def _positive_tasks(values: Mapping[Task, float]) -> list[Task]:
+    return [task for task, weight in values.items() if weight > 0]
