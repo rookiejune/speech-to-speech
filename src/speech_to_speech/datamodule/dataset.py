@@ -17,11 +17,10 @@ from anydataset.types import (
     TextMeta,
     TextView,
 )
-from torch import Tensor
 from torch.utils.data import Dataset
 
 from .._compat import StrEnum, auto
-from ..runtime.types import Codec
+from ..runtime.types import Codec, acoustic_codec
 from .protocol import DatasetRuntime
 
 
@@ -165,41 +164,22 @@ def _optional_root(value: str | None) -> Path | None:
 
 
 def _codebook_sizes(view: AudioView, codec: Codec) -> tuple[int, ...]:
-    semantic = codec.semantic_codebook
-    if not isinstance(semantic, Tensor):
-        raise TypeError("codec semantic_codebook must be a tensor.")
-    if semantic.dim() == 2:
-        semantic_sizes = (semantic.size(0),)
-    elif semantic.dim() == 3:
-        semantic_sizes = (semantic.size(1),) * semantic.size(0)
-    else:
-        raise ValueError(
-            "codec semantic_codebook must have shape [vocab, dim] or "
-            "[codebook, vocab, dim]."
-        )
-    if any(size <= 0 for size in semantic_sizes):
-        raise ValueError("codec semantic codebooks must be non-empty.")
-
-    acoustic_sizes = tuple(codec.acoustic_codebook_sizes)
-    if any(size <= 0 for size in acoustic_sizes):
-        raise ValueError("codec acoustic codebook sizes must be positive.")
+    sizes = tuple(codec.codebook_sizes)
+    if not sizes or any(size <= 0 for size in sizes):
+        raise ValueError("codec codebook sizes must be positive and non-empty.")
     if view is AudioView.LONGCAT:
-        if len(semantic_sizes) != 1 or not acoustic_sizes:
+        acoustic_sizes = tuple(acoustic_codec(codec).acoustic_codebook_sizes)
+        if len(sizes) != len(acoustic_sizes) + 1 or sizes[1:] != acoustic_sizes:
             raise ValueError(
-                "LongCat toy data requires one semantic and at least one acoustic "
-                "codebook."
+                "LongCat codec codebook sizes must contain one semantic codebook "
+                "followed by its acoustic codebooks."
             )
-        return semantic_sizes + acoustic_sizes
+        return sizes
     if view is AudioView.UNICODEC:
-        if acoustic_sizes:
-            raise ValueError("UniCodec toy data cannot contain acoustic codebooks.")
-        return semantic_sizes
+        if len(sizes) != 1:
+            raise ValueError("UniCodec toy data requires exactly one codebook.")
+        return sizes
     if view is AudioView.BICODEC:
-        if acoustic_sizes:
-            raise ValueError("BiCodec toy data cannot contain acoustic codebooks.")
-        sizes = tuple(codec.codebook_sizes)
-        if not sizes:
-            raise ValueError("BiCodec toy data requires codec codebook sizes.")
         return sizes
     raise ValueError(f"unsupported toy dataset audio view: {view.value}")
 

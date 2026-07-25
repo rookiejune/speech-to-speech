@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Protocol
+from typing import Protocol, cast, runtime_checkable
 
 from torch import Tensor, nn
 from transformers.cache_utils import Cache
@@ -18,26 +18,77 @@ class SemanticCodec(Protocol):
 
 
 class Codec(SemanticCodec, Protocol):
-
     @property
-    def acoustic_feature_dim(self) -> int: ...
-
-    @property
-    def semantic_codebook(self) -> Tensor: ...
+    def semantic_feature_dim(self) -> int: ...
 
     @property
     def codebook_sizes(self) -> tuple[int, ...]: ...
 
+    def encode(self, audio: Tensor, sample_rate: int) -> Tensor: ...
+
+
+class CodebookCodec(Codec, Protocol):
+    @property
+    def semantic_codebook(self) -> Tensor: ...
+
+
+class AcousticCodec(CodebookCodec, Protocol):
+    @property
+    def acoustic_feature_dim(self) -> int: ...
+
     @property
     def acoustic_codebook_sizes(self) -> tuple[int, ...]: ...
-
-    def encode(self, audio: Tensor, sample_rate: int) -> Tensor: ...
 
     def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor: ...
 
     def decode_features(
         self, semantic_codes: Tensor, acoustic_features: Tensor
     ) -> Tensor: ...
+
+
+@runtime_checkable
+class _CodebookCapability(Protocol):
+    @property
+    def semantic_codebook(self) -> Tensor: ...
+
+
+@runtime_checkable
+class _AcousticCapability(_CodebookCapability, Protocol):
+    @property
+    def acoustic_feature_dim(self) -> int: ...
+
+    @property
+    def acoustic_codebook_sizes(self) -> tuple[int, ...]: ...
+
+    def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor: ...
+
+    def decode_features(
+        self, semantic_codes: Tensor, acoustic_features: Tensor
+    ) -> Tensor: ...
+
+
+def codebook_codec(codec: Codec) -> CodebookCodec:
+    if not isinstance(codec, _CodebookCapability):
+        raise TypeError("codec-initialized audio embeddings require a semantic codebook.")
+    return cast(CodebookCodec, codec)
+
+
+def acoustic_codec(codec: Codec) -> AcousticCodec:
+    if not isinstance(codec, _AcousticCapability):
+        raise TypeError("acoustic decoding requires an acoustic codec capability.")
+    sizes = tuple(codec.acoustic_codebook_sizes)
+    if not sizes or any(size <= 0 for size in sizes):
+        raise ValueError("acoustic codec codebook sizes must be positive and non-empty.")
+    if codec.acoustic_feature_dim <= 0:
+        raise ValueError("acoustic codec feature dimension must be positive.")
+    return cast(AcousticCodec, codec)
+
+
+def supports_acoustic(codec: Codec) -> bool:
+    if not isinstance(codec, _AcousticCapability):
+        return False
+    acoustic_codec(codec)
+    return True
 
 
 class AudioTokenizer(Protocol):

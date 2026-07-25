@@ -97,7 +97,7 @@ class TrainingFlops:
             if target is not None:
                 _, mask = target
                 decoder = model.acoustic_decoder
-                feature_dim = model.runtime.codec.acoustic_feature_dim
+                feature_dim = model.acoustic_codec.acoustic_feature_dim
                 if decoder.latent_dim != feature_dim:
                     raise ValueError(
                         "Flow decoder latent size does not match the codec feature size."
@@ -112,7 +112,7 @@ class TrainingFlops:
             if target is not None:
                 _, mask = target
                 decoder = model.acoustic_decoder
-                sizes = tuple(model.runtime.codec.acoustic_codebook_sizes)
+                sizes = tuple(model.acoustic_codec.acoustic_codebook_sizes)
                 if tuple(decoder.codebook_sizes) != sizes:
                     raise ValueError(
                         "RVQ decoder codebooks do not match the runtime codec."
@@ -301,7 +301,7 @@ def _target(
         raise ValueError(
             "each training FLOPs acoustic target row must contain a valid frame."
         )
-    codebooks = tuple(model.runtime.codec.acoustic_codebook_sizes)
+    codebooks = tuple(model.acoustic_codec.acoustic_codebook_sizes)
     if codes.size(-1) != len(codebooks):
         raise ValueError(
             f"training FLOPs target has {codes.size(-1)} acoustic codebooks; "

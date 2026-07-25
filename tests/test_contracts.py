@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 import torch
 from anydataset import AnyDataset, Source, Spec
-from anydataset.store import DatasetWriter, StoreLocalBatchSampler
+from anydataset.store import DatasetWriter
 from anydataset.types import (
     AudioItem,
     AudioMeta,
@@ -66,18 +66,26 @@ from speech_to_speech.datamodule.types import (
     ModelSample,
     RawSingleBatch,
 )
-from speech_to_speech.callback.stage import Config as StageConfig
-from speech_to_speech.callback.stage import StageSwitcher
 from speech_to_speech.model import Config as ModelConfig, ToyConfig
 from speech_to_speech.runtime import AudioRepresentation, Config, Runtime
 from speech_to_speech.runtime.codec import BiCodecCodec
+from speech_to_speech.runtime.types import (
+    acoustic_codec,
+    codebook_codec,
+    supports_acoustic,
+)
 from speech_to_speech.runtime.runtime import audio_tokenizer, dtype
 from speech_to_speech.runtime.audio_tokenizer import (
     FlattenedAudioTokenizer,
     NativeAudioTokenizer,
     TorchCodecBPE,
 )
-from speech_to_speech.stage import ParameterGroup, STAGE_SPECS, StageName, apply_stage
+from speech_to_speech.stage import (
+    PARAMETER_POLICY_SPECS,
+    ParameterGroup,
+    ParameterPolicyName,
+    apply_parameter_policy,
+)
 from speech_to_speech.task import Task
 from scripts._config import overfit as parse_overfit
 from scripts.overfit import (
@@ -353,6 +361,7 @@ class ContractTest(unittest.TestCase):
         )
         datamodule = Mock()
         datamodule.train_dataloader.return_value = [Mock()]
+        model = Mock()
         with TemporaryDirectory() as output_dir:
             config = parse_overfit(
                 _compose(
@@ -368,15 +377,20 @@ class ContractTest(unittest.TestCase):
             with (
                 patch("scripts.overfit.pl.seed_everything"),
                 patch("scripts.overfit.runtime_config", return_value=Mock()),
-                patch("scripts.overfit.init_runtime", return_value=runtime),
+                patch("scripts.overfit.Runtime", return_value=runtime),
                 patch("scripts.overfit.FixedDataModule", return_value=datamodule),
-                patch("scripts.overfit.flow", return_value=(Mock(), Mock(), None)),
+                patch("scripts.overfit.flow", return_value=(Mock(), model, None)),
+                patch("scripts.overfit.apply_parameter_policy") as apply_policy,
                 patch(
                     "scripts.overfit.AcousticEvaluation", side_effect=EvaluationReached
                 ),
             ):
                 with self.assertRaises(EvaluationReached):
                     run(config)
+                apply_policy.assert_called_once_with(
+                    model,
+                    config.parameter_policy.spec(),
+                )
 
     @patch("scripts.overfit.torch.cuda.set_device")
     def test_post_fit_generation_uses_runtime_device(self, set_device):
@@ -450,7 +464,13 @@ class ContractTest(unittest.TestCase):
 
         self.assertEqual(codec.sample_rate, 16_000)
         self.assertEqual(codec.frame_rate, 50.0)
+        self.assertEqual(codec.semantic_feature_dim, 1024)
         self.assertEqual(codec.codebook_sizes, (5, 7, 7, 7))
+        self.assertFalse(supports_acoustic(codec))
+        with self.assertRaisesRegex(TypeError, "semantic codebook"):
+            codebook_codec(codec)
+        with self.assertRaisesRegex(TypeError, "acoustic codec capability"):
+            acoustic_codec(codec)
         self.assertEqual(tuple(codes.shape), (2, 4, 4))
         self.assertTrue(torch.equal(codes[..., 0], source.semantic))
         self.assertTrue(torch.equal(codes[:, :, 1:], source.global_tokens.expand(-1, 4, -1)))
@@ -905,7 +925,7 @@ class ContractTest(unittest.TestCase):
         datamodule.setup()
         loader = cast(Any, datamodule.train_dataloader())
 
-        self.assertNotIsInstance(loader.batch_sampler, StoreLocalBatchSampler)
+        self.assertIs(loader.dataset, load_dataset.return_value)
         self.assertEqual(loader.batch_size, 2)
 
     @patch("zhuyin.datasets.wmt19_tts.wmt19_tts_codec")
@@ -940,7 +960,7 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(loader.prefetch_batches, 0)
         self.assertEqual(loader.log_dir, Path(self.id()) / "lba" / "tts")
 
-    def test_datamodule_lba_uses_store_local_sampler_for_store_backed_data(self):
+    def test_datamodule_lba_uses_anydataset_batches_for_store_backed_data(self):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             with patch.dict("os.environ", {"ANYDATASET_HOME": str(root / "cache")}):
@@ -976,18 +996,12 @@ class ContractTest(unittest.TestCase):
 
                 self.assertEqual(type(loader).__name__, "LBA")
                 self.assertIs(loader.dataset, dataset)
-                self.assertIsInstance(loader.batch_sampler, StoreLocalBatchSampler)
                 sampler = loader.batch_sampler
-                self.assertIs(sampler.dataset, dataset.dataset)
-                self.assertEqual(sampler.batch_size, 2)
+                self.assertIs(sampler.dataset, dataset)
+                self.assertEqual(sampler.max_batch_memory, 2)
+                self.assertEqual(sampler.max_batch_samples, 2)
                 self.assertTrue(sampler.shuffle)
-                self.assertEqual(
-                    sampler.views,
-                    (
-                        (Role.SOURCE, Modality.AUDIO, AudioView.LONGCAT),
-                        (Role.TARGET, Modality.AUDIO, AudioView.LONGCAT),
-                    ),
-                )
+                _assert_store_local_batches(self, sampler)
 
     def test_metadata_speech_length_uses_codec_frames_without_duration(self):
         length = metadata_speech_length(
@@ -1055,8 +1069,13 @@ class ContractTest(unittest.TestCase):
             (
                 "longcat",
                 SimpleNamespace(
+                    semantic_feature_dim=4,
                     semantic_codebook=torch.zeros(5, 4),
+                    codebook_sizes=(5, 3, 7),
+                    acoustic_feature_dim=4,
                     acoustic_codebook_sizes=(3, 7),
+                    acoustic_codes_to_features=Mock(),
+                    decode_features=Mock(),
                     frame_rate=50.0,
                 ),
                 AudioView.LONGCAT,
@@ -1065,9 +1084,9 @@ class ContractTest(unittest.TestCase):
             (
                 "unicodec",
                 SimpleNamespace(
+                    semantic_feature_dim=4,
                     semantic_codebook=torch.zeros(11, 4),
                     codebook_sizes=(11,),
-                    acoustic_codebook_sizes=(),
                     frame_rate=50.0,
                 ),
                 AudioView.UNICODEC,
@@ -1076,9 +1095,8 @@ class ContractTest(unittest.TestCase):
             (
                 "bicodec",
                 SimpleNamespace(
-                    semantic_codebook=torch.zeros(13, 4),
+                    semantic_feature_dim=1024,
                     codebook_sizes=(13, 17, 17, 17),
-                    acoustic_codebook_sizes=(),
                     frame_rate=50.0,
                 ),
                 AudioView.BICODEC,
@@ -1124,9 +1142,9 @@ class ContractTest(unittest.TestCase):
         prepared.assert_not_called()
         self.assertEqual(len(datamodule.train_samples([0, 1])), 2)
         loader = cast(Any, datamodule.train_dataloader())
-        self.assertNotIsInstance(loader.batch_sampler, StoreLocalBatchSampler)
+        self.assertEqual(loader.batch_size, 1)
 
-    def test_datamodule_uses_store_local_sampler_for_store_backed_data(self):
+    def test_datamodule_uses_anydataset_batches_for_store_backed_data(self):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             with patch.dict("os.environ", {"ANYDATASET_HOME": str(root / "cache")}):
@@ -1158,52 +1176,13 @@ class ContractTest(unittest.TestCase):
 
                 load.assert_called_once()
                 self.assertIs(loader.dataset, dataset)
-                self.assertIsInstance(loader.batch_sampler, StoreLocalBatchSampler)
                 sampler = loader.batch_sampler
-                self.assertIs(sampler.dataset, dataset.dataset)
-                self.assertEqual(sampler.batch_size, 2)
+                self.assertIs(sampler.dataset, dataset)
+                self.assertEqual(sampler.max_batch_memory, 2)
+                self.assertEqual(sampler.max_batch_samples, 2)
                 self.assertTrue(sampler.shuffle)
-                self.assertEqual(
-                    sampler.views,
-                    (
-                        (Role.SOURCE, Modality.AUDIO, AudioView.LONGCAT),
-                        (Role.TARGET, Modality.AUDIO, AudioView.LONGCAT),
-                    ),
-                )
+                _assert_store_local_batches(self, sampler)
                 self.assertEqual(len(datamodule.train_samples([0, 1])), 2)
-
-    def test_datamodule_uses_store_local_sampler_through_merged_data(self):
-        with TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            with patch.dict("os.environ", {"ANYDATASET_HOME": str(root / "cache")}):
-                output = root / "dataset"
-                DatasetWriter(
-                    output,
-                    dataset_id="toy-speech",
-                    split="train",
-                    max_shard_samples=2,
-                ).write([_raw_sample(index) for index in range(4)])
-                dataset = AnyDataset(
-                    Spec(source=Source.STORE, path=str(output), split="train")
-                ).merge(ToyDataset("longcat", _longcat_codec(), samples=4, frames=2))
-                datamodule = DataModule(
-                    DataConfig(
-                        codec="longcat",
-                        dataloader={"batch_size": 2, "num_workers": 0},
-                    ),
-                    _data_runtime(),
-                    {Task.TTS: 1.0},
-                )
-
-                with patch(
-                    "speech_to_speech.datamodule.module.load_dataset",
-                    return_value=dataset,
-                ):
-                    datamodule.setup()
-                    loader = cast(Any, datamodule.train_dataloader())
-
-                self.assertIs(loader.dataset, dataset)
-                self.assertIsInstance(loader.batch_sampler, StoreLocalBatchSampler)
 
     def test_toy_settings_reject_invalid_dimensions(self):
         with self.assertRaisesRegex(ValueError, "divisible"):
@@ -1211,8 +1190,13 @@ class ContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "toy_samples"):
             DatasetConfig(name=DatasetName.TOY, toy_samples=0)
         codec = SimpleNamespace(
+            semantic_feature_dim=4,
             semantic_codebook=torch.zeros(5, 4),
-            acoustic_codebook_sizes=(),
+            codebook_sizes=(5, 4),
+            acoustic_feature_dim=4,
+            acoustic_codebook_sizes=(3,),
+            acoustic_codes_to_features=Mock(),
+            decode_features=Mock(),
             frame_rate=50.0,
         )
         with self.assertRaisesRegex(ValueError, "LongCat"):
@@ -1470,49 +1454,13 @@ class ContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "too small"):
             _allocate_tasks([Task.MT, Task.TTS], [1.0, 9.0], 8)
 
-    def test_stage_switcher_restores_task_weights_from_current_epoch(self):
-        task_weights = [{Task.TTS: 1.0}, {Task.ASR: 1.0}, {Task.TEXT_AR: 1.0}]
-        datamodule = SimpleNamespace(set_task_weights=Mock())
-        trainer = SimpleNamespace(datamodule=datamodule, current_epoch=3)
-        switcher = StageSwitcher(StageConfig(task_weights, epoch_milestones=[2, 4]))
-
-        switcher.on_fit_start(trainer, Mock())
-        switcher.on_train_epoch_end(trainer, Mock())
-
-        self.assertEqual(
-            datamodule.set_task_weights.call_args_list,
-            [unittest.mock.call(task_weights[1]), unittest.mock.call(task_weights[2])],
-        )
-
-    def test_stage_switcher_updates_loader_weights_and_freezes_parameters(self):
-        model = _StageModel()
-        datamodule = SimpleNamespace(
-            set_task_weights=Mock(),
-            set_loader_weights=Mock(),
-        )
-        trainer = SimpleNamespace(datamodule=datamodule, current_epoch=0)
-        pl_module = Mock()
-        pl_module.model = model
-        switcher = StageSwitcher(
-            StageConfig(
-                [{Task.TTS: 1.0}],
-                epoch_milestones=[],
-                loader_weights_by_stage=[{"tts": 0.9, "mt": 0.1}],
-                model_stages=[StageName.STAGE_1],
-            )
-        )
-
-        switcher.on_fit_start(trainer, pl_module)
-
-        datamodule.set_task_weights.assert_called_once_with({Task.TTS: 1.0})
-        datamodule.set_loader_weights.assert_called_once_with({"tts": 0.9, "mt": 0.1})
-        self.assertFalse(model.backbone.model.layers[0].weight.requires_grad)
-        self.assertTrue(model.semantic_audio_embedding.weight.requires_grad)
-
-    def test_stage_specs_freeze_explicit_parameter_groups(self):
+    def test_parameter_policy_freezes_explicit_parameter_groups(self):
         model = _StageModel()
 
-        counts = apply_stage(model, STAGE_SPECS[StageName.STAGE_1])
+        counts = apply_parameter_policy(
+            model,
+            PARAMETER_POLICY_SPECS[ParameterPolicyName.SPEECH_INTERFACE],
+        )
 
         self.assertGreater(counts[ParameterGroup.BACKBONE], 0)
         self.assertFalse(model.backbone.model.layers[0].weight.requires_grad)
@@ -1522,10 +1470,15 @@ class ContractTest(unittest.TestCase):
         self.assertFalse(model.acoustic_decoder.codebook_embeddings[-1].weight.requires_grad)
         self.assertFalse(model.acoustic_decoder.embedding_projections[-1].weight.requires_grad)
 
-    def test_partial_qwen_stage_unfreezes_top_layers_and_final_norm(self):
+    def test_partial_qwen_policy_unfreezes_top_layers_and_final_norm(self):
         model = _StageModel()
 
-        apply_stage(model, STAGE_SPECS[StageName.STAGE_3])
+        apply_parameter_policy(
+            model,
+            PARAMETER_POLICY_SPECS[
+                ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD
+            ],
+        )
 
         self.assertFalse(model.backbone.model.layers[0].weight.requires_grad)
         self.assertFalse(model.backbone.model.layers[1].weight.requires_grad)
@@ -1600,6 +1553,16 @@ def _target_sample(
     )
 
 
+def _assert_store_local_batches(
+    test: unittest.TestCase,
+    sampler: object,
+) -> None:
+    batches = [tuple(sorted(batch)) for batch in cast(Any, sampler)]
+    test.assertEqual(set(batches), {(0, 1), (2, 3)})
+    for batch in batches:
+        test.assertLessEqual(len(batch), 2)
+
+
 def _compose(*overrides: str, config_name: str = "overfit") -> DictConfig:
     root = Path(__file__).parents[1]
     with initialize_config_dir(
@@ -1628,8 +1591,13 @@ def _data_runtime():
 
 def _longcat_codec():
     return SimpleNamespace(
+        semantic_feature_dim=4,
         semantic_codebook=torch.zeros(5, 4),
+        codebook_sizes=(5, 3),
+        acoustic_feature_dim=4,
         acoustic_codebook_sizes=(3,),
+        acoustic_codes_to_features=Mock(),
+        decode_features=Mock(),
         frame_rate=50.0,
     )
 

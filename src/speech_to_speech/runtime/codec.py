@@ -36,6 +36,10 @@ class LongCatCodec:
         return self._acoustic_feature_dim
 
     @property
+    def semantic_feature_dim(self) -> int:
+        return int(self.semantic_codebook.size(-1))
+
+    @property
     def semantic_codebook(self) -> Tensor:
         return self.codec.semantic_codebook
 
@@ -102,8 +106,8 @@ class UnifiedCodec:
         return float(self.codec.model.frame_rate)
 
     @property
-    def acoustic_feature_dim(self) -> int:
-        raise RuntimeError("unified-token codec has no acoustic feature representation.")
+    def semantic_feature_dim(self) -> int:
+        return int(self._semantic_codebook.size(-1))
 
     @property
     def semantic_codebook(self) -> Tensor:
@@ -113,21 +117,11 @@ class UnifiedCodec:
     def codebook_sizes(self) -> tuple[int, ...]:
         return tuple(int(size) for size in self.codec.codebook_sizes)
 
-    @property
-    def acoustic_codebook_sizes(self) -> tuple[int, ...]:
-        return ()
-
     def encode(self, audio: Tensor, sample_rate: int) -> Tensor:
         return self.codec.encode(audio, sample_rate)
 
     def decode(self, codes: Tensor) -> Tensor:
         return self.codec.decode(codes)
-
-    def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor:
-        raise RuntimeError("unified-token codec has no acoustic codes.")
-
-    def decode_features(self, semantic_codes: Tensor, acoustic_features: Tensor) -> Tensor:
-        raise RuntimeError("unified-token codec has no acoustic features.")
 
 
 class BiCodecTokens(Protocol):
@@ -150,18 +144,12 @@ class BiCodecCodec:
     """Adapt Spark-TTS BiCodec to the full codec sequence contract."""
 
     name = "bicodec"
-    _embedding_dim = 1024
+    _semantic_feature_dim = 1024
     _default_global_codebooks = 3
 
     def __init__(self, codec: BiCodecSource) -> None:
         self.codec = codec
         self._codebook_sizes = _bicodec_codebook_sizes(codec)
-        semantic_size = self._codebook_sizes[0]
-        self._semantic_codebook = torch.zeros(
-            semantic_size,
-            self._embedding_dim,
-            device=_codec_device(codec),
-        )
         self._frame_rate = _bicodec_frame_rate(codec)
 
     @property
@@ -173,20 +161,12 @@ class BiCodecCodec:
         return self._frame_rate
 
     @property
-    def acoustic_feature_dim(self) -> int:
-        raise RuntimeError("BiCodec full-sequence mode has no acoustic features.")
-
-    @property
-    def semantic_codebook(self) -> Tensor:
-        return self._semantic_codebook
+    def semantic_feature_dim(self) -> int:
+        return self._semantic_feature_dim
 
     @property
     def codebook_sizes(self) -> tuple[int, ...]:
         return self._codebook_sizes
-
-    @property
-    def acoustic_codebook_sizes(self) -> tuple[int, ...]:
-        return ()
 
     def encode(self, audio: Tensor, sample_rate: int) -> Tensor:
         tokens = self.codec.encode(audio, sample_rate)
@@ -195,12 +175,6 @@ class BiCodecCodec:
     def decode(self, codes: Tensor) -> Tensor:
         semantic, global_tokens = _bicodec_tokens(codes, self.codebook_sizes)
         return self.codec.detokenize(semantic, global_tokens)
-
-    def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor:
-        raise RuntimeError("BiCodec full-sequence mode has no acoustic codes.")
-
-    def decode_features(self, semantic_codes: Tensor, acoustic_features: Tensor) -> Tensor:
-        raise RuntimeError("BiCodec full-sequence mode has no acoustic features.")
 
 
 def load_codec(name: str, device: str | None) -> Codec:
@@ -262,13 +236,6 @@ def _sizes(values: tuple[int, ...], *, name: str) -> tuple[int, ...]:
     if any(value <= 0 for value in output):
         raise ValueError(f"{name} must be positive.")
     return output
-
-
-def _codec_device(codec: object) -> torch.device:
-    value = getattr(codec, "device", None)
-    if isinstance(value, torch.device):
-        return value
-    return torch.device("cpu")
 
 
 def _bicodec_frame_rate(codec: BiCodecSource) -> float:

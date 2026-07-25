@@ -201,7 +201,15 @@ class _Tokenizer:
 class _Codec:
     acoustic_feature_dim = 4
     acoustic_codebook_sizes = (5, 6)
+    semantic_feature_dim = 4
+    codebook_sizes = (3, 5, 6)
     semantic_codebook = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+
+    def acoustic_codes_to_features(self, codes: Tensor) -> Tensor:
+        return codes[..., :1].float().expand(*codes.shape[:-1], 4)
+
+    def decode_features(self, semantic: Tensor, acoustic: Tensor) -> Tensor:
+        return semantic[..., :1].float() + acoustic[..., :1]
 
 
 def _flow_runtime() -> Any:

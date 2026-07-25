@@ -6,7 +6,13 @@ from typing import Protocol
 import torch
 from torch import Tensor, nn
 
-from ...runtime.types import AudioTokenizer, Backbone, Codec
+from ...runtime.types import (
+    AudioTokenizer,
+    Backbone,
+    CodebookCodec,
+    Codec,
+    codebook_codec,
+)
 from ..adapter import AdapterType, create_adapter
 
 _ROPE_THETA = 10000.0
@@ -27,7 +33,11 @@ def create_semantic_audio_modules(
     backbone: Backbone,
 ) -> tuple[nn.Embedding, nn.Module]:
     backbone_weight = backbone.get_input_embeddings().weight
-    audio = embedding(runtime.codec, runtime.audio_tokenizer).to(
+    audio = embedding(
+        runtime.codec,
+        runtime.audio_tokenizer,
+        reference=backbone_weight,
+    ).to(
         device=backbone_weight.device,
         dtype=backbone_weight.dtype,
     )
@@ -138,7 +148,7 @@ def merge_by_positions(
     return output, occupied
 
 
-def base_weight(codec: Codec, tokenizer: AudioTokenizer) -> Tensor:
+def base_weight(codec: CodebookCodec, tokenizer: AudioTokenizer) -> Tensor:
     """Create one fixed feature vector for every audio-tokenizer ID."""
     codebook = codec.semantic_codebook.detach()
     if codebook.dim() not in {2, 3}:
@@ -178,22 +188,20 @@ def base_weight(codec: Codec, tokenizer: AudioTokenizer) -> Tensor:
     return output
 
 
-def random_weight(codec: Codec, tokenizer: AudioTokenizer) -> Tensor:
+def random_weight(
+    feature_dim: int,
+    tokenizer: AudioTokenizer,
+    *,
+    reference: Tensor,
+) -> Tensor:
     """Create randomly initialized audio-token weights in codec feature space."""
-    codebook = codec.semantic_codebook.detach()
-    if codebook.dim() not in {2, 3}:
-        raise ValueError(
-            "codec semantic_codebook must have shape [vocab, dim] or "
-            "[codebooks, vocab, dim]."
-        )
-    dim = codebook.size(-1)
-    output = torch.empty(
+    if feature_dim <= 0:
+        raise ValueError("audio embedding feature dimension must be positive.")
+    output = reference.new_empty(
         tokenizer.vocab_size,
-        dim,
-        device=codebook.device,
-        dtype=codebook.dtype,
+        feature_dim,
     )
-    nn.init.normal_(output, std=dim**-0.5)
+    nn.init.normal_(output, std=feature_dim**-0.5)
     return output
 
 
@@ -232,16 +240,25 @@ def _unit_embeddings(codebook: Tensor, unit_ids: Tensor) -> Tensor:
     return torch.stack(frames, dim=1).mean(dim=1)
 
 
-def embedding(codec: Codec, tokenizer: AudioTokenizer) -> nn.Embedding:
+def embedding(
+    codec: Codec,
+    tokenizer: AudioTokenizer,
+    *,
+    reference: Tensor,
+) -> nn.Embedding:
     """Build a lookup initialized from the codec codebook.
 
     The final two rows are reserved for BOA and EOA.
     """
     initialization = tokenizer.embedding_initialization
     if initialization == "codec":
-        base = base_weight(codec, tokenizer)
+        base = base_weight(codebook_codec(codec), tokenizer)
     elif initialization == "random":
-        base = random_weight(codec, tokenizer)
+        base = random_weight(
+            codec.semantic_feature_dim,
+            tokenizer,
+            reference=reference,
+        )
     else:
         raise ValueError(f"unsupported audio embedding initialization: {initialization}")
     special = torch.empty(

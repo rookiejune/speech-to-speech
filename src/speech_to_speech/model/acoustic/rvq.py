@@ -7,9 +7,11 @@ from semantic_acoustic_codec.model import AcousticRVQDecoder
 from torch import Tensor
 
 from ...generation.types import AcousticGeneration
+from ...runtime.types import acoustic_codec
 from ..base import Config, TokenModel
 from ..protocol import TokenModelRuntime
 from ._config import DecoderConfig, decoder_options
+from ._codec import code_features
 
 
 class RVQModel(TokenModel):
@@ -23,9 +25,11 @@ class RVQModel(TokenModel):
         decoder: DecoderConfig | Mapping[str, object] | None = None,
         codebook_embeddings: Sequence[Tensor] | None = None,
     ) -> None:
+        codec = acoustic_codec(runtime.codec)
         super().__init__(config=config, runtime=runtime)
+        self.acoustic_codec = codec
         options = decoder_options(decoder)
-        sizes = self.runtime.codec.acoustic_codebook_sizes
+        sizes = self.acoustic_codec.acoustic_codebook_sizes
         backbone_weight = self.backbone.get_input_embeddings().weight
         self.acoustic_decoder = AcousticRVQDecoder(
             self.backbone.config.hidden_size,
@@ -86,7 +90,7 @@ class RVQModel(TokenModel):
             top_p=top_p,
             generator=generator,
         )
-        features = self.acoustic_code_features(codes)
+        features = code_features(self.acoustic_codec, self.backbone, codes)
         if mask is not None:
             features = features.masked_fill(~mask[..., None], 0)
         return features

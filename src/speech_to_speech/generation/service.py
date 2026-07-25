@@ -8,6 +8,7 @@ from anydataset.types import Modality
 from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
+from ..runtime.types import acoustic_codec
 from ..task import Task
 from .decode import decode_generated_audio, decode_generated_semantic
 from .protocol import AcousticFeatureGeneration, TokenGenerator
@@ -232,7 +233,7 @@ def _decode_rows(
             decoded = decode_generated_audio(
                 token_batch,
                 feature_batch,
-                codec=model.runtime.codec,
+                codec=acoustic_codec(model.runtime.codec),
                 audio_tokenizer=model.runtime.audio_tokenizer,
                 audio_token_range=model.runtime.codec_audio_range,
             )

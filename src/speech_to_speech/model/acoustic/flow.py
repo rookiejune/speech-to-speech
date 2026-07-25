@@ -6,9 +6,11 @@ import torch
 from torch import Tensor, nn
 
 from ...generation.types import AcousticGeneration
+from ...runtime.types import acoustic_codec
 from ..base import Config, TokenModel
 from ..protocol import FlowModelRuntime, FlowSamplingRuntime
 from ._config import DecoderConfig, FlowRepaConfig, decoder_options
+from ._codec import code_features
 from .dit import AcousticDiT
 
 
@@ -82,12 +84,14 @@ class FlowModel(TokenModel):
         decoder: DecoderConfig | Mapping[str, object] | None = None,
         repa: FlowRepaConfig | None = None,
     ) -> None:
+        codec = acoustic_codec(runtime.codec)
         super().__init__(config=config, runtime=runtime)
+        self.acoustic_codec = codec
         options = decoder_options(decoder)
         backbone_weight = self.backbone.get_input_embeddings().weight
         self.acoustic_flow = AcousticFlow(
             self.backbone.config.hidden_size,
-            self.runtime.codec.acoustic_feature_dim,
+            self.acoustic_codec.acoustic_feature_dim,
             runtime.flow_matching,
             hidden_dim=options.hidden_dim,
             layers=options.layers,
@@ -105,7 +109,7 @@ class FlowModel(TokenModel):
         if target_acoustic_codes.dim() != 3:
             raise ValueError("target acoustic codes must have shape [B, F, N].")
         safe_codes = target_acoustic_codes.clamp_min(0)
-        features = self.acoustic_code_features(safe_codes)
+        features = code_features(self.acoustic_codec, self.backbone, safe_codes)
         return features.masked_fill(
             (target_acoustic_codes < 0).all(dim=-1)[..., None], 0
         )

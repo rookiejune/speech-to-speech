@@ -70,16 +70,32 @@ class AudioEmbeddingTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(features.grad).all())
 
     def test_random_embedding_initialization_uses_tokenizer_vocab(self):
-        codebook = torch.arange(12, dtype=torch.float32).reshape(3, 4)
         tokenizer = _Tokenizer([])
         tokenizer.embedding_initialization = "random"
         tokenizer.vocab_size_override = 7
+        reference = torch.empty(1, dtype=torch.float64)
 
-        audio = embedding(_Codec(codebook), tokenizer)
+        audio = embedding(
+            _RandomCodec(4),
+            tokenizer,
+            reference=reference,
+        )
 
         self.assertEqual(audio.weight.shape, (9, 4))
+        self.assertEqual(audio.weight.dtype, reference.dtype)
+        self.assertEqual(audio.weight.device, reference.device)
         self.assertEqual(tokenizer.decode_batch_sizes, [])
         self.assertEqual(tokenizer.span_batch_sizes, [])
+
+    def test_codec_initialization_requires_a_semantic_codebook(self):
+        tokenizer = _Tokenizer([[(0,)]])
+
+        with self.assertRaisesRegex(TypeError, "semantic codebook"):
+            embedding(
+                _RandomCodec(4),
+                tokenizer,
+                reference=torch.empty(1),
+            )
 
 
 def _reference_merge(embeddings: torch.Tensor) -> torch.Tensor:
@@ -101,6 +117,11 @@ def _reference_merge(embeddings: torch.Tensor) -> torch.Tensor:
 class _Codec:
     def __init__(self, semantic_codebook: torch.Tensor) -> None:
         self.semantic_codebook = semantic_codebook
+
+
+class _RandomCodec:
+    def __init__(self, semantic_feature_dim: int) -> None:
+        self.semantic_feature_dim = semantic_feature_dim
 
 
 class _Tokenizer:

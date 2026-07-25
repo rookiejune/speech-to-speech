@@ -53,7 +53,10 @@ class _TextTokenizer:
 class _Codec:
     acoustic_feature_dim = 4
     acoustic_codebook_sizes = (16,)
+    semantic_feature_dim = 4
+    codebook_sizes = (8, 16)
     frame_rate = 50.0
+    sample_rate = 16_000
 
     def __init__(self) -> None:
         generator = torch.Generator().manual_seed(0)
@@ -64,6 +67,13 @@ class _Codec:
             raise ValueError("fake codec expects [batch, frame, 1] acoustic codes.")
         values = acoustic_codes[..., 0].to(dtype=torch.float64)
         return torch.stack((values, values.square(), values + 1, values * 0.5), dim=-1)
+
+    def encode(self, audio: Tensor, sample_rate: int) -> Tensor:
+        del sample_rate
+        return audio.new_zeros(audio.shape[0], 1, 2, dtype=torch.long)
+
+    def decode(self, codes: Tensor) -> Tensor:
+        return codes[..., 0].float()
 
     def decode_features(
         self, semantic_codes: Tensor, acoustic_features: Tensor

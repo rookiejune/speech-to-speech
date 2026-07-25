@@ -12,7 +12,7 @@ from torch import Tensor
 from ...datamodule import ModelBatch
 from ...generation.evaluation import evaluate
 from ...model.acoustic import FlowModel, RVQModel
-from ...runtime.types import Codec
+from ...runtime.types import AcousticCodec
 from ..interval import TrainInterval
 
 
@@ -21,7 +21,7 @@ class AcousticEvaluation(Callback):
         self,
         model: FlowModel | RVQModel,
         batch: ModelBatch,
-        codec: Codec,
+        codec: AcousticCodec,
         output_dir: Path,
         *,
         every_n_steps: int | None,

@@ -8,7 +8,7 @@ import torch
 from torch import Tensor
 
 from ..datamodule import ModelBatch
-from ..runtime.types import Codec
+from ..runtime.types import AcousticCodec
 
 if TYPE_CHECKING:
     from ..model.acoustic import FlowModel, RVQModel
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 def evaluate(
     model: FlowModel | RVQModel,
     batch: ModelBatch,
-    codec: Codec,
+    codec: AcousticCodec,
     *,
     seeds: Sequence[int],
 ) -> dict[str, float]:

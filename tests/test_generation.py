@@ -43,12 +43,14 @@ from speech_to_speech.runtime.audio_tokenizer import (
 )
 from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import Runtime
+from speech_to_speech.runtime.types import supports_acoustic
 from speech_to_speech.task import Task
 
 
 class _Codec:
     acoustic_feature_dim = 2
     acoustic_codebook_sizes = (8,)
+    semantic_codebook = torch.randn(2, 2)
     sample_rate = 16_000
 
     def __init__(self) -> None:
@@ -60,13 +62,20 @@ class _Codec:
         self.decode_calls += 1
         return semantic_codes[..., 0].to(acoustic_features) + acoustic_features[..., 0]
 
+    def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor:
+        values = acoustic_codes[..., :1].float()
+        return values.expand(*values.shape[:-1], self.acoustic_feature_dim)
+
     def decode(self, codes: Tensor) -> Tensor:
         self.decode_calls += 1
         return codes[..., 0].float()
 
 
-class _UnifiedCodec(_Codec):
-    acoustic_codebook_sizes = ()
+class _UnifiedCodec:
+    sample_rate = 16_000
+
+    def __init__(self) -> None:
+        self.decode_calls = 0
 
     def decode(self, codes: Tensor) -> Tensor:
         self.decode_calls += 1
@@ -94,7 +103,7 @@ class _Runtime:
 
     @property
     def acoustic_side_channel(self) -> bool:
-        return bool(self.codec.acoustic_codebook_sizes)
+        return supports_acoustic(self.codec)
 
     @property
     def audio_generation_allowed_ids(self) -> tuple[int, ...]:
@@ -119,6 +128,13 @@ class _TinyCodec:
     def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor:
         values = acoustic_codes[..., :1].to(dtype=torch.float32)
         return values.expand(*values.shape[:-1], self.acoustic_feature_dim)
+
+    def decode_features(
+        self,
+        semantic_codes: Tensor,
+        acoustic_features: Tensor,
+    ) -> Tensor:
+        return semantic_codes[..., 0].to(acoustic_features) + acoustic_features[..., 0]
 
     def decode(self, codes: Tensor) -> Tensor:
         return codes[..., 0].float()
@@ -226,7 +242,6 @@ class _UnifiedGenerationModel(_GenerationModel):
 
 
 class _FullSequenceCodec:
-    acoustic_codebook_sizes = (10,)
     sample_rate = 16_000
 
     def __init__(self) -> None:

@@ -15,7 +15,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from .audio_tokenizer import FlattenedAudioTokenizer, NativeAudioTokenizer, TorchCodecBPE
 from .codec import load_codec
 from .special_tokens import Qwen3SpecialToken
-from .types import AudioTokenizer, Backbone, Codec, SemanticCodec, TextTokenizer
+from .types import (
+    AudioTokenizer,
+    Backbone,
+    Codec,
+    SemanticCodec,
+    TextTokenizer,
+    supports_acoustic,
+)
 from .._compat import StrEnum, auto
 
 if TYPE_CHECKING:
@@ -132,7 +139,7 @@ class Runtime:
     def acoustic_side_channel(self) -> bool:
         return (
             self.audio_representation is AudioRepresentation.DECOUPLED
-            and bool(self.codec.acoustic_codebook_sizes)
+            and supports_acoustic(self.codec)
         )
 
     @cached_property
@@ -181,7 +188,7 @@ class Runtime:
                 codec_name=self.codec_name,
             )
         if self.config.audio_tokenizer is None:
-            return NativeAudioTokenizer(vocab_size=int(self.codec.semantic_codebook.size(0)))
+            return NativeAudioTokenizer(vocab_size=int(self.codec.codebook_sizes[0]))
         return audio_tokenizer(self.config.audio_tokenizer)
 
     @cached_property
