@@ -14,15 +14,13 @@ from omegaconf import DictConfig
 
 from speech_to_speech.callback import OnDeviceCodecMaterializer
 from speech_to_speech.callback.logging import GradNormLogger, LossSummary, OutputsLogger
-from speech_to_speech.datamodule import (
+from speech_to_speech.datamodule import DataModule, JointDataModule, TextDataModule
+from speech_to_speech.datamodule.joint import LoaderSchedule
+from speech_to_speech.datamodule.module import (
     Config as SpeechDataModuleConfig,
     DataLoaderConfig,
-    DataModule,
-    JointDataModule,
-    LoaderSchedule,
-    TextConfig,
-    TextDataModule,
 )
+from speech_to_speech.datamodule.text import TextConfig
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.performance import TrainingFlops
 from speech_to_speech.pl_module.composition import flow, rvq, token

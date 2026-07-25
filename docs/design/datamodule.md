@@ -99,9 +99,9 @@ acoustic_target: AcousticTarget | None
 
 ## 边界
 
-- 包级 `speech_to_speech.datamodule` 只导出 DataModule、JointDataModule、TextDataModule
-  等训练编排入口及其配置。parser、sample、types、protocol、collator、dataset factory 等
-  低层契约从对应子模块导入，不提升为包级稳定 API。
+- 包级 `speech_to_speech.datamodule` 只导出 DataModule、FixedDataModule、JointDataModule、
+  TextDataModule 四个运行入口。配置结构、schedule、parser、sample、types、protocol、collator、
+  dataset factory 等契约从对应子模块导入，不提升为包级稳定 API。
 - runtime 必须由组合入口显式传入：`DataModule` 接收 `DatasetRuntime`，`Collator` 及下游 parser
   和 sample builder 只消费较小的 `DataRuntime`；datamodule 不自行选择 tokenizer、layout 或
   special tokens。
