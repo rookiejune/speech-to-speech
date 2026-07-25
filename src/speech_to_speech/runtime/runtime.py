@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union, cast
 
@@ -70,6 +71,11 @@ class Config:
             raise ValueError(
                 "full codec sequence representation cannot use a BPE audio tokenizer."
             )
+        if (
+            self.codec == "bicodec"
+            and self.audio_representation is not AudioRepresentation.FULL_CODEC_SEQUENCE
+        ):
+            raise ValueError("BiCodec requires the full codec sequence representation.")
         if self.semantic_codec_artifact is not None:
             if not self.semantic_codec_artifact:
                 raise ValueError("semantic_codec_artifact must not be empty.")
@@ -110,6 +116,13 @@ class Runtime:
     @property
     def audio_view(self) -> AudioView:
         return self.config.audio_view
+
+    @property
+    def codec_frame_rate(self) -> float:
+        frame_rate = float(self.codec.frame_rate)
+        if not math.isfinite(frame_rate) or frame_rate <= 0:
+            raise ValueError("codec frame_rate must be finite and positive.")
+        return frame_rate
 
     @property
     def audio_representation(self) -> AudioRepresentation:

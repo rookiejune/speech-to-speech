@@ -7,7 +7,7 @@ REPOS_ROOT="${REPOS_ROOT:-$(cd "${SPEECH_TO_SPEECH_ROOT}/.." && pwd)}"
 source "${REPOS_ROOT}/workspace/jobs/env.sh"
 
 export SPEECH_TO_SPEECH_ROOT
-export PYTHONPATH="${SPEECH_TO_SPEECH_ROOT}/src:${REPOS_ROOT}/UniCodec:${REPOS_ROOT}/third_party/LongCat-Audio-Codec:${REPOS_ROOT}/third_party/length-based-batching-adapter/src:${PYTHONPATH:-}"
+export PYTHONPATH="${SPEECH_TO_SPEECH_ROOT}/src:${REPOS_ROOT}/semantic-acoustic-codec/src:${REPOS_ROOT}/UniCodec:${REPOS_ROOT}/third_party/LongCat-Audio-Codec:${REPOS_ROOT}/third_party/length-based-batching-adapter/src:${PYTHONPATH:-}"
 export SPEECH_TO_SPEECH_PYTHON="${SPEECH_TO_SPEECH_PYTHON:-${WORKSPACE_PYTHON:-python}}"
 if [[ -z "${SPEECH_TO_SPEECH_TRAIN_ROOT:-}" ]]; then
     : "${DYNAMIC_HOME:?Set DYNAMIC_HOME or SPEECH_TO_SPEECH_TRAIN_ROOT before sourcing jobs/env.sh}"

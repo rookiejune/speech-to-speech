@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Generic, TypeVar, cast
+from typing import Generic, Protocol, TypeVar, cast
 
 import torch
 from anytrain.optim.llm import create_optimizer
 from lightning.pytorch import LightningModule
 from torch import nn
 
-from ..datamodule.types import TrainBatch
+from ..datamodule.types import ModelBatch, RawSingleBatch, TrainBatch, TrainInputBatch
 from ..generation.service import generate_responses
 from ..generation.text import TextProbe, TextProbeResult, evaluate_text
 from ..generation.types import Request, Result
@@ -27,6 +27,15 @@ class Config:
 ModelT = TypeVar("ModelT", bound=TextEvaluationModel)
 
 
+class BatchMaterializer(Protocol):
+    def __call__(
+        self,
+        batch: TrainInputBatch,
+        *,
+        device: torch.device | None = None,
+    ) -> TrainBatch: ...
+
+
 class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
     def __init__(
         self,
@@ -34,6 +43,7 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         *,
         model: ModelT,
         objective: Objective[ModelT],
+        batch_materializer: BatchMaterializer | None = None,
     ) -> None:
         super().__init__()
 
@@ -41,10 +51,12 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
 
         self.model = model
         self.objective = objective
+        self.batch_materializer = batch_materializer
         self._current_loss_outputs: Outputs | None = None
 
-    def training_step(self, batch: TrainBatch, batch_idx: int = 0):
+    def training_step(self, batch: TrainInputBatch, batch_idx: int = 0):
         del batch_idx
+        batch = self.materialize_batch(batch)
         outputs = self._loss_outputs(batch)
         self._current_loss_outputs = outputs
         self.log(
@@ -58,12 +70,34 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
 
     def _loss_outputs(self, batch: TrainBatch) -> Outputs:
         if not isinstance(batch, tuple):
+            if not isinstance(batch, ModelBatch):
+                raise TypeError(
+                    "training_step requires ModelBatch unless a batch materializer "
+                    "converts the incoming batch."
+                )
             outputs = [self.objective.forward(batch, self.model)]
         else:
+            if any(not isinstance(item, ModelBatch) for item in batch):
+                raise TypeError(
+                    "joint training batches must contain ModelBatch values after "
+                    "materialization."
+                )
             outputs = [self.objective.forward(item, self.model) for item in batch]
         return self.objective.reduce(
             outputs,
         )
+
+    def materialize_batch(self, batch: TrainInputBatch) -> TrainBatch:
+        if self.batch_materializer is None:
+            if isinstance(batch, RawSingleBatch) or (
+                isinstance(batch, tuple)
+                and any(isinstance(item, RawSingleBatch) for item in batch)
+            ):
+                raise TypeError(
+                    "raw waveform batches require a batch materializer before loss."
+                )
+            return cast(TrainBatch, batch)
+        return self.batch_materializer(batch, device=self.device)
 
     def current_loss_outputs(self) -> Outputs:
         """Return loss outputs kept alive until the backward pass completes."""

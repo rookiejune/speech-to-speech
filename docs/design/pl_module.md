@@ -10,6 +10,10 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
 - `training_step()` 接收单个 `ModelBatch` 或多个 homogeneous 子 batch；联合 batch 会逐个调用
   objective，并按有效 token/frame 聚合分项 loss。它跨 rank 归约并记录一次 total loss，同时保留
   分项到 backward 完成。
+- 可选 `batch_materializer` 只处理显式 raw waveform fallback：当 datamodule single path 返回
+  `RawSingleBatch` 时，materializer 在当前训练 device 上调用 codec encode，并在 objective 前
+  转成标准 `ModelBatch`。没有 materializer 时，`training_step()` 只接受已 materialize 的
+  `ModelBatch` / joint `ModelBatch` tuple。
 - `current_loss_outputs()`：只在当前 training step 的 backward 完成前返回仍连接计算图的
   `Outputs`，供 `GradLogger` 计算指定分项梯度；其他时机显式报错。
 - `configure_optimizers()` 委托 anytrain optimizer preset。
@@ -29,10 +33,18 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
 
 - `StageSwitcher`：按 `epoch_milestones` 切换 task 权重、loader 权重和参数冻结，并从
   `current_epoch` 恢复当前 stage。
-- `OutputsLogger`：按 task 展开 `LossItem`，不读取 model head。
-- `GradLogger` / `GradNormLogger`：记录指定分项或全局梯度范数。
-- `FlowMatchingLogger`：显式接收 flow runtime，不向下读取 model runtime。
-- `LossSummary`：收集训练输出里的 total loss 与分项 `LossItem`，只在训练结束后生成窗口摘要。
+- `OutputsLogger`：只提供 S2S objective 到 task label 的适配，按 label 聚合 `LossItem` 的通用日志逻辑来自
+  `anytrain.lightning.LossItemLoggerCallback`。
+- `GradLogger` / `GradNormLogger`：只接入 S2S `TrainInterval`；指定分项或全局梯度范数的通用日志逻辑来自
+  `anytrain.lightning`。
+- `OnDeviceCodecMaterializer`：训练时 wav->codes 的显式 fallback。正式数据仍应提前 materialize
+  codec codes；该 fallback 只把 `RawSingleBatch` 规范化为 `ModelBatch`，不改变 objective 或 task
+  loss contract。BiCodec fallback 通过 runtime adapter 输出完整 codec sequence，与 sidecar
+  prepared codes 使用同一 `ModelBatch` contract。
+- `FlowMatchingLogger`：显式接收 flow runtime，不向下读取 model runtime；time histogram 和 bucketed
+  loss 日志来自 `anytrain.lightning.LossTimeBucketLoggerCallback`。
+- `LossSummary`：只注入 S2S objective 顺序；训练输出 total loss 与分项 `LossItem` 窗口摘要来自
+  `anytrain.lightning.LossSummaryCallback`。
 - `AcousticEvaluation`：对 fixed-sample acoustic model 使用本地 generator seeds 采样，记录 feature、
   waveform 与 STFT 距离；纯评估函数位于 `generation.evaluation`，不留在脚本私有模块。
 - `TaskSampleLogger`：只在 global zero 读取 datamodule 的公开 `train_samples()`/`collator`，

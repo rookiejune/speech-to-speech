@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Protocol
 
 import torch
-import torch.nn.functional as F
+from anytrain.loss import MaskedFrameMSELoss
 from torch import Tensor, nn
 
 from .types import LossItem
@@ -46,6 +46,10 @@ class FeatureDecoder(Protocol):
 
 class AcousticFlowLoss(nn.Module):
     """Frame-masked velocity objective for acoustic latent prediction."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.loss = MaskedFrameMSELoss()
 
     def forward(
         self,
@@ -97,24 +101,10 @@ class AcousticFlowLoss(nn.Module):
         target: Tensor,
         mask: Tensor,
     ) -> LossItem:
-        if prediction.shape != sample.velocity.shape:
-            raise ValueError("flow decoder output must match target latent shape.")
-
-        frame_mask = mask[..., None]
-        safe_prediction = prediction.masked_fill(~frame_mask, 0)
-        safe_velocity = sample.velocity.masked_fill(~frame_mask, 0)
-        frame_loss = F.mse_loss(
-            safe_prediction,
-            safe_velocity,
-            reduction="none",
-        ).mean(dim=-1)
-        weights = mask.to(dtype=frame_loss.dtype)
-        frame_count = weights.sum(dim=1)
-        loss = frame_loss.sum(dim=1) / frame_count.clamp_min(1)
-        return LossItem(
-            loss=loss,
-            details={
-                "frames": frame_count.to(dtype=target.dtype),
-                "t": sample.t.to(dtype=target.dtype),
-            },
+        return self.loss(
+            prediction,
+            sample.velocity,
+            mask,
+            details={"t": sample.t},
+            detail_dtype=target.dtype,
         )

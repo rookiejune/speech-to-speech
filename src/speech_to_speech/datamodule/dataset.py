@@ -26,6 +26,7 @@ from .protocol import DatasetRuntime
 
 
 class DatasetName(StrEnum):
+    QWEN_TTS_BICODEC = auto()
     WMT19_TTS = auto()
     TOY = auto()
 
@@ -141,7 +142,26 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
                 ),
             ),
         )
+    if config.name is DatasetName.QWEN_TTS_BICODEC:
+        from zhuyin.datasets.wmt19_tts import wmt19_qwen_tts_bicodec
+
+        return cast(
+            Dataset[Sample],
+            cast(
+                object,
+                wmt19_qwen_tts_bicodec(
+                    root=_optional_root(config.root),
+                    split=config.split,
+                ),
+            ),
+        )
     raise AssertionError(f"unsupported dataset: {config.name}")
+
+
+def _optional_root(value: str | None) -> Path | None:
+    if value is None or value == "":
+        return None
+    return Path(value).expanduser()
 
 
 def _codebook_sizes(view: AudioView, codec: Codec) -> tuple[int, ...]:
@@ -174,6 +194,13 @@ def _codebook_sizes(view: AudioView, codec: Codec) -> tuple[int, ...]:
         if acoustic_sizes:
             raise ValueError("UniCodec toy data cannot contain acoustic codebooks.")
         return semantic_sizes
+    if view is AudioView.BICODEC:
+        if acoustic_sizes:
+            raise ValueError("BiCodec toy data cannot contain acoustic codebooks.")
+        sizes = tuple(codec.codebook_sizes)
+        if not sizes:
+            raise ValueError("BiCodec toy data requires codec codebook sizes.")
+        return sizes
     raise ValueError(f"unsupported toy dataset audio view: {view.value}")
 
 

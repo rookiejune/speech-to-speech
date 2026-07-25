@@ -12,6 +12,7 @@ from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback, ModelCheckpoint
 from omegaconf import DictConfig
 
+from speech_to_speech.callback import OnDeviceCodecMaterializer
 from speech_to_speech.callback import StageConfig as CallbackStageConfig
 from speech_to_speech.callback import StageSwitcher
 from speech_to_speech.callback.logging import GradNormLogger, LossSummary, OutputsLogger
@@ -87,6 +88,8 @@ def run(config: StagedTrainConfig) -> None:
         module, model, _ = flow(rt, config.pl_module, config.model, config.acoustic)
     else:
         module, model = rvq(rt, config.pl_module, config.model, config.acoustic)
+    if config.data.encode_missing_codes is True:
+        module.batch_materializer = OnDeviceCodecMaterializer(rt)
     apply_parameter_policy(model, config.parameter_policy.spec())
 
     datamodule = build_datamodule(config, rt)
@@ -164,6 +167,8 @@ def _loader_datamodule(
         SpeechDataModuleConfig(
             codec=config.data.codec,
             dataloader=_dataloader(config.data.dataloader),
+            shape=config.data.shape,
+            encode_missing_codes=config.data.encode_missing_codes,
             dataset=config.data.dataset,
         ),
         runtime,

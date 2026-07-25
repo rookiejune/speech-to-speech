@@ -7,6 +7,7 @@ from typing import Optional, Type, TypeVar, Union, cast
 from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf
 
 from speech_to_speech.datamodule import (
+    DataShape,
     DatasetConfig,
     DatasetName,
     LBAConfig,
@@ -59,6 +60,8 @@ class AcousticNoneConfig:
 @dataclass
 class FixedDataConfig(DatasetConfig):
     sample_index: int = MISSING
+    shape: DataShape = DataShape.PAIR
+    encode_missing_codes: bool = False
 
 
 @dataclass
@@ -80,6 +83,8 @@ class TrainDataLoaderConfig:
 class SpeechDataConfig:
     codec: str = MISSING
     dataloader: TrainDataLoaderConfig = field(default_factory=TrainDataLoaderConfig)
+    shape: DataShape = DataShape.PAIR
+    encode_missing_codes: bool = False
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
 
 
@@ -353,6 +358,7 @@ def _prepare(config: DictConfig) -> DictConfig:
             )
     _normalize_dataset(result.get("data"))
     _normalize_dataset(result.get("data", {}).get("dataset"))
+    _normalize_data_shape(result.get("data"))
     _normalize_text_dataset(result.get("text_data", {}).get("dataset"))
     runtime = result.get("runtime")
     if runtime is not None:
@@ -408,6 +414,18 @@ def _normalize_dataset(value: object) -> None:
         DatasetName[raw].name
         if raw in DatasetName.__members__
         else DatasetName(raw).name
+    )
+
+
+def _normalize_data_shape(value: object) -> None:
+    if not isinstance(value, DictConfig):
+        return
+    shape = value.get("shape")
+    if shape is None:
+        return
+    raw = str(shape)
+    value.shape = (
+        DataShape[raw].name if raw in DataShape.__members__ else DataShape(raw).name
     )
 
 

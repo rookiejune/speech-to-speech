@@ -1,6 +1,6 @@
 # 011 Qwen RVQ Staged Joint Training P0 Smoke
 
-对应计划：[`schedules/011-qwen-rvq-staged-joint-training.md`](../schedules/011-qwen-rvq-staged-joint-training.md)。
+对应的旧 schedule 已删除；本文仅作为历史结果与 conclusion 引用证据保留。
 
 状态：**P0 未完成，不允许晋级。** 本次只验证了真实 Qwen + native LongCat + RVQ 的
 TTS/S2ST 单卡 fixed-sample 2-step 子项。两条训练和 teacher-forced acoustic sampling 均通过，

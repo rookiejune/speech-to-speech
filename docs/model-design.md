@@ -8,7 +8,7 @@
 - [runtime](design/runtime.md)：已加载资源及窄协议。
 - [generation](design/generation.md)：独立 `Request -> Result` 推理、batching、评估与 decode。
 - [pl_module 与 callback](design/pl_module.md)：Lightning 训练集成与日志。
-- [reporting](design/reporting.md)：实验入口共用的无状态窗口摘要。
+- [reporting](design/reporting.md)：实验入口复用 `anytrain.lightning.window_summary` 的窗口摘要边界。
 
 已验证结论见 [experiments/conclusion](experiments/conclusion.md)，尚未完成的复验与工程欠账见
 [experiments/todo](experiments/todo.md)。

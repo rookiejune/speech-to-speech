@@ -29,7 +29,17 @@ def build_sample(
 ) -> ModelSample:
     prompt = _prompt(speech_pair, task, runtime)
     source, target = _source_target(speech_pair, task)
+    return build_speech_sample(source, target, task, runtime, prompt=prompt)
 
+
+def build_speech_sample(
+    source: Speech,
+    target: Speech,
+    task: Task,
+    runtime: DataRuntime,
+    *,
+    prompt: str,
+) -> ModelSample:
     source_modality = task.source_modality
     target_modality = task.target_modality
     if source_modality is not None:
@@ -137,8 +147,16 @@ def _prompt(
     task: Task,
     runtime: DataRuntime,
 ) -> str:
+    return chat_prompt(speech_pair.target.language, task, runtime)
+
+
+def chat_prompt(
+    language: Language,
+    task: Task,
+    runtime: TextRuntime,
+) -> str:
     instruction = task.template.format(
-        language=str(speech_pair.target.language),
+        language=str(language),
         source=_PLACEHOLDER,
     )
     return cast(
@@ -192,8 +210,9 @@ def _audio_seconds(source: Speech, target: Speech, task: Task) -> float:
 def _duration(speech: Speech, *, role: str) -> float:
     if speech.duration_seconds is None:
         raise ValueError(
-            f"{role} audio sample is missing AudioMeta.DURATION; "
-            "migrate the prepared audio store with duration metadata."
+            f"{role} speech is missing duration_seconds; parse raw audio samples "
+            "with a DataRuntime so duration can be read from metadata or inferred "
+            "from codec frames."
         )
     return float(speech.duration_seconds)
 

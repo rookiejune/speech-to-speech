@@ -10,11 +10,16 @@ from anydataset.types import Modality
 from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
 
-from .._compat import StrEnum
+from .._compat import StrEnum, auto
 from .._tensor import is_signed_integer_dtype
 from ..task import Task
 
 ACOUSTIC_PAD_ID = -1
+
+
+class DataShape(StrEnum):
+    PAIR = auto()
+    SINGLE = auto()
 
 
 class Language(StrEnum):
@@ -75,6 +80,9 @@ class SpeechPair:
     target: Speech
 
 
+SpeechUtterance = Speech
+
+
 @dataclass
 class Text:
     text_token_ids: Tensor
@@ -91,6 +99,82 @@ class Text:
 class TextPair:
     source: Text
     target: Text
+
+
+@dataclass
+class RawSingleSample:
+    text_token_ids: Tensor
+    waveform: Tensor
+    sample_rate: int
+    language: Language
+    task: Task
+    duration_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.text_token_ids.dim() != 1:
+            raise ValueError("raw single text_token_ids must have shape [tokens].")
+        if not is_signed_integer_dtype(self.text_token_ids.dtype):
+            raise TypeError("raw single text_token_ids must use signed integer dtype.")
+        if self.waveform.dim() not in {1, 2}:
+            raise ValueError("raw single waveform must have shape [time] or [channel, time].")
+        if self.waveform.numel() == 0:
+            raise ValueError("raw single waveform must not be empty.")
+        if isinstance(self.sample_rate, bool) or not isinstance(self.sample_rate, int):
+            raise TypeError("raw single sample_rate must be an integer.")
+        if self.sample_rate <= 0:
+            raise ValueError("raw single sample_rate must be positive.")
+        if not isinstance(self.language, Language):
+            raise TypeError("raw single language must be a Language.")
+        if not isinstance(self.task, Task):
+            raise TypeError("raw single task must be a Task.")
+        if self.duration_seconds is not None:
+            if isinstance(self.duration_seconds, bool) or not isinstance(
+                self.duration_seconds,
+                (int, float),
+            ):
+                raise TypeError("raw single duration_seconds must be a number or None.")
+            if not math.isfinite(float(self.duration_seconds)) or self.duration_seconds < 0:
+                raise ValueError("raw single duration_seconds must be finite and non-negative.")
+
+    def pin_memory(self) -> RawSingleSample:
+        return RawSingleSample(
+            text_token_ids=self.text_token_ids.pin_memory(),
+            waveform=self.waveform.pin_memory(),
+            sample_rate=self.sample_rate,
+            language=self.language,
+            task=self.task,
+            duration_seconds=self.duration_seconds,
+        )
+
+
+@dataclass
+class RawSingleBatch:
+    samples: tuple[RawSingleSample, ...]
+    pad_token_id: int
+
+    def __post_init__(self) -> None:
+        if not self.samples:
+            raise ValueError("RawSingleBatch requires at least one sample.")
+        if isinstance(self.pad_token_id, bool) or not isinstance(self.pad_token_id, int):
+            raise TypeError("RawSingleBatch pad_token_id must be an integer.")
+        signatures = {
+            (sample.task.source_modality, sample.task.target_modality)
+            for sample in self.samples
+        }
+        if len(signatures) != 1:
+            raise ValueError(
+                "all raw single samples in a batch must use the same source and target modalities."
+            )
+
+    @property
+    def tasks(self) -> list[Task]:
+        return [sample.task for sample in self.samples]
+
+    def pin_memory(self) -> RawSingleBatch:
+        return RawSingleBatch(
+            samples=tuple(sample.pin_memory() for sample in self.samples),
+            pad_token_id=self.pad_token_id,
+        )
 
 
 class AcousticTarget(TypedDict):
@@ -206,6 +290,8 @@ class ModelBatch:
         )
 
 
+ConcreteTrainInput = Union[ModelBatch, RawSingleBatch]
+TrainInputBatch = Union[ConcreteTrainInput, tuple[ConcreteTrainInput, ...]]
 TrainBatch = Union[ModelBatch, tuple[ModelBatch, ...]]
 
 

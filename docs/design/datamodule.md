@@ -16,9 +16,15 @@
   `AudioView` 与 runtime `audio_representation`，将解耦路线的 LongCat codebooks 分成
   semantic/acoustic codes，或在 `full_codec_sequence` 下把完整 codec codes 作为 token
   supervision，并生成 text/audio token IDs 与 audio token spans。
+- `single.SingleCollator` / `single.parse_single_sample()`：处理 single utterance 数据形态，
+  即同一条 utterance 同时提供 text 与 audio/codes。TTS、ASR、TEXT_AR、AUDIO_AR 共用该
+  path，由 task 决定同一 utterance 的哪个 modality 作为 source/target；pair translation path
+  不再承载 single-only 数据契约。
 - `sample.build_sample()`：根据 `Task` 把 `SpeechPair` 组装成 `ModelSample`，负责 chat
   template、BOA/EOA/EOS、global ID 映射、token labels、acoustic prompt 和 target frame
   positions。
+- `single.build_single_sample()`：复用同一 `ModelSample` / `ModelBatch` 输出契约，把 single
+  utterance 组装成 text->audio 或 audio->text 序列；`pl_module` 不区分 batch 来源。
 - `types.Speech` / `types.SpeechPair`：raw sample 的 codec、token 和语言逻辑视图。
 - `types.ModelSample` / `types.ModelBatch`：单条和 batch 级模型输入；
   `ModelBatch.from_samples(..., pad_token_id=...)` 完成校验与 padding，mask 由 padding 字段
@@ -33,15 +39,18 @@
   optimizer step 确定性轮转；配置 `batches_per_step > 1` 时，一个 optimizer step 返回多个子
   batch，供静态 DDP 覆盖多条可训练执行路径。每个子 dataloader 自己保持单一 execution
   signature。
-- `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts` prepared data 或确定性的内存
-  `toy` data。toy codes 根据正式 codec 的 semantic/acoustic codebook 数量和值域构造。
+- `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts` prepared data、Qwen-TTS
+  BiCodec sidecar single data 或确定性的内存 `toy` data。toy codes 根据正式 codec 的
+  semantic/acoustic/full-sequence codebook 数量和值域构造。
 - `ToyDataset`：提供完整 source/target audio+text raw sample，不读取文件、不修改全局 RNG。
 - `LBAConfig`：按 `ModelSample` 的 text token 与 source/target frame 长度估算 batch cost，
   启用后每个 homogeneous loader 使用 third-party LBA，并把 planner summary 写到
   `output_dir/lba/{loader_name}`。speech loader 支持 prepared map-style dataset；text loader
   也必须使用 map-style dataset，当前 FDU joint smoke 因此使用 deterministic toy text samples。
 - `DataLoaderConfig(batch_size, num_workers, pin_memory, persistent_workers, lba)` /
-  `Config(codec, dataloader, dataset)`：公开的 DataLoader、dataset 与 DataModule 配置结构。
+  `Config(codec, dataloader, shape, encode_missing_codes, dataset)`：公开的 DataLoader、
+  dataset 与 DataModule 配置结构。`shape=pair` 是默认旧路径；`shape=single` 显式选择
+  single utterance path。
 - `DataModule(config, runtime, task_weights)`：Lightning 数据入口；`setup()` 加载所选 dataset，
   并在加载前校验 config 与 runtime 的 codec identity。重复调用不会重新加载已持有的数据集。
 - `FixedDataModule(codec, runtime, task_weights, sample_index, dataset=...)`：fixed-sample
@@ -59,6 +68,25 @@ raw Sample
     -> sample.build_sample(task, runtime) -> ModelSample
     -> ModelBatch.from_samples(pad_token_id=runtime.pad_token_id) -> ModelBatch
 ```
+
+single path 输入是 `Role.DEFAULT` 下的一条 text+audio utterance。正式训练要求 audio item 已经
+materialize 出当前 runtime `AudioView` 的 codec codes：
+
+```text
+raw Sample(Role.DEFAULT)
+    -> single.parse_single_sample(runtime) -> SpeechUtterance
+    -> single.build_single_sample(task, runtime) -> ModelSample
+    -> ModelBatch.from_samples(pad_token_id=runtime.pad_token_id) -> ModelBatch
+```
+
+debug fallback 可显式设置 `encode_missing_codes=true`，在缺少 codec codes 但存在
+`AudioView.WAVEFORM` 时让 collator 返回 `RawSingleBatch`。该 batch 不能直接进入 objective；
+训练入口必须给 `SpeechToSpeechModule` 挂 `OnDeviceCodecMaterializer`，在 GPU/device 上调用
+runtime codec encode 后再构造标准 `ModelBatch`。
+
+BiCodec 正式路径读取 workspace 生成的 sidecar：`semantic` token 与 `global_tokens` 保留在
+`AudioView.BICODEC` 的完整 code tensor 中，其中第 0 列是逐帧 semantic token，后续列是按帧重复的
+global speaker token。runtime decode 时只取首帧 global token 还原给 Spark-TTS BiCodec。
 
 `ModelSample` 和 `ModelBatch` 使用同一组核心字段：
 
@@ -81,6 +109,12 @@ acoustic_target: AcousticTarget | None
 - runtime 必须由组合入口显式传入：`DataModule` 接收 `DatasetRuntime`，`Collator` 及下游 parser
   和 sample builder 只消费较小的 `DataRuntime`；datamodule 不自行选择 tokenizer、layout 或
   special tokens。
+- datamodule 按数据形态拆分 pair/single，而不是按 TTS/ASR 拆分。pair path 拥有 source/target
+  role 选择；single path 拥有同一 utterance 内 text/audio 的方向选择。`Task.uses_source_role`
+  只服务 pair path，single path 不用它推断 dataset role。
+- 正式训练路径优先使用预先 materialize 的 codec codes。训练时 wav->codes 只作为显式 debug
+  fallback：普通 DataLoader worker 不持有 codec/CUDA module，fallback batch 必须在
+  `pl_module` loss 前经 on-device materializer 转为 `ModelBatch`。
 - toy dataset 只读取正式 runtime 的 codec identity 与 codebook metadata；它不提供 tokenizer、
   codec、layout 或 special token，因此不存在 toy runtime 分支。
 - `parser.py` 只解释 raw dataset representation；`sample.py` 只实现任务序列规则；
@@ -88,7 +122,8 @@ acoustic_target: AcousticTarget | None
 - LongCat 的第 0 个 codebook 和后续 codebooks 只在 parser 边界解释为 semantic/acoustic。
   `full_codec_sequence` 不拆 semantic/acoustic side channel，而是把完整 codec codes 放入
   `semantic_codes` 并设置 `acoustic_codes=None`；unified-token codec 的完整 codes 也是
-  `semantic_codes`，`acoustic_codes=None`。
+  `semantic_codes`，`acoustic_codes=None`。BiCodec 也必须走 `full_codec_sequence`，因为它的
+  global speaker token 不是独立 acoustic side channel。
 - audio tokenizer 的输出统一称为 `audio_token_ids`；codec codebook index 统一称为
   `semantic_codes` / `acoustic_codes`。只有 layout global IDs 使用 `input_ids` 和
   `token_labels`。
@@ -110,10 +145,11 @@ acoustic_target: AcousticTarget | None
 - `ACOUSTIC_PAD_ID=-1` 只由 batch padding 引入，不能出现在未 padding 的 `ModelSample`
   中；因此派生的 frame mask 只包含右侧 padding，不会形成内部空洞。
 - `ModelBatch` 只表达训练或 teacher-forcing evaluation，不表达缺少 target 的真实推理请求。
-- `AudioMeta.DURATION` 的单位是秒，不是 codec frame 或 waveform sample。parser 只校验并传递该
-  元数据；task sample builder 按 source/target modality 决定哪些角色计入
-  `ModelBatch.audio_seconds`。缺少 duration 的 audio task 直接报错，避免 callback cadence 和 LBA
-  使用错误单位。
+- `AudioMeta.DURATION` 的单位是秒，不是 codec frame 或 waveform sample。parser 优先读取并校验
+  该元数据；缺失时用当前 codec view 的 frame count 除以 `runtime.codec_frame_rate` 推导
+  `Speech.duration_seconds`。task sample builder 按 source/target modality 决定哪些角色计入
+  `ModelBatch.audio_seconds`。LBA 的 metadata 快路径同样优先使用 duration；缺失时读取对应 codec
+  view 的 frame count，不能把真实音频静默计为 0。
 - 同一 `task_weights` 中的任务必须具有相同 source/target modality，保证 DDP 各 rank 走相同
   模型路径。0 权重任务不会参与 batch 分配；每项权重必须有限且非负，总和必须有限且为正；
   按 batch size 固定分配时，任一非 0 权重任务拿不到至少 1 条 sample 会直接报错。非法 stage

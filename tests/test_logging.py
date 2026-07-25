@@ -9,13 +9,13 @@ import torch
 from speech_to_speech.callback.logging import (
     FlowMatchingLogger,
     GradNormLogger,
+    LossSummary,
     OutputsLogger,
 )
 from speech_to_speech.callback import TrainInterval, processed_audio_seconds
 from speech_to_speech.datamodule import ModelBatch, ModelSample
 from speech_to_speech.loss import LossItem, Outputs, loss_items
 from speech_to_speech.pl_module import Config, SpeechToSpeechModule
-from speech_to_speech.reporting import window_summary
 from speech_to_speech.task import Task
 
 
@@ -26,9 +26,10 @@ class LoggingTest(unittest.TestCase):
         objective.forward.return_value = outputs
         objective.reduce.side_effect = lambda values: values[0]
         module = SpeechToSpeechModule(Config(), model=Mock(), objective=objective)
+        batch = _batch(Task.TTS)
 
         with patch.object(module, "log") as log:
-            result = module.training_step(Mock())
+            result = module.training_step(batch)
 
         self.assertIs(result, outputs)
         objective.reduce.assert_called_once_with([outputs])
@@ -87,19 +88,24 @@ class LoggingTest(unittest.TestCase):
         self.assertTrue(interval.should_run(trainer, module, _batch(Task.TTS, 1.0)))
         self.assertEqual(reduce_ops, ["sum"])
 
-    def test_window_summary_reports_edges_and_window_means(self):
-        summary = window_summary([1.0, 2.0, 4.0], window=2)
+    def test_loss_summary_uses_stable_objective_order(self):
+        item = LossItem(torch.ones(1), details=None)
+        callback = LossSummary()
+        outputs = Outputs(
+            loss=torch.tensor(2.0),
+            flow_matching=item,
+            token=item,
+        )
 
-        self.assertEqual(summary["first"], 1.0)
-        self.assertEqual(summary["last"], 4.0)
-        self.assertEqual(summary["first_mean"], 1.5)
-        self.assertEqual(summary["last_mean"], 3.0)
-        self.assertEqual(summary["last_to_first"], 2.0)
+        callback.on_train_batch_end(
+            SimpleNamespace(),
+            SimpleNamespace(),
+            outputs,
+            None,
+            0,
+        )
 
-    def test_window_summary_exposes_zero_baseline(self):
-        summary = window_summary([0.0, 0.0])
-
-        self.assertIsNone(summary["last_to_first"])
+        self.assertEqual(list(callback.values), ["loss", "token", "flow_matching"])
 
     def test_flow_logger_uses_injected_runtime(self):
         experiment = Mock()

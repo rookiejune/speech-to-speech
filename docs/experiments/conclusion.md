@@ -2,17 +2,31 @@
 
 ## 适用范围
 
-本页最新真实实验是 013 的 FDU stage_2 joint LBA DDP smoke（2026-07-23）；它只验证
-正式 staged joint train entry 的两卡 DDP + LBA 两步执行闭环，不替代长跑 distributed sample
-partition、resume、质量或收敛验收。011 的 P0 fixed-sample 子项（2026-07-21，对应远端代码
-快照 `d5f6902`）只通过真实 Qwen/native/RVQ 的单卡训练与 teacher-forced acoustic decode，
-端到端 generation gate 仍失败，因此 011 P0 尚未完成。010 的 LongCat codec oracle 结论对应
-代码快照 `9127e62`。008/009 之后 model/runtime/data/generation 和按模态 token CE 仍有调整，
-因此相应 generation/overfit 数值作为历史基线保留，未完成项见
-[todo, lines 20-44](todo.md#L20-L44)。
+本页最新真实实验是 014 的 LongCat stable stage 1 P0 验收（2026-07-25）；它只证明
+debug copy 上历史 duration workaround、targeted tests、复旦 P0 wrapper 和 generation
+gate 已通过；当前代码已在缺失 `AudioMeta.DURATION` 时从 codec frame count 和 runtime
+frame rate 推导音频秒数，不表示正式 stable data root、split manifest、fingerprint 或 native
+token/RVQ 分布已经完成。013 的 FDU stage_2 joint LBA DDP smoke（2026-07-23）只验证正式 staged joint train
+entry 的两卡 DDP + LBA 两步执行闭环，不替代长跑 distributed sample partition、resume、质量或
+收敛验收。011 的 P0 fixed-sample 子项（2026-07-21，对应远端代码快照 `d5f6902`）只通过真实
+Qwen/native/RVQ 的单卡训练与 teacher-forced acoustic decode，端到端 generation gate 仍失败，
+因此 011 P0 尚未完成。010 的 LongCat codec oracle 结论对应代码快照 `9127e62`。008/009 之后
+model/runtime/data/generation 和按模态 token CE 仍有调整，因此相应 generation/overfit 数值作为
+历史基线保留。旧 schedule 已删除；新的未完成路线见 [todo](todo.md)。
 
 ## 已验证结论
 
+- 014 的 P0 在 debug-migrated copy 上通过：代码迁移的本地/远端 targeted tests 通过，远端
+  targeted tests 为 `Ran 96 tests ... OK`、exit `0`；历史 debug duration workaround 更新
+  2000 个 audio item 且只写入 debug copy；当前代码缺失 `AudioMeta.DURATION` 时可从 codec
+  frame count 和 runtime frame rate 推导音频秒数；复旦 `145` 上 TTS/S2ST wrapper、metrics、
+  generation 和 waveform decode 均为 finite。该结论只接受 debug copy P0，不允许直接晋级正式
+  stable root 或 native stable P1 长跑
+  （[014 result, lines 3-6](results/014-longcat-stable-stage1.md#L3-L6)，
+  [lines 24-29](results/014-longcat-stable-stage1.md#L24-L29)，
+  [lines 31-54](results/014-longcat-stable-stage1.md#L31-L54)，
+  [lines 55-83](results/014-longcat-stable-stage1.md#L55-L83)，
+  [lines 94-103](results/014-longcat-stable-stage1.md#L94-L103)）。
 - 真实 Qwen3-0.6B、LongCat native token 与 8 层 RVQ decoder 上，TTS/S2ST fixed-sample
   均完成 2-step forward/backward/optimizer；两条 total、audio token CE 和各 RVQ codebook CE
   均下降。teacher-forced RVQ sampling 在 3 个记录点、每点 4 个 seed 上均可 decode 2.16s

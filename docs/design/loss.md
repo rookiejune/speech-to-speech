@@ -14,15 +14,17 @@ position 语义见 [总览 §2.4](../model-design.md)。
 - `TokenLoss`：按 batch task 的 target modality 在对应局部词表上计算 CE，每行必须至少包含一个
   非 `-100` target；causal shift 在此完成，只把有效 predictor hidden states 交给
   `model.token_logits(hidden, modality)`，text/audio head 不做跨模态 softmax 竞争。
-- `AcousticFlowLoss`：frame-mask 的 velocity objective，只在有效 acoustic frame 上计算；
-  启用 REPA 时通过 `forward_with_features()` 复用同一次 DiT 前向。
+- `AcousticFlowLoss`：从 S2S decoder/runtime 取 `prediction`、`velocity`、mask 和 flow time，
+  转给 `anytrain.loss.MaskedFrameMSELoss`；启用 REPA 时通过 `forward_with_features()` 复用同一次
+  DiT 前向。
 - `CausalAcousticLoss`：对每个 RVQ codebook 计算 masked CE，再在 codebook 维等权平均；
   acoustic padding ID 不进入 decoder embedding 或 loss。
 - `WavLMTeacher`：按 boolean frame mask 在线解码 target semantic/acoustic codes，以 16 kHz
   waveform 运行冻结 WavLM，取得配置层的 hidden states 并插值、写回原有效 frame 位置。
-- `RepaLoss`：把选定 DiT block 的逐帧表示投影到 WavLM hidden dimension，与
-  stop-gradient teacher features 计算 masked cosine distance。
-- `types.LossItem` / `types.Outputs`：上层日志与训练消费的稳定结构。
+- `RepaLoss`：把选定 DiT block 的逐帧表示投影到 WavLM hidden dimension，再转给
+  `anytrain.loss.MaskedCosineAlignmentLoss` 与 stop-gradient teacher features 做 masked cosine distance。
+- `types.Outputs`：上层日志与训练消费的 S2S objective mapping；`LossItem` 和通用 output 聚合来自
+  `anytrain.loss`。
 - `types.loss_items()`：按 token、flow matching、REPA、RVQ 的稳定顺序遍历实际存在的
   分项，供 callback 和实验 summary 复用。
 

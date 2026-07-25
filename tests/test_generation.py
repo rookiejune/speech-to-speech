@@ -24,7 +24,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from speech_to_speech.callback.logging.task_sample import TaskSampleLogger
 from speech_to_speech.datamodule.module import Config as DataConfig
 from speech_to_speech.datamodule.module import DataModule
-from speech_to_speech.datamodule.types import ACOUSTIC_PAD_ID, ModelBatch
+from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.model import ToyConfig
 from speech_to_speech.model.acoustic import FlowModel
 from speech_to_speech.model.base import Config as ModelConfig

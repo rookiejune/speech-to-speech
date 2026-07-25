@@ -19,7 +19,8 @@ from .collator import Collator
 from .dataset import DatasetConfig, load_dataset
 from .lba import LBA, LBAConfig, PlannerMode, metadata_speech_length, speech_length
 from .protocol import DataRuntime, DataRuntimeSnapshot, DatasetRuntime
-from .types import ModelBatch
+from .single import SingleCollator
+from .types import ConcreteTrainInput, DataShape
 
 
 class DataLoaderConfig(TypedDict):
@@ -34,9 +35,17 @@ class DataLoaderConfig(TypedDict):
 class Config:
     codec: str
     dataloader: DataLoaderConfig
+    shape: DataShape = DataShape.PAIR
+    encode_missing_codes: bool = False
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.shape, DataShape):
+            raise TypeError("data shape must be a DataShape.")
+        if not isinstance(self.encode_missing_codes, bool):
+            raise TypeError("encode_missing_codes must be a boolean.")
+        if self.encode_missing_codes and self.shape is not DataShape.SINGLE:
+            raise ValueError("encode_missing_codes requires data shape single.")
         batch_size = self.dataloader["batch_size"]
         num_workers = self.dataloader["num_workers"]
         if isinstance(batch_size, bool) or not isinstance(batch_size, int):
@@ -70,7 +79,7 @@ class DataModule(LightningDataModule):
 
         self.config = config
         self.runtime = runtime
-        self.collator = Collator(runtime, task_weights)
+        self.collator = _collator(config, runtime, task_weights)
         self.output_dir = output_dir
         self.loader_name = loader_name
         self._train_dataset = None
@@ -95,7 +104,7 @@ class DataModule(LightningDataModule):
             raise RuntimeError("DataModule.setup() must run before reading samples.")
         return [self._train_dataset[index] for index in indices]
 
-    def train_dataloader(self) -> Iterable[ModelBatch]:
+    def train_dataloader(self) -> Iterable[ConcreteTrainInput]:
         if self._train_dataset is None:
             raise RuntimeError("DataModule.setup() must run before train_dataloader().")
         loader = self.config.dataloader
@@ -106,6 +115,8 @@ class DataModule(LightningDataModule):
         store_dataset = _store_group_dataset(self._train_dataset)
         lba = loader.get("lba")
         if lba is not None and lba.enabled:
+            if self.config.shape is DataShape.SINGLE:
+                raise ValueError("single data shape does not support LBA yet.")
             if store_dataset is not None:
                 return LBA(
                     self._train_dataset,
@@ -113,6 +124,7 @@ class DataModule(LightningDataModule):
                         store_dataset,
                         batch_size=loader["batch_size"],
                         audio_view=self.runtime.audio_view,
+                        shape=self.config.shape,
                     ),
                     num_workers=num_workers,
                     pin_memory=loader.get("pin_memory", False),
@@ -122,7 +134,8 @@ class DataModule(LightningDataModule):
                     collate_fn=self.collator,
                     len_fn=partial(
                         metadata_speech_length,
-                        frame_rate=self.runtime.codec.frame_rate,
+                        audio_view=self.runtime.audio_view,
+                        frame_rate=self.runtime.codec_frame_rate,
                         tasks=tuple(self.collator.tasks),
                         config=lba,
                     ),
@@ -163,6 +176,7 @@ class DataModule(LightningDataModule):
                     store_dataset,
                     batch_size=loader["batch_size"],
                     audio_view=self.runtime.audio_view,
+                    shape=self.config.shape,
                 ),
                 num_workers=num_workers,
                 pin_memory=loader.get("pin_memory", False),
@@ -197,7 +211,28 @@ def _store_group_dataset(dataset: object) -> StoreDataset | None:
     return None
 
 
-def _audio_views(audio_view: AudioView) -> tuple[tuple[Role, Modality, AudioView], ...]:
+def _collator(
+    config: Config,
+    runtime: DatasetRuntime,
+    task_weights: Mapping[Task, float],
+):
+    if config.shape is DataShape.PAIR:
+        return Collator(runtime, task_weights)
+    if config.shape is DataShape.SINGLE:
+        return SingleCollator(
+            runtime,
+            task_weights,
+            encode_missing_codes=config.encode_missing_codes,
+        )
+    raise AssertionError(f"unsupported data shape: {config.shape}")
+
+
+def _audio_views(
+    audio_view: AudioView,
+    shape: DataShape,
+) -> tuple[tuple[Role, Modality, AudioView], ...]:
+    if shape is DataShape.SINGLE:
+        return ((Role.DEFAULT, Modality.AUDIO, audio_view),)
     return (
         (Role.SOURCE, Modality.AUDIO, audio_view),
         (Role.TARGET, Modality.AUDIO, audio_view),
@@ -209,11 +244,12 @@ def _store_batch_sampler(
     *,
     batch_size: int,
     audio_view: AudioView,
+    shape: DataShape,
 ) -> StoreLocalBatchSampler:
     return StoreLocalBatchSampler(
         dataset,
         batch_size=batch_size,
-        views=_audio_views(audio_view),
+        views=_audio_views(audio_view, shape),
         shuffle=True,
     )
 

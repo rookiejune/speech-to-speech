@@ -12,6 +12,7 @@ from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig
 
+from speech_to_speech.callback import OnDeviceCodecMaterializer
 from speech_to_speech.callback import StageConfig as CallbackStageConfig
 from speech_to_speech.callback import StageSwitcher
 from speech_to_speech.callback.logging import (
@@ -86,6 +87,8 @@ def run(config: OverfitConfig) -> None:
         rt,
         {task: 1.0},
         config.data.sample_index,
+        shape=config.data.shape,
+        encode_missing_codes=config.data.encode_missing_codes,
         dataset=config.data,
     )
 
@@ -108,15 +111,24 @@ def run(config: OverfitConfig) -> None:
         )
     else:
         module, model = rvq(rt, config.pl_module, config.model, config.acoustic)
+    if config.data.encode_missing_codes is True:
+        module.batch_materializer = OnDeviceCodecMaterializer(rt)
     if uses_acoustic_decoder and config.callbacks.evaluation.enabled:
         datamodule.setup("fit")
         batch = next(iter(datamodule.train_dataloader()))
+        if config.data.encode_missing_codes is True:
+            batch = module.materialize_batch(batch)
+            if not isinstance(batch, ModelBatch):
+                raise TypeError(
+                    "acoustic evaluation requires a materialized ModelBatch."
+                )
+        evaluation_batch = cast(ModelBatch, batch)
         evaluation = AcousticEvaluation(
             cast(
                 Union[FlowModel, RVQModel],
                 model,
             ),
-            batch,
+            evaluation_batch,
             codec,
             output_dir,
             every_n_steps=max(1, config.train.max_steps // 5),

@@ -1,6 +1,6 @@
 # 010 Codec Oracle Flow/RVQ Smoke
 
-对应计划：[`schedules/010-codec-oracle-flow-rvq-smoke.md`](../schedules/010-codec-oracle-flow-rvq-smoke.md)。
+对应的旧 schedule 已删除；本文仅作为历史结果与 conclusion 引用证据保留。
 
 ## 环境
 

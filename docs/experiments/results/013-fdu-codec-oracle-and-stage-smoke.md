@@ -1,6 +1,6 @@
 # 013 FDU codec oracle and staged smoke
 
-对应计划：[`schedules/013-fdu-codec-oracle-and-stage-smoke.md`](../schedules/013-fdu-codec-oracle-and-stage-smoke.md)。
+对应的旧 schedule 已删除；本文仅作为历史结果与 conclusion 引用证据保留。
 
 ## Stage 2 joint LBA DDP smoke
 

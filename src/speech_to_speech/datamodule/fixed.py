@@ -11,7 +11,8 @@ from ..task import Task
 from .collator import Collator
 from .dataset import DatasetConfig, load_dataset
 from .protocol import DatasetRuntime
-from .types import ModelBatch
+from .single import SingleCollator
+from .types import ConcreteTrainInput, DataShape
 
 
 class FixedDataModule(LightningDataModule):
@@ -22,12 +23,21 @@ class FixedDataModule(LightningDataModule):
         task_weights: Mapping[Task, float],
         sample_index: int,
         *,
+        shape: DataShape = DataShape.PAIR,
+        encode_missing_codes: bool = False,
         dataset: DatasetConfig | None = None,
     ) -> None:
         super().__init__()
         self.codec = codec
         self.runtime = runtime
-        self.collator = Collator(runtime, task_weights)
+        self.shape = shape
+        self.encode_missing_codes = encode_missing_codes
+        self.collator = _collator(
+            shape,
+            runtime,
+            task_weights,
+            encode_missing_codes=encode_missing_codes,
+        )
         self.sample_index = sample_index
         self.dataset_config = dataset or DatasetConfig()
         self._dataset: Dataset[RawSample] | None = None
@@ -56,7 +66,7 @@ class FixedDataModule(LightningDataModule):
             raise RuntimeError("FixedDataModule.setup() must run before reading samples.")
         return [self._dataset[index] for index in indices]
 
-    def train_dataloader(self) -> Iterable[ModelBatch]:
+    def train_dataloader(self) -> Iterable[ConcreteTrainInput]:
         if self._training is None:
             raise RuntimeError("FixedDataModule.setup() must run before training.")
         return DataLoader(
@@ -65,3 +75,23 @@ class FixedDataModule(LightningDataModule):
             num_workers=0,
             collate_fn=self.collator,
         )
+
+
+def _collator(
+    shape: DataShape,
+    runtime: DatasetRuntime,
+    task_weights: Mapping[Task, float],
+    *,
+    encode_missing_codes: bool,
+):
+    if encode_missing_codes and shape is not DataShape.SINGLE:
+        raise ValueError("encode_missing_codes requires data shape single.")
+    if shape is DataShape.PAIR:
+        return Collator(runtime, task_weights)
+    if shape is DataShape.SINGLE:
+        return SingleCollator(
+            runtime,
+            task_weights,
+            encode_missing_codes=encode_missing_codes,
+        )
+    raise AssertionError(f"unsupported data shape: {shape}")

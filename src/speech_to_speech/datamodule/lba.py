@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from typing import Literal, Optional
 
 from anydataset.types import Sample as RawSample
-from anydataset.types import AudioItem, AudioMeta, Modality, Role
+from anydataset.types import AudioItem, AudioMeta, AudioView, Modality, Role
 from lba import LBA
+from torch import Tensor
 
 from ..task import Task
 from .parser import parse_sample, parse_text_sample
@@ -91,6 +92,7 @@ def speech_length(
 def metadata_speech_length(
     sample: RawSample,
     *,
+    audio_view: AudioView,
     frame_rate: float,
     tasks: Sequence[Task],
     config: LBAConfig,
@@ -106,8 +108,20 @@ def metadata_speech_length(
         )
     costs: list[int] = []
     for task in tasks:
-        source_frames = _task_frames(sample, task, source=True, frame_rate=frame_rate)
-        target_frames = _task_frames(sample, task, source=False, frame_rate=frame_rate)
+        source_frames = _task_frames(
+            sample,
+            task,
+            source=True,
+            audio_view=audio_view,
+            frame_rate=frame_rate,
+        )
+        target_frames = _task_frames(
+            sample,
+            task,
+            source=False,
+            audio_view=audio_view,
+            frame_rate=frame_rate,
+        )
         _cap(source_frames, config.max_source_frames, name="source frames")
         _cap(target_frames, config.max_target_frames, name="target frames")
         costs.append(math.ceil((source_frames + target_frames) / config.frame_unit))
@@ -150,6 +164,7 @@ def _task_frames(
     task: Task,
     *,
     source: bool,
+    audio_view: AudioView,
     frame_rate: float,
 ) -> int:
     if source:
@@ -160,10 +175,16 @@ def _task_frames(
         if task.target_modality is not Modality.AUDIO:
             return 0
         role = Role.TARGET
-    return _audio_frames(sample, role, frame_rate=frame_rate)
+    return _audio_frames(sample, role, audio_view=audio_view, frame_rate=frame_rate)
 
 
-def _audio_frames(sample: RawSample, role: Role, *, frame_rate: float) -> int:
+def _audio_frames(
+    sample: RawSample,
+    role: Role,
+    *,
+    audio_view: AudioView,
+    frame_rate: float,
+) -> int:
     item = sample.get((role, Modality.AUDIO))
     if item is None:
         return 0
@@ -171,16 +192,28 @@ def _audio_frames(sample: RawSample, role: Role, *, frame_rate: float) -> int:
         raise TypeError(f"{role.value} audio sample item must be an AudioItem.")
     value = item.meta.get(AudioMeta.DURATION)
     if value is None:
-        raise ValueError(
-            f"{role.value} audio sample is missing AudioMeta.DURATION; "
-            "migrate the prepared audio store with duration metadata."
-        )
+        return _codec_frames(item, role, audio_view=audio_view)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError("AudioMeta.DURATION must be a number of seconds.")
     duration = float(value)
     if not math.isfinite(duration) or duration < 0:
         raise ValueError("AudioMeta.DURATION must be finite and non-negative.")
     return round(duration * frame_rate)
+
+
+def _codec_frames(item: AudioItem, role: Role, *, audio_view: AudioView) -> int:
+    codes = item.views.get(audio_view)
+    if codes is None:
+        raise ValueError(
+            f"{role.value} audio sample is missing AudioMeta.DURATION and "
+            f"{audio_view.value} codec view."
+        )
+    if not isinstance(codes, Tensor) or codes.dim() != 2:
+        raise ValueError(
+            f"{role.value} audio {audio_view.value} codec view must have shape "
+            "[frames, codebooks] when AudioMeta.DURATION is absent."
+        )
+    return codes.size(0)
 
 
 def _cap(value: int, limit: int | None, *, name: str) -> None:

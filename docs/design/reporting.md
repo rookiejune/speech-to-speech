@@ -1,10 +1,11 @@
 # reporting
 
-提供实验入口共用的纯汇总函数，不持有 logger、文件或模型状态。
+S2S 不再维护本地 `speech_to_speech.reporting` 模块。实验入口共用的纯窗口汇总函数已经下沉到
+`anytrain.lightning.window_summary`，不持有 logger、文件或模型状态。
 
 ## 对外能力
 
-`window_summary(values, window=20)` 对一维数值序列生成可直接写入 JSON 的窗口摘要。
+`anytrain.lightning.window_summary(values, window=20)` 对一维数值序列生成可直接写入 JSON 的窗口摘要。
 `window` 的调用契约是正整数；实际窗口大小为 `min(window, len(values))`。
 
 空序列只返回：
@@ -32,6 +33,6 @@ NaN/Inf；监督指标的 finite 约束由产生这些数值的训练或实验�
 
 ## 边界
 
-- `reporting` 只计算稳定 mapping，不决定指标名称、输出路径、序列采集或日志后端。
+- `window_summary` 只计算稳定 mapping，不决定指标名称、输出路径、序列采集或日志后端。
 - overfit summary 与 probe/benchmark summary 复用同一函数，不能分别实现不同的窗口/比例语义。
 - `first`/`last` 是单点值，`last_to_first` 是首尾窗口均值之比，调用方不能把两者混为单步比值。

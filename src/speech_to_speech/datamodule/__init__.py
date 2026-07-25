@@ -16,6 +16,7 @@ from .protocol import (
     TextRuntime,
     TextRuntimeSnapshot,
 )
+from .single import SingleCollator
 from .text import (
     TextConfig,
     TextDataModule,
@@ -27,14 +28,20 @@ from .text import (
 from .types import (
     ACOUSTIC_PAD_ID,
     AcousticTarget,
+    ConcreteTrainInput,
+    DataShape,
     Language,
     ModelBatch,
     ModelSample,
+    RawSingleBatch,
+    RawSingleSample,
     Speech,
     SpeechPair,
+    SpeechUtterance,
     Text,
     TextPair,
     TrainBatch,
+    TrainInputBatch,
 )
 
 __all__ = [
@@ -42,10 +49,12 @@ __all__ = [
     "AcousticTarget",
     "Collator",
     "Config",
+    "ConcreteTrainInput",
     "DataLoaderConfig",
     "DataModule",
     "DataRuntime",
     "DataRuntimeSnapshot",
+    "DataShape",
     "DatasetConfig",
     "DatasetName",
     "DatasetRuntime",
@@ -56,9 +65,13 @@ __all__ = [
     "LoaderSchedule",
     "ModelBatch",
     "ModelSample",
+    "RawSingleBatch",
+    "RawSingleSample",
     "ScheduledDataLoader",
+    "SingleCollator",
     "Speech",
     "SpeechPair",
+    "SpeechUtterance",
     "Text",
     "TextCollator",
     "TextConfig",
@@ -71,6 +84,7 @@ __all__ = [
     "ToyDataset",
     "ToyTextDataset",
     "TrainBatch",
+    "TrainInputBatch",
     "TrainDataModule",
     "load_dataset",
     "load_text_dataset",

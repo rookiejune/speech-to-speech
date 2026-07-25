@@ -18,6 +18,9 @@ class DataRuntime(Protocol):
     def audio_view(self) -> AudioView: ...
 
     @property
+    def codec_frame_rate(self) -> float: ...
+
+    @property
     def audio_representation(self) -> AudioRepresentation: ...
 
     @cached_property

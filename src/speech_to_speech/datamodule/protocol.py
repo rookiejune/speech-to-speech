@@ -60,6 +60,7 @@ class DataRuntimeSnapshot:
 
     codec_name: str
     audio_view: AudioView
+    codec_frame_rate: float
     audio_representation: AudioRepresentation
     text_tokenizer: TextTokenizer
     audio_tokenizer: AudioTokenizer
@@ -74,6 +75,7 @@ class DataRuntimeSnapshot:
         return cls(
             codec_name=runtime.codec_name,
             audio_view=runtime.audio_view,
+            codec_frame_rate=runtime.codec_frame_rate,
             audio_representation=runtime.audio_representation,
             text_tokenizer=runtime.text_tokenizer,
             audio_tokenizer=runtime.audio_tokenizer,

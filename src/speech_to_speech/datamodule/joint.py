@@ -7,13 +7,13 @@ from typing import Protocol
 
 from lightning.pytorch import LightningDataModule
 
-from .types import ModelBatch, TrainBatch
+from .types import ConcreteTrainInput, TrainInputBatch
 
 
 class TrainDataModule(Protocol):
     def setup(self, stage: str | None = None) -> None: ...
 
-    def train_dataloader(self) -> Iterable[ModelBatch]: ...
+    def train_dataloader(self) -> Iterable[ConcreteTrainInput]: ...
 
 
 @dataclass(frozen=True)
@@ -37,7 +37,7 @@ class LoaderSchedule:
 class ScheduledDataLoader:
     def __init__(
         self,
-        loaders: Mapping[str, Iterable[ModelBatch]],
+        loaders: Mapping[str, Iterable[ConcreteTrainInput]],
         schedule: LoaderSchedule,
     ) -> None:
         missing = set(schedule.weights) - set(loaders)
@@ -53,7 +53,7 @@ class ScheduledDataLoader:
         self.loaders = dict(loaders)
         self.schedule = schedule
 
-    def __iter__(self) -> Iterator[TrainBatch]:
+    def __iter__(self) -> Iterator[TrainInputBatch]:
         keys = tuple(self.schedule.weights)
         weights = self.schedule.weights
         iterators = {key: iter(self.loaders[key]) for key in keys}
@@ -174,9 +174,9 @@ def _allocate_loaders(
 
 def _next_batch(
     key: str,
-    iterators: dict[str, Iterator[ModelBatch]],
-    loaders: Mapping[str, Iterable[ModelBatch]],
-) -> ModelBatch:
+    iterators: dict[str, Iterator[ConcreteTrainInput]],
+    loaders: Mapping[str, Iterable[ConcreteTrainInput]],
+) -> ConcreteTrainInput:
     try:
         return next(iterators[key])
     except StopIteration:

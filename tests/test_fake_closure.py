@@ -115,6 +115,7 @@ class _Runtime:
         self.config = SimpleNamespace(audio_view=AudioView.LONGCAT)
         self.codec_name = "longcat"
         self.audio_view = AudioView.LONGCAT
+        self.codec_frame_rate = 50.0
         self.audio_representation = AudioRepresentation.DECOUPLED
         self.text_tokenizer = _TextTokenizer()
         self.audio_tokenizer = NativeAudioTokenizer(vocab_size=8)

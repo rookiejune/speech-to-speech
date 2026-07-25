@@ -30,8 +30,10 @@ from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig, OmegaConf
 from torch import nn
 
+from speech_to_speech.callback import OnDeviceCodecMaterializer
 from speech_to_speech.datamodule.collator import Collator, TextCollator, _allocate_tasks
 from speech_to_speech.datamodule import (
+    DataShape,
     DatasetConfig,
     DatasetName,
     FixedDataModule,
@@ -46,6 +48,7 @@ from speech_to_speech.datamodule import (
     ToyDataset,
     load_text_dataset,
 )
+from speech_to_speech.datamodule import SingleCollator
 from speech_to_speech.datamodule.module import Config as DataConfig
 from speech_to_speech.datamodule.module import DataModule
 from speech_to_speech.datamodule.parser import (
@@ -53,17 +56,21 @@ from speech_to_speech.datamodule.parser import (
     parse_sample,
     parse_text_sample,
 )
+from speech_to_speech.datamodule.lba import metadata_speech_length
 from speech_to_speech.datamodule.sample import build_sample
+from speech_to_speech.datamodule.single import build_single_sample, parse_single_sample
 from speech_to_speech.datamodule.protocol import DataRuntime, DataRuntimeSnapshot
 from speech_to_speech.datamodule.types import (
     Language,
     ModelBatch,
     ModelSample,
+    RawSingleBatch,
 )
 from speech_to_speech.callback.stage import Config as StageConfig
 from speech_to_speech.callback.stage import StageSwitcher
 from speech_to_speech.model import Config as ModelConfig, ToyConfig
 from speech_to_speech.runtime import AudioRepresentation, Config, Runtime
+from speech_to_speech.runtime.codec import BiCodecCodec
 from speech_to_speech.runtime.runtime import audio_tokenizer, dtype
 from speech_to_speech.runtime.audio_tokenizer import (
     FlattenedAudioTokenizer,
@@ -203,10 +210,29 @@ class ContractTest(unittest.TestCase):
         )
         bind.assert_called_once_with(support, backend)
 
+    def test_runtime_loads_bicodec_through_codec_boundary(self):
+        codec = SimpleNamespace(sample_rate=16_000, frame_rate=50.0)
+        runtime = Runtime(
+            Config(
+                codec="bicodec",
+                audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
+            )
+        )
+
+        with patch(
+            "speech_to_speech.runtime.runtime.load_codec",
+            return_value=codec,
+        ) as load:
+            loaded = runtime.codec
+
+        self.assertIs(loaded, codec)
+        load.assert_called_once_with("bicodec", None)
+
     def test_worker_runtime_snapshot_excludes_model_and_codec(self):
         runtime = SimpleNamespace(
             codec_name="longcat",
             audio_view=AudioView.LONGCAT,
+            codec_frame_rate=50.0,
             audio_representation=AudioRepresentation.DECOUPLED,
             text_tokenizer=_Tokenizer(10),
             audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
@@ -223,6 +249,7 @@ class ContractTest(unittest.TestCase):
 
         self.assertFalse(hasattr(snapshot, "codec"))
         self.assertFalse(hasattr(snapshot, "backbone"))
+        self.assertEqual(snapshot.codec_frame_rate, 50.0)
         self.assertEqual(snapshot.layout.blocks, runtime.layout.blocks)
         self.assertIs(snapshot.layout, snapshot.layout)
 
@@ -394,6 +421,43 @@ class ContractTest(unittest.TestCase):
         self.assertTrue(torch.equal(semantic, torch.tensor([[1], [2], [3]])))
         self.assertIsNone(acoustic)
 
+    def test_bicodec_view_uses_full_sequence_codes(self):
+        codes = torch.tensor([[1, 4, 7, 10], [2, 5, 8, 11]])
+        item = AudioItem(views={AudioView.BICODEC: codes})
+
+        semantic, acoustic = _parse_audio_item(item, AudioView.BICODEC)
+
+        self.assertTrue(torch.equal(semantic, codes))
+        self.assertIsNone(acoustic)
+
+    def test_bicodec_runtime_requires_full_codec_sequence(self):
+        with self.assertRaisesRegex(ValueError, "full codec sequence"):
+            Config(codec="bicodec")
+
+        config = Config(
+            codec="bicodec",
+            audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
+        )
+
+        self.assertIs(config.audio_view, AudioView.BICODEC)
+
+    def test_bicodec_adapter_preserves_semantic_and_global_tokens(self):
+        source = _BiCodecSource()
+        codec = BiCodecCodec(cast(Any, source))
+
+        codes = codec.encode(torch.zeros(2, 1, 8), 16_000)
+        decoded = codec.decode(codes)
+
+        self.assertEqual(codec.sample_rate, 16_000)
+        self.assertEqual(codec.frame_rate, 50.0)
+        self.assertEqual(codec.codebook_sizes, (5, 7, 7, 7))
+        self.assertEqual(tuple(codes.shape), (2, 4, 4))
+        self.assertTrue(torch.equal(codes[..., 0], source.semantic))
+        self.assertTrue(torch.equal(codes[:, :, 1:], source.global_tokens.expand(-1, 4, -1)))
+        self.assertTrue(torch.equal(source.detokenized_semantic, source.semantic))
+        self.assertTrue(torch.equal(source.detokenized_global_tokens, source.global_tokens))
+        self.assertEqual(tuple(decoded.shape), (2, 1, 8))
+
     def test_parser_rejects_non_codec_audio_views(self):
         item = AudioItem(
             views={AudioView.WAVEFORM: torch.zeros(2, 2)},
@@ -492,6 +556,7 @@ class ContractTest(unittest.TestCase):
         tokenizer = _Tokenizer(10)
         runtime = SimpleNamespace(
             audio_view=AudioView.LONGCAT,
+            codec_frame_rate=50.0,
             audio_representation=AudioRepresentation.DECOUPLED,
             text_tokenizer=tokenizer,
             audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
@@ -509,6 +574,108 @@ class ContractTest(unittest.TestCase):
         )
         self.assertEqual(tokenizer.encoded, ("target text", False))
 
+    def test_parse_sample_infers_duration_from_codec_frames_when_metadata_missing(self):
+        runtime = _data_runtime()
+
+        pair = parse_sample(_raw_sample_without_duration(), runtime)
+
+        self.assertEqual(pair.source.duration_seconds, 0.04)
+        self.assertEqual(pair.target.duration_seconds, 0.04)
+
+    def test_build_sample_uses_inferred_audio_seconds_for_audio_tasks(self):
+        runtime = _data_runtime()
+        runtime.text_tokenizer = _ChatTokenizer(10)
+        pair = parse_sample(_raw_sample_without_duration(), runtime)
+
+        tts = build_sample(pair, Task.TTS, runtime)
+        s2st = build_sample(pair, Task.S2ST, runtime)
+
+        self.assertEqual(tts.audio_seconds, 0.04)
+        self.assertEqual(s2st.audio_seconds, 0.08)
+
+    def test_single_collator_builds_tts_from_default_utterance(self):
+        runtime = _data_runtime()
+        runtime.text_tokenizer = _ChatTokenizer(10)
+        utterance = parse_single_sample(_raw_single_sample(), runtime)
+        sample = build_single_sample(utterance, Task.TTS, runtime)
+
+        batch = SingleCollator(runtime, {Task.TTS: 1.0})([_raw_single_sample()])
+
+        self.assertEqual(sample.task, Task.TTS)
+        self.assertEqual(batch.tasks, [Task.TTS])
+        self.assertIsNotNone(batch.acoustic_target)
+        supervised = batch.token_labels[batch.token_labels.ne(-100)]
+        self.assertTrue(torch.equal(supervised, torch.tensor([10, 11, 19])))
+        self.assertAlmostEqual(float(batch.audio_seconds[0].item()), 0.04)
+
+    def test_single_collator_builds_asr_from_the_same_utterance_shape(self):
+        runtime = _data_runtime()
+        runtime.text_tokenizer = _ChatTokenizer(10)
+
+        batch = SingleCollator(runtime, {Task.ASR: 1.0})([_raw_single_sample()])
+
+        self.assertEqual(batch.tasks, [Task.ASR])
+        self.assertIsNone(batch.acoustic_target)
+        supervised = batch.token_labels[batch.token_labels.ne(-100)]
+        self.assertTrue(torch.equal(supervised, torch.tensor([1, 2, 1])))
+
+    def test_single_collator_emits_raw_batch_only_for_explicit_waveform_fallback(self):
+        runtime = _data_runtime()
+        runtime.text_tokenizer = _ChatTokenizer(10)
+        raw = _raw_single_waveform_sample()
+
+        with self.assertRaisesRegex(ValueError, "missing .* codec"):
+            SingleCollator(runtime, {Task.TTS: 1.0})([raw])
+
+        batch = SingleCollator(
+            runtime,
+            {Task.TTS: 1.0},
+            encode_missing_codes=True,
+        )([raw])
+
+        self.assertIsInstance(batch, RawSingleBatch)
+        self.assertEqual(batch.tasks, [Task.TTS])
+        self.assertEqual(batch.samples[0].sample_rate, 4)
+        self.assertEqual(batch.samples[0].duration_seconds, 1.0)
+
+    def test_on_device_codec_materializer_converts_raw_single_batch(self):
+        runtime = _data_runtime()
+        runtime.text_tokenizer = _ChatTokenizer(10)
+        runtime.codec = _EncodingCodec()
+        raw = SingleCollator(
+            runtime,
+            {Task.TTS: 1.0},
+            encode_missing_codes=True,
+        )([_raw_single_waveform_sample()])
+
+        batch = OnDeviceCodecMaterializer(runtime)(raw, device=torch.device("cpu"))
+
+        self.assertIsInstance(batch, ModelBatch)
+        self.assertEqual(batch.tasks, [Task.TTS])
+        self.assertIsNotNone(batch.acoustic_target)
+        self.assertEqual(runtime.codec.calls, [((1, 1, 4), 4)])
+
+    def test_datamodule_can_select_single_shape_without_changing_pair_default(self):
+        runtime = _data_runtime()
+        runtime.text_tokenizer = _ChatTokenizer(10)
+        config = DataConfig(
+            codec="longcat",
+            dataloader={"batch_size": 1, "num_workers": 0},
+            shape=DataShape.SINGLE,
+            encode_missing_codes=True,
+        )
+        datamodule = DataModule(config, runtime, {Task.TTS: 1.0})
+
+        with patch(
+            "speech_to_speech.datamodule.module.load_dataset",
+            return_value=[_raw_single_waveform_sample()],
+        ):
+            datamodule.setup()
+            batch = next(iter(datamodule.train_dataloader()))
+
+        self.assertIsInstance(batch, RawSingleBatch)
+        self.assertEqual(datamodule.config.shape, DataShape.SINGLE)
+
     def test_full_codec_sequence_flattens_complete_codes_without_acoustic_target(self):
         tokenizer = FlattenedAudioTokenizer(
             codebook_sizes=(8, 10),
@@ -517,6 +684,7 @@ class ContractTest(unittest.TestCase):
         audio_start = 10
         runtime = SimpleNamespace(
             audio_view=AudioView.LONGCAT,
+            codec_frame_rate=50.0,
             audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
             text_tokenizer=_ChatTokenizer(10),
             audio_tokenizer=tokenizer,
@@ -821,6 +989,30 @@ class ContractTest(unittest.TestCase):
                     ),
                 )
 
+    def test_metadata_speech_length_uses_codec_frames_without_duration(self):
+        length = metadata_speech_length(
+            _raw_sample_without_duration(),
+            audio_view=AudioView.LONGCAT,
+            frame_rate=50.0,
+            tasks=[Task.S2ST],
+            config=LBAConfig(frame_unit=2),
+        )
+
+        self.assertEqual(length, 2)
+
+    def test_metadata_speech_length_requires_codec_view_without_duration(self):
+        raw = _raw_sample_without_duration()
+        del raw[(Role.SOURCE, Modality.AUDIO)].views[AudioView.LONGCAT]
+
+        with self.assertRaisesRegex(ValueError, "missing AudioMeta.DURATION"):
+            metadata_speech_length(
+                raw,
+                audio_view=AudioView.LONGCAT,
+                frame_rate=50.0,
+                tasks=[Task.S2ST],
+                config=LBAConfig(frame_unit=2),
+            )
+
     def test_text_datamodule_uses_lba_when_enabled(self):
         runtime = SimpleNamespace(
             text_tokenizer=_ChatTokenizer(32),
@@ -874,11 +1066,23 @@ class ContractTest(unittest.TestCase):
                 "unicodec",
                 SimpleNamespace(
                     semantic_codebook=torch.zeros(11, 4),
+                    codebook_sizes=(11,),
                     acoustic_codebook_sizes=(),
                     frame_rate=50.0,
                 ),
                 AudioView.UNICODEC,
                 (11,),
+            ),
+            (
+                "bicodec",
+                SimpleNamespace(
+                    semantic_codebook=torch.zeros(13, 4),
+                    codebook_sizes=(13, 17, 17, 17),
+                    acoustic_codebook_sizes=(),
+                    frame_rate=50.0,
+                ),
+                AudioView.BICODEC,
+                (13, 17, 17, 17),
             ),
         )
 
@@ -1329,6 +1533,42 @@ class ContractTest(unittest.TestCase):
         self.assertTrue(model.backbone.model.norm.weight.requires_grad)
 
 
+class _BiCodecSource:
+    config = {"sample_rate": 16_000, "latent_hop_length": 320}
+    global_codebook_sizes = (7,)
+    sample_rate = 16_000
+    semantic_codebook_sizes = (5,)
+
+    def __init__(self) -> None:
+        self.semantic = torch.tensor(
+            [[1, 2, 3, 4], [4, 3, 2, 1]],
+            dtype=torch.long,
+        )
+        self.global_tokens = torch.tensor(
+            [[[1, 2, 3]], [[4, 5, 6]]],
+            dtype=torch.long,
+        )
+        self.detokenized_semantic = torch.empty(0, dtype=torch.long)
+        self.detokenized_global_tokens = torch.empty(0, dtype=torch.long)
+
+    def encode(self, audio: torch.Tensor, sample_rate: int):
+        self.encoded_audio = audio
+        self.encoded_sample_rate = sample_rate
+        return SimpleNamespace(
+            semantic=self.semantic,
+            global_tokens=self.global_tokens,
+        )
+
+    def detokenize(
+        self,
+        semantic: torch.Tensor,
+        global_tokens: torch.Tensor,
+    ) -> torch.Tensor:
+        self.detokenized_semantic = semantic
+        self.detokenized_global_tokens = global_tokens
+        return torch.ones(semantic.size(0), 1, 8)
+
+
 def _sample(task: Task) -> ModelSample:
     return ModelSample(
         input_ids=torch.tensor([1, 2]),
@@ -1373,6 +1613,7 @@ def _data_runtime():
     return SimpleNamespace(
         codec_name="longcat",
         audio_view=AudioView.LONGCAT,
+        codec_frame_rate=50.0,
         audio_representation=AudioRepresentation.DECOUPLED,
         text_tokenizer=_Tokenizer(10),
         audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
@@ -1391,6 +1632,15 @@ def _longcat_codec():
         acoustic_codebook_sizes=(3,),
         frame_rate=50.0,
     )
+
+
+class _EncodingCodec:
+    def __init__(self) -> None:
+        self.calls: list[tuple[tuple[int, ...], int]] = []
+
+    def encode(self, audio: torch.Tensor, sample_rate: int) -> torch.Tensor:
+        self.calls.append((tuple(audio.shape), sample_rate))
+        return audio.new_tensor([[[0, 2], [1, 3]]], dtype=torch.long)
 
 
 def _raw_sample(index: int = 0):
@@ -1416,6 +1666,43 @@ def _raw_sample(index: int = 0):
             meta={TextMeta.LANG: Lang.EN},
         ),
     }
+
+
+def _raw_single_sample(index: int = 0):
+    return {
+        (Role.DEFAULT, Modality.AUDIO): AudioItem(
+            views={
+                AudioView.LONGCAT: torch.tensor(
+                    [[index, index + 2], [index + 1, index + 3]]
+                )
+            },
+            meta={AudioMeta.DURATION: 0.04},
+        ),
+        (Role.DEFAULT, Modality.TEXT): TextItem(
+            views={TextView.TEXT: "single text"},
+            meta={TextMeta.LANG: Lang.EN},
+        ),
+    }
+
+
+def _raw_single_waveform_sample():
+    return {
+        (Role.DEFAULT, Modality.AUDIO): AudioItem(
+            views={AudioView.WAVEFORM: (torch.ones(1, 4), 4)},
+            meta={},
+        ),
+        (Role.DEFAULT, Modality.TEXT): TextItem(
+            views={TextView.TEXT: "single text"},
+            meta={TextMeta.LANG: Lang.EN},
+        ),
+    }
+
+
+def _raw_sample_without_duration(index: int = 0):
+    sample = _raw_sample(index)
+    for role in (Role.SOURCE, Role.TARGET):
+        sample[(role, Modality.AUDIO)].meta.pop(AudioMeta.DURATION)
+    return sample
 
 
 def _raw_text_sample():

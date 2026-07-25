@@ -34,6 +34,7 @@ from scripts.overfit import (
 )
 from scripts.train import build_datamodule as build_train_datamodule
 from speech_to_speech.datamodule import (
+    DataShape,
     DataModule,
     DatasetName,
     JointDataModule,
@@ -129,6 +130,20 @@ class ConfigTest(unittest.TestCase):
         self.assertIsInstance(config.model.toy, ToyConfig)
         self.assertIs(config.data.name, DatasetName.TOY)
         self.assertEqual(config.run_name, "longcat-full-sequence-token")
+        self.assertEqual(config.train.max_steps, 2)
+        self.assertFalse(config.callbacks.task_sample.enabled)
+        self.assertFalse(config.callbacks.evaluation.enabled)
+
+    def test_bicodec_tts_overfit_is_single_token_only(self):
+        config = overfit(_compose("overfit", "experiment=bicodec_tts_overfit"))
+
+        self.assertIsInstance(config, OverfitTokenConfig)
+        self.assertEqual(config.runtime.codec, "bicodec")
+        self.assertEqual(config.runtime.audio_representation.value, "full_codec_sequence")
+        self.assertEqual(config.acoustic.type, AcousticType.NONE.value)
+        self.assertIs(config.data.name, DatasetName.QWEN_TTS_BICODEC)
+        self.assertIs(config.data.shape, DataShape.SINGLE)
+        self.assertEqual(config.task, "tts")
         self.assertEqual(config.train.max_steps, 2)
         self.assertFalse(config.callbacks.task_sample.enabled)
         self.assertFalse(config.callbacks.evaluation.enabled)
@@ -978,6 +993,22 @@ class ConfigTest(unittest.TestCase):
                     re.findall(r"\bexperiment=([a-z0-9_]+)", source),
                     [expected],
                 )
+
+    def test_bicodec_tts_job_is_tts_only_and_configurable(self):
+        root = Path(__file__).parents[1]
+        source = (root / "jobs" / "015" / "01_bicodec_tts_overfit.sh").read_text()
+
+        self.assertIn("workspace/jobs/fudan/speech_to_speech_env.sh", source)
+        self.assertIn("scripts/overfit.py", source)
+        self.assertEqual(
+            re.findall(r"\bexperiment=([a-z0-9_]+)", source),
+            ["bicodec_tts_overfit"],
+        )
+        self.assertIn('"data.root=${bicodec_data_root}"', source)
+        self.assertNotIn("runtime.bicodec_", source)
+        self.assertIn("SPARK_TTS_ROOT", source)
+        self.assertNotIn("asr", source.lower())
+        self.assertIn('"$@"', source)
 
 
 def _compose(config_name: str, *overrides: str) -> DictConfig:
