@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TypedDict
 
+from anydataset.types import Modality
 from anytrain.module.idspace import Layout
 from torch import Tensor
 
@@ -76,6 +77,13 @@ class FlowObjective(Objective[FlowObjectiveModel]):
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
         target_data = batch.acoustic_target
+        if (
+            target_data is None
+            and batch.tasks[0].target_modality is Modality.AUDIO
+        ):
+            raise ValueError(
+                "FlowObjective requires acoustic target data for audio-target batches."
+            )
         hidden_states = model.token_hidden_states(
             batch.input_ids,
             attention_mask=batch.attention_mask,
@@ -148,6 +156,13 @@ class RVQObjective(Objective[RVQObjectiveModel]):
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
         target_data = batch.acoustic_target
+        if (
+            target_data is None
+            and batch.tasks[0].target_modality is Modality.AUDIO
+        ):
+            raise ValueError(
+                "RVQObjective requires acoustic target data for audio-target batches."
+            )
         hidden_states = model.token_hidden_states(
             batch.input_ids,
             attention_mask=batch.attention_mask,

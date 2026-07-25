@@ -499,6 +499,17 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertNotIn("flow_matching", outputs)
         self.assertEqual(model.token_hidden_calls, 1)
 
+    def test_text_target_does_not_require_acoustic_target_for_rvq(self):
+        layout = Layout(text=(0, 4), audio=(4, 7))
+        model = _RVQModel(layout)
+        batch = _batch(Task.ASR, token_labels=torch.tensor([[-100, 1]]))
+
+        outputs = RVQObjective(layout)(batch, model)
+
+        self.assertIn("token", outputs)
+        self.assertNotIn("rvq", outputs)
+        self.assertEqual(model.token_hidden_calls, 1)
+
     def test_token_objective_does_not_require_acoustic_model(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
         model = _TokenForwardModel(layout)
@@ -565,17 +576,22 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(gradient).all())
         self.assertTrue(torch.equal(gradient[:, 1], torch.zeros_like(gradient[:, 1])))
 
-    def test_unified_audio_target_uses_token_objective_only(self):
+    def test_acoustic_objectives_require_audio_target_data(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
-        model = _FlowModel(layout)
-        loss = FlowObjective(layout, _FlowRuntime())
         batch = _batch(Task.TTS, token_labels=torch.tensor([[-100, 4]]))
 
-        outputs = loss(batch, model)
-
-        self.assertIn("token", outputs)
-        self.assertNotIn("flow_matching", outputs)
-        self.assertEqual(model.token_hidden_calls, 1)
+        objectives = (
+            (FlowObjective(layout, _FlowRuntime()), _FlowModel(layout)),
+            (RVQObjective(layout), _RVQModel(layout)),
+        )
+        for objective, model in objectives:
+            with self.subTest(objective=type(objective).__name__):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"{type(objective).__name__} requires acoustic target data",
+                ):
+                    objective(batch, model)
+                self.assertEqual(model.token_hidden_calls, 0)
 
     def test_repa_is_an_explicit_audio_objective(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
