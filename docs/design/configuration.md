@@ -130,7 +130,8 @@ schema，不重复声明字段。OmegaConf 对字符串枚举只接受成员
 
 `configs/stage/stage_*.yaml` 只描述 loader/task schedule 与 `batches_per_step`。参数冻结和
 backbone top-fraction 抽象为顶层 `parameter_policy` 组，入口解析为
-`ParameterPolicyConfig` 后传给 `StageSwitcher`。默认 staged smoke 仍保持历史 stage 到
-policy 的映射：stage 0/4 使用 `full`，stage 1/2 使用 `speech_interface`，stage 3 使用
-`speech_interface_top_third`；需要只训练 semantic token interface 时显式选择
-`parameter_policy=semantic_only`。
+`ParameterPolicyConfig`，并在 Trainer/optimizer 创建前一次性应用。一个正式 job 只选择一个
+stage 和一个 parameter policy，运行中不切换数据计划或参数冻结。experiment 显式保留约定组合：
+stage 0/4 使用 `full`，stage 1/2 使用 `speech_interface`，stage 3 使用
+`speech_interface_top_third`；这不是 `StageName` 的隐式映射。需要只训练 semantic token
+interface 时显式选择 `parameter_policy=semantic_only`。

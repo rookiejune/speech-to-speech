@@ -211,7 +211,6 @@ def _request_metadata(
         "prompt_tokens": int(request["prompt_ids"].numel()),
         "source": _modality_metadata(sample, source_role, task.source_modality),
         "reference": _modality_metadata(sample, types.Role.TARGET, task.target_modality),
-        "source_acoustic_frames": _acoustic_frames(request),
     }
 
 
@@ -244,10 +243,6 @@ def _modality_metadata(
             **_codes_metadata(codes),
         }
     raise AssertionError(f"unsupported sample modality: {modality.value}")
-
-
-def _acoustic_frames(request: Request) -> int:
-    return 0
 
 
 def _result_metadata(result: Result, *, max_new_tokens: int) -> dict[str, Any]:

@@ -13,8 +13,6 @@ from lightning.pytorch.callbacks import Callback, ModelCheckpoint
 from omegaconf import DictConfig
 
 from speech_to_speech.callback import OnDeviceCodecMaterializer
-from speech_to_speech.callback import StageConfig as CallbackStageConfig
-from speech_to_speech.callback import StageSwitcher
 from speech_to_speech.callback.logging import GradNormLogger, LossSummary, OutputsLogger
 from speech_to_speech.datamodule import (
     Config as SpeechDataModuleConfig,
@@ -29,7 +27,7 @@ from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.performance import TrainingFlops
 from speech_to_speech.pl_module.composition import flow, rvq, token
 from speech_to_speech.runtime import Config as RuntimeConfig
-from speech_to_speech.runtime import Runtime, init_runtime
+from speech_to_speech.runtime import Runtime
 from speech_to_speech.stage import StageLoaderConfig, apply_parameter_policy
 from speech_to_speech.task import Task
 
@@ -75,7 +73,7 @@ def run(config: StagedTrainConfig) -> None:
 
     pl.seed_everything(config.train.seed, workers=True)
     rt_config = runtime_config(config)
-    rt = init_runtime(rt_config)
+    rt = Runtime(rt_config)
 
     torch.manual_seed(config.train.seed)
     acoustic_type = _composition(
@@ -233,14 +231,6 @@ def training_callbacks(
             list[Callback],
             [
                 OutputsLogger(),
-                StageSwitcher(
-                    CallbackStageConfig(
-                        task_weights_by_stage=None,
-                        epoch_milestones=[],
-                        loader_weights_by_stage=[config.stage.loader_weights()],
-                        model_stages=[config.parameter_policy],
-                    )
-                ),
                 summary,
             ],
         )

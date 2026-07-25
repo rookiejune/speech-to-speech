@@ -12,7 +12,7 @@ from speech_to_speech.generation.batch import requests_from_batch
 from speech_to_speech.generation.reporting import compare, summary
 from speech_to_speech.model.acoustic import FlowModel
 from speech_to_speech.runtime import Config as RuntimeConfig
-from speech_to_speech.runtime import init_runtime
+from speech_to_speech.runtime import Runtime
 from speech_to_speech.task import Task
 from zhuyin.datasets.wmt19_tts import wmt19_tts_codec
 
@@ -30,7 +30,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     torch.manual_seed(args.seed)
-    runtime = init_runtime(
+    runtime = Runtime(
         RuntimeConfig(
             codec=args.codec,
             backbone=args.backbone,
@@ -92,7 +92,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         "max_new_tokens": args.max_new_tokens,
         "seed": args.seed,
         "prompt_tokens": int(request["prompt_ids"].numel()),
-        "source_acoustic_frames": 0,
         "second_step_probe": probe,
         "cached": summary(cached),
         "full_recompute": summary(full),

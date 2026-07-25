@@ -104,6 +104,8 @@ semantic-audio token IDs
 
 Native/BPE semantic tokenizers 使用 codec codebook 初始化；完整 codec sequence tokenizer
 使用随机初始化，因为它的 vocab 同时包含多 codebook offset tokens 和 codec/codebook markers。
+随机初始化只读取 codec 声明的 semantic feature dimension，并使用 backbone embedding 作为
+device/dtype reference，不要求 backend 暴露虚构的 codebook tensor。
 codec features 在 acoustic decoder 路径转换到对应 device/dtype。frame mask 在进入 codec
 前把 `-1` code padding 替换为安全值，adapter 后再清除无效位置。
 
@@ -135,6 +137,6 @@ frame condition 的 `generate_sequence()` 循环位于私有
 `model/_generation.py`，只通过有类型的 `generation_step()` 驱动模型。
 
 具体模型不跨文件调用 `_generate()` 或 `_acoustic_features()`。KV cache 只属于一次调用；
-首步注入 source acoustic prompt，后续只输入新 token。frame span lookup 是非持久 buffer，
+首步编码完整 semantic-token prompt，后续只输入新 token。frame span lookup 是非持久 buffer，
 token-only audio decode 和 acoustic feature generation 都复用该 buffer 统计帧数，避免在
 generation service 中重复调用 tokenizer。condition 在设备侧累计并一次展开。

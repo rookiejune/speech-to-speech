@@ -28,11 +28,9 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
 
 ## callback
 
-`speech_to_speech.callback` 导出 `StageConfig`、`StageSwitcher` 与 train-batch interval helper；以下日志 callback 从
-`speech_to_speech.callback.logging` 导入：
+`speech_to_speech.callback` 导出 on-device codec materializer 与 train-batch interval helper；
+以下日志 callback 从 `speech_to_speech.callback.logging` 导入：
 
-- `StageSwitcher`：按 `epoch_milestones` 切换 task 权重、loader 权重和参数冻结，并从
-  `current_epoch` 恢复当前 stage。
 - `OutputsLogger`：只提供 S2S objective 到 task label 的适配，按 label 聚合 `LossItem` 的通用日志逻辑来自
   `anytrain.lightning.LossItemLoggerCallback`。
 - `GradLogger` / `GradNormLogger`：只接入 S2S `TrainInterval`；指定分项或全局梯度范数的通用日志逻辑来自

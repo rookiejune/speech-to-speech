@@ -13,8 +13,6 @@ from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig
 
 from speech_to_speech.callback import OnDeviceCodecMaterializer
-from speech_to_speech.callback import StageConfig as CallbackStageConfig
-from speech_to_speech.callback import StageSwitcher
 from speech_to_speech.callback.logging import (
     AcousticEvaluation,
     FlowMatchingLogger,
@@ -32,9 +30,9 @@ from speech_to_speech.pl_module import SpeechToSpeechModule
 from speech_to_speech.pl_module.composition import flow, rvq, token
 from speech_to_speech.performance import TrainingFlops
 from speech_to_speech.runtime import Config as RuntimeConfig
-from speech_to_speech.runtime import init_runtime
+from speech_to_speech.runtime import Runtime
 from speech_to_speech.runtime.types import Codec
-from speech_to_speech.stage import ParameterGroup
+from speech_to_speech.stage import ParameterGroup, apply_parameter_policy
 from speech_to_speech.task import Task
 
 if TYPE_CHECKING:
@@ -79,7 +77,7 @@ def run(config: OverfitConfig) -> None:
 
     pl.seed_everything(config.train.seed, workers=True)
     rt_config = runtime_config(config)
-    rt = init_runtime(rt_config)
+    rt = Runtime(rt_config)
     codec = rt.codec
     task = Task(config.task)
     datamodule = FixedDataModule(
@@ -111,6 +109,7 @@ def run(config: OverfitConfig) -> None:
         )
     else:
         module, model = rvq(rt, config.pl_module, config.model, config.acoustic)
+    apply_parameter_policy(model, config.parameter_policy.spec())
     if config.data.encode_missing_codes is True:
         module.batch_materializer = OnDeviceCodecMaterializer(rt)
     if uses_acoustic_decoder and config.callbacks.evaluation.enabled:
@@ -123,13 +122,11 @@ def run(config: OverfitConfig) -> None:
                     "acoustic evaluation requires a materialized ModelBatch."
                 )
         evaluation_batch = cast(ModelBatch, batch)
+        acoustic_model = cast(Union[FlowModel, RVQModel], model)
         evaluation = AcousticEvaluation(
-            cast(
-                Union[FlowModel, RVQModel],
-                model,
-            ),
+            acoustic_model,
             evaluation_batch,
-            codec,
+            acoustic_model.acoustic_codec,
             output_dir,
             every_n_steps=max(1, config.train.max_steps // 5),
             every_audio_seconds=config.callbacks.evaluation.every_audio_seconds,
@@ -158,13 +155,6 @@ def run(config: OverfitConfig) -> None:
                 },
                 every_n_steps=1,
                 max_new_tokens=8,
-            ),
-            StageSwitcher(
-                CallbackStageConfig(
-                    task_weights_by_stage=[{task: 1.0}],
-                    epoch_milestones=[],
-                    model_stages=[config.parameter_policy],
-                )
             ),
             summary,
         ],

@@ -71,9 +71,6 @@ class ParameterPolicySpec:
                 raise ValueError("backbone_top_fraction must be in [0, 1].")
 
 
-StageSpec = ParameterPolicySpec
-
-
 @dataclass
 class ParameterPolicyConfig:
     name: ParameterPolicyName = ParameterPolicyName.FULL
@@ -139,9 +136,6 @@ class StageConfig:
             for name in self.loaders:
                 if not name:
                     raise ValueError("stage loader names must not be empty.")
-
-    def spec(self) -> ParameterPolicySpec:
-        return STAGE_SPECS[self.name]
 
     def loader_weights(self) -> dict[str, float]:
         return {name: loader.weight for name, loader in self.loaders.items()}
@@ -209,24 +203,6 @@ PARAMETER_POLICY_SPECS: Mapping[ParameterPolicyName, ParameterPolicySpec] = {
     ),
 }
 
-STAGE_POLICY_NAMES: Mapping[StageName, ParameterPolicyName] = {
-    StageName.STAGE_0: ParameterPolicyName.FULL,
-    StageName.STAGE_1: ParameterPolicyName.SPEECH_INTERFACE,
-    StageName.STAGE_2: ParameterPolicyName.SPEECH_INTERFACE,
-    StageName.STAGE_3: ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD,
-    StageName.STAGE_4: ParameterPolicyName.FULL,
-}
-
-STAGE_SPECS: Mapping[StageName, ParameterPolicySpec] = {
-    name: PARAMETER_POLICY_SPECS[policy]
-    for name, policy in STAGE_POLICY_NAMES.items()
-}
-
-
-def default_stage_config(name: StageName) -> StageConfig:
-    return StageConfig(name=name)
-
-
 def default_parameter_policy_config(
     name: ParameterPolicyName,
 ) -> ParameterPolicyConfig:
@@ -258,10 +234,6 @@ def apply_parameter_policy(
             trainable = _backbone_trainable(name, model, spec.backbone_top_fraction)
         parameter.requires_grad_(trainable)
     return counts
-
-
-def apply_stage(model: StagedModel, spec: ParameterPolicySpec) -> dict[ParameterGroup, int]:
-    return apply_parameter_policy(model, spec)
 
 
 def parameter_group(name: str) -> ParameterGroup:
@@ -357,8 +329,6 @@ __all__ = [
     "PARAMETER_POLICY_SPECS",
     "SEMANTIC_GROUPS",
     "SPEECH_INTERFACE_GROUPS",
-    "STAGE_POLICY_NAMES",
-    "STAGE_SPECS",
     "ParameterGroup",
     "ParameterPolicyConfig",
     "ParameterPolicyName",
@@ -366,10 +336,7 @@ __all__ = [
     "StageConfig",
     "StageLoaderConfig",
     "StageName",
-    "StageSpec",
     "apply_parameter_policy",
-    "apply_stage",
     "default_parameter_policy_config",
-    "default_stage_config",
     "parameter_group",
 ]

@@ -9,8 +9,8 @@
 - `codec_name`：dataset 与 runtime 共用的唯一 codec identity；`audio_view` 由它转换。
 - `text_tokenizer` / `audio_tokenizer`：Qwen-compatible text tokenizer 与 Native/CodecBPE audio
   tokenizer。
-- `codec`：经本地 `Codec` Protocol adapter 暴露 sample/frame rate、codebook、feature 与
-  decode 能力。
+- `codec`：经本地 capability Protocol adapter 暴露当前 backend 实际拥有的 encode/decode、
+  codebook table 或 acoustic feature 能力，不为缺失能力提供占位属性。
 - `semantic_codec`：semantic token generation 的 waveform decoder。默认与 `codec` 相同；配置
   `semantic_codec_artifact` 时惰性加载 `semantic-acoustic-codec` artifact，并复用同一个 backend。
 - `audio_representation`：选择 audio token 序列契约，当前为 `decoupled` 或
@@ -31,13 +31,18 @@ codebooks 编入 token 序列，因此不能同时配置 BPE audio tokenizer。O
 
 ## 协议
 
-`runtime/types.py` 定义资源对象的 `SemanticCodec`、`Codec`、`AudioTokenizer`、`TextTokenizer` 与 `Backbone`
-Protocol。`runtime/protocol.py` 统一定义 `DataRuntime`、`GenerationRuntime` 与
+`runtime/types.py` 定义资源对象的 `SemanticCodec`、`Codec`、`CodebookCodec`、
+`AcousticCodec`、`AudioTokenizer`、`TextTokenizer` 与 `Backbone` Protocol。
+`runtime/protocol.py` 统一定义 `DataRuntime`、`GenerationRuntime` 与
 `TokenModelRuntime` capability；消费模块不重复声明相同属性。`DataRuntime` 只公开 parser、
 sample builder 和 batch padding 所需资源。
 
-`SemanticCodec` 只要求 sample/frame rate 与 `decode(semantic_codes)`；完整 `Codec` 扩展它并拥有
-encode、codebook 和 acoustic feature 能力。artifact 当前只支持 LongCat decoupled representation，
+`SemanticCodec` 只要求 sample/frame rate 与 `decode(codes)`；`Codec` 增加 encode、完整
+`codebook_sizes` 与随机 audio embedding 所需的 `semantic_feature_dim`。`CodebookCodec` 进一步
+提供真实 `semantic_codebook`，供 native/BPE tokenizer 初始化 embedding；`AcousticCodec` 再增加
+独立 acoustic codebooks、code-to-feature 与 feature decode。LongCat 实现 `AcousticCodec`，
+UniCodec 实现 `CodebookCodec`，BiCodec full-sequence adapter 只实现基础 `Codec`，不伪造全零
+semantic codebook 或不可用 acoustic API。artifact 当前只支持 LongCat decoupled representation，
 且入口只允许与 `model/acoustic=none` 组合，避免同一次生成同时启用 S2S acoustic decoder 和外部
 semantic support。
 
@@ -57,17 +62,15 @@ encode/decode 保持原 device，并直接使用向量视图，不经过逐标�
 
 `frame_spans()` 只返回每个 token 覆盖的 frame 数，不重建内容。
 
-## Singleton 边界
+## 组装边界
 
-`init_runtime(config)` 只服务于顶层组装并返回当前进程的 runtime。重复用不同 config 初始化会
-报错；底层模块不回读 singleton。
+顶层入口直接通过 `Runtime(config)` 创建本次运行的资源聚合对象，并把它显式传给 model、
+DataModule 与 generation service。runtime 不保存进程级 singleton；同一进程需要多套配置时，
+每套配置各自拥有一个 `Runtime`，其惰性资源缓存互不共享。
 
 文件职责保持分离：`runtime/runtime.py` 实现配置与资源聚合，`runtime/codec.py` 隔离 codec
-adapter 和加载，`runtime/singleton.py` 只保存进程级初始化状态。
-
-model 接收显式 runtime；DataModule/Collator 接收显式 `DataRuntime`。parser、sample
-builder、batch padding、objective 与 generation service 不调用 singleton，因此 model 与 data
-不会各自读取不同的进程状态。
+adapter 和加载。DataModule/Collator 接收显式 `DataRuntime`；parser、sample builder、batch
+padding、objective 与 generation service 不读取全局 runtime 状态。
 
 ## 资源边界
 
@@ -75,7 +78,8 @@ builder、batch padding、objective 与 generation service 不调用 singleton�
 - device、dtype 与 attention backend 来自显式配置，不依赖 Transformers 环境默认值。
 - layout、backbone/tokenizer vocabulary 与 codec/audio-tokenizer vocabulary 属于同一 snapshot。
 - Runtime 不是 `nn.Module`；optimizer/checkpoint ownership 只由 model 属性决定。
-- `LongCatCodec` 与 `UnifiedCodec` 隔离具体第三方类型，模型只依赖本地 `Codec` Protocol；
+- `LongCatCodec`、`UnifiedCodec` 与 `BiCodecCodec` 隔离具体第三方类型，消费者只依赖所需的最窄
+  codec capability；
   UniCodec loader 只在边界转换为窄 `UnifiedCodecSource`，adapter 内不使用 `Any`。
 - text special tokens 与 chat template 当前属于 Qwen3 contract；替换 backbone 前需提供对应
   tokenizer/chat adapter。

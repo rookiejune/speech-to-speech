@@ -153,13 +153,13 @@ Runtime 聚合互相兼容的 backbone、text/audio tokenizer、codec、layout�
 
 - model 接收满足 `TokenModelRuntime`（flow 额外满足 `FlowModelRuntime`）的显式 runtime。
 - datamodule/collator 只依赖窄 `DataRuntime` Protocol。
-- 入口可通过 singleton 完成一次组装；parser、sample builder、batch padding 不读取 singleton。
+- 组合入口显式构造并传递 `Runtime`；parser、sample builder、batch padding 不读取全局状态。
 - DataModule 在加载 prepared dataset 前比较 `config.codec` 与 `runtime.codec_name`。
 - 同一可训练 `nn.Module` 只注册在 model 的一条 ownership path 下。
 
 ## 5. Model 与 Objective
 
-`model.Config` 只配置 token backbone 周边的 semantic-audio adapter、output adapter 和 acoustic prompt adapter。acoustic composition 使用独立结构：
+`model.Config` 只配置 token backbone 周边的 semantic-audio input/output adapter。acoustic composition 使用独立结构：
 
 ```python
 @dataclass(frozen=True)
@@ -209,8 +209,9 @@ token，不在 S2S model 内生成 acoustic feature/codebook。audio response �
 属于 runtime codec 的 `decode(semantic_codes)` 能力；generation service 只负责把生成的 global audio
 token 还原为 semantic codes 并调用该能力。当前 runtime codec 可以直接实现该能力，后续也可以由独立的
 semantic-only support artifact 提供，但两者不能改变 token model、objective 或 `Request -> Result` 契约。
-该最小能力由 `runtime.types.SemanticCodec` 表达；训练数据、Flow/RVQ 和 feature decode 继续依赖扩展它的
-完整 `Codec`，避免 semantic-only support 被迫伪造 acoustic codebook 能力。
+该最小能力由 `runtime.types.SemanticCodec` 表达；训练数据只要求基础 `Codec`，codec table 初始化
+要求 `CodebookCodec`，Flow/RVQ 和 feature decode 显式要求 `AcousticCodec`。因此 unified-token
+与 full-sequence backend 不需要伪造 acoustic API，BiCodec 也不需要构造全零 semantic codebook。
 
 `speech_to_speech.generation` 拥有 `Request`、`Result`、service、decode 与 text evaluation；`pl_module` 只负责 Lightning 集成。
 
@@ -226,7 +227,9 @@ model 对外提供：
 基类私有方法。循环首步编码完整多模态 prompt，后续复用 KV cache；已结束行会同步从输入和 cache
 移除，只让 active rows 继续计算。cache 只属于单次调用。
 
-`AcousticPrompt` 使用 `codes` 与 `token_positions`，只允许出现在 audio-source task。service 按 target modality 和是否存在 acoustic prompt 分组，左 padding 变长 prompt，逐行追踪 EOS/EOA，并恢复原请求顺序。
+当前 generation 只接收已经映射到 layout global ID 空间的 semantic-token prompt；audio-source
+内容和 text-source 内容都编码在 `Request.prompt_ids` 中，不存在独立 acoustic side-channel prompt。
+service 只按 target modality 分组，左 padding 变长 prompt，逐行追踪 EOS/EOA，并恢复原请求顺序。
 
 状态机：
 
@@ -240,20 +243,20 @@ representation 时直接复用 model 返回的 frame count 裁剪 features；`(t
 
 ## 7. Data 与阶段配置
 
-DataModule 显式持有 runtime 与一个可更新的 Collator。初始 `task_weights` 在构造时确定；
-`StageSwitcher` 在 epoch 边界调用 `set_task_weights()`。task weights 位于进程共享数组，持久 worker
-在后续 collate 时读取新值；worker 侧 runtime 是不含 backbone/codec 的数据快照。
+DataModule 显式持有 runtime 与 Collator。一个正式 job 只运行一个 stage；loader/task 权重在
+DataModule 构造时确定，训练过程中保持不变。task weights 位于进程共享数组，持久 worker 在
+collate 时读取；worker 侧 runtime 是不含 backbone/codec 的数据快照。
 
 同一组 task weights 只能包含相同 source/target modality 的任务，权重必须有限、非负且总和为
 正，以保证每个子 batch 的执行签名稳定。task 与 loader 权重只控制进入训练 step 的数据频率，
 不额外乘到 loss 上；token、flow、RVQ 与 REPA loss 跨联合子 batch 按有效 token/frame 数聚合。
 
-`scripts/overfit.py` 只用于 fixed-sample overfit、smoke 和 stage freeze 合同验收；正式训练入口是
+`scripts/overfit.py` 只用于 fixed-sample overfit、smoke 和参数冻结合同验收；正式训练入口是
 `scripts/train.py`。`configs/stage/stage_*.yaml` 是 Stage 0-4 的默认训练契约：每个 stage 显式声明 loader
-权重、loader 内 task 权重、`batches_per_step`、可训练参数组、冻结参数组和
-`backbone_top_fraction`。`stage.py` 只负责把配置校验为 `StageSpec` 并执行 freeze。Stage
-1-2 默认冻结 backbone，只训练 speech interface；Stage 3 解冻 Qwen 顶部 1/3 block 与 final
-norm；Stage 4 全解冻 Qwen。RVQ decoder 的结构性冻结参数始终保持 frozen。Stage callback
-可以在同一 stage 切换 task 权重、loader 权重和参数冻结。正式 joint entry 以
+权重、loader 内 task 权重和 `batches_per_step`。独立的 `parameter_policy` 显式声明可训练参数组、
+冻结参数组和 `backbone_top_fraction`，入口在 Trainer 创建前应用一次。experiment 当前约定
+Stage 1-2 使用 speech-interface policy，Stage 3 解冻 Qwen 顶部 1/3 block 与 final norm，
+Stage 4 使用 full policy；stage 本身不隐式选择 policy。RVQ decoder 的结构性冻结参数始终保持
+frozen。正式 joint entry 以
 `find_unused_parameters=False` 为目标时，同一 optimizer step 必须通过 joint batch 覆盖所有
 仍可训练的执行路径，或在进入该 step 前冻结未使用参数组。

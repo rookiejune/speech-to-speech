@@ -49,6 +49,8 @@ class Result(TypedDict):
 不插入 instruction，也不追加或校验 response prefix；按 task builder 契约构造的 audio-target
 request 已经以 BOA 结束。`generation.batch.requests_from_batch()` 会从 teacher-forcing batch
 保留该 prefix，直接构造 request 的调用方负责保持相同状态机。
+当前 prompt 只由 layout global token IDs 表达；audio-source 内容也编码为 semantic audio token，
+`Request` 不接受独立 acoustic code/feature side channel。
 
 service 在 padding 前校验每条 request：
 
