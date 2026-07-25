@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from lightning.pytorch import LightningDataModule
 
@@ -14,6 +14,11 @@ class TrainDataModule(Protocol):
     def setup(self, stage: str | None = None) -> None: ...
 
     def train_dataloader(self) -> Iterable[ConcreteTrainInput]: ...
+
+
+@runtime_checkable
+class _EpochSetter(Protocol):
+    def set_epoch(self, epoch: int) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -57,11 +62,12 @@ class ScheduledDataLoader:
         keys = tuple(self.schedule.weights)
         weights = self.schedule.weights
         iterators = {key: iter(self.loaders[key]) for key in keys}
+        cycles = {key: 0 for key in keys}
         if self.schedule.batches_per_step > 1:
             fixed = _allocate_loaders(weights, self.schedule.batches_per_step)
             while True:
                 yield tuple(
-                    _next_batch(key, iterators, self.loaders)
+                    _next_batch(key, iterators, self.loaders, cycles)
                     for key in fixed
                 )
 
@@ -72,7 +78,7 @@ class ScheduledDataLoader:
                 credits[key] += weights[key]
             selected = max(keys, key=lambda key: (credits[key], -keys.index(key)))
             credits[selected] -= total
-            yield _next_batch(selected, iterators, self.loaders)
+            yield _next_batch(selected, iterators, self.loaders, cycles)
 
 
 class JointDataModule(LightningDataModule):
@@ -176,15 +182,27 @@ def _next_batch(
     key: str,
     iterators: dict[str, Iterator[ConcreteTrainInput]],
     loaders: Mapping[str, Iterable[ConcreteTrainInput]],
+    cycles: dict[str, int],
 ) -> ConcreteTrainInput:
     try:
         return next(iterators[key])
     except StopIteration:
+        cycles[key] += 1
+        _set_epoch(loaders[key], cycles[key])
         iterators[key] = iter(loaders[key])
         try:
             return next(iterators[key])
         except StopIteration as error:
             raise RuntimeError(f"scheduled loader {key!r} produced no batches.") from error
+
+
+def _set_epoch(loader: Iterable[ConcreteTrainInput], epoch: int) -> None:
+    if isinstance(loader, _EpochSetter):
+        loader.set_epoch(epoch)
+        return
+    batch_sampler = getattr(loader, "batch_sampler", None)
+    if isinstance(batch_sampler, _EpochSetter):
+        batch_sampler.set_epoch(epoch)
 
 
 __all__ = [

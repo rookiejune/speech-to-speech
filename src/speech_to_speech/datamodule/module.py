@@ -4,12 +4,10 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import Any, TypedDict, cast
 
-from anydataset.dataset import AnyDataset, MergedDataset
-from anydataset.store import StoreLocalBatchSampler
-from anydataset.store.reader import StoreDataset
-from anydataset.types import AudioView, Modality, Role, Sample as RawSample
+from anydataset.dataset import MapStyleABC
+from anydataset.types import AudioView, Sample as RawSample
 from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader
 from typing_extensions import NotRequired
@@ -112,20 +110,19 @@ class DataModule(LightningDataModule):
         if not isinstance(self.collator.runtime, DataRuntimeSnapshot):
             snapshot = DataRuntimeSnapshot.from_runtime(self.runtime)
             self.collator.runtime = cast(DataRuntime, cast(object, snapshot))
-        store_dataset = _store_group_dataset(self._train_dataset)
         lba = loader.get("lba")
         if lba is not None and lba.enabled:
             if self.config.shape is DataShape.SINGLE:
                 raise ValueError("single data shape does not support LBA yet.")
-            if store_dataset is not None:
+            source_loader = _source_loader(
+                self._train_dataset,
+                loader=loader,
+                collate_fn=self.collator,
+            )
+            if source_loader is not None:
                 return LBA(
                     self._train_dataset,
-                    batch_sampler=_store_batch_sampler(
-                        store_dataset,
-                        batch_size=loader["batch_size"],
-                        audio_view=self.runtime.audio_view,
-                        shape=self.config.shape,
-                    ),
+                    batch_sampler=source_loader.batch_sampler,
                     num_workers=num_workers,
                     pin_memory=loader.get("pin_memory", False),
                     persistent_workers=(
@@ -169,15 +166,17 @@ class DataModule(LightningDataModule):
                 drop_last_flush=lba.drop_last_flush,
                 log_dir=_lba_log_dir(self.output_dir, self.loader_name),
             )
-        if store_dataset is not None:
+        source_loader = _source_loader(
+            self._train_dataset,
+            loader=loader,
+            collate_fn=self.collator,
+        )
+        if source_loader is not None:
+            if source_loader.dataset is self._train_dataset:
+                return cast(Iterable[ConcreteTrainInput], source_loader)
             return DataLoader(
                 self._train_dataset,
-                batch_sampler=_store_batch_sampler(
-                    store_dataset,
-                    batch_size=loader["batch_size"],
-                    audio_view=self.runtime.audio_view,
-                    shape=self.config.shape,
-                ),
+                batch_sampler=source_loader.batch_sampler,
                 num_workers=num_workers,
                 pin_memory=loader.get("pin_memory", False),
                 persistent_workers=(
@@ -197,18 +196,32 @@ class DataModule(LightningDataModule):
         )
 
 
-def _store_group_dataset(dataset: object) -> StoreDataset | None:
-    if isinstance(dataset, StoreDataset):
-        return dataset
-    if isinstance(dataset, AnyDataset):
-        source = dataset.dataset
-        return source if isinstance(source, StoreDataset) else None
-    if isinstance(dataset, MergedDataset):
-        left = _store_group_dataset(dataset.left)
-        if left is not None:
-            return left
-        return _store_group_dataset(dataset.right)
-    return None
+def _source_loader(
+    dataset: object,
+    *,
+    loader: DataLoaderConfig,
+    collate_fn: Any,
+) -> DataLoader[Any] | None:
+    source = _source_dataset(dataset)
+    if source is None:
+        return None
+    batch_size = loader["batch_size"]
+    return source.dataloader(
+        cost_fn=_unit_cost,
+        max_batch_memory=batch_size,
+        max_batch_samples=batch_size,
+        shuffle=True,
+        num_workers=loader["num_workers"],
+        pin_memory=loader.get("pin_memory", False),
+        persistent_workers=(
+            loader.get("persistent_workers", False) and loader["num_workers"] > 0
+        ),
+        collate_fn=collate_fn,
+    )
+
+
+def _source_dataset(dataset: object) -> MapStyleABC | None:
+    return dataset if isinstance(dataset, MapStyleABC) else None
 
 
 def _collator(
@@ -227,31 +240,8 @@ def _collator(
     raise AssertionError(f"unsupported data shape: {config.shape}")
 
 
-def _audio_views(
-    audio_view: AudioView,
-    shape: DataShape,
-) -> tuple[tuple[Role, Modality, AudioView], ...]:
-    if shape is DataShape.SINGLE:
-        return ((Role.DEFAULT, Modality.AUDIO, audio_view),)
-    return (
-        (Role.SOURCE, Modality.AUDIO, audio_view),
-        (Role.TARGET, Modality.AUDIO, audio_view),
-    )
-
-
-def _store_batch_sampler(
-    dataset: StoreDataset,
-    *,
-    batch_size: int,
-    audio_view: AudioView,
-    shape: DataShape,
-) -> StoreLocalBatchSampler:
-    return StoreLocalBatchSampler(
-        dataset,
-        batch_size=batch_size,
-        views=_audio_views(audio_view, shape),
-        shuffle=True,
-    )
+def _unit_cost(_index: int) -> int:
+    return 1
 
 
 def _lba_log_dir(output_dir: Path | None, loader_name: str) -> Path | None:

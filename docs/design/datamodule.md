@@ -21,7 +21,7 @@
   path，由 task 决定同一 utterance 的哪个 modality 作为 source/target；pair translation path
   不再承载 single-only 数据契约。
 - `sample.build_sample()`：根据 `Task` 把 `SpeechPair` 组装成 `ModelSample`，负责 chat
-  template、BOA/EOA/EOS、global ID 映射、token labels、acoustic prompt 和 target frame
+  template、BOA/EOA/EOS、global ID 映射、source token prompt、token labels 和 target frame
   positions。
 - `single.build_single_sample()`：复用同一 `ModelSample` / `ModelBatch` 输出契约，把 single
   utterance 组装成 text->audio 或 audio->text 序列；`pl_module` 不区分 batch 来源。
@@ -32,7 +32,8 @@
 - `task.Task` / `types.Language`：任务与语言枚举。`Task` 是 source/target modality、
   `uses_source_role` 和 instruction template 的唯一事实来源。
 - `Collator(runtime, task_weights)`：按任务权重为 raw samples 选择任务，依次调用 parser、
-  sample builder 和 batch padding；`set_task_weights()` 原地更新后续 batch 的任务分布。
+  sample builder 和 batch padding；正式训练在构造时固定 task weights，`set_task_weights()` 只保留
+  为显式的低层控制入口。
 - `TextDataModule` / `TextCollator`：纯文本 MT 数据路径，只读取 source/target text，当前可配置为
   anydataset `WMT19` preset 或 deterministic toy text samples，不消费 codec/audio tokenizer。
 - `JointDataModule` / `ScheduledDataLoader`：组织多个 homogeneous dataloader。默认按
@@ -152,26 +153,27 @@ acoustic_target: AcousticTarget | None
   view 的 frame count，不能把真实音频静默计为 0。
 - 同一 `task_weights` 中的任务必须具有相同 source/target modality，保证 DDP 各 rank 走相同
   模型路径。0 权重任务不会参与 batch 分配；每项权重必须有限且非负，总和必须有限且为正；
-  按 batch size 固定分配时，任一非 0 权重任务拿不到至少 1 条 sample 会直接报错。非法 stage
-  更新在替换现有权重前报错。DataModule 构造时必须提供初始权重；stage callback 只在 epoch
-  边界调用 `set_task_weights()`。task weights 使用进程共享数组，因此持久 worker 会在下一次
-  collate 时看到更新，不要求 Trainer 重建 DataLoader。
+  按 batch size 固定分配时，任一非 0 权重任务拿不到至少 1 条 sample 会直接报错。非法权重
+  更新在替换现有权重前报错。DataModule 构造时必须提供初始权重；正式入口不会在运行中调用
+  `set_task_weights()`。权重使用进程共享数组，因此显式更新时持久 worker 会在下一次 collate
+  看到新值，不要求重建 DataLoader。
 - `LoaderSchedule.batches_per_step=1` 保留单子 batch 轮转；`batches_per_step > 1` 使用固定
   loader 分配，任一非 0 权重 loader 拿不到至少 1 个子 batch 会报错。loss 聚合不使用 loader
-  权重，权重只改变数据进入训练 step 的频率。
+  权重，权重只改变数据进入训练 step 的频率。每个子 loader 独立维护从 0 开始的 cycle；耗尽后
+  先推进到下一 cycle，再通过 loader 的 `set_epoch()` 或其 `batch_sampler.set_epoch()` 更新
+  deterministic shuffle，然后重建 iterator。同一 schedule 和 per-rank batch count 下，各 rank
+  会在相同 optimizer step 推进相同子 loader 的 epoch。
 - `DataModule` 在构造 loader 前把 collator 的完整 runtime 替换为 `DataRuntimeSnapshot`；主进程
   仍持有正式 runtime 供 dataset setup 使用。`persistent_workers` 只在 `num_workers > 0` 时启用，
   `pin_memory` 由入口显式配置。
-- 对 store-backed prepared speech dataset，`DataModule` 使用 anydataset 的
-  `StoreLocalBatchSampler`，按 source/target audio payload shard 分组后 shuffle。DataLoader 仍索引
-  原始外层 dataset，因此 `AnyDataset` transform 或 `MergedDataset` 组合不会被绕过；正式
-  `train.yaml` 关闭 Lightning 自动 distributed sampler，由该 batch sampler 按 runtime shard
-  负责多进程切分。
-- 启用 `dataloader.lba.enabled` 时，store-backed speech dataset 仍以 anydataset 的
-  `StoreLocalBatchSampler(shuffle=True)` 作为 source sampler；LBA 只消费该 sampler 产出的
-  store-local index 流并在其上做长度规划，不再使用自己的 `shuffle=True` 替代 store shuffle。
-  非 store map-style dataset 没有 anydataset shard/locality 语义，才使用 LBA/DataLoader 自己的
-  sample shuffle。joint train 的外层 `ScheduledDataLoader` 不接受 Lightning 注入 sampler；当前
+- 对 anydataset `MapStyleABC`，`DataModule` 使用其 `dataloader()` 公开入口负责 deterministic
+  shuffle 与 runtime shard；store-backed dataset 会额外保留 payload locality。DataLoader 仍索引
+  原始外层 dataset，因此 `AnyDataset` transform 不会被绕过。正式 `train.yaml` 关闭 Lightning
+  自动 distributed sampler，避免重复切分。
+- 启用 `dataloader.lba.enabled` 时，LBA 消费 anydataset dataloader 的 batch sampler 产出的
+  index 流并在其上做长度规划，不再用自己的 `shuffle=True` 覆盖 source shuffle。非 anydataset
+  map-style dataset 才使用 LBA/DataLoader 自己的 sample shuffle。joint train 的外层
+  `ScheduledDataLoader` 不接受 Lightning 注入 sampler；当前
   FDU smoke 验证 DDP 下每个子 loader 都能创建 per-rank LBA log 并完成 2-step 训练，正式
   distributed sample partition 仍需在长跑前单独复核。
 - `DataModule.train_samples()` 是 callback 按索引读取已 setup 训练样本的公开边界；callback
