@@ -2,9 +2,9 @@
 
 对应 [014 schedule](../schedules/014-longcat-stable-stage1.md)。本文记录 2026-07-25
 在 FDU `145` 上完成的 P0 验收和当前边界。状态：**P0 在 debug-migrated copy 上通过**；
-正式 stable data root 的 parquet 指纹审计和无 duration parse/map-style dataloader probe
-已补齐；split manifest、native token/RVQ 分布和训练验收仍未完成，不能视为正式数据根已进入
-stage 1 长跑。
+正式 stable data root 的 parquet 指纹审计、无 duration parse/map-style dataloader probe、
+native token/RVQ 分布审计和 pilot split candidate 已补齐；正式 split manifest 固化和
+P1 训练验收仍未完成，不能视为正式数据根已进入 stage 1 长跑。
 
 ## 范围与代码状态
 
@@ -89,6 +89,38 @@ source/target 均缺失 duration metadata，计数为 `source=7`、`target=7`。
 0 秒；但它仍只是抽样 parse/dataloader 验证，不等同于 split、分布、训练 step、overfit、
 DDP 或 resume 验收。
 
+## Formal Root Distribution and Pilot Candidate Audit
+
+2026-07-26 对正式 LongCat train split 做 1000-sample distribution/pilot candidate 审计。
+输出目录为
+`145:/mnt/pami202/zhuyin/dynamic/debug/s2s-014-distribution-pilot-20260726T070417Z`，
+脚本为
+`145:/mnt/pami202/zhuyin/dynamic/debug/s2s-audit-scripts/s2s_014_distribution_pilot.py`。
+本轮没有修改正式 root；这里的 pilot split 只是 debug candidate artifact，不是最终 formal
+split manifest，也不能直接作为 stage 1 长跑入口。
+
+| Artifact | Size | Role |
+| --- | ---: | --- |
+| `stats.json` | `10088` | token/frame/duration distribution audit |
+| `split_candidate.json` | `9054` | 800/100/100 顺序 pilot candidate |
+
+审计读取 `wmt19_tts_codec(codec='longcat', split='train')`，`processed=1000/1000`；
+`parse_errors=0`、`validation_errors=0`、`valid_sample_count=1000`。source/target LongCat
+tensor 均为 rank-2 integer，且均为 4 个 codebooks。source frame count 为
+min `14`、p50 `43`、p95 `43`、max `43`、mean `42.634`；target frame count 为
+min `20`、p50 `43`、p95 `43`、max `43`、mean `42.507`。
+
+正式 root 中 `AudioMeta.DURATION` 仍然缺失，计数为 source `1000`、target `1000`；但
+从 frame count 推导出的正数 duration 计数为 source `1000`、target `1000`，与前一节
+parse/dataloader probe 的 optional-duration contract 一致。`stats.json` 中已记录各 codebook
+的 min/max 与 top counts；source codebook 范围包含 cb0 `0..8191`、cb1-cb3 `0..8099`，
+target cb0 为 `2..8186`、cb1-cb3 为 `0..8099`。
+
+`split_candidate.json` 使用 `sequential_no_sample_id` 方法生成候选切分：train `800`、
+dev `100`、test `100`。由于这是从当前 1000 条 train view 顺序生成的 debug candidate，
+后续仍需把正式 split manifest 的生成规则、指纹、路径和 companion metadata 固化到正式
+数据/训练入口后，才允许进入 P1 长跑。
+
 ## P0 Wrapper Run
 
 复旦 P0 wrapper 复用现有 `jobs/011/01_rvq_native_p0_fixed_sample.sh`，但输出写入 014 路线的
@@ -136,7 +168,8 @@ P0 在 debug-migrated copy 上通过：代码迁移的本地/远端 targeted tes
 
 边界仍然明确：本轮没有修改正式 stable data root；正式根 parquet/fingerprint 审计与
 无 duration parse/map-style dataloader probe 已完成，且 probe 没有出现真实音频静默计为
-0 秒的问题。但正式 split manifest、native token/RVQ 分布表仍未生成；也没有执行正式根
+0 秒的问题。1000-sample native token/RVQ 分布审计和 800/100/100 pilot split candidate
+也已完成，但产物仍在 debug 目录内，不是最终正式 split manifest；也没有执行正式根
 training step、32-sample 100-step overfit、1k pilot、两卡 DDP 2-step 或 resume。因此当前
-P0 只能作为 debug copy acceptance 加正式根抽样 probe，不允许直接晋级到 native stable
-P1 长跑。
+P0 只能作为 debug copy acceptance 加正式根抽样/分布/pilot candidate probe，不允许直接
+晋级到 native stable P1 长跑。

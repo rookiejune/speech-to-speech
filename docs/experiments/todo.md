@@ -9,12 +9,12 @@ P0 已在 debug-migrated copy 上通过，证据见
 [014 result](results/014-longcat-stable-stage1.md)。后续代码已允许缺失 duration metadata 时从
 codec frame count 和 runtime frame rate 推导音频秒数，不再要求正式 root 先补写
 `AudioMeta.DURATION`。2026-07-26 已完成正式 root parquet/fingerprint manifest 审计，
-以及无 duration parse/map-style dataloader 抽样 probe；剩余正式验收如下。
+以及无 duration parse/map-style dataloader 抽样 probe。1000-sample native token/RVQ 分布审计
+和 800/100/100 pilot split candidate 已完成，但产物仍位于 debug 输出目录，不是最终正式
+split manifest；剩余正式验收如下。
 
-- 固化正式 split manifest 和 native token/RVQ 分布；禁止依赖 `/tmp` 或 debug copy 进入
+- 固化正式 split manifest；禁止依赖 `/tmp`、debug copy 或 debug candidate artifact 进入
   stage 1 长跑。
-- 建立 800/100/100 pilot split，并记录 parse/span error、semantic token、source/target frame、
-  RVQ codebook 和文本长度统计。
 - 跑正式 root native-token stable stage 1：training step、32-sample fixed overfit、1k pilot、
   两卡 DDP 2-step 与 resume。
 - native stage 1 达标后，再在完整 train split 上重训 speech BPE 并做 shadow ablation；旧 100k
