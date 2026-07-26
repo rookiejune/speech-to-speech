@@ -1027,6 +1027,54 @@ class ContractTest(unittest.TestCase):
                 _assert_store_local_batches(self, sampler)
                 self.assertEqual(len(datamodule.train_samples([0, 1])), 2)
 
+    def test_datamodule_uses_store_backed_data_without_duration(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with patch.dict("os.environ", {"ANYDATASET_HOME": str(root / "cache")}):
+                output = root / "dataset"
+                DatasetWriter(
+                    output,
+                    dataset_id="toy-speech",
+                    split="train",
+                    max_shard_samples=2,
+                ).write([_raw_sample_without_duration(index) for index in range(4)])
+                dataset = AnyDataset(
+                    Spec(source=Source.STORE, path=str(output), split="train")
+                )
+                runtime = _data_runtime()
+                runtime.text_tokenizer = _ChatTokenizer(10)
+                config = DataConfig(
+                    codec="longcat",
+                    dataloader={"batch_size": 2, "num_workers": 0},
+                )
+                datamodule = DataModule(
+                    runtime,
+                    {"train": LoaderSpec.speech(config, {Task.S2ST: 1.0})},
+                )
+
+                with patch(
+                    "speech_to_speech.datamodule.module.load_dataset",
+                    return_value=dataset,
+                ) as load:
+                    datamodule.setup()
+                    loader = cast(Any, datamodule.train_dataloader())
+
+                load.assert_called_once()
+                self.assertIs(loader.dataset, dataset)
+                sampler = loader.batch_sampler
+                self.assertIs(sampler.dataset, dataset)
+                self.assertEqual(sampler.max_batch_memory, 2)
+                self.assertEqual(sampler.max_batch_samples, 2)
+                self.assertTrue(sampler.shuffle)
+                _assert_store_local_batches(self, sampler)
+                batch = next(iter(loader))
+                self.assertEqual(batch.tasks, [Task.S2ST, Task.S2ST])
+                torch.testing.assert_close(
+                    batch.audio_seconds,
+                    torch.tensor([0.08, 0.08]),
+                )
+                self.assertEqual(len(datamodule.train_samples([0, 1])), 2)
+
     def test_toy_settings_reject_invalid_dimensions(self):
         with self.assertRaisesRegex(ValueError, "divisible"):
             ToyConfig(hidden_size=7, heads=2)

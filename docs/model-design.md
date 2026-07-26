@@ -178,9 +178,10 @@ class FlowRepaConfig(TypedDict):
 `decoder` 与可选 `codebook_embeddings`，但无法接收后被忽略的 REPA 字段。Hydra 使用
 `model/acoustic=none|flow|rvq`，`none` 只训练 semantic audio token，flow preset 独占
 teacher 与 student REPA 配置；训练组装由 `speech_to_speech.pl_module.composition` 持有，
-入口脚本只传入解析后的配置；root schema 直接复用基础 `model.Config`。unified-token codec 必须使用
-`runtime=unicodec model/acoustic=none`；有独立 acoustic codebook 的 codec 也可以显式选择
-`none` 作为 token-only baseline。ODE sampler 由 `runtime.Config.flow_*` 统一拥有；
+入口脚本只传入解析后的配置；root schema 直接复用基础 `model.Config`。UniCodec 也按
+`FrameCodec` 处理，`runtime=unicodec model/acoustic=none` 走 full-code token 序列，只是完整
+frame 里只有一个 codebook。有独立 acoustic codebook 的 codec 只有在配置 semantic-only artifact
+或选择 full-code sequence 时才可以作为 token-only baseline。ODE sampler 由 `runtime.Config.flow_*` 统一拥有；
 入口只校验 flow/RVQ 所需的 codec capability，不自动改写 composition。
 
 model 的训练能力是：

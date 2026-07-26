@@ -68,8 +68,7 @@ text target
 
 audio target + token-only model
     -> generate_tokens(stop=EOA)
-    -> expand token frame spans
-    -> semantic_codec.decode(semantic codes decoded from audio tokens)
+    -> FrameCodec full-code decode, or SAC SemanticCodecRuntime decode when artifact is configured
 
 audio target + runtime acoustic side channel + acoustic feature generator
     -> generate_audio_features()
@@ -83,7 +82,8 @@ codec 保留 batch 轴。`full_codec_sequence` 通过 `FlattenedAudioTokenizer` 
 `[frames, codebooks]` 还原后直接调用 `codec.decode()`，不会因为 LongCat codec 暴露 acoustic
 codebooks 而进入 Flow/RVQ acoustic feature generation。flow 与 RVQ 都返回相同的
 `AcousticGeneration`；`model/acoustic=none` 即使搭配 LongCat 这类带 acoustic codebook 的
-codec，也走 token-only decode。
+codec，也只走 token-only generation 分支；实际 waveform decoder 仍按 full-code sequence 或
+semantic artifact 路径选择。
 `FULL_CODEC_SEQUENCE` 只调用原 `FrameCodec.decode(full_codes)`。配置
 `runtime.semantic_codec_artifact` 后，service 只处理 structured backend 的 semantic tokens，
 并把 token-only decode 交给 `SemanticCodecRuntime`；普通 frame codec 的 `decode()` 不再接收
