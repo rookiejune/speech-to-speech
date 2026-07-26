@@ -2,8 +2,9 @@
 
 对应 [014 schedule](../schedules/014-longcat-stable-stage1.md)。本文记录 2026-07-25
 在 FDU `145` 上完成的 P0 验收和当前边界。状态：**P0 在 debug-migrated copy 上通过**；
-正式 stable data root、split manifest、fingerprint 和 native token/RVQ 分布仍未完成，不能
-视为正式数据根已变更。
+正式 stable data root 的 parquet 指纹审计和无 duration parse/map-style dataloader probe
+已补齐；split manifest、native token/RVQ 分布和训练验收仍未完成，不能视为正式数据根已进入
+stage 1 长跑。
 
 ## 范围与代码状态
 
@@ -50,13 +51,43 @@ Migration summary: `dry_run=false`、`frame_rate=50.0`、`pending_audio_items=20
 debug 目录内，inode 分别为 `754480618`、`754480619`，hardlink count 均为 `1`。
 因此本轮的 duration migration 是历史 debug workaround，只证明该 debug copy 曾可补写
 `AudioMeta.DURATION`；当前代码已在缺失 `AudioMeta.DURATION` 时从 codec frame count 和
-runtime frame rate 推导音频秒数，正式 root 不再需要 duration migration。正式 root 剩余工作是
-fingerprint、split manifest 和 native token/RVQ 分布验收。
+runtime frame rate 推导音频秒数，正式 root 不再需要 duration migration。正式 root 剩余工作
+见下方正式根审计与 probe 记录。
 
 debug 数据 summary 写在
 `145:/mnt/pami202/zhuyin/dynamic/debug/codex-s2s-anytrain-migration-20260725/datasets/wmt19_tts_duration_p0_20260725_040054/summary.json`。
 该 copy 的 `limit=1000`，sample 0 source semantic/acoustic shape 为 `[27]` / `[3,27]`，
 target semantic/acoustic shape 为 `[36]` / `[3,36]`；CUDA 可用，设备数 `4`。
+
+## Formal Root Parquet/Fingerprint Audit
+
+2026-07-26 对正式 LongCat stable root 做只读 parquet/fingerprint 审计。正式根为
+`145:/mnt/pami202/zhuyin/datasets/wmt19_tts/longcat`，审计 JSON 写在
+`145:/mnt/pami202/zhuyin/dynamic/debug/s2s-014-formal-root-parquet-audit-20260726-074012/audit.json`。
+审计环境使用 `pyarrow 24.0.0`，`failure_count=0`。这一步只证明正式根的关键文件可读、
+行数和 sha256 已固化；不包含 split manifest、native token/RVQ 分布或训练验收。
+
+| Artifact | Size | Rows | SHA256 | Columns |
+| --- | ---: | ---: | --- | --- |
+| `dataset.json` | `97` | — | `ff9e2ce9e9e28495481566d8c2aaa65c9713ef03e8f3e010d51f89b62040eeb6` | — |
+| `samples.parquet` | `13225` | `1000` | `caaae1793a81de3c763e906c533e15b9fe310a1bd39d50faab2ab77d58e14b52` | `sample_id,sample_index,items` |
+| `source/audio/longcat/manifest.parquet` | `14697` | `1000` | `3c984281251de87e854775094dbc06ed2c83a365d582a096c2e42f8548081ec9` | — |
+| `target/audio/longcat/manifest.parquet` | `14697` | `1000` | `4ff9e550b3b90e8e0eec02c9e5ae63d24bc9e6d7a5ed55edc8cf09c3e0a6dcb3` | — |
+| `source/text/text/manifest.parquet` | `14683` | `1000` | `8c6d6a5ca7931e354584803b2b7ac82835757e42d55662a178c3911481a4b976` | — |
+| `target/text/text/manifest.parquet` | `14683` | `1000` | `c3dbba304b765d2f5f75462bf17d9b65cb29bdd85b171094774ae94c6a5bb770` | — |
+
+## Formal Root Parse and DataLoader Probe
+
+2026-07-26 对同一正式 root 做 parse 与 map-style DataLoader probe。输出目录为
+`145:/mnt/pami202/zhuyin/dynamic/debug/s2s-014-formal-root-parse-dataloader-20260726-124930`。
+probe 读取到 `dataset_len=1000`，抽样 index 为 `0,1,2,3,4,500,999`；这些样本的
+source/target 均缺失 duration metadata，计数为 `source=7`、`target=7`。
+
+所有抽样 source/target LongCat tensor 都成功解析为 integer、rank-2、4 codebooks。DataModule
+的 S2ST dataloader batch 通过，`input_shape=[1,434]`、`label_shape=[1,434]`、
+`audio_seconds=[1.7200000286102295]`。这证明本次正式根 probe 没有把真实音频静默计为
+0 秒；但它仍只是抽样 parse/dataloader 验证，不等同于 split、分布、训练 step、overfit、
+DDP 或 resume 验收。
 
 ## P0 Wrapper Run
 
@@ -103,7 +134,9 @@ P0 在 debug-migrated copy 上通过：代码迁移的本地/远端 targeted tes
 上的 TTS 和 S2ST P0 wrapper 均 exit `0`；训练 metrics、`generation.json` 和 waveform decode
 均为 finite；toy smoke 也完成 1 step 并写出 finite metrics。
 
-边界仍然明确：本轮没有修改正式 stable data root；没有生成正式 split manifest、LongCat view
-fingerprint、native token/RVQ 分布表；也没有执行 32-sample 100-step overfit、1k pilot、
-两卡 DDP 2-step 或 resume。因此 P0 可作为 debug copy acceptance，不允许直接晋级到
-native stable P1 长跑。
+边界仍然明确：本轮没有修改正式 stable data root；正式根 parquet/fingerprint 审计与
+无 duration parse/map-style dataloader probe 已完成，且 probe 没有出现真实音频静默计为
+0 秒的问题。但正式 split manifest、native token/RVQ 分布表仍未生成；也没有执行正式根
+training step、32-sample 100-step overfit、1k pilot、两卡 DDP 2-step 或 resume。因此当前
+P0 只能作为 debug copy acceptance 加正式根抽样 probe，不允许直接晋级到 native stable
+P1 长跑。
