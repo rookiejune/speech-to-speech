@@ -16,15 +16,15 @@ position 语义见 [总览 §2.4](../model-design.md)。
 - `TokenLoss`：按 batch task 的 target modality 在对应局部词表上计算 CE，每行必须至少包含一个
   非 `-100` target；causal shift 在此完成，只把有效 predictor hidden states 交给
   `model.token_logits(hidden, modality)`，text/audio head 不做跨模态 softmax 竞争。
-- `AcousticFlowLoss`：从 S2S decoder/runtime 取 `prediction`、`velocity`、mask 和 flow time，
-  转给 `anytrain.loss.MaskedFrameMSELoss`；启用 REPA 时通过 `forward_with_features()` 复用同一次
-  DiT 前向。
-- `CausalAcousticLoss`：对每个 RVQ codebook 计算 masked CE，再在 codebook 维等权平均；训练 forward
+- `AcousticFlowLoss`：直接复用 `semantic-acoustic-codec.loss.FlowLoss`；S2S 只保留 joint
+  token/acoustic objective 的组合。
+- `CausalAcousticLoss`：直接复用 `anytrain.loss.MaskedCodebookCrossEntropyLoss`；训练 forward
   的 `details` 只保留逐行 `codebook_N` 和有效 frame 数。`RVQObjective.validation()` 显式请求
   `codebook_N_top1`，训练 step 不额外执行大码本 argmax；acoustic padding ID 不进入 decoder
   embedding、loss 或 accuracy。
-- `WavLMTeacher`：按 boolean frame mask 在线解码 target semantic/acoustic codes，以 16 kHz
-  waveform 运行冻结 WavLM，取得配置层的 hidden states 并插值、写回原有效 frame 位置。
+- `WavLMTeacher`：由 `semantic-acoustic-codec.loss` 提供；按 boolean frame mask 在线解码 target
+  semantic/acoustic codes，以 16 kHz waveform 运行冻结 WavLM，取得配置层的 hidden states 并插值、
+  写回原有效 frame 位置。
 - `RepaLoss`：把选定 DiT block 的逐帧表示投影到 WavLM hidden dimension，再转给
   `anytrain.loss.MaskedCosineAlignmentLoss` 与 stop-gradient teacher features 做 masked cosine distance。
 - `types.Outputs`：上层日志与训练消费的 S2S objective mapping；`LossItem` 和通用 output 聚合来自
@@ -118,4 +118,5 @@ teacher features。acoustic-only codec screening 与 legacy oracle checkpoint �
 - `causal_lm.py` 只实现离散 acoustic RVQ objective，不读取 model/runtime 或重复 condition
   对齐；其稳定输出键是 `rvq`。
 - REPA teacher 始终保持 eval/frozen；teacher features detach，梯度只进入 DiT 与 student
-  projector。
+  projector。声学 route 的 batch-free 训练入口由 `semantic-acoustic-codec` 维护，S2S 不再复制
+  route-specific loss/teacher 实现。
