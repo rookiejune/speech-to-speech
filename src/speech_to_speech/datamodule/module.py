@@ -129,8 +129,12 @@ class LoaderSpec:
 class _Loader(Protocol):
     def setup(self, stage: str | None = None) -> None: ...
 
+
+class _TrainLoader(_Loader, Protocol):
     def train_dataloader(self) -> Iterable[ConcreteTrainInput]: ...
 
+
+class _ValidationLoader(_Loader, Protocol):
     def validation_dataloader(self) -> Iterable[ConcreteTrainInput]: ...
 
 
@@ -151,12 +155,12 @@ class _SpeechLoader:
             encode_missing_codes=config.encode_missing_codes,
         )
         self.sample_index = sample_index
-        self._train_dataset = None
-        self._training: Subset[RawSample] | None = None
+        self._dataset = None
+        self._subset: Subset[RawSample] | None = None
 
     def setup(self, stage: str | None = None) -> None:
         del stage
-        if self._train_dataset is not None:
+        if self._dataset is not None:
             return
         try:
             runtime_codec = self.runtime.codec_name
@@ -167,21 +171,21 @@ class _SpeechLoader:
                 "datamodule and runtime must use the same codec: "
                 f"{self.config.codec!r} != {runtime_codec!r}."
             )
-        self._train_dataset = load_dataset(self.config.dataset, self.runtime)
+        self._dataset = load_dataset(self.config.dataset, self.runtime)
         if self.sample_index is not None:
-            if self.sample_index >= len(cast(Sized, self._train_dataset)):
+            if self.sample_index >= len(cast(Sized, self._dataset)):
                 raise IndexError(
                     f"sample_index {self.sample_index} is outside the training dataset."
                 )
-            self._training = Subset(self._train_dataset, [self.sample_index])
+            self._subset = Subset(self._dataset, [self.sample_index])
 
     def set_task_weights(self, task_weights: Mapping[Task, float]) -> None:
         self.collator.set_task_weights(task_weights)
 
     def train_samples(self, indices: Sequence[int]) -> list[RawSample]:
-        if self._train_dataset is None:
+        if self._dataset is None:
             raise RuntimeError("DataModule.setup() must run before reading samples.")
-        return [self._train_dataset[index] for index in indices]
+        return [self._dataset[index] for index in indices]
 
     def train_dataloader(self) -> Iterable[ConcreteTrainInput]:
         return self._dataloader(shuffle=True)
@@ -190,11 +194,13 @@ class _SpeechLoader:
         return self._dataloader(shuffle=False)
 
     def _dataloader(self, *, shuffle: bool) -> Iterable[ConcreteTrainInput]:
-        if self._train_dataset is None:
-            raise RuntimeError("speech loader setup() must run before training.")
-        if self._training is not None:
+        if self._dataset is None:
+            raise RuntimeError(
+                "speech loader setup() must run before building a loader."
+            )
+        if self._subset is not None:
             return DataLoader(
-                self._training,
+                self._subset,
                 batch_size=1,
                 num_workers=0,
                 collate_fn=self.collator,
@@ -205,16 +211,16 @@ class _SpeechLoader:
             snapshot = DataRuntimeSnapshot.from_runtime(self.runtime)
             self.collator.runtime = cast(DataRuntime, cast(object, snapshot))
         source_loader = _source_loader(
-            self._train_dataset,
+            self._dataset,
             loader=loader,
             collate_fn=self.collator,
             shuffle=shuffle,
         )
         if source_loader is not None:
-            if source_loader.dataset is self._train_dataset:
+            if source_loader.dataset is self._dataset:
                 return cast(Iterable[ConcreteTrainInput], source_loader)
             return DataLoader(
-                self._train_dataset,
+                self._dataset,
                 batch_sampler=source_loader.batch_sampler,
                 num_workers=num_workers,
                 pin_memory=loader.get("pin_memory", False),
@@ -224,7 +230,7 @@ class _SpeechLoader:
                 collate_fn=self.collator,
             )
         return DataLoader(
-            self._train_dataset,
+            self._dataset,
             batch_size=loader["batch_size"],
             num_workers=num_workers,
             pin_memory=loader.get("pin_memory", False),
@@ -255,7 +261,9 @@ class DataModule(LightningDataModule):
         }
         self.validation_spec = validation
         self._validation_loader = (
-            None if validation is None else _build_loader(validation, runtime)
+            None
+            if validation is None
+            else _build_validation_loader(validation, runtime)
         )
         if any(not name for name in self.loader_specs):
             raise ValueError("loader names must not be empty.")
@@ -316,8 +324,7 @@ class DataModule(LightningDataModule):
 
     def train_dataloader(self) -> Iterable[TrainInputBatch]:
         loaders = {
-            name: loader.train_dataloader()
-            for name, loader in self._loaders.items()
+            name: loader.train_dataloader() for name, loader in self._loaders.items()
         }
         if len(loaders) == 1 and self.schedule.batches_per_step == 1:
             return cast(Iterable[TrainInputBatch], next(iter(loaders.values())))
@@ -331,7 +338,7 @@ class DataModule(LightningDataModule):
             self._validation_loader.validation_dataloader(),
         )
 
-    def _single_loader(self, loader_name: str | None, operation: str) -> _Loader:
+    def _single_loader(self, loader_name: str | None, operation: str) -> _TrainLoader:
         if loader_name is None:
             if len(self._loaders) != 1:
                 raise ValueError(
@@ -347,7 +354,7 @@ class DataModule(LightningDataModule):
 def _build_loader(
     spec: LoaderSpec,
     runtime: DatasetRuntime | TextRuntime,
-) -> _Loader:
+) -> _TrainLoader:
     if spec.kind is LoaderKind.SPEECH:
         assert spec.speech_config is not None
         return _SpeechLoader(
@@ -363,6 +370,21 @@ def _build_loader(
         spec.text_config,
         cast(TextRuntime, runtime),
         spec.task_weights,
+    )
+
+
+def _build_validation_loader(
+    spec: LoaderSpec,
+    runtime: DatasetRuntime | TextRuntime,
+) -> _ValidationLoader:
+    if spec.kind is not LoaderKind.SPEECH:
+        raise ValueError("validation requires a speech loader.")
+    assert spec.speech_config is not None
+    return _SpeechLoader(
+        spec.speech_config,
+        cast(DatasetRuntime, runtime),
+        spec.task_weights,
+        sample_index=spec.sample_index,
     )
 
 

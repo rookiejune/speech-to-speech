@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Generic, Protocol, TypeVar, cast
 
@@ -13,8 +13,9 @@ from ..datamodule.types import ModelBatch, RawSingleBatch, TrainBatch, TrainInpu
 from ..generation.service import generate_responses
 from ..generation.text import TextProbe, TextProbeResult, evaluate_text
 from ..generation.types import Request, Result
+from ..loss import ValidationMetric, validation_metrics
 from ..loss.objective import Objective
-from ..loss.types import LossItem, Outputs
+from ..loss.types import Outputs
 from ..generation.protocol import TextEvaluationModel
 
 
@@ -70,87 +71,51 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
 
     def validation_step(self, batch: TrainInputBatch, batch_idx: int = 0):
         del batch_idx
-        outputs = self._loss_outputs(self.materialize_batch(batch))
-        token = outputs.get("token")
-        if token is not None:
-            self._log_validation_metric("token_ce", token, "tokens")
-        rvq = outputs.get("rvq")
-        if rvq is not None:
-            self._log_validation_metric("rvq_ce", rvq, "frames")
-            details = rvq.details
-            if details is None:
-                raise TypeError("RVQ validation requires loss details.")
-            for key in sorted(details):
-                if not key.startswith("codebook_"):
-                    continue
-                suffix = "" if key.endswith("_top1") else "_ce"
-                self._log_validation_detail(
-                    f"rvq_{key}{suffix}",
-                    rvq,
-                    key,
-                    "frames",
-                )
+        outputs = self._outputs(
+            self.materialize_batch(batch),
+            self.objective.validation,
+        )
+        for name, metric in validation_metrics(outputs).items():
+            self._log_validation_metric(name, metric)
         return outputs
 
     def _log_validation_metric(
         self,
         name: str,
-        item: LossItem,
-        unit: str,
+        metric: ValidationMetric,
     ) -> None:
-        details = item.details
-        if details is None or unit not in details:
-            raise TypeError(f"validation loss item requires {unit!r} details.")
-        self._log_validation_value(name, item.loss, details[unit])
-
-    def _log_validation_detail(
-        self,
-        name: str,
-        item: LossItem,
-        key: str,
-        unit: str,
-    ) -> None:
-        details = item.details
-        if details is None or key not in details or unit not in details:
-            raise TypeError(f"validation loss item requires {key!r} and {unit!r}.")
-        self._log_validation_value(name, details[key], details[unit])
-
-    def _log_validation_value(
-        self,
-        name: str,
-        values: torch.Tensor,
-        weights: torch.Tensor,
-    ) -> None:
-        if values.shape != weights.shape:
-            raise ValueError("validation values and weights must align by row.")
-        resolved = weights.to(dtype=values.dtype)
-        count = resolved.sum()
-        if bool(count.le(0)):
-            raise ValueError("validation metric weights must contain a positive total.")
+        value, count = metric.reduced()
         self.log(
             f"val/{name}",
-            (values * resolved).sum() / count,
+            value,
             on_step=False,
             on_epoch=True,
             sync_dist=True,
-            batch_size=int(count.detach().item()),
+            batch_size=count,
         )
 
     def _loss_outputs(self, batch: TrainBatch) -> Outputs:
+        return self._outputs(batch, self.objective.forward)
+
+    def _outputs(
+        self,
+        batch: TrainBatch,
+        objective: Callable[[ModelBatch, ModelT], Outputs],
+    ) -> Outputs:
         if not isinstance(batch, tuple):
             if not isinstance(batch, ModelBatch):
                 raise TypeError(
                     "training_step requires ModelBatch unless a batch materializer "
                     "converts the incoming batch."
                 )
-            outputs = [self.objective.forward(batch, self.model)]
+            outputs = [objective(batch, self.model)]
         else:
             if any(not isinstance(item, ModelBatch) for item in batch):
                 raise TypeError(
                     "joint training batches must contain ModelBatch values after "
                     "materialization."
                 )
-            outputs = [self.objective.forward(item, self.model) for item in batch]
+            outputs = [objective(item, self.model) for item in batch]
         return self.objective.reduce(
             outputs,
         )

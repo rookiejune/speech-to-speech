@@ -6,7 +6,9 @@ position 语义见 [总览 §2.4](../model-design.md)。
 ## 对外能力
 
 - `Objective[ModelT]`：统一描述 model/objective 配对的泛型 `nn.Module` 契约，确保 objective
-  的参数和子模块参与设备迁移、checkpoint 与 DDP。
+  的参数和子模块参与设备迁移、checkpoint 与 DDP。`forward(batch, model)` 只产出训练所需
+  loss；`validation(batch, model)` 默认复用 forward，允许具体 objective 在同一次前向中补充
+  teacher-forcing validation 指标。
 - `TokenObjective`：只组合 text/audio token CE；`FlowObjective`：组合 token CE、
   acoustic flow matching 和可选 REPA；`RVQObjective`：组合 token CE 与 acoustic RVQ CE。
   三者的 `forward(batch, model)` 都返回含标量总损失的 `Outputs`，直接满足 Lightning
@@ -17,9 +19,10 @@ position 语义见 [总览 §2.4](../model-design.md)。
 - `AcousticFlowLoss`：从 S2S decoder/runtime 取 `prediction`、`velocity`、mask 和 flow time，
   转给 `anytrain.loss.MaskedFrameMSELoss`；启用 REPA 时通过 `forward_with_features()` 复用同一次
   DiT 前向。
-- `CausalAcousticLoss`：对每个 RVQ codebook 计算 masked CE 与 top-1，再在 codebook 维等权平均 CE；
-  `details` 保留逐行 `codebook_N`、`codebook_N_top1` 和有效 frame 数，acoustic padding ID 不进入
-  decoder embedding、loss 或 accuracy。
+- `CausalAcousticLoss`：对每个 RVQ codebook 计算 masked CE，再在 codebook 维等权平均；训练 forward
+  的 `details` 只保留逐行 `codebook_N` 和有效 frame 数。`RVQObjective.validation()` 显式请求
+  `codebook_N_top1`，训练 step 不额外执行大码本 argmax；acoustic padding ID 不进入 decoder
+  embedding、loss 或 accuracy。
 - `WavLMTeacher`：按 boolean frame mask 在线解码 target semantic/acoustic codes，以 16 kHz
   waveform 运行冻结 WavLM，取得配置层的 hidden states 并插值、写回原有效 frame 位置。
 - `RepaLoss`：把选定 DiT block 的逐帧表示投影到 WavLM hidden dimension，再转给
@@ -28,6 +31,8 @@ position 语义见 [总览 §2.4](../model-design.md)。
   `anytrain.loss`。
 - `types.loss_items()`：按 token、flow matching、REPA、RVQ 的稳定顺序遍历实际存在的
   分项，供 callback 和实验 summary 复用。
+- `ValidationMetric` / `validation_metrics()`：把 objective outputs 转成显式的逐行 values/weights
+  契约，并统一拥有 token/RVQ/Flow/REPA validation 指标名和有效 token/frame 加权语义。
 
 ## Objective 组合
 
@@ -102,6 +107,8 @@ teacher features。acoustic-only codec screening 与 legacy oracle checkpoint �
   `target_frame_condition()` 统一处理，objective 不重复偏移。
 - `SpeechToSpeechModule` 通过泛型 `Objective` 保留 model/objective 的配对类型，不在训练循环中
   cast。
+- validation 指标名、RVQ codebook detail 解释和有效单位由 loss 模块唯一负责；pl_module 只消费
+  `ValidationMetric` 并接入 Lightning epoch/DDP aggregation。
 - flow runtime 等 objective 资源在 `FlowObjective` 构造时显式传入，不通过
   `model.runtime` 向下读取。
 - 子 objective 在 `__init__` 中构造完毕，forward 不挂载新 submodule。

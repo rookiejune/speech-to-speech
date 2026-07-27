@@ -2,11 +2,14 @@
 
 ## 适用范围
 
-本页最新真实实验是 014 的 pami201 1k stage 1 step-500 resume（2026-07-27）：已在
-1000-sample、20 payload-group 的正式 split manifest 上完成两卡 step 0/50/100/200/300/400/500
-完整 dev validation。step 500 相对初始 token/RVQ CE 下降 `19.602%`/`2.701%`，3 个 acoustic
-codebook top-1 均明显高于随机，并保留 step 200/300/400/500 与 latest checkpoint。RVQ CE
-尚未达到 5% 门槛；step-2000 gate、最多 5k-step pilot、decode、长跑监督和质量/收敛仍未验证。
+本页最新真实实验是 014 的 pami201 1k stage 1 step-2000 resume（2026-07-27）：已在
+1000-sample、20 payload-group 的正式 split manifest 上完成两卡 step 0 到 2000 的完整 dev
+validation。step 2000 相对初始 token/RVQ CE 下降 `22.736%`/`3.553%`，但 RVQ CE 未达到
+5% 门槛，最近 500 steps 仅改善 `0.007567`。3 个 acoustic codebook top-1 与无条件众数基线
+几乎相同，不能证明 decoder 有效利用 semantic condition。checkpoint 还显示随机初始化的可训练
+speech interface/acoustic decoder 及 AdamW moment 以 BF16 存储，预计可训练参数中只有 `20.19%`
+在 step 500 到 2000 间发生逐位变化；该观测支持先做 FP32-storage A/B，但尚未验证 BF16 是
+plateau 的唯一原因。当前停止机械延长到 5k；decode、长跑监督和质量/收敛仍未验证。
 同日的 32-sample smoke/canary 另外证明：`/mnt/pami202` 超时时，可以用
 145 本地 runtime/HF cache 和 pami201 小数据根完成 stage 1 TTS/S2ST 两步入口、
 正式 `scripts/train.py` 100-step canary，以及重分片 root 的两卡 DDP/resume。
@@ -25,15 +28,19 @@ model/runtime/data/generation 和按模态 token CE 仍有调整，因此相应 
 
 ## 已验证结论
 
-- 014 的 pami201 1k pilot validation、100-step canary 与 step-500 resume 通过：两卡分别读取 50 条 dev sample，
+- 014 的 pami201 1k pilot validation、100-step canary 与 resume 到 step 2000 均完成：两卡分别读取 50 条 dev sample，
   指标按有效 token/frame 跨 batch/rank 加权，并区分 sanity/interval 写入 `metrics.json`。
-  step 0 -> 500 的 token CE 为 `9.883604 -> 7.946233`，RVQ CE 为
-  `9.151793 -> 8.904623`；3 个 acoustic codebook top-1 从 `1/4264,0,0` 提升到
-  `163/4264,132/4264,155/4264`。step 200/300/400/500 与 `last.ckpt`、TensorBoard event 均已保留。
-  该 pilot 证明明确学习方向，但 RVQ CE 只下降 `2.701%`，尚未达到 5% 晋级门槛，
-  不支持质量或收敛结论
+  step 0 -> 2000 的 token CE 为 `9.883604 -> 7.636385`，RVQ CE 为
+  `9.151793 -> 8.826597`。最终 3 个 acoustic codebook top-1 为
+  `0.038227/0.032129/0.037992`，与 raw dev target 的无条件众数
+  `0.038687/0.031419/0.038453` 几乎相同；高于均匀随机值本身不是条件学习证据。
+  step 750/1000/1250/1500/1750/2000 与 `last.ckpt` 均已保留。step 500 -> 2000 checkpoint
+  delta 还显示所有相关浮点参数与 AdamW moment 为 BF16，预计可训练参数只有 `20.19%` 发生
+  逐位变化。该 pilot 已验证执行和指标链路，但尚未达到 5% 晋级门槛；BF16 是否构成主要因果
+  仍需从头 A/B，不支持质量或收敛结论
   （[014 result, lines 276-311](results/014-longcat-stable-stage1.md#L276-L311)，
-  [lines 313-372](results/014-longcat-stable-stage1.md#L313-L372)）。
+  [lines 313-374](results/014-longcat-stable-stage1.md#L313-L374)，
+  [lines 376-428](results/014-longcat-stable-stage1.md#L376-L428)）。
 - 014 的 pami201 1k pilot 已固化：数据根包含 1000 条样本、20 个各 50 条的
   payload group，LongCat tensor 为 rank-2 integer、4 个 codebook，frame 范围 `14..43`，
   无 symlink，总大小 `504357694` bytes。split manifest SHA256 为

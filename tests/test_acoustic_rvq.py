@@ -210,16 +210,30 @@ class AcousticRVQTest(unittest.TestCase):
             for value, classes in zip(predictions, (3, 4))
         )
 
-        baseline = CausalAcousticLoss()(logits, labels, mask)
+        training = CausalAcousticLoss()(logits, labels, mask)
+        baseline = CausalAcousticLoss()(
+            logits,
+            labels,
+            mask,
+            include_top1=True,
+        )
         changed = tuple(value.clone() for value in logits)
         for value in changed:
             value[~mask] = 1000
-        padded_changed = CausalAcousticLoss()(changed, labels, mask)
+        padded_changed = CausalAcousticLoss()(
+            changed,
+            labels,
+            mask,
+            include_top1=True,
+        )
 
+        training_details = training.details
         details = baseline.details
         changed_details = padded_changed.details
-        if details is None or changed_details is None:
+        if training_details is None or details is None or changed_details is None:
             self.fail("RVQ loss details are unavailable")
+        self.assertNotIn("codebook_0_top1", training_details)
+        self.assertNotIn("codebook_1_top1", training_details)
         torch.testing.assert_close(
             details["codebook_0_top1"],
             torch.tensor([0.5, 1.0]),

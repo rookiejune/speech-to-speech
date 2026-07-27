@@ -18,6 +18,7 @@ class CausalAcousticLoss(nn.Module):
         mask: Tensor,
         *,
         validate: bool = True,
+        include_top1: bool = False,
     ) -> LossItem:
         if labels.dim() != 3 or mask.shape != labels.shape[:2]:
             raise ValueError(
@@ -52,23 +53,25 @@ class CausalAcousticLoss(nn.Module):
                 reduction="none",
             ).masked_fill(~mask, 0)
             losses.append(loss)
-            correct = safe_value.argmax(dim=-1).eq(safe_target) & mask
-            accuracies.append(correct.sum(dim=1))
+            if include_top1:
+                correct = safe_value.argmax(dim=-1).eq(safe_target) & mask
+                accuracies.append(correct.sum(dim=1))
         frame_losses = torch.stack(losses, dim=-1)
         frame_count = mask.sum(dim=1).clamp_min(1)
         codebook_losses = frame_losses.sum(dim=1)
         codebook_losses = codebook_losses / frame_count[:, None]
-        codebook_top1 = torch.stack(accuracies, dim=-1) / frame_count[:, None]
         details = {
             f"codebook_{codebook}": codebook_losses[:, codebook]
             for codebook in range(labels.size(-1))
         }
-        details.update(
-            {
-                f"codebook_{codebook}_top1": codebook_top1[:, codebook]
-                for codebook in range(labels.size(-1))
-            }
-        )
+        if include_top1:
+            codebook_top1 = torch.stack(accuracies, dim=-1) / frame_count[:, None]
+            details.update(
+                {
+                    f"codebook_{codebook}_top1": codebook_top1[:, codebook]
+                    for codebook in range(labels.size(-1))
+                }
+            )
         details["frames"] = frame_count.to(dtype=frame_losses.dtype)
         return LossItem(
             loss=codebook_losses.mean(dim=-1),

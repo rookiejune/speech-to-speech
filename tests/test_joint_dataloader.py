@@ -3,13 +3,14 @@ from __future__ import annotations
 import unittest
 from collections.abc import Iterator
 from itertools import islice
-from unittest.mock import Mock, call, patch
+from unittest.mock import Mock, patch
 
 import torch
 
 from speech_to_speech.datamodule.dataset import DatasetConfig
 from speech_to_speech.datamodule.joint import LoaderSchedule, ScheduledDataLoader
 from speech_to_speech.datamodule.module import Config, DataModule, LoaderSpec
+from speech_to_speech.datamodule.text import TextConfig
 from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.task import Task
 
@@ -79,10 +80,16 @@ class ScheduledDataLoaderTest(unittest.TestCase):
         validation_loader.validation_dataloader.return_value = validation_batches
         runtime = Mock()
 
-        with patch(
-            "speech_to_speech.datamodule.module._build_loader",
-            side_effect=(train_loader, validation_loader),
-        ) as build:
+        with (
+            patch(
+                "speech_to_speech.datamodule.module._build_loader",
+                return_value=train_loader,
+            ) as build_train,
+            patch(
+                "speech_to_speech.datamodule.module._build_validation_loader",
+                return_value=validation_loader,
+            ) as build_validation,
+        ):
             datamodule = DataModule(
                 runtime,
                 {"tts": train_spec},
@@ -97,14 +104,59 @@ class ScheduledDataLoaderTest(unittest.TestCase):
         self.assertIs(datamodule.loader_specs["tts"], train_spec)
         self.assertIs(datamodule.validation_spec, validation_spec)
         self.assertIsNot(train_spec.speech_config, validation_spec.speech_config)
-        build.assert_has_calls(
-            [call(train_spec, runtime), call(validation_spec, runtime)]
-        )
+        build_train.assert_called_once_with(train_spec, runtime)
+        build_validation.assert_called_once_with(validation_spec, runtime)
         train_loader.setup.assert_called_once_with("fit")
         validation_loader.setup.assert_called_once_with("fit")
         train_loader.train_dataloader.assert_called_once_with()
         validation_loader.validation_dataloader.assert_called_once_with()
         validation_loader.train_dataloader.assert_not_called()
+
+    def test_datamodule_without_validation_does_not_build_a_val_loader(self) -> None:
+        spec = LoaderSpec.speech(
+            Config(
+                codec="longcat",
+                dataloader={"batch_size": 2, "num_workers": 0},
+            ),
+            {Task.TTS: 1.0},
+        )
+
+        with (
+            patch(
+                "speech_to_speech.datamodule.module._build_loader",
+                return_value=Mock(),
+            ),
+            patch(
+                "speech_to_speech.datamodule.module._build_validation_loader",
+            ) as build_validation,
+        ):
+            datamodule = DataModule(Mock(), {"tts": spec})
+
+        build_validation.assert_not_called()
+        self.assertIsNone(datamodule.validation_spec)
+        self.assertIsNone(datamodule.val_dataloader())
+
+    def test_datamodule_rejects_text_validation(self) -> None:
+        speech = LoaderSpec.speech(
+            Config(
+                codec="longcat",
+                dataloader={"batch_size": 2, "num_workers": 0},
+            ),
+            {Task.TTS: 1.0},
+        )
+        text = LoaderSpec.text(
+            TextConfig(dataloader={"batch_size": 2, "num_workers": 0}),
+            {Task.MT: 1.0},
+        )
+
+        with (
+            patch(
+                "speech_to_speech.datamodule.module._build_loader",
+                return_value=Mock(),
+            ),
+            self.assertRaisesRegex(ValueError, "validation requires a speech loader"),
+        ):
+            DataModule(Mock(), {"tts": speech}, validation=text)
 
     def test_restart_advances_loader_or_batch_sampler_epoch(self) -> None:
         direct = _DirectEpochLoader(_batch(Task.TTS))

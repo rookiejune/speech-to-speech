@@ -33,3 +33,10 @@ def combine_outputs(outputs: Sequence[Outputs]) -> Outputs:
 
 def loss_items(outputs: Mapping[str, Any]) -> Iterator[tuple[str, LossItem]]:
     yield from iter_loss_items(outputs, _OBJECTIVES)
+
+
+def loss_unit(name: str) -> str:
+    try:
+        return _UNITS[name]
+    except KeyError as error:
+        raise ValueError(f"unsupported loss objective: {name}") from error

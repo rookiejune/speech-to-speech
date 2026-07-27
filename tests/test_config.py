@@ -725,6 +725,20 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(continued.validation.every_n_steps, 250)
         self.assertEqual(continued.callbacks.checkpoint.every_n_train_steps, 250)
 
+        fp32 = parse_train(
+            _compose(
+                "train",
+                "experiment=014_stage1_pilot_fp32_500",
+                "data.dataset.root=/tmp/pilot",
+                "data.dataset.split_manifest=/tmp/pilot/splits.json",
+            )
+        )
+        self.assertEqual(fp32.train.seed, 0)
+        self.assertEqual(fp32.train.max_steps, 500)
+        self.assertIsNone(fp32.train.ckpt_path)
+        self.assertEqual(fp32.validation.every_n_steps, 100)
+        self.assertEqual(fp32.callbacks.checkpoint.every_n_train_steps, 100)
+
         with self.assertRaises(InterpolationResolutionError):
             parse_train(
                 _compose(
@@ -1089,6 +1103,17 @@ class ConfigTest(unittest.TestCase):
                 self.assertIn(f'"experiment={experiment}"', source)
                 self.assertIn('"train.ckpt_path=${checkpoint}"', source)
                 self.assertIn('"$@"', source)
+
+    def test_stage1_fp32_job_starts_without_a_checkpoint(self):
+        root = Path(__file__).parents[1]
+        source = (
+            root / "jobs" / "014" / "05_stage1_pilot_fp32_500.sh"
+        ).read_text()
+
+        self.assertIn('"experiment=014_stage1_pilot_fp32_500"', source)
+        self.assertNotIn("SPEECH_TO_SPEECH_STAGE_CKPT_PATH", source)
+        self.assertNotIn("train.ckpt_path=", source)
+        self.assertIn('"$@"', source)
 
     def test_fdu_smoke_jobs_select_explicit_configs(self):
         root = Path(__file__).parents[1]

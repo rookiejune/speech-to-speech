@@ -39,13 +39,13 @@ def create_semantic_audio_modules(
         reference=backbone_weight,
     ).to(
         device=backbone_weight.device,
-        dtype=backbone_weight.dtype,
+        dtype=torch.float32,
     )
     adapter = create_adapter(
         adapter_type,
         audio.weight.size(-1),
         backbone.config.hidden_size,
-    ).to(device=backbone_weight.device, dtype=backbone_weight.dtype)
+    ).to(device=backbone_weight.device, dtype=torch.float32)
     return audio, adapter
 
 

@@ -76,7 +76,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             self.config.semantic_audio_output_adapter,
             hidden_size,
             semantic_audio_weight.size(1),
-        ).to(device=backbone_weight.device, dtype=backbone_weight.dtype)
+        ).to(device=backbone_weight.device, dtype=torch.float32)
 
     def forward(
         self,

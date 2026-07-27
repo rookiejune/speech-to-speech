@@ -156,6 +156,18 @@ class LoggingTest(unittest.TestCase):
         )
         json.dumps(report, allow_nan=False)
 
+        restored = ValidationSummary()
+        restored.load_state_dict(callback.state_dict())
+        self.assertEqual(restored.report(), report)
+
+        trainer.callback_metrics = {"val/token_ce": torch.tensor(1.25)}
+        restored.on_validation_end(trainer, SimpleNamespace())
+        self.assertEqual(len(restored.interval), 1)
+        self.assertEqual(
+            restored.interval[0],
+            {"step": 1000, "metrics": {"val/token_ce": 1.25}},
+        )
+
     def test_validation_summary_rejects_non_scalar_metrics(self):
         callback = ValidationSummary()
         trainer = SimpleNamespace(

@@ -51,9 +51,13 @@ ablation，达标后才允许进入同等预算比较。
    - 32-sample fixed overfit：100 steps。
    - 1k pilot：最多 5k optimizer steps。
    - stable canary：>=50k train pair 后最多 50k steps。
+   - 预算是上限，不是必须跑满的目标。若连续两个 validation interval 的局部改善显著放缓，
+     或模型 top-1 与无条件 target 众数基线等价，先检查 condition 使用、参数/optimizer state dtype
+     与实际参数更新比例；诊断完成前不继续追加预算。
 4. 晋级条件：
    - train/dev RVQ CE finite 且 dev CE 相对初始下降至少 5%。
-   - 多数 codebook top-1 accuracy 高于随机基线。
+   - 多数 codebook top-1 accuracy 不仅高于均匀随机基线，也应明确优于各 codebook 的无条件
+     众数基线；否则不能据此判断模型利用了条件。
    - teacher-forced waveform decode 100% finite。
    - `last.ckpt`、归档 checkpoint、resume 后 metrics 连续。
    - 两卡 DDP 2-step + resume 通过，rank 间 task schedule 和 loss key 一致。

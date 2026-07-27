@@ -159,9 +159,6 @@ class _TextLoader:
             collate_fn=self.collator,
         )
 
-    def validation_dataloader(self) -> Iterable[ModelBatch]:
-        return self.train_dataloader()
-
 
 __all__ = [
     "TextConfig",

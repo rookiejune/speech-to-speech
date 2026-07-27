@@ -7,11 +7,14 @@
 
 剩余正式验收：
 
-- 从 1k pilot step 500 的 `last.ckpt` 恢复到 step 2000，每 250 steps 对完整 dev split
-  记录 token/RVQ CE 与每 codebook top-1。step 500 的 codebook top-1 均持续高于随机，
-  但 dev RVQ CE 相对初始只下降 `2.701%`；晋级仍要求相对初始 `9.151793` 至少下降 5%
-  （目标 `<=8.694203`）。step 2000 仍未达标时，先检查局部斜率与训练配置，再决定是否继续
-  到最多 5k steps。
+- 修正 stage 1 dtype 边界：frozen Qwen backbone 保持 BF16，随机初始化且可训练的 semantic
+  speech interface 与 acoustic decoder 保持 FP32 参数存储，forward 仍使用 mixed-precision
+  autocast。该因果 A/B 不从旧 BF16 checkpoint 恢复；用同 seed、同 split 从头跑 500-step A/B，对比
+  step 0/100/200/300/400/500 dev CE、各 codebook top-1 和实际发生变化的参数比例。
+- A/B 同时核对原始 dev `4265` frames 与 validation 有效 `4264` frames 的差异来自哪一个
+  causal/truncation mask；两组实验必须使用同一有效位口径。
+- 只有 FP32-storage A/B 明确优于当前 BF16 基线，且 top-1 优于无条件 codebook 众数基线，
+  才继续更长 pilot 并执行 teacher-forced decode；当前停止从 step 2000 机械延长到 5k。
 - 跑 native-token stable stage 1 长跑，保留 TensorBoard 监督曲线、周期 checkpoint
   和可恢复的最新 checkpoint；当前 1k pilot 只验证数据分片、两卡 DDP 和
   resume 执行契约，不支持质量或收敛结论。

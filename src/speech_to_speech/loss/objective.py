@@ -11,14 +11,15 @@ from .protocol import TokenObjectiveModel
 from .types import Outputs, combine_outputs
 
 
-ModelT_contra = TypeVar(
-    "ModelT_contra", bound=TokenObjectiveModel, contravariant=True
-)
+ModelT_contra = TypeVar("ModelT_contra", bound=TokenObjectiveModel, contravariant=True)
 
 
 class Objective(nn.Module, Generic[ModelT_contra], ABC):
     @abstractmethod
     def forward(self, batch: ModelBatch, model: ModelT_contra) -> Outputs: ...
+
+    def validation(self, batch: ModelBatch, model: ModelT_contra) -> Outputs:
+        return self.forward(batch, model)
 
     def reduce(self, outputs: Sequence[Outputs]) -> Outputs:
         return combine_outputs(outputs)

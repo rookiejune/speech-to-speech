@@ -180,6 +180,10 @@ acoustic_target: AcousticTarget | None
 - validation speech loader 使用同一公开 batch planner 和 distributed partition，但显式关闭
   shuffle。正式 train 入口从一个现有 stage speech loader 复制 task weights 与 speech config，
   只把复制后的 `DatasetConfig.split_label` 改为 dev；训练 spec 与 dataset config 保持不变。
+- train loader 与 validation loader 使用独立的窄 Protocol。没有 validation spec 时
+  `DataModule.val_dataloader()` 返回 `None`，Lightning 不运行 validation；text loader 不提供
+  `validation_dataloader()`，把 text spec 作为 validation 传入时在 DataModule 构造边界直接报错，
+  不用 training loader 伪装 validation。
 - `DataModule.train_samples()` 是 callback 按索引读取已 setup 训练样本的公开边界；callback
   不读取私有 dataset 字段。
 - parser 生成 `Speech.audio_token_spans`，`Speech` 校验 spans 与 semantic frame 完整对齐；

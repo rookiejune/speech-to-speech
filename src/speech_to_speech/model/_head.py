@@ -35,8 +35,10 @@ class VocabularyHeadMixin:
         hidden_state: torch.Tensor,
         local_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        projected = self.semantic_audio_output_adapter(hidden_state)
         weight = self.semantic_audio_embedding.weight
+        projected = self.semantic_audio_output_adapter(
+            hidden_state.to(dtype=weight.dtype)
+        )
         if local_ids is not None:
             weight = weight.index_select(0, local_ids)
         return F.linear(projected, weight)

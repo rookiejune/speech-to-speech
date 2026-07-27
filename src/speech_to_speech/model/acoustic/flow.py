@@ -56,6 +56,8 @@ class AcousticFlow(nn.Module):
                 raise ValueError("acoustic frame mask must align with condition.")
             if mask.dtype != torch.bool:
                 raise TypeError("acoustic frame mask must be boolean.")
+        parameter = next(self.decoder.parameters())
+        condition = condition.to(dtype=parameter.dtype)
         latent = torch.randn(
             (*condition.shape[:2], self.decoder.latent_dim),
             device=condition.device,
@@ -99,7 +101,7 @@ class FlowModel(TokenModel):
             ffn_ratio=options.ffn_ratio,
             repa_feature_dim=None if repa is None else repa["feature_dim"],
             repa_student_layer=None if repa is None else repa["student_layer"],
-        ).to(device=backbone_weight.device, dtype=backbone_weight.dtype)
+        ).to(device=backbone_weight.device, dtype=torch.float32)
 
     @property
     def acoustic_decoder(self) -> AcousticDiT:
@@ -109,9 +111,20 @@ class FlowModel(TokenModel):
         if target_acoustic_codes.dim() != 3:
             raise ValueError("target acoustic codes must have shape [B, F, N].")
         safe_codes = target_acoustic_codes.clamp_min(0)
-        features = code_features(self.acoustic_codec, self.backbone, safe_codes)
+        features = self._decoder_input(
+            code_features(self.acoustic_codec, self.backbone, safe_codes)
+        )
         return features.masked_fill(
             (target_acoustic_codes < 0).all(dim=-1)[..., None], 0
+        )
+
+    def target_frame_condition(
+        self,
+        hidden_states: Tensor,
+        target_positions: Tensor,
+    ) -> Tensor:
+        return self._decoder_input(
+            super().target_frame_condition(hidden_states, target_positions)
         )
 
     @torch.no_grad()
@@ -154,3 +167,7 @@ class FlowModel(TokenModel):
             features=self.sample_acoustic_features(condition, mask=frame_mask),
             frame_counts=frame_mask.sum(dim=1),
         )
+
+    def _decoder_input(self, value: Tensor) -> Tensor:
+        parameter = next(self.acoustic_decoder.parameters())
+        return value.to(dtype=parameter.dtype)

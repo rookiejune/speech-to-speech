@@ -105,8 +105,11 @@ semantic-audio token IDs
 Native/BPE semantic tokenizers 使用 codec codebook 初始化；完整 codec sequence tokenizer
 使用随机初始化，因为它的 vocab 同时包含多 codebook offset tokens 和 codec/codebook markers。
 随机初始化只读取 codec 声明的 semantic feature dimension，并使用 backbone embedding 作为
-device/dtype reference，不要求 backend 暴露虚构的 codebook tensor。
-codec features 在 acoustic decoder 路径转换到对应 device/dtype。frame mask 在进入 codec
+device reference，不要求 backend 暴露虚构的 codebook tensor。新建的 semantic embedding、
+input/output adapter 和 acoustic decoder 一律使用 FP32 参数存储；frozen backbone 可以保持
+BF16，forward 计算精度由 trainer autocast 控制。semantic head 与 acoustic decoder 的输入在
+模块边界显式转成对应参数 dtype，使训练外的 callback/generation 也遵守同一契约。
+codec features 在 acoustic decoder 路径转换到 decoder device/dtype。frame mask 在进入 codec
 前把 `-1` code padding 替换为安全值，adapter 后再清除无效位置。
 
 ## Acoustic decoder

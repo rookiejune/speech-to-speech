@@ -262,3 +262,7 @@ Stage 4 使用 full policy；stage 本身不隐式选择 policy。RVQ decoder �
 frozen。正式 joint entry 以
 `find_unused_parameters=False` 为目标时，同一 optimizer step 必须通过 joint batch 覆盖所有
 仍可训练的执行路径，或在进入该 step 前冻结未使用参数组。
+
+正式 train 只在配置了独立 speech validation spec 时让 `val_dataloader()` 返回真实 loader；
+没有 spec 时返回 `None`，text train loader 不被复用为 validation。teacher-forcing 指标由 loss 层的
+`ValidationMetric` 契约拥有，LightningModule 只负责 epoch/DDP aggregation。

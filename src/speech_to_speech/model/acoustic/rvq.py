@@ -40,7 +40,7 @@ class RVQModel(TokenModel):
             layers=options.layers,
             heads=options.heads,
             ffn_ratio=options.ffn_ratio,
-        ).to(device=backbone_weight.device, dtype=backbone_weight.dtype)
+        ).to(device=backbone_weight.device, dtype=torch.float32)
 
     def acoustic_logits(
         self,
@@ -48,7 +48,9 @@ class RVQModel(TokenModel):
         target_positions: Tensor,
         target_acoustic_codes: Tensor | None = None,
     ) -> tuple[Tensor, ...]:
-        condition = self.target_frame_condition(hidden_states, target_positions)
+        condition = self._decoder_input(
+            self.target_frame_condition(hidden_states, target_positions)
+        )
         return self.acoustic_decoder(
             condition,
             target_acoustic_codes,
@@ -66,7 +68,7 @@ class RVQModel(TokenModel):
         generator: torch.Generator | None = None,
     ) -> Tensor:
         return self.acoustic_decoder.generate(
-            condition,
+            self._decoder_input(condition),
             mask=mask,
             temperature=temperature,
             top_p=top_p,
@@ -127,3 +129,7 @@ class RVQModel(TokenModel):
             features=features,
             frame_counts=frame_mask.sum(dim=1),
         )
+
+    def _decoder_input(self, value: Tensor) -> Tensor:
+        parameter = next(self.acoustic_decoder.parameters())
+        return value.to(dtype=parameter.dtype)

@@ -1,4 +1,4 @@
-# 014 LongCat Stable Stage 1 P0 Acceptance
+# 014 LongCat Stable Stage 1
 
 对应 [014 schedule](../schedules/014-longcat-stable-stage1.md)。本文记录 2026-07-25
 在 FDU `145` 上完成的 P0 验收和当前边界。状态：**P0 在 debug-migrated copy 上通过**；
@@ -7,8 +7,10 @@ native token/RVQ 分布审计和 pilot split candidate 已补齐。2026-07-27 �
 32-sample root 完成 stage 1 TTS/S2ST 2-step smoke、正式 `scripts/train.py` 100-step canary，
 并在重分片 root 上完成两卡 DDP 2-step 与 resume 到 step 3，用来绕开 `/mnt/pami202` 超时
 验证入口闭环。随后又固化 pami201 1k pilot split manifest，验证两卡连续 5 个 epoch
-的 rank 均衡，并完成 2-step DDP 及 step 2 -> 3 resume。这些结果仍只验证数据与
-训练执行契约；dev CE、每 codebook top-1、长跑监督和质量/收敛尚未验证。
+的 rank 均衡，并完成 2-step DDP 及 step 2 -> 3 resume。完整 dev validation 随后推进到
+step 2000；RVQ CE 虽持续下降，但 acoustic top-1 与无条件众数基线几乎相同，且随机初始化的
+可训练参数以 BF16 存储时出现明显更新量化。当前停止机械延长到 5k，先做 dtype A/B；长跑、
+decode 质量和收敛仍未验证。
 
 ## 范围与代码状态
 
@@ -368,8 +370,62 @@ step 500 相对 step 0 的 token CE 下降 `19.602%`，RVQ CE 下降 `2.701%`。
 run 正常以 `max_steps=500` 退出，`last.ckpt` metadata 为 `global_step=500`；归档
 `step-00000200/300/400/500.ckpt` 与 `last.ckpt` 均存在，每个约 `2.2G`，TensorBoard event
 约 `500K`。运行期间同机外部评测在所有 GPU 上各占约 `4.8G` 和约 25% utilization，
-因此本次 `2:34` fit 时长不用于效率比较。下一步从 step 500 恢复到 step 2000，每 250 steps
-复验完整 dev；达到 `8.694203` 后先做 decode/companion manifest，不机械跑满 5k。
+因此本次 `2:34` fit 时长不用于效率比较。随后从 step 500 恢复到 step 2000，每 250 steps
+复验完整 dev，结果见下节。
+
+## PAMI201 1k Pilot Resume to Step 2000
+
+`experiment=014_stage1_pilot_resume_2000` 从 step 500 的 `last.ckpt` 恢复，在同一数据根、
+split manifest、GPU 1/2 和 batch size 1 配置下继续到 step 2000，每 250 steps 遍历完整 dev
+split。输出根为：
+
+`145:/home/zhuyin/local-runs/s2s-small-data-20260727/train-stage1-pilot1k-resume2000-v1`
+
+| Metric | Step 750 | Step 1000 | Step 1250 | Step 1500 | Step 1750 | Step 2000 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| token CE | `7.837758` | `7.748518` | `7.700278` | `7.671334` | `7.647567` | `7.636385` |
+| RVQ CE | `8.880487` | `8.854315` | `8.849685` | `8.834164` | `8.834585` | `8.826597` |
+| codebook 0 CE | `8.712561` | `8.686665` | `8.681400` | `8.667390` | `8.666157` | `8.658384` |
+| codebook 1 CE | `8.986501` | `8.962553` | `8.955858` | `8.941388` | `8.940144` | `8.932223` |
+| codebook 2 CE | `8.942399` | `8.913727` | `8.911791` | `8.893713` | `8.897455` | `8.889181` |
+| codebook 0 top-1 | `0.038227` | `0.038227` | `0.037758` | `0.037523` | `0.038462` | `0.038227` (`163/4264`) |
+| codebook 1 top-1 | `0.031660` | `0.031191` | `0.031895` | `0.032129` | `0.032129` | `0.032129` (`137/4264`) |
+| codebook 2 top-1 | `0.036585` | `0.037289` | `0.037289` | `0.037523` | `0.037523` | `0.037992` (`162/4264`) |
+
+step 2000 相对 step 0 的 token CE 下降 `22.736%`，RVQ CE 下降 `3.553%`，仍未达到
+5% 目标 `8.694203`。最近 500 steps 的 RVQ CE 只从 `8.834164` 改善到 `8.826597`；按该
+局部斜率还需约 `8.7k` steps 才可能触达门槛，因此不再把 5k 视为应机械跑满的默认预算。
+6 个 dev interval 均为 finite；run 正常退出并保留
+`step-00000750/1000/1250/1500/1750/2000.ckpt` 与 `last.ckpt`，后者已核对
+`global_step=2000`。同机其他评测在每卡占用约 `4.8 GiB` 和 25% utilization，本次耗时仍不用于
+效率结论。
+
+### Plateau Diagnostics
+
+对同一 dev split 的原始 target acoustic code 做无条件边际统计，三个 codebook 的众数 top-1
+分别为 `0.038687 / 0.031419 / 0.038453`；step 2000 模型为
+`0.038227 / 0.032129 / 0.037992`。两者几乎一致，说明高于 `1/8100` 随机值并不足以证明
+模型利用了 semantic condition；当前 decoder 的 top-1 行为主要可由 acoustic codebook 边际众数
+解释。原始 dev target 有 `4265` frames，而 validation 有效口径为 `4264` frames，可能来自
+causal shift 或 truncation mask；后续 A/B 必须保持同一有效位口径。
+
+边际统计归档于：
+
+`145:/home/zhuyin/local-runs/s2s-small-data-20260727/diagnostics/acoustic-marginal.json`
+
+另比较 step 500 与 step 2000 checkpoint：speech interface 与 acoustic decoder 的浮点参数均为
+BF16；预计可训练的 `175736556` 个参数中，仅 `20.19%` 发生任何逐位变化，若干 layer norm 与
+query/key norm 参数完全未变化。AdamW 的 `exp_avg`、`exp_avg_sq` 也以 BF16 保存，而 learning
+rate 仅为 `2e-5`。这证明当前更新受到 BF16 存储粒度强烈限制，但尚未证明它是 plateau 的唯一
+原因；因果判断留给同 seed、从头训练的 FP32-storage A/B。
+
+checkpoint delta 归档于：
+
+`145:/home/zhuyin/local-runs/s2s-small-data-20260727/diagnostics/checkpoint-delta-500-2000.json`
+
+当前 stop/go 决策：停止从旧 checkpoint 继续到 5k。下一轮保持 frozen backbone 为 BF16，
+随机初始化且可训练的 semantic speech interface 与 acoustic decoder 使用 FP32 参数存储，forward
+仍由 mixed-precision autocast 控制；从同 seed 重新跑 500-step A/B，再决定是否恢复更长 pilot。
 
 ## 判定
 
@@ -382,13 +438,15 @@ P0 在 debug-migrated copy 上通过：代码迁移的本地/远端 targeted tes
 0 秒的问题。1000-sample native token/RVQ 分布审计和 800/100/100 pilot split candidate
 也已完成，它们作为原始 debug candidate 记录保留。pami201 上另行固化的
 1k/20-group split manifest 已完成两卡 rank 均衡、DDP 2-step、resume 和完整 dev validation
-指标链路验收。恢复到 step 500 后三个 acoustic codebook top-1 仍明显高于随机，dev RVQ CE
-相对初始下降 `2.701%`，但尚未满足 5% 门槛，因此不允许直接晋级到 native stable P1 长跑。
+指标链路验收。恢复到 step 2000 后 dev RVQ CE 相对初始下降 `3.553%`，仍未满足 5% 门槛；
+三个 acoustic codebook top-1 与各自无条件众数基线几乎一致，尚未证明 decoder 有效利用条件，
+因此不允许直接晋级到 native stable P1 长跑。
 
 2026-07-27 的 pami201 32-sample root 进一步证明：当 202 超时时，使用 145 本地运行时、
 145 本地 HF/LongCat cache 和 pami201 数据根可以完成 stage 1 TTS/S2ST 2-step smoke，并且
 正式 `scripts/train.py` stage 1 可以完成 100-step 小数据 canary；重分片 root 还完成两卡
 DDP 2-step 与 resume 到 step 3。后续 1k pilot 已完成正式 split manifest、两卡
-rank 均衡、DDP/resume、完整 dev 指标链路，并从 100-step canary 恢复到 step 500。
-top-1 已显示学习信号，RVQ CE 单调下降但尚未达到计划门槛；当前仍缺 step-2000 gate、
-最多 5k-step pilot、decode 和长跑收敛验收，不支持质量或收敛结论。
+rank 均衡、DDP/resume、完整 dev 指标链路，并从 100-step canary 恢复到 step 2000。
+RVQ CE 缓慢下降但已进入平台，checkpoint delta 又显示 BF16 参数和 optimizer state 的更新量化；
+当前先做 FP32-storage 500-step A/B，不继续盲跑 5k。decode 和长跑收敛验收仍未完成，不支持
+质量或收敛结论。

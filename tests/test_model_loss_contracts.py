@@ -409,16 +409,25 @@ class ModelLossContractTest(unittest.TestCase):
                     "codebook_1_top1": torch.tensor([1.0, 0.0]),
                 },
             ),
+            "flow_matching": LossItem(
+                torch.tensor([1.0, 3.0]),
+                {"frames": torch.tensor([3.0, 1.0])},
+            ),
+            "repa": LossItem(
+                torch.tensor([0.2, 0.6]),
+                {"frames": torch.tensor([1.0, 1.0])},
+            ),
         }
         batch = _batch(Task.TTS, token_labels=torch.tensor([[-100, 1]]))
 
         with (
-            patch.object(module, "_loss_outputs", return_value=outputs),
+            patch.object(module, "_outputs", return_value=outputs) as collect,
             patch.object(module, "log") as log,
         ):
             returned = module.validation_step(batch, 0)
 
         self.assertIs(returned, outputs)
+        self.assertEqual(collect.call_args.args[1], module.objective.validation)
         calls = {item.args[0]: item for item in log.call_args_list}
         expected = {
             "val/token_ce": (torch.tensor(2.5), 4),
@@ -427,6 +436,8 @@ class ModelLossContractTest(unittest.TestCase):
             "val/rvq_codebook_0_top1": (torch.tensor(2.0 / 3.0), 3),
             "val/rvq_codebook_1_ce": (torch.tensor(4.0), 3),
             "val/rvq_codebook_1_top1": (torch.tensor(2.0 / 3.0), 3),
+            "val/flow_matching": (torch.tensor(1.5), 4),
+            "val/repa": (torch.tensor(0.4), 2),
         }
         self.assertEqual(set(calls), set(expected))
         for name, (value, batch_size) in expected.items():
@@ -679,10 +690,18 @@ class ModelLossContractTest(unittest.TestCase):
             target_audio_token_positions=positions,
         )
 
-        outputs = RVQObjective(layout)(batch, model)
+        objective = RVQObjective(layout)
+        outputs = objective(batch, model)
+        validation = objective.validation(batch, model)
 
         self.assertIn("rvq", outputs)
-        self.assertEqual(model.token_hidden_calls, 1)
+        training_details = outputs["rvq"].details
+        validation_details = validation["rvq"].details
+        if training_details is None or validation_details is None:
+            self.fail("RVQ loss details are unavailable")
+        self.assertNotIn("codebook_0_top1", training_details)
+        self.assertIn("codebook_0_top1", validation_details)
+        self.assertEqual(model.token_hidden_calls, 2)
         self.assertTrue(torch.equal(model.positions, positions))
         self.assertEqual(outputs["loss"].shape, ())
         self.assertTrue(torch.isfinite(outputs["loss"]))

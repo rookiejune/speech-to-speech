@@ -77,10 +77,7 @@ class FlowObjective(Objective[FlowObjectiveModel]):
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
         target_data = batch.acoustic_target
-        if (
-            target_data is None
-            and batch.tasks[0].target_modality is Modality.AUDIO
-        ):
+        if target_data is None and batch.tasks[0].target_modality is Modality.AUDIO:
             raise ValueError(
                 "FlowObjective requires acoustic target data for audio-target batches."
             )
@@ -153,13 +150,22 @@ class RVQObjective(Objective[RVQObjectiveModel]):
         self.rvq = CausalAcousticLoss()
 
     def forward(self, batch: ModelBatch, model: RVQObjectiveModel) -> Outputs:
+        return self._outputs(batch, model, include_top1=False)
+
+    def validation(self, batch: ModelBatch, model: RVQObjectiveModel) -> Outputs:
+        return self._outputs(batch, model, include_top1=True)
+
+    def _outputs(
+        self,
+        batch: ModelBatch,
+        model: RVQObjectiveModel,
+        *,
+        include_top1: bool,
+    ) -> Outputs:
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
         target_data = batch.acoustic_target
-        if (
-            target_data is None
-            and batch.tasks[0].target_modality is Modality.AUDIO
-        ):
+        if target_data is None and batch.tasks[0].target_modality is Modality.AUDIO:
             raise ValueError(
                 "RVQObjective requires acoustic target data for audio-target batches."
             )
@@ -191,6 +197,7 @@ class RVQObjective(Objective[RVQObjectiveModel]):
                 labels,
                 batch.acoustic_target_mask,
                 validate=False,
+                include_top1=include_top1,
             )
             result["rvq"] = acoustic
             result["loss"] = result["loss"] + _weighted_mean(acoustic, "frames")
