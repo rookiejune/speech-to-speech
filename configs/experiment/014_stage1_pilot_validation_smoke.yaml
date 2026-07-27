@@ -1,0 +1,29 @@
+# @package _global_
+defaults:
+  - override /stage: stage_1
+  - override /parameter_policy: speech_interface
+  - override /trainer: static_ddp
+  - _self_
+
+output_subdir: 014-longcat-stable-stage1/pilot-validation-smoke/${run_name}
+
+data:
+  dataloader:
+    batch_size: 1
+    num_workers: 0
+    pin_memory: false
+    persistent_workers: false
+
+validation:
+  enabled: true
+  loader: tts
+  split_label: dev
+  every_n_steps: 1
+  sanity_steps: -1
+
+train:
+  max_steps: 1
+
+trainer:
+  log_every_n_steps: 1
+  enable_checkpointing: false

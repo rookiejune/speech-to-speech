@@ -191,6 +191,52 @@ class AcousticRVQTest(unittest.TestCase):
 
         torch.testing.assert_close(baseline.loss, padded_changed.loss)
 
+    def test_causal_loss_reports_masked_codebook_top1(self):
+        labels = torch.tensor(
+            [
+                [[1, 2], [0, 1], [-1, -1]],
+                [[2, 3], [-1, -1], [-1, -1]],
+            ]
+        )
+        mask = torch.tensor(
+            [[True, True, False], [True, False, False]],
+        )
+        predictions = (
+            torch.tensor([[1, 2, 0], [2, 0, 0]]),
+            torch.tensor([[2, 1, 0], [0, 0, 0]]),
+        )
+        logits = tuple(
+            torch.nn.functional.one_hot(value, classes).to(dtype=torch.float32)
+            for value, classes in zip(predictions, (3, 4))
+        )
+
+        baseline = CausalAcousticLoss()(logits, labels, mask)
+        changed = tuple(value.clone() for value in logits)
+        for value in changed:
+            value[~mask] = 1000
+        padded_changed = CausalAcousticLoss()(changed, labels, mask)
+
+        details = baseline.details
+        changed_details = padded_changed.details
+        if details is None or changed_details is None:
+            self.fail("RVQ loss details are unavailable")
+        torch.testing.assert_close(
+            details["codebook_0_top1"],
+            torch.tensor([0.5, 1.0]),
+        )
+        torch.testing.assert_close(
+            details["codebook_1_top1"],
+            torch.tensor([1.0, 0.0]),
+        )
+        torch.testing.assert_close(
+            changed_details["codebook_0_top1"],
+            details["codebook_0_top1"],
+        )
+        torch.testing.assert_close(
+            changed_details["codebook_1_top1"],
+            details["codebook_1_top1"],
+        )
+
     def test_causal_loss_accepts_signed_integer_label_dtypes(self):
         loss = CausalAcousticLoss()
         item = loss(

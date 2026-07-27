@@ -3,10 +3,13 @@ from __future__ import annotations
 import unittest
 from collections.abc import Iterator
 from itertools import islice
+from unittest.mock import Mock, call, patch
 
 import torch
 
+from speech_to_speech.datamodule.dataset import DatasetConfig
 from speech_to_speech.datamodule.joint import LoaderSchedule, ScheduledDataLoader
+from speech_to_speech.datamodule.module import Config, DataModule, LoaderSpec
 from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.task import Task
 
@@ -52,6 +55,57 @@ class _BatchSamplerEpochLoader:
 
 
 class ScheduledDataLoaderTest(unittest.TestCase):
+    def test_datamodule_keeps_validation_loader_separate_from_training(self) -> None:
+        train_config = Config(
+            codec="longcat",
+            dataloader={"batch_size": 2, "num_workers": 0},
+            dataset=DatasetConfig(split_label="train"),
+        )
+        validation_config = Config(
+            codec="longcat",
+            dataloader={"batch_size": 2, "num_workers": 0},
+            dataset=DatasetConfig(split_label="dev"),
+        )
+        train_spec = LoaderSpec.speech(train_config, {Task.TTS: 1.0})
+        validation_spec = LoaderSpec.speech(
+            validation_config,
+            {Task.TTS: 1.0},
+        )
+        train_loader = Mock()
+        validation_loader = Mock()
+        train_batches = object()
+        validation_batches = object()
+        train_loader.train_dataloader.return_value = train_batches
+        validation_loader.validation_dataloader.return_value = validation_batches
+        runtime = Mock()
+
+        with patch(
+            "speech_to_speech.datamodule.module._build_loader",
+            side_effect=(train_loader, validation_loader),
+        ) as build:
+            datamodule = DataModule(
+                runtime,
+                {"tts": train_spec},
+                validation=validation_spec,
+            )
+            datamodule.setup("fit")
+            training = datamodule.train_dataloader()
+            validation = datamodule.val_dataloader()
+
+        self.assertIs(training, train_batches)
+        self.assertIs(validation, validation_batches)
+        self.assertIs(datamodule.loader_specs["tts"], train_spec)
+        self.assertIs(datamodule.validation_spec, validation_spec)
+        self.assertIsNot(train_spec.speech_config, validation_spec.speech_config)
+        build.assert_has_calls(
+            [call(train_spec, runtime), call(validation_spec, runtime)]
+        )
+        train_loader.setup.assert_called_once_with("fit")
+        validation_loader.setup.assert_called_once_with("fit")
+        train_loader.train_dataloader.assert_called_once_with()
+        validation_loader.validation_dataloader.assert_called_once_with()
+        validation_loader.train_dataloader.assert_not_called()
+
     def test_restart_advances_loader_or_batch_sampler_epoch(self) -> None:
         direct = _DirectEpochLoader(_batch(Task.TTS))
         fallback = _BatchSamplerEpochLoader(_batch(Task.MT))

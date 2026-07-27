@@ -81,6 +81,14 @@ UniCodec DDP smoke 则要求每个 rank
 - `011_qwen_rvq_native_p0_fixed_sample`：真实 Qwen、LongCat native token 与 RVQ decoder 的
   P0 TTS/S2ST 2-step fixed-sample 合同验收；该 experiment 只固化当前 P0 子项，不替代 011
   的正式 staged joint entry。
+- `014_stage1_pilot_validation_smoke`：两卡 stage 1 的 1-step pilot 验收；fit 前遍历完整 dev split，
+  step 1 再运行 interval validation，用于验证 token/RVQ CE 与各 codebook top-1 的真实 DDP 口径。
+- `014_stage1_pilot_canary`：同一 1k split 的 100-step 两卡 canary；step 50/100 运行完整 dev，
+  同步归档 checkpoint 并保留 `last.ckpt`，用于决定是否继续到计划中的 5k-step pilot。
+- `014_stage1_pilot_resume_500`：从显式 `train.ckpt_path` 恢复 100-step canary，到 step 500
+  为止每 100 steps 运行完整 dev 与归档 checkpoint；用于在扩大到 5k 前验证 RVQ CE 门槛。
+- `014_stage1_pilot_resume_2000`：step 500 未达 5% RVQ CE 门槛后，从其 `last.ckpt` 恢复到
+  step 2000，每 250 steps 运行完整 dev 与归档 checkpoint；作为是否继续到 5k 的中间 gate。
 - `train`：正式 staged joint training root。它直接消费 `configs/stage/stage_*.yaml` 中的
   loader/task/freeze 契约，构造唯一 `DataModule`；每个 speech loader 使用
   `LoaderSpec.speech(...)`，纯文本 MT loader 使用 `LoaderSpec.text(...)`，多 loader 调度由
@@ -99,7 +107,22 @@ training job 传递 `repo_output_root`、相对 `output_subdir` 和 `"$@"` 参�
 `jobs/011/02_rvq_native_stage_smoke.sh` 仍使用 `scripts/overfit.py` 验证每个 stage 的 freeze
 配置能完成 fixed-sample 两步训练。`jobs/011/03_staged_joint_train.sh` 是正式 staged joint
 training wrapper，调用 `scripts/train.py`，默认 `trainer=static_ddp`，并可用
-`SPEECH_TO_SPEECH_STAGE=stage_1..stage_4` 选择阶段。
+`SPEECH_TO_SPEECH_STAGE=stage_1..stage_4` 选择阶段。正式 train 入口通过
+`train.ckpt_path=<checkpoint>` 显式恢复 Lightning checkpoint；默认值为空，普通训练不走 resume。
+该字段只属于 staged train，overfit 配置不接受它；命名为 resume 的 experiment 必须把
+`train.ckpt_path` 标为必填，避免绕过 wrapper 时静默从头训练。
+`jobs/014/01_stage1_pilot_validation_smoke.sh` 复用同一 Python 入口；pilot data root 与 split manifest
+分别由 `SPEECH_TO_SPEECH_STAGE_DATA_ROOT`、`SPEECH_TO_SPEECH_STAGE_SPLIT_MANIFEST` 显式提供。
+`jobs/014/02_stage1_pilot_canary.sh` 使用相同资源入口运行 100-step canary，不从 smoke 输出恢复。
+`jobs/014/03_stage1_pilot_resume_500.sh` 与 `04_stage1_pilot_resume_2000.sh` 额外要求
+`SPEECH_TO_SPEECH_STAGE_CKPT_PATH`，避免隐式猜测 latest checkpoint。
+
+正式 train 的 `validation` 默认关闭。启用时，`loader` 必须选择当前 stage 的一个 speech loader，
+且 `data.dataset.split_manifest` 必须存在、`split_label` 必须与训练 split 不同。入口复制该 loader
+的 task weights 与 speech data config，仅替换 dev `split_label`；`every_n_steps` 直接作为
+optimizer-step `val_check_interval`，`sanity_steps=-1` 表示 fit 前遍历完整 dev split，非负值表示
+对应 sanity batch 数。为了让 step interval 不受 epoch 边界控制，入口同时设置
+`check_val_every_n_epoch=None`。每次 sanity/interval 结果按 step 记录到 `metrics.json.validation`。
 
 ## 入口边界
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 from hydra import compose, initialize_config_dir
@@ -25,6 +25,7 @@ from scripts._config import (
     train as parse_train,
 )
 from scripts._logging import build as build_logger
+from scripts import train as train_script
 from scripts.overfit import (
     _composition,
     _gradient_logger,
@@ -53,6 +54,7 @@ from speech_to_speech.stage import (
     StageLoaderConfig,
     StageName,
 )
+from speech_to_speech.task import Task
 
 
 class _DeviceRestoreModule(torch.nn.Module):
@@ -131,6 +133,29 @@ class ConfigTest(unittest.TestCase):
         self.assertFalse(config.callbacks.task_sample.enabled)
         self.assertFalse(config.callbacks.evaluation.enabled)
 
+    def test_decoupled_semantic_smoke_loads_artifact_config(self):
+        with patch.dict(
+            "os.environ",
+            {"SPEECH_TO_SPEECH_SEMANTIC_CODEC_ARTIFACT": "/tmp/semantic-codec"},
+        ):
+            config = overfit(
+                _compose(
+                    "overfit",
+                    "experiment=longcat_decoupled_semantic_only_smoke",
+                )
+            )
+
+        self.assertIsInstance(config, OverfitTokenConfig)
+        self.assertEqual(config.runtime.codec, "longcat")
+        self.assertEqual(
+            config.runtime.semantic_codec_artifact,
+            "/tmp/semantic-codec",
+        )
+        self.assertEqual(config.runtime.device, "cpu")
+        self.assertEqual(config.acoustic.type, AcousticType.NONE.value)
+        self.assertIsInstance(config.model.toy, ToyConfig)
+        self.assertIs(config.data.name, DatasetName.TOY)
+
     def test_composition_must_match_codec_capabilities(self):
         flow = overfit(_compose("overfit"))
         token = overfit(_compose("overfit", "runtime=unicodec", "model/acoustic=none"))
@@ -173,6 +198,11 @@ class ConfigTest(unittest.TestCase):
                     "+acoustic.repa.weight=0.1",
                 ),
                 "acoustic.repa",
+            ),
+            (
+                overfit,
+                _compose("overfit", "+train.ckpt_path=/tmp/resume.ckpt"),
+                "train.ckpt_path",
             ),
         ]
 
@@ -467,6 +497,11 @@ class ConfigTest(unittest.TestCase):
 
         self.assertIsInstance(default, StagedTrainRVQConfig)
         self.assertEqual(default.stage.name, StageName.STAGE_1)
+        self.assertFalse(default.validation.enabled)
+        self.assertEqual(default.validation.loader, "tts")
+        self.assertEqual(default.validation.split_label, "dev")
+        self.assertEqual(default.validation.every_n_steps, 1000)
+        self.assertEqual(default.validation.sanity_steps, -1)
         self.assertFalse(default.callbacks.performance.enabled)
         self.assertFalse(default.trainer.use_distributed_sampler)
         with self.assertRaises(AttributeError):
@@ -480,6 +515,10 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.data.dataset.name, DatasetName.WMT19_TTS)
         self.assertEqual(config.text_data.dataset.name.value, "wmt19")
         self.assertEqual(config.train.max_steps, 1000000)
+        self.assertIsNone(config.train.ckpt_path)
+
+        resumed = parse_train(_compose("train", "train.ckpt_path=/tmp/last.ckpt"))
+        self.assertEqual(resumed.train.ckpt_path, "/tmp/last.ckpt")
 
         ddp = parse_train(_compose("train", "trainer=static_ddp", "stage=stage_4"))
 
@@ -594,9 +633,196 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot mix pure text and speech"):
             build_train_datamodule(config, object())
 
-    def test_text_ar_uses_the_text_loader(self):
-        from speech_to_speech.task import Task
+    def test_train_datamodule_clones_the_selected_loader_for_validation(self):
+        config = parse_train(
+            _compose(
+                "train",
+                "stage=stage_2",
+                "validation.enabled=true",
+                "validation.loader=tts",
+                "validation.split_label=dev",
+                "data.dataset.split_manifest=/tmp/splits.json",
+            )
+        )
 
+        datamodule = build_train_datamodule(config, object())
+
+        training = datamodule.loader_specs["tts"].speech_config
+        validation = datamodule.validation_spec
+        if training is None or validation is None:
+            self.fail("validation speech loader was not configured")
+        validation_config = validation.speech_config
+        if validation_config is None:
+            self.fail("validation must reuse a speech loader")
+        self.assertIsNot(training, validation_config)
+        self.assertIsNot(training.dataset, validation_config.dataset)
+        self.assertEqual(training.dataset.split_label, "train")
+        self.assertEqual(validation_config.dataset.split_label, "dev")
+        self.assertEqual(validation.task_weights, {Task.TTS: 1.0})
+
+    def test_stage1_pilot_validation_smoke_owns_the_full_validation_budget(self):
+        config = parse_train(
+            _compose(
+                "train",
+                "experiment=014_stage1_pilot_validation_smoke",
+                "data.dataset.root=/tmp/pilot",
+                "data.dataset.split_manifest=/tmp/pilot/splits.json",
+            )
+        )
+
+        self.assertIs(config.stage.name, StageName.STAGE_1)
+        self.assertEqual(config.train.max_steps, 1)
+        self.assertTrue(config.validation.enabled)
+        self.assertEqual(config.validation.loader, "tts")
+        self.assertEqual(config.validation.split_label, "dev")
+        self.assertEqual(config.validation.every_n_steps, 1)
+        self.assertEqual(config.validation.sanity_steps, -1)
+        self.assertEqual(config.data.dataloader.batch_size, 1)
+        self.assertEqual(config.data.dataloader.num_workers, 0)
+        self.assertFalse(config.trainer.enable_checkpointing)
+
+        canary = parse_train(
+            _compose(
+                "train",
+                "experiment=014_stage1_pilot_canary",
+                "data.dataset.root=/tmp/pilot",
+                "data.dataset.split_manifest=/tmp/pilot/splits.json",
+            )
+        )
+        self.assertEqual(canary.train.max_steps, 100)
+        self.assertEqual(canary.validation.every_n_steps, 50)
+        self.assertEqual(canary.validation.sanity_steps, -1)
+        self.assertTrue(canary.trainer.enable_checkpointing)
+        self.assertEqual(canary.callbacks.checkpoint.every_n_train_steps, 50)
+        self.assertEqual(canary.callbacks.checkpoint.save_top_k, -1)
+
+        resumed = parse_train(
+            _compose(
+                "train",
+                "experiment=014_stage1_pilot_resume_500",
+                "data.dataset.root=/tmp/pilot",
+                "data.dataset.split_manifest=/tmp/pilot/splits.json",
+                "train.ckpt_path=/tmp/pilot/step-100.ckpt",
+            )
+        )
+        self.assertEqual(resumed.train.max_steps, 500)
+        self.assertEqual(resumed.train.ckpt_path, "/tmp/pilot/step-100.ckpt")
+        self.assertEqual(resumed.validation.every_n_steps, 100)
+        self.assertTrue(resumed.trainer.enable_checkpointing)
+        self.assertEqual(resumed.callbacks.checkpoint.every_n_train_steps, 100)
+
+        continued = parse_train(
+            _compose(
+                "train",
+                "experiment=014_stage1_pilot_resume_2000",
+                "data.dataset.root=/tmp/pilot",
+                "data.dataset.split_manifest=/tmp/pilot/splits.json",
+                "train.ckpt_path=/tmp/pilot/step-500.ckpt",
+            )
+        )
+        self.assertEqual(continued.train.max_steps, 2000)
+        self.assertEqual(continued.train.ckpt_path, "/tmp/pilot/step-500.ckpt")
+        self.assertEqual(continued.validation.every_n_steps, 250)
+        self.assertEqual(continued.callbacks.checkpoint.every_n_train_steps, 250)
+
+        with self.assertRaises(InterpolationResolutionError):
+            parse_train(
+                _compose(
+                    "train",
+                    "experiment=014_stage1_pilot_resume_500",
+                    "data.dataset.root=/tmp/pilot",
+                    "data.dataset.split_manifest=/tmp/pilot/splits.json",
+                )
+            )
+
+    def test_enabled_validation_requires_a_distinct_manifest_split(self):
+        with self.assertRaisesRegex(ValueError, "split_manifest"):
+            parse_train(_compose("train", "validation.enabled=true"))
+        with self.assertRaisesRegex(ValueError, "unknown validation loader"):
+            parse_train(
+                _compose(
+                    "train",
+                    "validation.enabled=true",
+                    "validation.loader=missing",
+                    "data.dataset.split_manifest=/tmp/splits.json",
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "must differ"):
+            parse_train(
+                _compose(
+                    "train",
+                    "validation.enabled=true",
+                    "validation.split_label=train",
+                    "data.dataset.split_manifest=/tmp/splits.json",
+                )
+            )
+
+    def test_train_trainer_forwards_step_validation_options(self):
+        config = parse_train(
+            _compose(
+                "train",
+                "validation.enabled=true",
+                "validation.every_n_steps=25",
+                "validation.sanity_steps=2",
+                "data.dataset.split_manifest=/tmp/splits.json",
+            )
+        )
+        callbacks = []
+
+        with (
+            patch("scripts.train.entry_trainer") as entry,
+            patch("scripts.train.build_logger") as logger,
+        ):
+            trainer = train_script.build_trainer(config, Path("/tmp/output"), callbacks)
+
+        self.assertIs(trainer, entry.return_value)
+        self.assertIs(entry.call_args.kwargs["logger"], logger.return_value)
+        self.assertEqual(entry.call_args.kwargs["val_check_interval"], 25)
+        self.assertEqual(entry.call_args.kwargs["num_sanity_val_steps"], 2)
+
+    @patch("scripts.train.build_trainer")
+    @patch("scripts.train.training_callbacks", return_value=[])
+    @patch("scripts.train.build_datamodule")
+    @patch("scripts.train.apply_parameter_policy")
+    @patch("scripts.train.rvq")
+    @patch("scripts.train._composition", return_value=AcousticType.RVQ)
+    @patch("scripts.train.Runtime")
+    @patch("scripts.train.pl.seed_everything")
+    def test_train_run_passes_ckpt_path_to_trainer_fit(
+        self,
+        seed,
+        runtime,
+        composition,
+        rvq,
+        policy,
+        datamodule,
+        callbacks,
+        trainer_factory,
+    ):
+        del seed, composition, policy, callbacks
+        config = parse_train(
+            _compose(
+                "train",
+                "train.ckpt_path=/tmp/resume.ckpt",
+                "trainer.enable_checkpointing=false",
+            )
+        )
+        module = Mock()
+        model = Mock()
+        rvq.return_value = (module, model)
+        runtime.return_value = Mock(acoustic_side_channel=False)
+        trainer = Mock(is_global_zero=False)
+        trainer_factory.return_value = trainer
+
+        train_script.run(config)
+
+        trainer.fit.assert_called_once_with(
+            module,
+            datamodule=datamodule.return_value,
+            ckpt_path="/tmp/resume.ckpt",
+        )
+
+    def test_text_ar_uses_the_text_loader(self):
         self.assertTrue(_is_text_loader({Task.TEXT_AR: 1.0}))
 
     def test_removed_parallel_groups_are_not_composable(self):
@@ -834,6 +1060,7 @@ class ConfigTest(unittest.TestCase):
         jobs = [
             *sorted((root / "jobs" / "011").glob("*.sh")),
             *sorted((root / "jobs" / "013").glob("*.sh")),
+            *sorted((root / "jobs" / "014").glob("*.sh")),
         ]
 
         self.assertFalse((root / "jobs" / "013" / "fdu_env.sh").exists())
@@ -846,6 +1073,22 @@ class ConfigTest(unittest.TestCase):
                     source,
                     r"/(?:home|mnt|Users)/|hf-mirror|Qwen3-0\.6B|HF_HOME|ANYTRAIN_HOME",
                 )
+
+    def test_stage1_resume_job_requires_and_forwards_checkpoint(self):
+        root = Path(__file__).parents[1]
+        jobs = {
+            "03_stage1_pilot_resume_500.sh": "014_stage1_pilot_resume_500",
+            "04_stage1_pilot_resume_2000.sh": "014_stage1_pilot_resume_2000",
+        }
+
+        for name, experiment in jobs.items():
+            with self.subTest(job=name):
+                source = (root / "jobs" / "014" / name).read_text()
+
+                self.assertIn("SPEECH_TO_SPEECH_STAGE_CKPT_PATH:?", source)
+                self.assertIn(f'"experiment={experiment}"', source)
+                self.assertIn('"train.ckpt_path=${checkpoint}"', source)
+                self.assertIn('"$@"', source)
 
     def test_fdu_smoke_jobs_select_explicit_configs(self):
         root = Path(__file__).parents[1]

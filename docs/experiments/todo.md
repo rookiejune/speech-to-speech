@@ -5,26 +5,22 @@
 
 ## 014 LongCat stable stage 1
 
-P0 已在 debug-migrated copy 上通过，证据见
-[014 result](results/014-longcat-stable-stage1.md)。后续代码已允许缺失 duration metadata 时从
-codec frame count 和 runtime frame rate 推导音频秒数，不再要求正式 root 先补写
-`AudioMeta.DURATION`。2026-07-26 已完成正式 root parquet/fingerprint manifest 审计，
-以及无 duration parse/map-style dataloader 抽样 probe。1000-sample native token/RVQ 分布审计
-和 800/100/100 pilot split candidate 已完成，但产物仍位于 debug 输出目录，不是最终正式
-split manifest；剩余正式验收如下。
+剩余正式验收：
 
-- 固化正式 split manifest；禁止依赖 `/tmp`、debug copy 或 debug candidate artifact 进入
-  stage 1 长跑。
-- 跑正式 root native-token stable stage 1：training step、32-sample fixed overfit、1k pilot、
-  两卡 DDP 2-step 与 resume。
+- 从 1k pilot step 500 的 `last.ckpt` 恢复到 step 2000，每 250 steps 对完整 dev split
+  记录 token/RVQ CE 与每 codebook top-1。step 500 的 codebook top-1 均持续高于随机，
+  但 dev RVQ CE 相对初始只下降 `2.701%`；晋级仍要求相对初始 `9.151793` 至少下降 5%
+  （目标 `<=8.694203`）。step 2000 仍未达标时，先检查局部斜率与训练配置，再决定是否继续
+  到最多 5k steps。
+- 跑 native-token stable stage 1 长跑，保留 TensorBoard 监督曲线、周期 checkpoint
+  和可恢复的最新 checkpoint；当前 1k pilot 只验证数据分片、两卡 DDP 和
+  resume 执行契约，不支持质量或收敛结论。
 - native stage 1 达标后，再在完整 train split 上重训 speech BPE 并做 shadow ablation；旧 100k
   BPE collapse artifact 不复用。
 - 只有 BPE 在 held-out 分布、decode finite、dev CE 和吞吐/显存上通过 A/B，才允许进入后续 stage。
 
 ## 其他工程欠账
 
-- 正式多任务 DDP 初始仍使用 `find_unused_parameters=True`；native stable path 固化后再评估静态
-  DDP 或冻结策略优化。
 - stage 1 companion manifest 需要绑定 checkpoint、tokenizer/native-or-BPE、semantic vocab、
   RVQ codebook、decoder config、state-dict prefix whitelist 和 split fingerprint。
 - 后续进入 Qwen partial/full joint 前，再补齐 stage-specific FLOPs provider、validation generation、

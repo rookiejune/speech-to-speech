@@ -88,22 +88,30 @@ def trainer(
     *,
     logger: Any,
     factory: Callable[..., Any],
+    val_check_interval: int | float | None = None,
+    num_sanity_val_steps: int | None = None,
 ) -> Any:
-    return factory(
-        accelerator=config.trainer.accelerator,
-        devices=config.trainer.devices,
-        precision=config.trainer.precision,
-        max_steps=config.train.max_steps,
-        max_epochs=config.trainer.max_epochs,
-        default_root_dir=str(output_dir),
-        logger=logger,
-        callbacks=callbacks,
-        log_every_n_steps=config.trainer.log_every_n_steps,
-        enable_checkpointing=config.trainer.enable_checkpointing,
-        gradient_clip_val=config.trainer.gradient_clip_val,
-        strategy=config.trainer.strategy,
-        use_distributed_sampler=config.trainer.use_distributed_sampler,
-    )
+    options = {
+        "accelerator": config.trainer.accelerator,
+        "devices": config.trainer.devices,
+        "precision": config.trainer.precision,
+        "max_steps": config.train.max_steps,
+        "max_epochs": config.trainer.max_epochs,
+        "default_root_dir": str(output_dir),
+        "logger": logger,
+        "callbacks": callbacks,
+        "log_every_n_steps": config.trainer.log_every_n_steps,
+        "enable_checkpointing": config.trainer.enable_checkpointing,
+        "gradient_clip_val": config.trainer.gradient_clip_val,
+        "strategy": config.trainer.strategy,
+        "use_distributed_sampler": config.trainer.use_distributed_sampler,
+    }
+    if val_check_interval is not None:
+        options["val_check_interval"] = val_check_interval
+        options["check_val_every_n_epoch"] = None
+    if num_sanity_val_steps is not None:
+        options["num_sanity_val_steps"] = num_sanity_val_steps
+    return factory(**options)
 
 
 def performance(

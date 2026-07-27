@@ -3,8 +3,12 @@
 对应 [014 schedule](../schedules/014-longcat-stable-stage1.md)。本文记录 2026-07-25
 在 FDU `145` 上完成的 P0 验收和当前边界。状态：**P0 在 debug-migrated copy 上通过**；
 正式 stable data root 的 parquet 指纹审计、无 duration parse/map-style dataloader probe、
-native token/RVQ 分布审计和 pilot split candidate 已补齐；正式 split manifest 固化和
-P1 训练验收仍未完成，不能视为正式数据根已进入 stage 1 长跑。
+native token/RVQ 分布审计和 pilot split candidate 已补齐。2026-07-27 另用 pami201
+32-sample root 完成 stage 1 TTS/S2ST 2-step smoke、正式 `scripts/train.py` 100-step canary，
+并在重分片 root 上完成两卡 DDP 2-step 与 resume 到 step 3，用来绕开 `/mnt/pami202` 超时
+验证入口闭环。随后又固化 pami201 1k pilot split manifest，验证两卡连续 5 个 epoch
+的 rank 均衡，并完成 2-step DDP 及 step 2 -> 3 resume。这些结果仍只验证数据与
+训练执行契约；dev CE、每 codebook top-1、长跑监督和质量/收敛尚未验证。
 
 ## 范围与代码状态
 
@@ -118,8 +122,8 @@ target cb0 为 `2..8186`、cb1-cb3 为 `0..8099`。
 
 `split_candidate.json` 使用 `sequential_no_sample_id` 方法生成候选切分：train `800`、
 dev `100`、test `100`。由于这是从当前 1000 条 train view 顺序生成的 debug candidate，
-后续仍需把正式 split manifest 的生成规则、指纹、路径和 companion metadata 固化到正式
-数据/训练入口后，才允许进入 P1 长跑。
+它不作为后续训练入口。split 生成规则、指纹和路径后续已在 pami201 1k
+pilot manifest 中固化；companion metadata 与 P1 长跑仍是后续工作。
 
 ## P0 Wrapper Run
 
@@ -160,16 +164,231 @@ optimizer step、metrics 写出和训练后 generation gate；一步 run 不支�
 该 run 为 `max_steps=1`、`task=tts`、`stage_0`，metrics 全部 finite：
 `loss=11.212008`、`token=8.792907`、`flow_matching=2.419101`。
 
+## PAMI201 Small Root Stage 1 Smoke
+
+2026-07-27 因 `/mnt/pami202` NFS 操作超时，另走 `145` 本地运行目录与 `/mnt/pami201`
+数据根做一批 32-sample 小数据，用来先验证 stage 1 入口不再依赖 202。新数据根为
+`145:/mnt/pami201/zhuyin/datasets/wmt19_tts_stage1_small_32_20260727`；其中 `base/` 从
+`145:/tmp/s2s-oracle-010-data/base` 的前 32 条重写为 schema v3 store，`longcat/` 用
+`145:/tmp/s2s-011-hf/longcat-audio-codec` 权重在 GPU 1 重新 materialize，避免复用旧的
+无文本 LongCat store。`base/.ready` 与 `longcat/.ready` 均存在，总大小约 `16M`，且未发现
+指向 `/mnt/pami202` 的 symlink。
+
+数据验收使用 `145:/home/zhuyin/local-runs/s2s-small-data-20260727/runtime` 下同步的本地源码，
+显式设置 `HF_HOME=/tmp/s2s-011-hf`、`ANYDATASET_HOME`、`ANYTRAIN_HOME` 和本地
+`DYNAMIC_HOME`，不 source 会回落到 202 的 wrapper。`wmt19_tts_codec()` 与
+`speech_to_speech.datamodule.dataset.load_dataset()` 均读取到 `32` 条样本；64 个 source/target
+LongCat tensor 全部为 rank-2 integer、4 codebooks，frame 数范围为 `22..43`，并通过码本范围
+检查。Qwen 快照使用本地 HF cache：
+`145:/tmp/s2s-011-hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca`。
+
+首次 stage 1 smoke 在 runtime codec 初始化处失败：`speech_to_speech.runtime.codec` 将
+`LongCat` 放在 `TYPE_CHECKING` 下，但 `cast(LongCat, ...)` 运行时仍会求值，触发
+`NameError: name 'LongCat' is not defined`。修复方式是将 `LongCat` 作为运行时导入，并补充
+`tests/test_runtime_codec.py` 覆盖 `load_codec("longcat")` 的 adapter 构造。修复后本地验收为：
+`basedpyright` 0 errors、`unittest discover` 229 tests OK / 1 skipped、`compileall` OK、
+`git diff --check` OK。
+
+修复后在同一 32-sample root 上运行 `011_rvq_native_stage_1_smoke`，单卡 GPU 1、
+`max_steps=2`、`parameter_policy=speech_interface`、`runtime.audio_tokenizer=null`，输出写入
+145 本地盘，避免训练产物回落 202。TTS 与 S2ST 均完成真实 Qwen/native LongCat/RVQ 的
+forward、backward、optimizer step、metrics 写出与训练后 teacher-forced acoustic generation。
+
+| Task | First loss | Last loss | First token | Last token | First RVQ | Last RVQ | Artifact |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| TTS | `18.403934` | `18.029600` | `9.250000` | `8.955236` | `9.153935` | `9.074364` | `145:/home/zhuyin/local-runs/s2s-small-data-20260727/train-stage1-retry/011-rvq-native-stage-smoke/tts/stage_1-rvq-8l/metrics.json` |
+| S2ST | `19.127556` | `18.530514` | `9.939189` | `9.391047` | `9.188368` | `9.139467` | `145:/home/zhuyin/local-runs/s2s-small-data-20260727/train-stage1-s2st/011-rvq-native-stage-smoke/s2st/stage_1-rvq-8l/metrics.json` |
+
+两条任务均写出 `generation.json`，路径分别位于上表同目录。该 smoke 只证明绕开 202 后，
+32-sample pami201 root 可以完成 stage 1 的 TTS/S2ST 2-step overfit 入口和 finite 指标。
+
+随后直接调用正式 `scripts/train.py`，不用 `jobs/011/03_staged_joint_train.sh`，因为 wrapper 会默认
+进入 static DDP 且容易把 train root 带回 202。本轮显式设置 `trainer.strategy=auto`、
+`trainer.devices=1`、`trainer.enable_checkpointing=false`、`data.dataset.root=<32-sample root>`、
+`data.dataloader.batch_size=1`、`num_workers=0`、`runtime.audio_tokenizer=null`。`stage_1` 的正式
+ASR/TTS 两个 speech loader 均参与，`batches_per_step=2`。
+
+| Run | Max steps | First loss | Last loss | Last mean loss | Token last mean | RVQ last mean | Artifact |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| formal train smoke | `2` | `15.921749` | `16.752659` | `16.337204` | `6.792932` | `9.106468` | `145:/home/zhuyin/local-runs/s2s-small-data-20260727/train-formal-stage1-2step/011-staged-joint-train/stage_1/stage_1-rvq-8l/metrics.json` |
+| formal train canary | `100` | `15.921749` | `15.254683` | `15.080203` | `5.879787` | `8.870380` | `145:/home/zhuyin/local-runs/s2s-small-data-20260727/train-formal-stage1-100step/011-staged-joint-train/stage_1/stage_1-rvq-8l/metrics.json` |
+
+100-step canary 约 55 秒完成，窗口口径下 total loss `last_to_first=0.898619`、token
+`last_to_first=0.840348`、RVQ `last_to_first=0.967496`。该 run 证明 32-sample 小数据上正式
+stage 1 train entry 可以持续 100 optimizer steps；该 run 本身没有 dev loader、split manifest、
+1k pilot、DDP 或 resume，因此不满足 P1 晋级条件。小数据 DDP/resume 另见下节。
+
+## PAMI201 Small Root DDP and Resume
+
+首次用该 root 启动两卡 DDP 时，训练在首个 batch 前失败。原因不是样本数本身，而是
+`longcat/` 只有一个覆盖全部 32 条样本的 payload group；store 的 DDP shuffle 按 payload group
+分 rank，结果 rank 0 得到 32 条、rank 1 得到 0 条。anydataset 为保持等长 DDP step 在 rank 0
+丢弃 32 个尾 batch，随后 staged loader 报 `scheduled loader 'asr' produced no batches`。
+`drop_distributed_tail=false` 只会把这一不等长条件改为显式错误，不能形成可运行的 DDP 输入。
+
+为继续验证而不改 third-party batching，另把同一 32 条 `base/` 与 `longcat/` store 重写到
+`145:/mnt/pami201/zhuyin/datasets/wmt19_tts_stage1_small_32_ddp4_20260727`，写入时设置
+`max_shard_samples=8`。两个 store 均为 32 条且 `.ready` 存在；LongCat payload groups 为
+`(0,8)`、`(8,16)`、`(16,24)`、`(24,32)`，可均匀分到两个 rank。
+
+正式 train 入口新增可选 `train.ckpt_path`，默认空，并传给
+`trainer.fit(..., ckpt_path=config.train.ckpt_path)`。在 GPU 1/2、
+`NCCL_IB_DISABLE=1 NCCL_P2P_DISABLE=1`、batch size 1、checkpoint 每 step 保存的条件下，
+两卡 DDP 完成 2 optimizer steps；随后从 `last.ckpt` 恢复，日志明确记录
+`Restoring states from the checkpoint path` 与 `Restored all states`，并继续到 step 3。
+
+| Run | Result | Artifact |
+| --- | --- | --- |
+| DDP 2-step | exit 0；两个 rank 注册；`max_steps=2` reached；生成 `step-00000001.ckpt`、`step-00000002.ckpt` 与 `last.ckpt` | `145:/home/zhuyin/local-runs/s2s-small-data-20260727/train-formal-stage1-ddp-resume-ddp4/011-staged-joint-train/stage_1/stage_1-rvq-8l/metrics.json` |
+| resume step 2 -> 3 | exit 0；恢复 optimizer/loop states；`max_steps=3` reached；生成 `step-00000003.ckpt` | `145:/home/zhuyin/local-runs/s2s-small-data-20260727/train-formal-stage1-ddp-resume-ddp4/ddp_resume_step3.log` |
+
+resume run 新增一步的 total/token/RVQ loss 分别为 `16.206238`、`6.756507`、`9.044817`；
+`last.ckpt` 大小为 `2342056597` bytes。该 smoke 证明多 payload group 的 pami201 小数据 root
+可以完成正式 stage 1 两卡 DDP checkpoint/resume 执行契约，但该 small-root smoke
+本身不替代正式 split 的 distributed partition、dev CE、pilot 或长跑验收。后续
+1k pilot 的 split/DDP/resume 验收见下节。
+
+## PAMI201 1k Pilot Split, DDP and Resume
+
+32-sample 闭环通过后，2026-07-27 在 pami201 固化 1k pilot 数据根：
+`145:/mnt/pami201/zhuyin/datasets/wmt19_tts_stage1_pilot_1000_ddp20_20260727`。该 root
+包含 `1000` 条样本和 `20` 个 payload group，每组 `50` 条；LongCat tensor 均为
+rank-2 integer、`4` 个 codebook，frame 数范围为 `14..43`。root 内无 symlink，
+总大小为 `504357694` bytes。
+
+正式 split manifest 为
+`145:/mnt/pami201/zhuyin/datasets/wmt19_tts_stage1_pilot_1000_ddp20_20260727/manifests/stage1_pilot.json`，
+SHA256 为 `ef3f1009bfb1f1c885ec0cfbab6d06875a7678f164865bba89e9011e8a0dc728`。
+每个 50-sample payload group 固定分为 train/dev/test `40/5/5`。连续 5 个 epoch 的两卡分片
+验证均得到 train rank counts `[400,400]`、dev `[50,50]`、test `[50,50]`，
+未出现单 payload group root 曾触发的 rank 空数据问题。
+
+用该 manifest 运行正式 stage 1 train entry，两卡 DDP 2-step 与从 step 2 恢复到
+step 3 均 exit `0`：
+`145:/home/zhuyin/local-runs/s2s-small-data-20260727/train-stage1-pilot1k-ddp20-resume`。
+resume 日志明确包含 `Restoring states...` 和 `Restored all states`；恢复后新增 step 的
+total/token/RVQ loss 分别为 `16.085545`、`6.741939`、`9.137355`。
+
+该 pilot 证据固化了 split 指纹，并验证了 payload-group-aware 两卡 partition、
+checkpoint 和 resume 执行契约。两步训练和一步恢复的 finite loss 不支持质量或
+收敛结论；dev 指标链路的独立验收见下节。
+
+## PAMI201 1k Pilot Dev Validation Smoke
+
+正式 staged train 新增默认关闭的 teacher-forcing validation：从现有 stage speech loader
+复制 task weights 和 speech config，只把复制后的 `DatasetConfig.split_label` 改成 dev；训练
+loader 保持 train split。token CE 按有效 token 数加权，RVQ 总 CE、逐 codebook CE/top-1
+按有效 target frame 数加权；Lightning 在 epoch 结束时同步两卡加权和与计数。sanity 与
+optimizer-step interval 结果分别写入 `metrics.json.validation`。
+
+本地验收为 240 tests OK / 1 CUDA skip、basedpyright 0 errors、ruff、compileall、job shell
+syntax 和 `git diff --check` 全部通过。远端使用
+`experiment=014_stage1_pilot_validation_smoke`、GPU 1/2、batch size 1、完整 dev sanity、
+`max_steps=1`、step 1 interval validation；输出为：
+
+`145:/home/zhuyin/local-runs/s2s-small-data-20260727/train-stage1-pilot1k-validation-v1/014-longcat-stable-stage1/pilot-validation-smoke/stage_1-rvq-8l/metrics.json`
+
+两卡均注册成功，进程正常退出，日志未出现 traceback、OOM 或非 finite 指标。manifest 已独立
+验证 dev rank counts `[50,50]`；本次两个 validation pass 均遍历该完整 dev split。LongCat
+semantic codebook 由 token objective 监督，因此下表 `codebook_0..2` 是 3 个 acoustic RVQ
+codebook；dev 有效 target frame 总数为 `4264`。
+
+| Metric | Sanity step 0 | Interval step 1 |
+| --- | ---: | ---: |
+| token CE | `9.883604` | `9.842715` |
+| RVQ CE | `9.151793` | `9.151495` |
+| codebook 0 CE | `9.150218` | `9.147419` |
+| codebook 1 CE | `9.144267` | `9.144913` |
+| codebook 2 CE | `9.160889` | `9.162157` |
+| codebook 0 top-1 | `0.000234522` (`1/4264`) | `0.000234522` (`1/4264`) |
+| codebook 1 top-1 | `0` | `0` |
+| codebook 2 top-1 | `0` | `0` |
+
+每个 acoustic codebook size 为 `8100`，均匀随机 top-1 基线约为 `0.000123457`。
+codebook 0 的单次命中不足以支持高于随机的统计结论，另两个 codebook 为 0；因此尚未满足
+P1 的“多数 codebook top-1 高于随机”门槛。一步后 token CE 下降约 `0.414%`，RVQ CE
+下降约 `0.003%`，也不构成学习或收敛结论。本次只接受 validation split、DDP 加权、指标命名
+与 JSON reporting 闭环；下一步先跑 100-step canary，并在 step 50/100 对同一 dev split 复验。
+
+## PAMI201 1k Pilot 100-Step Canary
+
+`experiment=014_stage1_pilot_canary` 使用同一数据根/manifest、GPU 1/2、batch size 1，
+从头训练 100 optimizer steps；完整 dev validation 在 step 0/50/100 运行，checkpoint 在
+step 50/100 归档并保留 `last.ckpt`。SSH 端到端用时约 133 秒，Lightning fit loop 约 59 秒；
+日志无 traceback、OOM 或非 finite 指标。metrics 位于：
+
+`145:/home/zhuyin/local-runs/s2s-small-data-20260727/train-stage1-pilot1k-canary-v1/014-longcat-stable-stage1/pilot-canary/stage_1-rvq-8l/metrics.json`
+
+| Metric | Step 0 | Step 50 | Step 100 |
+| --- | ---: | ---: | ---: |
+| token CE | `9.883604` | `8.798153` | `8.467776` |
+| RVQ CE | `9.151793` | `9.101947` | `9.047078` |
+| codebook 0 CE | `9.150218` | `9.078161` | `8.991410` |
+| codebook 1 CE | `9.144267` | `9.113574` | `9.083248` |
+| codebook 2 CE | `9.160889` | `9.114109` | `9.066575` |
+| codebook 0 top-1 | `0.000234522` | `0.000469043` | `0.033302065` (`142/4264`) |
+| codebook 1 top-1 | `0` | `0.007035647` | `0.028142588` (`120/4264`) |
+| codebook 2 top-1 | `0` | `0` | `0.029315198` (`125/4264`) |
+
+step 100 相对初始 token CE 下降 `14.325%`，RVQ CE 下降 `1.144%`。三个 acoustic codebook
+top-1 均已明显高于 `1/8100` 随机基线，满足 P1 的 majority-top1 方向门槛；但 RVQ CE 尚未达到
+5% 下降目标 `8.694203`。训练窗口摘要的 total/token/RVQ `last_to_first` 分别为
+`0.950962`、`0.916650`、`0.998476`，同样说明当前主要改善来自 token path，acoustic bridge
+仍需继续验证。
+
+归档 `step-00000050.ckpt`、`step-00000100.ckpt` 和 `last.ckpt` 均存在，每个约
+`2342056597` bytes；TensorBoard event 位于同一输出根的
+`tensorboard/014-longcat-stable-stage1/pilot-canary/stage_1-rvq-8l/version_0/`。
+
+## PAMI201 1k Pilot Resume to Step 500
+
+`experiment=014_stage1_pilot_resume_500` 从上述 `last.ckpt` 恢复，日志明确记录
+`Restoring states`、两卡注册与 `Restored all states`；checkpoint metadata 的起始
+`global_step=100`、Lightning 版本为 `2.6.1`。该 run 在 GPU 1/2 上继续到 step 500，
+每 100 steps 遍历完整 dev split。输出位于：
+
+`145:/home/zhuyin/local-runs/s2s-small-data-20260727/train-stage1-pilot1k-resume500-v1/014-longcat-stable-stage1/pilot-resume-500/stage_1-rvq-8l/metrics.json`
+
+| Metric | Step 100 | Step 200 | Step 300 | Step 400 | Step 500 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| token CE | `8.467776` | `8.273833` | `8.129531` | `8.035213` | `7.946233` |
+| RVQ CE | `9.047078` | `8.981592` | `8.941418` | `8.924411` | `8.904623` |
+| codebook 0 CE | `8.991410` | `8.874780` | `8.806050` | `8.777058` | `8.749586` |
+| codebook 1 CE | `9.083248` | `9.054724` | `9.030916` | `9.021158` | `9.002337` |
+| codebook 2 CE | `9.066575` | `9.015273` | `8.987288` | `8.975017` | `8.961946` |
+| codebook 0 top-1 | `0.033302065` | `0.038461540` | `0.038461540` | `0.038227018` | `0.038227018` (`163/4264`) |
+| codebook 1 top-1 | `0.028142588` | `0.031191370` | `0.031191370` | `0.031191370` | `0.030956848` (`132/4264`) |
+| codebook 2 top-1 | `0.029315198` | `0.036585364` | `0.036585364` | `0.036350843` | `0.036350843` (`155/4264`) |
+
+step 500 相对 step 0 的 token CE 下降 `19.602%`，RVQ CE 下降 `2.701%`。所有 interval
+指标均为 finite，三个 codebook top-1 持续高于 `1/8100` 随机基线；但 RVQ CE 仍高于
+5% 目标 `8.694203`。step 300 到 500 的 RVQ CE 从 `8.941418` 降到 `8.904623`；只按该
+局部斜率线性外推，还需约 `1144` steps，此外推只用于设置下一段预算，不作为收敛结论。
+
+run 正常以 `max_steps=500` 退出，`last.ckpt` metadata 为 `global_step=500`；归档
+`step-00000200/300/400/500.ckpt` 与 `last.ckpt` 均存在，每个约 `2.2G`，TensorBoard event
+约 `500K`。运行期间同机外部评测在所有 GPU 上各占约 `4.8G` 和约 25% utilization，
+因此本次 `2:34` fit 时长不用于效率比较。下一步从 step 500 恢复到 step 2000，每 250 steps
+复验完整 dev；达到 `8.694203` 后先做 decode/companion manifest，不机械跑满 5k。
+
 ## 判定
 
 P0 在 debug-migrated copy 上通过：代码迁移的本地/远端 targeted tests 通过；复旦 `145`
 上的 TTS 和 S2ST P0 wrapper 均 exit `0`；训练 metrics、`generation.json` 和 waveform decode
 均为 finite；toy smoke 也完成 1 step 并写出 finite metrics。
 
-边界仍然明确：本轮没有修改正式 stable data root；正式根 parquet/fingerprint 审计与
+边界仍然明确：本轮没有修改原 pami202 stable data root；正式根 parquet/fingerprint 审计与
 无 duration parse/map-style dataloader probe 已完成，且 probe 没有出现真实音频静默计为
 0 秒的问题。1000-sample native token/RVQ 分布审计和 800/100/100 pilot split candidate
-也已完成，但产物仍在 debug 目录内，不是最终正式 split manifest；也没有执行正式根
-training step、32-sample 100-step overfit、1k pilot、两卡 DDP 2-step 或 resume。因此当前
-P0 只能作为 debug copy acceptance 加正式根抽样/分布/pilot candidate probe，不允许直接
-晋级到 native stable P1 长跑。
+也已完成，它们作为原始 debug candidate 记录保留。pami201 上另行固化的
+1k/20-group split manifest 已完成两卡 rank 均衡、DDP 2-step、resume 和完整 dev validation
+指标链路验收。恢复到 step 500 后三个 acoustic codebook top-1 仍明显高于随机，dev RVQ CE
+相对初始下降 `2.701%`，但尚未满足 5% 门槛，因此不允许直接晋级到 native stable P1 长跑。
+
+2026-07-27 的 pami201 32-sample root 进一步证明：当 202 超时时，使用 145 本地运行时、
+145 本地 HF/LongCat cache 和 pami201 数据根可以完成 stage 1 TTS/S2ST 2-step smoke，并且
+正式 `scripts/train.py` stage 1 可以完成 100-step 小数据 canary；重分片 root 还完成两卡
+DDP 2-step 与 resume 到 step 3。后续 1k pilot 已完成正式 split manifest、两卡
+rank 均衡、DDP/resume、完整 dev 指标链路，并从 100-step canary 恢复到 step 500。
+top-1 已显示学习信号，RVQ CE 单调下降但尚未达到计划门槛；当前仍缺 step-2000 gate、
+最多 5k-step pilot、decode 和长跑收敛验收，不支持质量或收敛结论。

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -13,7 +14,12 @@ from lightning.pytorch.callbacks import Callback, ModelCheckpoint
 from omegaconf import DictConfig
 
 from speech_to_speech.callback import OnDeviceCodecMaterializer
-from speech_to_speech.callback.logging import GradNormLogger, LossSummary, OutputsLogger
+from speech_to_speech.callback.logging import (
+    GradNormLogger,
+    LossSummary,
+    OutputsLogger,
+    ValidationSummary,
+)
 from speech_to_speech.datamodule import DataModule
 from speech_to_speech.datamodule.joint import LoaderSchedule
 from speech_to_speech.datamodule.module import (
@@ -32,6 +38,7 @@ from speech_to_speech.task import Task
 
 if TYPE_CHECKING:
     from scripts._config import StagedTrainConfig, TrainDataLoaderConfig
+    from speech_to_speech.datamodule.dataset import DatasetConfig
 
 if __package__:
     from ._config import (
@@ -91,15 +98,21 @@ def run(config: StagedTrainConfig) -> None:
 
     datamodule = build_datamodule(config, rt)
     summary = LossSummary()
-    callbacks = training_callbacks(config, output_dir, summary)
+    validation_summary = ValidationSummary() if config.validation.enabled else None
+    callbacks = training_callbacks(
+        config,
+        output_dir,
+        summary,
+        validation_summary,
+    )
 
     trainer = build_trainer(config, output_dir, callbacks)
-    trainer.fit(module, datamodule=datamodule)
+    trainer.fit(module, datamodule=datamodule, ckpt_path=config.train.ckpt_path)
 
     if not trainer.is_global_zero:
         return
 
-    result = {
+    result: dict[str, object] = {
         "stage": config.stage.name.value,
         "parameter_policy": config.parameter_policy.name.value,
         "loaders": {
@@ -122,6 +135,8 @@ def run(config: StagedTrainConfig) -> None:
         },
         "metrics": summary.report(),
     }
+    if validation_summary is not None:
+        result["validation"] = validation_summary.report()
     (output_dir / "metrics.json").write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n"
     )
@@ -140,6 +155,9 @@ def build_datamodule(config: StagedTrainConfig, runtime: Runtime) -> DataModule:
             config.stage.loader_weights(),
             batches_per_step=config.stage.batches_per_step,
         ),
+        validation=(
+            _validation_spec(config) if config.validation.enabled else None
+        ),
     )
 
 
@@ -156,15 +174,35 @@ def _loader_spec(
             ),
             task_weights,
         )
+    return LoaderSpec.speech(_speech_config(config), task_weights)
+
+
+def _validation_spec(config: StagedTrainConfig) -> LoaderSpec:
+    loader = config.stage.loaders[config.validation.loader]
+    task_weights = _task_weights(loader)
+    if _is_text_loader(task_weights):
+        raise ValueError("validation loader must be a speech loader.")
+    dataset = replace(
+        config.data.dataset,
+        split_label=config.validation.split_label,
+    )
     return LoaderSpec.speech(
-        SpeechDataModuleConfig(
-            codec=config.data.codec,
-            dataloader=_dataloader(config.data.dataloader),
-            shape=config.data.shape,
-            encode_missing_codes=config.data.encode_missing_codes,
-            dataset=config.data.dataset,
-        ),
+        _speech_config(config, dataset=dataset),
         task_weights,
+    )
+
+
+def _speech_config(
+    config: StagedTrainConfig,
+    *,
+    dataset: DatasetConfig | None = None,
+) -> SpeechDataModuleConfig:
+    return SpeechDataModuleConfig(
+        codec=config.data.codec,
+        dataloader=_dataloader(config.data.dataloader),
+        shape=config.data.shape,
+        encode_missing_codes=config.data.encode_missing_codes,
+        dataset=config.data.dataset if dataset is None else dataset,
     )
 
 
@@ -205,6 +243,16 @@ def build_trainer(
             callbacks,
             logger=build_logger(config.logging),
             factory=pl.Trainer,
+            val_check_interval=(
+                config.validation.every_n_steps
+                if config.validation.enabled
+                else None
+            ),
+            num_sanity_val_steps=(
+                config.validation.sanity_steps
+                if config.validation.enabled
+                else None
+            ),
         ),
     )
 
@@ -213,6 +261,7 @@ def training_callbacks(
     config: StagedTrainConfig,
     output_dir: Path,
     summary: Callback,
+    validation_summary: Callback | None = None,
 ) -> list[Callback]:
     callbacks: list[Callback] = []
     performance = _performance(config)
@@ -227,6 +276,8 @@ def training_callbacks(
             ],
         )
     )
+    if validation_summary is not None:
+        callbacks.append(validation_summary)
     if config.callbacks.grad_norm.enabled and performance is None:
         callbacks.append(
             GradNormLogger(

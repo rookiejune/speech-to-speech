@@ -14,7 +14,7 @@ from ..generation.service import generate_responses
 from ..generation.text import TextProbe, TextProbeResult, evaluate_text
 from ..generation.types import Request, Result
 from ..loss.objective import Objective
-from ..loss.types import Outputs
+from ..loss.types import LossItem, Outputs
 from ..generation.protocol import TextEvaluationModel
 
 
@@ -67,6 +67,74 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
             sync_dist=True,
         )
         return outputs
+
+    def validation_step(self, batch: TrainInputBatch, batch_idx: int = 0):
+        del batch_idx
+        outputs = self._loss_outputs(self.materialize_batch(batch))
+        token = outputs.get("token")
+        if token is not None:
+            self._log_validation_metric("token_ce", token, "tokens")
+        rvq = outputs.get("rvq")
+        if rvq is not None:
+            self._log_validation_metric("rvq_ce", rvq, "frames")
+            details = rvq.details
+            if details is None:
+                raise TypeError("RVQ validation requires loss details.")
+            for key in sorted(details):
+                if not key.startswith("codebook_"):
+                    continue
+                suffix = "" if key.endswith("_top1") else "_ce"
+                self._log_validation_detail(
+                    f"rvq_{key}{suffix}",
+                    rvq,
+                    key,
+                    "frames",
+                )
+        return outputs
+
+    def _log_validation_metric(
+        self,
+        name: str,
+        item: LossItem,
+        unit: str,
+    ) -> None:
+        details = item.details
+        if details is None or unit not in details:
+            raise TypeError(f"validation loss item requires {unit!r} details.")
+        self._log_validation_value(name, item.loss, details[unit])
+
+    def _log_validation_detail(
+        self,
+        name: str,
+        item: LossItem,
+        key: str,
+        unit: str,
+    ) -> None:
+        details = item.details
+        if details is None or key not in details or unit not in details:
+            raise TypeError(f"validation loss item requires {key!r} and {unit!r}.")
+        self._log_validation_value(name, details[key], details[unit])
+
+    def _log_validation_value(
+        self,
+        name: str,
+        values: torch.Tensor,
+        weights: torch.Tensor,
+    ) -> None:
+        if values.shape != weights.shape:
+            raise ValueError("validation values and weights must align by row.")
+        resolved = weights.to(dtype=values.dtype)
+        count = resolved.sum()
+        if bool(count.le(0)):
+            raise ValueError("validation metric weights must contain a positive total.")
+        self.log(
+            f"val/{name}",
+            (values * resolved).sum() / count,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=int(count.detach().item()),
+        )
 
     def _loss_outputs(self, batch: TrainBatch) -> Outputs:
         if not isinstance(batch, tuple):

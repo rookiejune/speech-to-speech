@@ -66,6 +66,20 @@ class TrainConfig:
 
 
 @dataclass
+class ResumableTrainConfig(TrainConfig):
+    ckpt_path: Optional[str] = None
+
+
+@dataclass
+class ValidationConfig:
+    enabled: bool = False
+    loader: str = "tts"
+    split_label: str = "dev"
+    every_n_steps: int = 1000
+    sanity_steps: int = -1
+
+
+@dataclass
 class TrainDataLoaderConfig:
     batch_size: int = MISSING
     num_workers: int = MISSING
@@ -226,7 +240,8 @@ class _StagedTrainConfig:
     data: SpeechDataConfig = field(default_factory=SpeechDataConfig)
     text_data: TextDataConfig = field(default_factory=TextDataConfig)
     pl_module: ModuleConfig = field(default_factory=ModuleConfig)
-    train: TrainConfig = field(default_factory=TrainConfig)
+    train: ResumableTrainConfig = field(default_factory=ResumableTrainConfig)
+    validation: ValidationConfig = field(default_factory=ValidationConfig)
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     callbacks: StagedCallbacksConfig = field(default_factory=StagedCallbacksConfig)
@@ -297,7 +312,39 @@ def train(config: DictConfig) -> StagedTrainConfig:
     _validate_audio_representation(result)
     if not result.stage.loaders:
         raise ValueError("formal train requires stage.loaders.")
+    _validate_validation(result)
     return result
+
+
+def _validate_validation(config: StagedTrainConfig) -> None:
+    validation = config.validation
+    if not isinstance(validation.enabled, bool):
+        raise TypeError("validation enabled must be a boolean.")
+    if not isinstance(validation.loader, str) or not validation.loader:
+        raise TypeError("validation loader must be a non-empty string.")
+    if not isinstance(validation.split_label, str) or not validation.split_label:
+        raise TypeError("validation split_label must be a non-empty string.")
+    if (
+        isinstance(validation.every_n_steps, bool)
+        or not isinstance(validation.every_n_steps, int)
+        or validation.every_n_steps <= 0
+    ):
+        raise TypeError("validation every_n_steps must be a positive integer.")
+    if (
+        isinstance(validation.sanity_steps, bool)
+        or not isinstance(validation.sanity_steps, int)
+        or validation.sanity_steps < -1
+    ):
+        raise TypeError("validation sanity_steps must be -1 or non-negative.")
+    if not validation.enabled:
+        return
+    if validation.loader not in config.stage.loaders:
+        raise ValueError(f"unknown validation loader {validation.loader!r}.")
+    dataset = config.data.dataset
+    if dataset.split_manifest is None:
+        raise ValueError("enabled validation requires data.dataset.split_manifest.")
+    if validation.split_label == dataset.split_label:
+        raise ValueError("validation split_label must differ from the train split_label.")
 
 
 def _validate_output(

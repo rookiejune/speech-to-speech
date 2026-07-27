@@ -57,12 +57,13 @@
   dataset 与 DataModule 配置结构。prepared speech 的 map-style dataset 通过
   `MapStyleABC.dataloader()` 使用 anydataset 的 cost planner；普通或 iterable dataset 使用
   PyTorch `DataLoader`。`shape=pair` 是默认路径；`shape=single` 显式选择 single utterance path。
-- `DataModule(runtime, loaders, schedule=None)`：唯一 Lightning 数据入口。`loaders` 是
+- `DataModule(runtime, loaders, schedule=None, validation=None)`：唯一 Lightning 数据入口。`loaders` 是
   `name -> LoaderSpec` 映射；speech loader 使用 `LoaderSpec.speech(config, task_weights,
   sample_index=...)`，纯文本 loader 使用 `LoaderSpec.text(config, task_weights)`。`setup()` 加载
   所选 dataset，并在加载前校验 speech config 与 runtime 的 codec identity；重复调用不会重新
   加载已持有的数据集。fixed-sample overfit 只是 speech spec 的 `sample_index` 变体，仍复用
-  `train_samples()` 边界供 callback 读取 raw sample。
+  `train_samples()` 边界供 callback 读取 raw sample。可选 `validation` 是独立的 `LoaderSpec`；
+  `val_dataloader()` 不进入 train schedule，也不复用 train loader instance。
 
 ## 输入输出
 
@@ -176,6 +177,9 @@ acoustic_target: AcousticTarget | None
   普通或 iterable dataset 使用 PyTorch `DataLoader`。多 loader train 的外层
   `ScheduledDataLoader` 不接受 Lightning 注入 sampler；正式 distributed sample partition
   由各 loader 的公开 dataloader 契约负责。
+- validation speech loader 使用同一公开 batch planner 和 distributed partition，但显式关闭
+  shuffle。正式 train 入口从一个现有 stage speech loader 复制 task weights 与 speech config，
+  只把复制后的 `DatasetConfig.split_label` 改为 dev；训练 spec 与 dataset config 保持不变。
 - `DataModule.train_samples()` 是 callback 按索引读取已 setup 训练样本的公开边界；callback
   不读取私有 dataset 字段。
 - parser 生成 `Speech.audio_token_spans`，`Speech` 校验 spans 与 semantic frame 完整对齐；

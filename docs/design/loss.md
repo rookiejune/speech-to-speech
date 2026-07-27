@@ -17,8 +17,9 @@ position 语义见 [总览 §2.4](../model-design.md)。
 - `AcousticFlowLoss`：从 S2S decoder/runtime 取 `prediction`、`velocity`、mask 和 flow time，
   转给 `anytrain.loss.MaskedFrameMSELoss`；启用 REPA 时通过 `forward_with_features()` 复用同一次
   DiT 前向。
-- `CausalAcousticLoss`：对每个 RVQ codebook 计算 masked CE，再在 codebook 维等权平均；
-  acoustic padding ID 不进入 decoder embedding 或 loss。
+- `CausalAcousticLoss`：对每个 RVQ codebook 计算 masked CE 与 top-1，再在 codebook 维等权平均 CE；
+  `details` 保留逐行 `codebook_N`、`codebook_N_top1` 和有效 frame 数，acoustic padding ID 不进入
+  decoder embedding、loss 或 accuracy。
 - `WavLMTeacher`：按 boolean frame mask 在线解码 target semantic/acoustic codes，以 16 kHz
   waveform 运行冻结 WavLM，取得配置层的 hidden states 并插值、写回原有效 frame 位置。
 - `RepaLoss`：把选定 DiT block 的逐帧表示投影到 WavLM hidden dimension，再转给

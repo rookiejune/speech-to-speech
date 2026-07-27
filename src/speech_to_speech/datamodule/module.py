@@ -131,6 +131,8 @@ class _Loader(Protocol):
 
     def train_dataloader(self) -> Iterable[ConcreteTrainInput]: ...
 
+    def validation_dataloader(self) -> Iterable[ConcreteTrainInput]: ...
+
 
 class _SpeechLoader:
     def __init__(
@@ -182,6 +184,12 @@ class _SpeechLoader:
         return [self._train_dataset[index] for index in indices]
 
     def train_dataloader(self) -> Iterable[ConcreteTrainInput]:
+        return self._dataloader(shuffle=True)
+
+    def validation_dataloader(self) -> Iterable[ConcreteTrainInput]:
+        return self._dataloader(shuffle=False)
+
+    def _dataloader(self, *, shuffle: bool) -> Iterable[ConcreteTrainInput]:
         if self._train_dataset is None:
             raise RuntimeError("speech loader setup() must run before training.")
         if self._training is not None:
@@ -200,6 +208,7 @@ class _SpeechLoader:
             self._train_dataset,
             loader=loader,
             collate_fn=self.collator,
+            shuffle=shuffle,
         )
         if source_loader is not None:
             if source_loader.dataset is self._train_dataset:
@@ -232,6 +241,8 @@ class DataModule(LightningDataModule):
         runtime: DatasetRuntime | TextRuntime,
         loaders: Mapping[str, LoaderSpec],
         schedule: LoaderSchedule | None = None,
+        *,
+        validation: LoaderSpec | None = None,
     ) -> None:
         super().__init__()
         self.runtime = runtime
@@ -242,6 +253,10 @@ class DataModule(LightningDataModule):
             name: _build_loader(spec, runtime)
             for name, spec in self.loader_specs.items()
         }
+        self.validation_spec = validation
+        self._validation_loader = (
+            None if validation is None else _build_loader(validation, runtime)
+        )
         if any(not name for name in self.loader_specs):
             raise ValueError("loader names must not be empty.")
         self.schedule = schedule or LoaderSchedule(
@@ -252,6 +267,8 @@ class DataModule(LightningDataModule):
     def setup(self, stage: str | None = None) -> None:
         for loader in self._loaders.values():
             loader.setup(stage)
+        if self._validation_loader is not None:
+            self._validation_loader.setup(stage)
 
     @property
     def loader_names(self) -> tuple[str, ...]:
@@ -305,6 +322,14 @@ class DataModule(LightningDataModule):
         if len(loaders) == 1 and self.schedule.batches_per_step == 1:
             return cast(Iterable[TrainInputBatch], next(iter(loaders.values())))
         return ScheduledDataLoader(loaders, self.schedule)
+
+    def val_dataloader(self) -> Iterable[TrainInputBatch] | None:
+        if self._validation_loader is None:
+            return None
+        return cast(
+            Iterable[TrainInputBatch],
+            self._validation_loader.validation_dataloader(),
+        )
 
     def _single_loader(self, loader_name: str | None, operation: str) -> _Loader:
         if loader_name is None:
@@ -367,6 +392,7 @@ def _source_loader(
     *,
     loader: DataLoaderConfig,
     collate_fn: Any,
+    shuffle: bool,
 ) -> DataLoader[Any] | None:
     source = _source_dataset(dataset)
     if source is None:
@@ -376,7 +402,7 @@ def _source_loader(
         cost_fn=_unit_cost,
         max_batch_memory=batch_size,
         max_batch_samples=batch_size,
-        shuffle=True,
+        shuffle=shuffle,
         num_workers=loader["num_workers"],
         pin_memory=loader.get("pin_memory", False),
         persistent_workers=(

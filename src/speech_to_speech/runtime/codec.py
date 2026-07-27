@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import Protocol, cast
 
 import torch
 from anytrain.codec import AcousticLayout, SemanticAcousticCodes, load_frame
+from anytrain.codec.longcat import LongCat
 from torch import Tensor
 
 from .types import Codec
-
-if TYPE_CHECKING:
-    from anytrain.codec.longcat import LongCat
-
 
 class LongCatCodec:
     """Adapt LongCat to the model-facing codec contract."""

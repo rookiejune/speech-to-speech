@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -11,6 +12,7 @@ from speech_to_speech.callback.logging import (
     GradNormLogger,
     LossSummary,
     OutputsLogger,
+    ValidationSummary,
 )
 from speech_to_speech.callback import TrainInterval, processed_audio_seconds
 from speech_to_speech.datamodule.types import ModelBatch, ModelSample
@@ -106,6 +108,64 @@ class LoggingTest(unittest.TestCase):
         )
 
         self.assertEqual(list(callback.values), ["loss", "token", "flow_matching"])
+
+    def test_validation_summary_separates_sanity_and_interval_metrics(self):
+        callback = ValidationSummary()
+        trainer = SimpleNamespace(
+            callback_metrics={
+                "train/loss": torch.tensor(5.0),
+                "val/token_ce": torch.tensor(2.0),
+                "val/rvq_ce": torch.tensor(3.0),
+            },
+            global_step=0,
+            sanity_checking=True,
+        )
+
+        callback.on_validation_end(trainer, SimpleNamespace())
+        trainer.callback_metrics = {
+            "val/token_ce": torch.tensor(1.5),
+            "val/rvq_ce": torch.tensor(2.5),
+        }
+        trainer.global_step = 1000
+        trainer.sanity_checking = False
+        callback.on_validation_end(trainer, SimpleNamespace())
+
+        report = callback.report()
+        self.assertEqual(
+            report,
+            {
+                "sanity": [
+                    {
+                        "step": 0,
+                        "metrics": {
+                            "val/rvq_ce": 3.0,
+                            "val/token_ce": 2.0,
+                        },
+                    }
+                ],
+                "interval": [
+                    {
+                        "step": 1000,
+                        "metrics": {
+                            "val/rvq_ce": 2.5,
+                            "val/token_ce": 1.5,
+                        },
+                    }
+                ],
+            },
+        )
+        json.dumps(report, allow_nan=False)
+
+    def test_validation_summary_rejects_non_scalar_metrics(self):
+        callback = ValidationSummary()
+        trainer = SimpleNamespace(
+            callback_metrics={"val/token_ce": torch.tensor([1.0, 2.0])},
+            global_step=0,
+            sanity_checking=False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "val/token_ce.*scalar"):
+            callback.on_validation_end(trainer, SimpleNamespace())
 
     def test_flow_logger_uses_injected_runtime(self):
         experiment = Mock()

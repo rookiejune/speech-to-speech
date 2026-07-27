@@ -387,6 +387,61 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertEqual(objective.tasks, [Task.ASR, Task.MT])
         torch.testing.assert_close(outputs["loss"], torch.tensor(2.5))
 
+    def test_validation_step_logs_effective_unit_weighted_metrics(self):
+        module = SpeechToSpeechModule(
+            ModuleConfig(),
+            model=cast(Any, SimpleNamespace()),
+            objective=_BatchObjective(),
+        )
+        outputs: Outputs = {
+            "loss": torch.tensor(3.0),
+            "token": LossItem(
+                torch.tensor([1.0, 3.0]),
+                {"tokens": torch.tensor([1.0, 3.0])},
+            ),
+            "rvq": LossItem(
+                torch.tensor([2.0, 5.0]),
+                {
+                    "frames": torch.tensor([2.0, 1.0]),
+                    "codebook_0": torch.tensor([1.0, 4.0]),
+                    "codebook_0_top1": torch.tensor([0.5, 1.0]),
+                    "codebook_1": torch.tensor([3.0, 6.0]),
+                    "codebook_1_top1": torch.tensor([1.0, 0.0]),
+                },
+            ),
+        }
+        batch = _batch(Task.TTS, token_labels=torch.tensor([[-100, 1]]))
+
+        with (
+            patch.object(module, "_loss_outputs", return_value=outputs),
+            patch.object(module, "log") as log,
+        ):
+            returned = module.validation_step(batch, 0)
+
+        self.assertIs(returned, outputs)
+        calls = {item.args[0]: item for item in log.call_args_list}
+        expected = {
+            "val/token_ce": (torch.tensor(2.5), 4),
+            "val/rvq_ce": (torch.tensor(3.0), 3),
+            "val/rvq_codebook_0_ce": (torch.tensor(2.0), 3),
+            "val/rvq_codebook_0_top1": (torch.tensor(2.0 / 3.0), 3),
+            "val/rvq_codebook_1_ce": (torch.tensor(4.0), 3),
+            "val/rvq_codebook_1_top1": (torch.tensor(2.0 / 3.0), 3),
+        }
+        self.assertEqual(set(calls), set(expected))
+        for name, (value, batch_size) in expected.items():
+            with self.subTest(metric=name):
+                torch.testing.assert_close(calls[name].args[1], value)
+                self.assertEqual(
+                    calls[name].kwargs,
+                    {
+                        "on_step": False,
+                        "on_epoch": True,
+                        "sync_dist": True,
+                        "batch_size": batch_size,
+                    },
+                )
+
     def test_combined_outputs_use_effective_units_without_loader_weights(self):
         first = LossItem(
             torch.tensor([1.0]),
