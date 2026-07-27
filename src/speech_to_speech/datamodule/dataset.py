@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence, Sized
+from collections.abc import Iterator, Sequence, Sized
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, cast
@@ -89,6 +89,10 @@ class SplitManifestDataset(MapStyleABC):
             label=label,
             count=len(cast(Sized, dataset)),
         )
+        self._positions = {
+            global_index: position
+            for position, global_index in enumerate(self.indices)
+        }
 
     def __len__(self) -> int:
         return len(self.indices)
@@ -102,6 +106,39 @@ class SplitManifestDataset(MapStyleABC):
         if index < 0 or index >= len(self.indices):
             raise IndexError(index)
         return self.indices[index]
+
+    def _shuffle(
+        self,
+        *,
+        shuffle: bool,
+        seed: int,
+        epoch: int,
+        num_replicas: int,
+        rank: int,
+    ) -> Iterator[Sequence[int]]:
+        if not isinstance(self.dataset, MapStyleABC):
+            yield from super()._shuffle(
+                shuffle=shuffle,
+                seed=seed,
+                epoch=epoch,
+                num_replicas=num_replicas,
+                rank=rank,
+            )
+            return
+        for group in self.dataset._shuffle(
+            shuffle=shuffle,
+            seed=seed,
+            epoch=epoch,
+            num_replicas=num_replicas,
+            rank=rank,
+        ):
+            positions = tuple(
+                self._positions[index]
+                for index in group
+                if index in self._positions
+            )
+            if positions:
+                yield positions
 
 
 class ToyDataset(Dataset[Sample]):

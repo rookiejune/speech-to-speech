@@ -44,8 +44,9 @@
 - `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts` prepared data 或确定性的内存
   `toy` data。可选的 `split_manifest` + `split_label` 把已加载的 map-style dataset 限制到
   manifest 声明的非重复、非负索引；manifest 不替换底层 anydataset split，也不绕过其公开
-  dataloader/batch-planning 契约。toy codes 根据正式 codec 的 semantic/acoustic/full-sequence
-  codebook 数量和值域构造。
+  dataloader/batch-planning 契约。底层是 `MapStyleABC` 时，split view 委托其 `_shuffle()` 并
+  映射回子集位置，以保留 store-backed payload locality。toy codes 根据正式 codec 的
+  semantic/acoustic/full-sequence codebook 数量和值域构造。
 - split manifest 的生成属于审计/部署入口，不属于 dataset loader：
   `scripts/create_split_manifest.py` 只消费 candidate、root audit 和 data-root 路径，输出带
   source artifact 与 root fingerprint 的 JSON；训练前必须先在 stable root 上完成该产物的独立

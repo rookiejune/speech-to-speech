@@ -30,6 +30,7 @@ from anytrain.module.idspace import Layout
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig, OmegaConf
 from torch import nn
+from anydataset.dataset import MapStyleABC
 
 from speech_to_speech.callback import OnDeviceCodecMaterializer
 from speech_to_speech.datamodule.collator import Collator, TextCollator, _allocate_tasks
@@ -1223,6 +1224,38 @@ class ContractTest(unittest.TestCase):
             self.assertEqual(manifest["split_method"], "sequential_no_sample_id")
             self.assertEqual(manifest["root_fingerprint"], {"samples.parquet": "abc"})
             self.assertEqual(manifest["splits"], {"train": [0, 1], "dev": [2], "test": [3]})
+
+    def test_split_manifest_preserves_map_style_shuffle_groups(self):
+        class GroupedDataset(MapStyleABC):
+            def __len__(self):
+                return 4
+
+            def __getitem__(self, index):
+                return cast(Any, index)
+
+            def _shuffle(self, **kwargs):
+                del kwargs
+                yield (0, 1)
+                yield (2, 3)
+
+        dataset = SplitManifestDataset(
+            GroupedDataset(),
+            [3, 0],
+            manifest=Path("/stable/split.json"),
+            label="train",
+        )
+
+        groups = list(
+            dataset._shuffle(
+                shuffle=True,
+                seed=0,
+                epoch=0,
+                num_replicas=1,
+                rank=0,
+            )
+        )
+
+        self.assertEqual(groups, [(1,), (0,)])
 
     def test_datamodule_rejects_runtime_codec_mismatch(self):
         config = DataConfig(
