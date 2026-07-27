@@ -1203,7 +1203,6 @@ class ContractTest(unittest.TestCase):
                     {
                         "dataset": "wmt19_tts_codec",
                         "codec": "longcat",
-                        "split": "train",
                         "dataset_len": 4,
                         "split_candidate": {"method": "sequential_no_sample_id"},
                         "files": [

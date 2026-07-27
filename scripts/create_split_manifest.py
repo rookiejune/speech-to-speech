@@ -19,7 +19,7 @@ def build_manifest(
     audit = _load_object(audit_path, "root audit")
     dataset = _string(candidate, "dataset", "split candidate")
     codec = _string(candidate, "codec", "split candidate")
-    split = _string(audit, "split", "root audit")
+    split = _optional_string(audit, "split", "root audit", default="train")
     if _string(audit, "dataset", "root audit") != dataset:
         raise ValueError("split candidate and root audit datasets do not match.")
     if _string(audit, "codec", "root audit") != codec:
@@ -105,6 +105,19 @@ def _object(value: object, label: str) -> dict[str, Any]:
 
 def _string(payload: dict[str, Any], key: str, label: str) -> str:
     value = payload.get(key)
+    if not isinstance(value, str) or not value:
+        raise TypeError(f"{label} field {key!r} must be a non-empty string.")
+    return value
+
+
+def _optional_string(
+    payload: dict[str, Any],
+    key: str,
+    label: str,
+    *,
+    default: str,
+) -> str:
+    value = payload.get(key, default)
     if not isinstance(value, str) or not value:
         raise TypeError(f"{label} field {key!r} must be a non-empty string.")
     return value
