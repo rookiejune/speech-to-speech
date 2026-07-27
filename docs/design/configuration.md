@@ -17,6 +17,10 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
   production/fixed-sample experiment 默认仍使用 WMT19 TTS prepared data。需要固定正式
   train/dev/test 子集时，通过 `DatasetConfig.split_manifest` 和 `split_label` 显式选择
   manifest 中的索引集合。
+- `scripts/create_split_manifest.py`：把 distribution candidate 与 formal-root audit 转成
+  可追溯的 split manifest。它要求候选索引覆盖 audited `samples.parquet` 的全部行，绑定
+  audit 文件 fingerprint，并把 split method 作为显式参数；它不是训练入口，也不会修改原始
+  parquet 或 payload。
 - `pl_module`：完整映射 `pl_module.Config` 的 learning rate 与 weight decay；不再使用含义重复的
   `optimizer` 组。
 

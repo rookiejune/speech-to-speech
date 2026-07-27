@@ -46,6 +46,10 @@
   manifest 声明的非重复、非负索引；manifest 不替换底层 anydataset split，也不绕过其公开
   dataloader/batch-planning 契约。toy codes 根据正式 codec 的 semantic/acoustic/full-sequence
   codebook 数量和值域构造。
+- split manifest 的生成属于审计/部署入口，不属于 dataset loader：
+  `scripts/create_split_manifest.py` 只消费 candidate、root audit 和 data-root 路径，输出带
+  source artifact 与 root fingerprint 的 JSON；训练前必须先在 stable root 上完成该产物的独立
+  校验。
 - `ToyDataset`：提供完整 source/target audio+text raw sample，不读取文件、不修改全局 RNG。
 - `DataLoaderConfig(batch_size, num_workers, pin_memory, persistent_workers)` /
   `Config(codec, dataloader, shape, encode_missing_codes, dataset)`：公开的 DataLoader、
