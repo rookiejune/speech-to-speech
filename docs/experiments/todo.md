@@ -7,11 +7,9 @@
 
 剩余正式验收：
 
-- 从 FP32-storage step-500 checkpoint 恢复到 step 1000，使用修复后的 distributed reducer，
-  每 100 steps 对同一 4265-frame dev split 记录 CE、逐 codebook top-1 和 condition ablation。
-  若仍未达到既定 RVQ CE gate `8.694203`，保持 stop 并重新判断模型/目标，不机械追加预算。
-- FP32 step 1000 达到 CE gate 后执行 teacher-forced decode，并同时检查各 codebook top-1 是否
-  稳定优于无条件众数；只有两项都通过，才允许进入更长 pilot。
+- 当前 FP32 step 1000 仍未达到 CE gate；只有后续明确修改训练目标并重新达到 gate 后，才执行
+  teacher-forced decode，并检查各 codebook top-1 是否稳定优于无条件众数。两项都通过后才允许
+  进入更长 pilot。
 - 跑 native-token stable stage 1 长跑，保留 TensorBoard 监督曲线、周期 checkpoint
   和可恢复的最新 checkpoint；当前 1k pilot 只验证数据分片、两卡 DDP 和
   resume 执行契约，不支持质量或收敛结论。

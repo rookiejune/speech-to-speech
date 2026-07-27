@@ -12,8 +12,8 @@ step 2000；RVQ CE 虽持续下降，但 acoustic top-1 与无条件众数基线
 可训练参数以 BF16 存储时出现明显更新量化。同 seed 的 FP32-storage run 已从头完成 500 steps；
 修复 distributed validation reducer 后，step-500 RVQ CE 为 `8.780052`，相对修正后的 step-0
 估计下降约 `4.040%`，仍未达到 5% 门槛。condition ablation 已证明 correct condition 明显优于
-shuffled/zero condition；下一步只从 FP32 step 500 恢复到 step 1000，长跑、decode 质量和收敛
-仍未验证。
+shuffled/zero condition；FP32 checkpoint 已继续到 step 1000，但 RVQ CE 仍未达到既定 gate，
+因此停止追加预算。长跑、decode 质量和收敛仍未验证。
 
 ## 范围与代码状态
 
@@ -493,8 +493,30 @@ condition，而不只是复现无条件 codebook 众数。correct condition 的�
 按历史 step-0 numerator 和正确分母估计，修正后的初始 RVQ CE 为约 `9.149663`；FP32 step 500
 下降约 `4.040%`，仍比 5% gate `8.694203` 高 `0.085849`。它比旧 BF16 step 500/2000 的历史
 RVQ CE 分别低 `0.124571 / 0.046545`，支持 FP32 storage 明显改善优化，但尚不足以晋级长跑。
-下一段只从 FP32 step 500 恢复到 step 1000，并继续使用修复后的 reducer；若仍未达到 gate，
-保持 stop 并重新判断模型/目标，而不是继续机械追加预算。
+FP32 step 500 -> 1000 的恢复段已完成并继续使用修复后的 reducer；step 1000 仍未达到 gate，
+保持 stop 并重新判断模型/目标，不再机械追加预算。
+
+## FP32 Storage Resume to Step 1000
+
+`experiment=014_stage1_pilot_fp32_resume_1000` 从上述 FP32 step-500 `last.ckpt` 恢复，使用
+commit `5015f48`、GPU 4/5、NCCL、同一 split manifest 和 batch size 1；每 100 optimizer steps
+遍历完整 dev split，并归档 `step-00000600/700/800/900/1000.ckpt` 与 `last.ckpt`。输出位于：
+
+`145:/home/zhuyin/local-runs/s2s-small-data-20260727/train-stage1-pilot1k-fp32-resume1000-v1/014-longcat-stable-stage1/pilot-fp32-resume-1000/stage_1-rvq-8l/metrics.json`
+
+五个 validation interval 和最终 `global_step=1000` 均正常写出，日志无 traceback、OOM 或非 finite
+指标。曲线如下：
+
+| Metric | Step 600 | Step 700 | Step 800 | Step 900 | Step 1000 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| token CE | `6.275235` | `5.915315` | `5.583732` | `5.290805` | `5.048135` |
+| RVQ CE | `8.867524` | `8.782422` | `8.756305` | `8.747676` | `8.773024` |
+
+step 1000 相对修正 step-0 估计 `9.149663` 下降约 `4.116%`，仍比既定 5% gate `8.694203` 高
+`0.078821`；step 500 -> 1000 仅改善 `0.007029`，且 step 900 是局部最低点，末步出现回升。
+step 1000 的 codebook top-1 为 `168/4265`、`144/4265`、`165/4265`，仍略高于原始 dev 的
+无条件众数基线，但这不能弥补 CE gate 未通过。按既定止损规则，本 run 不再继续到 5k，
+teacher-forced decode 和 native stable 长跑也不启动。
 
 ## 判定
 
@@ -508,9 +530,9 @@ P0 在 debug-migrated copy 上通过：代码迁移的本地/远端 targeted tes
 也已完成，它们作为原始 debug candidate 记录保留。pami201 上另行固化的
 1k/20-group split manifest 已完成两卡 rank 均衡、DDP 2-step、resume 和完整 dev validation
 指标链路验收。历史 BF16 run 恢复到 step 2000 后仍未满足 5% 门槛，且旧 reducer 有 4265 -> 4264
-分母截断；该 reducer 已通过 Gloo 回归和真实 NCCL step-500 复验修复。FP32 step 500 的正确双卡
-RVQ CE 为 `8.780052`，condition ablation 证明 CE 依赖 semantic condition，但相对修正初始值只
-下降约 `4.040%`，因此仍不允许直接晋级到 native stable P1 长跑。
+分母截断；该 reducer 已通过 Gloo 回归和真实 NCCL step-500 复验修复。FP32 step 1000 的正确双卡
+RVQ CE 为 `8.773024`，condition ablation 证明 CE 依赖 semantic condition，但相对修正初始值只
+下降约 `4.116%`，因此仍不允许直接晋级到 native stable P1 长跑。
 
 2026-07-27 的 pami201 32-sample root 进一步证明：当 202 超时时，使用 145 本地运行时、
 145 本地 HF/LongCat cache 和 pami201 数据根可以完成 stage 1 TTS/S2ST 2-step smoke，并且
@@ -518,5 +540,5 @@ RVQ CE 为 `8.780052`，condition ablation 证明 CE 依赖 semantic condition�
 DDP 2-step 与 resume 到 step 3。后续 1k pilot 已完成正式 split manifest、两卡
 rank 均衡、DDP/resume、完整 dev 指标链路，并从 100-step canary 恢复到 step 2000。
 BF16 run 已进入平台且存在参数/optimizer state 更新量化；FP32-storage 500-step A/B 明显改善
-参数更新覆盖与 dev CE，并通过 condition ablation，但仍差 5% gate `0.085849`。当前只允许恢复
-FP32 checkpoint 到 step 1000；decode 和长跑收敛验收仍未完成，不支持质量或收敛结论。
+参数更新覆盖与 dev CE，并通过 condition ablation，但恢复到 step 1000 后仍差 5% gate `0.078821`。
+当前停止继续追加预算；decode 和长跑收敛验收仍未完成，不支持质量或收敛结论。

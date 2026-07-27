@@ -2,15 +2,15 @@
 
 ## 适用范围
 
-本页最新真实实验是 014 的 pami201 1k stage 1 FP32-storage step-500 A/B 与 reducer 修复复验
-（2026-07-27）：修复后的两卡 NCCL dev RVQ CE 为 `8.780052`，三个 codebook top-1 分别为
-`166/4265`、`141/4265`、`165/4265`，与单卡 oracle `8.779940` 一致。condition ablation 中
-shuffled/zero condition 相对 correct condition 的 CE 分别恶化 `0.207262/0.301940`，证明 decoder
-已使用 semantic condition。四组目标可训练参数在 step 100 到 500 间有 `99.181562%` 发生逐位
-变化，参数与 AdamW moment 均为 FP32；这明显优于旧 BF16 checkpoint 的 `20.19%` 更新覆盖。
-但 FP32 step 500 相对修正后的 step-0 估计只下降约 `4.040%`，仍未达到既定 5% gate
-`8.694203`。当前只允许从该 FP32 checkpoint 恢复到 step 1000；decode、长跑监督和质量/收敛
-仍未验证。历史 BF16 step-2000 run 仍作为执行和趋势证据保留，但其 validation artifact 使用了
+本页最新真实实验是 014 的 pami201 1k stage 1 FP32-storage step-500 -> 1000 resume 与 reducer
+修复复验（2026-07-27）：step 1000 的两卡 NCCL dev RVQ CE 为 `8.773024`，相对修正后的
+step-0 估计下降 `4.116%`，仍未达到既定 5% gate `8.694203`；step 900 的局部最低值为
+`8.747676`，末步略有回升。step-500 condition ablation 中 shuffled/zero condition 相对 correct
+condition 的 CE 分别恶化 `0.207262/0.301940`，证明 decoder 已使用 semantic condition。四组
+目标可训练参数在 step 100 到 500 间有 `99.181562%` 发生逐位变化，参数与 AdamW moment 均为
+FP32；这明显优于旧 BF16 checkpoint 的 `20.19%` 更新覆盖。当前停止继续追加预算；decode、
+长跑监督和质量/收敛仍未验证。历史 BF16 step-2000 run 仍作为执行和趋势证据保留，但其
+validation artifact 使用了
 会把 `4265` 截断为等效 `4264` 分母的旧 Lightning reducer，不再视为精确全局加权值。
 同日的 32-sample smoke/canary 另外证明：`/mnt/pami202` 超时时，可以用
 145 本地 runtime/HF cache 和 pami201 小数据根完成 stage 1 TTS/S2ST 两步入口、
@@ -30,13 +30,13 @@ model/runtime/data/generation 和按模态 token CE 仍有调整，因此相应 
 
 ## 已验证结论
 
-- 014 的 FP32-storage 500-step A/B 已完成：修复后的两卡 NCCL validation 使用真实 `4265`
-  frame 分母，RVQ CE 为 `8.780052`，与单卡 oracle 只差 `0.000112`；三个 top-1 命中数也完全
-  一致。correct condition 比 shuffled/zero condition 分别低 `0.207262/0.301940` CE，证明模型
-  使用了条件。四组目标参数的加权更新覆盖为 `99.181562%`，且参数/optimizer moment 均为 FP32，
-  支持 FP32 storage 显著改善优化；但相对修正初始估计只下降 `4.040%`，仍未达到 5% gate，
-  因此只能继续到 step 1000，不支持质量或收敛结论
-  （[014 result, lines 440-497](results/014-longcat-stable-stage1.md#L440-L497)）。
+- 014 的 FP32-storage 500-step A/B 与 500 -> 1000 resume 已完成：修复后的两卡 NCCL validation
+  使用真实 `4265` frame 分母，step 500 RVQ CE 为 `8.780052`，step 1000 为 `8.773024`；step
+  1000 相对修正初始估计只下降 `4.116%`，仍未达到 5% gate。step 900 的局部最低值为 `8.747676`
+  且末步回升，因此按止损规则不再追加预算。step-500 condition ablation 证明 correct condition
+  比 shuffled/zero 分别低 `0.207262/0.301940` CE；四组目标参数更新覆盖为 `99.181562%`，参数
+  与 optimizer moment 均为 FP32，支持 storage 改善但不支持质量或收敛结论
+  （[014 result, lines 440-519](results/014-longcat-stable-stage1.md#L440-L519)）。
 - 014 的历史 pami201 1k pilot validation、100-step canary 与 BF16 resume 到 step 2000 均完成，
   step 750/1000/1250/1500/1750/2000 与 `last.ckpt` 均已保留；但历史 Lightning 2.6.x reducer
   会把全局 `4265` frame 的整数 count mean 截断为等效 `4264`，所以原始表只保留为执行和趋势
