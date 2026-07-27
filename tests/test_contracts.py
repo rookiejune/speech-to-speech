@@ -1201,8 +1201,6 @@ class ContractTest(unittest.TestCase):
             audit.write_text(
                 json.dumps(
                     {
-                        "dataset": "wmt19_tts_codec",
-                        "codec": "longcat",
                         "dataset_len": 4,
                         "split_candidate": {"method": "sequential_no_sample_id"},
                         "files": [

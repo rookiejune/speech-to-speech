@@ -20,9 +20,21 @@ def build_manifest(
     dataset = _string(candidate, "dataset", "split candidate")
     codec = _string(candidate, "codec", "split candidate")
     split = _optional_string(audit, "split", "root audit", default="train")
-    if _string(audit, "dataset", "root audit") != dataset:
+    audit_dataset = _optional_string(
+        audit,
+        "dataset",
+        "root audit",
+        default=dataset,
+    )
+    audit_codec = _optional_string(
+        audit,
+        "codec",
+        "root audit",
+        default=codec,
+    )
+    if audit_dataset != dataset:
         raise ValueError("split candidate and root audit datasets do not match.")
-    if _string(audit, "codec", "root audit") != codec:
+    if audit_codec != codec:
         raise ValueError("split candidate and root audit codecs do not match.")
 
     dataset_length = _positive_int(audit.get("dataset_len"), "dataset_len")
