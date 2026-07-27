@@ -2,28 +2,23 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from typing import cast
 from unittest.mock import patch
 
-from speech_to_speech.runtime.codec import LongCatCodec, load_codec
+from speech_to_speech.runtime.codec import load_codec
 
 
 class RuntimeCodecTest(unittest.TestCase):
-    def test_load_codec_longcat_constructs_adapter(self) -> None:
-        backend = SimpleNamespace(
-            decoders={"16k_4codebooks": SimpleNamespace(latent_dim=32)},
-        )
+    def test_load_codec_longcat_uses_anytrain_backend(self) -> None:
+        backend = SimpleNamespace(name="longcat")
 
         with patch(
-            "speech_to_speech.runtime.codec.load_frame",
+            "speech_to_speech.runtime.codec.load_semantic_acoustic",
             return_value=backend,
-        ) as load_frame:
+        ) as load_codec_backend:
             codec = load_codec("longcat", device="cuda")
 
-        adapter = cast(LongCatCodec, codec)
-        self.assertIsInstance(adapter, LongCatCodec)
-        self.assertIs(adapter.codec, backend)
-        load_frame.assert_called_once_with("longcat", device="cuda")
+        self.assertIs(codec, backend)
+        load_codec_backend.assert_called_once_with("longcat", device="cuda")
 
 
 if __name__ == "__main__":

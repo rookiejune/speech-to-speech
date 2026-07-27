@@ -86,7 +86,8 @@ padding、objective 与 generation service 不读取全局 runtime 状态。
 - device、dtype 与 attention backend 来自显式配置，不依赖 Transformers 环境默认值。
 - layout、backbone/tokenizer vocabulary 与 codec/audio-tokenizer vocabulary 属于同一 snapshot。
 - Runtime 不是 `nn.Module`；optimizer/checkpoint ownership 只由 model 属性决定。
-- `LongCatCodec` 与 `UnifiedCodec` 隔离具体第三方类型，消费者只依赖所需的最窄 codec capability；
+- LongCat 直接使用 anytrain 的 semantic-acoustic backend；`UnifiedCodec` 只保留给没有独立
+  semantic/acoustic capability 的 UniCodec。消费者只依赖所需的最窄 codec capability。
   UniCodec loader 只在边界转换为窄 `UnifiedCodecSource`，adapter 内不使用 `Any`。
 - text special tokens 与 chat template 当前属于 Qwen3 contract；替换 backbone 前需提供对应
   tokenizer/chat adapter。
