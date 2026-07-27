@@ -6,6 +6,7 @@ from typing import Any, Protocol, TypedDict, cast
 
 import torch
 from anydataset import types
+from anytrain.lightning import experiment
 from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 from torch import Tensor
@@ -13,7 +14,7 @@ from torch import Tensor
 from ...generation import Request, Result
 from ...generation.batch import requests_from_batch
 from ..interval import TrainInterval
-from .._lightning import attached_datamodule, audio_experiment, text_experiment
+from .._lightning import attached_datamodule
 
 
 class _Module(Protocol):
@@ -91,8 +92,8 @@ class TaskSampleLogger(Callback):
             return
         if not trainer.is_global_zero:
             return
-        audio_writer = audio_experiment(trainer)
-        text_writer = text_experiment(trainer)
+        audio_writer = experiment.audio(trainer)
+        text_writer = experiment.text(trainer)
         if audio_writer is None and text_writer is None:
             return
         module = cast(_Module, cast(object, pl_module))

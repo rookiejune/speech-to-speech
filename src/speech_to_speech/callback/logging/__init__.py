@@ -5,7 +5,6 @@ from .loss import LossSummary
 from .outputs import OutputsLogger
 from .task_sample import TaskSampleLogger
 from .text import TextProbe, TextRetentionLogger
-from .validation import ValidationSummary
 
 __all__ = [
     "AcousticEvaluation",
@@ -17,5 +16,4 @@ __all__ = [
     "TaskSampleLogger",
     "TextProbe",
     "TextRetentionLogger",
-    "ValidationSummary",
 ]

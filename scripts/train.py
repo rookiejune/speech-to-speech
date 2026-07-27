@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING, cast
 import hydra
 import torch
 from anydataset.types import Modality
-from anytrain.lightning import PerformanceCallback
+from anytrain.lightning import ModelCheckpoint, PerformanceCallback, validation
 from lightning import pytorch as pl
-from lightning.pytorch.callbacks import Callback, ModelCheckpoint
+from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig
 
 from speech_to_speech.callback import OnDeviceCodecMaterializer
@@ -18,7 +18,6 @@ from speech_to_speech.callback.logging import (
     GradNormLogger,
     LossSummary,
     OutputsLogger,
-    ValidationSummary,
 )
 from speech_to_speech.datamodule import DataModule
 from speech_to_speech.datamodule.joint import LoaderSchedule
@@ -98,12 +97,12 @@ def run(config: StagedTrainConfig) -> None:
 
     datamodule = build_datamodule(config, rt)
     summary = LossSummary()
-    validation_summary = ValidationSummary() if config.validation.enabled else None
+    validation_history = validation.History() if config.validation.enabled else None
     callbacks = training_callbacks(
         config,
         output_dir,
         summary,
-        validation_summary,
+        validation_history,
     )
 
     trainer = build_trainer(config, output_dir, callbacks)
@@ -135,8 +134,8 @@ def run(config: StagedTrainConfig) -> None:
         },
         "metrics": summary.report(),
     }
-    if validation_summary is not None:
-        result["validation"] = validation_summary.report()
+    if validation_history is not None:
+        result["validation"] = validation_history.report()
     (output_dir / "metrics.json").write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n"
     )
@@ -261,7 +260,7 @@ def training_callbacks(
     config: StagedTrainConfig,
     output_dir: Path,
     summary: Callback,
-    validation_summary: Callback | None = None,
+    validation_history: Callback | None = None,
 ) -> list[Callback]:
     callbacks: list[Callback] = []
     performance = _performance(config)
@@ -276,8 +275,8 @@ def training_callbacks(
             ],
         )
     )
-    if validation_summary is not None:
-        callbacks.append(validation_summary)
+    if validation_history is not None:
+        callbacks.append(validation_history)
     if config.callbacks.grad_norm.enabled and performance is None:
         callbacks.append(
             GradNormLogger(

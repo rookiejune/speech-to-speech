@@ -31,8 +31,9 @@ position 语义见 [总览 §2.4](../model-design.md)。
   `anytrain.loss`。
 - `types.loss_items()`：按 token、flow matching、REPA、RVQ 的稳定顺序遍历实际存在的
   分项，供 callback 和实验 summary 复用。
-- `ValidationMetric` / `validation_metrics()`：把 objective outputs 转成显式的逐行 values/weights
-  契约，并统一拥有 token/RVQ/Flow/REPA validation 指标名和有效 token/frame 加权语义。
+- `validation_metrics()`：把 objective outputs 转成 `anytrain.evaluator.weighted.Metric`，并统一
+  拥有 token/RVQ/Flow/REPA validation 指标名和有效 token/frame count 语义；通用加权聚合不在本模块
+  重复实现。
 
 ## Objective 组合
 
@@ -108,7 +109,7 @@ teacher features。acoustic-only codec screening 与 legacy oracle checkpoint �
 - `SpeechToSpeechModule` 通过泛型 `Objective` 保留 model/objective 的配对类型，不在训练循环中
   cast。
 - validation 指标名、RVQ codebook detail 解释和有效单位由 loss 模块唯一负责；pl_module 只消费
-  `ValidationMetric` 并接入 Lightning epoch/DDP aggregation。
+  `validation.Metric`，通过 `anytrain.lightning.validation.log()` 接入 Lightning epoch/DDP aggregation。
 - flow runtime 等 objective 资源在 `FlowObjective` 构造时显式传入，不通过
   `model.runtime` 向下读取。
 - 子 objective 在 `__init__` 中构造完毕，forward 不挂载新 submodule。

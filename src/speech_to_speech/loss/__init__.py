@@ -3,7 +3,7 @@ from .module import FlowObjective, RepaConfig, RVQObjective, TokenObjective
 from .objective import Objective
 from .repa import RepaLoss, WavLMTeacher
 from .types import LossItem, Outputs, combine_outputs, loss_items
-from .validation import ValidationMetric, validation_metrics
+from .validation import validation_metrics
 
 __all__ = [
     "FlowObjective",
@@ -15,7 +15,6 @@ __all__ = [
     "RepaConfig",
     "RepaLoss",
     "TokenObjective",
-    "ValidationMetric",
     "WavLMTeacher",
     "combine_outputs",
     "loss_items",

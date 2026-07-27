@@ -1,29 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
+from anytrain.evaluator.weighted import Metric
 from torch import Tensor
 
 from .types import LossItem, Outputs, loss_items, loss_unit
 
 
-@dataclass(frozen=True)
-class ValidationMetric:
-    values: Tensor
-    weights: Tensor
-
-    def reduced(self) -> tuple[Tensor, int]:
-        if self.values.shape != self.weights.shape:
-            raise ValueError("validation values and weights must align by row.")
-        weights = self.weights.to(dtype=self.values.dtype)
-        count = weights.sum()
-        if bool(count.le(0)):
-            raise ValueError("validation metric weights must contain a positive total.")
-        return (self.values * weights).sum() / count, int(count.detach().item())
-
-
-def validation_metrics(outputs: Outputs) -> dict[str, ValidationMetric]:
-    metrics: dict[str, ValidationMetric] = {}
+def validation_metrics(outputs: Outputs) -> dict[str, Metric]:
+    metrics: dict[str, Metric] = {}
     for objective, item in loss_items(outputs):
         name = _NAMES[objective]
         metrics[name] = _metric(item, item.loss, loss_unit(objective))
@@ -40,7 +24,7 @@ _NAMES = {
 }
 
 
-def _rvq_metrics(item: LossItem) -> dict[str, ValidationMetric]:
+def _rvq_metrics(item: LossItem) -> dict[str, Metric]:
     details = item.details
     if details is None:
         raise TypeError("RVQ validation requires loss details.")
@@ -66,8 +50,8 @@ def _rvq_name(key: str) -> str | None:
     return None
 
 
-def _metric(item: LossItem, values: Tensor, unit: str) -> ValidationMetric:
+def _metric(item: LossItem, values: Tensor, unit: str) -> Metric:
     details = item.details
     if details is None or unit not in details:
         raise TypeError(f"validation loss item requires {unit!r} details.")
-    return ValidationMetric(values, details[unit])
+    return Metric(values, details[unit])

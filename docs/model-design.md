@@ -265,4 +265,5 @@ frozen。正式 joint entry 以
 
 正式 train 只在配置了独立 speech validation spec 时让 `val_dataloader()` 返回真实 loader；
 没有 spec 时返回 `None`，text train loader 不被复用为 validation。teacher-forcing 指标由 loss 层的
-`ValidationMetric` 契约拥有，LightningModule 只负责 epoch/DDP aggregation。
+`validation_metrics()` 解释 objective 输出，通用 count-weighted epoch/DDP aggregation 和可恢复历史
+由 `anytrain.lightning.validation` 提供。

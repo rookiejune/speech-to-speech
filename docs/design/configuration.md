@@ -65,6 +65,8 @@ Hydra metadata 与 `metrics.json` 写入 `output_dir`；TensorBoard/CSV logger �
 解析出的 `DYNAMIC_HOME` 派生为 `$DYNAMIC_HOME/train/speech-to-speech`。job wrapper source
 `workspace/jobs/env.sh` 后使用同一默认值，缺少 `DYNAMIC_HOME` 时显式失败，不回退到项目目录。
 `output_subdir` 不允许绝对路径或 `..`，`output_dir` 也不允许独立 override。
+正式 staged train 使用 `anytrain.lightning.ModelCheckpoint` 的默认异步落盘，把本机临时保存与目标
+目录复制串行解耦；本项目的 checkpoint 配置只决定目录、文件名、归档 cadence 与保留策略。
 
 两个 trainer preset 都使用 `devices: auto`，由 Lightning 使用 `CUDA_VISIBLE_DEVICES` 中的全部
 可见设备；设备数量不再作为运行时配置契约重复校验。job wrapper 只提供机器相关的默认可见设备，

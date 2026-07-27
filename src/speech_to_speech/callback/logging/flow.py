@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from anytrain.lightning import LossTimeBucketLoggerCallback
+from anytrain.lightning import LossTimeBucketLoggerCallback, experiment
 from lightning import LightningModule, Trainer
 
-from .._lightning import text_experiment
 from ..interval import TrainInterval
 
 
@@ -41,8 +40,8 @@ class FlowMatchingLogger(LossTimeBucketLoggerCallback):
         )
 
     def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        experiment = text_experiment(trainer)
-        if experiment is None:
+        writer = experiment.text(trainer)
+        if writer is None:
             return
 
         sampler = self.runtime.time_sampler
@@ -53,7 +52,7 @@ class FlowMatchingLogger(LossTimeBucketLoggerCallback):
             for name in ("mean", "std", "t_min", "t_max")
             if name in config
         )
-        experiment.add_text("flow/config", "\n".join(values), 0)
+        writer.add_text("flow/config", "\n".join(values), 0)
 
     def should_log(
         self,

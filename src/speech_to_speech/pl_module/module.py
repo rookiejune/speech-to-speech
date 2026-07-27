@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Generic, Protocol, TypeVar, cast
 
 import torch
+from anytrain.lightning import validation
 from anytrain.optim.llm import create_optimizer
 from lightning.pytorch import LightningModule
 from torch import nn
@@ -13,7 +14,7 @@ from ..datamodule.types import ModelBatch, RawSingleBatch, TrainBatch, TrainInpu
 from ..generation.service import generate_responses
 from ..generation.text import TextProbe, TextProbeResult, evaluate_text
 from ..generation.types import Request, Result
-from ..loss import ValidationMetric, validation_metrics
+from ..loss import validation_metrics
 from ..loss.objective import Objective
 from ..loss.types import Outputs
 from ..generation.protocol import TextEvaluationModel
@@ -75,24 +76,8 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
             self.materialize_batch(batch),
             self.objective.validation,
         )
-        for name, metric in validation_metrics(outputs).items():
-            self._log_validation_metric(name, metric)
+        validation.log(self, validation_metrics(outputs))
         return outputs
-
-    def _log_validation_metric(
-        self,
-        name: str,
-        metric: ValidationMetric,
-    ) -> None:
-        value, count = metric.reduced()
-        self.log(
-            f"val/{name}",
-            value,
-            on_step=False,
-            on_epoch=True,
-            sync_dist=True,
-            batch_size=count,
-        )
 
     def _loss_outputs(self, batch: TrainBatch) -> Outputs:
         return self._outputs(batch, self.objective.forward)

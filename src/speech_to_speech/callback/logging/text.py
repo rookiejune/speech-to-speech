@@ -3,11 +3,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Protocol, cast
 
+from anytrain.lightning import experiment
 from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 
 from ..interval import TrainInterval
-from .._lightning import scalar_experiment, text_experiment
 from ...generation import TextProbe, TextProbeResult
 
 
@@ -82,8 +82,8 @@ class TextRetentionLogger(Callback):
     def _log(self, trainer: Trainer, module: _Module, *, baseline: bool) -> None:
         if not trainer.is_global_zero:
             return
-        scalar_writer = scalar_experiment(trainer)
-        text_writer = text_experiment(trainer)
+        scalar_writer = experiment.scalar(trainer)
+        text_writer = experiment.text(trainer)
         if scalar_writer is None and text_writer is None:
             return
 

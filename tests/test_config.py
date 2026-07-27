@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import torch
+from anytrain.lightning import ModelCheckpoint
 from hydra import compose, initialize_config_dir
 from hydra.errors import ConfigCompositionException
 from omegaconf import DictConfig
@@ -793,6 +794,22 @@ class ConfigTest(unittest.TestCase):
         self.assertIs(entry.call_args.kwargs["logger"], logger.return_value)
         self.assertEqual(entry.call_args.kwargs["val_check_interval"], 25)
         self.assertEqual(entry.call_args.kwargs["num_sanity_val_steps"], 2)
+
+    def test_train_uses_async_checkpoint(self):
+        config = parse_train(_compose("train"))
+
+        callbacks = train_script.training_callbacks(
+            config,
+            Path("/tmp/output"),
+            Mock(),
+        )
+
+        checkpoint = next(
+            callback
+            for callback in callbacks
+            if isinstance(callback, ModelCheckpoint)
+        )
+        self.assertTrue(checkpoint.async_save)
 
     @patch("scripts.train.build_trainer")
     @patch("scripts.train.training_callbacks", return_value=[])

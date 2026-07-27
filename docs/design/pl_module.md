@@ -11,9 +11,10 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
   objective，并按有效 token/frame 聚合分项 loss。它跨 rank 归约并记录一次 total loss，同时保留
   分项到 backward 完成。
 - `validation_step()` 复用同一 materialize 路径，通过 `Objective.validation()` 做 teacher-forcing
-  dev 评估，并消费 loss 模块提供的 `ValidationMetric`；它不解析 objective 名、RVQ detail key 或
-  有效单位。Lightning 在 epoch 结束时同步各 rank 的加权和与计数，因此不同 batch/rank 的长度
-  差异不会退化为 batch mean 或 rank mean。
+  dev 评估，并把 loss 模块提供的 `evaluator.weighted.Metric` 交给
+  `anytrain.lightning.validation.log()`；它不解析 objective 名、RVQ detail key 或有效单位。Lightning
+  在 epoch 结束时同步各 rank 的加权和与计数，因此不同 batch/rank 的长度差异不会退化为 batch mean
+  或 rank mean。
 - 可选 `batch_materializer` 只处理显式 raw waveform fallback：当 datamodule single path 返回
   `RawSingleBatch` 时，materializer 在当前训练 device 上调用 codec encode，并在 objective 前
   转成标准 `ModelBatch`。没有 materializer 时，`training_step()` 只接受已 materialize 的
@@ -46,16 +47,19 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
   loss 日志来自 `anytrain.lightning.LossTimeBucketLoggerCallback`。
 - `LossSummary`：只注入 S2S objective 顺序；训练输出 total loss 与分项 `LossItem` 窗口摘要来自
   `anytrain.lightning.LossSummaryCallback`。
-- `ValidationSummary`：在每次 validation 结束后收集 `val/*` 标量，区分 fit 前 sanity run 和
-  optimizer-step interval run，并把 step 与指标写入正式训练的 `metrics.json`；callback state
-  随 checkpoint 保存和恢复，同类同 step 记录覆盖而不重复。反序列化 state、非标量或没有
-  validation 指标时明确校验并报错。
+- `anytrain.lightning.validation.History`：正式训练入口启用 validation 时挂载该通用 callback；它在
+  每次 validation 结束后收集 `val/*` 标量，区分 fit 前 sanity run 和 optimizer-step interval run，
+  并把可恢复的 report 写入 `metrics.json`。本项目不重复实现 history state 或 scalar 校验。
 - `AcousticEvaluation`：对 fixed-sample acoustic model 使用本地 generator seeds 采样，记录 feature、
   waveform 与 STFT 距离；纯评估函数位于 `generation.evaluation`，不留在脚本私有模块。
 - `TaskSampleLogger`：只在 global zero 读取 datamodule 的公开 `train_samples()`/`collator`，
   按真实 task 记录 source/reference/generated metadata，并复用一次 generation 的 token、features
   与 waveform；它不运行额外神经网络评估器，也不重复计算 loss。
 - `TextRetentionLogger`：记录 text probe generation、reference NLL 与相对基线漂移。
+
+上述 callback 需要 logger experiment 时统一通过 `anytrain.lightning.experiment` 获取 text、scalar、
+audio 或 histogram 能力；本项目只负责 rank、cadence、tag 和领域数据转换，不再维护重复的 logger
+Protocol/helper。
 
 `TrainInterval` 是项目内 callback cadence 接口。默认保留历史 `every_n_steps` optimizer-step 行为；
 配置 `every_audio_seconds` 时改为按 `ModelBatch.audio_seconds` 累计全局 processed audio seconds
@@ -111,3 +115,5 @@ FlashAttention 或其他 custom op 也可能不在通用算子计数覆盖范围
 - total loss 只由 LightningModule 以 `sync_dist=True` 记录一次，分项 logger 不重复记录。
 - validation 是 teacher-forcing loss/accuracy 口径，不调用 autoregressive generation；真实生成质量
   仍由 generation callback 与独立结果文档验收。
+- 正式 `scripts/train.py` 使用 `anytrain.lightning.ModelCheckpoint` 的默认异步保存；checkpoint
+  目录、命名、保留数量和触发步数仍由本项目配置拥有。
