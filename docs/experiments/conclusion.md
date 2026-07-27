@@ -2,14 +2,16 @@
 
 ## 适用范围
 
-本页最新真实实验是 014 的 pami201 1k stage 1 step-2000 resume（2026-07-27）：已在
-1000-sample、20 payload-group 的正式 split manifest 上完成两卡 step 0 到 2000 的完整 dev
-validation。step 2000 相对初始 token/RVQ CE 下降 `22.736%`/`3.553%`，但 RVQ CE 未达到
-5% 门槛，最近 500 steps 仅改善 `0.007567`。3 个 acoustic codebook top-1 与无条件众数基线
-几乎相同，不能证明 decoder 有效利用 semantic condition。checkpoint 还显示随机初始化的可训练
-speech interface/acoustic decoder 及 AdamW moment 以 BF16 存储，预计可训练参数中只有 `20.19%`
-在 step 500 到 2000 间发生逐位变化；该观测支持先做 FP32-storage A/B，但尚未验证 BF16 是
-plateau 的唯一原因。当前停止机械延长到 5k；decode、长跑监督和质量/收敛仍未验证。
+本页最新真实实验是 014 的 pami201 1k stage 1 FP32-storage step-500 A/B 与 reducer 修复复验
+（2026-07-27）：修复后的两卡 NCCL dev RVQ CE 为 `8.780052`，三个 codebook top-1 分别为
+`166/4265`、`141/4265`、`165/4265`，与单卡 oracle `8.779940` 一致。condition ablation 中
+shuffled/zero condition 相对 correct condition 的 CE 分别恶化 `0.207262/0.301940`，证明 decoder
+已使用 semantic condition。四组目标可训练参数在 step 100 到 500 间有 `99.181562%` 发生逐位
+变化，参数与 AdamW moment 均为 FP32；这明显优于旧 BF16 checkpoint 的 `20.19%` 更新覆盖。
+但 FP32 step 500 相对修正后的 step-0 估计只下降约 `4.040%`，仍未达到既定 5% gate
+`8.694203`。当前只允许从该 FP32 checkpoint 恢复到 step 1000；decode、长跑监督和质量/收敛
+仍未验证。历史 BF16 step-2000 run 仍作为执行和趋势证据保留，但其 validation artifact 使用了
+会把 `4265` 截断为等效 `4264` 分母的旧 Lightning reducer，不再视为精确全局加权值。
 同日的 32-sample smoke/canary 另外证明：`/mnt/pami202` 超时时，可以用
 145 本地 runtime/HF cache 和 pami201 小数据根完成 stage 1 TTS/S2ST 两步入口、
 正式 `scripts/train.py` 100-step canary，以及重分片 root 的两卡 DDP/resume。
@@ -28,19 +30,19 @@ model/runtime/data/generation 和按模态 token CE 仍有调整，因此相应 
 
 ## 已验证结论
 
-- 014 的 pami201 1k pilot validation、100-step canary 与 resume 到 step 2000 均完成：两卡分别读取 50 条 dev sample，
-  指标按有效 token/frame 跨 batch/rank 加权，并区分 sanity/interval 写入 `metrics.json`。
-  step 0 -> 2000 的 token CE 为 `9.883604 -> 7.636385`，RVQ CE 为
-  `9.151793 -> 8.826597`。最终 3 个 acoustic codebook top-1 为
-  `0.038227/0.032129/0.037992`，与 raw dev target 的无条件众数
-  `0.038687/0.031419/0.038453` 几乎相同；高于均匀随机值本身不是条件学习证据。
-  step 750/1000/1250/1500/1750/2000 与 `last.ckpt` 均已保留。step 500 -> 2000 checkpoint
-  delta 还显示所有相关浮点参数与 AdamW moment 为 BF16，预计可训练参数只有 `20.19%` 发生
-  逐位变化。该 pilot 已验证执行和指标链路，但尚未达到 5% 晋级门槛；BF16 是否构成主要因果
-  仍需从头 A/B，不支持质量或收敛结论
-  （[014 result, lines 276-311](results/014-longcat-stable-stage1.md#L276-L311)，
-  [lines 313-374](results/014-longcat-stable-stage1.md#L313-L374)，
-  [lines 376-428](results/014-longcat-stable-stage1.md#L376-L428)）。
+- 014 的 FP32-storage 500-step A/B 已完成：修复后的两卡 NCCL validation 使用真实 `4265`
+  frame 分母，RVQ CE 为 `8.780052`，与单卡 oracle 只差 `0.000112`；三个 top-1 命中数也完全
+  一致。correct condition 比 shuffled/zero condition 分别低 `0.207262/0.301940` CE，证明模型
+  使用了条件。四组目标参数的加权更新覆盖为 `99.181562%`，且参数/optimizer moment 均为 FP32，
+  支持 FP32 storage 显著改善优化；但相对修正初始估计只下降 `4.040%`，仍未达到 5% gate，
+  因此只能继续到 step 1000，不支持质量或收敛结论
+  （[014 result, lines 440-497](results/014-longcat-stable-stage1.md#L440-L497)）。
+- 014 的历史 pami201 1k pilot validation、100-step canary 与 BF16 resume 到 step 2000 均完成，
+  step 750/1000/1250/1500/1750/2000 与 `last.ckpt` 均已保留；但历史 Lightning 2.6.x reducer
+  会把全局 `4265` frame 的整数 count mean 截断为等效 `4264`，所以原始表只保留为执行和趋势
+  证据，不再作为精确全局加权值。旧 BF16 checkpoint 的预计可训练参数更新覆盖只有 `20.19%`；
+  top-1 又接近无条件众数，不能单凭该历史 run 证明条件使用或收敛
+  （[014 result, lines 281-438](results/014-longcat-stable-stage1.md#L281-L438)）。
 - 014 的 pami201 1k pilot 已固化：数据根包含 1000 条样本、20 个各 50 条的
   payload group，LongCat tensor 为 rank-2 integer、4 个 codebook，frame 范围 `14..43`，
   无 symlink，总大小 `504357694` bytes。split manifest SHA256 为
@@ -51,7 +53,7 @@ model/runtime/data/generation 和按模态 token CE 仍有调整，因此相应 
   total/token/RVQ 为 `16.085545`/`6.741939`/`9.137355`。这只验证
   split、distributed partition、checkpoint/resume 和 finite loss 契约；独立 dev validation
   结论见上一项，长跑、质量和收敛均未验证
-  （[014 result, lines 251-275](results/014-longcat-stable-stage1.md#L251-L275)）。
+  （[014 result, lines 256-279](results/014-longcat-stable-stage1.md#L256-L279)）。
 - 014 的 pami201 32-sample root smoke/canary 通过：在 202 NFS 超时时，`145` 本地 runtime、
   本地 Qwen/LongCat cache 与 `/mnt/pami201` 数据根可完成 stage 1 TTS/S2ST 2-step
   forward/backward/optimizer、metrics 写出和训练后 teacher-forced acoustic generation；正式
@@ -60,19 +62,18 @@ model/runtime/data/generation 和按模态 token CE 仍有调整，因此相应 
   完成 2 steps，并通过新增 `train.ckpt_path` 从 step 2 恢复到 step 3。同时修复了
   `load_codec("longcat")` 在运行时求值 `LongCat` 的 `NameError` 并补测试。该结论只验证小数据入口、
   checkpoint/resume 执行契约和 finite 指标，不支持质量或收敛结论
-  （[014 result, lines 167-203](results/014-longcat-stable-stage1.md#L167-L203)，
-  [lines 205-219](results/014-longcat-stable-stage1.md#L205-L219)，
-  [lines 221-249](results/014-longcat-stable-stage1.md#L221-L249)）。
+  （[014 result, lines 172-224](results/014-longcat-stable-stage1.md#L172-L224)，
+  [lines 226-254](results/014-longcat-stable-stage1.md#L226-L254)）。
 - 014 的 P0 在 debug-migrated copy 上通过：代码迁移的本地/远端 targeted tests 通过，远端
   targeted tests 为 `Ran 96 tests ... OK`、exit `0`；历史 debug duration workaround 更新
   2000 个 audio item 且只写入 debug copy；当前代码缺失 `AudioMeta.DURATION` 时可从 codec
   frame count 和 runtime frame rate 推导音频秒数；复旦 `145` 上 TTS/S2ST wrapper、metrics、
   generation 和 waveform decode 均为 finite。该结论只接受 debug copy P0，不允许直接晋级正式
   stable root 或 native stable P1 长跑
-  （[014 result, lines 3-5](results/014-longcat-stable-stage1.md#L3-L5)，
-  [lines 20-34](results/014-longcat-stable-stage1.md#L20-L34)，
-  [lines 38-64](results/014-longcat-stable-stage1.md#L38-L64)，
-  [lines 128-156](results/014-longcat-stable-stage1.md#L128-L156)）。
+  （[014 result, lines 3-16](results/014-longcat-stable-stage1.md#L3-L16)，
+  [lines 18-39](results/014-longcat-stable-stage1.md#L18-L39)，
+  [lines 41-69](results/014-longcat-stable-stage1.md#L41-L69)，
+  [lines 133-161](results/014-longcat-stable-stage1.md#L133-L161)）。
 - 真实 Qwen3-0.6B、LongCat native token 与 8 层 RVQ decoder 上，TTS/S2ST fixed-sample
   均完成 2-step forward/backward/optimizer；两条 total、audio token CE 和各 RVQ codebook CE
   均下降。teacher-forced RVQ sampling 在 3 个记录点、每点 4 个 seed 上均可 decode 2.16s

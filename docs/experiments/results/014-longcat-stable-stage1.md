@@ -9,8 +9,11 @@ native token/RVQ 分布审计和 pilot split candidate 已补齐。2026-07-27 �
 验证入口闭环。随后又固化 pami201 1k pilot split manifest，验证两卡连续 5 个 epoch
 的 rank 均衡，并完成 2-step DDP 及 step 2 -> 3 resume。完整 dev validation 随后推进到
 step 2000；RVQ CE 虽持续下降，但 acoustic top-1 与无条件众数基线几乎相同，且随机初始化的
-可训练参数以 BF16 存储时出现明显更新量化。当前停止机械延长到 5k，先做 dtype A/B；长跑、
-decode 质量和收敛仍未验证。
+可训练参数以 BF16 存储时出现明显更新量化。同 seed 的 FP32-storage run 已从头完成 500 steps；
+修复 distributed validation reducer 后，step-500 RVQ CE 为 `8.780052`，相对修正后的 step-0
+估计下降约 `4.040%`，仍未达到 5% 门槛。condition ablation 已证明 correct condition 明显优于
+shuffled/zero condition；下一步只从 FP32 step 500 恢复到 step 1000，长跑、decode 质量和收敛
+仍未验证。
 
 ## 范围与代码状态
 
@@ -280,8 +283,10 @@ checkpoint 和 resume 执行契约。两步训练和一步恢复的 finite loss 
 正式 staged train 新增默认关闭的 teacher-forcing validation：从现有 stage speech loader
 复制 task weights 和 speech config，只把复制后的 `DatasetConfig.split_label` 改成 dev；训练
 loader 保持 train split。token CE 按有效 token 数加权，RVQ 总 CE、逐 codebook CE/top-1
-按有效 target frame 数加权；Lightning 在 epoch 结束时同步两卡加权和与计数。sanity 与
-optimizer-step interval 结果分别写入 `metrics.json.validation`。
+按有效 target frame 数加权；sanity 与 optimizer-step interval 结果分别写入
+`metrics.json.validation`。历史实现把 rank-local 整数 count 作为 Lightning `batch_size`，期望
+epoch 结束时同步两卡加权和与计数；后续确认 Lightning 2.6.x 会对该整数 accumulator 做跨 rank
+mean，不能整除 world size 时发生截断，因此下面的历史 DDP 指标不是精确全局加权结果。
 
 本地验收为 240 tests OK / 1 CUDA skip、basedpyright 0 errors、ruff、compileall、job shell
 syntax 和 `git diff --check` 全部通过。远端使用
@@ -293,7 +298,8 @@ syntax 和 `git diff --check` 全部通过。远端使用
 两卡均注册成功，进程正常退出，日志未出现 traceback、OOM 或非 finite 指标。manifest 已独立
 验证 dev rank counts `[50,50]`；本次两个 validation pass 均遍历该完整 dev split。LongCat
 semantic codebook 由 token objective 监督，因此下表 `codebook_0..2` 是 3 个 acoustic RVQ
-codebook；dev 有效 target frame 总数为 `4264`。
+codebook。raw dev、单卡 datamodule probe 和修复后的双卡复验均确认有效 target frame 总数为
+`4265`；历史 reducer 把两卡整数 count 的 mean 截断为 `2132`，最终等效分母为 `4264`。
 
 | Metric | Sanity step 0 | Interval step 1 |
 | --- | ---: | ---: |
@@ -302,15 +308,18 @@ codebook；dev 有效 target frame 总数为 `4264`。
 | codebook 0 CE | `9.150218` | `9.147419` |
 | codebook 1 CE | `9.144267` | `9.144913` |
 | codebook 2 CE | `9.160889` | `9.162157` |
-| codebook 0 top-1 | `0.000234522` (`1/4264`) | `0.000234522` (`1/4264`) |
+| codebook 0 top-1 | `0.000234522`（旧 reducer 输出，等效 `1/4264`） | `0.000234522`（旧 reducer 输出，等效 `1/4264`） |
 | codebook 1 top-1 | `0` | `0` |
 | codebook 2 top-1 | `0` | `0` |
 
 每个 acoustic codebook size 为 `8100`，均匀随机 top-1 基线约为 `0.000123457`。
 codebook 0 的单次命中不足以支持高于随机的统计结论，另两个 codebook 为 0；因此尚未满足
 P1 的“多数 codebook top-1 高于随机”门槛。一步后 token CE 下降约 `0.414%`，RVQ CE
-下降约 `0.003%`，也不构成学习或收敛结论。本次只接受 validation split、DDP 加权、指标命名
-与 JSON reporting 闭环；下一步先跑 100-step canary，并在 step 50/100 对同一 dev split 复验。
+下降约 `0.003%`，也不构成学习或收敛结论。本次只接受 validation split、指标命名与 JSON
+reporting 闭环；历史 DDP 加权正确性不再接受，修复后的独立验收见后文。
+
+以下 100/500/2000-step 表继续按原始 `metrics.json` 保留，便于追溯真实 run；其中 RVQ 指标和
+`/4264` 命中数均是旧 reducer 口径，不静默改写为修正值。
 
 ## PAMI201 1k Pilot 100-Step Canary
 
@@ -406,8 +415,9 @@ step 2000 相对 step 0 的 token CE 下降 `22.736%`，RVQ CE 下降 `3.553%`�
 分别为 `0.038687 / 0.031419 / 0.038453`；step 2000 模型为
 `0.038227 / 0.032129 / 0.037992`。两者几乎一致，说明高于 `1/8100` 随机值并不足以证明
 模型利用了 semantic condition；当前 decoder 的 top-1 行为主要可由 acoustic codebook 边际众数
-解释。原始 dev target 有 `4265` frames，而 validation 有效口径为 `4264` frames，可能来自
-causal shift 或 truncation mask；后续 A/B 必须保持同一有效位口径。
+解释。原始 dev target、单卡 validation datamodule 和修复后的双卡 validation 都有 `4265`
+frames，不存在 causal shift 或 truncation mask 丢帧。`4264` 来自 Lightning 2.6.x 对 rank-local
+整数 `batch_size` accumulator 做 mean：全局 `4265` 被截断成 `2132 * 2 = 4264`。
 
 边际统计归档于：
 
@@ -423,9 +433,68 @@ checkpoint delta 归档于：
 
 `145:/home/zhuyin/local-runs/s2s-small-data-20260727/diagnostics/checkpoint-delta-500-2000.json`
 
-当前 stop/go 决策：停止从旧 checkpoint 继续到 5k。下一轮保持 frozen backbone 为 BF16，
-随机初始化且可训练的 semantic speech interface 与 acoustic decoder 使用 FP32 参数存储，forward
-仍由 mixed-precision autocast 控制；从同 seed 重新跑 500-step A/B，再决定是否恢复更长 pilot。
+旧 BF16 checkpoint 不再继续到 5k。下一轮保持 frozen backbone 为 BF16，随机初始化且可训练的
+semantic speech interface 与 acoustic decoder 使用 FP32 参数存储，forward 仍由 mixed-precision
+autocast 控制；对应 500-step A/B 已完成，结果如下。
+
+## FP32 Storage 500-Step A/B and Condition Ablation
+
+`experiment=014_stage1_pilot_fp32_500` 使用同 seed、同 1k/20-group split、GPU 1/2 和 batch size 1
+从头训练；frozen Qwen backbone 保持 BF16，四组目标可训练参数与 AdamW moment 使用 FP32，forward
+继续使用 BF16 mixed-precision autocast。输出位于：
+
+`145:/home/zhuyin/local-runs/s2s-small-data-20260727/train-stage1-pilot1k-fp32-500-v1/014-longcat-stable-stage1/pilot-fp32-500/stage_1-rvq-8l/metrics.json`
+
+原始 run 仍使用旧 reducer，曲线如下；这些数值只用于同一历史 logging 口径下比较趋势：
+
+| Metric | Step 0 | Step 100 | Step 200 | Step 300 | Step 400 | Step 500 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| token CE | `9.883604` | `7.963008` | `7.532671` | `7.173612` | `6.869839` | `6.558120` |
+| RVQ CE | `9.151809` | `8.946848` | `8.854377` | `8.819901` | `8.789456` | `8.782111` |
+
+step 100 到 500 的 checkpoint delta 显示 acoustic decoder 预计可训练参数中 `99.120499%` 发生
+逐位变化；四组目标参数合计 `188848620` 个，发生变化的加权比例为 `99.181562%`。所有目标参数、
+AdamW `exp_avg` 和 `exp_avg_sq` 均为 FP32。相比旧 BF16 step 500 -> 2000 只有 `20.19%` 的预计
+可训练参数发生逐位变化，FP32 storage 已消除主要的更新量化。归档位于：
+
+`145:/home/zhuyin/local-runs/s2s-small-data-20260727/diagnostics/checkpoint-delta-fp32-100-500.json`
+
+对 FP32 step-500 checkpoint 的单卡 condition ablation 遍历同一 `4265` 个有效 frame；correct、
+shuffled 和 zero condition 的 RVQ CE 分别为 `8.779940208 / 8.987201932 / 9.081879852`。shuffled
+与 zero 相对 correct 分别恶化 `0.207261724 / 0.301939644`，证明 decoder 的 CE 确实依赖 semantic
+condition，而不只是复现无条件 codebook 众数。correct condition 的逐 codebook CE 为
+`8.536335881 / 8.892582497 / 8.910902246`，top-1 命中为 `166/4265`、`141/4265`、`165/4265`。
+归档位于：
+
+`145:/home/zhuyin/local-runs/s2s-small-data-20260727/diagnostics/condition-ablation-fp32-500.json`
+
+分母偏差的根因修复下沉到 `anytrain` commit `9bad97d`，主工程通过 commit `ad85e4a` 接入。
+修复将传给 Lightning 的 rank-local 整数 count 统一乘 active world size，使 mean 后的 accumulator
+仍为整数；两进程 Gloo 回归固定覆盖 global count `7`，另有 FP16/BF16 FP32-accumulation 回归。
+本地全量验证为 `anytrain` 626 passed / 4 skipped、`speech-to-speech` 246 passed / 1 skipped，
+两边 ruff、basedpyright 和 compileall 均通过。
+
+在 145 的独立 `ad85e4a + 9bad97d` runtime 上，用 GPU 4/5、NCCL 和正式
+`Trainer.validate(..., ckpt_path=...)` 对原 step-500 checkpoint 重跑完整 dev split，结果为：
+
+| Metric | Fixed two-rank validation | Count |
+| --- | ---: | ---: |
+| token CE | `6.556618` | valid token weighted |
+| RVQ CE | `8.780052` | `4265` frames |
+| codebook 0 CE / top-1 | `8.536282` / `0.038921453` | `166/4265` |
+| codebook 1 CE / top-1 | `8.892416` / `0.033059791` | `141/4265` |
+| codebook 2 CE / top-1 | `8.911456` / `0.038686987` | `165/4265` |
+
+双卡 RVQ CE 与单卡 oracle 只差 `0.000112`，三个 top-1 分母和命中数完全一致，确认 reducer 修复
+在真实 NCCL 路径上使用 `4265` 口径。复验归档位于：
+
+`145:/home/zhuyin/local-runs/s2s-small-data-20260727/diagnostics/validation-reducer-fix-fp32-500.json`
+
+按历史 step-0 numerator 和正确分母估计，修正后的初始 RVQ CE 为约 `9.149663`；FP32 step 500
+下降约 `4.040%`，仍比 5% gate `8.694203` 高 `0.085849`。它比旧 BF16 step 500/2000 的历史
+RVQ CE 分别低 `0.124571 / 0.046545`，支持 FP32 storage 明显改善优化，但尚不足以晋级长跑。
+下一段只从 FP32 step 500 恢复到 step 1000，并继续使用修复后的 reducer；若仍未达到 gate，
+保持 stop 并重新判断模型/目标，而不是继续机械追加预算。
 
 ## 判定
 
@@ -438,15 +507,16 @@ P0 在 debug-migrated copy 上通过：代码迁移的本地/远端 targeted tes
 0 秒的问题。1000-sample native token/RVQ 分布审计和 800/100/100 pilot split candidate
 也已完成，它们作为原始 debug candidate 记录保留。pami201 上另行固化的
 1k/20-group split manifest 已完成两卡 rank 均衡、DDP 2-step、resume 和完整 dev validation
-指标链路验收。恢复到 step 2000 后 dev RVQ CE 相对初始下降 `3.553%`，仍未满足 5% 门槛；
-三个 acoustic codebook top-1 与各自无条件众数基线几乎一致，尚未证明 decoder 有效利用条件，
-因此不允许直接晋级到 native stable P1 长跑。
+指标链路验收。历史 BF16 run 恢复到 step 2000 后仍未满足 5% 门槛，且旧 reducer 有 4265 -> 4264
+分母截断；该 reducer 已通过 Gloo 回归和真实 NCCL step-500 复验修复。FP32 step 500 的正确双卡
+RVQ CE 为 `8.780052`，condition ablation 证明 CE 依赖 semantic condition，但相对修正初始值只
+下降约 `4.040%`，因此仍不允许直接晋级到 native stable P1 长跑。
 
 2026-07-27 的 pami201 32-sample root 进一步证明：当 202 超时时，使用 145 本地运行时、
 145 本地 HF/LongCat cache 和 pami201 数据根可以完成 stage 1 TTS/S2ST 2-step smoke，并且
 正式 `scripts/train.py` stage 1 可以完成 100-step 小数据 canary；重分片 root 还完成两卡
 DDP 2-step 与 resume 到 step 3。后续 1k pilot 已完成正式 split manifest、两卡
 rank 均衡、DDP/resume、完整 dev 指标链路，并从 100-step canary 恢复到 step 2000。
-RVQ CE 缓慢下降但已进入平台，checkpoint delta 又显示 BF16 参数和 optimizer state 的更新量化；
-当前先做 FP32-storage 500-step A/B，不继续盲跑 5k。decode 和长跑收敛验收仍未完成，不支持
-质量或收敛结论。
+BF16 run 已进入平台且存在参数/optimizer state 更新量化；FP32-storage 500-step A/B 明显改善
+参数更新覆盖与 dev CE，并通过 condition ablation，但仍差 5% gate `0.085849`。当前只允许恢复
+FP32 checkpoint 到 step 1000；decode 和长跑收敛验收仍未完成，不支持质量或收敛结论。

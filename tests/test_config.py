@@ -740,6 +740,28 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(fp32.validation.every_n_steps, 100)
         self.assertEqual(fp32.callbacks.checkpoint.every_n_train_steps, 100)
 
+        resumed_fp32 = parse_train(
+            _compose(
+                "train",
+                "experiment=014_stage1_pilot_fp32_resume_1000",
+                "data.dataset.root=/tmp/pilot",
+                "data.dataset.split_manifest=/tmp/pilot/splits.json",
+                "train.ckpt_path=/tmp/pilot/fp32-step-500.ckpt",
+            )
+        )
+        self.assertEqual(resumed_fp32.train.seed, 0)
+        self.assertEqual(resumed_fp32.train.max_steps, 1000)
+        self.assertEqual(
+            resumed_fp32.train.ckpt_path,
+            "/tmp/pilot/fp32-step-500.ckpt",
+        )
+        self.assertEqual(resumed_fp32.validation.every_n_steps, 100)
+        self.assertEqual(resumed_fp32.validation.sanity_steps, 0)
+        self.assertEqual(
+            resumed_fp32.callbacks.checkpoint.every_n_train_steps,
+            100,
+        )
+
         with self.assertRaises(InterpolationResolutionError):
             parse_train(
                 _compose(
@@ -1110,6 +1132,9 @@ class ConfigTest(unittest.TestCase):
         jobs = {
             "03_stage1_pilot_resume_500.sh": "014_stage1_pilot_resume_500",
             "04_stage1_pilot_resume_2000.sh": "014_stage1_pilot_resume_2000",
+            "06_stage1_pilot_fp32_resume_1000.sh": (
+                "014_stage1_pilot_fp32_resume_1000"
+            ),
         }
 
         for name, experiment in jobs.items():
