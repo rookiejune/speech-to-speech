@@ -7,7 +7,6 @@ from unittest.mock import patch
 import torch
 from anydataset.types import AudioView, Modality
 from anytrain.module.idspace import Layout
-from semantic_acoustic_codec.model import AcousticDiT as SharedAcousticDiT
 from semantic_acoustic_codec.model import AcousticRVQDecoder as SharedRVQDecoder
 from torch import Tensor, nn
 
@@ -16,6 +15,7 @@ from speech_to_speech.datamodule.dataset import ToyDataset
 from speech_to_speech.loss import FlowObjective
 from speech_to_speech.model import ToyConfig
 from speech_to_speech.model.acoustic import (
+    AcousticDiT,
     FlowModel,
     RVQModel,
 )
@@ -181,7 +181,7 @@ class FakeClosureTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(outputs["loss"]))
         self.assertEqual(model.acoustic_decoder.feature_layer, 1)
         self.assertIsNotNone(model.acoustic_decoder.feature_projection)
-        self.assertIsInstance(model.acoustic_decoder, SharedAcousticDiT)
+        self.assertIsInstance(model.acoustic_decoder, AcousticDiT)
 
     def test_rvq_model_generates_acoustic_features(self):
         torch.manual_seed(0)

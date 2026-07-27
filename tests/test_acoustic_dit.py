@@ -5,9 +5,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+from anytrain.loss import MaskedCosineAlignmentLoss
 from torch import Tensor, nn
 
-from speech_to_speech.loss import RepaLoss, WavLMTeacher
+from speech_to_speech.loss import WavLMTeacher
 from speech_to_speech.model.acoustic import AcousticDiT, AcousticFlow
 
 
@@ -135,7 +136,7 @@ class AcousticDiTTest(unittest.TestCase):
     def test_repa_detaches_teacher(self):
         representation = torch.randn(2, 3, 5, requires_grad=True)
         condition = torch.randn(2, 3, 5, requires_grad=True)
-        item = RepaLoss()(
+        item = MaskedCosineAlignmentLoss()(
             representation,
             condition,
             torch.tensor([[True, True, True], [True, False, False]]),
@@ -153,7 +154,7 @@ class AcousticDiTTest(unittest.TestCase):
         )
         target = torch.tensor([[[1.0, 0.0], [float("nan"), float("inf")]]])
 
-        item = RepaLoss()(
+        item = MaskedCosineAlignmentLoss()(
             representation,
             target,
             torch.tensor([[True, False]]),

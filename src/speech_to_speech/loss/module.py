@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TypedDict
 
 from anydataset.types import Modality
+from anytrain.loss import MaskedCosineAlignmentLoss
 from anytrain.module.idspace import Layout
 from torch import Tensor
 
@@ -15,7 +16,7 @@ from .protocol import (
 from .causal_lm import CausalAcousticLoss
 from .flow_matching import AcousticFlowLoss, FlowRuntime
 from .objective import Objective
-from .repa import RepaLoss, Teacher
+from .repa import Teacher
 from .token import TokenLoss
 from .types import LossItem, Outputs
 
@@ -68,7 +69,7 @@ class FlowObjective(Objective[FlowObjectiveModel]):
         self.layout = layout
         self.token = TokenLoss(layout)
         self.flow_matching = AcousticFlowLoss()
-        self.repa_loss = RepaLoss()
+        self.repa_loss = MaskedCosineAlignmentLoss()
         self.repa_teacher = None if repa is None else repa["teacher"]
         self.flow_runtime = flow_runtime
         self.repa_weight = None if repa is None else repa["weight"]

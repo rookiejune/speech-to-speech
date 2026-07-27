@@ -25,7 +25,7 @@ position 语义见 [总览 §2.4](../model-design.md)。
 - `WavLMTeacher`：由 `semantic-acoustic-codec.loss` 提供；按 boolean frame mask 在线解码 target
   semantic/acoustic codes，以 16 kHz waveform 运行冻结 WavLM，取得配置层的 hidden states 并插值、
   写回原有效 frame 位置。
-- `RepaLoss`：把选定 DiT block 的逐帧表示投影到 WavLM hidden dimension，再转给
+- `MaskedCosineAlignmentLoss`：把选定 DiT block 的逐帧表示投影到 WavLM hidden dimension，再转给
   `anytrain.loss.MaskedCosineAlignmentLoss` 与 stop-gradient teacher features 做 masked cosine distance。
 - `types.Outputs`：上层日志与训练消费的 S2S objective mapping；`LossItem` 和通用 output 聚合来自
   `anytrain.loss`。
