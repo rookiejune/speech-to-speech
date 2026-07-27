@@ -81,6 +81,7 @@ from speech_to_speech.stage import (
 )
 from speech_to_speech.task import Task
 from scripts._config import overfit as parse_overfit
+from scripts.create_split_manifest import build_manifest
 from scripts.overfit import (
     _prepare_generation_module,
     build_trainer,
@@ -1180,6 +1181,44 @@ class ContractTest(unittest.TestCase):
                 for sample in samples
             ]
             self.assertEqual(texts, ["toy source 3", "toy source 1"])
+
+    def test_split_manifest_builder_binds_audit_fingerprint(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            candidate = root / "candidate.json"
+            audit = root / "audit.json"
+            candidate.write_text(
+                json.dumps(
+                    {
+                        "dataset": "wmt19_tts_codec",
+                        "codec": "longcat",
+                        "train": [0, 1],
+                        "dev": [2],
+                        "test": [3],
+                    }
+                )
+            )
+            audit.write_text(
+                json.dumps(
+                    {
+                        "dataset": "wmt19_tts_codec",
+                        "codec": "longcat",
+                        "split": "train",
+                        "dataset_len": 4,
+                        "split_candidate": {"method": "sequential_no_sample_id"},
+                        "files": [
+                            {"relative_path": "samples.parquet", "sha256": "abc"}
+                        ],
+                    }
+                )
+            )
+
+            manifest = build_manifest(candidate, audit, Path("/stable/root"))
+
+            self.assertEqual(manifest["dataset_length"], 4)
+            self.assertEqual(manifest["split_method"], "sequential_no_sample_id")
+            self.assertEqual(manifest["root_fingerprint"], {"samples.parquet": "abc"})
+            self.assertEqual(manifest["splits"], {"train": [0, 1], "dev": [2], "test": [3]})
 
     def test_datamodule_rejects_runtime_codec_mismatch(self):
         config = DataConfig(
