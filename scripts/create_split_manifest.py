@@ -14,6 +14,7 @@ def build_manifest(
     data_root: Path,
     *,
     artifact_role: str = "stage1_pilot",
+    split_method: str = "candidate_artifact",
 ) -> dict[str, Any]:
     candidate = _load_object(candidate_path, "split candidate")
     audit = _load_object(audit_path, "root audit")
@@ -37,9 +38,19 @@ def build_manifest(
     if audit_codec != codec:
         raise ValueError("split candidate and root audit codecs do not match.")
 
-    dataset_length = _positive_int(audit.get("dataset_len"), "dataset_len")
-    split_metadata = _object(audit.get("split_candidate"), "root audit split_candidate")
-    split_method = _string(split_metadata, "method", "root audit split_candidate")
+    dataset_length = _dataset_length(audit)
+    split_metadata = audit.get("split_candidate")
+    if split_metadata is not None:
+        audit_method = _string(
+            _object(split_metadata, "root audit split_candidate"),
+            "method",
+            "root audit split_candidate",
+        )
+        if audit_method != split_method:
+            raise ValueError(
+                "requested split method does not match the root audit: "
+                f"{split_method!r} != {audit_method!r}."
+            )
     root_fingerprint = _root_fingerprint(audit.get("files"))
     splits: dict[str, list[int]] = {}
     seen: set[int] = set()
@@ -85,6 +96,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         audit,
         Path(args.data_root).expanduser(),
         artifact_role=args.artifact_role,
+        split_method=args.split_method,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -98,6 +110,7 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--artifact-role", default="stage1_pilot")
+    parser.add_argument("--split-method", default="candidate_artifact")
     return parser
 
 
@@ -139,6 +152,22 @@ def _positive_int(value: object, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise TypeError(f"{label} must be a positive integer.")
     return value
+
+
+def _dataset_length(audit: dict[str, Any]) -> int:
+    value = audit.get("dataset_len")
+    if value is not None:
+        return _positive_int(value, "dataset_len")
+    files = audit.get("files")
+    if not isinstance(files, list):
+        raise TypeError("root audit files must be a list.")
+    for offset, item in enumerate(files):
+        entry = _object(item, f"root audit files[{offset}]")
+        if entry.get("relative_path") != "samples.parquet":
+            continue
+        parquet = _object(entry.get("parquet"), "root audit samples.parquet parquet")
+        return _positive_int(parquet.get("num_rows"), "samples.parquet num_rows")
+    raise ValueError("root audit does not contain samples.parquet row count.")
 
 
 def _indices(

@@ -1201,16 +1201,23 @@ class ContractTest(unittest.TestCase):
             audit.write_text(
                 json.dumps(
                     {
-                        "dataset_len": 4,
-                        "split_candidate": {"method": "sequential_no_sample_id"},
                         "files": [
-                            {"relative_path": "samples.parquet", "sha256": "abc"}
+                            {
+                                "relative_path": "samples.parquet",
+                                "sha256": "abc",
+                                "parquet": {"num_rows": 4},
+                            }
                         ],
                     }
                 )
             )
 
-            manifest = build_manifest(candidate, audit, Path("/stable/root"))
+            manifest = build_manifest(
+                candidate,
+                audit,
+                Path("/stable/root"),
+                split_method="sequential_no_sample_id",
+            )
 
             self.assertEqual(manifest["dataset_length"], 4)
             self.assertEqual(manifest["split_method"], "sequential_no_sample_id")
