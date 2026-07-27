@@ -1,0 +1,43 @@
+# @package _global_
+defaults:
+  - /model: toy
+  - /model/acoustic: none
+  - /runtime: bicodec_semantic
+  - /data: qwen_tts_speaker
+  - /pl_module: sft
+  - /trainer: default
+  - /logging: csv
+  - override /stage: stage_1
+  - override /parameter_policy: semantic_only
+  - _self_
+
+task: tts
+run_name: bicodec-semantic-only
+output_subdir: bicodec-semantic-only-smoke/${task}/${run_name}
+
+runtime:
+  device: cpu
+  dtype: float32
+  attn_implementation:
+
+data:
+  sample_index: 0
+  shape: single
+
+callbacks:
+  task_sample:
+    enabled: false
+    every_n_steps: 1
+  evaluation:
+    enabled: false
+
+train:
+  seed: 0
+  max_steps: 2
+
+trainer:
+  accelerator: cpu
+  devices: 1
+  precision: 32-true
+  log_every_n_steps: 1
+  enable_checkpointing: false

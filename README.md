@@ -23,11 +23,21 @@ integration is provided by `SpeechToSpeechModule`.
 
 - `scripts/overfit.py`: fixed-sample TTS/S2ST overfit and callback smoke tests;
   its Hydra root is `configs/overfit.yaml`.
+- `scripts/train.py`: staged joint training; its Hydra root is
+  `configs/train.yaml`, reusable production defaults live in
+  `configs/entry/train.yaml`, and concrete runs select `experiment=train/...`.
 - `scripts/generation_smoke.py`: cached versus full-recompute S2ST generation
   and variable-batch generation checks using the public `generation` package;
   cache probes, benchmarks, and reporting live in separate private script modules.
 - `jobs/`: machine-aware wrappers for formal experiment runs. Each wrapper
   invokes one of the Python entry points directly and forwards extra arguments.
+
+The Stable Codec no-audio-BPE TTS+ASR long run is
+`jobs/015/01_stable_codec_stage1.sh`. It selects the Stable Codec full-code
+sequence, stage 1 (50% ASR / 50% TTS), a 1M-step budget, 10k-step checkpoints,
+and fixed-sample TensorBoard logging for both loaders.
+The wrapper requires `SPEECH_TO_SPEECH_STABLE_PYTHON`, because the optional
+`stable-codec` dependency has its own compatibility environment.
 
 Acoustic-only codec screening and the former codec-oracle training entry have
 moved to `semantic-acoustic-codec`; this repository keeps the joint S2ST

@@ -208,6 +208,7 @@ class _GenerationModel(FlowModel):
         self.backbone = SimpleNamespace(
             get_input_embeddings=lambda: SimpleNamespace(weight=torch.empty(0))
         )
+        self.acoustic_condition = nn.Identity()
         self.calls: list[tuple[int, int]] = []
         self.condition: Tensor | None = None
         self.sample_calls = 0

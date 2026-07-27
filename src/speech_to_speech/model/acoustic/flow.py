@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 import torch
+from semantic_acoustic_codec.model import FMFeatureGenerator
+from semantic_acoustic_codec.runtime import AcousticGeneratorArtifact
 from torch import Tensor, nn
 
 from ...generation.types import AcousticGeneration
@@ -11,6 +13,7 @@ from ..base import Config, TokenModel
 from ..protocol import FlowModelRuntime, FlowSamplingRuntime
 from ._config import DecoderConfig, FlowRepaConfig, decoder_options
 from ._codec import code_features
+from .condition import HiddenConditionAdapter
 from .dit import AcousticDiT
 
 
@@ -29,6 +32,8 @@ class AcousticFlow(nn.Module):
         ffn_ratio: int = 4,
         repa_feature_dim: int | None = None,
         repa_student_layer: int | None = None,
+        feature_mean: tuple[float, ...] | None = None,
+        feature_std: tuple[float, ...] | None = None,
     ) -> None:
         super().__init__()
         self.decoder = AcousticDiT(
@@ -42,6 +47,12 @@ class AcousticFlow(nn.Module):
             repa_student_layer=repa_student_layer,
         )
         self.runtime = runtime
+        self.feature_mean = nn.Buffer(
+            _feature_stat(latent_dim, feature_mean, fill=0.0)
+        )
+        self.feature_std = nn.Buffer(
+            _feature_stat(latent_dim, feature_std, fill=1.0)
+        )
 
     @torch.no_grad()
     def sample(
@@ -70,6 +81,7 @@ class AcousticFlow(nn.Module):
             condition=condition,
             mask=mask,
         ).final
+        output = output * self.feature_std + self.feature_mean
         if mask is not None:
             output = output.masked_fill(~mask[..., None], 0)
         return output
@@ -85,14 +97,31 @@ class FlowModel(TokenModel):
         runtime: FlowModelRuntime,
         decoder: DecoderConfig | Mapping[str, object] | None = None,
         repa: FlowRepaConfig | None = None,
+        initialization: AcousticGeneratorArtifact | None = None,
     ) -> None:
         codec = acoustic_codec(runtime.codec)
         super().__init__(config=config, runtime=runtime)
         self.acoustic_codec = codec
         options = decoder_options(decoder)
         backbone_weight = self.backbone.get_input_embeddings().weight
-        self.acoustic_flow = AcousticFlow(
+        condition_dim = self.backbone.config.hidden_size
+        feature_mean = None
+        feature_std = None
+        if initialization is not None:
+            generator = initialization.generator
+            if not isinstance(generator, FMFeatureGenerator):
+                raise TypeError("Flow initialization requires an FMFeatureGenerator artifact.")
+            _validate_decoder_options(options, initialization)
+            _validate_repa(repa, initialization)
+            condition_dim = initialization.spec.condition_dim
+            feature_mean = initialization.spec.feature_mean
+            feature_std = initialization.spec.feature_std
+        self.acoustic_condition = HiddenConditionAdapter(
             self.backbone.config.hidden_size,
+            condition_dim,
+        ).to(device=backbone_weight.device, dtype=torch.float32)
+        self.acoustic_flow = AcousticFlow(
+            condition_dim,
             self.acoustic_codec.acoustic_feature_dim,
             runtime.flow_matching,
             hidden_dim=options.hidden_dim,
@@ -101,7 +130,14 @@ class FlowModel(TokenModel):
             ffn_ratio=options.ffn_ratio,
             repa_feature_dim=None if repa is None else repa["feature_dim"],
             repa_student_layer=None if repa is None else repa["student_layer"],
+            feature_mean=feature_mean,
+            feature_std=feature_std,
         ).to(device=backbone_weight.device, dtype=torch.float32)
+        if initialization is not None:
+            generator = initialization.generator
+            if not isinstance(generator, FMFeatureGenerator):
+                raise AssertionError("Flow initialization type changed after validation.")
+            self.acoustic_decoder.load_state_dict(generator.core.decoder.state_dict())
 
     @property
     def acoustic_decoder(self) -> AcousticDiT:
@@ -111,9 +147,10 @@ class FlowModel(TokenModel):
         if target_acoustic_codes.dim() != 3:
             raise ValueError("target acoustic codes must have shape [B, F, N].")
         safe_codes = target_acoustic_codes.clamp_min(0)
-        features = self._decoder_input(
-            code_features(self.acoustic_codec, self.backbone, safe_codes)
-        )
+        features = self._decoder_input(code_features(self.acoustic_codec, self.backbone, safe_codes))
+        features = (
+            features - self.acoustic_flow.feature_mean
+        ) / self.acoustic_flow.feature_std
         return features.masked_fill(
             (target_acoustic_codes < 0).all(dim=-1)[..., None], 0
         )
@@ -123,7 +160,7 @@ class FlowModel(TokenModel):
         hidden_states: Tensor,
         target_positions: Tensor,
     ) -> Tensor:
-        return self._decoder_input(
+        return self.acoustic_condition(
             super().target_frame_condition(hidden_states, target_positions)
         )
 
@@ -162,6 +199,7 @@ class FlowModel(TokenModel):
             do_sample=do_sample,
             use_cache=use_cache,
         )
+        condition = self.acoustic_condition(condition)
         return AcousticGeneration(
             sequence=generated,
             features=self.sample_acoustic_features(condition, mask=frame_mask),
@@ -171,3 +209,52 @@ class FlowModel(TokenModel):
     def _decoder_input(self, value: Tensor) -> Tensor:
         parameter = next(self.acoustic_decoder.parameters())
         return value.to(dtype=parameter.dtype)
+
+
+def _validate_decoder_options(
+    options: DecoderConfig,
+    initialization: AcousticGeneratorArtifact,
+) -> None:
+    decoder = initialization.spec.decoder
+    expected = (options.hidden_dim, options.layers, options.heads, options.ffn_ratio)
+    actual = (decoder.hidden_dim, decoder.layers, decoder.heads, decoder.ffn_ratio)
+    if expected != actual:
+        raise ValueError(
+            "acoustic decoder config does not match initialization artifact: "
+            f"{expected!r} != {actual!r}."
+        )
+
+
+def _validate_repa(
+    repa: FlowRepaConfig | None,
+    initialization: AcousticGeneratorArtifact,
+) -> None:
+    decoder = initialization.spec.decoder
+    expected = (
+        None if repa is None else repa["feature_dim"],
+        None if repa is None else repa["student_layer"],
+    )
+    actual = (decoder.repa_feature_dim, decoder.repa_student_layer)
+    if expected != actual:
+        raise ValueError(
+            "Flow REPA config does not match initialization artifact: "
+            f"{expected!r} != {actual!r}."
+        )
+
+
+def _feature_stat(
+    feature_dim: int,
+    value: tuple[float, ...] | None,
+    *,
+    fill: float,
+) -> Tensor:
+    if value is None:
+        return torch.full((1, 1, feature_dim), fill, dtype=torch.float32)
+    if len(value) != feature_dim:
+        raise ValueError("acoustic feature normalization must match feature dimension.")
+    result = torch.tensor(value, dtype=torch.float32).view(1, 1, -1)
+    if not bool(torch.isfinite(result).all()):
+        raise ValueError("acoustic feature normalization must be finite.")
+    if fill == 1.0 and not bool((result > 0).all()):
+        raise ValueError("acoustic feature standard deviation must be positive.")
+    return result

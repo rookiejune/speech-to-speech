@@ -1,0 +1,36 @@
+# @package _global_
+defaults:
+  - override /stage: stage_1
+  - override /parameter_policy: speech_interface
+  - override /runtime: stable_codec
+  - override /model/acoustic: none
+  - override /trainer: static_ddp
+  - override /logging: tensorboard
+  - _self_
+
+output_subdir: stable-codec-stage1/${run_name}
+
+train:
+  max_steps: 1000000
+
+trainer:
+  log_every_n_steps: 10
+  enable_checkpointing: true
+
+callbacks:
+  task_sample:
+    enabled: true
+    every_n_steps: 10000
+    indices_by_loader:
+      asr: [0]
+      tts: [0]
+    max_new_tokens: 512
+    temperature: 1.0
+    top_p: 1.0
+    do_sample: false
+    use_cache: true
+  checkpoint:
+    filename: step-{step:08d}
+    save_last: true
+    save_top_k: -1
+    every_n_train_steps: 10000

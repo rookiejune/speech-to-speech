@@ -11,6 +11,8 @@
   flow target、sampling 和 `generate_audio_features()`。
 - `acoustic.RVQModel`：组合 SAC 维护的 `AcousticRVQDecoder`，提供 teacher-forced
   codebook logits、sampling 和 `generate_audio_features()`。
+- `acoustic.HiddenConditionAdapter`：以 `LayerNorm + Linear` 把对齐后的 backbone hidden state 映射到
+  SAC generator 的 condition space；训练和 generation 共用该入口。
 - `loss.protocol.TokenObjectiveModel` / `FlowObjectiveModel` / `RVQObjectiveModel`：objective
   所依赖的训练能力。
 - `generation.protocol.TokenGenerator` / `AcousticFeatureGeneration`：generation service
@@ -85,12 +87,14 @@ codebook 的 `codebook_embeddings`，但没有 REPA 参数。Hydra 使用
 与 student REPA 配置。ODE sampling 由 `runtime.Config.flow_*` 拥有。没有独立 acoustic
 codebooks 的 unified-token codec 必须使用 `model/acoustic=none`；有独立 acoustic codebook 的
 codec 也可以显式选择 `none` 作为 token-only baseline。入口不根据 codec 静默覆盖用户选择。
-fixed-length structured codec（例如 BiCodec）没有对应的 S2S model-facing adapter，不能选择为
-当前 runtime codec。
+fixed-length structured codec（例如 BiCodec）使用独立的 model-facing token layout。它只支持
+semantic-only artifact 或 full structured sequence 两种 TTS 路线，不接入当前 frame-aligned
+Flow/RVQ acoustic side channel。
 
 底层 acoustic decoder 的所有权在 `semantic-acoustic-codec`：S2S 的 Flow/RVQ model 只负责
-从 backbone hidden state 取 frame-aligned condition，并把 condition 送入 SAC 的 DiT/DiT+REPA/RVQ
-decoder。S2S 不维护 acoustic-only codec oracle，也不复制底层 decoder 实现。
+从 backbone hidden state 取 frame-aligned condition，经 `HiddenConditionAdapter` 映射后送入 SAC 的
+DiT/DiT+REPA/RVQ decoder。`acoustic.init_artifact` 可在 composition 边界加载 SAC generator；model
+构造器不执行 artifact I/O。S2S 不维护 acoustic-only codec oracle，也不复制底层 decoder 实现。
 
 ## Embedding
 
@@ -114,6 +118,9 @@ codec features 在 acoustic decoder 路径转换到 decoder device/dtype。frame
 
 ## Acoustic decoder
 
+- `HiddenConditionAdapter` 是 backbone 与 decoder 的唯一 condition 适配边界。它把 backbone hidden
+  dimension 映射到 artifact `condition_dim`，属于 `ACOUSTIC_DECODER` 参数组；teacher-forcing 与
+  autoregressive generation 都不能绕过它。
 - flow decoder 沿 frame 轴做 self-attention；condition 与 timestep embedding 产生逐层 FiLM
   scale、shift 和 residual gate。frame mask 同时约束 attention、decoder 输出与最终 sampled
   features，padding frame 固定为零。
@@ -130,6 +137,11 @@ codec features 在 acoustic decoder 路径转换到 decoder device/dtype。frame
   `sample_acoustic_codes()` 表达。
 - Runtime codec 固定 codebook 输入、feature dimension 与 waveform decode；model 不任意切取
   codebooks。
+
+联合初始化只支持 frame-aligned SAC artifact。Flow 严格迁移 decoder state 与 feature normalization；
+RVQ 只接收 `codebook_ar` generator。route、decoder topology、REPA 和 acoustic backend metadata 不匹配时
+直接失败；semantic vocab/embedding 不参与联合初始化校验，因为该路径的输入是 hidden state 而不是 codes。
+旧 Flow/RVQ checkpoint 没有 `acoustic_condition.*` 参数，strict resume 不做兼容填充。
 
 ## Generation 边界
 

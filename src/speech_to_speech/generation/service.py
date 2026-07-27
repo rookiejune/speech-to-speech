@@ -9,14 +9,16 @@ from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
 from ..runtime import AudioRepresentation
-from ..runtime.types import acoustic_codec
+from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
+from ..runtime.types import Codec, acoustic_codec, structured_codec
 from ..task import Task
 from .decode import (
     decode_generated_audio,
+    decode_generated_bicodec_full,
     decode_generated_frame_codes,
     decode_generated_semantic,
 )
-from .protocol import AcousticFeatureGeneration, TokenGenerator
+from .protocol import AcousticFeatureGeneration, StructuredTokenGenerator, TokenGenerator
 from .types import AcousticGeneration, AudioOutput, Request, Result
 
 
@@ -63,6 +65,22 @@ def generate_responses(
                 use_cache=use_cache,
             )
             sequence = acoustic_generation["sequence"]
+        elif (
+            modality is Modality.AUDIO
+            and model.runtime.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE
+            and getattr(model.runtime, "codec_name", None) == "bicodec"
+        ):
+            if not isinstance(model, StructuredTokenGenerator):
+                raise TypeError("BiCodec full sequence requires structured token generation.")
+            sequence = model.generate_full_codec_sequence(
+                prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                prompt_attention_mask=prompt_mask,
+                do_sample=do_sample,
+                use_cache=use_cache,
+            )
         else:
             sequence = model.generate_tokens(
                 prompt,
@@ -228,12 +246,23 @@ def _decode_rows(
         first_features = row_features[rows[0]]
         if first_features is None:
             if model.runtime.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE:
-                decoded = decode_generated_frame_codes(
-                    token_batch,
-                    codec=model.runtime.codec,
-                    audio_tokenizer=model.runtime.audio_tokenizer,
-                    audio_token_range=model.runtime.codec_audio_range,
-                )
+                if getattr(model.runtime, "codec_name", None) == "bicodec":
+                    tokenizer = model.runtime.audio_tokenizer
+                    if not isinstance(tokenizer, BiCodecAudioTokenizer):
+                        raise TypeError("BiCodec full sequence requires BiCodecAudioTokenizer.")
+                    decoded = decode_generated_bicodec_full(
+                        token_batch,
+                        codec=structured_codec(model.runtime.codec),
+                        audio_tokenizer=tokenizer,
+                        audio_token_range=model.runtime.codec_audio_range,
+                    )
+                else:
+                    decoded = decode_generated_frame_codes(
+                        token_batch,
+                        codec=cast(Codec, model.runtime.codec),
+                        audio_tokenizer=model.runtime.audio_tokenizer,
+                        audio_token_range=model.runtime.codec_audio_range,
+                    )
             else:
                 decoded = decode_generated_semantic(
                     token_batch,

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import torch
+from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
-from ..runtime.audio_tokenizer import semantic_codes_from_audio_tokens
-from ..runtime.types import AcousticCodec, AudioTokenizer, Codec, SemanticCodec
+from ..runtime.audio_tokenizer import BiCodecAudioTokenizer, semantic_codes_from_audio_tokens
+from ..runtime.types import AcousticCodec, AudioTokenizer, Codec, SemanticCodec, StructuredCodec
 
 
 def decode_generated_audio(
@@ -76,6 +77,27 @@ def decode_generated_frame_codes(
             "full codec token rows must expand to the same frame and codebook shape."
         )
     return codec.decode(torch.stack(rows))
+
+
+def decode_generated_bicodec_full(
+    audio_token_ids: Tensor,
+    *,
+    codec: StructuredCodec,
+    audio_tokenizer: BiCodecAudioTokenizer,
+    audio_token_range: tuple[int, int],
+) -> Tensor:
+    """Decode a structured BiCodec full sequence without collapsing its axes."""
+    local_ids = _local_ids(audio_token_ids, audio_token_range)
+    rows = [audio_tokenizer.decode_full(row) for row in local_ids]
+    if not rows or len({tuple(row.semantic.shape) for row in rows}) != 1:
+        raise ValueError("BiCodec semantic token rows must have the same shape.")
+    if len({tuple(row.acoustic.shape) for row in rows}) != 1:
+        raise ValueError("BiCodec acoustic token rows must have the same shape.")
+    codes = SemanticAcousticCodes(
+        semantic=torch.stack([row.semantic for row in rows]),
+        acoustic=torch.stack([row.acoustic for row in rows]),
+    )
+    return codec.detokenize(codes)
 
 
 def decode_generated_codes(

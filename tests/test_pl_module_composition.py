@@ -4,6 +4,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, patch
 
+import torch
+from semantic_acoustic_codec.config import Route
+
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model.acoustic import DecoderConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
@@ -54,6 +57,7 @@ class PlModuleCompositionTest(unittest.TestCase):
             ),
         )
         acoustic = SimpleNamespace(
+            init_artifact=None,
             decoder=DecoderConfig(hidden_dim=None, layers=2, heads=1, ffn_ratio=3),
             repa=SimpleNamespace(
                 weight=0.2,
@@ -89,6 +93,7 @@ class PlModuleCompositionTest(unittest.TestCase):
     def test_rvq_model_receives_only_decoder_options(self, model, objective, module):
         runtime = SimpleNamespace(layout=Mock())
         acoustic = SimpleNamespace(
+            init_artifact=None,
             decoder=DecoderConfig(hidden_dim=None, layers=2, heads=1, ffn_ratio=3),
         )
         model_config = ModelConfig()
@@ -96,7 +101,48 @@ class PlModuleCompositionTest(unittest.TestCase):
         rvq(runtime, ModuleConfig(), model_config, acoustic)
 
         self.assertIs(model.call_args.args[0], model_config)
-        self.assertEqual(set(model.call_args.kwargs), {"runtime", "decoder"})
+        self.assertEqual(
+            set(model.call_args.kwargs),
+            {"runtime", "decoder", "initialization"},
+        )
+
+    @patch("speech_to_speech.pl_module.composition.SpeechToSpeechModule")
+    @patch("speech_to_speech.pl_module.composition.RVQObjective")
+    @patch("speech_to_speech.pl_module.composition.RVQModel")
+    @patch("speech_to_speech.pl_module.composition.load_acoustic_initialization")
+    def test_rvq_loads_joint_initialization_in_composition(
+        self,
+        load_initialization,
+        model,
+        objective,
+        module,
+    ):
+        runtime = SimpleNamespace(
+            codec=Mock(),
+            layout=Mock(),
+            backbone=SimpleNamespace(
+                get_input_embeddings=lambda: SimpleNamespace(
+                    weight=SimpleNamespace(device=torch.device("cpu"))
+                )
+            ),
+        )
+        acoustic = SimpleNamespace(
+            init_artifact="/tmp/acoustic-generator",
+            decoder=DecoderConfig(hidden_dim=None, layers=2, heads=1, ffn_ratio=3),
+        )
+
+        rvq(runtime, ModuleConfig(), ModelConfig(), acoustic)
+
+        load_initialization.assert_called_once_with(
+            "/tmp/acoustic-generator",
+            codec=runtime.codec,
+            route=Route.RVQ,
+            device=torch.device("cpu"),
+        )
+        self.assertIs(
+            model.call_args.kwargs["initialization"],
+            load_initialization.return_value,
+        )
 
 
 if __name__ == "__main__":

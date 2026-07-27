@@ -51,8 +51,16 @@ LongCat 的 `DECOUPLED + model/acoustic=none` 必须配置 `semantic_codec_artif
 训练路径，仍由 `Codec.decode_features()` 消费生成的 features；它不代表 anytrain 提供
 semantic-only decoder。
 
-当前 artifact 接入仍要求 LongCat backend；固定长度 structured backend 的 S2S 数据视图和
-token-layout adapter 尚未加入，因此不能把 BiCodec 强行当成 frame codec。
+BiCodec 使用同一个 structured backend，但保留两条互斥的 TTS 路线：
+
+- `DECOUPLED + semantic_codec_artifact` 只生成 semantic units，固定长度 acoustic units 由
+  `semantic-acoustic-codec` artifact 采样并解码。
+- `FULL_CODEC_SEQUENCE` 生成显式的 structured token layout：codec marker、semantic marker、
+  semantic tokens、acoustic marker、slot-major acoustic codebooks、end marker。解码时恢复
+  `SemanticAcousticCodes`，直接调用 BiCodec `detokenize()`。
+
+BiCodec 的 acoustic 轴是 `FIXED_LENGTH`，不能广播到 semantic frame 轴，也不能接入当前
+frame-aligned Flow/RVQ side channel。
 
 `audio_tokenizer.py` 提供：
 
@@ -61,6 +69,8 @@ token-layout adapter 尚未加入，因此不能把 BiCodec 强行当成 frame c
   block 写 marker 和 offset 后的 code IDs；marker 的 frame span 为 0，首个 codebook token 的
   frame span 为 1，用于 generation 统计输出帧数。
 - `TorchCodecBPE`：为 CodecBPE 增加 tensor API。
+- `BiCodecAudioTokenizer`：分别支持 semantic-only token 和 fixed-length structured full
+  sequence；full sequence 的 acoustic payload 使用 slot-major 顺序。
 - `semantic_codes_from_audio_tokens()`：把 audio token IDs 解码为
   `[frames, semantic_codebooks]`。
 

@@ -206,6 +206,163 @@ def generate_sequence(
     return generated, condition, frame_spans
 
 
+def generate_bicodec_sequence(
+    model: GenerationStepModel,
+    prompt_ids: Tensor,
+    *,
+    semantic_range: tuple[int, int],
+    codec_token_id: int,
+    semantic_token_id: int,
+    acoustic_token_id: int,
+    end_token_id: int,
+    acoustic_offsets: Sequence[int],
+    acoustic_sizes: Sequence[int],
+    acoustic_unit_length: int,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    prompt_attention_mask: Tensor | None,
+    do_sample: bool,
+    use_cache: bool,
+) -> Tensor:
+    """Generate one constrained structured BiCodec sequence per prompt row."""
+    if prompt_ids.dim() != 2 or prompt_ids.size(0) < 1:
+        raise ValueError("generation requires at least one prompt row.")
+    if max_new_tokens < 1 or temperature <= 0 or not 0 < top_p <= 1:
+        raise ValueError("invalid generation parameters")
+    if prompt_attention_mask is None:
+        prompt_attention_mask = torch.ones_like(prompt_ids, dtype=torch.bool)
+    if prompt_attention_mask.shape != prompt_ids.shape:
+        raise ValueError("prompt attention mask must align with prompt ids.")
+
+    rows = []
+    for row in range(prompt_ids.size(0)):
+        rows.append(
+            _generate_bicodec_row(
+                model,
+                prompt_ids[row : row + 1],
+                prompt_attention_mask=prompt_attention_mask[row : row + 1],
+                semantic_range=semantic_range,
+                codec_token_id=codec_token_id,
+                semantic_token_id=semantic_token_id,
+                acoustic_token_id=acoustic_token_id,
+                end_token_id=end_token_id,
+                acoustic_offsets=acoustic_offsets,
+                acoustic_sizes=acoustic_sizes,
+                acoustic_unit_length=acoustic_unit_length,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=do_sample,
+                use_cache=use_cache,
+            )
+        )
+    width = max(row.size(1) for row in rows)
+    output = prompt_ids.new_full((len(rows), width), model.runtime.eoa_token_id)
+    for index, row in enumerate(rows):
+        output[index, : row.size(1)] = row[0]
+    return output
+
+
+def _generate_bicodec_row(
+    model: GenerationStepModel,
+    prompt_ids: Tensor,
+    *,
+    prompt_attention_mask: Tensor,
+    semantic_range: tuple[int, int],
+    codec_token_id: int,
+    semantic_token_id: int,
+    acoustic_token_id: int,
+    end_token_id: int,
+    acoustic_offsets: Sequence[int],
+    acoustic_sizes: Sequence[int],
+    acoustic_unit_length: int,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    do_sample: bool,
+    use_cache: bool,
+) -> Tensor:
+    generated = prompt_ids.clone()
+    attention = prompt_attention_mask.clone()
+    past_key_values: Cache | None = None
+    current = generated
+    emitted = 0
+
+    def step(allowed: Tensor, *, force: bool = False) -> int:
+        nonlocal generated, attention, past_key_values, current, emitted
+        if emitted >= max_new_tokens:
+            raise ValueError("BiCodec full sequence exceeded max_new_tokens.")
+        output = model.generation_step(
+            current,
+            attention_mask=attention,
+            output_hidden_states=False,
+            token_ids=allowed,
+            modality=None,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+        )
+        if output.logits is None:
+            raise RuntimeError("model did not return generation logits.")
+        logits = output.logits[:, -1] / temperature
+        if force or allowed.numel() == 1:
+            index = logits.argmax(dim=-1)
+        else:
+            if top_p < 1.0:
+                logits = top_p_filter(logits, top_p)
+            index = (
+                torch.distributions.Categorical(logits=logits).sample()
+                if do_sample
+                else logits.argmax(dim=-1)
+            )
+        next_id = int(allowed[index].item())
+        generated = torch.cat((generated, generated.new_tensor([[next_id]])), dim=1)
+        attention = torch.cat((attention, attention.new_ones((1, 1))), dim=1)
+        emitted += 1
+        if use_cache:
+            past_key_values = output.past_key_values
+            if past_key_values is None:
+                raise RuntimeError("backbone did not return a generation cache.")
+            current = generated[:, -1:]
+        else:
+            current = generated
+        return next_id
+
+    audio_start, _ = model.runtime.audio_head_range
+
+    def local(value: int) -> Tensor:
+        return generated.new_tensor([audio_start + value], dtype=torch.long)
+
+    def range_ids(start: int, size: int) -> Tensor:
+        return torch.arange(
+            audio_start + start,
+            audio_start + start + size,
+            device=generated.device,
+            dtype=torch.long,
+        )
+
+    step(local(codec_token_id), force=True)
+    step(local(semantic_token_id), force=True)
+    semantic_count = 0
+    semantic_ids = range_ids(*semantic_range)
+    transition = local(acoustic_token_id)
+    while semantic_count < 1:
+        step(semantic_ids)
+        semantic_count += 1
+    while True:
+        next_id = step(torch.cat((semantic_ids, transition)))
+        if next_id == int(transition.item()):
+            break
+        semantic_count += 1
+
+    for _ in range(acoustic_unit_length):
+        for offset, size in zip(acoustic_offsets, acoustic_sizes):
+            step(range_ids(offset, size))
+    step(local(end_token_id), force=True)
+    step(local(model.runtime.eoa_token_id - audio_start), force=True)
+    return generated
+
+
 def _rows(value: Tensor | None, rows: Tensor) -> Tensor | None:
     if value is None or value.size(0) == rows.numel():
         return value

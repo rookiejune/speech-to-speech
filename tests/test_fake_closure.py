@@ -6,8 +6,23 @@ from unittest.mock import patch
 
 import torch
 from anydataset.types import AudioView, Modality
+from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
-from semantic_acoustic_codec.model import AcousticRVQDecoder as SharedRVQDecoder
+from semantic_acoustic_codec.config import (
+    DecoderConfig as SharedDecoderConfig,
+    Route,
+    RVQPredictor,
+)
+from semantic_acoustic_codec.model import (
+    AcousticRVQDecoder as SharedRVQDecoder,
+    FMFeatureGenerator,
+    RVQCodeGenerator,
+)
+from semantic_acoustic_codec.runtime import (
+    AcousticGeneratorArtifact,
+    AcousticGeneratorSpec,
+    SamplingConfig,
+)
 from torch import Tensor, nn
 
 from speech_to_speech.datamodule.collator import Collator
@@ -144,6 +159,87 @@ class _Runtime:
 
 
 class FakeClosureTest(unittest.TestCase):
+    def test_flow_model_loads_generator_and_adapts_hidden_condition(self):
+        rt = _Runtime()
+        config = SharedDecoderConfig(hidden_dim=4, layers=1, heads=1, ffn_ratio=2)
+        generator = FMFeatureGenerator(6, 4, config)
+        _fill(generator.core.decoder, 0.125)
+        artifact = _artifact(Route.FM, config, generator, condition_dim=6)
+
+        model = FlowModel(
+            _model_config(),
+            runtime=rt,
+            decoder={
+                "hidden_dim": 4,
+                "layers": 1,
+                "heads": 1,
+                "ffn_ratio": 2,
+            },
+            initialization=artifact,
+        )
+
+        self.assertEqual(model.acoustic_condition.hidden_dim, 4)
+        self.assertEqual(model.acoustic_condition.condition_dim, 6)
+        self.assertEqual(model.acoustic_decoder.condition_dim, 6)
+        _assert_state_equal(self, model.acoustic_decoder, generator.core.decoder)
+
+    def test_rvq_model_loads_codebook_ar_generator(self):
+        rt = _Runtime()
+        config = SharedDecoderConfig(
+            hidden_dim=4,
+            layers=1,
+            heads=1,
+            ffn_ratio=2,
+            rvq_predictor=RVQPredictor.CODEBOOK_AR,
+        )
+        generator = RVQCodeGenerator(6, (16,), config)
+        self.assertIsInstance(generator.core, SharedRVQDecoder)
+        _fill(generator.core, 0.25)
+        artifact = _artifact(Route.RVQ, config, generator, condition_dim=6)
+
+        model = RVQModel(
+            _model_config(),
+            runtime=rt,
+            decoder={
+                "hidden_dim": 4,
+                "layers": 1,
+                "heads": 1,
+                "ffn_ratio": 2,
+            },
+            initialization=artifact,
+        )
+
+        self.assertEqual(model.acoustic_condition.condition_dim, 6)
+        self.assertEqual(model.acoustic_decoder.condition_dim, 6)
+        _assert_state_equal(self, model.acoustic_decoder, generator.core)
+
+    def test_rvq_model_rejects_mtp_initialization(self):
+        rt = _Runtime()
+        config = SharedDecoderConfig(
+            hidden_dim=4,
+            layers=1,
+            heads=1,
+            ffn_ratio=2,
+            rvq_predictor=RVQPredictor.MTP,
+            mtp_layers=1,
+            mtp_heads=1,
+        )
+        generator = RVQCodeGenerator(6, (16,), config)
+        artifact = _artifact(Route.RVQ, config, generator, condition_dim=6)
+
+        with self.assertRaisesRegex(ValueError, "codebook_ar"):
+            RVQModel(
+                _model_config(),
+                runtime=rt,
+                decoder={
+                    "hidden_dim": 4,
+                    "layers": 1,
+                    "heads": 1,
+                    "ffn_ratio": 2,
+                },
+                initialization=artifact,
+            )
+
     def test_flow_model_uses_runtime_sampler(self):
         rt = _Runtime()
         model = FlowModel(
@@ -339,6 +435,48 @@ def _dataset(runtime: _Runtime) -> ToyDataset:
         samples=2,
         frames=3,
     )
+
+
+def _artifact(
+    route: Route,
+    decoder: SharedDecoderConfig,
+    generator: FMFeatureGenerator | RVQCodeGenerator,
+    *,
+    condition_dim: int,
+) -> AcousticGeneratorArtifact:
+    return AcousticGeneratorArtifact(
+        generator=generator,
+        spec=AcousticGeneratorSpec(
+            route=route,
+            condition_dim=condition_dim,
+            decoder=decoder,
+            semantic_vocab_size=8,
+            semantic_embedding_dim=4,
+            acoustic_feature_dim=4,
+            acoustic_codebook_sizes=(16,),
+            acoustic_layout=AcousticLayout.FRAME_ALIGNED,
+            acoustic_unit_length=None,
+            feature_mean=(0.0, 0.0, 0.0, 0.0),
+            feature_std=(1.0, 1.0, 1.0, 1.0),
+            sampling=SamplingConfig(),
+        ),
+    )
+
+
+def _fill(module: nn.Module, value: float) -> None:
+    with torch.no_grad():
+        for parameter in module.parameters():
+            parameter.fill_(value)
+
+
+def _assert_state_equal(
+    test: unittest.TestCase,
+    actual: nn.Module,
+    expected: nn.Module,
+) -> None:
+    test.assertEqual(actual.state_dict().keys(), expected.state_dict().keys())
+    for key, value in expected.state_dict().items():
+        test.assertTrue(torch.equal(actual.state_dict()[key], value), key)
 
 
 if __name__ == "__main__":

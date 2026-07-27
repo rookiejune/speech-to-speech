@@ -10,7 +10,8 @@ from torch import nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.cache_utils import Cache
 
-from ._generation import generate_sequence
+from ._generation import generate_bicodec_sequence, generate_sequence
+from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ._head import VocabularyHeadMixin
 from .adapter import AdapterType, create_adapter
 from .embedding import create_semantic_audio_modules
@@ -257,6 +258,40 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             < frame_counts[:, None]
         )
         return generated, condition, frame_mask
+
+    @torch.no_grad()
+    def generate_full_codec_sequence(
+        self,
+        prompt_ids: torch.Tensor,
+        *,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        prompt_attention_mask: torch.Tensor | None = None,
+        do_sample: bool = True,
+        use_cache: bool = True,
+    ) -> torch.Tensor:
+        tokenizer = self.runtime.audio_tokenizer
+        if not isinstance(tokenizer, BiCodecAudioTokenizer):
+            raise TypeError("full structured generation requires BiCodecAudioTokenizer.")
+        return generate_bicodec_sequence(
+            self,
+            prompt_ids,
+            semantic_range=(0, tokenizer.semantic_vocab_size),
+            codec_token_id=tokenizer.codec_token_id,
+            semantic_token_id=tokenizer.semantic_token_id,
+            acoustic_token_id=tokenizer.acoustic_token_id,
+            end_token_id=tokenizer.end_token_id,
+            acoustic_offsets=tokenizer.acoustic_offsets,
+            acoustic_sizes=tokenizer.acoustic_codebook_sizes,
+            acoustic_unit_length=tokenizer.acoustic_unit_length,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            prompt_attention_mask=prompt_attention_mask,
+            do_sample=do_sample,
+            use_cache=use_cache,
+        )
 
     def target_frame_condition(
         self,

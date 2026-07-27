@@ -1,8 +1,8 @@
 # configuration
 
 Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维护平行结构。目录只为真正可替换的
-模块 preset 和运行编排建层级；入口自身的生产默认写在 root config，完整链路测试的组合与预算
-写在 `experiment` 中。
+模块 preset 和运行编排建层级。root config 只选择入口基线和可选 experiment；入口自身的生产默认
+写在 `entry`，完整链路测试的组合与预算写在 `experiment` 中。
 
 ## 源码模块
 
@@ -27,7 +27,7 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
 Acoustic-only codec screening 已迁入 `semantic-acoustic-codec`。本仓库不再维护对应的 Hydra root、
 job wrapper 或 config schema；历史实验记录仍保存在 `docs/experiments/` 中。
 
-`trainer`、`logging`、`callback` 与 `experiment` 属于 Lightning/Hydra 运行编排，可以没有同名
+`entry`、`trainer`、`logging`、`callback` 与 `experiment` 属于 Lightning/Hydra 运行编排，可以没有同名
 `src` 包。overfit 的 sample index 和 train budget 位于 experiment；数据源通过公开
 `DatasetConfig` 选择。overfit 的 `callbacks.evaluation.enabled` 控制声学生成评估；真实
 fixed-sample experiment 默认启用，随机输出不构成质量结论的 `toy_smoke` 显式关闭。共享
@@ -77,24 +77,32 @@ UniCodec DDP smoke 则要求每个 rank
 
 完整链路实验分别负责其 composition、数据范围、trainer、callback 和 step budget：
 
+`configs/experiment/train/` 只放 `scripts/train.py` 消费的 staged experiments；仍位于
+`configs/experiment/` 顶层的文件由 `scripts/overfit.py` 消费。这样两个入口不会共享一组含义不明的
+flat experiment 名称。`configs/train.yaml` 仅组合 `entry=train` 和可选 experiment；可复用的
+百万步预算、数据加载和 callback cadence 位于 `configs/entry/train.yaml`。
+
 - `unicodec_overfit`：UniCodec fixed-sample 100-step overfit。
 - `unicodec_ddp_smoke`：UniCodec 显式 DDP 两步验收。
 - `overfit`：TTS/S2ST fixed-sample 完整链路实验。
 - `011_qwen_rvq_native_p0_fixed_sample`：真实 Qwen、LongCat native token 与 RVQ decoder 的
   P0 TTS/S2ST 2-step fixed-sample 合同验收；该 experiment 只固化当前 P0 子项，不替代 011
   的正式 staged joint entry。
-- `014_stage1_pilot_validation_smoke`：两卡 stage 1 的 1-step pilot 验收；fit 前遍历完整 dev split，
+- `train/014_stage1_pilot_validation_smoke`：两卡 stage 1 的 1-step pilot 验收；fit 前遍历完整 dev split，
   step 1 再运行 interval validation，用于验证 token/RVQ CE 与各 codebook top-1 的真实 DDP 口径。
-- `014_stage1_pilot_canary`：同一 1k split 的 100-step 两卡 canary；step 50/100 运行完整 dev，
+- `train/014_stage1_pilot_canary`：同一 1k split 的 100-step 两卡 canary；step 50/100 运行完整 dev，
   同步归档 checkpoint 并保留 `last.ckpt`，用于决定是否继续到计划中的 5k-step pilot。
-- `014_stage1_pilot_resume_500`：从显式 `train.ckpt_path` 恢复 100-step canary，到 step 500
+- `train/014_stage1_pilot_resume_500`：从显式 `train.ckpt_path` 恢复 100-step canary，到 step 500
   为止每 100 steps 运行完整 dev 与归档 checkpoint；用于在扩大到 5k 前验证 RVQ CE 门槛。
-- `014_stage1_pilot_resume_2000`：step 500 未达 5% RVQ CE 门槛后，从其 `last.ckpt` 恢复到
+- `train/014_stage1_pilot_resume_2000`：step 500 未达 5% RVQ CE 门槛后，从其 `last.ckpt` 恢复到
   step 2000，每 250 steps 运行完整 dev 与归档 checkpoint；作为是否继续到 5k 的中间 gate。
-- `train`：正式 staged joint training root。它直接消费 `configs/stage/stage_*.yaml` 中的
-  loader/task/freeze 契约，构造唯一 `DataModule`；每个 speech loader 使用
+- `train/staged_joint_stage_1..4`：正式 staged joint experiments。每个文件显式绑定 stage 与
+  parameter policy；入口消费 `configs/stage/stage_*.yaml` 中的 loader/task 契约并构造唯一
+  `DataModule`。每个 speech loader 使用
   `LoaderSpec.speech(...)`，纯文本 MT loader 使用 `LoaderSpec.text(...)`，多 loader 调度由
   `LoaderSchedule` 持有。
+- `train/parameter_policy_smoke`：参数冻结专用两步实验。它固定 toy model/data 与 CPU trainer，
+  只通过 `parameter_policy=<name>` 切换冻结策略，不借用正式长跑配置充当策略测试夹具。
 - `toy_smoke`：正式 LongCat runtime 加 tiny model/in-memory dataset 的 CPU 两步训练契约测试；
   不读取真实 backbone 权重或 WMT19 prepared dataset，也不替代真实资源验收。
 
@@ -108,8 +116,9 @@ training job 传递 `repo_output_root`、相对 `output_subdir` 和 `"$@"` 参�
 临时 `/tmp` 路径写死进 Hydra preset。
 `jobs/011/02_rvq_native_stage_smoke.sh` 仍使用 `scripts/overfit.py` 验证每个 stage 的 freeze
 配置能完成 fixed-sample 两步训练。`jobs/011/03_staged_joint_train.sh` 是正式 staged joint
-training wrapper，调用 `scripts/train.py`，默认 `trainer=static_ddp`，并可用
-`SPEECH_TO_SPEECH_STAGE=stage_1..stage_4` 选择阶段。正式 train 入口通过
+training wrapper，调用 `scripts/train.py`，默认 `trainer=static_ddp`，并根据
+`SPEECH_TO_SPEECH_STAGE=stage_1..stage_4` 选择对应的 `train/staged_joint_stage_*` experiment，
+由 experiment 同时绑定 stage 和 parameter policy。正式 train 入口通过
 `train.ckpt_path=<checkpoint>` 显式恢复 Lightning checkpoint；默认值为空，普通训练不走 resume。
 该字段只属于 staged train，overfit 配置不接受它；命名为 resume 的 experiment 必须把
 `train.ckpt_path` 标为必填，避免绕过 wrapper 时静默从头训练。
@@ -118,6 +127,16 @@ training wrapper，调用 `scripts/train.py`，默认 `trainer=static_ddp`，并
 `jobs/014/02_stage1_pilot_canary.sh` 使用相同资源入口运行 100-step canary，不从 smoke 输出恢复。
 `jobs/014/03_stage1_pilot_resume_500.sh` 与 `04_stage1_pilot_resume_2000.sh` 额外要求
 `SPEECH_TO_SPEECH_STAGE_CKPT_PATH`，避免隐式猜测 latest checkpoint。
+
+`jobs/015/01_stable_codec_stage1.sh` 是 Stable Codec 的默认长跑入口：固定
+`runtime=stable_codec`、`full_codec_sequence`（不使用 audio BPE）、stage 1 的 ASR/TTS
+双 loader、1,000,000 optimizer steps 和每 10,000 steps 的 checkpoint。它还为两个
+loader 各启用 fixed-sample callback；Stable 的 FrameCodec 路径没有独立的 acoustic
+teacher-forcing，因此 TTS TensorBoard audio 记录 codec 重建的 `target` 和自回归
+`generated`。只有 Flow/RVQ acoustic 路径才会额外记录 `reference_generation`；ASR
+记录 target/reference 与 generated text。
+该 wrapper 要求显式设置 `SPEECH_TO_SPEECH_STABLE_PYTHON`，因为 Stable Codec 的
+`stable-codec` 依赖使用独立兼容环境，不能默认复用普通训练 Python。
 
 正式 train 的 `validation` 默认关闭。启用时，`loader` 必须选择当前 stage 的一个 speech loader，
 且 `data.dataset.split_manifest` 必须存在、`split_label` 必须与训练 split 不同。入口复制该 loader
@@ -151,12 +170,16 @@ schema，不重复声明字段。OmegaConf 对字符串枚举只接受成员
 - `runtime.audio_representation=full_codec_sequence` 只允许 `model/acoustic=none`，因为完整
   codec codes 已作为 token objective 训练，不能再同时构造 acoustic side channel。
 - `runtime.semantic_codec_artifact` 为 `semantic-acoustic-codec` 的 semantic-only waveform
-  support artifact；当前 S2S 只接入 LongCat structured backend，因此只允许
-  `runtime=longcat|longcat_native model/acoustic=none`，并拒绝 full codec sequence、UniCodec、Flow
-  和 RVQ composition。FrameCodec 的 token-only 路径使用 full-code sequence；artifact 路径只生成
-  structured backend 的 semantic units。LongCat decoupled `model/acoustic=none` 必须配置该
-  artifact；否则应改用 `runtime=longcat_full_sequence`。已有 `DECOUPLED + Flow/RVQ` 组合仍表示
-  S2S 内部的 acoustic feature 训练路径，不是 semantic-only artifact 路径。
+  support artifact；LongCat 和 BiCodec 都可使用，但只允许 `model/acoustic=none` 的
+  `DECOUPLED` 路径。BiCodec 另提供 `runtime=bicodec_full_sequence`，生成 structured full
+  sequence 并调用 backend `detokenize()`；它不接入 Flow/RVQ composition。两份 BiCodec smoke
+  都选择 `data=qwen_tts_speaker` 和 `data.shape=single`，直接消费 workspace prepared grid 的
+  flat cells；可用 `data.speaker=<id>` 限制到一个 speaker。FrameCodec 的 token-only 路径仍使用
+  flattened full-code sequence。
+- `acoustic.init_artifact` 是 Flow/RVQ 联合训练的 generator 初始化路径，与
+  `runtime.semantic_codec_artifact` 不同。composition 加载 artifact 后校验 route、frame-aligned layout、
+  decoder/REPA 配置和 acoustic backend metadata，再把已加载对象交给 model；semantic conditioner 不进入
+  S2S。Flow 迁移 decoder 与 feature normalization，RVQ 当前只接受 `codebook_ar` artifact。
 - UniCodec 也是 `FrameCodec`，`runtime=unicodec model/acoustic=none` 使用
   `full_codec_sequence`，只是完整 frame 里只有一个 codebook。有独立 acoustic codebook 的 codec
   只有在提供 semantic-only artifact 或选择 full-code sequence 时才可以作为 token-only baseline。
@@ -169,7 +192,11 @@ schema，不重复声明字段。OmegaConf 对字符串枚举只接受成员
 `configs/stage/stage_*.yaml` 只描述 loader/task schedule 与 `batches_per_step`。参数冻结和
 backbone top-fraction 抽象为顶层 `parameter_policy` 组，入口解析为
 `ParameterPolicyConfig`，并在 Trainer/optimizer 创建前一次性应用。一个正式 job 只选择一个
-stage 和一个 parameter policy，运行中不切换数据计划或参数冻结。experiment 显式保留约定组合：
+experiment，运行中不切换数据计划或参数冻结。`train/staged_joint_stage_*` 显式保留约定组合：
 stage 0/4 使用 `full`，stage 1/2 使用 `speech_interface`，stage 3 使用
 `speech_interface_top_third`；这不是 `StageName` 的隐式映射。需要只训练 semantic token
-interface 时显式选择 `parameter_policy=semantic_only`。
+interface 时在专用 experiment 中显式选择 `parameter_policy=semantic_only`。
+
+Stage 0-4 是 S2S 内部的数据/任务/参数策略日程，不等同于“先在 SAC 预训练 generator、再在 S2S
+用 hidden state 联合训练”的两个 phase。artifact 初始化只在 model composition 时发生一次，stage 不拥有
+artifact 导出或切换逻辑。

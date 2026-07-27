@@ -1,0 +1,5 @@
+# @package _global_
+defaults:
+  - override /stage: stage_4
+  - override /parameter_policy: full
+  - _self_

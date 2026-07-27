@@ -7,20 +7,29 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union, cast
 
 import torch
+from anytrain.codec import AcousticLayout
 from anydataset.types import AudioView, Modality
 from anytrain.module.idspace import Layout
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .audio_tokenizer import FlattenedAudioTokenizer, NativeAudioTokenizer, TorchCodecBPE
+from .audio_tokenizer import (
+    BiCodecAudioTokenizer,
+    FlattenedAudioTokenizer,
+    NativeAudioTokenizer,
+    TorchCodecBPE,
+)
 from .codec import load_codec
 from .special_tokens import Qwen3SpecialToken
 from .types import (
     AudioTokenizer,
     Backbone,
     Codec,
+    CodecBackend,
     SemanticCodec,
     TextTokenizer,
+    structured_codec,
+    supports_structured,
     supports_acoustic,
 )
 from .._compat import StrEnum, auto
@@ -71,10 +80,6 @@ class Config:
     def __post_init__(self) -> None:
         if not isinstance(self.audio_representation, AudioRepresentation):
             raise TypeError("audio_representation must be an AudioRepresentation.")
-        if self.codec == "bicodec":
-            raise ValueError(
-                "speech-to-speech does not support the fixed-length structured codec 'bicodec'."
-            )
         if (
             self.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE
             and self.audio_tokenizer is not None
@@ -89,9 +94,16 @@ class Config:
                 raise ValueError(
                     "semantic codec artifacts require the decoupled audio representation."
                 )
-            if self.codec != "longcat":
+            if self.codec not in {"longcat", "bicodec"}:
                 raise ValueError(
-                    "semantic codec artifacts currently require the longcat codec."
+                    "semantic codec artifacts currently require LongCat or BiCodec."
+                )
+        if self.codec == "bicodec" and self.semantic_codec_artifact is None:
+            if self.audio_representation is not AudioRepresentation.FULL_CODEC_SEQUENCE:
+                raise ValueError(
+                    "BiCodec is a fixed-length structured codec and requires "
+                    "semantic_codec_artifact for semantic-only decoding or "
+                    "full_codec_sequence for token-only decoding."
                 )
         if self.flow_method not in _FLOW_METHODS:
             raise ValueError(f"unsupported flow method: {self.flow_method}")
@@ -105,6 +117,8 @@ class Config:
 
     @property
     def audio_view(self) -> AudioView:
+        if self.codec == "stable_codec":
+            return AudioView.STABLE
         try:
             return AudioView(self.codec)
         except ValueError as error:
@@ -135,12 +149,28 @@ class Runtime:
         return self.config.audio_representation
 
     @property
+    def semantic_codec_artifact(self) -> str | None:
+        return self.config.semantic_codec_artifact
+
+    @property
     def acoustic_side_channel(self) -> bool:
         return (
             self.audio_representation is AudioRepresentation.DECOUPLED
             and self.config.semantic_codec_artifact is None
             and supports_acoustic(self.codec)
         )
+
+    @property
+    def acoustic_layout(self) -> AcousticLayout:
+        if supports_structured(self.codec):
+            return AcousticLayout(structured_codec(self.codec).acoustic_layout)
+        return AcousticLayout.FRAME_ALIGNED
+
+    @property
+    def acoustic_unit_length(self) -> int | None:
+        if supports_structured(self.codec):
+            return structured_codec(self.codec).acoustic_unit_length
+        return None
 
     @cached_property
     def text_tokenizer(self) -> TextTokenizer:
@@ -160,8 +190,14 @@ class Runtime:
         return cast(Backbone, cast(object, backbone))
 
     @cached_property
-    def codec(self) -> Codec:
+    def codec(self) -> CodecBackend:
         return load_codec(self.config.codec, self.config.device)
+
+    @property
+    def semantic_codebook_sizes(self) -> tuple[int, ...]:
+        if supports_structured(self.codec):
+            return tuple(structured_codec(self.codec).semantic_codebook_sizes)
+        return tuple(cast(Codec, self.codec).codebook_sizes)
 
     @cached_property
     def semantic_codec(self) -> SemanticCodec:
@@ -186,12 +222,19 @@ class Runtime:
     @cached_property
     def audio_tokenizer(self) -> AudioTokenizer:
         if self.config.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE:
+            if self.config.codec == "bicodec":
+                codec = structured_codec(self.codec)
+                return BiCodecAudioTokenizer(
+                    semantic_vocab_size=self.semantic_codebook_sizes[0],
+                    acoustic_codebook_sizes=codec.acoustic_codebook_sizes,
+                    acoustic_unit_length=codec.acoustic_unit_length,
+                )
             return FlattenedAudioTokenizer(
-                codebook_sizes=self.codec.codebook_sizes,
+                codebook_sizes=cast(Codec, self.codec).codebook_sizes,
                 codec_name=self.codec_name,
             )
         if self.config.audio_tokenizer is None:
-            return NativeAudioTokenizer(vocab_size=int(self.codec.codebook_sizes[0]))
+            return NativeAudioTokenizer(vocab_size=int(self.semantic_codebook_sizes[0]))
         return audio_tokenizer(self.config.audio_tokenizer)
 
     @cached_property

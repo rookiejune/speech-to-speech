@@ -32,7 +32,8 @@ class AcousticDecoder(Protocol):
         t: Tensor,
         *,
         condition: Tensor,
-        mask: Tensor | None = None,
+        mask: Tensor,
+        validate: bool = True,
     ) -> Tensor: ...
 
     def forward_with_features(
@@ -41,7 +42,8 @@ class AcousticDecoder(Protocol):
         t: Tensor,
         *,
         condition: Tensor,
-        mask: Tensor | None = None,
+        mask: Tensor,
+        validate: bool = True,
     ) -> tuple[Tensor, Tensor]: ...
 
 

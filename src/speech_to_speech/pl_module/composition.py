@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from typing import Optional, Protocol
+from typing import Optional, Protocol, cast
+
+from semantic_acoustic_codec.config import Route
+from semantic_acoustic_codec.runtime import AcousticGeneratorArtifact
 
 from speech_to_speech.loss import FlowObjective, RVQObjective, TokenObjective, WavLMTeacher
 from speech_to_speech.model import Config as ModelConfig
@@ -11,7 +14,9 @@ from speech_to_speech.model.acoustic import (
     FlowModel,
     RVQModel,
 )
+from speech_to_speech.model.acoustic.initialization import load_acoustic_initialization
 from speech_to_speech.runtime import Runtime
+from speech_to_speech.runtime.types import Codec
 
 from .module import Config, SpeechToSpeechModule
 from .protocol import FlowCompositionModel, RVQCompositionModel
@@ -33,6 +38,9 @@ class RepaConfig(Protocol):
 
 class FlowConfig(Protocol):
     @property
+    def init_artifact(self) -> Optional[str]: ...
+
+    @property
     def decoder(self) -> DecoderConfig: ...
 
     @property
@@ -40,6 +48,9 @@ class FlowConfig(Protocol):
 
 
 class RVQConfig(Protocol):
+    @property
+    def init_artifact(self) -> Optional[str]: ...
+
     @property
     def decoder(self) -> DecoderConfig: ...
 
@@ -70,11 +81,20 @@ def flow(
     weight = acoustic.repa.weight
     if weight is not None:
         teacher = WavLMTeacher(
-            runtime.codec,
+            cast(Codec, runtime.codec),
             checkpoint=acoustic.repa.teacher_checkpoint,
             layer=acoustic.repa.teacher_layer,
             device=runtime.backbone.get_input_embeddings().weight.device,
         )
+    initialization = _initialization(runtime, acoustic.init_artifact, Route.FM)
+    if initialization is not None:
+        expected_repa_weight = 0.0 if weight is None else weight
+        if initialization.spec.decoder.repa_loss_weight != expected_repa_weight:
+            raise ValueError(
+                "Flow REPA weight does not match initialization artifact: "
+                f"{expected_repa_weight!r} != "
+                f"{initialization.spec.decoder.repa_loss_weight!r}."
+            )
     model = FlowModel(
         model_config,
         runtime=runtime,
@@ -87,6 +107,7 @@ def flow(
                 student_layer=acoustic.repa.student_layer,
             )
         ),
+        initialization=initialization,
     )
     objective = FlowObjective(
         runtime.layout,
@@ -106,10 +127,12 @@ def rvq(
     model_config: ModelConfig,
     acoustic: RVQConfig,
 ) -> tuple[SpeechToSpeechModule[RVQCompositionModel], RVQModel]:
+    initialization = _initialization(runtime, acoustic.init_artifact, Route.RVQ)
     model = RVQModel(
         model_config,
         runtime=runtime,
         decoder=acoustic.decoder,
+        initialization=initialization,
     )
     module = SpeechToSpeechModule[RVQCompositionModel](
         config,
@@ -117,3 +140,18 @@ def rvq(
         objective=RVQObjective(runtime.layout),
     )
     return module, model
+
+
+def _initialization(
+    runtime: Runtime,
+    path: Optional[str],
+    route: Route,
+) -> AcousticGeneratorArtifact | None:
+    if path is None:
+        return None
+    return load_acoustic_initialization(
+        path,
+        codec=runtime.codec,
+        route=route,
+        device=runtime.backbone.get_input_embeddings().weight.device,
+    )

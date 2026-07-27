@@ -13,7 +13,7 @@ from typing_extensions import NotRequired
 from .._compat import StrEnum, auto
 from ..task import Task
 from .collator import Collator
-from .dataset import DatasetConfig, load_dataset
+from .dataset import DatasetConfig, DatasetName, load_dataset
 from .joint import LoaderSchedule, ScheduledDataLoader
 from .protocol import (
     DataRuntime,
@@ -50,6 +50,11 @@ class Config:
             raise TypeError("encode_missing_codes must be a boolean.")
         if self.encode_missing_codes and self.shape is not DataShape.SINGLE:
             raise ValueError("encode_missing_codes requires data shape single.")
+        if (
+            self.dataset.name is DatasetName.QWEN_TTS_SPEAKER
+            and self.shape is not DataShape.SINGLE
+        ):
+            raise ValueError("qwen_tts_speaker requires data shape single.")
         batch_size = self.dataloader["batch_size"]
         num_workers = self.dataloader["num_workers"]
         if isinstance(batch_size, bool) or not isinstance(batch_size, int):
@@ -316,7 +321,10 @@ class DataModule(LightningDataModule):
 
     @property
     def collator(self) -> Any:
-        loader = self._single_loader(None, "read collator")
+        return self.collator_for()
+
+    def collator_for(self, loader_name: str | None = None) -> Any:
+        loader = self._single_loader(loader_name, "read collator")
         collator = getattr(loader, "collator", None)
         if collator is None:
             raise ValueError("the selected loader does not expose a collator.")

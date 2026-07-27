@@ -6,6 +6,7 @@ from functools import cached_property
 from typing import TypeVar, TypedDict, Union
 
 import torch
+from anytrain.codec import AcousticLayout
 from anydataset.types import Modality
 from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
@@ -42,6 +43,8 @@ class Language(StrEnum):
 class Speech:
     semantic_codes: Tensor
     acoustic_codes: Tensor | None
+    acoustic_layout: AcousticLayout
+    acoustic_unit_length: int | None
     text_token_ids: Tensor
     audio_token_ids: Tensor
     audio_token_spans: Tensor
@@ -54,9 +57,19 @@ class Speech:
         if self.acoustic_codes is not None:
             if self.acoustic_codes.dim() != 2:
                 raise ValueError("acoustic_codes must have shape [frames, codebooks].")
-            if self.acoustic_codes.size(0) != self.semantic_codes.size(0):
+            if (
+                self.acoustic_layout is AcousticLayout.FRAME_ALIGNED
+                and self.acoustic_codes.size(0) != self.semantic_codes.size(0)
+            ):
                 raise ValueError(
                     "semantic_codes and acoustic_codes must share the frame axis."
+                )
+            if (
+                self.acoustic_unit_length is not None
+                and self.acoustic_codes.size(0) != self.acoustic_unit_length
+            ):
+                raise ValueError(
+                    "acoustic_codes must match the codec acoustic unit length."
                 )
         if self.audio_token_ids.dim() != 1 or self.audio_token_spans.shape != (
             self.audio_token_ids.numel(),

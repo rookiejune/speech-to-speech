@@ -26,7 +26,9 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
 
 `pl_module.composition` 负责组装 `model + objective + SpeechToSpeechModule` 的 token/Flow/RVQ
 组合，入口只选择组合并传入已解析配置；该模块通过窄 Protocol 消费 acoustic config，不反向依赖
-`scripts._config`。
+`scripts._config`。当 `acoustic.init_artifact` 非空时，composition 负责加载 SAC
+`AcousticGeneratorArtifact`，校验 route、frame layout 与 backend metadata，并把已加载对象传给 model；
+model 构造器不接收路径或执行文件 I/O。
 
 `pl_module` 不实现 task 状态机、decode、文本 NLL、对齐或 loss；包级 API 只导出
 `Config` 与 `SpeechToSpeechModule`，composition 通过显式子模块导入。
@@ -52,9 +54,11 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
   并把可恢复的 report 写入 `metrics.json`。本项目不重复实现 history state 或 scalar 校验。
 - `AcousticEvaluation`：对 fixed-sample acoustic model 使用本地 generator seeds 采样，记录 feature、
   waveform 与 STFT 距离；纯评估函数位于 `generation.evaluation`，不留在脚本私有模块。
-- `TaskSampleLogger`：只在 global zero 读取 datamodule 的公开 `train_samples()`/`collator`，
-  按真实 task 记录 source/reference/generated metadata，并复用一次 generation 的 token、features
-  与 waveform；它不运行额外神经网络评估器，也不重复计算 loss。
+- `TaskSampleLogger`：只在 global zero 读取 datamodule 的公开 `train_samples()`/`collator_for()`，
+  可按 loader 固定样本，按真实 task 记录 source/target/generated；TTS acoustic batch 还记录
+  target waveform 与 teacher-forced `reference_generation`，并复用一次自回归 generation 的
+  token、features 与 waveform。Stable Codec 的 full-code 路径没有 acoustic teacher-forcing，
+  因此只记录 codec 重建的 target 与自回归 generated。它不重复计算 loss。
 - `TextRetentionLogger`：记录 text probe generation、reference NLL 与相对基线漂移。
 
 上述 callback 需要 logger experiment 时统一通过 `anytrain.lightning.experiment` 获取 text、scalar、

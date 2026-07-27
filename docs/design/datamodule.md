@@ -41,12 +41,22 @@
   默认按 optimizer step 确定性轮转；配置 `batches_per_step > 1` 时，一个 optimizer step 返回
   多个子 batch，供静态 DDP 覆盖多条可训练执行路径。每个子 loader 自己保持单一 execution
   signature。
-- `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts` prepared data 或确定性的内存
-  `toy` data。可选的 `split_manifest` + `split_label` 把已加载的 map-style dataset 限制到
+- `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts`、`qwen_tts_speaker` prepared data
+  或确定性的内存 `toy` data。`qwen_tts_speaker` 通过 workspace 加载
+  `SpeakerAudioGrid`，再由 `SpeakerGridCellsDataset` 暴露 `Role.DEFAULT` flat cells；默认覆盖
+  所有 speaker，也可用 `speaker` 显式选择一列。BiCodec prepared cell 使用
+  `AudioView.BICODEC` 的 structured mapping，semantic 和 fixed-length acoustic unit 分别保留
+  独立轴；可选的 `split_manifest` + `split_label` 把已加载的 map-style dataset 限制到
   manifest 声明的非重复、非负索引；manifest 不替换底层 anydataset split，也不绕过其公开
   dataloader/batch-planning 契约。底层是 `MapStyleABC` 时，split view 委托其 `_shuffle()` 并
   映射回子集位置，以保留 store-backed payload locality。toy codes 根据正式 codec 的
   semantic/acoustic/full-sequence codebook 数量和值域构造。
+
+Qwen speaker grid 只允许 `bicodec` / `longcat` runtime，并强制使用 `shape=single`。训练不读取
+grouped rows，因此不会把 speaker 轴或 semantic padding 带入模型 batch。指定 speaker 时 adapter
+把底层 flat store 的局部分组映射回 text-row 索引，再在过滤后执行 rank 分片，避免 speaker-minor
+排列把某一列集中到单个 distributed rank。该接入只确认 prepared-data 与模型输入契约；真实
+checkpoint 的收敛和生成音质仍需单独验收。
 - split manifest 的生成属于审计/部署入口，不属于 dataset loader：
   `scripts/create_split_manifest.py` 只消费 candidate、root audit 和 data-root 路径，输出带
   source artifact 与 root fingerprint 的 JSON；训练前必须先在 stable root 上完成该产物的独立
@@ -119,6 +129,8 @@ acoustic_target: AcousticTarget | None
 - datamodule 按数据形态拆分 pair/single，而不是按 TTS/ASR 拆分。pair path 拥有 source/target
   role 选择；single path 拥有同一 utterance 内 text/audio 的方向选择。`Task.uses_source_role`
   只服务 pair path，single path 不用它推断 dataset role。
+- `SpeakerAudioGrid.rows` 是检查/对比 speaker 轴的 grouped view，不进入训练。Qwen TTS 训练只消费
+  `cells`，并要求每个 cell 在 `Role.DEFAULT` 下同时提供 text/audio；adapter 不静默重写 role。
 - 正式训练路径优先使用预先 materialize 的 codec codes。训练时 wav->codes 只作为显式 debug
   fallback：普通 DataLoader worker 不持有 codec/CUDA module，fallback batch 必须在
   `pl_module` loss 前经 on-device materializer 转为 `ModelBatch`。

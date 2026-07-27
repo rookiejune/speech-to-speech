@@ -201,7 +201,7 @@ def run(config: OverfitConfig) -> None:
 
     if evaluation is not None:
         _prepare_generation_module(module, _device(rt_config))
-        generation = evaluate_generation(module, evaluation.batch, codec)
+        generation = evaluate_generation(module, evaluation.batch, cast(Codec, codec))
         (output_dir / "generation.json").write_text(
             json.dumps(generation, indent=2, sort_keys=True) + "\n"
         )

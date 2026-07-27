@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from anydataset import types
+from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
 from ..task import Task
@@ -101,11 +102,20 @@ def build_single_sample(
 
 def build_single_sample_from_codes(
     sample: RawSingleSample,
-    codes: Tensor,
+    codes: object,
     runtime: DataRuntime,
 ) -> ModelSample:
+    if isinstance(codes, Tensor):
+        codes = codes.cpu()
+    elif isinstance(codes, SemanticAcousticCodes):
+        codes = SemanticAcousticCodes(
+            semantic=codes.semantic.cpu(),
+            acoustic=codes.acoustic.cpu(),
+        )
+    else:
+        raise TypeError("single codec codes must be a Tensor or SemanticAcousticCodes.")
     speech = speech_from_codes(
-        codes.cpu(),
+        codes,
         text_token_ids=sample.text_token_ids.cpu(),
         language=sample.language,
         duration_seconds=sample.duration_seconds,
@@ -167,15 +177,13 @@ def _single_items(sample: types.Sample) -> tuple[types.AudioItem, types.TextItem
     return audio_item, text_item
 
 
-def _codec_codes(audio_item: types.AudioItem, runtime: DataRuntime) -> Tensor:
+def _codec_codes(audio_item: types.AudioItem, runtime: DataRuntime) -> object:
     try:
         codes = audio_item.views[runtime.audio_view]
     except KeyError as error:
         raise ValueError(
             f"single audio sample is missing {runtime.audio_view.value!r} codec codes."
         ) from error
-    if not isinstance(codes, Tensor):
-        raise TypeError("single codec codes must be a Tensor.")
     return codes
 
 

@@ -67,8 +67,8 @@ text target
     -> Result(audio=None)
 
 audio target + token-only model
-    -> generate_tokens(stop=EOA)
-    -> FrameCodec full-code decode, or SAC SemanticCodecRuntime decode when artifact is configured
+    -> generate_tokens(stop=EOA), or BiCodec structured state machine
+    -> FrameCodec full-code decode, BiCodec detokenize, or SAC SemanticCodecRuntime decode
 
 audio target + runtime acoustic side channel + acoustic feature generator
     -> generate_audio_features()
@@ -84,11 +84,13 @@ codebooks 而进入 Flow/RVQ acoustic feature generation。flow 与 RVQ 都返�
 `AcousticGeneration`；`model/acoustic=none` 即使搭配 LongCat 这类带 acoustic codebook 的
 codec，也只走 token-only generation 分支；实际 waveform decoder 仍按 full-code sequence 或
 semantic artifact 路径选择。
-`FULL_CODEC_SEQUENCE` 只调用原 `FrameCodec.decode(full_codes)`。配置
+`FULL_CODEC_SEQUENCE` 对普通 `FrameCodec` 仍调用 `decode(full_codes)`；BiCodec 则使用受约束的
+structured state machine 生成 marker、semantic token 和固定数量的 slot-major acoustic
+codebook token，恢复 `SemanticAcousticCodes` 后调用 `detokenize()`。配置
 `runtime.semantic_codec_artifact` 后，service 只处理 structured backend 的 semantic tokens，
-并把 token-only decode 交给 `SemanticCodecRuntime`；普通 frame codec 的 `decode()` 不再接收
-semantic-only codes。未配置 artifact 的 LongCat decoupled token-only composition 在配置阶段失败；
-训练数据、tokenizer、layout 和 codec identity 仍来自原 backend。
+并把 waveform decode 交给 `SemanticCodecRuntime`；普通 frame codec 的 `decode()` 不再接收
+semantic-only codes。BiCodec 的 semantic-only 与 full-sequence 路线都在配置阶段显式选择，
+不会把 fixed-length acoustic units 伪装成 frame-aligned codes。
 
 自回归 cache、sampling、allowed IDs、逐行 stop 状态和 frame condition 收集属于 model。已有行
 生成 stop token 后，后续步骤只对剩余 active rows 执行 backbone 与 sampling；cache 同步收缩，

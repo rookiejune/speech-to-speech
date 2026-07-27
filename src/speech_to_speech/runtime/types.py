@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Protocol, cast, runtime_checkable
+from typing import Protocol, Union, cast, runtime_checkable
 
 from torch import Tensor, nn
 from transformers.cache_utils import Cache
@@ -17,7 +17,7 @@ class SemanticCodec(Protocol):
     def decode(self, semantic_codes: Tensor) -> Tensor: ...
 
 
-class Codec(Protocol):
+class SemanticCodebookCodec(Protocol):
     @property
     def sample_rate(self) -> int: ...
 
@@ -25,7 +25,10 @@ class Codec(Protocol):
     def frame_rate(self) -> float: ...
 
     @property
-    def semantic_feature_dim(self) -> int: ...
+    def semantic_codebook(self) -> Tensor: ...
+
+
+class Codec(SemanticCodebookCodec, Protocol):
 
     @property
     def codebook_sizes(self) -> tuple[int, ...]: ...
@@ -35,9 +38,35 @@ class Codec(Protocol):
     def decode(self, codes: Tensor) -> Tensor: ...
 
 
-class CodebookCodec(Codec, Protocol):
+class StructuredCodec(SemanticCodebookCodec, Protocol):
     @property
-    def semantic_codebook(self) -> Tensor: ...
+    def semantic_codebook_sizes(self) -> tuple[int, ...]: ...
+
+    @property
+    def acoustic_codebook_sizes(self) -> tuple[int, ...]: ...
+
+    @property
+    def acoustic_layout(self) -> object: ...
+
+    @property
+    def acoustic_unit_length(self) -> int | None: ...
+
+    def tokenize(self, audio: Tensor, sample_rate: int) -> object: ...
+
+    def detokenize(self, codes: object) -> Tensor: ...
+
+    def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor: ...
+
+    def decode_features(
+        self, semantic_codes: Tensor, acoustic_features: Tensor
+    ) -> Tensor: ...
+
+
+CodecBackend = Union[Codec, StructuredCodec]
+
+
+class CodebookCodec(SemanticCodebookCodec, Protocol):
+    pass
 
 
 class AcousticCodec(CodebookCodec, Protocol):
@@ -75,13 +104,29 @@ class _AcousticCapability(_CodebookCapability, Protocol):
     ) -> Tensor: ...
 
 
-def codebook_codec(codec: Codec) -> CodebookCodec:
+@runtime_checkable
+class _StructuredCapability(_CodebookCapability, Protocol):
+    @property
+    def semantic_codebook_sizes(self) -> tuple[int, ...]: ...
+
+    @property
+    def acoustic_layout(self) -> object: ...
+
+    @property
+    def acoustic_unit_length(self) -> int | None: ...
+
+    def tokenize(self, audio: Tensor, sample_rate: int) -> object: ...
+
+    def detokenize(self, codes: object) -> Tensor: ...
+
+
+def codebook_codec(codec: SemanticCodebookCodec) -> CodebookCodec:
     if not isinstance(codec, _CodebookCapability):
         raise TypeError("codec-initialized audio embeddings require a semantic codebook.")
     return cast(CodebookCodec, codec)
 
 
-def acoustic_codec(codec: Codec) -> AcousticCodec:
+def acoustic_codec(codec: SemanticCodebookCodec) -> AcousticCodec:
     if not isinstance(codec, _AcousticCapability):
         raise TypeError("acoustic decoding requires an acoustic codec capability.")
     sizes = tuple(codec.acoustic_codebook_sizes)
@@ -92,11 +137,21 @@ def acoustic_codec(codec: Codec) -> AcousticCodec:
     return cast(AcousticCodec, codec)
 
 
-def supports_acoustic(codec: Codec) -> bool:
+def supports_acoustic(codec: SemanticCodebookCodec) -> bool:
     if not isinstance(codec, _AcousticCapability):
         return False
     acoustic_codec(codec)
     return True
+
+
+def structured_codec(codec: SemanticCodebookCodec) -> StructuredCodec:
+    if not isinstance(codec, _StructuredCapability):
+        raise TypeError("structured codec capability is required.")
+    return cast(StructuredCodec, codec)
+
+
+def supports_structured(codec: SemanticCodebookCodec) -> bool:
+    return isinstance(codec, _StructuredCapability)
 
 
 class AudioTokenizer(Protocol):

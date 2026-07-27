@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, cast
 
-from anydataset.dataset import MapStyleABC
+from anydataset.dataset import MapStyleABC, SpeakerAudioGrid
 import torch
 from anydataset.types import (
     AudioItem,
@@ -23,11 +23,12 @@ from anydataset.types import (
 from torch.utils.data import Dataset
 
 from .._compat import StrEnum, auto
-from ..runtime.types import Codec, acoustic_codec
+from ..runtime.types import Codec, CodecBackend, acoustic_codec, structured_codec
 from .protocol import DatasetRuntime
 
 
 class DatasetName(StrEnum):
+    QWEN_TTS_SPEAKER = auto()
     WMT19_TTS = auto()
     TOY = auto()
 
@@ -39,6 +40,7 @@ class DatasetConfig:
     split: str = "train"
     split_manifest: Optional[str] = None
     split_label: str = "train"
+    speaker: Optional[str] = None
     toy_samples: int = 8
     toy_frames: int = 4
 
@@ -60,6 +62,11 @@ class DatasetConfig:
             raise TypeError("split_label must be a string.")
         if not self.split_label:
             raise ValueError("split_label must not be empty.")
+        if self.speaker is not None:
+            if not isinstance(self.speaker, str):
+                raise TypeError("dataset speaker must be a string or None.")
+            if not self.speaker:
+                raise ValueError("dataset speaker must not be empty.")
         for name, value in (
             ("toy_samples", self.toy_samples),
             ("toy_frames", self.toy_frames),
@@ -141,13 +148,108 @@ class SplitManifestDataset(MapStyleABC):
                 yield positions
 
 
+class SpeakerGridCellsDataset(MapStyleABC):
+    """Expose all cells or one speaker column from a speaker audio grid."""
+
+    def __init__(
+        self,
+        grid: SpeakerAudioGrid,
+        *,
+        speaker: str | None = None,
+    ) -> None:
+        default_text = (Role.DEFAULT, Modality.TEXT)
+        default_audio = (Role.DEFAULT, Modality.AUDIO)
+        if grid.text_ref != default_text or grid.audio_ref != default_audio:
+            raise ValueError(
+                "Qwen TTS speaker grids must use Role.DEFAULT text and audio cells."
+            )
+        self.grid = grid
+        self.cells = cast(Dataset[Sample], cast(object, grid.cells))
+        self.speaker_ids = tuple(grid.speaker_ids)
+        if speaker is None:
+            self.speaker_index = None
+        else:
+            try:
+                self.speaker_index = self.speaker_ids.index(speaker)
+            except ValueError as error:
+                raise ValueError(
+                    f"speaker id {speaker!r} is not present in the Qwen TTS grid."
+                ) from error
+
+    def __len__(self) -> int:
+        if self.speaker_index is None:
+            return len(cast(Sized, self.cells))
+        return len(self.grid)
+
+    def __getitem__(self, index: int) -> Sample:
+        global_index = self.global_index(index)
+        return _single_cell(self.cells[global_index], global_index=global_index)
+
+    def global_index(self, index: int) -> int:
+        count = len(self)
+        if index < 0:
+            index += count
+        if index < 0 or index >= count:
+            raise IndexError(index)
+        if self.speaker_index is None:
+            return index
+        return index * len(self.speaker_ids) + self.speaker_index
+
+    def _shuffle(
+        self,
+        *,
+        shuffle: bool,
+        seed: int,
+        epoch: int,
+        num_replicas: int,
+        rank: int,
+    ) -> Iterator[Sequence[int]]:
+        if not isinstance(self.cells, MapStyleABC):
+            yield from super()._shuffle(
+                shuffle=shuffle,
+                seed=seed,
+                epoch=epoch,
+                num_replicas=num_replicas,
+                rank=rank,
+            )
+            return
+        if self.speaker_index is None:
+            yield from self.cells._shuffle(
+                shuffle=shuffle,
+                seed=seed,
+                epoch=epoch,
+                num_replicas=num_replicas,
+                rank=rank,
+            )
+            return
+
+        selected_offset = 0
+        speaker_count = len(self.speaker_ids)
+        for group in self.cells._shuffle(
+            shuffle=shuffle,
+            seed=seed,
+            epoch=epoch,
+            num_replicas=1,
+            rank=0,
+        ):
+            positions: list[int] = []
+            for global_index in group:
+                if global_index % speaker_count != self.speaker_index:
+                    continue
+                if selected_offset % num_replicas == rank:
+                    positions.append(global_index // speaker_count)
+                selected_offset += 1
+            if positions:
+                yield tuple(positions)
+
+
 class ToyDataset(Dataset[Sample]):
     """Deterministic in-memory codec samples for model contract tests."""
 
     def __init__(
         self,
         codec_name: str,
-        codec: Codec,
+        codec: CodecBackend,
         *,
         samples: int = 8,
         frames: int = 4,
@@ -164,7 +266,18 @@ class ToyDataset(Dataset[Sample]):
         self.samples = config.toy_samples
         self.frames = config.toy_frames
         self.frame_rate = codec.frame_rate
-        self.codebook_sizes = _codebook_sizes(self.view, codec)
+        if self.view is AudioView.BICODEC:
+            structured = structured_codec(codec)
+            self.codebook_sizes = tuple(structured.semantic_codebook_sizes)
+            self.acoustic_codebook_sizes = tuple(structured.acoustic_codebook_sizes)
+            unit_length = structured.acoustic_unit_length
+            if unit_length is None:
+                raise ValueError("BiCodec toy data requires a fixed acoustic unit length.")
+            self.acoustic_unit_length = unit_length
+        else:
+            self.codebook_sizes = _codebook_sizes(self.view, cast(Codec, codec))
+            self.acoustic_codebook_sizes = ()
+            self.acoustic_unit_length = None
 
     def __len__(self) -> int:
         return self.samples
@@ -189,6 +302,23 @@ class ToyDataset(Dataset[Sample]):
 
     def _audio(self, offset: int) -> AudioItem:
         steps = torch.arange(self.frames, dtype=torch.long)
+        if self.view is AudioView.BICODEC:
+            semantic = ((steps + offset) % self.codebook_sizes[0]).unsqueeze(-1)
+            unit_length = self.acoustic_unit_length
+            if unit_length is None:
+                raise RuntimeError("BiCodec toy data is missing its acoustic unit length.")
+            acoustic_steps = torch.arange(unit_length, dtype=torch.long)
+            acoustic = torch.stack(
+                [
+                    (acoustic_steps + offset + codebook) % size
+                    for codebook, size in enumerate(self.acoustic_codebook_sizes)
+                ],
+                dim=-1,
+            )
+            return AudioItem(
+                views={AudioView.BICODEC: {"semantic": semantic, "acoustic": acoustic}},
+                meta={AudioMeta.DURATION: self.frames / self.frame_rate},
+            )
         columns = [
             (steps + offset + codebook) % size
             for codebook, size in enumerate(self.codebook_sizes)
@@ -201,6 +331,7 @@ class ToyDataset(Dataset[Sample]):
 
 def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Sample]:
     if config.name is DatasetName.TOY:
+        _reject_speaker(config)
         return _apply_split_manifest(
             ToyDataset(
                 runtime.codec_name,
@@ -211,7 +342,12 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
             config,
         )
     if config.name is DatasetName.WMT19_TTS:
+        _reject_speaker(config)
         from zhuyin.datasets.wmt19_tts import wmt19_tts_codec
+
+        codec_name = (
+            "stable" if runtime.codec_name == "stable_codec" else runtime.codec_name
+        )
 
         return _apply_split_manifest(
             cast(
@@ -219,7 +355,7 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
                 cast(
                     object,
                     wmt19_tts_codec(
-                        codec=runtime.codec_name,
+                        codec=codec_name,
                         root=(
                             None
                             if config.root is None
@@ -231,7 +367,50 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
             ),
             config,
         )
+    if config.name is DatasetName.QWEN_TTS_SPEAKER:
+        if runtime.codec_name not in {"bicodec", "longcat"}:
+            raise ValueError(
+                "qwen_tts_speaker supports only the bicodec and longcat runtimes."
+            )
+        from zhuyin.datasets.qwen_tts_speech import qwen_tts_speaker_codec_grid
+
+        grid = qwen_tts_speaker_codec_grid(
+            codec=runtime.codec_name,
+            root=None if config.root is None else Path(config.root).expanduser(),
+            split=config.split,
+        )
+        return _apply_split_manifest(
+            SpeakerGridCellsDataset(grid, speaker=config.speaker),
+            config,
+        )
     raise AssertionError(f"unsupported dataset: {config.name}")
+
+
+def _reject_speaker(config: DatasetConfig) -> None:
+    if config.speaker is not None:
+        raise ValueError(
+            "dataset speaker selection is supported only by qwen_tts_speaker."
+        )
+
+
+def _single_cell(sample: Sample, *, global_index: int) -> Sample:
+    for ref, expected in (
+        ((Role.DEFAULT, Modality.TEXT), TextItem),
+        ((Role.DEFAULT, Modality.AUDIO), AudioItem),
+    ):
+        try:
+            item = sample[ref]
+        except KeyError as error:
+            raise ValueError(
+                f"Qwen TTS speaker cell {global_index} must use Role.DEFAULT "
+                "text and audio items."
+            ) from error
+        if not isinstance(item, expected):
+            raise TypeError(
+                f"Qwen TTS speaker cell {global_index} {ref!r} must contain "
+                f"{expected.__name__}."
+            )
+    return sample
 
 
 def _apply_split_manifest(
@@ -324,12 +503,15 @@ def _codebook_sizes(view: AudioView, codec: Codec) -> tuple[int, ...]:
         if len(sizes) != 1:
             raise ValueError("UniCodec toy data requires exactly one codebook.")
         return sizes
+    if view is AudioView.STABLE:
+        return sizes
     raise ValueError(f"unsupported toy dataset audio view: {view.value}")
 
 
 __all__ = [
     "DatasetConfig",
     "DatasetName",
+    "SpeakerGridCellsDataset",
     "SplitManifestDataset",
     "ToyDataset",
     "load_dataset",

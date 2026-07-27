@@ -38,6 +38,21 @@ class TokenGenerator(Protocol):
     ) -> Tensor: ...
 
 
+@runtime_checkable
+class StructuredTokenGenerator(TokenGenerator, Protocol):
+    def generate_full_codec_sequence(
+        self,
+        prompt_ids: Tensor,
+        *,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        prompt_attention_mask: Tensor | None = None,
+        do_sample: bool = True,
+        use_cache: bool = True,
+    ) -> Tensor: ...
+
+
 class TextEvaluationModel(TokenGenerator, Protocol):
     @property
     def layout(self) -> Layout: ...

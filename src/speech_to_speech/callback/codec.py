@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import torch
+from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
+from typing import cast
 
 from ..datamodule.protocol import DatasetRuntime
 from ..datamodule.single import build_single_sample_from_codes
@@ -13,6 +15,7 @@ from ..datamodule.types import (
     TrainBatch,
     TrainInputBatch,
 )
+from ..runtime.types import Codec, structured_codec, supports_structured
 
 
 class OnDeviceCodecMaterializer:
@@ -55,9 +58,27 @@ class OnDeviceCodecMaterializer:
             waveform = sample.waveform
             if device is not None:
                 waveform = waveform.to(device=device)
-            codes = _encoded_codes(
-                self.runtime.codec.encode(_batched_waveform(waveform), sample.sample_rate)
-            )
+            batched_waveform = _batched_waveform(waveform)
+            if supports_structured(self.runtime.codec):
+                encoded = structured_codec(self.runtime.codec).tokenize(
+                    batched_waveform,
+                    sample.sample_rate,
+                )
+                if not isinstance(encoded, SemanticAcousticCodes):
+                    raise TypeError("structured codec tokenize must return SemanticAcousticCodes.")
+                if encoded.semantic.size(0) != 1 or encoded.acoustic.size(0) != 1:
+                    raise ValueError("per-sample codec fallback expects one encoded item.")
+                codes: object = SemanticAcousticCodes(
+                    semantic=encoded.semantic[0].detach().cpu(),
+                    acoustic=encoded.acoustic[0].detach().cpu(),
+                )
+            else:
+                codes = _encoded_codes(
+                    cast(Codec, self.runtime.codec).encode(
+                        batched_waveform,
+                        sample.sample_rate,
+                    )
+                )
             samples.append(build_single_sample_from_codes(sample, codes, self.runtime))
         return _move_model_batch(
             ModelBatch.from_samples(samples, pad_token_id=batch.pad_token_id),

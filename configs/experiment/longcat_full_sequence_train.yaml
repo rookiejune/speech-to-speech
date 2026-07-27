@@ -1,8 +1,0 @@
-# @package _global_
-defaults:
-  - override /runtime: longcat_full_sequence
-  - override /model/acoustic: none
-  - _self_
-
-output_subdir: 014-longcat-full-sequence/${stage.name}/${run_name}
-

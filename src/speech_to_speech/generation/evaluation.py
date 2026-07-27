@@ -80,6 +80,51 @@ def evaluate(
         model.train(was_training)
 
 
+@torch.no_grad()
+def reference_audio(
+    model: "FlowModel | RVQModel",
+    batch: ModelBatch,
+    codec: AcousticCodec,
+    *,
+    seed: int = 0,
+) -> tuple[Tensor, Tensor]:
+    """Decode target audio and a target-semantic teacher-forced sample."""
+    batch = device_batch(batch, next(model.parameters()).device)
+    target_data = batch.acoustic_target
+    if target_data is None or batch.acoustic_target_mask is None:
+        raise RuntimeError("reference audio requires complete target fields")
+    if batch.input_ids.size(0) != 1:
+        raise ValueError("reference audio currently requires batch size 1")
+
+    was_training = model.training
+    model.eval()
+    try:
+        hidden_states = model.token_hidden_states(
+            batch.input_ids,
+            attention_mask=batch.attention_mask,
+        )
+        condition = model.target_frame_condition(
+            hidden_states, target_data["token_positions"]
+        )
+        target_features = codec.acoustic_codes_to_features(
+            target_data["codes"].clamp_min(0)
+        )
+        valid = batch.acoustic_target_mask[0]
+        semantic = target_data["semantic_codes"][0, valid].unsqueeze(0)
+        target_features = target_features[0, valid].unsqueeze(0)
+        target_waveform = mono(codec.decode_features(semantic, target_features))
+        sampled = model.sample_acoustic_features(
+            condition,
+            mask=batch.acoustic_target_mask,
+            generator=torch.Generator(device=condition.device).manual_seed(seed),
+        )
+        sampled = sampled[0, valid].unsqueeze(0)
+        reference_waveform = mono(codec.decode_features(semantic, sampled))
+        return target_waveform, reference_waveform
+    finally:
+        model.train(was_training)
+
+
 def device_batch(batch: ModelBatch, device: torch.device) -> ModelBatch:
     def move(value: Tensor | None) -> Tensor | None:
         return None if value is None else value.to(device)

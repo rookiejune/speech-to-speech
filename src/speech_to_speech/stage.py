@@ -245,7 +245,11 @@ def parameter_group(name: str) -> ParameterGroup:
         return ParameterGroup.SEMANTIC_AUDIO_ADAPTER
     if name.startswith("semantic_audio_output_adapter."):
         return ParameterGroup.SEMANTIC_AUDIO_OUTPUT
-    if name.startswith("acoustic_decoder.") or name.startswith("acoustic_flow."):
+    if (
+        name.startswith("acoustic_condition.")
+        or name.startswith("acoustic_decoder.")
+        or name.startswith("acoustic_flow.")
+    ):
         return ParameterGroup.ACOUSTIC_DECODER
     raise ValueError(f"parameter {name!r} does not belong to a stage group.")
 

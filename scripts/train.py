@@ -18,6 +18,7 @@ from speech_to_speech.callback.logging import (
     GradNormLogger,
     LossSummary,
     OutputsLogger,
+    TaskSampleLogger,
 )
 from speech_to_speech.datamodule import DataModule
 from speech_to_speech.datamodule.joint import LoaderSchedule
@@ -277,6 +278,25 @@ def training_callbacks(
     )
     if validation_history is not None:
         callbacks.append(validation_history)
+    if config.callbacks.task_sample.enabled:
+        for loader_name, indices in config.callbacks.task_sample.indices_by_loader.items():
+            if loader_name not in config.stage.loaders:
+                raise ValueError(
+                    f"task sample callback references unknown loader {loader_name!r}."
+                )
+            callbacks.append(
+                TaskSampleLogger(
+                    indices,
+                    config.callbacks.task_sample.every_n_steps,
+                    loader_name=loader_name,
+                    every_audio_seconds=config.callbacks.task_sample.every_audio_seconds,
+                    max_new_tokens=config.callbacks.task_sample.max_new_tokens,
+                    temperature=config.callbacks.task_sample.temperature,
+                    top_p=config.callbacks.task_sample.top_p,
+                    do_sample=config.callbacks.task_sample.do_sample,
+                    use_cache=config.callbacks.task_sample.use_cache,
+                )
+            )
     if config.callbacks.grad_norm.enabled and performance is None:
         callbacks.append(
             GradNormLogger(

@@ -5,11 +5,12 @@ from functools import cached_property
 from typing import Protocol
 
 from anydataset.types import AudioView
+from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 
 from ..runtime import AudioRepresentation
 from ..runtime.protocol import DataRuntime
-from ..runtime.types import AudioTokenizer, Codec, TextTokenizer
+from ..runtime.types import AudioTokenizer, CodecBackend, TextTokenizer
 
 
 class TextRuntime(Protocol):
@@ -28,7 +29,7 @@ class TextRuntime(Protocol):
 
 class DatasetRuntime(DataRuntime, Protocol):
     @cached_property
-    def codec(self) -> Codec: ...
+    def codec(self) -> CodecBackend: ...
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,9 @@ class DataRuntimeSnapshot:
     audio_view: AudioView
     codec_frame_rate: float
     audio_representation: AudioRepresentation
+    semantic_codec_artifact: str | None
+    acoustic_layout: AcousticLayout
+    acoustic_unit_length: int | None
     text_tokenizer: TextTokenizer
     audio_tokenizer: AudioTokenizer
     layout_blocks: tuple[tuple[str, tuple[int, int]], ...]
@@ -77,6 +81,9 @@ class DataRuntimeSnapshot:
             audio_view=runtime.audio_view,
             codec_frame_rate=runtime.codec_frame_rate,
             audio_representation=runtime.audio_representation,
+            semantic_codec_artifact=getattr(runtime, "semantic_codec_artifact", None),
+            acoustic_layout=getattr(runtime, "acoustic_layout", AcousticLayout.FRAME_ALIGNED),
+            acoustic_unit_length=getattr(runtime, "acoustic_unit_length", None),
             text_tokenizer=runtime.text_tokenizer,
             audio_tokenizer=runtime.audio_tokenizer,
             layout_blocks=tuple(runtime.layout.blocks.items()),

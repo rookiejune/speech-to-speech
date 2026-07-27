@@ -1,0 +1,5 @@
+# @package _global_
+defaults:
+  - override /stage: stage_3
+  - override /parameter_policy: speech_interface_top_third
+  - _self_

@@ -109,7 +109,7 @@ class TrainingFlopsTest(unittest.TestCase):
             model.acoustic_decoder,
             batch=2,
             frames=3,
-        )
+        ) + 3 * linear(model.acoustic_condition.projection, sparse.acoustic_target_mask.numel())
         self.assertEqual(_flops(module, sparse), expected)
         self.assertEqual(_flops(module, dense), _flops(module, sparse))
 
@@ -133,7 +133,7 @@ class TrainingFlopsTest(unittest.TestCase):
         expected = _token_expected(model, sparse) + 3 * rvq_decoder(
             model.acoustic_decoder,
             valid_frames=int(sparse_mask.sum().item()),
-        )
+        ) + 3 * linear(model.acoustic_condition.projection, sparse_mask.numel())
         self.assertEqual(_flops(module, sparse), expected)
         self.assertGreater(_flops(module, dense), _flops(module, sparse))
 

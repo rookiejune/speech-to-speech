@@ -6,6 +6,7 @@ import torch
 from anydataset.types import Modality
 from torch import Tensor
 
+from ..runtime import AudioRepresentation
 from ..task import Task
 from ._tokenization import token_ids
 from .protocol import DataRuntime, TextRuntime
@@ -63,7 +64,9 @@ def build_speech_sample(
 
     if target_modality is Modality.AUDIO:
         response_ids = _boa_eoa(response_ids, runtime)
-        if target.acoustic_codes is not None:
+        if target.acoustic_codes is not None and getattr(runtime, "semantic_codec_artifact", None) is None and (
+            runtime.audio_representation is not AudioRepresentation.FULL_CODEC_SEQUENCE
+        ):
             target_semantic_codes = target.semantic_codes
             target_acoustic_codes = target.acoustic_codes
     else:

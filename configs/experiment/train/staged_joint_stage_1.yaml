@@ -1,0 +1,5 @@
+# @package _global_
+defaults:
+  - override /stage: stage_1
+  - override /parameter_policy: speech_interface
+  - _self_

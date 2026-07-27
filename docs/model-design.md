@@ -25,14 +25,15 @@ Raw Sample
     -> FlowModel | RVQModel
          -> token backbone
          -> text / semantic-audio token heads
-         -> flow | RVQ acoustic decoder
+         -> aligned hidden state -> HiddenConditionAdapter -> flow | RVQ acoustic decoder
 ```
 
 设计原则：
 
 1. 全局 token 序列同时容纳 text token 与 semantic-audio token。
 2. acoustic stream 只为已经可见的 speech token span 提供 side channel；response acoustic target 不注入 backbone。
-3. backbone 和 acoustic decoder 通过 frame-aligned hidden-state contract 连接。
+3. backbone 和 acoustic decoder 通过 frame-aligned hidden-state contract 连接；adapter 显式隔离
+   backbone hidden dimension 与 acoustic generator condition dimension。
 4. runtime 在入口创建并显式传给 model 与 datamodule；底层 model/data 代码不读取 singleton。
 5. flow 与 RVQ 是显式组合，非法配置不能通过未消费字段静默进入模型。
 
@@ -184,6 +185,29 @@ frame 里只有一个 codebook。有独立 acoustic codebook 的 codec 只有在
 或选择 full-code sequence 时才可以作为 token-only baseline。ODE sampler 由 `runtime.Config.flow_*` 统一拥有；
 入口只校验 flow/RVQ 所需的 codec capability，不自动改写 composition。
 
+semantic-only 路线的跨仓库训练分为两个 phase：
+
+```text
+Phase A: semantic codes -> SAC conditioner -> acoustic generator pretraining
+Phase B: aligned backbone hidden state -> HiddenConditionAdapter -> initialized generator joint training
+```
+
+Phase A 由 `semantic-acoustic-codec` 拥有。Phase B 通过 `acoustic.init_artifact` 加载 SAC 的
+`AcousticGeneratorArtifact`，只迁移 generator 权重和其 condition/acoustic contract；SAC semantic/reference
+conditioner 不进入 S2S model。artifact I/O、route/backend/config 校验由 `pl_module.composition` 持有，
+`FlowModel`/`RVQModel` 构造器只接收已加载对象，不读取路径。
+
+`HiddenConditionAdapter` 固定为 `LayerNorm + Linear(backbone_hidden_dim, condition_dim)`，teacher-forcing 与
+autoregressive generation 共用同一路径，并归入现有 `ACOUSTIC_DECODER` 参数组。当前初始化仅支持
+frame-aligned generator：Flow 同时迁移 decoder 和 feature normalization；RVQ 只支持 SAC
+`codebook_ar`，`MTP` 与 fixed-length artifact 显式失败。联合初始化只校验 acoustic metadata；artifact
+里的 semantic vocab/embedding 是来源记录，不约束 hidden-state consumer。
+
+`runtime.semantic_codec_artifact` 是另一条独立用途：它配合 `model/acoustic=none` 加载完整 semantic
+support 做 waveform reconstruction，不初始化联合训练 decoder，并继续校验 semantic + acoustic 全部
+backend metadata。新增 adapter 改变了 Flow/RVQ checkpoint schema；旧 S2S checkpoint 缺少
+`acoustic_condition.*`，strict resume 会显式失败，不做隐式补参。
+
 model 的训练能力是：
 
 - `token_hidden_states()`：返回完整 backbone 表示，不构造 vocabulary logits。
@@ -254,14 +278,19 @@ collate 时读取；worker 侧 runtime 是不含 backbone/codec 的数据快照�
 不额外乘到 loss 上；token、flow、RVQ 与 REPA loss 跨联合子 batch 按有效 token/frame 数聚合。
 
 `scripts/overfit.py` 只用于 fixed-sample overfit、smoke 和参数冻结合同验收；正式训练入口是
-`scripts/train.py`。`configs/stage/stage_*.yaml` 是 Stage 0-4 的默认训练契约：每个 stage 显式声明 loader
+`scripts/train.py`。`configs/stage/stage_*.yaml` 是 Stage 0-4 的数据计划契约：每个 stage 显式声明 loader
 权重、loader 内 task 权重和 `batches_per_step`。独立的 `parameter_policy` 显式声明可训练参数组、
-冻结参数组和 `backbone_top_fraction`，入口在 Trainer 创建前应用一次。experiment 当前约定
+冻结参数组和 `backbone_top_fraction`，入口在 Trainer 创建前应用一次。正式
+`experiment=train/staged_joint_stage_1..4` 当前约定
 Stage 1-2 使用 speech-interface policy，Stage 3 解冻 Qwen 顶部 1/3 block 与 final norm，
 Stage 4 使用 full policy；stage 本身不隐式选择 policy。RVQ decoder 的结构性冻结参数始终保持
 frozen。正式 joint entry 以
 `find_unused_parameters=False` 为目标时，同一 optimizer step 必须通过 joint batch 覆盖所有
 仍可训练的执行路径，或在进入该 step 前冻结未使用参数组。
+
+这里的 Stage 0-4 只表示 S2S 数据、任务和参数策略日程，不是上文 Phase A/B。SAC generator pretraining
+在进入任一使用 `acoustic.init_artifact` 的 S2S experiment 之前独立完成；S2S stage 不在运行中创建或
+替换 SAC artifact。
 
 正式 train 只在配置了独立 speech validation spec 时让 `val_dataloader()` 返回真实 loader；
 没有 spec 时返回 `None`，text train loader 不被复用为 validation。teacher-forcing 指标由 loss 层的

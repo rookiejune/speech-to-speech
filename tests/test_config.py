@@ -41,6 +41,7 @@ from scripts.train import (
 from speech_to_speech.datamodule import DataModule
 from speech_to_speech.datamodule.module import LoaderKind
 from speech_to_speech.datamodule.dataset import DatasetName
+from speech_to_speech.datamodule.types import DataShape
 from speech_to_speech.model import (
     AdapterType,
     Config as ModelConfig,
@@ -94,6 +95,21 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(token.runtime.codec, "unicodec")
         self.assertIs(flow.model.semantic_audio_adapter, AdapterType.LINEAR)
         self.assertFalse(flow.callbacks.performance.enabled)
+
+    def test_acoustic_generator_initialization_is_explicit(self):
+        flow = overfit(
+            _compose("overfit", "acoustic.init_artifact=/tmp/flow-artifact")
+        )
+        rvq = overfit(
+            _compose(
+                "overfit",
+                "model/acoustic=rvq",
+                "acoustic.init_artifact=/tmp/rvq-artifact",
+            )
+        )
+
+        self.assertEqual(flow.acoustic.init_artifact, "/tmp/flow-artifact")
+        self.assertEqual(rvq.acoustic.init_artifact, "/tmp/rvq-artifact")
 
     def test_toy_smoke_selects_model_and_dataset_without_a_toy_runtime(self):
         config = overfit(_compose("overfit", "experiment=toy_smoke"))
@@ -156,6 +172,25 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.acoustic.type, AcousticType.NONE.value)
         self.assertIsInstance(config.model.toy, ToyConfig)
         self.assertIs(config.data.name, DatasetName.TOY)
+
+    def test_bicodec_smokes_use_qwen_single_speaker_cells(self):
+        with patch.dict(
+            "os.environ",
+            {"SPEECH_TO_SPEECH_BICODEC_SEMANTIC_ARTIFACT": "/tmp/bicodec-semantic"},
+        ):
+            semantic = overfit(
+                _compose("overfit", "experiment=bicodec_semantic_only_smoke")
+            )
+        full = overfit(
+            _compose("overfit", "experiment=bicodec_full_sequence_smoke")
+        )
+
+        for config in (semantic, full):
+            self.assertIsInstance(config, OverfitTokenConfig)
+            self.assertEqual(config.runtime.codec, "bicodec")
+            self.assertIs(config.data.name, DatasetName.QWEN_TTS_SPEAKER)
+            self.assertIs(config.data.shape, DataShape.SINGLE)
+            self.assertIsNone(config.data.speaker)
 
     def test_composition_must_match_codec_capabilities(self):
         flow = overfit(_compose("overfit"))
@@ -537,6 +572,67 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "semantic_codec_artifact"):
             parse_train(_compose("train", "model/acoustic=none"))
 
+    def test_parameter_policy_smoke_composes_each_supported_policy(self):
+        policies = (
+            ParameterPolicyName.FULL,
+            ParameterPolicyName.SPEECH_INTERFACE,
+            ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD,
+            ParameterPolicyName.SEMANTIC_ONLY,
+            ParameterPolicyName.ACOUSTIC_ONLY,
+        )
+
+        for policy in policies:
+            with self.subTest(policy=policy.value):
+                config = parse_train(
+                    _compose(
+                        "train",
+                        "experiment=train/parameter_policy_smoke",
+                        f"parameter_policy={policy.value}",
+                    )
+                )
+
+                self.assertIs(config.parameter_policy.name, policy)
+                self.assertEqual(config.train.max_steps, 2)
+                self.assertEqual(config.trainer.accelerator, "cpu")
+                self.assertIn(policy.value, config.output_subdir)
+
+    def test_staged_joint_experiments_bind_stage_and_parameter_policy(self):
+        policies = (
+            ParameterPolicyName.SPEECH_INTERFACE,
+            ParameterPolicyName.SPEECH_INTERFACE,
+            ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD,
+            ParameterPolicyName.FULL,
+        )
+
+        for index, policy in enumerate(policies, start=1):
+            with self.subTest(stage=index):
+                config = parse_train(
+                    _compose(
+                        "train",
+                        f"experiment=train/staged_joint_stage_{index}",
+                    )
+                )
+
+                self.assertIs(config.stage.name, StageName(f"stage_{index}"))
+                self.assertIs(config.parameter_policy.name, policy)
+
+    def test_stable_codec_stage1_long_run_enables_fixed_samples_for_asr_and_tts(self):
+        config = parse_train(
+            _compose("train", "experiment=train/stable_codec_stage1_train")
+        )
+
+        self.assertEqual(config.train.max_steps, 1_000_000)
+        self.assertEqual(config.stage.name, StageName.STAGE_1)
+        self.assertEqual(config.runtime.codec, "stable_codec")
+        self.assertEqual(config.runtime.audio_representation.value, "full_codec_sequence")
+        self.assertIsNone(config.runtime.audio_tokenizer)
+        self.assertTrue(config.callbacks.task_sample.enabled)
+        self.assertEqual(
+            config.callbacks.task_sample.indices_by_loader,
+            {"asr": [0], "tts": [0]},
+        )
+        self.assertEqual(config.callbacks.checkpoint.every_n_train_steps, 10_000)
+
     def test_fdu_stage_smoke_configs_cover_formal_train_stages(self):
         stage_0 = overfit(_compose("overfit", "experiment=fdu_stage_0_smoke"))
         self.assertIsInstance(stage_0, OverfitRVQConfig)
@@ -550,7 +646,7 @@ class ConfigTest(unittest.TestCase):
         for index in range(1, 5):
             with self.subTest(stage=index):
                 config = parse_train(
-                    _compose("train", f"experiment=fdu_stage_{index}_smoke")
+                    _compose("train", f"experiment=train/fdu_stage_{index}_smoke")
                 )
 
                 self.assertIsInstance(config, StagedTrainRVQConfig)
@@ -585,7 +681,7 @@ class ConfigTest(unittest.TestCase):
                 config = parse_train(
                     _compose(
                         "train",
-                        f"experiment=fdu_stage_{index}_acoustic_none_smoke",
+                        f"experiment=train/fdu_stage_{index}_acoustic_none_smoke",
                     )
                 )
 
@@ -665,7 +761,7 @@ class ConfigTest(unittest.TestCase):
         config = parse_train(
             _compose(
                 "train",
-                "experiment=014_stage1_pilot_validation_smoke",
+                "experiment=train/014_stage1_pilot_validation_smoke",
                 "data.dataset.root=/tmp/pilot",
                 "data.dataset.split_manifest=/tmp/pilot/splits.json",
             )
@@ -685,7 +781,7 @@ class ConfigTest(unittest.TestCase):
         canary = parse_train(
             _compose(
                 "train",
-                "experiment=014_stage1_pilot_canary",
+                "experiment=train/014_stage1_pilot_canary",
                 "data.dataset.root=/tmp/pilot",
                 "data.dataset.split_manifest=/tmp/pilot/splits.json",
             )
@@ -700,7 +796,7 @@ class ConfigTest(unittest.TestCase):
         resumed = parse_train(
             _compose(
                 "train",
-                "experiment=014_stage1_pilot_resume_500",
+                "experiment=train/014_stage1_pilot_resume_500",
                 "data.dataset.root=/tmp/pilot",
                 "data.dataset.split_manifest=/tmp/pilot/splits.json",
                 "train.ckpt_path=/tmp/pilot/step-100.ckpt",
@@ -715,7 +811,7 @@ class ConfigTest(unittest.TestCase):
         continued = parse_train(
             _compose(
                 "train",
-                "experiment=014_stage1_pilot_resume_2000",
+                "experiment=train/014_stage1_pilot_resume_2000",
                 "data.dataset.root=/tmp/pilot",
                 "data.dataset.split_manifest=/tmp/pilot/splits.json",
                 "train.ckpt_path=/tmp/pilot/step-500.ckpt",
@@ -729,7 +825,7 @@ class ConfigTest(unittest.TestCase):
         fp32 = parse_train(
             _compose(
                 "train",
-                "experiment=014_stage1_pilot_fp32_500",
+                "experiment=train/014_stage1_pilot_fp32_500",
                 "data.dataset.root=/tmp/pilot",
                 "data.dataset.split_manifest=/tmp/pilot/splits.json",
             )
@@ -743,7 +839,7 @@ class ConfigTest(unittest.TestCase):
         resumed_fp32 = parse_train(
             _compose(
                 "train",
-                "experiment=014_stage1_pilot_fp32_resume_1000",
+                "experiment=train/014_stage1_pilot_fp32_resume_1000",
                 "data.dataset.root=/tmp/pilot",
                 "data.dataset.split_manifest=/tmp/pilot/splits.json",
                 "train.ckpt_path=/tmp/pilot/fp32-step-500.ckpt",
@@ -766,7 +862,7 @@ class ConfigTest(unittest.TestCase):
             parse_train(
                 _compose(
                     "train",
-                    "experiment=014_stage1_pilot_resume_500",
+                    "experiment=train/014_stage1_pilot_resume_500",
                     "data.dataset.root=/tmp/pilot",
                     "data.dataset.split_manifest=/tmp/pilot/splits.json",
                 )
@@ -1107,6 +1203,8 @@ class ConfigTest(unittest.TestCase):
         self.assertIn('"trainer=static_ddp"', source)
         self.assertIn("fdu_stage_data_args data.dataset.root", source)
         self.assertIn("SPEECH_TO_SPEECH_STAGE:-stage_1", source)
+        self.assertIn('experiment="train/staged_joint_${stage}"', source)
+        self.assertIn('"experiment=${experiment}"', source)
 
     def test_fdu_project_jobs_source_workspace_environment(self):
         root = Path(__file__).parents[1]
@@ -1130,10 +1228,10 @@ class ConfigTest(unittest.TestCase):
     def test_stage1_resume_job_requires_and_forwards_checkpoint(self):
         root = Path(__file__).parents[1]
         jobs = {
-            "03_stage1_pilot_resume_500.sh": "014_stage1_pilot_resume_500",
-            "04_stage1_pilot_resume_2000.sh": "014_stage1_pilot_resume_2000",
+            "03_stage1_pilot_resume_500.sh": "train/014_stage1_pilot_resume_500",
+            "04_stage1_pilot_resume_2000.sh": "train/014_stage1_pilot_resume_2000",
             "06_stage1_pilot_fp32_resume_1000.sh": (
-                "014_stage1_pilot_fp32_resume_1000"
+                "train/014_stage1_pilot_fp32_resume_1000"
             ),
         }
 
@@ -1152,7 +1250,7 @@ class ConfigTest(unittest.TestCase):
             root / "jobs" / "014" / "05_stage1_pilot_fp32_500.sh"
         ).read_text()
 
-        self.assertIn('"experiment=014_stage1_pilot_fp32_500"', source)
+        self.assertIn('"experiment=train/014_stage1_pilot_fp32_500"', source)
         self.assertNotIn("SPEECH_TO_SPEECH_STAGE_CKPT_PATH", source)
         self.assertNotIn("train.ckpt_path=", source)
         self.assertIn('"$@"', source)
@@ -1168,25 +1266,25 @@ class ConfigTest(unittest.TestCase):
             ),
             (
                 "11_stage_1_smoke.sh",
-                "fdu_stage_1_smoke",
+                "train/fdu_stage_1_smoke",
                 "scripts/train.py",
                 "fdu_stage_data_args data.dataset.root",
             ),
             (
                 "12_stage_2_smoke.sh",
-                "fdu_stage_2_smoke",
+                "train/fdu_stage_2_smoke",
                 "scripts/train.py",
                 "fdu_stage_data_args data.dataset.root",
             ),
             (
                 "13_stage_3_smoke.sh",
-                "fdu_stage_3_smoke",
+                "train/fdu_stage_3_smoke",
                 "scripts/train.py",
                 "fdu_stage_data_args data.dataset.root",
             ),
             (
                 "14_stage_4_smoke.sh",
-                "fdu_stage_4_smoke",
+                "train/fdu_stage_4_smoke",
                 "scripts/train.py",
                 "fdu_stage_data_args data.dataset.root",
             ),
@@ -1198,25 +1296,25 @@ class ConfigTest(unittest.TestCase):
             ),
             (
                 "21_stage_1_acoustic_none_smoke.sh",
-                "fdu_stage_1_acoustic_none_smoke",
+                "train/fdu_stage_1_acoustic_none_smoke",
                 "scripts/train.py",
                 "fdu_stage_data_args data.dataset.root",
             ),
             (
                 "22_stage_2_acoustic_none_smoke.sh",
-                "fdu_stage_2_acoustic_none_smoke",
+                "train/fdu_stage_2_acoustic_none_smoke",
                 "scripts/train.py",
                 "fdu_stage_data_args data.dataset.root",
             ),
             (
                 "23_stage_3_acoustic_none_smoke.sh",
-                "fdu_stage_3_acoustic_none_smoke",
+                "train/fdu_stage_3_acoustic_none_smoke",
                 "scripts/train.py",
                 "fdu_stage_data_args data.dataset.root",
             ),
             (
                 "24_stage_4_acoustic_none_smoke.sh",
-                "fdu_stage_4_acoustic_none_smoke",
+                "train/fdu_stage_4_acoustic_none_smoke",
                 "scripts/train.py",
                 "fdu_stage_data_args data.dataset.root",
             ),
@@ -1229,7 +1327,7 @@ class ConfigTest(unittest.TestCase):
                 self.assertIn("workspace/jobs/env.sh", source)
                 self.assertIn(entry, source)
                 self.assertEqual(
-                    re.findall(r"\bexperiment=([a-z0-9_]+)", source),
+                    re.findall(r"\bexperiment=([a-z0-9_/]+)", source),
                     [experiment],
                 )
                 self.assertIn(data_call, source)

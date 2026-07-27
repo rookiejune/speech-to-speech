@@ -1,0 +1,40 @@
+# @package _global_
+defaults:
+  - override /stage: stage_1
+  - override /parameter_policy: speech_interface
+  - override /model: toy
+  - override /model/acoustic: rvq
+  - override /runtime: longcat_native
+  - override /data@data.dataset: toy
+  - override /trainer: default
+  - override /logging: csv
+  - _self_
+
+run_name: parameter-policy-${parameter_policy.name}
+output_subdir: parameter-policy-smoke/${run_name}
+
+runtime:
+  device: cpu
+  dtype: float32
+  attn_implementation:
+
+data:
+  dataloader:
+    batch_size: 1
+    num_workers: 0
+    pin_memory: false
+    persistent_workers: false
+
+train:
+  max_steps: 2
+
+trainer:
+  accelerator: cpu
+  devices: 1
+  precision: 32-true
+  log_every_n_steps: 1
+  enable_checkpointing: false
+
+callbacks:
+  checkpoint:
+    every_n_train_steps: 1

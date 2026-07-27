@@ -35,21 +35,34 @@ class RepaConfig:
 class FlowConfig:
     type: str = AcousticType.FLOW.value
     name: str = MISSING
+    init_artifact: Optional[str] = None
     decoder: DecoderConfig = field(default_factory=DecoderConfig)
     repa: RepaConfig = field(default_factory=RepaConfig)
+
+    def __post_init__(self) -> None:
+        _validate_init_artifact(self.init_artifact)
 
 
 @dataclass
 class RVQConfig:
     type: str = AcousticType.RVQ.value
     name: str = MISSING
+    init_artifact: Optional[str] = None
     decoder: DecoderConfig = field(default_factory=DecoderConfig)
+
+    def __post_init__(self) -> None:
+        _validate_init_artifact(self.init_artifact)
 
 
 @dataclass
 class AcousticNoneConfig:
     type: str = AcousticType.NONE.value
     name: str = "token"
+
+
+def _validate_init_artifact(value: Optional[str]) -> None:
+    if value is not None and not value:
+        raise ValueError("acoustic init_artifact must not be empty.")
 
 
 @dataclass
@@ -130,6 +143,19 @@ class TaskSampleCallbackConfig:
 
 
 @dataclass
+class StagedTaskSampleCallbackConfig:
+    enabled: bool = False
+    every_n_steps: int = 10_000
+    every_audio_seconds: Optional[float] = None
+    indices_by_loader: dict[str, list[int]] = field(default_factory=dict)
+    max_new_tokens: int = 256
+    temperature: float = 1.0
+    top_p: float = 1.0
+    do_sample: bool = False
+    use_cache: bool = True
+
+
+@dataclass
 class EvaluationCallbackConfig:
     enabled: bool = True
     every_audio_seconds: Optional[float] = None
@@ -179,6 +205,9 @@ class OverfitCallbacksConfig:
 
 @dataclass
 class StagedCallbacksConfig:
+    task_sample: StagedTaskSampleCallbackConfig = field(
+        default_factory=StagedTaskSampleCallbackConfig
+    )
     grad_norm: GradNormCallbackConfig = field(default_factory=GradNormCallbackConfig)
     checkpoint: CheckpointCallbackConfig = field(
         default_factory=CheckpointCallbackConfig
@@ -312,8 +341,43 @@ def train(config: DictConfig) -> StagedTrainConfig:
     _validate_audio_representation(result)
     if not result.stage.loaders:
         raise ValueError("formal train requires stage.loaders.")
+    _validate_task_samples(result)
     _validate_validation(result)
     return result
+
+
+def _validate_task_samples(config: StagedTrainConfig) -> None:
+    callback = config.callbacks.task_sample
+    if (
+        isinstance(callback.every_n_steps, bool)
+        or not isinstance(callback.every_n_steps, int)
+        or callback.every_n_steps <= 0
+    ):
+        raise ValueError("task sample every_n_steps must be a positive integer.")
+    if not callback.enabled:
+        return
+    if not callback.indices_by_loader:
+        raise ValueError(
+            "enabled staged task samples require indices_by_loader."
+        )
+    for loader_name, indices in callback.indices_by_loader.items():
+        if not isinstance(loader_name, str) or not loader_name:
+            raise TypeError("task sample loader names must be non-empty strings.")
+        if loader_name not in config.stage.loaders:
+            raise ValueError(
+                f"task sample callback references unknown loader {loader_name!r}."
+            )
+        if not indices:
+            raise ValueError(
+                f"task sample indices for loader {loader_name!r} must not be empty."
+            )
+        if any(
+            isinstance(index, bool) or not isinstance(index, int) or index < 0
+            for index in indices
+        ):
+            raise ValueError(
+                f"task sample indices for loader {loader_name!r} must be non-negative integers."
+            )
 
 
 def _validate_validation(config: StagedTrainConfig) -> None:
@@ -380,15 +444,20 @@ def _validate_audio_representation(
         raise ValueError(
             "runtime.semantic_codec_artifact requires model/acoustic=none."
         )
+    if config.runtime.codec == "bicodec" and acoustic is not AcousticType.NONE:
+        raise ValueError(
+            "BiCodec fixed-length acoustic units require model/acoustic=none; "
+            "use a semantic codec artifact or full_codec_sequence."
+        )
     if (
         acoustic is AcousticType.NONE
-        and config.runtime.codec == "longcat"
+        and config.runtime.codec in {"longcat", "bicodec"}
         and config.runtime.audio_representation is AudioRepresentation.DECOUPLED
         and config.runtime.semantic_codec_artifact is None
     ):
         raise ValueError(
-            "LongCat decoupled model/acoustic=none requires runtime.semantic_codec_artifact; "
-            "use runtime=longcat_full_sequence for FrameCodec token-only training."
+            "decoupled model/acoustic=none requires runtime.semantic_codec_artifact; "
+            "use a full_codec_sequence runtime for token-only training."
         )
 
 

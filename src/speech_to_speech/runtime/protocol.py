@@ -4,10 +4,17 @@ from functools import cached_property
 from typing import Protocol
 
 from anydataset.types import AudioView, Modality
+from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 
 from .runtime import AudioRepresentation
-from .types import AudioTokenizer, Backbone, Codec, SemanticCodec, TextTokenizer
+from .types import (
+    AudioTokenizer,
+    Backbone,
+    SemanticCodebookCodec,
+    SemanticCodec,
+    TextTokenizer,
+)
 
 
 class DataRuntime(Protocol):
@@ -22,6 +29,15 @@ class DataRuntime(Protocol):
 
     @property
     def audio_representation(self) -> AudioRepresentation: ...
+
+    @property
+    def semantic_codec_artifact(self) -> str | None: ...
+
+    @property
+    def acoustic_layout(self) -> AcousticLayout: ...
+
+    @property
+    def acoustic_unit_length(self) -> int | None: ...
 
     @cached_property
     def text_tokenizer(self) -> TextTokenizer: ...
@@ -47,7 +63,7 @@ class DataRuntime(Protocol):
 
 class GenerationRuntime(DataRuntime, Protocol):
     @cached_property
-    def codec(self) -> Codec: ...
+    def codec(self) -> SemanticCodebookCodec: ...
 
     @cached_property
     def semantic_codec(self) -> SemanticCodec: ...
@@ -60,6 +76,9 @@ class GenerationRuntime(DataRuntime, Protocol):
 
     @property
     def codec_audio_range(self) -> tuple[int, int]: ...
+
+    @property
+    def audio_head_range(self) -> tuple[int, int]: ...
 
     @cached_property
     def audio_generation_allowed_ids(self) -> tuple[int, ...]: ...

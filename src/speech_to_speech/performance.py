@@ -16,13 +16,14 @@ from transformers import Qwen3ForCausalLM, Qwen3Model
 from ._flops import (
     adapter,
     flow_decoder,
+    linear,
     qwen_backbone,
     rvq_decoder,
 )
 from .datamodule.types import ModelBatch
 from .loss import FlowObjective, LossItem, RVQObjective, TokenObjective
 from .model import TokenModel
-from .model.acoustic import FlowModel, RVQModel
+from .model.acoustic import FlowModel, HiddenConditionAdapter, RVQModel
 from .pl_module import SpeechToSpeechModule
 
 
@@ -107,6 +108,7 @@ class TrainingFlops:
                     batch=mask.size(0),
                     frames=mask.size(1),
                 )
+                forward += _acoustic_condition(model.acoustic_condition, mask)
         elif isinstance(model, RVQModel):
             target = _target(batch, model)
             if target is not None:
@@ -121,8 +123,23 @@ class TrainingFlops:
                     decoder,
                     valid_frames=int(mask.sum().item()),
                 )
+                forward += _acoustic_condition(model.acoustic_condition, mask)
 
         return training_flops_from_forward(float(forward), backward_multiplier=2.0)
+
+
+def _acoustic_condition(adapter: HiddenConditionAdapter, mask: Tensor) -> int:
+    if type(adapter) is not HiddenConditionAdapter:
+        raise TypeError("training FLOPs require the standard hidden condition adapter.")
+    if type(adapter.norm) is not nn.LayerNorm or type(adapter.projection) is not nn.Linear:
+        raise TypeError("hidden condition adapter uses unsupported modules.")
+    if adapter.norm.normalized_shape != (adapter.hidden_dim,):
+        raise ValueError("hidden condition adapter normalization does not match hidden_dim.")
+    if adapter.projection.in_features != adapter.hidden_dim:
+        raise ValueError("hidden condition projection does not match hidden_dim.")
+    if adapter.projection.out_features != adapter.condition_dim:
+        raise ValueError("hidden condition projection does not match condition_dim.")
+    return linear(adapter.projection, mask.numel())
 
 
 def _flow_objective(objective: FlowObjective, model: nn.Module) -> None:
