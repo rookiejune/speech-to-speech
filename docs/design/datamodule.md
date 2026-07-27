@@ -42,7 +42,10 @@
   多个子 batch，供静态 DDP 覆盖多条可训练执行路径。每个子 loader 自己保持单一 execution
   signature。
 - `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts` prepared data 或确定性的内存
-  `toy` data。toy codes 根据正式 codec 的 semantic/acoustic/full-sequence codebook 数量和值域构造。
+  `toy` data。可选的 `split_manifest` + `split_label` 把已加载的 map-style dataset 限制到
+  manifest 声明的非重复、非负索引；manifest 不替换底层 anydataset split，也不绕过其公开
+  dataloader/batch-planning 契约。toy codes 根据正式 codec 的 semantic/acoustic/full-sequence
+  codebook 数量和值域构造。
 - `ToyDataset`：提供完整 source/target audio+text raw sample，不读取文件、不修改全局 RNG。
 - `DataLoaderConfig(batch_size, num_workers, pin_memory, persistent_workers)` /
   `Config(codec, dataloader, shape, encode_missing_codes, dataset)`：公开的 DataLoader、

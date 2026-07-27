@@ -14,7 +14,9 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
   backbone；`model/acoustic` 选择 flow/RVQ composition，preset package 仍是顶层 `acoustic`，
   避免把 subtype 字段混入基础 `model.Config`。
 - `data`：overfit 数据源 preset；`data=toy` 使用 `DatasetConfig` 选择内存 codec samples，
-  production/fixed-sample experiment 默认仍使用 WMT19 TTS prepared data。
+  production/fixed-sample experiment 默认仍使用 WMT19 TTS prepared data。需要固定正式
+  train/dev/test 子集时，通过 `DatasetConfig.split_manifest` 和 `split_label` 显式选择
+  manifest 中的索引集合。
 - `pl_module`：完整映射 `pl_module.Config` 的 learning rate 与 weight decay；不再使用含义重复的
   `optimizer` 组。
 

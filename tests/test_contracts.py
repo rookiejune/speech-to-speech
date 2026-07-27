@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import multiprocessing
 import pickle
 import sys
@@ -32,7 +33,13 @@ from torch import nn
 
 from speech_to_speech.callback import OnDeviceCodecMaterializer
 from speech_to_speech.datamodule.collator import Collator, TextCollator, _allocate_tasks
-from speech_to_speech.datamodule.dataset import DatasetConfig, DatasetName, ToyDataset
+from speech_to_speech.datamodule.dataset import (
+    DatasetConfig,
+    DatasetName,
+    SplitManifestDataset,
+    ToyDataset,
+    load_dataset,
+)
 from speech_to_speech.datamodule.joint import LoaderSchedule, ScheduledDataLoader
 from speech_to_speech.datamodule.module import Config as DataConfig
 from speech_to_speech.datamodule.module import DataModule, LoaderSpec
@@ -1092,6 +1099,87 @@ class ContractTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "LongCat"):
             ToyDataset("longcat", codec)
+
+    def test_split_manifest_dataset_reads_explicit_indices(self):
+        with TemporaryDirectory() as tmpdir:
+            manifest = Path(tmpdir) / "split.json"
+            manifest.write_text(
+                json.dumps({"version": 1, "splits": {"pilot": [2, 0]}}),
+            )
+            runtime = _data_runtime()
+            config = DatasetConfig(
+                name=DatasetName.TOY,
+                split_manifest=str(manifest),
+                split_label="pilot",
+                toy_samples=3,
+            )
+
+            dataset = load_dataset(config, runtime)
+
+            self.assertIsInstance(dataset, SplitManifestDataset)
+            self.assertEqual(len(dataset), 2)
+            self.assertEqual(dataset.global_index(0), 2)
+            self.assertEqual(dataset.global_index(1), 0)
+            first = dataset[0]
+            text = first[(Role.SOURCE, Modality.TEXT)].views[TextView.TEXT]
+            self.assertEqual(text, "toy source 2")
+
+    def test_split_manifest_rejects_invalid_indices(self):
+        with TemporaryDirectory() as tmpdir:
+            manifest = Path(tmpdir) / "split.json"
+            manifest.write_text(
+                json.dumps({"version": 1, "splits": {"train": [0, 0]}}),
+            )
+            config = DatasetConfig(
+                name=DatasetName.TOY,
+                split_manifest=str(manifest),
+                toy_samples=2,
+            )
+
+            with self.assertRaisesRegex(ValueError, "repeats"):
+                load_dataset(config, _data_runtime())
+
+            manifest.write_text(
+                json.dumps({"version": 1, "splits": {"train": [2]}}),
+            )
+            with self.assertRaisesRegex(IndexError, "outside"):
+                load_dataset(config, _data_runtime())
+
+    def test_datamodule_uses_split_manifest_as_store_backed_subset(self):
+        with TemporaryDirectory() as tmpdir:
+            manifest = Path(tmpdir) / "split.json"
+            manifest.write_text(
+                json.dumps({"version": 1, "splits": {"pilot": [3, 1]}}),
+            )
+            runtime = _data_runtime()
+            config = DataConfig(
+                codec="longcat",
+                dataloader={"batch_size": 2, "num_workers": 0},
+                dataset=DatasetConfig(
+                    name=DatasetName.TOY,
+                    split_manifest=str(manifest),
+                    split_label="pilot",
+                    toy_samples=4,
+                ),
+            )
+            datamodule = DataModule(
+                runtime,
+                {"train": LoaderSpec.speech(config, {Task.TTS: 1.0})},
+            )
+
+            datamodule.setup()
+            loader = cast(Any, datamodule.train_dataloader())
+
+            self.assertIsInstance(loader.dataset, SplitManifestDataset)
+            self.assertEqual(loader.dataset.indices, (3, 1))
+            self.assertIs(loader.batch_sampler.dataset, loader.dataset)
+            self.assertTrue(loader.batch_sampler.shuffle)
+            samples = datamodule.train_samples([0, 1])
+            texts = [
+                sample[(Role.SOURCE, Modality.TEXT)].views[TextView.TEXT]
+                for sample in samples
+            ]
+            self.assertEqual(texts, ["toy source 3", "toy source 1"])
 
     def test_datamodule_rejects_runtime_codec_mismatch(self):
         config = DataConfig(

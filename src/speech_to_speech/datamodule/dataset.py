@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+from collections.abc import Sequence, Sized
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, cast
 
+from anydataset.dataset import MapStyleABC
 import torch
 from anydataset.types import (
     AudioItem,
@@ -34,6 +37,8 @@ class DatasetConfig:
     name: DatasetName = DatasetName.WMT19_TTS
     root: Optional[str] = None
     split: str = "train"
+    split_manifest: Optional[str] = None
+    split_label: str = "train"
     toy_samples: int = 8
     toy_frames: int = 4
 
@@ -46,6 +51,15 @@ class DatasetConfig:
             raise TypeError("dataset split must be a string.")
         if not self.split:
             raise ValueError("dataset split must not be empty.")
+        if self.split_manifest is not None and not isinstance(
+            self.split_manifest,
+            str,
+        ):
+            raise TypeError("split_manifest must be a string or None.")
+        if not isinstance(self.split_label, str):
+            raise TypeError("split_label must be a string.")
+        if not self.split_label:
+            raise ValueError("split_label must not be empty.")
         for name, value in (
             ("toy_samples", self.toy_samples),
             ("toy_frames", self.toy_frames),
@@ -54,6 +68,40 @@ class DatasetConfig:
                 raise TypeError(f"{name} must be an integer.")
             if value <= 0:
                 raise ValueError(f"{name} must be positive.")
+
+
+class SplitManifestDataset(MapStyleABC):
+    """Dataset view backed by an explicit split manifest index list."""
+
+    def __init__(
+        self,
+        dataset: Dataset[Sample],
+        indices: Sequence[int],
+        *,
+        manifest: Path,
+        label: str,
+    ) -> None:
+        self.dataset = dataset
+        self.manifest = manifest
+        self.label = label
+        self.indices = _validate_indices(
+            indices,
+            label=label,
+            count=len(cast(Sized, dataset)),
+        )
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __getitem__(self, index: int) -> Sample:
+        return self.dataset[self.global_index(index)]
+
+    def global_index(self, index: int) -> int:
+        if index < 0:
+            index += len(self.indices)
+        if index < 0 or index >= len(self.indices):
+            raise IndexError(index)
+        return self.indices[index]
 
 
 class ToyDataset(Dataset[Sample]):
@@ -116,31 +164,111 @@ class ToyDataset(Dataset[Sample]):
 
 def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Sample]:
     if config.name is DatasetName.TOY:
-        return ToyDataset(
-            runtime.codec_name,
-            runtime.codec,
-            samples=config.toy_samples,
-            frames=config.toy_frames,
+        return _apply_split_manifest(
+            ToyDataset(
+                runtime.codec_name,
+                runtime.codec,
+                samples=config.toy_samples,
+                frames=config.toy_frames,
+            ),
+            config,
         )
     if config.name is DatasetName.WMT19_TTS:
         from zhuyin.datasets.wmt19_tts import wmt19_tts_codec
 
-        return cast(
-            Dataset[Sample],
+        return _apply_split_manifest(
             cast(
-                object,
-                wmt19_tts_codec(
-                    codec=runtime.codec_name,
-                    root=(
-                        None
-                        if config.root is None
-                        else Path(config.root).expanduser()
+                Dataset[Sample],
+                cast(
+                    object,
+                    wmt19_tts_codec(
+                        codec=runtime.codec_name,
+                        root=(
+                            None
+                            if config.root is None
+                            else Path(config.root).expanduser()
+                        ),
+                        split=config.split,
                     ),
-                    split=config.split,
                 ),
             ),
+            config,
         )
     raise AssertionError(f"unsupported dataset: {config.name}")
+
+
+def _apply_split_manifest(
+    dataset: Dataset[Sample],
+    config: DatasetConfig,
+) -> Dataset[Sample]:
+    if config.split_manifest is None:
+        return dataset
+    manifest = Path(config.split_manifest).expanduser()
+    return SplitManifestDataset(
+        dataset,
+        _read_split_indices(manifest, config.split_label),
+        manifest=manifest,
+        label=config.split_label,
+    )
+
+
+def _read_split_indices(path: Path, label: str) -> tuple[int, ...]:
+    try:
+        payload = json.loads(path.read_text())
+    except FileNotFoundError as error:
+        raise FileNotFoundError(f"split manifest does not exist: {path}") from error
+    if not isinstance(payload, dict):
+        raise TypeError("split manifest root must be a JSON object.")
+    splits = payload.get("splits")
+    if not isinstance(splits, dict):
+        raise ValueError("split manifest must contain a 'splits' object.")
+    try:
+        raw = splits[label]
+    except KeyError as error:
+        raise ValueError(f"split manifest does not contain split {label!r}.") from error
+    if not isinstance(raw, list):
+        raise TypeError(f"split manifest split {label!r} must be a list.")
+    if not raw:
+        raise ValueError(f"split manifest split {label!r} must not be empty.")
+    return _index_tuple(raw, label=label)
+
+
+def _index_tuple(raw: Sequence[object], *, label: str) -> tuple[int, ...]:
+    indices: list[int] = []
+    seen: set[int] = set()
+    for offset, value in enumerate(raw):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(
+                f"split manifest split {label!r} index {offset} must be an integer."
+            )
+        index = value
+        if index < 0:
+            raise ValueError(
+                f"split manifest split {label!r} index {offset} must be non-negative."
+            )
+        if index in seen:
+            raise ValueError(
+                f"split manifest split {label!r} repeats dataset index {index}."
+            )
+        indices.append(index)
+        seen.add(index)
+    return tuple(indices)
+
+
+def _validate_indices(
+    indices: Sequence[int],
+    *,
+    label: str,
+    count: int,
+) -> tuple[int, ...]:
+    result = tuple(indices)
+    for offset, index in enumerate(result):
+        if index >= count:
+            raise IndexError(
+                f"split manifest split {label!r} index {offset} points outside "
+                f"dataset length {count}: {index}."
+            )
+    return result
 
 
 def _codebook_sizes(view: AudioView, codec: Codec) -> tuple[int, ...]:
@@ -165,6 +293,7 @@ def _codebook_sizes(view: AudioView, codec: Codec) -> tuple[int, ...]:
 __all__ = [
     "DatasetConfig",
     "DatasetName",
+    "SplitManifestDataset",
     "ToyDataset",
     "load_dataset",
 ]

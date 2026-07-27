@@ -1,5 +1,7 @@
 name: wmt19_tts
 root:
 split: train
+split_manifest:
+split_label: train
 toy_samples: 8
 toy_frames: 4
