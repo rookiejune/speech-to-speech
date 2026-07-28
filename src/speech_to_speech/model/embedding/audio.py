@@ -10,8 +10,8 @@ from ...runtime.types import (
     AudioTokenizer,
     Backbone,
     CodebookCodec,
-    SemanticCodebookCodec,
     codebook_codec,
+    semantic_feature_dim,
 )
 from ..adapter import AdapterType, create_adapter
 
@@ -24,7 +24,7 @@ class _Runtime(Protocol):
     def audio_tokenizer(self) -> AudioTokenizer: ...
 
     @cached_property
-    def codec(self) -> SemanticCodebookCodec: ...
+    def codec(self) -> object: ...
 
 
 def create_semantic_audio_modules(
@@ -241,7 +241,7 @@ def _unit_embeddings(codebook: Tensor, unit_ids: Tensor) -> Tensor:
 
 
 def embedding(
-    codec: SemanticCodebookCodec,
+    codec: object,
     tokenizer: AudioTokenizer,
     *,
     reference: Tensor,
@@ -254,18 +254,8 @@ def embedding(
     if initialization == "codec":
         base = base_weight(codebook_codec(codec), tokenizer)
     elif initialization == "random":
-        codebook = getattr(codec, "semantic_codebook", None)
-        if isinstance(codebook, Tensor):
-            if codebook.dim() not in {2, 3}:
-                raise ValueError(
-                    "codec semantic_codebook must have shape [vocab, dim] or "
-                    "[codebooks, vocab, dim]."
-                )
-            feature_dim = int(codebook.size(-1))
-        else:
-            feature_dim = int(getattr(codec, "semantic_feature_dim"))
         base = random_weight(
-            feature_dim,
+            semantic_feature_dim(codec),
             tokenizer,
             reference=reference,
         )

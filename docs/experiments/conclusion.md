@@ -2,8 +2,16 @@
 
 ## 适用范围
 
-本页最新真实实验是 014 的 pami201 1k stage 1 FP32-storage step-500 -> 1000 resume 与 reducer
-修复复验（2026-07-27）：step 1000 的两卡 NCCL dev RVQ CE 为 `8.773024`，相对修正后的
+本页最新真实实验是 016 的 Stable Codec stage 1 单步验收（2026-07-28）：真实
+`stabilityai/stable-codec-speech-16k`、Qwen3-0.6B 和 WMT19 prepared data 完成无 audio BPE 的
+ASR/TTS optimizer step 与 fixed-sample TensorBoard 闭环；loss 与 target/generated waveform finite，
+Stable 路线没有 Flow/RVQ `reference_generation`。该 smoke 不支持质量或收敛结论。015 的
+SAC Flow generator 到 S2S hidden-state joint 与 resume 验收（同日）使用真实 Qwen3-0.6B、
+LongCat、WMT19 sample 0 与 8 层 SAC Flow artifact
+完成初始化、forward/backward/optimizer、finite generation 和正式 Stage 1 step 1 -> 2 resume；
+hidden adapter 与 decoder 均有 finite 非零梯度和 checkpoint delta。该结果不支持质量或收敛结论，
+RVQ `codebook_ar` 仍未验证。014 的 pami201 1k stage 1 FP32-storage step-500 -> 1000 resume 与 reducer
+修复复验（2026-07-27）中，step 1000 的两卡 NCCL dev RVQ CE 为 `8.773024`，相对修正后的
 step-0 估计下降 `4.116%`，仍未达到既定 5% gate `8.694203`；step 900 的局部最低值为
 `8.747676`，末步略有回升。step-500 condition ablation 中 shuffled/zero condition 相对 correct
 condition 的 CE 分别恶化 `0.207262/0.301940`，证明 decoder 已使用 semantic condition。四组
@@ -15,7 +23,7 @@ validation artifact 使用了
 同日的 32-sample smoke/canary 另外证明：`/mnt/pami202` 超时时，可以用
 145 本地 runtime/HF cache 和 pami201 小数据根完成 stage 1 TTS/S2ST 两步入口、
 正式 `scripts/train.py` 100-step canary，以及重分片 root 的两卡 DDP/resume。
-014 的 LongCat stable stage 1 P0 验收（2026-07-25）只证明 debug copy 上历史 duration
+014 的 LongCat native stage 1 P0 验收（2026-07-25）只证明 debug copy 上历史 duration
 workaround、targeted tests、复旦 P0 wrapper 和 generation gate 已通过；当前代码已在缺失
 `AudioMeta.DURATION` 时从 codec frame count 和 runtime frame rate 推导音频秒数；原 pami202 root
 的 fingerprint 与 native token/RVQ 分布审计已经完成，pami201 1k pilot 已固化
@@ -30,6 +38,26 @@ model/runtime/data/generation 和按模态 token CE 仍有调整，因此相应 
 
 ## 已验证结论
 
+- 真实 Stable Codec stage 1 无 BPE 路线已完成单步 smoke：Stable backend 为 16 kHz、25 Hz、
+  单码本 46656 codes；ASR/TTS 每个 optimizer step 各提供一个 batch，total/token loss 为
+  `9.965052/8.360746`，均 finite。TensorBoard 的 ASR index 0 写出 target/generated text；TTS
+  index 0 写出 2.16s target 与 1.28s generated 16 kHz finite audio，tag 按 loader 隔离，且没有
+  `reference_generation`。该结论覆盖真实 codec/Qwen/data 的入口、生成语法、mixed dtype、训练和
+  fixed-sample 日志契约，不覆盖质量或收敛；正式 1M-step 长跑仍未执行
+  （[016 result, lines 3-19](results/016-stable-codec-stage1-smoke.md#L3-L19)，
+  [lines 35-64](results/016-stable-codec-stage1-smoke.md#L35-L64)，
+  [lines 68-78](results/016-stable-codec-stage1-smoke.md#L68-L78)）。
+- 真实 SAC frame-aligned Flow artifact 已完成 S2S `acoustic.init_artifact` joint smoke：
+  generator-only loader 在旧 conditioner state 不兼容时仍严格加载 162662400 个 generator
+  参数；WMT19 TTS sample 0 的 total/token/Flow loss 为 `13.177253/10.386825/2.790428`。
+  训练后生成 `[64,1024]` finite features 与 `[1,61440]` finite waveform；speech-interface
+  策略下 hidden adapter 4 个参数和 acoustic decoder 124 个参数的梯度 norm 分别为
+  `0.589404/1.639094`，均 finite。正式 Stage 1 checkpoint 从 step 1 恢复到 step 2，optimizer
+  counter 全部从 1 推进到 2；hidden adapter `4/4` 个 key、decoder `124/124` 个 key 发生 finite
+  变化，固定 `last.ckpt` 正确指向 `global_step=2`。该结论覆盖 Phase B 初始化、单步执行和
+  checkpoint resume，不覆盖 RVQ、质量或收敛
+  （[015 result, lines 3-23](results/015-sac-flow-joint-init-smoke.md#L3-L23)，
+  [lines 43-104](results/015-sac-flow-joint-init-smoke.md#L43-L104)）。
 - 014 的 FP32-storage 500-step A/B 与 500 -> 1000 resume 已完成：修复后的两卡 NCCL validation
   使用真实 `4265` frame 分母，step 500 RVQ CE 为 `8.780052`，step 1000 为 `8.773024`；step
   1000 相对修正初始估计只下降 `4.116%`，仍未达到 5% gate。step 900 的局部最低值为 `8.747676`

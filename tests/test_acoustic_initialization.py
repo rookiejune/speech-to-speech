@@ -3,9 +3,10 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
 
 import torch
-from anytrain.codec import AcousticLayout
+from anytrain.codec import AcousticLayout, SemanticAcousticCodec
 from semantic_acoustic_codec.config import DecoderConfig, Route
 from semantic_acoustic_codec.runtime import (
     SemanticSupportConfig,
@@ -17,6 +18,10 @@ from speech_to_speech.model.acoustic.initialization import load_acoustic_initial
 
 
 class _Backend:
+    name = "fake"
+    sample_rate = 16_000
+    frame_rate = 50.0
+    semantic_frame_rate = 50.0
     semantic_codebook = torch.randn(8, 4)
     acoustic_feature_dim = 4
     acoustic_codebook_sizes = (5, 7)
@@ -96,7 +101,7 @@ def _save(path: Path) -> None:
         acoustic_layout=backend.acoustic_layout,
         acoustic_unit_length=backend.acoustic_unit_length,
     )
-    save_artifact(path, support, config)
+    save_artifact(path, support, config, backend=cast(SemanticAcousticCodec, backend))
 
 
 if __name__ == "__main__":

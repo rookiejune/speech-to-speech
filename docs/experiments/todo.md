@@ -3,7 +3,7 @@
 设计契约见 `docs/model-design.md` 与 `docs/design/`；已验证结论及支撑结果见
 `docs/experiments/conclusion.md`。本文只维护未完成的验证和工程欠账，完成项及时删除。
 
-## 014 LongCat stable stage 1
+## 014 LongCat native stage 1
 
 剩余正式验收：
 
@@ -17,11 +17,15 @@
   BPE collapse artifact 不复用。
 - 只有 BPE 在 held-out 分布、decode finite、dev CE 和吞吐/显存上通过 A/B，才允许进入后续 stage。
 
+## 016 Stable Codec stage 1
+
+- 真实单步 smoke 已验证 Stable Codec、无 BPE、ASR/TTS fixed samples 和 finite loss；下一步使用
+  `jobs/015/01_stable_codec_stage1.sh` 启动正式 1,000,000-step 长跑，保留每 10,000 steps 的
+  TensorBoard fixed samples、周期 checkpoint 与最新恢复点。单步 smoke 不支持质量或收敛结论。
+
 ## 其他工程欠账
 
-- 用真实 frame-aligned SAC Flow artifact 跑一次 `acoustic.init_artifact` joint smoke，确认 decoder 与
-  feature normalization 迁移、hidden adapter/decoder 梯度、teacher-forced loss、autoregressive decode
-  和 checkpoint resume；RVQ 路线需先产出并验证 `codebook_ar` artifact，不能用默认 MTP 代替。
+- RVQ 路线需先产出并验证 `codebook_ar` artifact，不能用默认 MTP 代替。
 - stage 1 companion manifest 需要绑定 checkpoint、tokenizer/native-or-BPE、semantic vocab、
   RVQ codebook、decoder config、state-dict prefix whitelist 和 split fingerprint。
 - 后续进入 Qwen partial/full joint 前，再补齐 stage-specific FLOPs provider、validation generation、

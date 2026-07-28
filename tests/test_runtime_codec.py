@@ -2,13 +2,23 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 from anydataset.types import AudioView
+from anytrain.codec import AcousticLayout
 
-from speech_to_speech.runtime import AudioRepresentation, Config
+from speech_to_speech.runtime import AudioRepresentation, Config, Runtime
+from speech_to_speech.runtime.audio_tokenizer import (
+    BiCodecAudioTokenizer,
+    FlattenedAudioTokenizer,
+)
 from speech_to_speech.runtime.codec import load_codec
+from speech_to_speech.runtime.types import (
+    frame_codec,
+    supports_acoustic,
+    supports_structured,
+)
 
 
 class RuntimeCodecTest(unittest.TestCase):
@@ -51,6 +61,87 @@ class RuntimeCodecTest(unittest.TestCase):
 
         self.assertIs(config.audio_view, AudioView.STABLE)
 
+    def test_frame_aligned_structured_codec_uses_frame_full_sequence(self) -> None:
+        runtime = _runtime("longcat", _codec(AcousticLayout.FRAME_ALIGNED))
+
+        self.assertFalse(runtime.structured_full_sequence)
+        self.assertIsInstance(runtime.audio_tokenizer, FlattenedAudioTokenizer)
+
+    def test_fixed_length_structured_codec_uses_structured_full_sequence(self) -> None:
+        runtime = _runtime("bicodec", _codec(AcousticLayout.FIXED_LENGTH))
+
+        self.assertTrue(runtime.structured_full_sequence)
+        self.assertIsInstance(runtime.audio_tokenizer, BiCodecAudioTokenizer)
+
+    def test_frame_codec_rejects_invalid_codebook_sizes(self) -> None:
+        cases = (
+            ([], TypeError, "tuple"),
+            ((), ValueError, "non-empty"),
+            ((True,), TypeError, "integer"),
+            ((1.5,), TypeError, "integer"),
+            ((0,), ValueError, "positive"),
+        )
+        for sizes, error, message in cases:
+            with self.subTest(sizes=sizes), self.assertRaisesRegex(error, message):
+                frame_codec(_codec(AcousticLayout.FRAME_ALIGNED, codebook_sizes=sizes))
+
+    def test_frame_codec_rejects_invalid_rate_metadata(self) -> None:
+        cases = (
+            ({"sample_rate": True}, TypeError, "integer"),
+            ({"sample_rate": 0}, ValueError, "positive"),
+            ({"frame_rate": True}, TypeError, "number"),
+            ({"frame_rate": float("nan")}, ValueError, "finite"),
+            ({"frame_rate": 0.0}, ValueError, "positive"),
+        )
+        for overrides, error, message in cases:
+            codec = _codec(AcousticLayout.FRAME_ALIGNED, **overrides)
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(error, message):
+                frame_codec(codec)
+
+    def test_acoustic_capability_rejects_invalid_metadata(self) -> None:
+        cases = (
+            ({"sample_rate": True}, TypeError, "integer"),
+            ({"frame_rate": float("inf")}, ValueError, "finite"),
+            ({"acoustic_codebook_sizes": []}, TypeError, "tuple"),
+            ({"acoustic_codebook_sizes": ()}, ValueError, "non-empty"),
+            ({"acoustic_codebook_sizes": (True,)}, TypeError, "integer"),
+            ({"acoustic_feature_dim": True}, TypeError, "integer"),
+            ({"acoustic_feature_dim": 0}, ValueError, "positive"),
+        )
+        for overrides, error, message in cases:
+            codec = _codec(AcousticLayout.FRAME_ALIGNED, **overrides)
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(error, message):
+                supports_acoustic(codec)
+
+    def test_structured_capability_rejects_invalid_metadata(self) -> None:
+        cases = (
+            ({"semantic_codebook_sizes": []}, TypeError, "tuple"),
+            ({"semantic_codebook_sizes": ()}, ValueError, "non-empty"),
+            ({"semantic_codebook_sizes": (True,)}, TypeError, "integer"),
+            ({"acoustic_codebook_sizes": (1.5,)}, TypeError, "integer"),
+            ({"acoustic_layout": "fixed_length"}, TypeError, "AcousticLayout"),
+            (
+                {"acoustic_layout": AcousticLayout.FIXED_LENGTH, "acoustic_unit_length": None},
+                TypeError,
+                "integer",
+            ),
+            (
+                {"acoustic_layout": AcousticLayout.FIXED_LENGTH, "acoustic_unit_length": True},
+                TypeError,
+                "integer",
+            ),
+            (
+                {"acoustic_layout": AcousticLayout.FIXED_LENGTH, "acoustic_unit_length": 0},
+                ValueError,
+                "positive",
+            ),
+            ({"acoustic_unit_length": 2}, ValueError, "must be None"),
+        )
+        for overrides, error, message in cases:
+            codec = _codec(AcousticLayout.FRAME_ALIGNED, **overrides)
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(error, message):
+                supports_structured(codec)
+
 
 class _StableSource:
     sample_rate = 16_000
@@ -68,6 +159,41 @@ class _StableSource:
     def decode(self, codes: torch.Tensor) -> torch.Tensor:
         del codes
         return self.waveform
+
+
+def _runtime(codec_name: str, codec: object) -> Runtime:
+    runtime = Runtime(
+        Config(
+            codec=codec_name,
+            audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
+        )
+    )
+    runtime.__dict__["codec"] = codec
+    return runtime
+
+
+def _codec(layout: AcousticLayout, **overrides: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "sample_rate": 16_000,
+        "frame_rate": 50.0,
+        "codebook_sizes": (8, 5, 7),
+        "semantic_codebook": torch.zeros(8, 4),
+        "semantic_codebook_sizes": (8,),
+        "acoustic_codebook_sizes": (5, 7),
+        "acoustic_feature_dim": 4,
+        "acoustic_layout": layout,
+        "acoustic_unit_length": (
+            3 if layout is AcousticLayout.FIXED_LENGTH else None
+        ),
+        "encode": Mock(),
+        "decode": Mock(),
+        "tokenize": Mock(),
+        "detokenize": Mock(),
+        "acoustic_codes_to_features": Mock(),
+        "decode_features": Mock(),
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
 
 
 if __name__ == "__main__":

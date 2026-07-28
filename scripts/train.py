@@ -22,12 +22,7 @@ from speech_to_speech.callback.logging import (
 )
 from speech_to_speech.datamodule import DataModule
 from speech_to_speech.datamodule.joint import LoaderSchedule
-from speech_to_speech.datamodule.module import (
-    Config as SpeechDataModuleConfig,
-    DataLoaderConfig,
-    LoaderSpec,
-)
-from speech_to_speech.datamodule.text import TextConfig
+from speech_to_speech.datamodule.module import LoaderSpec
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.performance import TrainingFlops
 from speech_to_speech.pl_module.composition import flow, rvq, token
@@ -37,8 +32,7 @@ from speech_to_speech.stage import StageLoaderConfig, apply_parameter_policy
 from speech_to_speech.task import Task
 
 if TYPE_CHECKING:
-    from scripts._config import StagedTrainConfig, TrainDataLoaderConfig
-    from speech_to_speech.datamodule.dataset import DatasetConfig
+    from scripts._config import StagedTrainConfig
 
 if __package__:
     from ._config import (
@@ -168,13 +162,10 @@ def _loader_spec(
     task_weights = _task_weights(loader)
     if _is_text_loader(task_weights):
         return LoaderSpec.text(
-            TextConfig(
-                dataloader=_dataloader(config.text_data.dataloader),
-                dataset=config.text_data.dataset,
-            ),
+            config.text_data,
             task_weights,
         )
-    return LoaderSpec.speech(_speech_config(config), task_weights)
+    return LoaderSpec.speech(config.data, task_weights)
 
 
 def _validation_spec(config: StagedTrainConfig) -> LoaderSpec:
@@ -187,22 +178,8 @@ def _validation_spec(config: StagedTrainConfig) -> LoaderSpec:
         split_label=config.validation.split_label,
     )
     return LoaderSpec.speech(
-        _speech_config(config, dataset=dataset),
+        replace(config.data, dataset=dataset),
         task_weights,
-    )
-
-
-def _speech_config(
-    config: StagedTrainConfig,
-    *,
-    dataset: DatasetConfig | None = None,
-) -> SpeechDataModuleConfig:
-    return SpeechDataModuleConfig(
-        codec=config.data.codec,
-        dataloader=_dataloader(config.data.dataloader),
-        shape=config.data.shape,
-        encode_missing_codes=config.data.encode_missing_codes,
-        dataset=config.data.dataset if dataset is None else dataset,
     )
 
 
@@ -219,15 +196,6 @@ def _is_text_loader(task_weights: dict[Task, float]) -> bool:
     if any(text_tasks) and not all(text_tasks):
         raise ValueError("a staged loader cannot mix pure text and speech tasks.")
     return all(text_tasks)
-
-
-def _dataloader(config: TrainDataLoaderConfig) -> DataLoaderConfig:
-    return {
-        "batch_size": config.batch_size,
-        "num_workers": config.num_workers,
-        "pin_memory": config.pin_memory,
-        "persistent_workers": config.persistent_workers,
-    }
 
 
 def build_trainer(
@@ -313,6 +281,7 @@ def training_callbacks(
                 save_top_k=config.callbacks.checkpoint.save_top_k,
                 every_n_train_steps=config.callbacks.checkpoint.every_n_train_steps,
                 auto_insert_metric_name=False,
+                enable_version_counter=False,
             )
         )
     return callbacks

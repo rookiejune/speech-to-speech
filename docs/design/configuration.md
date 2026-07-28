@@ -151,8 +151,10 @@ optimizer-step `val_check_interval`，`sanity_steps=-1` 表示 fit 前遍历完�
 acoustic config；`speech_to_speech.pl_module.composition` 负责 token/flow/RVQ 的
 model/objective/module 组装；`scripts/_entry.py` 只放 overfit/train 共享的
 runtime device、Trainer、performance callback 与 acoustic composition 边界校验。
-`runtime.Config`、`model.Config`、`pl_module.Config` 和 `model.DecoderConfig` 直接进入 root
-schema，不重复声明字段。OmegaConf 对字符串枚举只接受成员
+`runtime.Config`、`model.Config`、`pl_module.Config`、`model.DecoderConfig`、
+`datamodule.config.SpeechConfig`、`DataLoaderConfig` 和 `datamodule.text.TextConfig` 直接进入 root
+schema，不重复声明字段；`scripts/train.py` 直接把解析后的 data config 交给 `LoaderSpec`，不做
+同构对象转换。OmegaConf 对字符串枚举只接受成员
 名，入口在合并前把公开的小写 value 转成 enum member name；除此之外不做兼容重写。
 
 两个入口分别解析为：

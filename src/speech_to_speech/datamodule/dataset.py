@@ -23,7 +23,12 @@ from anydataset.types import (
 from torch.utils.data import Dataset
 
 from .._compat import StrEnum, auto
-from ..runtime.types import Codec, CodecBackend, acoustic_codec, structured_codec
+from ..runtime.types import (
+    CodecBackend,
+    acoustic_codec,
+    frame_codebook_sizes,
+    structured_codec,
+)
 from .protocol import DatasetRuntime
 
 
@@ -275,7 +280,7 @@ class ToyDataset(Dataset[Sample]):
                 raise ValueError("BiCodec toy data requires a fixed acoustic unit length.")
             self.acoustic_unit_length = unit_length
         else:
-            self.codebook_sizes = _codebook_sizes(self.view, cast(Codec, codec))
+            self.codebook_sizes = _codebook_sizes(self.view, codec)
             self.acoustic_codebook_sizes = ()
             self.acoustic_unit_length = None
 
@@ -487,10 +492,8 @@ def _validate_indices(
     return result
 
 
-def _codebook_sizes(view: AudioView, codec: Codec) -> tuple[int, ...]:
-    sizes = tuple(codec.codebook_sizes)
-    if not sizes or any(size <= 0 for size in sizes):
-        raise ValueError("codec codebook sizes must be positive and non-empty.")
+def _codebook_sizes(view: AudioView, codec: object) -> tuple[int, ...]:
+    sizes = frame_codebook_sizes(codec)
     if view is AudioView.LONGCAT:
         acoustic_sizes = tuple(acoustic_codec(codec).acoustic_codebook_sizes)
         if len(sizes) != len(acoustic_sizes) + 1 or sizes[1:] != acoustic_sizes:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from typing import cast
 
 import torch
 
@@ -96,6 +97,20 @@ class AudioEmbeddingTest(unittest.TestCase):
                 tokenizer,
                 reference=torch.empty(1),
             )
+
+    def test_random_initialization_requires_valid_feature_metadata(self):
+        tokenizer = _Tokenizer([])
+        tokenizer.embedding_initialization = "random"
+        tokenizer.vocab_size_override = 2
+
+        for codec, error, message in (
+            (object(), TypeError, "feature dimension"),
+            (_RandomCodec(0), ValueError, "positive"),
+            (_RandomCodec(cast(int, True)), TypeError, "integer"),
+            (_Codec(torch.zeros(2, 3, 0)), ValueError, "positive"),
+        ):
+            with self.subTest(codec=codec), self.assertRaisesRegex(error, message):
+                embedding(codec, tokenizer, reference=torch.empty(1))
 
 
 def _reference_merge(embeddings: torch.Tensor) -> torch.Tensor:

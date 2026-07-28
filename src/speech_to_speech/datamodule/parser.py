@@ -6,7 +6,7 @@ from typing import cast
 
 import torch
 from anydataset import types
-from anytrain.codec import AcousticLayout, SemanticAcousticCodes
+from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
 from ._tokenization import token_ids
@@ -80,8 +80,8 @@ def speech_from_codes(
     return Speech(
         semantic_codes=semantic_codes,
         acoustic_codes=acoustic_codes,
-        acoustic_layout=getattr(runtime, "acoustic_layout", AcousticLayout.FRAME_ALIGNED),
-        acoustic_unit_length=getattr(runtime, "acoustic_unit_length", None),
+        acoustic_layout=runtime.acoustic_layout,
+        acoustic_unit_length=runtime.acoustic_unit_length,
         text_token_ids=text_token_ids,
         audio_token_ids=audio_token_ids,
         audio_token_spans=audio_token_spans,
@@ -112,7 +112,7 @@ def _split_audio_codes(
                 "LongCat view must contain semantic and acoustic codebooks."
             )
         return codes[:, :1], codes[:, 1:]
-    if view is types.AudioView.UNICODEC:
+    if view in {types.AudioView.STABLE, types.AudioView.UNICODEC}:
         return codes, None
     raise ValueError(f"unsupported codec audio view: {view.value}")
 

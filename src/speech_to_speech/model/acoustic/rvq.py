@@ -8,7 +8,7 @@ from semantic_acoustic_codec.runtime import AcousticGeneratorArtifact
 from torch import Tensor
 
 from ...generation.types import AcousticGeneration
-from ...runtime.types import acoustic_codec
+from ...runtime.types import AcousticCodec, acoustic_codec
 from ..base import Config, TokenModel
 from ..protocol import TokenModelRuntime
 from ._config import DecoderConfig, decoder_options
@@ -30,9 +30,8 @@ class RVQModel(TokenModel):
     ) -> None:
         codec = acoustic_codec(runtime.codec)
         super().__init__(config=config, runtime=runtime)
-        self.acoustic_codec = codec
         options = decoder_options(decoder)
-        sizes = self.acoustic_codec.acoustic_codebook_sizes
+        sizes = codec.acoustic_codebook_sizes
         backbone_weight = self.backbone.get_input_embeddings().weight
         condition_dim = self.backbone.config.hidden_size
         if initialization is not None:
@@ -66,6 +65,10 @@ class RVQModel(TokenModel):
             ):
                 raise AssertionError("RVQ initialization type changed after validation.")
             self.acoustic_decoder.load_state_dict(generator.core.state_dict())
+
+    @property
+    def acoustic_codec(self) -> AcousticCodec:
+        return acoustic_codec(self.runtime.codec)
 
     def target_frame_condition(
         self,

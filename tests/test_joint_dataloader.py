@@ -9,7 +9,8 @@ import torch
 
 from speech_to_speech.datamodule.dataset import DatasetConfig
 from speech_to_speech.datamodule.joint import LoaderSchedule, ScheduledDataLoader
-from speech_to_speech.datamodule.module import Config, DataModule, LoaderSpec
+from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
+from speech_to_speech.datamodule.module import DataModule, LoaderSpec
 from speech_to_speech.datamodule.text import TextConfig
 from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.task import Task
@@ -57,14 +58,14 @@ class _BatchSamplerEpochLoader:
 
 class ScheduledDataLoaderTest(unittest.TestCase):
     def test_datamodule_keeps_validation_loader_separate_from_training(self) -> None:
-        train_config = Config(
+        train_config = SpeechConfig(
             codec="longcat",
-            dataloader={"batch_size": 2, "num_workers": 0},
+            dataloader=DataLoaderConfig(batch_size=2, num_workers=0),
             dataset=DatasetConfig(split_label="train"),
         )
-        validation_config = Config(
+        validation_config = SpeechConfig(
             codec="longcat",
-            dataloader={"batch_size": 2, "num_workers": 0},
+            dataloader=DataLoaderConfig(batch_size=2, num_workers=0),
             dataset=DatasetConfig(split_label="dev"),
         )
         train_spec = LoaderSpec.speech(train_config, {Task.TTS: 1.0})
@@ -114,9 +115,9 @@ class ScheduledDataLoaderTest(unittest.TestCase):
 
     def test_datamodule_without_validation_does_not_build_a_val_loader(self) -> None:
         spec = LoaderSpec.speech(
-            Config(
+            SpeechConfig(
                 codec="longcat",
-                dataloader={"batch_size": 2, "num_workers": 0},
+                dataloader=DataLoaderConfig(batch_size=2, num_workers=0),
             ),
             {Task.TTS: 1.0},
         )
@@ -134,18 +135,18 @@ class ScheduledDataLoaderTest(unittest.TestCase):
 
         build_validation.assert_not_called()
         self.assertIsNone(datamodule.validation_spec)
-        self.assertIsNone(datamodule.val_dataloader())
+        self.assertEqual(tuple(datamodule.val_dataloader()), ())
 
     def test_datamodule_rejects_text_validation(self) -> None:
         speech = LoaderSpec.speech(
-            Config(
+            SpeechConfig(
                 codec="longcat",
-                dataloader={"batch_size": 2, "num_workers": 0},
+                dataloader=DataLoaderConfig(batch_size=2, num_workers=0),
             ),
             {Task.TTS: 1.0},
         )
         text = LoaderSpec.text(
-            TextConfig(dataloader={"batch_size": 2, "num_workers": 0}),
+            TextConfig(dataloader=DataLoaderConfig(batch_size=2, num_workers=0)),
             {Task.MT: 1.0},
         )
 

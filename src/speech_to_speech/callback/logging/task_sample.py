@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol, TypedDict, cast
 
 import torch
 from anydataset import types
+from anytrain.codec import SemanticAcousticCodes
+from anytrain.module.idspace import Layout
 from anytrain.lightning import experiment
 from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
@@ -13,7 +15,21 @@ from torch import Tensor
 
 from ...generation import Request, Result
 from ...generation.batch import requests_from_batch
+from ...generation.decode import decode_reference_codes
 from ...generation.evaluation import reference_audio
+from ...datamodule.diagnostic import SampleRef, source_item, target_item
+from ...datamodule.types import (
+    ConcreteTrainInput,
+    ModelBatch,
+    TrainBatch,
+    TrainInputBatch,
+)
+from ...runtime.types import (
+    CodecBackend,
+    TextTokenizer,
+    acoustic_codec,
+    codec_sample_rate,
+)
 from ...task import Task
 from ..interval import TrainInterval
 from .._lightning import attached_datamodule
@@ -21,6 +37,8 @@ from .._lightning import attached_datamodule
 
 class _Module(Protocol):
     model: Any
+
+    def materialize_batch(self, batch: TrainInputBatch) -> TrainBatch: ...
 
     def generate(
         self,
@@ -43,8 +61,7 @@ class _GenerationKwargs(TypedDict):
 
 
 class _DataModule(Protocol):
-    collator: Callable[[list[types.Sample]], Any]
-    runtime: Any
+    runtime: _LoggingRuntime
 
     def train_samples(
         self,
@@ -56,7 +73,21 @@ class _DataModule(Protocol):
     def collator_for(
         self,
         loader_name: str | None = None,
-    ) -> Callable[[list[types.Sample]], Any]: ...
+    ) -> Callable[[list[types.Sample]], ConcreteTrainInput]: ...
+
+
+class _LoggingRuntime(Protocol):
+    @property
+    def audio_view(self) -> types.AudioView: ...
+
+    @property
+    def codec(self) -> CodecBackend: ...
+
+    @property
+    def text_tokenizer(self) -> TextTokenizer: ...
+
+    @property
+    def layout(self) -> Layout: ...
 
 
 class TaskSampleLogger(Callback):
@@ -94,6 +125,15 @@ class TaskSampleLogger(Callback):
         self.use_cache = use_cache
         self.samples: list[types.Sample] = []
 
+    @property
+    def state_key(self) -> str:
+        return self._generate_state_key(
+            loader_name=self.loader_name,
+            indices=tuple(self.indices),
+            every_n_steps=self.interval.every_n_steps,
+            every_audio_seconds=self.interval.every_audio_seconds,
+        )
+
     def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         del pl_module
         if not trainer.is_global_zero:
@@ -118,18 +158,11 @@ class TaskSampleLogger(Callback):
             return
         module = cast(_Module, cast(object, pl_module))
         datamodule = cast(_DataModule, attached_datamodule(trainer))
-        collator_for = getattr(datamodule, "collator_for", None)
-        if callable(collator_for):
-            collator = cast(
-                Callable[
-                    [str | None],
-                    Callable[[list[types.Sample]], Any],
-                ],
-                collator_for,
-            )(self.loader_name)
-        else:
-            collator = datamodule.collator
-        sample_batch = collator(self.samples)
+        collator = datamodule.collator_for(self.loader_name)
+        materialized = module.materialize_batch(collator(self.samples))
+        if not isinstance(materialized, ModelBatch):
+            raise TypeError("task sample logging requires one materialized ModelBatch.")
+        sample_batch = materialized
         requests = requests_from_batch(sample_batch)
         cuda_devices = [torch.cuda.current_device()] if torch.cuda.is_available() else []
         generation = self._generation_kwargs()
@@ -142,7 +175,7 @@ class TaskSampleLogger(Callback):
                     self.indices, self.samples, requests
                 ):
                     text_writer.add_text(
-                        f"{_tag(dataset_index)}/metadata",
+                        f"{_tag(dataset_index, self.loader_name)}/metadata",
                         _metadata_json(
                             {
                                 **_request_metadata(dataset_index, sample, request),
@@ -164,7 +197,7 @@ class TaskSampleLogger(Callback):
                     self.indices, self.samples, requests
                 ):
                     text_writer.add_text(
-                        f"{_tag(dataset_index)}/metadata",
+                        f"{_tag(dataset_index, self.loader_name)}/metadata",
                         _metadata_json(
                             {
                                 **_request_metadata(dataset_index, sample, request),
@@ -179,10 +212,10 @@ class TaskSampleLogger(Callback):
                         trainer.global_step,
                     )
             raise error
-        for dataset_index, sample, request, result in zip(
-            self.indices, self.samples, requests, results
+        for row, (dataset_index, sample, request, result) in enumerate(
+            zip(self.indices, self.samples, requests, results)
         ):
-            tag = _tag(dataset_index)
+            tag = _tag(dataset_index, self.loader_name)
             if text_writer is not None:
                 text_writer.add_text(
                     f"{tag}/metadata",
@@ -201,12 +234,12 @@ class TaskSampleLogger(Callback):
                 )
             audio = result["audio"]
             if audio is not None and audio_writer is not None:
-                if hasattr(sample_batch, "acoustic_target") and sample_batch.acoustic_target is not None:
+                if sample_batch.acoustic_target is not None:
                     _log_reference_audio(
                         audio_writer,
                         datamodule,
                         module,
-                        sample_batch,
+                        sample_batch.row(row),
                         tag,
                         trainer.global_step,
                     )
@@ -268,13 +301,12 @@ def _request_metadata(
     request: Request,
 ) -> dict[str, Any]:
     task = request["task"]
-    source_role = types.Role.SOURCE if task.uses_source_role else types.Role.TARGET
     return {
         "dataset_index": dataset_index,
         "task": task.value,
         "prompt_tokens": int(request["prompt_ids"].numel()),
-        "source": _modality_metadata(sample, source_role, task.source_modality),
-        "reference": _modality_metadata(sample, types.Role.TARGET, task.target_modality),
+        "source": _modality_metadata(source_item(sample, task), task.source_modality),
+        "reference": _modality_metadata(target_item(sample, task), task.target_modality),
     }
 
 
@@ -286,16 +318,11 @@ def _log_reference_audio(
     tag: str,
     step: int,
 ) -> None:
-    if not hasattr(batch, "acoustic_target") or batch.acoustic_target is None:
+    if batch.acoustic_target is None:
         return
-    runtime = getattr(datamodule, "runtime", None)
-    if runtime is None:
-        return
-    codec = getattr(runtime, "codec", None)
-    if codec is None or not hasattr(codec, "acoustic_codes_to_features"):
-        return
+    codec = acoustic_codec(datamodule.runtime.codec)
     target, reference = reference_audio(module.model, batch, codec, seed=0)
-    sample_rate = int(getattr(codec, "sample_rate"))
+    sample_rate = codec_sample_rate(codec)
     audio_writer.add_audio(
         f"{tag}/target",
         target.detach().cpu(),
@@ -320,36 +347,29 @@ def _log_target_audio(
 ) -> None:
     if task.target_modality is not types.Modality.AUDIO:
         return
-    runtime = getattr(datamodule, "runtime", None)
-    if runtime is None:
-        return
-    codec = getattr(runtime, "codec", None)
-    if codec is None or not hasattr(codec, "decode"):
-        return
-    item = cast(types.AudioItem, sample[(types.Role.TARGET, types.Modality.AUDIO)])
-    view = getattr(runtime, "audio_view")
-    codes = item.views[view]
-    if not isinstance(codes, Tensor) or codes.dim() != 2:
-        raise ValueError("fixed target audio codes must have shape [frames, codebooks].")
-    waveform = codec.decode(codes.unsqueeze(0))
+    runtime = datamodule.runtime
+    _, item = target_item(sample, task)
+    if not isinstance(item, types.AudioItem):
+        raise TypeError("audio-target task sample must contain an AudioItem.")
+    codes = item.views[runtime.audio_view]
+    waveform = decode_reference_codes(
+        codes,
+        codec=runtime.codec,
+    )
     if waveform.dim() < 2:
         raise ValueError("codec target decode must return a batched waveform.")
     audio_writer.add_audio(
         f"{tag}/target",
         waveform[0].detach().cpu(),
         step,
-        sample_rate=int(codec.sample_rate),
+        sample_rate=codec_sample_rate(runtime.codec),
     )
 
 
 def _generated_text(datamodule: _DataModule, response_ids: Tensor) -> str | None:
-    runtime = getattr(datamodule, "runtime", None)
-    if runtime is None:
-        return None
-    tokenizer = getattr(runtime, "text_tokenizer", None)
-    layout = getattr(runtime, "layout", None)
-    if tokenizer is None or layout is None:
-        return None
+    runtime = datamodule.runtime
+    tokenizer = runtime.text_tokenizer
+    layout = runtime.layout
     local_ids = layout.to_local(response_ids.detach().cpu())
     return tokenizer.decode(local_ids.tolist(), skip_special_tokens=True)
 
@@ -357,23 +377,32 @@ def _generated_text(datamodule: _DataModule, response_ids: Tensor) -> str | None
 def _target_text(sample: types.Sample, task: Task) -> str | None:
     if task.target_modality is not types.Modality.TEXT:
         return None
-    item = cast(types.TextItem, sample[(types.Role.TARGET, types.Modality.TEXT)])
+    _, item = target_item(sample, task)
+    if not isinstance(item, types.TextItem):
+        raise TypeError("text-target task sample must contain a TextItem.")
     return item.views[types.TextView.TEXT]
 
 
-def _tag(dataset_index: int) -> str:
-    return f"task_sample/{dataset_index}"
+def _tag(dataset_index: int, loader_name: str | None) -> str:
+    if loader_name is None:
+        return f"task_sample/{dataset_index}"
+    return f"task_sample/{loader_name}/{dataset_index}"
 
 
 def _modality_metadata(
-    sample: types.Sample,
-    role: types.Role,
+    ref: SampleRef | None,
     modality: types.Modality | None,
 ) -> dict[str, Any] | None:
     if modality is None:
+        if ref is not None:
+            raise ValueError("a modality-free task source must not resolve a sample item.")
         return None
+    if ref is None:
+        raise ValueError("task modality metadata requires a sample item.")
+    role, item = ref
     if modality is types.Modality.TEXT:
-        item = cast(types.TextItem, sample[(role, types.Modality.TEXT)])
+        if not isinstance(item, types.TextItem):
+            raise TypeError("text modality metadata requires a TextItem.")
         return {
             "modality": modality.value,
             "role": role.value,
@@ -381,7 +410,8 @@ def _modality_metadata(
             "text": item.views[types.TextView.TEXT],
         }
     if modality is types.Modality.AUDIO:
-        item = cast(types.AudioItem, sample[(role, types.Modality.AUDIO)])
+        if not isinstance(item, types.AudioItem):
+            raise TypeError("audio modality metadata requires an AudioItem.")
         view, codes = next(iter(item.views.items()))
         return {
             "modality": modality.value,
@@ -414,9 +444,32 @@ def _result_metadata(result: Result, *, max_new_tokens: int) -> dict[str, Any]:
     }
 
 
-def _codes_metadata(codes: Tensor) -> dict[str, Any]:
+def _codes_metadata(codes: object) -> dict[str, Any]:
+    if isinstance(codes, SemanticAcousticCodes):
+        semantic = codes.semantic
+        acoustic = codes.acoustic
+    elif isinstance(codes, Mapping):
+        semantic = codes.get("semantic")
+        acoustic = codes.get("acoustic")
+        if not isinstance(semantic, Tensor) or not isinstance(acoustic, Tensor):
+            raise TypeError(
+                "structured audio sample codes require Tensor semantic/acoustic fields."
+            )
+    else:
+        semantic = None
+        acoustic = None
+    if semantic is not None and acoustic is not None:
+        return {
+            "structured": True,
+            "semantic": _code_tensor_metadata(semantic),
+            "acoustic": _code_tensor_metadata(acoustic),
+        }
     if not isinstance(codes, Tensor):
-        raise TypeError("audio sample codes must be a Tensor.")
+        raise TypeError("audio sample codes must be a Tensor or structured mapping.")
+    return _code_tensor_metadata(codes)
+
+
+def _code_tensor_metadata(codes: Tensor) -> dict[str, Any]:
     if codes.dim() != 2:
         raise ValueError("audio sample codes must have shape [frames, codebooks].")
     return {

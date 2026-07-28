@@ -6,7 +6,7 @@ from typing import Protocol
 import torch
 from anydataset.types import Modality
 from anytrain.module.idspace import Layout
-from torch import Tensor, nn
+from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.cache_utils import Cache
@@ -18,7 +18,7 @@ from .protocol import TokenModelRuntime
 class GenerationStepModel(Protocol):
     layout: Layout
     runtime: TokenModelRuntime
-    audio_token_frame_spans: nn.Buffer
+    audio_token_frame_spans: Tensor
 
     def generation_step(
         self,

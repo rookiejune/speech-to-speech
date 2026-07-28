@@ -29,7 +29,7 @@ from speech_to_speech.datamodule.dataset import (
     SpeakerGridCellsDataset,
     load_dataset,
 )
-from speech_to_speech.datamodule.module import Config as DataConfig
+from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.single import SingleCollator
 from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.runtime import AudioRepresentation
@@ -122,9 +122,9 @@ class SpeakerGridDatasetTest(unittest.TestCase):
 
     def test_speaker_grid_requires_single_data_shape(self):
         with self.assertRaisesRegex(ValueError, "requires data shape single"):
-            DataConfig(
+            SpeechConfig(
                 codec="bicodec",
-                dataloader={"batch_size": 1, "num_workers": 0},
+                dataloader=DataLoaderConfig(batch_size=1, num_workers=0),
                 dataset=DatasetConfig(name=DatasetName.QWEN_TTS_SPEAKER),
             )
 

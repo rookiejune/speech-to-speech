@@ -10,6 +10,7 @@ from torch import nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.cache_utils import Cache
 
+from ._buffer import register
 from ._generation import generate_bicodec_sequence, generate_sequence
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ._head import VocabularyHeadMixin
@@ -29,6 +30,8 @@ class Config:
 
 class TokenModel(VocabularyHeadMixin, nn.Module):
     """Shared text and semantic-audio token modeling."""
+
+    audio_token_frame_spans: torch.Tensor
 
     def __init__(
         self,
@@ -68,7 +71,9 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
                 "backbone output embedding does not cover the text layout vocabulary."
             )
         backbone_weight = input_embedding.weight
-        self.audio_token_frame_spans = nn.Buffer(
+        register(
+            self,
+            "audio_token_frame_spans",
             _frame_span_lookup(self.runtime).to(device=backbone_weight.device),
             persistent=False,
         )
@@ -346,9 +351,10 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             input_ids.clamp(text_start, text_end - 1) - text_start
         )
         audio_token_ids = input_ids[audio_mask] - audio_start
-        output[audio_mask] = self.semantic_audio_adapter(
+        audio = self.semantic_audio_adapter(
             self.semantic_audio_embedding(audio_token_ids)
         )
+        output[audio_mask] = audio.to(dtype=output.dtype)
         return output
 
 

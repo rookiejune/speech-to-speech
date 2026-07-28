@@ -928,6 +928,7 @@ class ConfigTest(unittest.TestCase):
             if isinstance(callback, ModelCheckpoint)
         )
         self.assertTrue(checkpoint.async_save)
+        self.assertFalse(checkpoint._enable_version_counter)
 
     @patch("scripts.train.build_trainer")
     @patch("scripts.train.training_callbacks", return_value=[])

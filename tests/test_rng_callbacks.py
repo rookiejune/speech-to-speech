@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 import torch
 from torch import Tensor
 from anydataset.types import Lang, Modality, Role, TextItem, TextMeta, TextView
+from anytrain.module.idspace import Layout
 
 from speech_to_speech.generation.evaluation import evaluate
 from speech_to_speech.callback.logging.task_sample import TaskSampleLogger
@@ -26,6 +27,9 @@ class _RandomGenerationModule:
         if self.use_cuda:
             torch.rand(4, device=torch.device("cuda", torch.cuda.current_device()))
         return [Result(response_ids=torch.tensor([1]), audio=None)]
+
+    def materialize_batch(self, batch: object) -> object:
+        return batch
 
 
 class _EvaluationModel:
@@ -171,7 +175,13 @@ def task_sample_logger_fixture() -> tuple[TaskSampleLogger, object]:
         global_step=0,
         is_global_zero=True,
         logger=SimpleNamespace(experiment=experiment),
-        datamodule=SimpleNamespace(collator=Mock(return_value=batch)),
+        datamodule=SimpleNamespace(
+            collator_for=Mock(return_value=Mock(return_value=batch)),
+            runtime=SimpleNamespace(
+                layout=Layout(text=(0, 10), audio=(10, 20)),
+                text_tokenizer=SimpleNamespace(decode=Mock(return_value="generated")),
+            ),
+        ),
     )
     logger = TaskSampleLogger([0], every_n_steps=1)
     logger.samples = [

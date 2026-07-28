@@ -26,6 +26,7 @@ from anydataset.types import (
     TextView,
 )
 from hydra import compose, initialize_config_dir
+from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig, OmegaConf
@@ -33,7 +34,9 @@ from torch import nn
 from anydataset.dataset import MapStyleABC
 
 from speech_to_speech.callback import OnDeviceCodecMaterializer
-from speech_to_speech.datamodule.collator import Collator, TextCollator, _allocate_tasks
+from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
+from speech_to_speech.datamodule._task import allocate_tasks
+from speech_to_speech.datamodule.collator import Collator, TextCollator
 from speech_to_speech.datamodule.dataset import (
     DatasetConfig,
     DatasetName,
@@ -42,7 +45,6 @@ from speech_to_speech.datamodule.dataset import (
     load_dataset,
 )
 from speech_to_speech.datamodule.joint import LoaderSchedule, ScheduledDataLoader
-from speech_to_speech.datamodule.module import Config as DataConfig
 from speech_to_speech.datamodule.module import DataModule, LoaderSpec
 from speech_to_speech.datamodule.single import SingleCollator
 from speech_to_speech.datamodule.text import (
@@ -165,6 +167,29 @@ def _observe_task_updates(
 
 
 class ContractTest(unittest.TestCase):
+    def test_dataloader_config_validates_loader_values(self):
+        invalid = (
+            ({"batch_size": 0, "num_workers": 0}, ValueError, "positive"),
+            ({"batch_size": True, "num_workers": 0}, TypeError, "integer"),
+            ({"batch_size": 1, "num_workers": -1}, ValueError, "non-negative"),
+            (
+                {"batch_size": 1, "num_workers": 0, "pin_memory": 1},
+                TypeError,
+                "boolean",
+            ),
+        )
+        for kwargs, error, message in invalid:
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(error, message):
+                DataLoaderConfig(**kwargs)
+
+    def test_datamodule_configs_reject_mapping_loader_config(self):
+        loader = cast(DataLoaderConfig, {"batch_size": 1, "num_workers": 0})
+
+        with self.assertRaisesRegex(TypeError, "DataLoaderConfig"):
+            SpeechConfig(codec="longcat", dataloader=loader)
+        with self.assertRaisesRegex(TypeError, "DataLoaderConfig"):
+            TextConfig(dataloader=loader)
+
     def test_runtime_loads_semantic_codec_artifact_with_existing_backend(self):
         backend = SimpleNamespace(name="longcat")
         support = SimpleNamespace()
@@ -224,6 +249,9 @@ class ContractTest(unittest.TestCase):
             audio_view=AudioView.LONGCAT,
             codec_frame_rate=50.0,
             audio_representation=AudioRepresentation.DECOUPLED,
+            semantic_codec_artifact=None,
+            acoustic_layout=AcousticLayout.FRAME_ALIGNED,
+            acoustic_unit_length=None,
             text_tokenizer=_Tokenizer(10),
             audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
             layout=Layout(text=(0, 10), audio=(10, 20)),
@@ -301,6 +329,7 @@ class ContractTest(unittest.TestCase):
         self.assertFalse(kwargs["use_distributed_sampler"])
         self.assertEqual(kwargs["gradient_clip_val"], 1.0)
         self.assertTrue(kwargs["enable_checkpointing"])
+        self.assertEqual(kwargs["num_sanity_val_steps"], 0)
         self.assertIs(kwargs["logger"], logger.return_value)
         self.assertEqual(kwargs["callbacks"], callbacks)
 
@@ -417,6 +446,15 @@ class ContractTest(unittest.TestCase):
         self.assertTrue(torch.equal(semantic, torch.tensor([[1], [2], [3]])))
         self.assertIsNone(acoustic)
 
+    def test_stable_codec_uses_full_codes_without_acoustic_side_channel(self):
+        codes = torch.tensor([[1], [2], [3]])
+        item = AudioItem(views={AudioView.STABLE: codes})
+
+        semantic, acoustic = _parse_audio_item(item, AudioView.STABLE)
+
+        self.assertIs(semantic, codes)
+        self.assertIsNone(acoustic)
+
     def test_bicodec_runtime_rejects_fixed_length_structured_codec(self):
         with self.assertRaisesRegex(ValueError, "fixed-length structured codec"):
             Config(codec="bicodec")
@@ -521,6 +559,9 @@ class ContractTest(unittest.TestCase):
             audio_view=AudioView.LONGCAT,
             codec_frame_rate=50.0,
             audio_representation=AudioRepresentation.DECOUPLED,
+            semantic_codec_artifact=None,
+            acoustic_layout=AcousticLayout.FRAME_ALIGNED,
+            acoustic_unit_length=None,
             text_tokenizer=tokenizer,
             audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
         )
@@ -621,9 +662,9 @@ class ContractTest(unittest.TestCase):
     def test_datamodule_can_select_single_shape_without_changing_pair_default(self):
         runtime = _data_runtime()
         runtime.text_tokenizer = _ChatTokenizer(10)
-        config = DataConfig(
+        config = SpeechConfig(
             codec="longcat",
-            dataloader={"batch_size": 1, "num_workers": 0},
+            dataloader=_loader(),
             shape=DataShape.SINGLE,
             encode_missing_codes=True,
         )
@@ -655,6 +696,9 @@ class ContractTest(unittest.TestCase):
             audio_view=AudioView.LONGCAT,
             codec_frame_rate=50.0,
             audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
+            semantic_codec_artifact=None,
+            acoustic_layout=AcousticLayout.FRAME_ALIGNED,
+            acoustic_unit_length=None,
             text_tokenizer=_ChatTokenizer(10),
             audio_tokenizer=tokenizer,
             layout=Layout(
@@ -759,7 +803,7 @@ class ContractTest(unittest.TestCase):
             {
                 "mt": LoaderSpec.text(
                     TextConfig(
-                        dataloader={"batch_size": 2, "num_workers": 0},
+                        dataloader=_loader(2),
                         dataset=TextDatasetConfig(
                             name=TextDatasetName.TOY,
                             toy_samples=2,
@@ -812,9 +856,9 @@ class ContractTest(unittest.TestCase):
         runtime = _data_runtime()
         runtime.text_tokenizer = _ChatTokenizer(32)
         speech = LoaderSpec.speech(
-            DataConfig(
+            SpeechConfig(
                 codec="longcat",
-                dataloader={"batch_size": 1, "num_workers": 0},
+                dataloader=_loader(),
                 dataset=DatasetConfig(
                     name=DatasetName.TOY,
                     toy_samples=1,
@@ -825,7 +869,7 @@ class ContractTest(unittest.TestCase):
         )
         mt = LoaderSpec.text(
             TextConfig(
-                dataloader={"batch_size": 1, "num_workers": 0},
+                dataloader=_loader(),
                 dataset=TextDatasetConfig(
                     name=TextDatasetName.TOY,
                     toy_samples=1,
@@ -852,9 +896,9 @@ class ContractTest(unittest.TestCase):
     def test_datamodule_validates_loader_names(self):
         runtime = _data_runtime()
         speech = LoaderSpec.speech(
-            DataConfig(
+            SpeechConfig(
                 codec="longcat",
-                dataloader={"batch_size": 1, "num_workers": 0},
+                dataloader=_loader(),
                 dataset=DatasetConfig(name=DatasetName.TOY),
             ),
             {Task.TTS: 1.0},
@@ -870,9 +914,9 @@ class ContractTest(unittest.TestCase):
 
     def test_datamodule_keeps_schedule_when_loader_weight_update_is_invalid(self):
         runtime = _data_runtime()
-        config = DataConfig(
+        config = SpeechConfig(
             codec="longcat",
-            dataloader={"batch_size": 1, "num_workers": 0},
+            dataloader=_loader(),
             dataset=DatasetConfig(name=DatasetName.TOY),
         )
         datamodule = DataModule(
@@ -890,9 +934,9 @@ class ContractTest(unittest.TestCase):
     def test_datamodule_setup_loads_dataset_once(self, load_dataset):
         load_dataset.return_value = []
         runtime = _data_runtime()
-        config = DataConfig(
+        config = SpeechConfig(
             codec="longcat",
-            dataloader={"batch_size": 1, "num_workers": 0},
+            dataloader=_loader(),
         )
         datamodule = DataModule(
             runtime,
@@ -911,9 +955,9 @@ class ContractTest(unittest.TestCase):
     ):
         load_dataset.return_value = [_raw_sample(), _raw_sample()]
         runtime = _data_runtime()
-        config = DataConfig(
+        config = SpeechConfig(
             codec="longcat",
-            dataloader={"batch_size": 2, "num_workers": 0},
+            dataloader=_loader(2),
         )
         datamodule = DataModule(
             runtime,
@@ -931,6 +975,7 @@ class ContractTest(unittest.TestCase):
             (
                 "longcat",
                 SimpleNamespace(
+                    sample_rate=16_000,
                     semantic_feature_dim=4,
                     semantic_codebook=torch.zeros(5, 4),
                     codebook_sizes=(5, 3, 7),
@@ -975,9 +1020,9 @@ class ContractTest(unittest.TestCase):
 
     def test_datamodule_loads_toy_data_without_prepared_dataset(self):
         runtime = _data_runtime()
-        config = DataConfig(
+        config = SpeechConfig(
             codec="longcat",
-            dataloader={"batch_size": 1, "num_workers": 0},
+            dataloader=_loader(),
             dataset=DatasetConfig(
                 name=DatasetName.TOY,
                 toy_samples=2,
@@ -1010,9 +1055,9 @@ class ContractTest(unittest.TestCase):
                     Spec(source=Source.STORE, path=str(output), split="train")
                 )
                 runtime = _data_runtime()
-                config = DataConfig(
+                config = SpeechConfig(
                     codec="longcat",
-                    dataloader={"batch_size": 2, "num_workers": 0},
+                    dataloader=_loader(2),
                 )
                 datamodule = DataModule(
                     runtime,
@@ -1052,9 +1097,9 @@ class ContractTest(unittest.TestCase):
                 )
                 runtime = _data_runtime()
                 runtime.text_tokenizer = _ChatTokenizer(10)
-                config = DataConfig(
+                config = SpeechConfig(
                     codec="longcat",
-                    dataloader={"batch_size": 2, "num_workers": 0},
+                    dataloader=_loader(2),
                 )
                 datamodule = DataModule(
                     runtime,
@@ -1090,6 +1135,7 @@ class ContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "toy_samples"):
             DatasetConfig(name=DatasetName.TOY, toy_samples=0)
         codec = SimpleNamespace(
+            sample_rate=16_000,
             semantic_feature_dim=4,
             semantic_codebook=torch.zeros(5, 4),
             codebook_sizes=(5, 4),
@@ -1154,9 +1200,9 @@ class ContractTest(unittest.TestCase):
                 json.dumps({"version": 1, "splits": {"pilot": [3, 1]}}),
             )
             runtime = _data_runtime()
-            config = DataConfig(
+            config = SpeechConfig(
                 codec="longcat",
-                dataloader={"batch_size": 2, "num_workers": 0},
+                dataloader=_loader(2),
                 dataset=DatasetConfig(
                     name=DatasetName.TOY,
                     split_manifest=str(manifest),
@@ -1258,9 +1304,9 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(groups, [(1,), (0,)])
 
     def test_datamodule_rejects_runtime_codec_mismatch(self):
-        config = DataConfig(
+        config = SpeechConfig(
             codec="unicodec",
-            dataloader={"batch_size": 1, "num_workers": 0},
+            dataloader=_loader(),
         )
         datamodule = DataModule(
             _data_runtime(),
@@ -1272,9 +1318,9 @@ class ContractTest(unittest.TestCase):
 
     def test_overfit_datamodule_repeats_only_the_selected_sample(self):
         samples = [object(), object()]
-        config = DataConfig(
+        config = SpeechConfig(
             codec="longcat",
-            dataloader={"batch_size": 1, "num_workers": 0},
+            dataloader=_loader(),
         )
         collator = Mock(side_effect=lambda batch: batch)
         with (
@@ -1304,9 +1350,9 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(second_epoch, [[samples[1]]])
 
     def test_overfit_datamodule_rejects_runtime_codec_mismatch(self):
-        config = DataConfig(
+        config = SpeechConfig(
             codec="unicodec",
-            dataloader={"batch_size": 1, "num_workers": 0},
+            dataloader=_loader(),
         )
         datamodule = DataModule(
             _data_runtime(),
@@ -1379,6 +1425,31 @@ class ContractTest(unittest.TestCase):
         batch = ModelBatch.from_samples([_sample(Task.TTS)], pad_token_id=99)
 
         self.assertIsNone(batch.acoustic_target)
+
+    def test_model_batch_row_preserves_one_acoustic_target(self):
+        batch = ModelBatch.from_samples(
+            [
+                _target_sample(torch.tensor([[1, 2]])),
+                _target_sample(torch.tensor([[3, 4], [5, 6]])),
+            ],
+            pad_token_id=99,
+        )
+
+        row = batch.row(1)
+
+        self.assertEqual(row.tasks, [Task.TTS])
+        self.assertTrue(torch.equal(row.input_ids, batch.input_ids[1:2]))
+        self.assertIsNotNone(row.acoustic_target)
+        if row.acoustic_target is None or batch.acoustic_target is None:
+            self.fail("acoustic target was dropped while selecting a row")
+        self.assertTrue(
+            torch.equal(
+                row.acoustic_target["codes"],
+                batch.acoustic_target["codes"][1:2],
+            )
+        )
+        with self.assertRaises(IndexError):
+            batch.row(2)
 
     def test_model_batch_owns_acoustic_target_position_constraints(self):
         def batch(position: int, codes: torch.Tensor | None = None) -> ModelBatch:
@@ -1518,13 +1589,13 @@ class ContractTest(unittest.TestCase):
 
     def test_fixed_task_allocation_uses_batch_size_and_rejects_tiny_batches(self):
         self.assertEqual(
-            _allocate_tasks([Task.T2ST, Task.TTS], [1.0, 2.0], 6),
+            allocate_tasks([Task.T2ST, Task.TTS], [1.0, 2.0], 6),
             [Task.T2ST, Task.T2ST, Task.TTS, Task.TTS, Task.TTS, Task.TTS],
         )
         collator = Collator(Mock(), {Task.TTS: 1.0, Task.T2ST: 0.0})
         self.assertEqual(collator.tasks, [Task.TTS])
         with self.assertRaisesRegex(ValueError, "too small"):
-            _allocate_tasks([Task.MT, Task.TTS], [1.0, 9.0], 8)
+            allocate_tasks([Task.MT, Task.TTS], [1.0, 9.0], 8)
 
     def test_parameter_policy_freezes_explicit_parameter_groups(self):
         model = _StageModel()
@@ -1614,6 +1685,9 @@ def _data_runtime():
         audio_view=AudioView.LONGCAT,
         codec_frame_rate=50.0,
         audio_representation=AudioRepresentation.DECOUPLED,
+        semantic_codec_artifact=None,
+        acoustic_layout=AcousticLayout.FRAME_ALIGNED,
+        acoustic_unit_length=None,
         text_tokenizer=_Tokenizer(10),
         audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
         layout=Layout(text=(0, 10), audio=(10, 20)),
@@ -1625,8 +1699,13 @@ def _data_runtime():
     )
 
 
+def _loader(batch_size: int = 1) -> DataLoaderConfig:
+    return DataLoaderConfig(batch_size=batch_size, num_workers=0)
+
+
 def _longcat_codec():
     return SimpleNamespace(
+        sample_rate=16_000,
         semantic_feature_dim=4,
         semantic_codebook=torch.zeros(5, 4),
         codebook_sizes=(5, 3),
@@ -1639,12 +1718,19 @@ def _longcat_codec():
 
 
 class _EncodingCodec:
+    sample_rate = 16_000
+    frame_rate = 50.0
+    codebook_sizes = (5, 3)
+
     def __init__(self) -> None:
         self.calls: list[tuple[tuple[int, ...], int]] = []
 
     def encode(self, audio: torch.Tensor, sample_rate: int) -> torch.Tensor:
         self.calls.append((tuple(audio.shape), sample_rate))
         return audio.new_tensor([[[0, 2], [1, 3]]], dtype=torch.long)
+
+    def decode(self, codes: torch.Tensor) -> torch.Tensor:
+        return codes.new_zeros((codes.size(0), 1, codes.size(1)), dtype=torch.float32)
 
 
 def _raw_sample(index: int = 0):

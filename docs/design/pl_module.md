@@ -55,10 +55,14 @@ model 构造器不接收路径或执行文件 I/O。
 - `AcousticEvaluation`：对 fixed-sample acoustic model 使用本地 generator seeds 采样，记录 feature、
   waveform 与 STFT 距离；纯评估函数位于 `generation.evaluation`，不留在脚本私有模块。
 - `TaskSampleLogger`：只在 global zero 读取 datamodule 的公开 `train_samples()`/`collator_for()`，
-  可按 loader 固定样本，按真实 task 记录 source/target/generated；TTS acoustic batch 还记录
+  通过 module 的 `materialize_batch()` 获得标准 batch，并用 `ModelBatch.row()` 保持 raw sample、
+  generation request 与 teacher-forcing reference 逐行对齐。pair 数据严格读取 source/target role，
+  single 数据严格读取 `Role.DEFAULT`，不靠缺项 fallback 猜测形态。callback 可按 loader 固定样本，
+  按真实 task 记录 source/target/generated；TTS acoustic batch 还记录
   target waveform 与 teacher-forced `reference_generation`，并复用一次自回归 generation 的
   token、features 与 waveform。Stable Codec 的 full-code 路径没有 acoustic teacher-forcing，
-  因此只记录 codec 重建的 target 与自回归 generated。它不重复计算 loss。
+  因此只记录 codec 重建的 target 与自回归 generated。它不重复计算 loss。每个 callback 的
+  checkpoint state key 包含 loader、固定样本 indices 和 cadence，使 ASR/TTS 多实例可独立恢复。
 - `TextRetentionLogger`：记录 text probe generation、reference NLL 与相对基线漂移。
 
 上述 callback 需要 logger experiment 时统一通过 `anytrain.lightning.experiment` 获取 text、scalar、

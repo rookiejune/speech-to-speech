@@ -6,10 +6,12 @@
 ## 对外能力
 
 - `protocol.DataRuntime`：datamodule 所需资源的最小只读协议，公开 codec identity/view、
-  text/audio tokenizer、layout 和 special token ID。正式 `Runtime` 与测试 fake 都通过该协议
-  显式注入。
+  representation、semantic artifact、acoustic layout/unit length、text/audio tokenizer、layout
+  和 special token ID。正式 `Runtime` 与测试 fake 都必须显式满足完整协议，不为缺失字段推断
+  默认语义。
 - `DataRuntimeSnapshot`：DataLoader worker 使用的可 pickle 数据视图，只保存 tokenizer、layout
-  blocks 和 special token ID；不携带 runtime 已缓存的 backbone、codec 或 CUDA module。
+  blocks、codec 数据解释字段和 special token ID；不携带 runtime 已缓存的 backbone、codec 或
+  CUDA module。
 - `DatasetRuntime`：在 `DataRuntime` 上增加正式 codec object，仅供 dataset factory 根据
   codebook metadata 构造 toy prepared-code samples。
 - `parser.parse_sample()`：把 `anydataset.types.Sample` 解析为 `SpeechPair`。它解释当前
@@ -62,11 +64,15 @@ checkpoint 的收敛和生成音质仍需单独验收。
   source artifact 与 root fingerprint 的 JSON；训练前必须先在 stable root 上完成该产物的独立
   校验。
 - `ToyDataset`：提供完整 source/target audio+text raw sample，不读取文件、不修改全局 RNG。
-- `DataLoaderConfig(batch_size, num_workers, pin_memory, persistent_workers)` /
-  `Config(codec, dataloader, shape, encode_missing_codes, dataset)`：公开的 DataLoader、
-  dataset 与 DataModule 配置结构。prepared speech 的 map-style dataset 通过
+- `config.DataLoaderConfig(batch_size, num_workers, pin_memory, persistent_workers)` /
+  `SpeechConfig(codec, dataloader, shape, encode_missing_codes, dataset)`：公开的 DataLoader、
+  dataset 与 DataModule dataclass 配置结构，字段和值域校验只在这里维护；Hydra staged train
+  直接复用 `Config` 与 `TextConfig`，入口不声明同构 schema 或转换 dict。prepared speech 的 map-style dataset 通过
   `MapStyleABC.dataloader()` 使用 anydataset 的 cost planner；普通或 iterable dataset 使用
   PyTorch `DataLoader`。`shape=pair` 是默认路径；`shape=single` 显式选择 single utterance path。
+- `_task.py` 私有承载 loader task weights 校验与 batch task 分配；`_text.py` 私有承载 text dataset
+  的 DataLoader 构造。相邻模块复用其中公开命名的 `TaskWeights`、`allocate_tasks` 与 `TextLoader`，
+  不跨模块导入函数级私有名，也不把这些实现细节提升为包级 API。
 - `DataModule(runtime, loaders, schedule=None, validation=None)`：唯一 Lightning 数据入口。`loaders` 是
   `name -> LoaderSpec` 映射；speech loader 使用 `LoaderSpec.speech(config, task_weights,
   sample_index=...)`，纯文本 loader 使用 `LoaderSpec.text(config, task_weights)`。`setup()` 加载
@@ -140,9 +146,8 @@ acoustic_target: AcousticTarget | None
   `types.py` 保存结构并处理局部校验、padding 和 mask。三层不反向读取彼此的私有逻辑。
 - LongCat 的第 0 个 codebook 和后续 codebooks 只在 parser 边界解释为 semantic/acoustic。
   `full_codec_sequence` 不拆 semantic/acoustic side channel，而是把完整 codec codes 放入
-  `semantic_codes` 并设置 `acoustic_codes=None`；unified-token codec 的完整 codes 也是
-  `semantic_codes`，`acoustic_codes=None`。fixed-length structured codec 不属于这条 frame-code
-  parser 路径。
+  `semantic_codes` 并设置 `acoustic_codes=None`；Stable Codec 与 UniCodec 的完整 frame codes
+  也使用相同表示。fixed-length structured codec 不属于这条 frame-code parser 路径。
 - audio tokenizer 的输出统一称为 `audio_token_ids`；codec codebook index 统一称为
   `semantic_codes` / `acoustic_codes`。只有 layout global IDs 使用 `input_ids` 和
   `token_labels`。
@@ -193,11 +198,14 @@ acoustic_target: AcousticTarget | None
   shuffle。正式 train 入口从一个现有 stage speech loader 复制 task weights 与 speech config，
   只把复制后的 `DatasetConfig.split_label` 改为 dev；训练 spec 与 dataset config 保持不变。
 - train loader 与 validation loader 使用独立的窄 Protocol。没有 validation spec 时
-  `DataModule.val_dataloader()` 返回 `None`，Lightning 不运行 validation；text loader 不提供
+  `DataModule.val_dataloader()` 返回空 iterable，Lightning 不运行 validation；text loader 不提供
   `validation_dataloader()`，把 text spec 作为 validation 传入时在 DataModule 构造边界直接报错，
   不用 training loader 伪装 validation。
 - `DataModule.train_samples()` 是 callback 按索引读取已 setup 训练样本的公开边界；callback
-  不读取私有 dataset 字段。
+  不读取私有 dataset 字段。诊断代码通过 `diagnostic.source_item()` / `target_item()` 按 task
+  解析 raw sample：pair sample 只接受 source/target role，single sample 只接受
+  `Role.DEFAULT`，缺项或混用 role 直接报错。`ModelBatch.row()` 提供与该 raw sample 同行的
+  teacher-forcing batch，不由 callback 手工切 tensor。
 - parser 生成 `Speech.audio_token_spans`，`Speech` 校验 spans 与 semantic frame 完整对齐；
   不满足时直接报错，不做静默修复。
 - raw language 在 parser 边界转换为 `Language`，未知语言直接报错；task template 不消费

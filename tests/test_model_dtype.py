@@ -77,6 +77,21 @@ class ModelDtypeTest(unittest.TestCase):
         self.assertTrue(states)
         self.assertTrue(all(value.dtype is torch.float32 for value in states))
 
+    def test_combined_vocabulary_logits_promote_fp32_audio_head(self):
+        model = _rvq_model()
+        hidden = torch.randn(1, 2, 4, dtype=torch.bfloat16)
+
+        dense = model.token_logits(hidden)
+        selected = model.selected_logits(hidden, torch.tensor([0, 4, 8]))
+        audio = model.selected_logits(hidden, torch.tensor([4, 8]))
+
+        self.assertEqual(dense.dtype, torch.float32)
+        self.assertEqual(selected.dtype, torch.float32)
+        self.assertEqual(audio.dtype, torch.float32)
+        self.assertTrue(torch.isfinite(dense).all())
+        self.assertTrue(torch.isfinite(selected).all())
+        self.assertTrue(torch.isfinite(audio).all())
+
     def test_flow_inputs_follow_fp32_decoder_storage(self):
         model = _flow_model()
         hidden = torch.randn(1, 2, 4, dtype=torch.bfloat16)
@@ -94,6 +109,16 @@ class ModelDtypeTest(unittest.TestCase):
         )
         self.assertEqual(condition.dtype, torch.float32)
         self.assertEqual(target.dtype, torch.float32)
+
+    def test_audio_embeddings_merge_into_bf16_backbone_input(self):
+        model = _flow_model()
+        token_labels = torch.tensor([[0, 4]])
+        positions = torch.tensor([[0, 1]])
+
+        condition = model.target_frame_label_condition(token_labels, positions)
+
+        self.assertEqual(condition.dtype, torch.bfloat16)
+        self.assertTrue(torch.isfinite(condition).all())
 
 
 class _Backbone(nn.Module):

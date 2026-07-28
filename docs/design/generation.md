@@ -46,9 +46,12 @@ class Result(TypedDict):
 ```
 
 `prompt_ids` 必须是调用方已经准备好的完整 generation prompt。service 不渲染 chat template、
-不插入 instruction，也不追加或校验 response prefix；按 task builder 契约构造的 audio-target
-request 已经以 BOA 结束。`generation.batch.requests_from_batch()` 会从 teacher-forcing batch
-保留该 prefix，直接构造 request 的调用方负责保持相同状态机。
+不插入 instruction；按 task builder 契约构造的 audio-target request 已经以 BOA 结束。
+单码本 `FlattenedAudioTokenizer` 的 codec/codebook marker 是 codec serialization grammar，service
+会把它们追加到模型 prompt，并把后续采样限制为该码本 code range 与 EOA；marker 计入
+`max_new_tokens`，也保留在 `response_ids` 中供 frame count 与 decode 使用。
+`generation.batch.requests_from_batch()` 会从 teacher-forcing batch 保留 task prefix，直接构造
+request 的调用方负责保持相同 task 状态机。
 当前 prompt 只由 layout global token IDs 表达；audio-source 内容也编码为 semantic audio token，
 `Request` 不接受独立 acoustic code/feature side channel。
 
@@ -84,7 +87,9 @@ codebooks 而进入 Flow/RVQ acoustic feature generation。flow 与 RVQ 都返�
 `AcousticGeneration`；`model/acoustic=none` 即使搭配 LongCat 这类带 acoustic codebook 的
 codec，也只走 token-only generation 分支；实际 waveform decoder 仍按 full-code sequence 或
 semantic artifact 路径选择。
-`FULL_CODEC_SEQUENCE` 对普通 `FrameCodec` 仍调用 `decode(full_codes)`；BiCodec 则使用受约束的
+`FULL_CODEC_SEQUENCE` 对普通 `FrameCodec` 仍调用 `decode(full_codes)`；单码本 flattened codec
+使用固定 marker prefix 和 code-range sampling，避免随机初始化的 audio head 产生不可解析序列；
+BiCodec 则使用受约束的
 structured state machine 生成 marker、semantic token 和固定数量的 slot-major acoustic
 codebook token，恢复 `SemanticAcousticCodes` 后调用 `detokenize()`。配置
 `runtime.semantic_codec_artifact` 后，service 只处理 structured backend 的 semantic tokens，
@@ -102,6 +107,11 @@ runtime。三层不重复推导同一约束。
 
 `generation.batch.requests_from_batch()` 仅供 teacher-forcing 日志使用：它以每行第一个非
 `-100` label 为 prompt 边界并去掉 batch padding。核心 service 不依赖 `ModelBatch`。
+
+`decode_reference_codes()` 是 raw task sample 的统一重建边界：二维 frame-code tensor 通过
+`frame_codec().decode()`，structured mapping 恢复为 `SemanticAcousticCodes` 后通过
+`structured_codec().detokenize()`。callback 不按 codec 名称复制 decode 分支，也不把 fixed-length
+acoustic units 当作 semantic frame 轴。
 
 `evaluate_text()` 使用 `Task.T2TT` 构造 request，执行 greedy generation；reference NLL 则以
 text modality-local logits 计算，并包含 EOS target。`SpeechToSpeechModule.generate()` 与

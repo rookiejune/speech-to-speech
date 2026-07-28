@@ -64,7 +64,7 @@ def build_speech_sample(
 
     if target_modality is Modality.AUDIO:
         response_ids = _boa_eoa(response_ids, runtime)
-        if target.acoustic_codes is not None and getattr(runtime, "semantic_codec_artifact", None) is None and (
+        if target.acoustic_codes is not None and runtime.semantic_codec_artifact is None and (
             runtime.audio_representation is not AudioRepresentation.FULL_CODEC_SEQUENCE
         ):
             target_semantic_codes = target.semantic_codes

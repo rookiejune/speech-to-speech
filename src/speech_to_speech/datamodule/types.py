@@ -302,6 +302,23 @@ class ModelBatch:
             audio_seconds=audio_seconds.pin_memory(),
         )
 
+    def row(self, index: int) -> ModelBatch:
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise TypeError("ModelBatch row index must be an integer.")
+        if index < 0 or index >= self.input_ids.size(0):
+            raise IndexError(f"ModelBatch row index is out of range: {index}.")
+        audio_seconds = self.audio_seconds
+        if audio_seconds is None:
+            raise RuntimeError("ModelBatch audio_seconds is unavailable after validation.")
+        return ModelBatch(
+            input_ids=self.input_ids[index : index + 1],
+            token_labels=self.token_labels[index : index + 1],
+            acoustic_target=_target_row(self.acoustic_target, index),
+            tasks=[self.tasks[index]],
+            pad_token_id=self.pad_token_id,
+            audio_seconds=audio_seconds[index : index + 1],
+        )
+
 
 ConcreteTrainInput = Union[ModelBatch, RawSingleBatch]
 TrainInputBatch = Union[ConcreteTrainInput, tuple[ConcreteTrainInput, ...]]
@@ -338,6 +355,16 @@ def _pin_target(value: AcousticTarget | None) -> AcousticTarget | None:
         semantic_codes=value["semantic_codes"].pin_memory(),
         codes=value["codes"].pin_memory(),
         token_positions=value["token_positions"].pin_memory(),
+    )
+
+
+def _target_row(value: AcousticTarget | None, index: int) -> AcousticTarget | None:
+    if value is None:
+        return None
+    return AcousticTarget(
+        semantic_codes=value["semantic_codes"][index : index + 1],
+        codes=value["codes"][index : index + 1],
+        token_positions=value["token_positions"][index : index + 1],
     )
 
 

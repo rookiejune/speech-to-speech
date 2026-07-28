@@ -7,8 +7,8 @@ from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
 from ..task import Task
+from ._task import TaskWeights, allocate_tasks
 from ._tokenization import token_ids
-from .collator import _TaskWeights, _allocate_tasks
 from .parser import parse_audio_codes, speech_from_codes
 from .protocol import DataRuntime
 from .sample import build_speech_sample, chat_prompt
@@ -28,7 +28,7 @@ class SingleCollator:
         self.runtime = runtime
         self.encode_missing_codes = encode_missing_codes
         _validate_single_tasks(_positive_tasks(task_weights))
-        self._task_weights = _TaskWeights(task_weights)
+        self._task_weights = TaskWeights(task_weights)
 
     def set_task_weights(self, task_weights: Mapping[Task, float]) -> None:
         _validate_single_tasks(_positive_tasks(task_weights))
@@ -41,7 +41,7 @@ class SingleCollator:
 
     def _items(self, samples: list[types.Sample]) -> list[ModelSample | RawSingleSample]:
         available, weights = self._task_weights.get()
-        tasks = _allocate_tasks(available, weights, len(samples))
+        tasks = allocate_tasks(available, weights, len(samples))
         return [
             _build_item(
                 sample,

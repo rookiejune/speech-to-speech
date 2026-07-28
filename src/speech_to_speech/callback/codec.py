@@ -3,7 +3,6 @@ from __future__ import annotations
 import torch
 from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
-from typing import cast
 
 from ..datamodule.protocol import DatasetRuntime
 from ..datamodule.single import build_single_sample_from_codes
@@ -15,7 +14,7 @@ from ..datamodule.types import (
     TrainBatch,
     TrainInputBatch,
 )
-from ..runtime.types import Codec, structured_codec, supports_structured
+from ..runtime.types import frame_codec, structured_codec, supports_structured
 
 
 class OnDeviceCodecMaterializer:
@@ -74,7 +73,7 @@ class OnDeviceCodecMaterializer:
                 )
             else:
                 codes = _encoded_codes(
-                    cast(Codec, self.runtime.codec).encode(
+                    frame_codec(self.runtime.codec).encode(
                         batched_waveform,
                         sample.sample_rate,
                     )

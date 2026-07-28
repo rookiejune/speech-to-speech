@@ -54,14 +54,19 @@ class VocabularyHeadMixin:
             return self.semantic_audio_logits(hidden_state)
         if modality is not None:
             raise ValueError(f"unsupported token modality: {modality.value}")
-        logits = hidden_state.new_full(
+        text = self.text_logits(hidden_state)
+        audio = self.semantic_audio_logits(hidden_state)
+        dtype = torch.promote_types(text.dtype, audio.dtype)
+        logits = torch.full(
             (*hidden_state.shape[:-1], self.runtime.layout.vocab_size),
             float("-inf"),
+            dtype=dtype,
+            device=hidden_state.device,
         )
         text_start, text_end = self.runtime.layout.blocks["text"]
         audio_start, audio_end = self.runtime.layout.blocks["audio"]
-        logits[..., text_start:text_end] = self.text_logits(hidden_state)
-        logits[..., audio_start:audio_end] = self.semantic_audio_logits(hidden_state)
+        logits[..., text_start:text_end] = text.to(dtype=dtype)
+        logits[..., audio_start:audio_end] = audio.to(dtype=dtype)
         return logits
 
     def modality_logits(
@@ -87,19 +92,24 @@ class VocabularyHeadMixin:
         hidden_state: torch.Tensor,
         token_ids: torch.Tensor,
     ) -> torch.Tensor:
-        logits = hidden_state.new_empty(*hidden_state.shape[:-1], token_ids.numel())
         text_start, text_end = self.runtime.layout.blocks["text"]
         audio_start, audio_end = self.runtime.layout.blocks["audio"]
         text_mask = token_ids.ge(text_start) & token_ids.lt(text_end)
         audio_mask = token_ids.ge(audio_start) & token_ids.lt(audio_end)
         if not bool((text_mask | audio_mask).all()):
             raise ValueError("selected token ids contain an invalid vocabulary id.")
-        if bool(text_mask.any()):
-            logits[..., text_mask] = self.text_logits(
-                hidden_state, token_ids[text_mask] - text_start
-            )
-        if bool(audio_mask.any()):
-            logits[..., audio_mask] = self.semantic_audio_logits(
-                hidden_state, token_ids[audio_mask] - audio_start
-            )
+        if bool(text_mask.all()):
+            return self.text_logits(hidden_state, token_ids - text_start)
+        if bool(audio_mask.all()):
+            return self.semantic_audio_logits(hidden_state, token_ids - audio_start)
+        text = self.text_logits(hidden_state, token_ids[text_mask] - text_start)
+        audio = self.semantic_audio_logits(hidden_state, token_ids[audio_mask] - audio_start)
+        dtype = torch.promote_types(text.dtype, audio.dtype)
+        logits = torch.empty(
+            (*hidden_state.shape[:-1], token_ids.numel()),
+            dtype=dtype,
+            device=hidden_state.device,
+        )
+        logits[..., text_mask] = text.to(dtype=dtype)
+        logits[..., audio_mask] = audio.to(dtype=dtype)
         return logits

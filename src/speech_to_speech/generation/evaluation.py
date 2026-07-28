@@ -8,7 +8,7 @@ import torch
 from torch import Tensor
 
 from ..datamodule.types import ModelBatch
-from ..runtime.types import AcousticCodec
+from ..runtime.types import AcousticCodec, codec_sample_rate
 
 if TYPE_CHECKING:
     from ..model.acoustic import FlowModel, RVQModel
@@ -30,6 +30,7 @@ def evaluate(
         raise ValueError("acoustic evaluation currently requires batch size 1")
 
     was_training = model.training
+    sample_rate = codec_sample_rate(codec)
     model.eval()
     try:
         hidden_states = model.token_hidden_states(
@@ -69,11 +70,11 @@ def evaluate(
             append(values, "waveform_rms", waveform.square().mean().sqrt())
             append(values, "waveform_peak", waveform.abs().max())
             values.setdefault("duration_seconds", []).append(
-                waveform.numel() / codec.sample_rate
+                waveform.numel() / sample_rate
             )
             values.setdefault("sampling_seconds", []).append(elapsed)
             values.setdefault("sampling_rtf", []).append(
-                elapsed / (waveform.numel() / codec.sample_rate)
+                elapsed / (waveform.numel() / sample_rate)
             )
         return {name: sum(items) / len(items) for name, items in values.items()}
     finally:

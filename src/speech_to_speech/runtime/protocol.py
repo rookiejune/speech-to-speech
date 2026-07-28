@@ -11,7 +11,7 @@ from .runtime import AudioRepresentation
 from .types import (
     AudioTokenizer,
     Backbone,
-    SemanticCodebookCodec,
+    CodecBackend,
     SemanticCodec,
     TextTokenizer,
 )
@@ -63,13 +63,16 @@ class DataRuntime(Protocol):
 
 class GenerationRuntime(DataRuntime, Protocol):
     @cached_property
-    def codec(self) -> SemanticCodebookCodec: ...
+    def codec(self) -> CodecBackend: ...
 
     @cached_property
     def semantic_codec(self) -> SemanticCodec: ...
 
     @property
     def acoustic_side_channel(self) -> bool: ...
+
+    @property
+    def structured_full_sequence(self) -> bool: ...
 
     @cached_property
     def bos_token_id(self) -> int: ...

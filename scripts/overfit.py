@@ -24,7 +24,7 @@ from speech_to_speech.callback.logging import (
     TextRetentionLogger,
 )
 from speech_to_speech.datamodule import DataModule
-from speech_to_speech.datamodule.module import Config as SpeechDataModuleConfig
+from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.module import LoaderSpec
 from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.generation.batch import requests_from_batch
@@ -34,7 +34,7 @@ from speech_to_speech.pl_module.composition import flow, rvq, token
 from speech_to_speech.performance import TrainingFlops
 from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import Runtime
-from speech_to_speech.runtime.types import Codec
+from speech_to_speech.runtime.types import codec_sample_rate
 from speech_to_speech.stage import ParameterGroup, apply_parameter_policy
 from speech_to_speech.task import Task
 
@@ -87,9 +87,9 @@ def run(config: OverfitConfig) -> None:
         rt,
         {
             "train": LoaderSpec.speech(
-                SpeechDataModuleConfig(
+                SpeechConfig(
                     codec=config.runtime.codec,
-                    dataloader={"batch_size": 1, "num_workers": 0},
+                    dataloader=DataLoaderConfig(batch_size=1, num_workers=0),
                     shape=config.data.shape,
                     encode_missing_codes=config.data.encode_missing_codes,
                     dataset=config.data,
@@ -201,7 +201,11 @@ def run(config: OverfitConfig) -> None:
 
     if evaluation is not None:
         _prepare_generation_module(module, _device(rt_config))
-        generation = evaluate_generation(module, evaluation.batch, cast(Codec, codec))
+        generation = evaluate_generation(
+            module,
+            evaluation.batch,
+            sample_rate=codec_sample_rate(codec),
+        )
         (output_dir / "generation.json").write_text(
             json.dumps(generation, indent=2, sort_keys=True) + "\n"
         )
@@ -248,6 +252,7 @@ def build_trainer(
             callbacks,
             logger=build_logger(config.logging),
             factory=pl.Trainer,
+            num_sanity_val_steps=0,
         ),
     )
 
@@ -268,7 +273,8 @@ def _prepare_generation_module(
 def evaluate_generation(
     module: SpeechToSpeechModule,
     batch: ModelBatch,
-    codec: Codec,
+    *,
+    sample_rate: int,
 ) -> dict[str, Any]:
     device = next(module.parameters()).device
     if device.type == "cuda":
@@ -291,7 +297,7 @@ def evaluate_generation(
         raise RuntimeError("LongCat generation did not return acoustic features.")
     if not bool(torch.isfinite(features).all() and torch.isfinite(waveform).all()):
         raise RuntimeError("generation returned non-finite acoustic output.")
-    duration = waveform.numel() / codec.sample_rate
+    duration = waveform.numel() / sample_rate
     return {
         "token_ids": result["response_ids"].detach().cpu().tolist(),
         "feature_shape": list(features.shape),

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Protocol, cast
+from typing import Optional, Protocol
 
 from semantic_acoustic_codec.config import Route
 from semantic_acoustic_codec.runtime import AcousticGeneratorArtifact
@@ -16,7 +16,7 @@ from speech_to_speech.model.acoustic import (
 )
 from speech_to_speech.model.acoustic.initialization import load_acoustic_initialization
 from speech_to_speech.runtime import Runtime
-from speech_to_speech.runtime.types import Codec
+from speech_to_speech.runtime.types import frame_codec
 
 from .module import Config, SpeechToSpeechModule
 from .protocol import FlowCompositionModel, RVQCompositionModel
@@ -81,7 +81,7 @@ def flow(
     weight = acoustic.repa.weight
     if weight is not None:
         teacher = WavLMTeacher(
-            cast(Codec, runtime.codec),
+            frame_codec(runtime.codec),
             checkpoint=acoustic.repa.teacher_checkpoint,
             layer=acoustic.repa.teacher_layer,
             device=runtime.backbone.get_input_embeddings().weight.device,

@@ -22,7 +22,7 @@ from torch import Tensor, nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from speech_to_speech.callback.logging.task_sample import TaskSampleLogger
-from speech_to_speech.datamodule.module import Config as DataConfig
+from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.module import DataModule, LoaderSpec
 from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.model import ToyConfig
@@ -53,6 +53,7 @@ class _Codec:
     acoustic_codebook_sizes = (8,)
     semantic_codebook = torch.randn(2, 2)
     sample_rate = 16_000
+    frame_rate = 50.0
 
     def __init__(self) -> None:
         self.decode_calls = 0
@@ -74,6 +75,8 @@ class _Codec:
 
 class _UnifiedCodec:
     sample_rate = 16_000
+    frame_rate = 50.0
+    codebook_sizes = (2,)
 
     def __init__(self) -> None:
         self.decode_calls = 0
@@ -81,6 +84,10 @@ class _UnifiedCodec:
     def decode(self, codes: Tensor) -> Tensor:
         self.decode_calls += 1
         return codes[..., 0].float()
+
+    def encode(self, audio: Tensor, sample_rate: int) -> Tensor:
+        del audio, sample_rate
+        raise NotImplementedError
 
 
 class _Runtime:
@@ -94,6 +101,7 @@ class _Runtime:
         self.bos_token_id = 1
         self.boa_token_id = 6
         self.eoa_token_id = 7
+        self.structured_full_sequence = False
 
     @property
     def semantic_codec(self):
@@ -290,11 +298,10 @@ class _UnifiedGenerationModel(TokenModel):
             get_input_embeddings=lambda: SimpleNamespace(weight=torch.empty(0))
         )
         start, _ = self.runtime.codec_audio_range
+        encoded = self.runtime.audio_tokenizer.encode(torch.tensor([[0], [1]]))
         self._tokens = [
             start + token_id
-            for token_id in self.runtime.audio_tokenizer.encode(
-                torch.tensor([[0], [1]])
-            ).tolist()
+            for token_id in encoded[2:].tolist()
         ]
         self._tokens.append(self.runtime.eoa_token_id)
         self._step = 0
@@ -349,8 +356,10 @@ class _UnifiedGenerationModel(TokenModel):
 
 class _FullSequenceCodec:
     sample_rate = 16_000
+    frame_rate = 50.0
 
-    def __init__(self) -> None:
+    def __init__(self, codebook_sizes: tuple[int, ...] = (4, 10)) -> None:
+        self.codebook_sizes = codebook_sizes
         self.decode_calls = 0
         self.decoded_codes: Tensor | None = None
 
@@ -359,21 +368,26 @@ class _FullSequenceCodec:
         self.decoded_codes = codes.clone()
         return codes.sum(dim=-1).float()
 
+    def encode(self, audio: Tensor, sample_rate: int) -> Tensor:
+        del audio, sample_rate
+        raise NotImplementedError
+
 
 class _FullSequenceRuntime:
-    def __init__(self) -> None:
+    def __init__(self, codebook_sizes: tuple[int, ...] = (4, 10)) -> None:
         self.audio_representation = AudioRepresentation.FULL_CODEC_SEQUENCE
         self.audio_tokenizer = FlattenedAudioTokenizer(
-            codebook_sizes=(4, 10),
-            codec_name="longcat",
+            codebook_sizes=codebook_sizes,
+            codec_name="frame-codec",
         )
-        self.codec = _FullSequenceCodec()
+        self.codec = _FullSequenceCodec(codebook_sizes)
         self.layout = Layout(text=(0, 4), audio=(4, 4 + self.audio_tokenizer.vocab_size + 2))
         self.pad_token_id = 0
         self.eos_token_id = 3
         self.bos_token_id = 1
         self.boa_token_id = self.codec_audio_range[1]
         self.eoa_token_id = self.boa_token_id + 1
+        self.structured_full_sequence = False
 
     @property
     def semantic_codec(self):
@@ -404,9 +418,18 @@ class _FullSequenceRuntime:
 
 
 class _FullSequenceGenerationModel(TokenModel):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        codes: Tensor | None = None,
+        *,
+        codebook_sizes: tuple[int, ...] = (4, 10),
+    ) -> None:
         nn.Module.__init__(self)
-        self.runtime = _FullSequenceRuntime()
+        if codes is None:
+            codes = torch.tensor([[1, 5], [2, 6]])
+        if codes.size(1) != len(codebook_sizes):
+            raise ValueError("test codes must match configured codebooks.")
+        self.runtime = _FullSequenceRuntime(codebook_sizes)
         self.layout = self.runtime.layout
         self.audio_token_frame_spans = torch.tensor(
             self.runtime.audio_tokenizer.frame_spans(
@@ -417,15 +440,18 @@ class _FullSequenceGenerationModel(TokenModel):
             get_input_embeddings=lambda: SimpleNamespace(weight=torch.empty(0))
         )
         start, _ = self.runtime.codec_audio_range
+        encoded = self.runtime.audio_tokenizer.encode(codes)
+        if len(self.runtime.audio_tokenizer.codebook_sizes) == 1:
+            encoded = encoded[2:]
         self._tokens = [
             start + token_id
-            for token_id in self.runtime.audio_tokenizer.encode(
-                torch.tensor([[1, 5], [2, 6]])
-            ).tolist()
+            for token_id in encoded.tolist()
         ]
         self._tokens.append(self.runtime.eoa_token_id)
         self._step = 0
         self.sample_calls = 0
+        self.generation_inputs: list[Tensor] = []
+        self.allowed_token_ids: list[Tensor | None] = []
 
     def generation_step(
         self,
@@ -438,10 +464,21 @@ class _FullSequenceGenerationModel(TokenModel):
         modality: Modality | None = None,
         **kwargs,
     ) -> CausalLMOutputWithPast:
-        del kwargs, output_hidden_states, past_key_values, use_cache, token_ids
+        del kwargs, output_hidden_states, past_key_values
+        self.generation_inputs.append(input_ids.clone())
+        self.allowed_token_ids.append(None if token_ids is None else token_ids.clone())
         next_id = self._tokens[min(self._step, len(self._tokens) - 1)]
         self._step += 1
-        if modality is Modality.AUDIO:
+        if token_ids is not None:
+            matches = (token_ids == next_id).nonzero()
+            if matches.numel() == 0:
+                raise AssertionError("generated id is outside allowed token_ids")
+            logits = torch.full(
+                (input_ids.size(0), input_ids.size(1), token_ids.numel()),
+                float("-inf"),
+            )
+            logits[:, -1, int(matches[0, 0])] = 0
+        elif modality is Modality.AUDIO:
             start, end = self.layout.blocks[Modality.AUDIO.value]
             logits = torch.full((input_ids.size(0), input_ids.size(1), end - start), float("-inf"))
             logits[:, -1, next_id - start] = 0
@@ -451,7 +488,12 @@ class _FullSequenceGenerationModel(TokenModel):
                 float("-inf"),
             )
             logits[:, -1, next_id] = 0
-        return CausalLMOutputWithPast(logits=logits)
+        cache = (
+            SimpleNamespace(batch_select_indices=lambda indices: None)
+            if use_cache
+            else None
+        )
+        return CausalLMOutputWithPast(logits=logits, past_key_values=cache)
 
     def generate_audio_features(self, **kwargs) -> None:
         del kwargs
@@ -537,6 +579,19 @@ class GenerationTest(unittest.TestCase):
         ).to(device="meta")
 
         self.assertEqual(model.audio_token_frame_spans.device.type, "meta")
+        self.assertNotIn("audio_token_frame_spans", model.state_dict())
+
+    @patch("speech_to_speech.model._buffer.nn.Buffer", new=None)
+    def test_frame_span_buffer_supports_torch_without_nn_buffer(self):
+        model = TokenModel(
+            _model_config(),
+            runtime=_TinyRuntime(),
+        )
+
+        self.assertIs(
+            model.audio_token_frame_spans,
+            model._buffers["audio_token_frame_spans"],
+        )
         self.assertNotIn("audio_token_frame_spans", model.state_dict())
 
     def test_text_generation_excludes_padding_and_bos(self):
@@ -942,6 +997,66 @@ class GenerationTest(unittest.TestCase):
         )
         self.assertTrue(torch.equal(audio["waveform"], torch.tensor([6.0, 8.0])))
 
+    def test_single_codebook_full_sequence_forces_prefix_and_code_range(self):
+        codes = torch.tensor([[1], [2]])
+        for use_cache in (False, True):
+            with self.subTest(use_cache=use_cache):
+                model = _FullSequenceGenerationModel(codes, codebook_sizes=(4,))
+                request = Request(prompt_ids=torch.tensor([1]), task=Task.TTS)
+
+                result = generate_responses(
+                    [request],
+                    model,
+                    max_new_tokens=5,
+                    do_sample=False,
+                    use_cache=use_cache,
+                )[0]
+
+                start, _ = model.runtime.codec_audio_range
+                expected_local = model.runtime.audio_tokenizer.encode(codes)
+                self.assertTrue(
+                    torch.equal(result["response_ids"], expected_local + start)
+                )
+                prefix = expected_local[:2] + start
+                self.assertTrue(
+                    torch.equal(model.generation_inputs[0][0, -2:], prefix)
+                )
+                allowed_token_ids = model.allowed_token_ids[0]
+                self.assertIsNotNone(allowed_token_ids)
+                self.assertTrue(
+                    torch.equal(
+                        allowed_token_ids,
+                        torch.tensor(
+                            [
+                                *range(start, start + 4),
+                                model.runtime.eoa_token_id,
+                            ]
+                        ),
+                    )
+                )
+                self.assertIsNotNone(result["audio"])
+                self.assertTrue(
+                    torch.equal(
+                        model.runtime.codec.decoded_codes,
+                        codes.unsqueeze(0),
+                    )
+                )
+
+    def test_single_codebook_prefix_counts_toward_generation_budget(self):
+        model = _FullSequenceGenerationModel(
+            torch.tensor([[1]]),
+            codebook_sizes=(4,),
+        )
+
+        with self.assertRaisesRegex(ValueError, "include the codec prefix"):
+            generate_responses(
+                [Request(prompt_ids=torch.tensor([1]), task=Task.TTS)],
+                model,
+                max_new_tokens=2,
+                do_sample=False,
+                use_cache=False,
+            )
+
     def test_generation_batches_variable_length_requests(self):
         model = _UnifiedGenerationModel()
         frame_spans = model.runtime.audio_tokenizer.frame_spans
@@ -955,7 +1070,7 @@ class GenerationTest(unittest.TestCase):
         )
 
         self.assertEqual(len(results), 2)
-        self.assertEqual([call[1] for call in model.calls], [2, 2, 2, 2, 2])
+        self.assertEqual([call[1] for call in model.calls], [2, 2, 2])
         self.assertEqual(model.runtime.audio_tokenizer.frame_spans.call_count, 0)
         self.assertEqual(model.runtime.codec.decode_calls, 1)
 
@@ -1053,15 +1168,26 @@ class GenerationTest(unittest.TestCase):
                 "sample_rate": 16_000,
             },
         )
-        module = SimpleNamespace(generate=Mock(return_value=[result]))
-        datamodule = SimpleNamespace(collator=Mock(return_value=batch))
+        module = SimpleNamespace(
+            generate=Mock(return_value=[result]),
+            materialize_batch=Mock(side_effect=lambda value: value),
+        )
+        datamodule = SimpleNamespace(
+            collator_for=Mock(return_value=Mock(return_value=batch)),
+            runtime=SimpleNamespace(
+                codec=_FullSequenceCodec(),
+                audio_view=AudioView.LONGCAT,
+                layout=Layout(text=(0, 4), audio=(4, 8)),
+                text_tokenizer=SimpleNamespace(decode=Mock(return_value="generated")),
+            ),
+        )
         experiment = Mock()
         trainer = SimpleNamespace(
             global_step=0,
             logger=SimpleNamespace(experiment=experiment),
             datamodule=datamodule,
         )
-        logger = TaskSampleLogger([0], every_n_steps=1)
+        logger = TaskSampleLogger([0], every_n_steps=1, loader_name="tts")
         logger.samples = [
             {
                 (Role.SOURCE, Modality.TEXT): TextItem(
@@ -1083,15 +1209,15 @@ class GenerationTest(unittest.TestCase):
         logger.on_train_batch_start(trainer, module, None, 0)
 
         module.generate.assert_called_once()
-        experiment.add_audio.assert_called_once()
-        audio_call = experiment.add_audio.call_args
-        self.assertEqual(audio_call.args[0], "task_sample/0/generated")
+        self.assertEqual(experiment.add_audio.call_count, 2)
+        audio_call = experiment.add_audio.call_args_list[1]
+        self.assertEqual(audio_call.args[0], "task_sample/tts/0/generated")
         self.assertTrue(torch.equal(audio_call.args[1], result["audio"]["waveform"]))
         self.assertEqual(audio_call.args[2], 0)
         self.assertEqual(audio_call.kwargs, {"sample_rate": 16_000})
         experiment.add_text.assert_called_once()
         metadata_call = experiment.add_text.call_args
-        self.assertEqual(metadata_call.args[0], "task_sample/0/metadata")
+        self.assertEqual(metadata_call.args[0], "task_sample/tts/0/metadata")
         self.assertIn('"task": "tts"', metadata_call.args[1])
         self.assertIn('"dataset_index": 0', metadata_call.args[1])
         self.assertIn('"duration_seconds": 0.0005', metadata_call.args[1])
@@ -1100,9 +1226,9 @@ class GenerationTest(unittest.TestCase):
 
     def test_task_sample_logger_loads_samples_from_real_datamodule(self):
         samples = [Mock(), Mock()]
-        config = DataConfig(
+        config = SpeechConfig(
             codec="longcat",
-            dataloader={"batch_size": 1, "num_workers": 0},
+            dataloader=DataLoaderConfig(batch_size=1, num_workers=0),
         )
         datamodule = DataModule(
             SimpleNamespace(codec_name="longcat"),
@@ -1117,6 +1243,14 @@ class GenerationTest(unittest.TestCase):
 
         self.assertEqual(logger.samples, [samples[1], samples[0]])
 
+    def test_task_sample_logger_state_key_distinguishes_fixed_loaders(self):
+        asr = TaskSampleLogger([0], every_n_steps=10, loader_name="asr")
+        same_asr = TaskSampleLogger([0], every_n_steps=10, loader_name="asr")
+        tts = TaskSampleLogger([0], every_n_steps=10, loader_name="tts")
+
+        self.assertEqual(asr.state_key, same_asr.state_key)
+        self.assertNotEqual(asr.state_key, tts.state_key)
+
     def test_task_sample_logger_logs_generation_failure(self):
         batch = ModelBatch(
             input_ids=torch.tensor([[1, 2]]),
@@ -1125,13 +1259,18 @@ class GenerationTest(unittest.TestCase):
             tasks=[Task.T2TT],
             pad_token_id=0,
         )
-        module = SimpleNamespace(generate=Mock(side_effect=RuntimeError("boom")))
+        module = SimpleNamespace(
+            generate=Mock(side_effect=RuntimeError("boom")),
+            materialize_batch=Mock(side_effect=lambda value: value),
+        )
         experiment = SimpleNamespace(add_text=Mock())
         trainer = SimpleNamespace(
             global_step=0,
             is_global_zero=True,
             logger=SimpleNamespace(experiment=experiment),
-            datamodule=SimpleNamespace(collator=Mock(return_value=batch)),
+            datamodule=SimpleNamespace(
+                collator_for=Mock(return_value=Mock(return_value=batch))
+            ),
         )
         logger = TaskSampleLogger([0], every_n_steps=1)
         logger.samples = [_raw_sample()]
@@ -1152,13 +1291,18 @@ class GenerationTest(unittest.TestCase):
             tasks=[Task.T2TT],
             pad_token_id=0,
         )
-        module = SimpleNamespace(generate=Mock(return_value=[]))
+        module = SimpleNamespace(
+            generate=Mock(return_value=[]),
+            materialize_batch=Mock(side_effect=lambda value: value),
+        )
         experiment = SimpleNamespace(add_text=Mock())
         trainer = SimpleNamespace(
             global_step=0,
             is_global_zero=True,
             logger=SimpleNamespace(experiment=experiment),
-            datamodule=SimpleNamespace(collator=Mock(return_value=batch)),
+            datamodule=SimpleNamespace(
+                collator_for=Mock(return_value=Mock(return_value=batch))
+            ),
         )
         logger = TaskSampleLogger([0], every_n_steps=1)
         logger.samples = [_raw_sample()]

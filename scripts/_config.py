@@ -4,10 +4,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Type, TypeVar, Union, cast
 
+from anydataset.types import AudioView
 from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf
 
+from speech_to_speech.datamodule.config import SpeechConfig
 from speech_to_speech.datamodule.dataset import DatasetConfig, DatasetName
-from speech_to_speech.datamodule.text import TextDatasetConfig, TextDatasetName
+from speech_to_speech.datamodule.text import (
+    TextConfig as TextDataConfig,
+    TextDatasetName,
+)
 from speech_to_speech.datamodule.types import DataShape
 from speech_to_speech.model import AdapterType
 from speech_to_speech.model import Config as ModelConfig
@@ -90,29 +95,6 @@ class ValidationConfig:
     split_label: str = "dev"
     every_n_steps: int = 1000
     sanity_steps: int = -1
-
-
-@dataclass
-class TrainDataLoaderConfig:
-    batch_size: int = MISSING
-    num_workers: int = MISSING
-    pin_memory: bool = False
-    persistent_workers: bool = False
-
-
-@dataclass
-class SpeechDataConfig:
-    codec: str = MISSING
-    dataloader: TrainDataLoaderConfig = field(default_factory=TrainDataLoaderConfig)
-    shape: DataShape = DataShape.PAIR
-    encode_missing_codes: bool = False
-    dataset: DatasetConfig = field(default_factory=DatasetConfig)
-
-
-@dataclass
-class TextDataConfig:
-    dataloader: TrainDataLoaderConfig = field(default_factory=TrainDataLoaderConfig)
-    dataset: TextDatasetConfig = field(default_factory=TextDatasetConfig)
 
 
 @dataclass
@@ -266,8 +248,8 @@ class _StagedTrainConfig:
     output_dir: str = MISSING
     model: ModelConfig = field(default_factory=ModelConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
-    data: SpeechDataConfig = field(default_factory=SpeechDataConfig)
-    text_data: TextDataConfig = field(default_factory=TextDataConfig)
+    data: SpeechConfig = MISSING
+    text_data: TextDataConfig = MISSING
     pl_module: ModuleConfig = field(default_factory=ModuleConfig)
     train: ResumableTrainConfig = field(default_factory=ResumableTrainConfig)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
@@ -444,14 +426,14 @@ def _validate_audio_representation(
         raise ValueError(
             "runtime.semantic_codec_artifact requires model/acoustic=none."
         )
-    if config.runtime.codec == "bicodec" and acoustic is not AcousticType.NONE:
+    if config.runtime.audio_view is AudioView.BICODEC and acoustic is not AcousticType.NONE:
         raise ValueError(
             "BiCodec fixed-length acoustic units require model/acoustic=none; "
             "use a semantic codec artifact or full_codec_sequence."
         )
     if (
         acoustic is AcousticType.NONE
-        and config.runtime.codec in {"longcat", "bicodec"}
+        and config.runtime.audio_view in {AudioView.LONGCAT, AudioView.BICODEC}
         and config.runtime.audio_representation is AudioRepresentation.DECOUPLED
         and config.runtime.semantic_codec_artifact is None
     ):

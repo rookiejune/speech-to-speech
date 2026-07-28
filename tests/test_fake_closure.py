@@ -104,6 +104,13 @@ class _Codec:
         return semantic + acoustic_features[..., 0]
 
 
+class _ModuleCodec(_Codec, nn.Module):
+    def __init__(self) -> None:
+        nn.Module.__init__(self)
+        _Codec.__init__(self)
+        self.backend_weight = nn.Parameter(torch.ones(1))
+
+
 class _FlowRuntime:
     def __init__(self) -> None:
         self.sampled = False
@@ -143,6 +150,9 @@ class _Runtime:
         self.audio_view = AudioView.LONGCAT
         self.codec_frame_rate = 50.0
         self.audio_representation = AudioRepresentation.DECOUPLED
+        self.semantic_codec_artifact = None
+        self.acoustic_layout = AcousticLayout.FRAME_ALIGNED
+        self.acoustic_unit_length = None
         self.text_tokenizer = _TextTokenizer()
         self.audio_tokenizer = NativeAudioTokenizer(vocab_size=8)
         self.codec = _Codec()
@@ -159,6 +169,22 @@ class _Runtime:
 
 
 class FakeClosureTest(unittest.TestCase):
+    def test_acoustic_model_does_not_own_runtime_codec(self):
+        rt = _Runtime()
+        rt.codec = _ModuleCodec()
+
+        model = FlowModel(
+            _model_config(),
+            runtime=rt,
+            decoder={"hidden_dim": 4, "layers": 1, "heads": 1, "ffn_ratio": 2},
+        )
+
+        self.assertIs(model.acoustic_codec, rt.codec)
+        self.assertNotIn("acoustic_codec", model._modules)
+        self.assertFalse(
+            any(name.startswith("acoustic_codec.") for name, _ in model.named_parameters())
+        )
+
     def test_flow_model_loads_generator_and_adapts_hidden_condition(self):
         rt = _Runtime()
         config = SharedDecoderConfig(hidden_dim=4, layers=1, heads=1, ffn_ratio=2)
@@ -450,6 +476,10 @@ def _artifact(
             route=route,
             condition_dim=condition_dim,
             decoder=decoder,
+            backend_name="fake",
+            sample_rate=16_000,
+            frame_rate=50.0,
+            semantic_frame_rate=50.0,
             semantic_vocab_size=8,
             semantic_embedding_dim=4,
             acoustic_feature_dim=4,

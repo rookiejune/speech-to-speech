@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence, Sized
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from anydataset.dataset import MapStyleABC
 from anydataset.types import Sample as RawSample
 from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader, Subset
-from typing_extensions import NotRequired
 
 from .._compat import StrEnum, auto
 from ..task import Task
+from ._text import TextLoader
 from .collator import Collator
-from .dataset import DatasetConfig, DatasetName, load_dataset
+from .config import DataLoaderConfig, SpeechConfig
+from .dataset import load_dataset
 from .joint import LoaderSchedule, ScheduledDataLoader
 from .protocol import (
     DataRuntime,
@@ -28,49 +29,6 @@ if TYPE_CHECKING:
     from .text import TextConfig
 
 
-class DataLoaderConfig(TypedDict):
-    batch_size: int
-    num_workers: int
-    pin_memory: NotRequired[bool]
-    persistent_workers: NotRequired[bool]
-
-
-@dataclass
-class Config:
-    codec: str
-    dataloader: DataLoaderConfig
-    shape: DataShape = DataShape.PAIR
-    encode_missing_codes: bool = False
-    dataset: DatasetConfig = field(default_factory=DatasetConfig)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.shape, DataShape):
-            raise TypeError("data shape must be a DataShape.")
-        if not isinstance(self.encode_missing_codes, bool):
-            raise TypeError("encode_missing_codes must be a boolean.")
-        if self.encode_missing_codes and self.shape is not DataShape.SINGLE:
-            raise ValueError("encode_missing_codes requires data shape single.")
-        if (
-            self.dataset.name is DatasetName.QWEN_TTS_SPEAKER
-            and self.shape is not DataShape.SINGLE
-        ):
-            raise ValueError("qwen_tts_speaker requires data shape single.")
-        batch_size = self.dataloader["batch_size"]
-        num_workers = self.dataloader["num_workers"]
-        if isinstance(batch_size, bool) or not isinstance(batch_size, int):
-            raise TypeError("dataloader batch_size must be an integer.")
-        if batch_size <= 0:
-            raise ValueError("dataloader batch_size must be positive.")
-        if isinstance(num_workers, bool) or not isinstance(num_workers, int):
-            raise TypeError("dataloader num_workers must be an integer.")
-        if num_workers < 0:
-            raise ValueError("dataloader num_workers must be non-negative.")
-        for name in ("pin_memory", "persistent_workers"):
-            value = self.dataloader.get(name, False)
-            if not isinstance(value, bool):
-                raise TypeError(f"dataloader {name} must be a boolean.")
-
-
 class LoaderKind(StrEnum):
     SPEECH = auto()
     TEXT = auto()
@@ -80,7 +38,7 @@ class LoaderKind(StrEnum):
 class LoaderSpec:
     kind: LoaderKind
     task_weights: Mapping[Task, float]
-    speech_config: Config | None = None
+    speech_config: SpeechConfig | None = None
     text_config: TextConfig | None = None
     sample_index: int | None = None
 
@@ -106,7 +64,7 @@ class LoaderSpec:
     @classmethod
     def speech(
         cls,
-        config: Config,
+        config: SpeechConfig,
         task_weights: Mapping[Task, float],
         *,
         sample_index: int | None = None,
@@ -136,6 +94,11 @@ class _Loader(Protocol):
 
 
 class _TrainLoader(_Loader, Protocol):
+    @property
+    def collator(self) -> Callable[[list[RawSample]], ConcreteTrainInput]: ...
+
+    def set_task_weights(self, task_weights: Mapping[Task, float]) -> None: ...
+
     def train_dataloader(self) -> Iterable[ConcreteTrainInput]: ...
 
 
@@ -146,7 +109,7 @@ class _ValidationLoader(_Loader, Protocol):
 class _SpeechLoader:
     def __init__(
         self,
-        config: Config,
+        config: SpeechConfig,
         runtime: DatasetRuntime,
         task_weights: Mapping[Task, float],
         sample_index: int | None = None,
@@ -211,7 +174,7 @@ class _SpeechLoader:
                 collate_fn=self.collator,
             )
         loader = self.config.dataloader
-        num_workers = loader["num_workers"]
+        num_workers = loader.num_workers
         if not isinstance(self.collator.runtime, DataRuntimeSnapshot):
             snapshot = DataRuntimeSnapshot.from_runtime(self.runtime)
             self.collator.runtime = cast(DataRuntime, cast(object, snapshot))
@@ -228,19 +191,19 @@ class _SpeechLoader:
                 self._dataset,
                 batch_sampler=source_loader.batch_sampler,
                 num_workers=num_workers,
-                pin_memory=loader.get("pin_memory", False),
+                pin_memory=loader.pin_memory,
                 persistent_workers=(
-                    loader.get("persistent_workers", False) and num_workers > 0
+                    loader.persistent_workers and num_workers > 0
                 ),
                 collate_fn=self.collator,
             )
         return DataLoader(
             self._dataset,
-            batch_size=loader["batch_size"],
+            batch_size=loader.batch_size,
             num_workers=num_workers,
-            pin_memory=loader.get("pin_memory", False),
+            pin_memory=loader.pin_memory,
             persistent_workers=(
-                loader.get("persistent_workers", False) and num_workers > 0
+                loader.persistent_workers and num_workers > 0
             ),
             collate_fn=self.collator,
         )
@@ -302,10 +265,7 @@ class DataModule(LightningDataModule):
         loader_name: str | None = None,
     ) -> None:
         loader = self._single_loader(loader_name, "set task weights")
-        setter = getattr(loader, "set_task_weights", None)
-        if not callable(setter):
-            raise ValueError("the selected loader does not support task weights.")
-        setter(task_weights)
+        loader.set_task_weights(task_weights)
 
     def train_samples(
         self,
@@ -314,21 +274,16 @@ class DataModule(LightningDataModule):
         loader_name: str | None = None,
     ) -> list[RawSample]:
         loader = self._single_loader(loader_name, "read samples")
-        reader = getattr(loader, "train_samples", None)
-        if not callable(reader):
+        if not isinstance(loader, _SpeechLoader):
             raise ValueError("the selected loader does not expose raw samples.")
-        return cast(Callable[[Sequence[int]], list[RawSample]], reader)(indices)
+        return loader.train_samples(indices)
 
-    @property
-    def collator(self) -> Any:
-        return self.collator_for()
-
-    def collator_for(self, loader_name: str | None = None) -> Any:
+    def collator_for(
+        self,
+        loader_name: str | None = None,
+    ) -> Callable[[list[RawSample]], ConcreteTrainInput]:
         loader = self._single_loader(loader_name, "read collator")
-        collator = getattr(loader, "collator", None)
-        if collator is None:
-            raise ValueError("the selected loader does not expose a collator.")
-        return collator
+        return loader.collator
 
     def train_dataloader(self) -> Iterable[TrainInputBatch]:
         loaders = {
@@ -338,9 +293,9 @@ class DataModule(LightningDataModule):
             return cast(Iterable[TrainInputBatch], next(iter(loaders.values())))
         return ScheduledDataLoader(loaders, self.schedule)
 
-    def val_dataloader(self) -> Iterable[TrainInputBatch] | None:
+    def val_dataloader(self) -> Iterable[TrainInputBatch]:
         if self._validation_loader is None:
-            return None
+            return ()
         return cast(
             Iterable[TrainInputBatch],
             self._validation_loader.validation_dataloader(),
@@ -372,9 +327,7 @@ def _build_loader(
             sample_index=spec.sample_index,
         )
     assert spec.text_config is not None
-    from .text import _TextLoader
-
-    return _TextLoader(
+    return TextLoader(
         spec.text_config,
         cast(TextRuntime, runtime),
         spec.task_weights,
@@ -427,16 +380,16 @@ def _source_loader(
     source = _source_dataset(dataset)
     if source is None:
         return None
-    batch_size = loader["batch_size"]
+    batch_size = loader.batch_size
     return source.dataloader(
         cost_fn=_unit_cost,
         max_batch_memory=batch_size,
         max_batch_samples=batch_size,
         shuffle=shuffle,
-        num_workers=loader["num_workers"],
-        pin_memory=loader.get("pin_memory", False),
+        num_workers=loader.num_workers,
+        pin_memory=loader.pin_memory,
         persistent_workers=(
-            loader.get("persistent_workers", False) and loader["num_workers"] > 0
+            loader.persistent_workers and loader.num_workers > 0
         ),
         collate_fn=collate_fn,
     )

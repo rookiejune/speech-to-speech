@@ -293,6 +293,6 @@ frozen。正式 joint entry 以
 替换 SAC artifact。
 
 正式 train 只在配置了独立 speech validation spec 时让 `val_dataloader()` 返回真实 loader；
-没有 spec 时返回 `None`，text train loader 不被复用为 validation。teacher-forcing 指标由 loss 层的
+没有 spec 时返回空 iterable，text train loader 不被复用为 validation。teacher-forcing 指标由 loss 层的
 `validation_metrics()` 解释 objective 输出，通用 count-weighted epoch/DDP aggregation 和可恢复历史
 由 `anytrain.lightning.validation` 提供。

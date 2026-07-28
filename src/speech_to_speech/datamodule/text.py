@@ -1,18 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Optional, cast
+from typing import Optional
 
 from anydataset.types import Lang, Modality, Role, Sample, TextItem, TextMeta, TextView
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
 
 from .._compat import StrEnum, auto
-from ..task import Task
-from .collator import TextCollator
-from .module import DataLoaderConfig
-from .protocol import TextRuntime, TextRuntimeSnapshot
-from .types import ModelBatch
+from .config import DataLoaderConfig
 
 
 class TextDatasetName(StrEnum):
@@ -99,65 +94,8 @@ class TextConfig:
     dataset: TextDatasetConfig = field(default_factory=TextDatasetConfig)
 
     def __post_init__(self) -> None:
-        batch_size = self.dataloader["batch_size"]
-        num_workers = self.dataloader["num_workers"]
-        if isinstance(batch_size, bool) or not isinstance(batch_size, int):
-            raise TypeError("text dataloader batch_size must be an integer.")
-        if batch_size <= 0:
-            raise ValueError("text dataloader batch_size must be positive.")
-        if isinstance(num_workers, bool) or not isinstance(num_workers, int):
-            raise TypeError("text dataloader num_workers must be an integer.")
-        if num_workers < 0:
-            raise ValueError("text dataloader num_workers must be non-negative.")
-        for name in ("pin_memory", "persistent_workers"):
-            value = self.dataloader.get(name, False)
-            if not isinstance(value, bool):
-                raise TypeError(f"text dataloader {name} must be a boolean.")
-
-
-class _TextLoader:
-    def __init__(
-        self,
-        config: TextConfig,
-        runtime: TextRuntime,
-        task_weights: Mapping[Task, float],
-    ) -> None:
-        self.config = config
-        self.runtime = runtime
-        self.collator = TextCollator(runtime, task_weights)
-        self._train_dataset = None
-
-    def setup(self, stage: str | None = None) -> None:
-        del stage
-        if self._train_dataset is not None:
-            return
-        self._train_dataset = load_text_dataset(self.config.dataset)
-
-    def set_task_weights(self, task_weights: Mapping[Task, float]) -> None:
-        self.collator.set_task_weights(task_weights)
-
-    def train_dataloader(self) -> Iterable[ModelBatch]:
-        if self._train_dataset is None:
-            raise RuntimeError(
-                "text loader setup() must run before train_dataloader()."
-            )
-        loader = self.config.dataloader
-        num_workers = loader["num_workers"]
-        if not isinstance(self.collator.runtime, TextRuntimeSnapshot):
-            self.collator.runtime = cast(
-                TextRuntime,
-                cast(object, TextRuntimeSnapshot.from_runtime(self.runtime)),
-            )
-        return DataLoader(
-            self._train_dataset,
-            batch_size=loader["batch_size"],
-            num_workers=num_workers,
-            pin_memory=loader.get("pin_memory", False),
-            persistent_workers=(
-                loader.get("persistent_workers", False) and num_workers > 0
-            ),
-            collate_fn=self.collator,
-        )
+        if not isinstance(self.dataloader, DataLoaderConfig):
+            raise TypeError("text dataloader must be a DataLoaderConfig.")
 
 
 __all__ = [

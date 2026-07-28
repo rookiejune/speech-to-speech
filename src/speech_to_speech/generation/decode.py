@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import torch
 from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer, semantic_codes_from_audio_tokens
-from ..runtime.types import AcousticCodec, AudioTokenizer, Codec, SemanticCodec, StructuredCodec
+from ..runtime.types import (
+    AcousticCodec,
+    AudioTokenizer,
+    Codec,
+    CodecBackend,
+    SemanticCodec,
+    StructuredCodec,
+    frame_codec,
+    structured_codec,
+)
 
 
 def decode_generated_audio(
@@ -118,6 +129,26 @@ def decode_generated_codes(
     )
 
 
+def decode_reference_codes(
+    codes: object,
+    *,
+    codec: CodecBackend,
+) -> Tensor:
+    """Decode one prepared-code sample through its actual backend capability."""
+    if isinstance(codes, (Mapping, SemanticAcousticCodes)):
+        structured = _structured_codes(codes)
+        return structured_codec(codec).detokenize(
+            SemanticAcousticCodes(
+                semantic=structured.semantic.unsqueeze(0),
+                acoustic=structured.acoustic.unsqueeze(0),
+            )
+        )
+    if not isinstance(codes, Tensor):
+        raise TypeError("frame codec reference codes must be a Tensor.")
+    _reference_code_tensor(codes)
+    return frame_codec(codec).decode(codes.unsqueeze(0))
+
+
 def _local_ids(audio_token_ids: Tensor, audio_token_range: tuple[int, int]) -> Tensor:
     if not isinstance(audio_token_ids, Tensor):
         raise TypeError("audio token ids must be a Tensor.")
@@ -149,3 +180,28 @@ def _decoded_frames(tokenizer: AudioTokenizer, token_ids: Tensor) -> Tensor:
     if not is_signed_integer_dtype(frames.dtype):
         raise TypeError("decoded full codec codes must use a signed integer dtype.")
     return frames.to(device=token_ids.device, dtype=torch.long)
+
+
+def _structured_codes(value: object) -> SemanticAcousticCodes:
+    if isinstance(value, SemanticAcousticCodes):
+        semantic = value.semantic
+        acoustic = value.acoustic
+    elif isinstance(value, Mapping):
+        semantic = value.get("semantic")
+        acoustic = value.get("acoustic")
+        if not isinstance(semantic, Tensor) or not isinstance(acoustic, Tensor):
+            raise TypeError(
+                "structured reference codes must contain Tensor semantic/acoustic fields."
+            )
+    else:
+        raise TypeError("structured reference codes require semantic/acoustic fields.")
+    _reference_code_tensor(semantic)
+    _reference_code_tensor(acoustic)
+    return SemanticAcousticCodes(semantic=semantic, acoustic=acoustic)
+
+
+def _reference_code_tensor(value: Tensor) -> None:
+    if value.dim() != 2:
+        raise ValueError("reference codes must have shape [units, codebooks].")
+    if not is_signed_integer_dtype(value.dtype):
+        raise TypeError("reference codes must use a signed integer dtype.")

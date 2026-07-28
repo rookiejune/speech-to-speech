@@ -32,8 +32,8 @@ codebooks 编入 token 序列，因此不能同时配置 BPE audio tokenizer。O
 
 ## 协议
 
-`runtime/types.py` 定义资源对象的 `SemanticCodec`、`Codec`、`CodebookCodec`、
-`AcousticCodec`、`AudioTokenizer`、`TextTokenizer` 与 `Backbone` Protocol。
+`runtime/types.py` 定义资源对象的 `SemanticCodec`、`Codec`、`StructuredCodec`、
+`CodebookCodec`、`AcousticCodec`、`AudioTokenizer`、`TextTokenizer` 与 `Backbone` Protocol。
 `runtime/protocol.py` 统一定义 `DataRuntime`、`GenerationRuntime` 与
 `TokenModelRuntime` capability；消费模块不重复声明相同属性。`DataRuntime` 只公开 parser、
 sample builder 和 batch padding 所需资源。
@@ -45,6 +45,16 @@ semantic-only decoder。`FULL_CODEC_SEQUENCE` 对 `FrameCodec` 展开全部 code
 `SemanticAcousticCodec` 的 semantic units，waveform 由
 `semantic_acoustic_codec.runtime.SemanticCodecRuntime` 负责。semantic-only decoder 不放回
 anytrain，也不通过普通 codec 的 `decode()` 伪装。
+
+能力检查按实际接口而不是 codec 名称分派：`frame_codec()` 要求完整 encode/decode、frame rate 和
+codebook sizes；`structured_codec()` 要求 tokenize/detokenize、semantic/acoustic codebook、layout
+与 feature decode 接口；`acoustic_codec()` 只用于 frame-aligned side channel。一个 backend 只有在
+满足对应完整 Protocol 时才进入该路径，不用单个同名属性推断整组能力。
+capability metadata 在这些边界统一校验：sample rate 必须是正整数，frame rate 必须是有限正数，
+codebook sizes 必须是非空正整数 tuple，feature dim 必须是正整数，structured layout 必须是
+`AcousticLayout`，且 `FIXED_LENGTH` 必须提供正整数 `acoustic_unit_length`；接口存在但 metadata
+无效时直接暴露错误。只消费采样率或 frame-code codebook metadata 的调用点分别使用
+`codec_sample_rate()` 与 `frame_codebook_sizes()`，不要求无关的完整 encode/decode 能力。
 
 LongCat 的 `DECOUPLED + model/acoustic=none` 必须配置 `semantic_codec_artifact`；没有 artifact
 时应选择 `FULL_CODEC_SEQUENCE`。`DECOUPLED + Flow/RVQ` 是现有 S2S 内部 acoustic-feature
@@ -61,6 +71,12 @@ BiCodec 使用同一个 structured backend，但保留两条互斥的 TTS 路线
 
 BiCodec 的 acoustic 轴是 `FIXED_LENGTH`，不能广播到 semantic frame 轴，也不能接入当前
 frame-aligned Flow/RVQ side channel。
+
+`supports_structured()` 只表示 backend 同时提供 semantic/acoustic structured 能力，不决定 token
+序列格式。`FULL_CODEC_SEQUENCE` 按 layout 分派：`FIXED_LENGTH` 使用
+`BiCodecAudioTokenizer` 的 structured 状态机；`FRAME_ALIGNED` 必须同时满足 `frame_codec()`，并用
+`FlattenedAudioTokenizer` 展开完整 frame codebooks。因此同时实现 frame 与 structured capability
+的 LongCat 不会误入固定长度状态机。
 
 `audio_tokenizer.py` 提供：
 

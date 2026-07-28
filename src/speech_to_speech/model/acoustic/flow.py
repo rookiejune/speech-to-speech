@@ -8,7 +8,8 @@ from semantic_acoustic_codec.runtime import AcousticGeneratorArtifact
 from torch import Tensor, nn
 
 from ...generation.types import AcousticGeneration
-from ...runtime.types import acoustic_codec
+from ...runtime.types import AcousticCodec, acoustic_codec
+from .._buffer import register
 from ..base import Config, TokenModel
 from ..protocol import FlowModelRuntime, FlowSamplingRuntime
 from ._config import DecoderConfig, FlowRepaConfig, decoder_options
@@ -19,6 +20,9 @@ from .dit import AcousticDiT
 
 class AcousticFlow(nn.Module):
     """Acoustic flow decoder and sampling shared by training compositions."""
+
+    feature_mean: Tensor
+    feature_std: Tensor
 
     def __init__(
         self,
@@ -47,11 +51,15 @@ class AcousticFlow(nn.Module):
             repa_student_layer=repa_student_layer,
         )
         self.runtime = runtime
-        self.feature_mean = nn.Buffer(
-            _feature_stat(latent_dim, feature_mean, fill=0.0)
+        register(
+            self,
+            "feature_mean",
+            _feature_stat(latent_dim, feature_mean, fill=0.0),
         )
-        self.feature_std = nn.Buffer(
-            _feature_stat(latent_dim, feature_std, fill=1.0)
+        register(
+            self,
+            "feature_std",
+            _feature_stat(latent_dim, feature_std, fill=1.0),
         )
 
     @torch.no_grad()
@@ -101,7 +109,6 @@ class FlowModel(TokenModel):
     ) -> None:
         codec = acoustic_codec(runtime.codec)
         super().__init__(config=config, runtime=runtime)
-        self.acoustic_codec = codec
         options = decoder_options(decoder)
         backbone_weight = self.backbone.get_input_embeddings().weight
         condition_dim = self.backbone.config.hidden_size
@@ -122,7 +129,7 @@ class FlowModel(TokenModel):
         ).to(device=backbone_weight.device, dtype=torch.float32)
         self.acoustic_flow = AcousticFlow(
             condition_dim,
-            self.acoustic_codec.acoustic_feature_dim,
+            codec.acoustic_feature_dim,
             runtime.flow_matching,
             hidden_dim=options.hidden_dim,
             layers=options.layers,
@@ -138,6 +145,10 @@ class FlowModel(TokenModel):
             if not isinstance(generator, FMFeatureGenerator):
                 raise AssertionError("Flow initialization type changed after validation.")
             self.acoustic_decoder.load_state_dict(generator.core.decoder.state_dict())
+
+    @property
+    def acoustic_codec(self) -> AcousticCodec:
+        return acoustic_codec(self.runtime.codec)
 
     @property
     def acoustic_decoder(self) -> AcousticDiT:

@@ -199,6 +199,8 @@ class _Tokenizer:
 
 
 class _Codec:
+    sample_rate = 16_000
+    frame_rate = 50.0
     acoustic_feature_dim = 4
     acoustic_codebook_sizes = (5, 6)
     semantic_feature_dim = 4
