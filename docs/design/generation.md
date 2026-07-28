@@ -84,7 +84,7 @@ text target
 
 audio target + token-only model
     -> generate_tokens(stop=EOA), or constrained full-codec state machine
-    -> FrameCodec full-code decode, BiCodec detokenize, or SAC SemanticCodecRuntime decode
+    -> FrameCodec full-code decode, route-aware BiCodec detokenize, or SAC SemanticCodecRuntime decode
 
 audio target + runtime acoustic side channel + acoustic feature generator
     -> generate_audio_features()
@@ -94,7 +94,7 @@ audio target + runtime acoustic side channel + acoustic feature generator
 
 audio 路径至少要生成一个 codec-decodable token。service 按
 `(generated_token_count, generated_frame_count)` 合并 shape 相同的行执行 codec decode，并要求
-codec 保留 batch 轴。`full_codec_sequence` 通过 `FlattenedAudioTokenizer` 把完整
+codec 保留 batch 轴。`audio_representation=full_codec_sequence` 只对 FrameCodec 通过 `FlattenedAudioTokenizer` 把完整
 `[frames, codebooks]` 还原后直接调用 `codec.decode()`，不会因为 LongCat codec 暴露 acoustic
 codebooks 而进入 Flow/RVQ acoustic feature generation。flow 与 RVQ 都返回相同的
 `AcousticGeneration`；`model/acoustic=none` 即使搭配 LongCat 这类带 acoustic codebook 的

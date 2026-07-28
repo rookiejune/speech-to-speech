@@ -12,6 +12,11 @@ from torch import Tensor, nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from speech_to_speech.datamodule.types import ModelBatch
+from speech_to_speech.audio_route import (
+    AudioStream,
+    BICODEC_PREDICT_ACOUSTIC,
+    BICODEC_REUSE_PROMPT_ACOUSTIC,
+)
 from speech_to_speech.loss import (
     FlowObjective,
     LossItem,
@@ -26,7 +31,10 @@ from speech_to_speech.loss.types import combine_outputs
 from speech_to_speech.model.base import Config, TokenModel
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.pl_module import SpeechToSpeechModule
-from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
+from speech_to_speech.runtime.audio_tokenizer import (
+    BiCodecAudioTokenizer,
+    NativeAudioTokenizer,
+)
 from speech_to_speech.task import Task
 
 
@@ -234,6 +242,74 @@ class _BatchObjective(Objective[Any]):
 
 
 class ModelLossContractTest(unittest.TestCase):
+    def test_bicodec_grouped_loss_restricts_each_prediction_head(self):
+        tokenizer = BiCodecAudioTokenizer(
+            semantic_vocab_size=4,
+            acoustic_codebook_sizes=(2,),
+            acoustic_unit_length=1,
+        )
+        layout = Layout(text=(0, 4), audio=(4, 4 + tokenizer.vocab_size))
+        codes = {
+            "semantic": torch.tensor([[1]]),
+            "acoustic": torch.tensor([[0]]),
+        }
+        local_ids, local_groups = tokenizer.encode_streams_with_groups(
+            codes,
+            (AudioStream.ACOUSTIC, AudioStream.SEMANTIC),
+        )
+        global_ids = layout.to_global(Modality.AUDIO.value, local_ids)
+        input_ids = torch.cat((torch.tensor([1]), global_ids)).unsqueeze(0)
+        labels = torch.full_like(input_ids, -100)
+        groups = torch.full_like(input_ids, -1)
+        supervised = local_groups.ge(0)
+        labels[0, 1:][supervised] = global_ids[supervised]
+        groups[0, 1:][supervised] = local_groups[supervised]
+        calls: list[Tensor] = []
+
+        def selected(hidden: Tensor, allowed: Tensor) -> Tensor:
+            calls.append(allowed.detach().clone())
+            return torch.zeros(hidden.size(0), allowed.numel())
+
+        item = TokenLoss(layout, tokenizer)(
+            torch.zeros(1, input_ids.size(1), 3),
+            labels,
+            Modality.AUDIO,
+            lambda hidden, modality: torch.empty(0),
+            token_groups=groups,
+            selected_logits=selected,
+        )
+
+        self.assertTrue(torch.isfinite(item.loss).all())
+        self.assertEqual(len(calls), 3)
+        expected = {
+            tuple(
+                layout.to_global(
+                    Modality.AUDIO.value,
+                    tokenizer.prediction_ids(group, device=torch.device("cpu")),
+                ).tolist()
+            )
+            for group in (0, 1, 2)
+        }
+        self.assertEqual({tuple(call.tolist()) for call in calls}, expected)
+
+    def test_checkpoint_audio_route_is_immutable(self):
+        model = SimpleNamespace(
+            runtime=SimpleNamespace(audio_route=BICODEC_REUSE_PROMPT_ACOUSTIC)
+        )
+        module = SpeechToSpeechModule(
+            ModuleConfig(),
+            model=cast(Any, model),
+            objective=cast(Any, SimpleNamespace()),
+        )
+        checkpoint: dict[str, object] = {}
+
+        module.on_save_checkpoint(checkpoint)
+        module.on_load_checkpoint(checkpoint)
+
+        model.runtime.audio_route = BICODEC_PREDICT_ACOUSTIC
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            module.on_load_checkpoint(checkpoint)
+
     def test_sparse_modality_logits_match_dense_modality_cross_entropy(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
         labels = torch.tensor(
