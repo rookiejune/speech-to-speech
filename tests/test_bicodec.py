@@ -15,6 +15,9 @@ from speech_to_speech.generation.decode import (
     decode_generated_bicodec_full,
     decode_generated_bicodec_route,
 )
+from speech_to_speech.generation.service import _validate_request
+from speech_to_speech.task import Task
+from anytrain.module.idspace import Layout
 from speech_to_speech.runtime import AudioRepresentation, Config
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.model._generation import generate_bicodec_sequence
@@ -106,6 +109,20 @@ class BiCodecTokenizerTest(unittest.TestCase):
 
 
 class BiCodecDecodeTest(unittest.TestCase):
+    def test_predict_route_still_requires_reference_prompt_context(self):
+        model = SimpleNamespace(
+            runtime=SimpleNamespace(
+                audio_route=BICODEC_PREDICT_ACOUSTIC,
+                layout=Layout(text=(0, 4), audio=(4, 30)),
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "structured prompt audio context"):
+            _validate_request(
+                {"prompt_ids": torch.tensor([1]), "task": Task.TTS},
+                model,
+            )
+
     def test_full_decode_passes_structured_codes_to_backend(self):
         tokenizer = BiCodecAudioTokenizer(
             semantic_vocab_size=8,
