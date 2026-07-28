@@ -39,8 +39,10 @@ from scripts.train import (
     build_datamodule as build_train_datamodule,
 )
 from speech_to_speech.audio_route import (
+    BICODEC_GENERATE_GLOBAL,
     BICODEC_PREDICT_ACOUSTIC,
     BICODEC_REUSE_PROMPT_ACOUSTIC,
+    BICODEC_REUSE_PROMPT_GLOBAL,
 )
 from speech_to_speech.datamodule import DataModule
 from speech_to_speech.datamodule.module import LoaderKind
@@ -234,10 +236,37 @@ class ConfigTest(unittest.TestCase):
             self.assertIs(config.data.shape, DataShape.SINGLE)
             self.assertIsNone(config.data.speaker)
 
-        self.assertEqual(semantic.audio_route, BICODEC_REUSE_PROMPT_ACOUSTIC)
-        self.assertEqual(full.audio_route, BICODEC_PREDICT_ACOUSTIC)
+        self.assertEqual(semantic.audio_route, BICODEC_REUSE_PROMPT_GLOBAL)
+        self.assertEqual(full.audio_route, BICODEC_GENERATE_GLOBAL)
+        self.assertEqual(semantic.run_name, "bicodec-reuse-prompt-global")
+        self.assertEqual(full.run_name, "bicodec-generate-global")
+        self.assertIn("bicodec-reuse-prompt-global-smoke", semantic.output_dir)
+        self.assertIn("bicodec-generate-global-smoke", full.output_dir)
         self.assertIsNone(semantic.runtime.semantic_codec_artifact)
         self.assertIsNone(full.runtime.semantic_codec_artifact)
+
+        legacy_reuse = overfit(
+            _compose(
+                "overfit",
+                "experiment=bicodec_semantic_only_smoke",
+                "audio_route=bicodec_reuse_prompt_acoustic",
+            )
+        )
+        legacy_predict = overfit(
+            _compose(
+                "overfit",
+                "experiment=bicodec_full_sequence_smoke",
+                "audio_route=bicodec_predict_acoustic",
+            )
+        )
+        self.assertEqual(
+            legacy_reuse.audio_route,
+            BICODEC_REUSE_PROMPT_ACOUSTIC,
+        )
+        self.assertEqual(
+            legacy_predict.audio_route,
+            BICODEC_PREDICT_ACOUSTIC,
+        )
 
     def test_composition_must_match_codec_capabilities(self):
         flow = overfit(_compose("overfit"))

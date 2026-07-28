@@ -52,7 +52,7 @@
   或确定性的内存 `toy` data。`qwen_tts_speaker` 通过 workspace 加载
   `SpeakerAudioGrid`，再由 `SpeakerGridCellsDataset` 暴露 `Role.DEFAULT` flat cells；默认覆盖
   所有 speaker，也可用 `speaker` 显式选择一列。BiCodec prepared cell 使用
-  `AudioView.BICODEC` 的 structured mapping，semantic 和 fixed-length acoustic unit 分别保留
+  `AudioView.BICODEC` 的 structured mapping，semantic 和 fixed-length global unit 分别保留
   独立轴；可选的 `split_manifest` + `split_label` 把已加载的 map-style dataset 限制到
   manifest 声明的非重复、非负索引；manifest 不替换底层 anydataset split，也不绕过其公开
   dataloader/batch-planning 契约。底层是 `MapStyleABC` 时，split view 委托其 `_shuffle()` 并
@@ -138,7 +138,9 @@ audio_context: SemanticAcousticCodes | None
 不能形成半完整状态。
 
 BiCodec route 的 sample builder 先按 `prompt.source` 选择 source/reference，再只序列化
-`prompt.streams`；target 只按 `output.streams` 产生 response。reference 的 semantic/acoustic codes
+`prompt.streams`；target 只按 `output.streams` 产生 response。`global` 表示 fixed-length
+speaker/style codes，仍存放在 structured codes 的 `acoustic` 字段；route 中的 `acoustic` 只为
+legacy metadata 保留。reference 的 semantic/global codes
 作为 `audio_context` 独立保存供 route-aware decode 使用，target semantic 不会被放进 prompt。
 `token_groups` 只标记实际预测的 semantic、semantic-or-end 或各 acoustic codebook payload；forced
 codec/stream marker 与外层 EOA 不进入监督。

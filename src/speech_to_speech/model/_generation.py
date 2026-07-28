@@ -522,10 +522,10 @@ def _generate_bicodec_row(
         )
 
     row.step(local(tokenizer.codec_token_id))
-    if AudioStream.ACOUSTIC in streams:
-        row.step(local(tokenizer.acoustic_token_id))
-        for _ in range(tokenizer.acoustic_unit_length):
-            for start, end in tokenizer.acoustic_token_ranges:
+    if AudioStream.GLOBAL in streams:
+        row.step(local(tokenizer.global_token_id))
+        for _ in range(tokenizer.global_unit_length):
+            for start, end in tokenizer.global_token_ranges:
                 row.step(range_ids(start, end - start))
 
     if AudioStream.SEMANTIC in streams:
@@ -547,12 +547,19 @@ def _audio_streams(streams: Sequence[AudioStream]) -> tuple[AudioStream, ...]:
         raise ValueError("BiCodec generation requires at least one output stream.")
     if any(not isinstance(stream, AudioStream) for stream in values):
         raise TypeError("BiCodec generation streams must contain AudioStream values.")
-    if len(values) != len(set(values)):
-        raise ValueError("BiCodec generation streams must not contain duplicates.")
+    normalized = tuple(
+        AudioStream.GLOBAL if stream is AudioStream.ACOUSTIC else stream
+        for stream in values
+    )
+    if len(normalized) != len(set(normalized)):
+        raise ValueError(
+            "BiCodec generation streams must not contain both global and legacy "
+            "acoustic streams."
+        )
     return tuple(
         stream
-        for stream in (AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
-        if stream in values
+        for stream in (AudioStream.GLOBAL, AudioStream.SEMANTIC)
+        if stream in normalized
     )
 
 

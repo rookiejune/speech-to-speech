@@ -9,12 +9,12 @@ defaults:
   - /logging: csv
   - override /stage: stage_1
   - override /parameter_policy: full
-  - override /audio_route: bicodec_predict_acoustic
+  - override /audio_route: bicodec_generate_global
   - _self_
 
 task: tts
-run_name: bicodec-full-sequence
-output_subdir: bicodec-full-sequence-smoke/${task}/${run_name}
+run_name: bicodec-generate-global
+output_subdir: bicodec-generate-global-smoke/${task}/${run_name}
 
 runtime:
   device: cpu

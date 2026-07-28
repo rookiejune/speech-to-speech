@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import FrozenInstanceError
 from typing import cast
 
 from speech_to_speech.audio_route import (
+    BICODEC_GENERATE_GLOBAL,
     BICODEC_PREDICT_ACOUSTIC,
     BICODEC_REUSE_PROMPT_ACOUSTIC,
+    BICODEC_REUSE_PROMPT_GLOBAL,
     AudioStream,
     Config,
     Decode,
@@ -17,6 +20,11 @@ from speech_to_speech.audio_route import (
 
 
 class AudioRouteTest(unittest.TestCase):
+    def test_global_stream_is_distinct_from_legacy_acoustic(self):
+        self.assertIsNot(AudioStream.GLOBAL, AudioStream.ACOUSTIC)
+        self.assertIs(AudioStream("global"), AudioStream.GLOBAL)
+        self.assertIs(AudioStream("acoustic"), AudioStream.ACOUSTIC)
+
     def test_stream_order_is_canonical_not_declaration_order(self):
         prompt = Prompt(
             source=PromptSource.SOURCE,
@@ -38,9 +46,11 @@ class AudioRouteTest(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "output streams.*duplicates"):
             Output(streams=(AudioStream.ACOUSTIC, AudioStream.ACOUSTIC))
+        with self.assertRaisesRegex(ValueError, "global.*legacy acoustic"):
+            Output(streams=(AudioStream.GLOBAL, AudioStream.ACOUSTIC))
 
     def test_route_rejects_decode_stream_missing_from_prompt(self):
-        with self.assertRaisesRegex(ValueError, "prompt does not provide acoustic"):
+        with self.assertRaisesRegex(ValueError, "prompt does not provide .*global/acoustic"):
             Config(
                 prompt=Prompt(
                     source=PromptSource.REFERENCE,
@@ -87,12 +97,27 @@ class AudioRouteTest(unittest.TestCase):
                 streams=(AudioStream.SEMANTIC,),
             )
 
-    def test_stream_lists_are_normalized_for_omegaconf(self):
-        output = Output(
-            streams=cast(tuple[AudioStream, ...], [AudioStream.SEMANTIC])
-        )
+    def test_stream_lists_are_rejected(self):
+        with self.assertRaisesRegex(TypeError, "output streams must be a tuple"):
+            Output(streams=cast(tuple[AudioStream, ...], [AudioStream.SEMANTIC]))
 
-        self.assertEqual(output.streams, (AudioStream.SEMANTIC,))
+    def test_route_dataclasses_are_frozen(self):
+        prompt = Prompt(source=PromptSource.SOURCE, streams=())
+        output = Output(streams=(AudioStream.SEMANTIC,))
+        decode = Decode(
+            semantic=StreamSource.OUTPUT,
+            acoustic=StreamSource.GENERATOR,
+        )
+        route = Config(prompt=prompt, output=output, decode=decode)
+
+        with self.assertRaises(FrozenInstanceError):
+            prompt.source = PromptSource.REFERENCE
+        with self.assertRaises(FrozenInstanceError):
+            output.streams = ()
+        with self.assertRaises(FrozenInstanceError):
+            decode.acoustic = StreamSource.OUTPUT
+        with self.assertRaises(FrozenInstanceError):
+            route.output = Output(streams=())
 
     def test_bicodec_reuse_prompt_acoustic_preset(self):
         route = BICODEC_REUSE_PROMPT_ACOUSTIC
@@ -112,6 +137,27 @@ class AudioRouteTest(unittest.TestCase):
         self.assertEqual(
             route.output.canonical_streams,
             (AudioStream.ACOUSTIC, AudioStream.SEMANTIC),
+        )
+        self.assertIs(route.decode.semantic, StreamSource.OUTPUT)
+        self.assertIs(route.decode.acoustic, StreamSource.OUTPUT)
+
+    def test_bicodec_reuse_prompt_global_preset(self):
+        route = BICODEC_REUSE_PROMPT_GLOBAL
+
+        self.assertIs(route.prompt.source, PromptSource.REFERENCE)
+        self.assertEqual(route.prompt.canonical_streams, (AudioStream.GLOBAL,))
+        self.assertEqual(route.output.canonical_streams, (AudioStream.SEMANTIC,))
+        self.assertIs(route.decode.semantic, StreamSource.OUTPUT)
+        self.assertIs(route.decode.acoustic, StreamSource.PROMPT)
+
+    def test_bicodec_generate_global_preset(self):
+        route = BICODEC_GENERATE_GLOBAL
+
+        self.assertIs(route.prompt.source, PromptSource.SOURCE)
+        self.assertEqual(route.prompt.canonical_streams, ())
+        self.assertEqual(
+            route.output.canonical_streams,
+            (AudioStream.GLOBAL, AudioStream.SEMANTIC),
         )
         self.assertIs(route.decode.semantic, StreamSource.OUTPUT)
         self.assertIs(route.decode.acoustic, StreamSource.OUTPUT)

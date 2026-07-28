@@ -33,7 +33,16 @@ from .types import (
     supports_structured,
 )
 from .._compat import StrEnum, auto
-from ..audio_route import Config as AudioRouteConfig
+from ..audio_route import (
+    BICODEC_GENERATE_GLOBAL,
+    BICODEC_PREDICT_ACOUSTIC,
+    BICODEC_REUSE_PROMPT_ACOUSTIC,
+    BICODEC_REUSE_PROMPT_GLOBAL,
+    FULL_OUTPUT,
+    SEMANTIC_GENERATOR,
+    Config as AudioRouteConfig,
+    StreamSource,
+)
 
 if TYPE_CHECKING:
     from anytrain.codec import SemanticAcousticCodec
@@ -145,6 +154,7 @@ class Runtime:
             AudioRouteConfig,
         ):
             raise TypeError("runtime audio_route must be an audio route Config.")
+        validate_audio_route(self.config, self.audio_route)
 
     @property
     def codec_name(self) -> str:
@@ -344,6 +354,49 @@ class Runtime:
     def is_codec_audio_id(self, token_id: int) -> bool:
         start, end = self.codec_audio_range
         return start <= token_id < end
+
+
+def validate_audio_route(
+    config: Config,
+    route: AudioRouteConfig | None,
+) -> None:
+    """Validate that an audio route is executable by the runtime representation."""
+    if route is None:
+        return
+    if not route.output.streams:
+        raise ValueError("runtime audio route must declare at least one output stream.")
+
+    representation = config.audio_representation
+    if representation is AudioRepresentation.DECOUPLED:
+        if route != SEMANTIC_GENERATOR:
+            raise ValueError(
+                "decoupled audio representation requires audio_route=semantic_generator."
+            )
+        return
+
+    if StreamSource.GENERATOR in {
+        route.decode.semantic,
+        route.decode.acoustic,
+    }:
+        raise ValueError(
+            "full codec sequence routes cannot use generator-owned decode streams."
+        )
+    if config.audio_view is AudioView.BICODEC:
+        if route not in (
+            BICODEC_GENERATE_GLOBAL,
+            BICODEC_REUSE_PROMPT_GLOBAL,
+            BICODEC_REUSE_PROMPT_ACOUSTIC,
+            BICODEC_PREDICT_ACOUSTIC,
+        ):
+            raise ValueError(
+                "BiCodec full codec sequence requires a supported global or legacy "
+                "acoustic route."
+            )
+        return
+    if route != FULL_OUTPUT:
+        raise ValueError(
+            "frame codec full sequence representation requires audio_route=full_output."
+        )
 
 
 def audio_tokenizer(path: str | Path) -> AudioTokenizer:

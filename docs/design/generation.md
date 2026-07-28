@@ -20,6 +20,10 @@
   有效 frame 数。
 - `generate_responses()`：校验请求、分组 batch generation、逐行截断 stop token、waveform
   decode，并恢复原请求顺序。
+- `prepare_bicodec_tts_request()`：为 `bicodec_reuse_prompt_global` 构造 reference-conditioned TTS
+  request，只接收预编码的 `SemanticAcousticCodes`。
+- `prepare_bicodec_global_tts_request()`：为 `bicodec_generate_global` 构造无 audio context 的 TTS
+  request。
 - `decode_generated_audio()` / `decode_generated_codes()`：分别把 audio token 配合 acoustic
   feature/code 解码为 waveform。semantic-only decode 由 service 内部处理。
 - `TextProbe` / `TextProbeResult` / `evaluate_text()`：greedy text generation 与 reference NLL
@@ -57,6 +61,11 @@ class Result(TypedDict):
 prompt 中若包含 BiCodec reference stream，`prompt_ids` 已经包含 route 规定的 serialized stream，
 而 `audio_context` 保存同一份未序列化 codes，供 decode 复用 prompt-owned stream。route 是固定的
 experiment/checkpoint contract，不属于 `Request`，请求只能提供 context 数据，不能选择另一条 route。
+reference builder 生成的结尾严格为
+`[BOA, serialized route.prompt streams, EOA, BOA]`；service 会重新序列化 `audio_context` 并要求
+它与整个后缀逐 token 相等。context 的 shape、dtype、值域和 global 固定长度由
+`BiCodecAudioTokenizer.encode_streams()` 在同一条路径校验，不接受“可解码但不是当前 prompt”的
+近似匹配。
 `FlattenedAudioTokenizer` 的 codec/codebook marker 和各 codebook range 是 codec serialization
 grammar。model 侧 full-sequence generation 强制 marker 顺序，首个 codebook 生成至少一个
 payload 并决定 frame count，其余 codebook 只能生成相同数量、属于各自 range 的 payload，完整
@@ -65,13 +74,17 @@ block 结束后才允许 EOA。marker 与 EOA 都计入 `max_new_tokens`，marke
 `generation.batch.requests_from_batch()` 会从 teacher-forcing batch 保留 task prefix，直接构造
 request 的调用方负责保持相同 task 状态机。
 当前 prompt 只由 layout global token IDs 表达；普通 audio-source 内容编码为 semantic audio token，
-structured BiCodec route 另外通过 `audio_context` 携带 decode 所需的 reference acoustic/semantic
-codes。`Request` 不接受可切换的 acoustic feature side channel。
+structured BiCodec route 另外通过 `audio_context` 携带 decode 所需的 reference global/semantic
+codes，其中 global 仍使用 `SemanticAcousticCodes.acoustic` 字段。`Request` 不接受可切换的
+acoustic feature side channel。
 
 service 在 padding 前校验每条 request：
 
 - task 必须是 `Task`；prompt 必须是非空一维有符号整数 Tensor，且所有 ID 都属于 runtime
   layout。
+- 非空 `audio_context` 必须是 `SemanticAcousticCodes`；text request、没有 route 或 route 没有
+  prompt streams 时禁止携带多余 context。reference/prompt-owned route 必须提供 context，且
+  structured prompt streams 必须使用 `BiCodecAudioTokenizer`。
 ## 执行流程
 
 `generate_responses()` 按 target modality 分组。每组 prompt 左 padding，输出仍按原始请求顺序排列。
@@ -104,14 +117,15 @@ semantic artifact 路径选择。
 状态机生成有序 marker、各 codebook 等长 payload 和 EOA，避免 audio head 产生不可解析序列；
 多码本每行可独立决定 frame count，返回 batch 以 EOA padding 对齐。BiCodec 使用另一套受约束的
 structured state machine，根据固定 route.output 生成 marker、semantic token 和可选的固定数量
-slot-major acoustic codebook token，恢复 `SemanticAcousticCodes` 后按 route.decode 合并 prompt
-与 output stream，再调用 `detokenize()`。reuse route 只生成 semantic 并复用 prompt acoustic；
-predict route 生成并使用 output acoustic。配置
+slot-major global codebook token，恢复 `SemanticAcousticCodes` 后按 route.decode 合并 prompt
+与 output stream，再调用 `detokenize()`。global reuse route 只生成 semantic 并复用 prompt global；
+global generate route 生成并使用 output global。legacy acoustic route 在 tokenizer/model 边界规范为
+相同 global grammar。配置
 `runtime.semantic_codec_artifact` 后，service 只处理 structured backend 的 semantic tokens，
 并把 waveform decode 交给 `SemanticCodecRuntime`；普通 frame codec 的 `decode()` 不再接收
 semantic-only codes。semantic-artifact 与 structured full-sequence 是配置阶段选择的两条解码路径；
 structured full-sequence 内部的 prompt/output/decode stream 仍由固定 `audio_route` 决定，不会把
-fixed-length acoustic units 伪装成 frame-aligned codes。
+fixed-length global units 伪装成 frame-aligned codes。
 
 自回归 cache、sampling、动态 allowed IDs、逐行 stop 状态和 frame condition 收集属于 model。已有行
 生成 stop token 后，后续步骤只对剩余 active rows 执行 backbone 与 sampling；cache 同步收缩，

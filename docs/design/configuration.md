@@ -167,7 +167,9 @@ schema，不重复声明字段；`scripts/train.py` 直接把解析后的 data c
 同构对象转换。OmegaConf 对字符串枚举只接受成员
 名，入口在合并前把公开的小写 value 转成 enum member name；除此之外不做兼容重写。
 `audio_route` 是 root schema 的独立公开结构，不属于 `runtime.Config`；入口解析后把同一份 route
-传给 `Runtime`、DataModule、model 和 generation service。
+传给 `Runtime`、DataModule、model 和 generation service。Hydra 的 list/enum 表示只存在于入口的
+私有 mutable transport schema；解析完成后入口立即构造 streams 为 tuple 的公开 frozen route，
+公开 route 不接受 list。
 
 两个入口分别解析为：
 
@@ -186,17 +188,19 @@ schema，不重复声明字段；`scripts/train.py` 直接把解析后的 data c
   frame-aligned acoustic side channel。它不决定 prompt 使用哪些 stream，也不决定 output 的 decode
   所有权。
 - `audio_route` 是 experiment/checkpoint 级的固定音频流契约。`prompt.source` 选择 source 或独立
-  reference，`prompt.streams` 声明进入 prompt 的 acoustic/semantic stream，`output.streams` 声明
+  reference，`prompt.streams` 声明进入 prompt 的 global/acoustic/semantic stream，`output.streams` 声明
   自回归实际预测的 stream，`decode` 分别声明 semantic/acoustic 由 prompt、output 或 generator
-  提供。route 不属于 `Request`，一次运行中不能按请求切换。
+  提供。BiCodec 的 `global` 是固定长度 speaker/style stream；`acoustic` 是 legacy route 名称，
+  同一声明不能同时包含两者。route 不属于 `Request`，一次运行中不能按请求切换。
 - `runtime.backbone_initialization=random` 从 `runtime.backbone` 读取 tokenizer 与完整 HF config，
   但不读取预训练权重；它不能与 `model=toy` 组合，并要求 `parameter_policy=full`。
 - `runtime.semantic_codec_artifact` 为 `semantic-acoustic-codec` 的 semantic-only waveform
   support artifact；LongCat 的 `DECOUPLED` token-only 路径可使用它。BiCodec 的 structured
   `FULL_CODEC_SEQUENCE` 路径由 `audio_route` 选择 stream ownership，并调用 backend
-  `detokenize()`；它不接入 Flow/RVQ composition。`bicodec_reuse_prompt_acoustic` 使用 reference
-  的 acoustic+semantic prompt，只预测 semantic，decode 复用 prompt acoustic；
-  `bicodec_predict_acoustic` 使用同样的 prompt，但同时预测并 decode acoustic+semantic。两份
+  `detokenize()`；它不接入 Flow/RVQ composition。默认 smoke 使用
+  `bicodec_reuse_prompt_global`（reference global -> output semantic）和
+  `bicodec_generate_global`（无 audio prompt -> output global+semantic）。
+  `bicodec_reuse_prompt_acoustic` / `bicodec_predict_acoustic` 继续作为 legacy route 可组合。两份
   BiCodec smoke 都选择 `data=qwen_tts_speaker` 和 `data.shape=single`，直接消费 workspace
   prepared grid 的 flat cells；可用 `data.speaker=<id>` 限制到一个 speaker。FrameCodec 的
   token-only 路径仍使用 `audio_representation=full_codec_sequence`。

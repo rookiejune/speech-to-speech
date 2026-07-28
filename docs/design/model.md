@@ -93,10 +93,14 @@ codebooks 的 unified-token codec 必须使用 `model/acoustic=none`；有独立
 codec 也可以显式选择 `none` 作为 token-only baseline。入口不根据 codec 静默覆盖用户选择。
 fixed-length structured codec（例如 BiCodec）使用独立的 model-facing token layout。它只支持
 按 `audio_route` 固定的 structured sequence 路线，不接入当前 frame-aligned Flow/RVQ acoustic
-side channel。`bicodec_reuse_prompt_acoustic` 的 model output 只有 semantic stream；
-`bicodec_predict_acoustic` 的 model output 同时包含 acoustic 与 semantic stream。两者使用同一套
-稳定 vocabulary，route 只改变 grammar 的 output groups 与 decode stream ownership，不按 request
-动态改变模型 head。
+side channel。新 route 使用 `global` 表示固定长度 speaker/style stream：
+`bicodec_reuse_prompt_global` 只输出 semantic，`bicodec_generate_global` 同时输出 global 与
+semantic。legacy `acoustic` route 在 generation state machine 边界规范为同一 global grammar；
+global/acoustic 不能同时声明。所有 route 使用同一套稳定 vocabulary，route 只改变 grammar 的
+output groups 与 decode stream ownership，不按 request 动态改变模型 head。
+无 reference 的 `bicodec_generate_global` 不自带 speaker ID；多 speaker 训练若没有额外条件或
+latent sampling，global 预测可能偏向数据中的主导 speaker，这属于模型条件设计而不是 codec
+序列化问题。
 
 底层 acoustic decoder 的所有权在 `semantic-acoustic-codec`：S2S 的 Flow/RVQ model 只负责
 从 backbone hidden state 取 frame-aligned condition，经 `HiddenConditionAdapter` 映射后送入 SAC 的
@@ -114,8 +118,8 @@ semantic-audio token IDs
     -> semantic audio adapter
 
 Native/BPE semantic tokenizers 使用 codec codebook 初始化；完整 codec sequence tokenizer
-使用随机初始化，因为它的 vocab 同时包含多 codebook offset tokens、BiCodec semantic/acoustic
-ranges 与 codec/stream/end markers。BiCodec 的 semantic payload、各 fixed-length acoustic slot
+使用随机初始化，因为它的 vocab 同时包含多 codebook offset tokens、BiCodec semantic/global
+ranges 与 codec/stream/end markers。BiCodec 的 semantic payload、各 fixed-length global slot
 和 marker 共用这一稳定 global vocabulary，候选范围由 route grammar 在每个位置收窄。
 随机初始化只读取 codec 声明的 semantic feature dimension，并使用 backbone embedding 作为
 device reference，不要求 backend 暴露虚构的 codebook tensor。新建的 semantic embedding、
@@ -162,8 +166,8 @@ frame condition 的 `generate_sequence()` 循环位于私有
 `generate_full_codec_sequence()` 按 audio tokenizer 分派：frame-aligned
 `FlattenedAudioTokenizer` 使用 codebook-block 状态机，首码本决定 frame count 并约束后续等长
 payload；fixed-length `BiCodecAudioTokenizer` 使用 `audio_route.output.streams` 选择 grammar：
-reuse route 生成 `codec, semantic_marker, semantic..., end`，predict route 生成
-`codec, acoustic_marker, acoustic..., semantic_marker, semantic..., end`。service 不复制 marker、
+reuse route 生成 `codec, semantic_marker, semantic..., end`，generate route 生成
+`codec, global_marker, global..., semantic_marker, semantic..., end`。service 不复制 marker、
 range 或 block-length 规则。
 
 route 的 prompt 属于调用前已序列化的 token context，model 只生成固定的 output streams；model 不

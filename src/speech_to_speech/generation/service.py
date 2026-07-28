@@ -5,6 +5,7 @@ from typing import cast
 
 import torch
 from anydataset.types import Modality
+from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
@@ -120,7 +121,7 @@ def generate_responses(
             for token_ids, (result_index, request) in zip(responses, group):
                 waveform, codes = decode_generated_bicodec_route(
                     token_ids,
-                    request["audio_context"],
+                    request.get("audio_context"),
                     route=route,
                     codec=codec,
                     audio_tokenizer=tokenizer,
@@ -214,17 +215,62 @@ def _validate_request(request: Request, model: TokenGenerator) -> None:
     if not bool(inside.all()):
         raise ValueError("prompt ids must belong to the runtime layout.")
     route = model.runtime.audio_route
-    if route is not None:
-        context = request.get("audio_context")
-        requires_context = (
-            route.prompt.source is PromptSource.REFERENCE
-            and bool(route.prompt.streams)
-        ) or (
-            route.decode.semantic is StreamSource.PROMPT
-            or route.decode.acoustic is StreamSource.PROMPT
+    context = request.get("audio_context")
+    if context is not None and not isinstance(context, SemanticAcousticCodes):
+        raise TypeError("generation audio context must be SemanticAcousticCodes.")
+    if task.target_modality is Modality.TEXT:
+        if context is not None:
+            raise ValueError("text generation requests cannot include audio context.")
+        return
+    if route is None:
+        if context is not None:
+            raise ValueError(
+                "generation requests without an audio route cannot include audio context."
+            )
+        return
+
+    prompt_streams = route.prompt.canonical_streams
+    requires_context = (
+        route.prompt.source is PromptSource.REFERENCE and bool(prompt_streams)
+    ) or (
+        route.decode.semantic is StreamSource.PROMPT
+        or route.decode.acoustic is StreamSource.PROMPT
+    )
+    if requires_context and context is None:
+        raise ValueError("audio route requires structured prompt audio context.")
+    if not prompt_streams:
+        if context is not None:
+            raise ValueError(
+                "audio route without prompt streams cannot include audio context."
+            )
+        return
+    if context is None:
+        raise ValueError("audio route prompt streams require audio context.")
+
+    tokenizer = model.runtime.audio_tokenizer
+    if not isinstance(tokenizer, BiCodecAudioTokenizer):
+        raise TypeError("structured prompt streams require BiCodecAudioTokenizer.")
+    local_ids = tokenizer.encode_streams(context, prompt_streams)
+    global_ids = model.runtime.layout.to_global(
+        Modality.AUDIO.value,
+        local_ids,
+    ).to(device=prompt.device)
+    expected = torch.cat(
+        (
+            prompt.new_tensor([model.runtime.boa_token_id]),
+            global_ids,
+            prompt.new_tensor(
+                [model.runtime.eoa_token_id, model.runtime.boa_token_id]
+            ),
         )
-        if requires_context and context is None:
-            raise ValueError("audio route requires structured prompt audio context.")
+    )
+    if prompt.numel() < expected.numel() or not torch.equal(
+        prompt[-expected.numel() :],
+        expected,
+    ):
+        raise ValueError(
+            "generation audio context does not serialize to the prompt suffix."
+        )
 
 
 

@@ -8,6 +8,8 @@ from ._compat import StrEnum, auto
 
 
 class AudioStream(StrEnum):
+    GLOBAL = auto()
+    # Retained for frame-aligned codecs and legacy BiCodec route metadata.
     ACOUSTIC = auto()
     SEMANTIC = auto()
 
@@ -23,10 +25,10 @@ class StreamSource(StrEnum):
     GENERATOR = auto()
 
 
-_STREAM_ORDER = (AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
+_STREAM_ORDER = (AudioStream.GLOBAL, AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
 
 
-@dataclass
+@dataclass(frozen=True)
 class Prompt:
     source: PromptSource
     streams: tuple[AudioStream, ...]
@@ -34,26 +36,26 @@ class Prompt:
     def __post_init__(self) -> None:
         if not isinstance(self.source, PromptSource):
             raise TypeError("audio route prompt source must be a PromptSource.")
-        self.streams = _streams(self.streams, name="prompt")
+        _streams(self.streams, name="prompt")
 
     @property
     def canonical_streams(self) -> tuple[AudioStream, ...]:
         return _canonical_streams(self.streams)
 
 
-@dataclass
+@dataclass(frozen=True)
 class Output:
     streams: tuple[AudioStream, ...]
 
     def __post_init__(self) -> None:
-        self.streams = _streams(self.streams, name="output")
+        _streams(self.streams, name="output")
 
     @property
     def canonical_streams(self) -> tuple[AudioStream, ...]:
         return _canonical_streams(self.streams)
 
 
-@dataclass
+@dataclass(frozen=True)
 class Decode:
     semantic: StreamSource
     acoustic: StreamSource
@@ -67,12 +69,12 @@ class Decode:
     def source(self, stream: AudioStream) -> StreamSource:
         if stream is AudioStream.SEMANTIC:
             return self.semantic
-        if stream is AudioStream.ACOUSTIC:
+        if stream in {AudioStream.GLOBAL, AudioStream.ACOUSTIC}:
             return self.acoustic
         raise TypeError("audio route stream must be an AudioStream.")
 
 
-@dataclass
+@dataclass(frozen=True)
 class Config:
     prompt: Prompt
     output: Output
@@ -85,40 +87,78 @@ class Config:
             raise TypeError("audio route output must be an Output.")
         if not isinstance(self.decode, Decode):
             raise TypeError("audio route decode must be a Decode.")
-        for stream in AudioStream:
+        # GLOBAL is the concrete BiCodec speaker/style stream. ACOUSTIC is an
+        # older name for the same structured backend field and remains valid in
+        # legacy route metadata.
+        for stream in (AudioStream.GLOBAL, AudioStream.SEMANTIC):
             source = self.decode.source(stream)
-            if source is StreamSource.PROMPT and stream not in self.prompt.streams:
+            if source is StreamSource.PROMPT and not _provides_stream(
+                self.prompt.streams,
+                stream,
+            ):
                 raise ValueError(
-                    f"audio route decode source prompt does not provide {stream.value}."
+                    f"audio route decode source prompt does not provide {_stream_label(stream)}."
                 )
-            if source is StreamSource.OUTPUT and stream not in self.output.streams:
+            if source is StreamSource.OUTPUT and not _provides_stream(
+                self.output.streams,
+                stream,
+            ):
                 raise ValueError(
-                    f"audio route decode source output does not provide {stream.value}."
+                    f"audio route decode source output does not provide {_stream_label(stream)}."
                 )
 
 
 def _streams(
-    streams: list[AudioStream] | tuple[AudioStream, ...],
+    streams: tuple[AudioStream, ...],
     *,
     name: str,
-) -> tuple[AudioStream, ...]:
-    if not isinstance(streams, (list, tuple)):
-        raise TypeError(f"audio route {name} streams must be a list or tuple.")
+) -> None:
+    if not isinstance(streams, tuple):
+        raise TypeError(f"audio route {name} streams must be a tuple.")
     if any(not isinstance(stream, AudioStream) for stream in streams):
         raise TypeError(f"audio route {name} streams must contain AudioStream values.")
     if len(streams) != len(set(streams)):
         raise ValueError(f"audio route {name} streams must not contain duplicates.")
-    return tuple(streams)
+    if AudioStream.GLOBAL in streams and AudioStream.ACOUSTIC in streams:
+        raise ValueError(
+            f"audio route {name} streams must not contain both global and "
+            "legacy acoustic streams."
+        )
 
 
 def _canonical_streams(streams: tuple[AudioStream, ...]) -> tuple[AudioStream, ...]:
     return tuple(stream for stream in _STREAM_ORDER if stream in streams)
 
 
+def _stream_label(stream: AudioStream) -> str:
+    return "global/acoustic" if stream is AudioStream.GLOBAL else stream.value
+
+
+def _provides_stream(
+    streams: tuple[AudioStream, ...],
+    stream: AudioStream,
+) -> bool:
+    if stream is AudioStream.GLOBAL:
+        return AudioStream.GLOBAL in streams or AudioStream.ACOUSTIC in streams
+    return stream in streams
+
+
 BICODEC_REUSE_PROMPT_ACOUSTIC = Config(
     prompt=Prompt(
         source=PromptSource.REFERENCE,
         streams=(AudioStream.ACOUSTIC, AudioStream.SEMANTIC),
+    ),
+    output=Output(streams=(AudioStream.SEMANTIC,)),
+    decode=Decode(
+        semantic=StreamSource.OUTPUT,
+        acoustic=StreamSource.PROMPT,
+    ),
+)
+
+BICODEC_REUSE_PROMPT_GLOBAL = Config(
+    prompt=Prompt(
+        source=PromptSource.REFERENCE,
+        streams=(AudioStream.GLOBAL,),
     ),
     output=Output(streams=(AudioStream.SEMANTIC,)),
     decode=Decode(
@@ -163,10 +203,24 @@ FULL_OUTPUT = Config(
     ),
 )
 
+BICODEC_GENERATE_GLOBAL = Config(
+    prompt=Prompt(
+        source=PromptSource.SOURCE,
+        streams=(),
+    ),
+    output=Output(streams=(AudioStream.GLOBAL, AudioStream.SEMANTIC)),
+    decode=Decode(
+        semantic=StreamSource.OUTPUT,
+        acoustic=StreamSource.OUTPUT,
+    ),
+)
+
 
 __all__ = [
+    "BICODEC_GENERATE_GLOBAL",
     "BICODEC_PREDICT_ACOUSTIC",
     "BICODEC_REUSE_PROMPT_ACOUSTIC",
+    "BICODEC_REUSE_PROMPT_GLOBAL",
     "FULL_OUTPUT",
     "SEMANTIC_GENERATOR",
     "AudioStream",

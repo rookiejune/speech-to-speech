@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Type, TypeVar, Union, cast
+from typing import TYPE_CHECKING, Optional, Type, TypeVar, Union, cast
 
 from anydataset.types import AudioView, Modality
 from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf
@@ -16,12 +16,11 @@ from speech_to_speech.datamodule.text import (
 )
 from speech_to_speech.datamodule.types import DataShape
 from speech_to_speech.audio_route import (
-    BICODEC_PREDICT_ACOUSTIC,
-    BICODEC_REUSE_PROMPT_ACOUSTIC,
-    FULL_OUTPUT,
-    SEMANTIC_GENERATOR,
     AudioStream,
     Config as AudioRouteConfig,
+    Decode,
+    Output,
+    Prompt,
     PromptSource,
     StreamSource,
 )
@@ -33,6 +32,7 @@ from speech_to_speech.runtime import (
     AudioRepresentation,
     BackboneInitialization,
     Config as RuntimeConfig,
+    validate_audio_route,
 )
 from speech_to_speech.stage import (
     ParameterGroup,
@@ -223,6 +223,43 @@ class StagedCallbacksConfig:
 
 
 @dataclass
+class _AudioRoutePromptConfig:
+    source: str = MISSING
+    streams: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _AudioRouteOutputConfig:
+    streams: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _AudioRouteDecodeConfig:
+    semantic: str = MISSING
+    acoustic: str = MISSING
+
+
+@dataclass
+class _AudioRouteConfig:
+    prompt: _AudioRoutePromptConfig = field(
+        default_factory=_AudioRoutePromptConfig
+    )
+    output: _AudioRouteOutputConfig = field(
+        default_factory=_AudioRouteOutputConfig
+    )
+    decode: _AudioRouteDecodeConfig = field(
+        default_factory=_AudioRouteDecodeConfig
+    )
+
+
+# OmegaConf needs a mutable nested schema, while callers see the frozen route.
+if TYPE_CHECKING:
+    _AudioRouteSchema = AudioRouteConfig
+else:
+    _AudioRouteSchema = _AudioRouteConfig
+
+
+@dataclass
 class _OverfitConfig:
     task: str = MISSING
     stage: StageConfig = field(default_factory=StageConfig)
@@ -235,7 +272,7 @@ class _OverfitConfig:
     output_dir: str = MISSING
     model: ModelConfig = field(default_factory=ModelConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
-    audio_route: AudioRouteConfig = MISSING
+    audio_route: _AudioRouteSchema = MISSING
     data: FixedDataConfig = field(default_factory=FixedDataConfig)
     pl_module: ModuleConfig = field(default_factory=ModuleConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
@@ -274,7 +311,7 @@ class _StagedTrainConfig:
     output_dir: str = MISSING
     model: ModelConfig = field(default_factory=ModelConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
-    audio_route: AudioRouteConfig = MISSING
+    audio_route: _AudioRouteSchema = MISSING
     data: SpeechConfig = MISSING
     text_data: TextDataConfig = MISSING
     pl_module: ModuleConfig = field(default_factory=ModuleConfig)
@@ -316,6 +353,25 @@ AudioRouteEnumT = TypeVar(
 )
 
 
+def _finalize_audio_route(
+    config: Union[OverfitConfig, StagedTrainConfig],
+) -> None:
+    value = cast(_AudioRouteConfig, config.audio_route)
+    config.audio_route = AudioRouteConfig(
+        prompt=Prompt(
+            source=PromptSource[value.prompt.source],
+            streams=tuple(AudioStream[stream] for stream in value.prompt.streams),
+        ),
+        output=Output(
+            streams=tuple(AudioStream[stream] for stream in value.output.streams),
+        ),
+        decode=Decode(
+            semantic=StreamSource[value.decode.semantic],
+            acoustic=StreamSource[value.decode.acoustic],
+        ),
+    )
+
+
 def overfit(config: DictConfig) -> OverfitConfig:
     config = _prepare(config)
     schema: Type[OverfitConfig]
@@ -327,6 +383,7 @@ def overfit(config: DictConfig) -> OverfitConfig:
     else:
         schema = OverfitRVQConfig
     result = _parse(config, schema)
+    _finalize_audio_route(result)
     _validate_output(result)
     _validate_audio_representation(result)
     _validate_audio_route(result)
@@ -354,6 +411,7 @@ def train(config: DictConfig) -> StagedTrainConfig:
     else:
         schema = StagedTrainRVQConfig
     result = _parse(config, schema)
+    _finalize_audio_route(result)
     _validate_output(result)
     _validate_audio_representation(result)
     _validate_audio_route(result)
@@ -556,20 +614,9 @@ def _validate_audio_route(
     config: Union[OverfitConfig, StagedTrainConfig],
 ) -> None:
     route = config.audio_route
-    representation = config.runtime.audio_representation
+    validate_audio_route(config.runtime, route)
     acoustic = AcousticType(config.acoustic.type)
     if config.runtime.audio_view is AudioView.BICODEC:
-        if route not in (
-            BICODEC_REUSE_PROMPT_ACOUSTIC,
-            BICODEC_PREDICT_ACOUSTIC,
-        ):
-            raise ValueError(
-                "BiCodec requires a reference reuse or reference predict audio route."
-            )
-        if representation is not AudioRepresentation.FULL_CODEC_SEQUENCE:
-            raise ValueError(
-                "BiCodec audio routes require the stable structured token vocabulary."
-            )
         if acoustic is not AcousticType.NONE:
             raise ValueError("BiCodec audio routes require model/acoustic=none.")
         if config.runtime.semantic_codec_artifact is not None:
@@ -584,24 +631,9 @@ def _validate_audio_route(
         )
         if dataset.name is not DatasetName.QWEN_TTS_SPEAKER:
             raise ValueError(
-                "BiCodec reference routes currently require qwen_tts_speaker data."
+                "BiCodec audio routes currently require qwen_tts_speaker data."
             )
         return
-
-    if route.prompt.streams:
-        raise ValueError(
-            "audio prompt streams are currently implemented only for BiCodec."
-        )
-    if representation is AudioRepresentation.FULL_CODEC_SEQUENCE:
-        if route != FULL_OUTPUT:
-            raise ValueError(
-                "full codec sequence representation requires audio_route=full_output."
-            )
-        return
-    if route != SEMANTIC_GENERATOR:
-        raise ValueError(
-            "decoupled audio representation requires audio_route=semantic_generator."
-        )
 
 
 def _validate_backbone_initialization(

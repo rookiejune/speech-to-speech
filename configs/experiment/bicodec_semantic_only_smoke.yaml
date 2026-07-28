@@ -9,12 +9,12 @@ defaults:
   - /logging: csv
   - override /stage: stage_1
   - override /parameter_policy: semantic_only
-  - override /audio_route: bicodec_reuse_prompt_acoustic
+  - override /audio_route: bicodec_reuse_prompt_global
   - _self_
 
 task: tts
-run_name: bicodec-semantic-only
-output_subdir: bicodec-semantic-only-smoke/${task}/${run_name}
+run_name: bicodec-reuse-prompt-global
+output_subdir: bicodec-reuse-prompt-global-smoke/${task}/${run_name}
 
 runtime:
   device: cpu

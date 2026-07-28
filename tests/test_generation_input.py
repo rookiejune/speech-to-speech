@@ -22,7 +22,7 @@ from speech_to_speech.generation import (
     prepare_bicodec_tts_request,
 )
 from speech_to_speech.generation.service import _validate_request
-from speech_to_speech.runtime import AudioTokenFormat
+from speech_to_speech.runtime import AudioRepresentation
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.runtime.protocol import GenerationRuntime
 from speech_to_speech.runtime.types import Backbone
@@ -55,7 +55,7 @@ def _runtime(*, route=BICODEC_REUSE_PROMPT_GLOBAL) -> GenerationRuntime:
         GenerationRuntime,
         SimpleNamespace(
             audio_route=route,
-            codec_token_format=AudioTokenFormat.FULL_CODEC_SEQUENCE,
+            audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
             audio_tokenizer=tokenizer,
             text_tokenizer=_TextTokenizer(),
             layout=Layout(
@@ -215,6 +215,28 @@ class BiCodecRequestInputTest(unittest.TestCase):
         torch.testing.assert_close(codec.codes.semantic, output.semantic.unsqueeze(0))
         torch.testing.assert_close(codec.codes.acoustic, context.acoustic.unsqueeze(0))
 
+    def test_global_request_generates_global_and_semantic(self) -> None:
+        runtime = _runtime(route=BICODEC_GENERATE_GLOBAL)
+        output = SemanticAcousticCodes(
+            semantic=torch.tensor([[4], [5]], dtype=torch.long),
+            acoustic=torch.tensor([[2], [1]], dtype=torch.long),
+        )
+        codec = _StructuredCodec()
+        cast(SimpleNamespace, cast(object, runtime)).codec = codec
+
+        result = generate_responses(
+            [prepare_bicodec_global_tts_request("hello", runtime)],
+            _RouteModel(runtime, output),
+            max_new_tokens=8,
+            do_sample=False,
+        )[0]
+
+        audio = result["audio"]
+        if audio is None or audio["codes"] is None:
+            self.fail("global route generation did not return structured audio codes")
+        torch.testing.assert_close(audio["codes"].semantic, output.semantic)
+        torch.testing.assert_close(audio["codes"].acoustic, output.acoustic)
+
 
 class _StructuredCodec:
     sample_rate = 16_000
@@ -266,9 +288,12 @@ class _RouteModel:
                 SimpleNamespace(get_input_embeddings=lambda: embedding),
             ),
         )
+        route = runtime.audio_route
+        if route is None:
+            raise ValueError("route model requires an audio route")
         local_ids = runtime.audio_tokenizer.encode_streams(
             output,
-            BICODEC_REUSE_PROMPT_GLOBAL.output.canonical_streams,
+            route.output.canonical_streams,
         )
         self.response = torch.cat(
             (

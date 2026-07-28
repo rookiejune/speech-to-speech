@@ -302,7 +302,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             )
         route = self.runtime.audio_route
         streams = (
-            (AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
+            (AudioStream.GLOBAL, AudioStream.SEMANTIC)
             if route is None
             else route.output.canonical_streams
         )

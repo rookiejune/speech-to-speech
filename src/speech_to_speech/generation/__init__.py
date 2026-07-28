@@ -6,6 +6,10 @@ from .decode import (
     decode_generated_frame_codes,
     decode_reference_codes,
 )
+from .input import (
+    prepare_bicodec_global_tts_request,
+    prepare_bicodec_tts_request,
+)
 from .service import generate_responses
 from .text import TextProbe, TextProbeResult, evaluate_text
 from .types import AcousticGeneration, AudioOutput, Request, Result
@@ -25,4 +29,6 @@ __all__ = [
     "decode_reference_codes",
     "evaluate_text",
     "generate_responses",
+    "prepare_bicodec_global_tts_request",
+    "prepare_bicodec_tts_request",
 ]

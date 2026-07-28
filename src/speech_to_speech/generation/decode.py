@@ -140,7 +140,7 @@ def decode_generated_bicodec_route(
         audio_context,
     )
     acoustic = _route_stream(
-        AudioStream.ACOUSTIC,
+        AudioStream.GLOBAL,
         route.decode.acoustic,
         output,
         audio_context,

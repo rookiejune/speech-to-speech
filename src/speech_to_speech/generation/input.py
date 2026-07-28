@@ -49,8 +49,6 @@ def prepare_bicodec_tts_request(
 
     tokenizer = _validate_bicodec_tokenizer(runtime)
     _validate_reference_codes(reference_codes)
-    if not isinstance(reference_codes, SemanticAcousticCodes):
-        raise TypeError("BiCodec reference codes must be SemanticAcousticCodes.")
 
     streams = route.prompt.canonical_streams
     local_audio_ids = tokenizer.encode_streams(reference_codes, streams)
