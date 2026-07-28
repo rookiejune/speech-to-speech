@@ -6,11 +6,11 @@
 `stabilityai/stable-codec-speech-16k`、Qwen3-0.6B 和 WMT19 prepared data 完成无 audio BPE 的
 ASR/TTS optimizer step 与 fixed-sample TensorBoard 闭环；loss 与 target/generated waveform finite，
 Stable 路线没有 Flow/RVQ `reference_generation`。该 smoke 不支持质量或收敛结论。015 的
-SAC Flow generator 到 S2S hidden-state joint 与 resume 验收（同日）使用真实 Qwen3-0.6B、
-LongCat、WMT19 sample 0 与 8 层 SAC Flow artifact
-完成初始化、forward/backward/optimizer、finite generation 和正式 Stage 1 step 1 -> 2 resume；
-hidden adapter 与 decoder 均有 finite 非零梯度和 checkpoint delta。该结果不支持质量或收敛结论，
-RVQ `codebook_ar` 仍未验证。014 的 pami201 1k stage 1 FP32-storage step-500 -> 1000 resume 与 reducer
+SAC generator 到 S2S hidden-state joint 验收（同日）使用真实 Qwen3-0.6B、LongCat、WMT19 sample 0
+与 8 层 Flow/RVQ `codebook_ar` artifact，完成两条 route 的初始化、forward/backward/optimizer 和
+finite generation；hidden adapter 与 decoder 均有 finite 非零梯度。Flow 另完成正式 Stage 1
+step 1 -> 2 resume 和 checkpoint delta。该结果不支持质量或收敛结论，RVQ checkpoint resume 未单独
+验证。014 的 pami201 1k stage 1 FP32-storage step-500 -> 1000 resume 与 reducer
 修复复验（2026-07-27）中，step 1000 的两卡 NCCL dev RVQ CE 为 `8.773024`，相对修正后的
 step-0 估计下降 `4.116%`，仍未达到既定 5% gate `8.694203`；step 900 的局部最低值为
 `8.747676`，末步略有回升。step-500 condition ablation 中 shuffled/zero condition 相对 correct
@@ -54,10 +54,17 @@ model/runtime/data/generation 和按模态 token CE 仍有调整，因此相应 
   策略下 hidden adapter 4 个参数和 acoustic decoder 124 个参数的梯度 norm 分别为
   `0.589404/1.639094`，均 finite。正式 Stage 1 checkpoint 从 step 1 恢复到 step 2，optimizer
   counter 全部从 1 推进到 2；hidden adapter `4/4` 个 key、decoder `124/124` 个 key 发生 finite
-  变化，固定 `last.ckpt` 正确指向 `global_step=2`。该结论覆盖 Phase B 初始化、单步执行和
-  checkpoint resume，不覆盖 RVQ、质量或收敛
+  变化，固定 `last.ckpt` 正确指向 `global_step=2`。该结论覆盖 Flow Phase B 初始化、单步执行和
+  checkpoint resume，不覆盖质量或收敛
   （[015 result, lines 3-23](results/015-sac-flow-joint-init-smoke.md#L3-L23)，
-  [lines 43-104](results/015-sac-flow-joint-init-smoke.md#L43-L104)）。
+  [lines 43-102](results/015-sac-flow-joint-init-smoke.md#L43-L102)）。
+- 真实 SAC frame-aligned RVQ `codebook_ar` artifact 已完成 S2S joint smoke：generator-only loader
+  严格加载 `184031980` 个 `AcousticRVQDecoder` 参数；WMT19 TTS sample 0 的 total/token/RVQ loss
+  为 `18.904053/9.745777/9.158276`。训练后生成 `[64,1024]` finite features 与 `[1,61440]`
+  finite waveform，RTF 为 `1.788941`；speech-interface 策略下 hidden adapter 4 个参数和 acoustic
+  decoder 98 个参数的梯度 norm 分别为 `2.216846/5.768480`，均 finite。该结论验证 RVQ Phase B
+  初始化与单步执行，不覆盖 checkpoint resume、质量或收敛
+  （[015 result, lines 104-149](results/015-sac-flow-joint-init-smoke.md#L104-L149)）。
 - 014 的 FP32-storage 500-step A/B 与 500 -> 1000 resume 已完成：修复后的两卡 NCCL validation
   使用真实 `4265` frame 分母，step 500 RVQ CE 为 `8.780052`，step 1000 为 `8.773024`；step
   1000 相对修正初始估计只下降 `4.116%`，仍未达到 5% gate。step 900 的局部最低值为 `8.747676`

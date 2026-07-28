@@ -25,7 +25,6 @@
 
 ## 其他工程欠账
 
-- RVQ 路线需先产出并验证 `codebook_ar` artifact，不能用默认 MTP 代替。
 - stage 1 companion manifest 需要绑定 checkpoint、tokenizer/native-or-BPE、semantic vocab、
   RVQ codebook、decoder config、state-dict prefix whitelist 和 split fingerprint。
 - 后续进入 Qwen partial/full joint 前，再补齐 stage-specific FLOPs provider、validation generation、

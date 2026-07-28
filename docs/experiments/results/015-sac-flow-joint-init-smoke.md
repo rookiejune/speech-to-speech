@@ -1,11 +1,11 @@
-# 015 SAC Flow Joint Initialization Smoke
+# 015 SAC Generator Joint Initialization Smoke
 
 2026-07-28 在 FDU `145` 的 GPU 7（RTX 4090 D, 24 GB）完成真实
-`semantic-acoustic-codec` Flow generator 到 S2S hidden-state joint 路线的单步验收。
-本结果证明初始化、forward/backward/optimizer、生成和正式 checkpoint resume 执行契约，
-不支持质量或收敛结论；RVQ `codebook_ar` 仍未验证。
+`semantic-acoustic-codec` Flow 与 RVQ `codebook_ar` generator 到 S2S hidden-state joint 路线验收。
+本结果证明两条 route 的初始化、forward/backward/optimizer 和生成执行契约，并完成 Flow 的正式
+checkpoint resume；不支持质量或收敛结论，RVQ checkpoint resume 未单独验证。
 
-## Artifact 与隔离环境
+## Flow Artifact 与隔离环境
 
 - Python：`/home/zhuyin/anaconda3/envs/py312/bin/python`，Torch `2.9.0+cu128`。
 - 隔离代码：`/tmp/s2s-joint-init-20260728/repos`，未修改共享 checkout。
@@ -22,7 +22,7 @@
 `load_generator_artifact()` 不构造 conditioner，只严格加载 `generator.*`，同一真实 checkpoint
 加载成功且所有参数 finite。回归测试同时确认 generator 自身缺键或多键仍会失败。
 
-## Full Joint Smoke
+## Flow Full Joint Smoke
 
 关键环境为 `CUDA_VISIBLE_DEVICES=7`、`LOCATION=fudan`、`HF_HUB_OFFLINE=1`、
 `TRANSFORMERS_OFFLINE=1`、共享 HF/anytrain cache 与 pami201 WMT19 prepared root。Qwen repo id
@@ -57,7 +57,7 @@ WMT19 TTS sample 0 完成 1 个 optimizer step：total loss `13.177252769470215`
 - 同目录 `generation.json`、`evaluation.json` 与 `hydra/overfit.log`
 - TensorBoard：`/tmp/s2s-joint-init-20260728/output/tensorboard/002-single-batch-overfit/tts/flow-8l/version_3`
 
-## Direct Phase B Gradients
+## Flow Direct Phase B Gradients
 
 第二次运行使用相同 artifact/batch 和 `parameter_policy=speech_interface`，只把临时诊断 callback
 放在 `/tmp/s2s-joint-init-20260728/grad_smoke.py`，不进入仓库。176826112 个参数 trainable，
@@ -71,7 +71,7 @@ backbone 冻结；loss 与 full run 一致。optimizer step 前直接汇总得�
 这证明真实 hidden state 经 `HiddenConditionAdapter` 驱动了从 SAC 初始化的 decoder，而不是把
 semantic codes 继续传给 Phase B generator。
 
-## Formal Checkpoint Resume
+## Flow Formal Checkpoint Resume
 
 同日在同一 GPU、Qwen、LongCat 与 SAC artifact 上，改用正式 `scripts/train.py`、Stage 1、
 `speech_interface` policy 和 pami201 的 32-sample 真实 WMT19/LongCat root。batch size 为 1，
@@ -101,6 +101,53 @@ step 2 的直接 checkpoint delta 为：
 `3314328997` bytes。最终输出位于
 `145:/tmp/s2s-joint-init-20260728/resume-fixed-v2/run`。
 
+## RVQ Codebook-AR Joint Smoke
+
+同日在 GPU 7 继续验收 RVQ route。原 artifact 为
+`/mnt/pami202/zhuyin/dynamic/debug/semantic-acoustic-codec/overfit-longcat-rvq-8l-sample0/artifact`：
+真实 LongCat、frame-aligned、3 个 `8100` codebook、condition dim 1024、8 层 decoder，predictor
+明确为 `codebook_ar`。原 schema 5 只在 `/tmp/s2s-joint-init-20260728/rvq-artifact` 迁到 schema 7，
+checkpoint 仍以 symlink 指向原权重。generator-only loader 构造出
+`RVQCodeGenerator(AcousticRVQDecoder)`，共 `184031980` 参数，全部 finite；没有使用当前 SAC
+默认的 MTP predictor。
+
+```bash
+python -u scripts/overfit.py \
+  experiment=overfit runtime=longcat_native model/acoustic=rvq \
+  runtime.backbone=/mnt/pami202/zhuyin/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca \
+  acoustic.init_artifact=/tmp/s2s-joint-init-20260728/rvq-artifact \
+  data.root=/mnt/pami201/zhuyin/datasets/wmt19_tts_stage1_small_32_20260727 \
+  train.max_steps=1 runtime.device=cuda \
+  trainer.accelerator=gpu trainer.devices=1 trainer.strategy=auto \
+  trainer.precision=bf16-mixed callbacks.task_sample.enabled=false \
+  +callbacks.evaluation.enabled=true \
+  repo_output_root=/tmp/s2s-joint-init-20260728/rvq-output
+```
+
+使用与 Flow 相同的 Qwen3-0.6B、LongCat、WMT19 sample 0 和 BF16 mixed precision 完成 1 个
+optimizer step。Full policy 模型参数为 `794245612`，其中 `785950188` trainable；total/token/RVQ
+loss 分别为 `18.904052734375`、`9.745777130126953`、`9.158275604248047`。
+
+训练后 autoregressive generation 产生 `[64, 1024]` finite acoustic features 和
+`[1, 61440]` finite waveform，duration `3.84s`、RTF `1.788941324290742`。独立 acoustic
+evaluation 的两个 seed 都成功 decode 2.16s waveform，feature MSE 为
+`2.3287537693977356` / `2.231229782104492`，采样 RTF 为 `0.01381` / `0.01171`。
+
+第二次运行改用 `parameter_policy=speech_interface`，189900268 个参数 trainable，backbone
+冻结；optimizer step 前的直接梯度为：
+
+| Module | Parameters with grad | L2 norm | Finite |
+| --- | ---: | ---: | --- |
+| `model.acoustic_condition` | 4 | `2.216846466064453` | true |
+| `model.acoustic_decoder` | 98 | `5.76848030090332` | true |
+
+这证明 RVQ Phase B 同样由真实 backbone hidden state 经 `HiddenConditionAdapter` 驱动，而不是把
+Phase A semantic codes 作为 decoder condition。结果位于：
+
+- `/tmp/s2s-joint-init-20260728/rvq-output/002-single-batch-overfit/tts/rvq-8l`
+- 同目录 `metrics.json`、`generation.json`、`evaluation.json` 与 Hydra config
+- TensorBoard：`/tmp/s2s-joint-init-20260728/rvq-output/tensorboard/002-single-batch-overfit/tts/rvq-8l/version_0`
+
 ## 实测暴露并修复的边界
 
 1. generator-only loader 不再受无关 conditioner schema 阻断，同时保持 generator strict load。
@@ -108,6 +155,7 @@ step 2 的直接 checkpoint delta 为：
 3. FP32 speech adapter 输出在汇入 BF16 backbone embedding 时显式转换 dtype，adapter storage 仍为 FP32。
 4. 无 validation split 的 DataModule 返回合法空 iterable；overfit Trainer 关闭 sanity validation。
 5. 正式 checkpoint resume 保持归档 step 文件，并让固定 `last.ckpt` 始终覆盖为最新恢复点。
+6. RVQ joint initialization 只接受 frame-aligned `codebook_ar` artifact；默认 MTP 不作为兼容替代。
 
 本地验收：S2S `296 tests OK / 1 CUDA skip`、basedpyright 0 errors，Ruff、compileall 与
 `git diff --check` 通过。SAC 全量测试为 `66 passed`，Ruff、compileall 与
