@@ -8,6 +8,7 @@ defaults:
   - /trainer: default
   - /logging: csv
   - override /parameter_policy: full
+  - override /audio_route: full_output
   - _self_
 
 task: tts

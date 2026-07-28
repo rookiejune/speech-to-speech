@@ -9,6 +9,7 @@ defaults:
   - /logging: csv
   - override /stage: stage_1
   - override /parameter_policy: full
+  - override /audio_route: bicodec_predict_acoustic
   - _self_
 
 task: tts

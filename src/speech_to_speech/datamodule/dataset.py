@@ -23,6 +23,7 @@ from anydataset.types import (
 from torch.utils.data import Dataset
 
 from .._compat import StrEnum, auto
+from ..audio_route import PromptSource
 from ..runtime.types import (
     CodecBackend,
     acoustic_codec,
@@ -30,6 +31,7 @@ from ..runtime.types import (
     structured_codec,
 )
 from .protocol import DatasetRuntime
+from .types import AudioContextSample
 
 
 class DatasetName(StrEnum):
@@ -161,6 +163,7 @@ class SpeakerGridCellsDataset(MapStyleABC):
         grid: SpeakerAudioGrid,
         *,
         speaker: str | None = None,
+        with_audio_context: bool = False,
     ) -> None:
         default_text = (Role.DEFAULT, Modality.TEXT)
         default_audio = (Role.DEFAULT, Modality.AUDIO)
@@ -171,6 +174,11 @@ class SpeakerGridCellsDataset(MapStyleABC):
         self.grid = grid
         self.cells = cast(Dataset[Sample], cast(object, grid.cells))
         self.speaker_ids = tuple(grid.speaker_ids)
+        self.with_audio_context = with_audio_context
+        if with_audio_context and len(grid) < 2:
+            raise ValueError(
+                "Qwen TTS audio context requires at least two text rows."
+            )
         if speaker is None:
             self.speaker_index = None
         else:
@@ -188,7 +196,27 @@ class SpeakerGridCellsDataset(MapStyleABC):
 
     def __getitem__(self, index: int) -> Sample:
         global_index = self.global_index(index)
-        return _single_cell(self.cells[global_index], global_index=global_index)
+        sample = _single_cell(self.cells[global_index], global_index=global_index)
+        if not self.with_audio_context:
+            return sample
+        speaker_count = len(self.speaker_ids)
+        row = global_index // speaker_count
+        speaker_index = global_index % speaker_count
+        context_row = (row + 1) % len(self.grid)
+        context_index = context_row * speaker_count + speaker_index
+        if context_index == global_index:
+            raise RuntimeError("Qwen TTS audio context must differ from its target cell.")
+        context = _single_cell(
+            self.cells[context_index],
+            global_index=context_index,
+        )
+        return cast(
+            Sample,
+            cast(
+                object,
+                AudioContextSample(sample=sample, audio_context=context),
+            ),
+        )
 
     def global_index(self, index: int) -> int:
         count = len(self)
@@ -385,7 +413,15 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
             split=config.split,
         )
         return _apply_split_manifest(
-            SpeakerGridCellsDataset(grid, speaker=config.speaker),
+            SpeakerGridCellsDataset(
+                grid,
+                speaker=config.speaker,
+                with_audio_context=(
+                    runtime.audio_route is not None
+                    and bool(runtime.audio_route.prompt.streams)
+                    and runtime.audio_route.prompt.source is PromptSource.REFERENCE
+                ),
+            ),
             config,
         )
     raise AssertionError(f"unsupported dataset: {config.name}")

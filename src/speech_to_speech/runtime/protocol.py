@@ -7,6 +7,7 @@ from anydataset.types import AudioView, Modality
 from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 
+from ..audio_route import Config as AudioRouteConfig
 from .runtime import AudioRepresentation
 from .types import (
     AudioTokenizer,
@@ -18,6 +19,9 @@ from .types import (
 
 
 class DataRuntime(Protocol):
+    @property
+    def audio_route(self) -> AudioRouteConfig | None: ...
+
     @property
     def codec_name(self) -> str: ...
 

@@ -13,6 +13,7 @@ from ._tokenization import token_ids
 from .protocol import DataRuntime, TextRuntime
 from .types import (
     Language,
+    AudioContextSample,
     RawSpeech,
     Speech,
     SpeechPair,
@@ -56,7 +57,24 @@ def parse_task_sample(
         runtime,
         encode_missing_codes=encode_missing_codes,
     )
-    return SpeechTaskSample(source=source, target=target, task=task)
+    audio_context = None
+    if isinstance(sample, AudioContextSample):
+        context = _parse_task_item(
+            sample.audio_context,
+            types.Role.DEFAULT,
+            types.Modality.AUDIO,
+            runtime,
+            encode_missing_codes=encode_missing_codes,
+        )
+        if isinstance(context, Text):
+            raise AssertionError("audio context parser returned text.")
+        audio_context = context
+    return SpeechTaskSample(
+        source=source,
+        target=target,
+        task=task,
+        audio_context=audio_context,
+    )
 
 
 def parse_text_sample(sample: types.Sample, runtime: TextRuntime) -> TextPair:

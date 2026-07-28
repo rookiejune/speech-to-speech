@@ -33,6 +33,7 @@ from .types import (
     supports_structured,
 )
 from .._compat import StrEnum, auto
+from ..audio_route import Config as AudioRouteConfig
 
 if TYPE_CHECKING:
     from anytrain.codec import SemanticAcousticCodec
@@ -136,6 +137,14 @@ class Config:
 @dataclass(frozen=True)
 class Runtime:
     config: Config
+    audio_route: AudioRouteConfig | None = None
+
+    def __post_init__(self) -> None:
+        if self.audio_route is not None and not isinstance(
+            self.audio_route,
+            AudioRouteConfig,
+        ):
+            raise TypeError("runtime audio_route must be an audio route Config.")
 
     @property
     def codec_name(self) -> str:

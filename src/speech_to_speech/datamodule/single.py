@@ -16,6 +16,7 @@ from .types import (
     RawSpeech,
     RawSpeechBatch,
     Speech,
+    AudioContextSample,
     SpeechTaskSample,
     Text,
 )
@@ -120,17 +121,40 @@ def _build_item(
         and task.target_modality is not types.Modality.AUDIO
     ):
         return SpeechTaskSample(source=None, target=text, task=task)
+    utterance = _utterance(
+        sample,
+        audio_item,
+        runtime,
+        encode_missing_codes=encode_missing_codes,
+    )
+    audio_context = None
+    if isinstance(sample, AudioContextSample):
+        context_audio, _ = _single_items(sample.audio_context)
+        audio_context = _utterance(
+            sample.audio_context,
+            context_audio,
+            runtime,
+            encode_missing_codes=encode_missing_codes,
+        )
+    return _task_sample(utterance, text, task, audio_context=audio_context)
+
+
+def _utterance(
+    sample: types.Sample,
+    audio_item: types.AudioItem,
+    runtime: DataRuntime,
+    *,
+    encode_missing_codes: bool,
+) -> Speech | RawSpeech:
     if runtime.audio_view in audio_item.views:
-        utterance: Speech | RawSpeech = parse_single_sample(sample, runtime)
-    else:
-        if not encode_missing_codes:
-            raise ValueError(
-                f"single audio sample is missing {runtime.audio_view.value!r} codec "
-                "codes; materialize codec views before training or enable explicit "
-                "waveform fallback."
-            )
-        utterance = parse_raw_single_sample(sample, runtime)
-    return _task_sample(utterance, text, task)
+        return parse_single_sample(sample, runtime)
+    if not encode_missing_codes:
+        raise ValueError(
+            f"single audio sample is missing {runtime.audio_view.value!r} codec "
+            "codes; materialize codec views before training or enable explicit "
+            "waveform fallback."
+        )
+    return parse_raw_single_sample(sample, runtime)
 
 
 def parse_raw_single_sample(
@@ -145,6 +169,8 @@ def _task_sample(
     utterance: Speech | RawSpeech,
     text: Text,
     task: Task,
+    *,
+    audio_context: Speech | RawSpeech | None = None,
 ) -> SpeechTaskSample:
     source = None
     if task.source_modality is types.Modality.AUDIO:
@@ -152,7 +178,12 @@ def _task_sample(
     elif task.source_modality is types.Modality.TEXT:
         source = text
     target = utterance if task.target_modality is types.Modality.AUDIO else text
-    return SpeechTaskSample(source=source, target=target, task=task)
+    return SpeechTaskSample(
+        source=source,
+        target=target,
+        task=task,
+        audio_context=audio_context,
+    )
 
 
 def _single_items(sample: types.Sample) -> tuple[types.AudioItem, types.TextItem]:

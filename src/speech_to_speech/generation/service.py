@@ -10,6 +10,7 @@ from torch import Tensor
 from .._tensor import is_signed_integer_dtype
 from ..runtime import AudioRepresentation
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
+from ..audio_route import StreamSource
 from ..runtime.types import (
     acoustic_codec,
     codec_sample_rate,
@@ -20,6 +21,7 @@ from ..task import Task
 from .decode import (
     decode_generated_audio,
     decode_generated_bicodec_full,
+    decode_generated_bicodec_route,
     decode_generated_frame_codes,
     decode_generated_semantic,
 )
@@ -111,6 +113,30 @@ def generate_responses(
                 results[result_index] = Result(response_ids=token_ids, audio=None)
             continue
 
+        route = model.runtime.audio_route
+        tokenizer = model.runtime.audio_tokenizer
+        if route is not None and isinstance(tokenizer, BiCodecAudioTokenizer):
+            codec = structured_codec(model.runtime.codec)
+            for token_ids, (result_index, request) in zip(responses, group):
+                waveform, codes = decode_generated_bicodec_route(
+                    token_ids,
+                    request["audio_context"],
+                    route=route,
+                    codec=codec,
+                    audio_tokenizer=tokenizer,
+                    audio_token_range=model.runtime.codec_audio_range,
+                )
+                results[result_index] = Result(
+                    response_ids=token_ids,
+                    audio=AudioOutput(
+                        features=None,
+                        codes=codes,
+                        waveform=waveform,
+                        sample_rate=codec_sample_rate(codec),
+                    ),
+                )
+            continue
+
         if acoustic_generation is None:
             features = None
             frame_counts = _frame_counts(responses, model)
@@ -135,6 +161,7 @@ def generate_responses(
                 response_ids=responses[row],
                 audio=AudioOutput(
                     features=row_features[row],
+                    codes=None,
                     waveform=waveforms[row],
                     sample_rate=codec_sample_rate(decoder),
                 ),
@@ -186,6 +213,14 @@ def _validate_request(request: Request, model: TokenGenerator) -> None:
         inside |= prompt.ge(start) & prompt.lt(end)
     if not bool(inside.all()):
         raise ValueError("prompt ids must belong to the runtime layout.")
+    route = model.runtime.audio_route
+    if route is not None and (
+        route.decode.semantic is StreamSource.PROMPT
+        or route.decode.acoustic is StreamSource.PROMPT
+    ):
+        context = request["audio_context"]
+        if context is None:
+            raise ValueError("audio route requires structured prompt audio context.")
 
 
 

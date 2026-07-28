@@ -3,3 +3,32 @@ defaults:
   - override /stage: stage_4
   - override /parameter_policy: full
   - _self_
+
+callbacks:
+  task_sample:
+    enabled: true
+    panels:
+      - split: train
+        loader: asr_s2tt
+        task: asr
+        indices: [0, 1, 2]
+      - split: train
+        loader: asr_s2tt
+        task: s2tt
+        indices: [0, 1, 2]
+      - split: train
+        loader: tts_t2st
+        task: tts
+        indices: [0, 1, 2]
+      - split: train
+        loader: tts_t2st
+        task: t2st
+        indices: [0, 1, 2]
+      - split: train
+        loader: s2st
+        task: s2st
+        indices: [0, 1, 2]
+      - split: train
+        loader: mt
+        task: mt
+        indices: [0, 1, 2]

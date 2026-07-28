@@ -40,6 +40,7 @@ def evaluate_text(
         Request(
             prompt_ids=prompts[name],
             task=Task.T2TT,
+            audio_context=None,
         )
         for name in probes
     ]

@@ -6,7 +6,15 @@ import torch
 from anytrain.codec import AcousticLayout, SemanticAcousticCodes
 from types import SimpleNamespace
 
-from speech_to_speech.generation.decode import decode_generated_bicodec_full
+from speech_to_speech.audio_route import (
+    AudioStream,
+    BICODEC_PREDICT_ACOUSTIC,
+    BICODEC_REUSE_PROMPT_ACOUSTIC,
+)
+from speech_to_speech.generation.decode import (
+    decode_generated_bicodec_full,
+    decode_generated_bicodec_route,
+)
 from speech_to_speech.runtime import AudioRepresentation, Config
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.model._generation import generate_bicodec_sequence
@@ -38,10 +46,6 @@ class BiCodecTokenizerTest(unittest.TestCase):
         expected = torch.tensor(
             [
                 self.tokenizer.codec_token_id,
-                self.tokenizer.semantic_token_id,
-                2,
-                4,
-                6,
                 self.tokenizer.acoustic_token_id,
                 16,
                 22,
@@ -49,6 +53,10 @@ class BiCodecTokenizerTest(unittest.TestCase):
                 24,
                 20,
                 26,
+                self.tokenizer.semantic_token_id,
+                2,
+                4,
+                6,
                 self.tokenizer.end_token_id,
             ]
         )
@@ -67,6 +75,34 @@ class BiCodecTokenizerTest(unittest.TestCase):
         decoded = self.tokenizer.decode_full(self.tokenizer.encode_full(codes))
         self.assertEqual(decoded.semantic.shape, (5, 1))
         self.assertEqual(decoded.acoustic.shape, (3, 2))
+
+    def test_stream_routes_serialize_only_the_owned_streams(self):
+        codes = SemanticAcousticCodes(
+            semantic=torch.tensor([[2], [4]]),
+            acoustic=torch.tensor([[0, 1], [2, 3], [4, 5]]),
+        )
+
+        reused = self.tokenizer.encode_streams(
+            codes,
+            BICODEC_REUSE_PROMPT_ACOUSTIC.output.canonical_streams,
+        )
+        decoded_reused = self.tokenizer.decode_streams(
+            reused,
+            BICODEC_REUSE_PROMPT_ACOUSTIC.output.canonical_streams,
+        )
+        self.assertIsNone(decoded_reused.acoustic)
+        torch.testing.assert_close(decoded_reused.semantic, codes.semantic)
+
+        predicted = self.tokenizer.encode_streams(
+            codes,
+            BICODEC_PREDICT_ACOUSTIC.output.canonical_streams,
+        )
+        decoded_predicted = self.tokenizer.decode_streams(
+            predicted,
+            BICODEC_PREDICT_ACOUSTIC.output.canonical_streams,
+        )
+        torch.testing.assert_close(decoded_predicted.semantic, codes.semantic)
+        torch.testing.assert_close(decoded_predicted.acoustic, codes.acoustic)
 
 
 class BiCodecDecodeTest(unittest.TestCase):
@@ -105,14 +141,8 @@ class BiCodecDecodeTest(unittest.TestCase):
         output = generate_bicodec_sequence(
             model,
             torch.tensor([[1]]),
-            semantic_range=tokenizer.semantic_token_range,
-            codec_token_id=tokenizer.codec_token_id,
-            semantic_token_id=tokenizer.semantic_token_id,
-            acoustic_token_id=tokenizer.acoustic_token_id,
-            end_token_id=tokenizer.end_token_id,
-            acoustic_offsets=tokenizer.acoustic_offsets,
-            acoustic_sizes=tokenizer.acoustic_codebook_sizes,
-            acoustic_unit_length=tokenizer.acoustic_unit_length,
+            tokenizer=tokenizer,
+            streams=(AudioStream.ACOUSTIC, AudioStream.SEMANTIC),
             max_new_tokens=32,
             temperature=1.0,
             top_p=1.0,
@@ -124,6 +154,33 @@ class BiCodecDecodeTest(unittest.TestCase):
         decoded = tokenizer.decode_full(output[0, 1:-1] - 10)
         self.assertEqual(decoded.semantic.shape, (1, 1))
         self.assertEqual(decoded.acoustic.shape, (2, 1))
+
+    def test_state_machine_can_generate_semantic_only_output(self):
+        tokenizer = BiCodecAudioTokenizer(
+            semantic_vocab_size=8,
+            acoustic_codebook_sizes=(3,),
+            acoustic_unit_length=2,
+        )
+        model = _GenerationModel(30)
+        output = generate_bicodec_sequence(
+            model,
+            torch.tensor([[1]]),
+            tokenizer=tokenizer,
+            streams=(AudioStream.SEMANTIC,),
+            max_new_tokens=10,
+            temperature=1.0,
+            top_p=1.0,
+            prompt_attention_mask=None,
+            do_sample=False,
+            use_cache=False,
+        )
+
+        decoded = tokenizer.decode_streams(
+            output[0, 1:-1] - 10,
+            (AudioStream.SEMANTIC,),
+        )
+        self.assertIsNone(decoded.acoustic)
+        self.assertEqual(decoded.semantic.shape, (1, 1))
 
 
 class BiCodecConfigTest(unittest.TestCase):

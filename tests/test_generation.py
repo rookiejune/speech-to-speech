@@ -92,6 +92,7 @@ class _UnifiedCodec:
 
 class _Runtime:
     def __init__(self) -> None:
+        self.audio_route = None
         self.audio_representation = AudioRepresentation.DECOUPLED
         self.layout = Layout(text=(0, 4), audio=(4, 8))
         self.audio_tokenizer = NativeAudioTokenizer(vocab_size=2)
@@ -375,6 +376,7 @@ class _FullSequenceCodec:
 
 class _FullSequenceRuntime:
     def __init__(self, codebook_sizes: tuple[int, ...] = (4, 10)) -> None:
+        self.audio_route = None
         self.audio_representation = AudioRepresentation.FULL_CODEC_SEQUENCE
         self.audio_tokenizer = FlattenedAudioTokenizer(
             codebook_sizes=codebook_sizes,

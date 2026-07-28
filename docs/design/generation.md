@@ -7,12 +7,14 @@
 
 包级 API 公开以下结构和入口：
 
-- `Request(prompt_ids, task)`：无 target、无 batch padding 的单条推理输入。
-  `prompt_ids` 是一维 layout global token IDs。
+- `Request(prompt_ids, task, audio_context)`：无 target、无 batch padding 的单条推理输入。
+  `prompt_ids` 是一维 layout global token IDs；当固定 `audio_route` 的 decode 需要 prompt stream
+  时，`audio_context` 提供同一 reference 的 structured semantic/acoustic codes。
 - `Result(response_ids, audio)`：按原请求顺序返回的单条结果。`response_ids` 是不含 EOS/EOA
   的 layout global token IDs；text task 的 `audio=None`。
-- `AudioOutput(features, waveform, sample_rate)`：audio task 的 decode 结果。unified-token codec
-  没有独立 acoustic representation，因此 `features=None`。
+- `AudioOutput(features, codes, waveform, sample_rate)`：audio task 的 decode 结果。`codes` 保存
+  route resolve 后的 structured semantic/acoustic codes；unified-token codec 没有独立 acoustic
+  representation，因此 `features=None`。
 - `AcousticGeneration(sequence, features, frame_counts)`：acoustic model 与 service 之间的批量
   返回契约；`features` 是带右侧 padding 的 `[batch, frames, dim]`，`frame_counts` 给出每行
   有效 frame 数。
@@ -43,6 +45,7 @@
 class Request(TypedDict):
     prompt_ids: Tensor
     task: Task
+    audio_context: SemanticAcousticCodes | None
 
 class Result(TypedDict):
     response_ids: Tensor
@@ -51,6 +54,9 @@ class Result(TypedDict):
 
 `prompt_ids` 必须是调用方已经准备好的完整 generation prompt。service 不渲染 chat template、
 不插入 instruction；按 task builder 契约构造的 audio-target request 已经以 BOA 结束。
+prompt 中若包含 BiCodec reference stream，`prompt_ids` 已经包含 route 规定的 serialized stream，
+而 `audio_context` 保存同一份未序列化 codes，供 decode 复用 prompt-owned stream。route 是固定的
+experiment/checkpoint contract，不属于 `Request`，请求只能提供 context 数据，不能选择另一条 route。
 `FlattenedAudioTokenizer` 的 codec/codebook marker 和各 codebook range 是 codec serialization
 grammar。model 侧 full-sequence generation 强制 marker 顺序，首个 codebook 生成至少一个
 payload 并决定 frame count，其余 codebook 只能生成相同数量、属于各自 range 的 payload，完整
@@ -58,8 +64,9 @@ block 结束后才允许 EOA。marker 与 EOA 都计入 `max_new_tokens`，marke
 `response_ids` 中供 frame count 与 decode 使用。单码本是同一契约的批量化简化路径。
 `generation.batch.requests_from_batch()` 会从 teacher-forcing batch 保留 task prefix，直接构造
 request 的调用方负责保持相同 task 状态机。
-当前 prompt 只由 layout global token IDs 表达；audio-source 内容也编码为 semantic audio token，
-`Request` 不接受独立 acoustic code/feature side channel。
+当前 prompt 只由 layout global token IDs 表达；普通 audio-source 内容编码为 semantic audio token，
+structured BiCodec route 另外通过 `audio_context` 携带 decode 所需的 reference acoustic/semantic
+codes。`Request` 不接受可切换的 acoustic feature side channel。
 
 service 在 padding 前校验每条 request：
 

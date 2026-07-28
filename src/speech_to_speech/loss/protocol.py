@@ -24,6 +24,12 @@ class TokenObjectiveModel(Protocol):
         modality: Modality | None = None,
     ) -> Tensor: ...
 
+    def selected_logits(
+        self,
+        hidden_state: Tensor,
+        token_ids: Tensor,
+    ) -> Tensor: ...
+
 
 class AcousticDecoder(Protocol):
     def __call__(

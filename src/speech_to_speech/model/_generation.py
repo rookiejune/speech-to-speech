@@ -11,6 +11,8 @@ from torch.nn.utils.rnn import pad_sequence
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.cache_utils import Cache
 
+from ..audio_route import AudioStream
+from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ._sampling import top_p_filter
 from .protocol import TokenModelRuntime
 
@@ -438,14 +440,8 @@ def generate_bicodec_sequence(
     model: GenerationStepModel,
     prompt_ids: Tensor,
     *,
-    semantic_range: tuple[int, int],
-    codec_token_id: int,
-    semantic_token_id: int,
-    acoustic_token_id: int,
-    end_token_id: int,
-    acoustic_offsets: Sequence[int],
-    acoustic_sizes: Sequence[int],
-    acoustic_unit_length: int,
+    tokenizer: BiCodecAudioTokenizer,
+    streams: Sequence[AudioStream],
     max_new_tokens: int,
     temperature: float,
     top_p: float,
@@ -454,6 +450,7 @@ def generate_bicodec_sequence(
     use_cache: bool,
 ) -> Tensor:
     """Generate one constrained structured BiCodec sequence per prompt row."""
+    streams = _audio_streams(streams)
     if prompt_ids.dim() != 2 or prompt_ids.size(0) < 1:
         raise ValueError("generation requires at least one prompt row.")
     if max_new_tokens < 1 or temperature <= 0 or not 0 < top_p <= 1:
@@ -470,14 +467,8 @@ def generate_bicodec_sequence(
                 model,
                 prompt_ids[row : row + 1],
                 prompt_attention_mask=prompt_attention_mask[row : row + 1],
-                semantic_range=semantic_range,
-                codec_token_id=codec_token_id,
-                semantic_token_id=semantic_token_id,
-                acoustic_token_id=acoustic_token_id,
-                end_token_id=end_token_id,
-                acoustic_offsets=acoustic_offsets,
-                acoustic_sizes=acoustic_sizes,
-                acoustic_unit_length=acoustic_unit_length,
+                tokenizer=tokenizer,
+                streams=streams,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_p=top_p,
@@ -497,14 +488,8 @@ def _generate_bicodec_row(
     prompt_ids: Tensor,
     *,
     prompt_attention_mask: Tensor,
-    semantic_range: tuple[int, int],
-    codec_token_id: int,
-    semantic_token_id: int,
-    acoustic_token_id: int,
-    end_token_id: int,
-    acoustic_offsets: Sequence[int],
-    acoustic_sizes: Sequence[int],
-    acoustic_unit_length: int,
+    tokenizer: BiCodecAudioTokenizer,
+    streams: tuple[AudioStream, ...],
     max_new_tokens: int,
     temperature: float,
     top_p: float,
@@ -536,26 +521,39 @@ def _generate_bicodec_row(
             dtype=torch.long,
         )
 
-    row.step(local(codec_token_id))
-    row.step(local(semantic_token_id))
-    semantic_count = 0
-    semantic_ids = range_ids(*semantic_range)
-    transition = local(acoustic_token_id)
-    while semantic_count < 1:
-        row.step(semantic_ids)
-        semantic_count += 1
-    while True:
-        next_id = row.step(torch.cat((semantic_ids, transition)))
-        if next_id == int(transition.item()):
-            break
-        semantic_count += 1
+    row.step(local(tokenizer.codec_token_id))
+    if AudioStream.ACOUSTIC in streams:
+        row.step(local(tokenizer.acoustic_token_id))
+        for _ in range(tokenizer.acoustic_unit_length):
+            for start, end in tokenizer.acoustic_token_ranges:
+                row.step(range_ids(start, end - start))
 
-    for _ in range(acoustic_unit_length):
-        for offset, size in zip(acoustic_offsets, acoustic_sizes):
-            row.step(range_ids(offset, size))
-    row.step(local(end_token_id))
-    row.step(local(model.runtime.eoa_token_id - audio_start))
+    if AudioStream.SEMANTIC in streams:
+        row.step(local(tokenizer.semantic_token_id))
+        semantic_ids = range_ids(*tokenizer.semantic_token_range)
+        row.step(semantic_ids)
+        end = local(tokenizer.end_token_id)
+        while row.step(torch.cat((semantic_ids, end))) != int(end.item()):
+            pass
+    else:
+        row.step(local(tokenizer.end_token_id))
+    row.step(prompt_ids.new_tensor([model.runtime.eoa_token_id], dtype=torch.long))
     return row.sequence
+
+
+def _audio_streams(streams: Sequence[AudioStream]) -> tuple[AudioStream, ...]:
+    values = tuple(streams)
+    if not values:
+        raise ValueError("BiCodec generation requires at least one output stream.")
+    if any(not isinstance(stream, AudioStream) for stream in values):
+        raise TypeError("BiCodec generation streams must contain AudioStream values.")
+    if len(values) != len(set(values)):
+        raise ValueError("BiCodec generation streams must not contain duplicates.")
+    return tuple(
+        stream
+        for stream in (AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
+        if stream in values
+    )
 
 
 def _rows(value: Tensor | None, rows: Tensor) -> Tensor | None:

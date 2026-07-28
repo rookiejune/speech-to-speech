@@ -104,7 +104,10 @@ class SpeakerGridDatasetTest(unittest.TestCase):
             speaker="bob",
         )
 
-        dataset = load_dataset(config, SimpleNamespace(codec_name="bicodec"))
+        dataset = load_dataset(
+            config,
+            SimpleNamespace(codec_name="bicodec", audio_route=None),
+        )
 
         self.assertIsInstance(dataset, SpeakerGridCellsDataset)
         self.assertEqual(len(dataset), 2)
@@ -118,7 +121,10 @@ class SpeakerGridDatasetTest(unittest.TestCase):
         config = DatasetConfig(name=DatasetName.QWEN_TTS_SPEAKER)
 
         with self.assertRaisesRegex(ValueError, "bicodec and longcat"):
-            load_dataset(config, SimpleNamespace(codec_name="unicodec"))
+            load_dataset(
+                config,
+                SimpleNamespace(codec_name="unicodec", audio_route=None),
+            )
 
     def test_speaker_grid_requires_single_data_shape(self):
         with self.assertRaisesRegex(ValueError, "requires data shape single"):
@@ -247,6 +253,7 @@ def _runtime(representation: AudioRepresentation):
         acoustic_unit_length=3,
     )
     return SimpleNamespace(
+        audio_route=None,
         codec_name="bicodec",
         audio_view=AudioView.BICODEC,
         codec_frame_rate=50.0,

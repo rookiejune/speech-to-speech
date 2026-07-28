@@ -94,7 +94,16 @@ class _Loader(Protocol):
     def setup(self, stage: str | None = None) -> None: ...
 
 
-class _TrainLoader(_Loader, Protocol):
+class _DiagnosticLoader(_Loader, Protocol):
+    def train_samples(self, indices: Sequence[int]) -> list[RawSample]: ...
+
+    def diagnostic_collator(
+        self,
+        task: Task,
+    ) -> Callable[[list[RawSample]], ConcreteTrainInput]: ...
+
+
+class _TrainLoader(_DiagnosticLoader, Protocol):
     @property
     def collator(self) -> Callable[[list[RawSample]], ConcreteTrainInput]: ...
 
@@ -103,7 +112,7 @@ class _TrainLoader(_Loader, Protocol):
     def train_dataloader(self) -> Iterable[ConcreteTrainInput]: ...
 
 
-class _ValidationLoader(_Loader, Protocol):
+class _ValidationLoader(_DiagnosticLoader, Protocol):
     def validation_dataloader(self) -> Iterable[ConcreteTrainInput]: ...
 
 
@@ -286,8 +295,6 @@ class DataModule(LightningDataModule):
         loader_name: str | None = None,
     ) -> list[RawSample]:
         loader = self._single_loader(loader_name, "read samples")
-        if not isinstance(loader, _SpeechLoader):
-            raise ValueError("the selected loader does not expose raw samples.")
         return loader.train_samples(indices)
 
     def collator_for(
@@ -347,26 +354,22 @@ class DataModule(LightningDataModule):
         self,
         split: SampleSplit,
         loader_name: str,
-    ) -> _SpeechLoader:
+    ) -> _DiagnosticLoader:
         if not isinstance(split, SampleSplit):
             raise TypeError("diagnostic split must be a SampleSplit.")
         try:
             spec = self.loader_specs[loader_name]
         except KeyError as error:
             raise ValueError(f"unknown loader {loader_name!r}.") from error
+        if split is SampleSplit.TRAIN:
+            return self._loaders[loader_name]
         if spec.kind is not LoaderKind.SPEECH:
-            raise ValueError("diagnostic samples require a speech loader.")
-        loader = (
-            self._loaders[loader_name]
-            if split is SampleSplit.TRAIN
-            else self._validation_loader
-        )
+            raise ValueError("validation diagnostic samples require a speech loader.")
+        loader = self._validation_loader
         if loader is None:
             raise RuntimeError(
                 "validation diagnostic samples require a validation dataset."
             )
-        if not isinstance(loader, _SpeechLoader):
-            raise TypeError("diagnostic samples require an internal speech loader.")
         return loader
 
 

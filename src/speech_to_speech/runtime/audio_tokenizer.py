@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from numbers import Integral
 from typing import cast, overload
 
@@ -12,7 +13,14 @@ from anytrain.tokenizer import CodecBPE
 from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
+from ..audio_route import AudioStream
 from .types import AudioTokenizer
+
+
+@dataclass(frozen=True)
+class BiCodecStreams:
+    semantic: Tensor | None
+    acoustic: Tensor | None
 
 
 class NativeAudioTokenizer:
@@ -169,6 +177,10 @@ class BiCodecAudioTokenizer:
     """Serialize BiCodec semantic units and fixed acoustic slots."""
 
     embedding_initialization = "random"
+    forced_group = -1
+    semantic_group = 0
+    semantic_or_end_group = 1
+    acoustic_group_start = 2
 
     def __init__(
         self,
@@ -236,12 +248,37 @@ class BiCodecAudioTokenizer:
     def semantic_token_range(self) -> tuple[int, int]:
         return 0, self._semantic_vocab_size
 
+    @property
+    def acoustic_token_ranges(self) -> tuple[tuple[int, int], ...]:
+        return tuple(
+            (offset, offset + size)
+            for offset, size in zip(
+                self._acoustic_offsets,
+                self._acoustic_codebook_sizes,
+            )
+        )
+
+    @property
+    def prediction_token_ranges(self) -> tuple[tuple[int, int], ...]:
+        return (self.semantic_token_range, *self.acoustic_token_ranges)
+
     def encode(self, frames: Sequence[Sequence[int]] | Tensor) -> Tensor:
         """Encode semantic codes for the semantic-only route."""
         tensor = _semantic_tensor(frames, self._semantic_vocab_size)
         return tensor[:, 0].to(dtype=torch.long)
 
     def encode_full(self, value: object) -> Tensor:
+        return self.encode_streams(
+            value,
+            (AudioStream.ACOUSTIC, AudioStream.SEMANTIC),
+        )
+
+    def encode_streams(
+        self,
+        value: object,
+        streams: Sequence[AudioStream],
+    ) -> Tensor:
+        streams = _bicodec_streams(streams)
         semantic, acoustic = _bicodec_units(value)
         semantic = _semantic_tensor(semantic, self._semantic_vocab_size)
         acoustic = _acoustic_tensor(acoustic, self._acoustic_codebook_sizes)
@@ -249,18 +286,67 @@ class BiCodecAudioTokenizer:
             raise ValueError(
                 "BiCodec acoustic units must match the configured fixed length."
             )
-        values = [
-            semantic.new_tensor([self._codec_token_id, self._semantic_token_id]),
-            semantic[:, 0].to(dtype=torch.long),
-            semantic.new_tensor([self._acoustic_token_id]),
-        ]
-        for slot in range(self._acoustic_unit_length):
-            for index, offset in enumerate(self._acoustic_offsets):
-                values.append(
-                    acoustic[slot, index].reshape(1).to(dtype=torch.long) + offset
+        values = [semantic.new_tensor([self._codec_token_id])]
+        if AudioStream.ACOUSTIC in streams:
+            values.append(semantic.new_tensor([self._acoustic_token_id]))
+            for slot in range(self._acoustic_unit_length):
+                for index, offset in enumerate(self._acoustic_offsets):
+                    values.append(
+                        acoustic[slot, index].reshape(1).to(dtype=torch.long) + offset
+                    )
+        if AudioStream.SEMANTIC in streams:
+            values.extend(
+                (
+                    semantic.new_tensor([self._semantic_token_id]),
+                    semantic[:, 0].to(dtype=torch.long),
                 )
+            )
         values.append(semantic.new_tensor([self._end_token_id]))
         return torch.cat(values).to(dtype=torch.long)
+
+    def encode_streams_with_groups(
+        self,
+        value: object,
+        streams: Sequence[AudioStream],
+    ) -> tuple[Tensor, Tensor]:
+        streams = _bicodec_streams(streams)
+        token_ids = self.encode_streams(value, streams)
+        groups = token_ids.new_full(token_ids.shape, self.forced_group)
+        cursor = 1
+        if AudioStream.ACOUSTIC in streams:
+            cursor += 1
+            for _ in range(self._acoustic_unit_length):
+                for codebook in range(len(self._acoustic_codebook_sizes)):
+                    groups[cursor] = self.acoustic_group_start + codebook
+                    cursor += 1
+        if AudioStream.SEMANTIC in streams:
+            cursor += 1
+            semantic_count = token_ids.numel() - cursor - 1
+            if semantic_count < 1:
+                raise AssertionError("BiCodec semantic serialization produced no payload.")
+            groups[cursor] = self.semantic_group
+            if semantic_count > 1:
+                groups[cursor + 1 : cursor + semantic_count] = (
+                    self.semantic_or_end_group
+                )
+            groups[-1] = self.semantic_or_end_group
+        return token_ids, groups
+
+    def prediction_ids(self, group: int, *, device: torch.device) -> Tensor:
+        if isinstance(group, bool) or not isinstance(group, int):
+            raise TypeError("BiCodec prediction group must be an integer.")
+        if group == self.semantic_group:
+            start, end = self.semantic_token_range
+            return torch.arange(start, end, dtype=torch.long, device=device)
+        if group == self.semantic_or_end_group:
+            start, end = self.semantic_token_range
+            semantic = torch.arange(start, end, dtype=torch.long, device=device)
+            return torch.cat((semantic, semantic.new_tensor([self._end_token_id])))
+        codebook = group - self.acoustic_group_start
+        if codebook < 0 or codebook >= len(self.acoustic_token_ranges):
+            raise ValueError(f"unknown BiCodec prediction group: {group}.")
+        start, end = self.acoustic_token_ranges[codebook]
+        return torch.arange(start, end, dtype=torch.long, device=device)
 
     def decode(
         self,
@@ -272,44 +358,76 @@ class BiCodecAudioTokenizer:
         return tensor[:, None] if isinstance(token_ids, Tensor) else [(int(value),) for value in tensor]
 
     def decode_full(self, token_ids: Sequence[int] | Tensor) -> SemanticAcousticCodes:
-        tensor = _token_tensor(token_ids)
-        if tensor.numel() < 5:
-            raise ValueError("BiCodec full sequence is too short.")
-        if int(tensor[0]) != self._codec_token_id:
-            raise ValueError("BiCodec full sequence must start with a codec marker.")
-        if int(tensor[1]) != self._semantic_token_id:
-            raise ValueError("BiCodec full sequence is missing the semantic marker.")
-        acoustic_start = (tensor == self._acoustic_token_id).nonzero(as_tuple=False)
-        if acoustic_start.numel() != 1:
-            raise ValueError("BiCodec full sequence must contain one acoustic marker.")
-        marker = int(acoustic_start.item())
-        semantic = tensor[2:marker]
-        if semantic.numel() < 1 or bool((semantic < 0).any()) or bool(
-            (semantic >= self._semantic_vocab_size).any()
-        ):
-            raise ValueError("BiCodec semantic tokens are out of range.")
-        payload = tensor[marker + 1 :]
-        if payload.numel() != self._acoustic_unit_length * len(self._acoustic_codebook_sizes) + 1:
-            raise ValueError("BiCodec full sequence has an invalid acoustic payload length.")
-        if int(payload[-1]) != self._end_token_id:
-            raise ValueError("BiCodec full sequence must end with a sequence marker.")
-        payload = payload[:-1]
-        slots = []
-        cursor = 0
-        for _ in range(self._acoustic_unit_length):
-            values = []
-            for offset, size in zip(self._acoustic_offsets, self._acoustic_codebook_sizes):
-                value = payload[cursor] - offset
-                if bool((value < 0) or (value >= size)):
-                    raise ValueError("BiCodec acoustic tokens are out of range.")
-                values.append(value)
-                cursor += 1
-            slots.append(torch.stack(values))
-        acoustic = torch.stack(slots, dim=0)
-        return SemanticAcousticCodes(
-            semantic=semantic[:, None],
-            acoustic=acoustic,
+        decoded = self.decode_streams(
+            token_ids,
+            (AudioStream.ACOUSTIC, AudioStream.SEMANTIC),
         )
+        if decoded.semantic is None or decoded.acoustic is None:
+            raise AssertionError("full BiCodec decode must produce both streams.")
+        return SemanticAcousticCodes(
+            semantic=decoded.semantic,
+            acoustic=decoded.acoustic,
+        )
+
+    def decode_streams(
+        self,
+        token_ids: Sequence[int] | Tensor,
+        streams: Sequence[AudioStream],
+    ) -> BiCodecStreams:
+        streams = _bicodec_streams(streams)
+        tensor = _token_tensor(token_ids)
+        if tensor.numel() < 3:
+            raise ValueError("BiCodec stream sequence is too short.")
+        if int(tensor[0]) != self._codec_token_id:
+            raise ValueError("BiCodec stream sequence must start with a codec marker.")
+        if int(tensor[-1]) != self._end_token_id:
+            raise ValueError("BiCodec stream sequence must end with a sequence marker.")
+
+        cursor = 1
+        semantic: Tensor | None = None
+        acoustic: Tensor | None = None
+        if AudioStream.ACOUSTIC in streams:
+            if int(tensor[cursor]) != self._acoustic_token_id:
+                raise ValueError("BiCodec stream sequence is missing the acoustic marker.")
+            cursor += 1
+            payload_length = self._acoustic_unit_length * len(
+                self._acoustic_codebook_sizes
+            )
+            payload = tensor[cursor : cursor + payload_length]
+            if payload.numel() != payload_length:
+                raise ValueError("BiCodec stream sequence has an invalid acoustic payload length.")
+            values = []
+            payload_cursor = 0
+            for _ in range(self._acoustic_unit_length):
+                slot = []
+                for offset, size in zip(
+                    self._acoustic_offsets,
+                    self._acoustic_codebook_sizes,
+                ):
+                    value = payload[payload_cursor] - offset
+                    if bool((value < 0) or (value >= size)):
+                        raise ValueError("BiCodec acoustic tokens are out of range.")
+                    slot.append(value)
+                    payload_cursor += 1
+                values.append(torch.stack(slot))
+            acoustic = torch.stack(values, dim=0)
+            cursor += payload_length
+
+        if AudioStream.SEMANTIC in streams:
+            if int(tensor[cursor]) != self._semantic_token_id:
+                raise ValueError("BiCodec stream sequence is missing the semantic marker.")
+            cursor += 1
+            semantic = tensor[cursor:-1]
+            if semantic.numel() < 1 or bool((semantic < 0).any()) or bool(
+                (semantic >= self._semantic_vocab_size).any()
+            ):
+                raise ValueError("BiCodec semantic tokens are out of range.")
+            semantic = semantic[:, None]
+            cursor = tensor.numel() - 1
+
+        if cursor != tensor.numel() - 1:
+            raise ValueError("BiCodec stream sequence contains unexpected tokens.")
+        return BiCodecStreams(semantic=semantic, acoustic=acoustic)
 
     def frame_spans(
         self,
@@ -412,6 +530,23 @@ def semantic_codes_from_audio_tokens(
         raise ValueError(
             "decoded semantic frames must have the same codebook count."
         ) from error
+
+
+def _bicodec_streams(
+    streams: Sequence[AudioStream],
+) -> tuple[AudioStream, ...]:
+    values = tuple(streams)
+    if not values:
+        raise ValueError("BiCodec serialization requires at least one audio stream.")
+    if any(not isinstance(stream, AudioStream) for stream in values):
+        raise TypeError("BiCodec streams must contain AudioStream values.")
+    if len(values) != len(set(values)):
+        raise ValueError("BiCodec streams must not contain duplicates.")
+    return tuple(
+        stream
+        for stream in (AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
+        if stream in values
+    )
 
 
 def _single_code(frame: Sequence[int], vocab_size: int) -> int:

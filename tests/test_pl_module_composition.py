@@ -18,14 +18,14 @@ class PlModuleCompositionTest(unittest.TestCase):
     @patch("speech_to_speech.pl_module.composition.TokenObjective")
     @patch("speech_to_speech.pl_module.composition.TokenModel")
     def test_token_closes_model_and_objective(self, model, objective, module):
-        runtime = SimpleNamespace(layout=Mock())
+        runtime = SimpleNamespace(layout=Mock(), audio_tokenizer=None)
         model_config = ModelConfig()
 
         built_module, built_model = token(runtime, ModuleConfig(), model_config)
 
         self.assertIs(built_model, model.return_value)
         model.assert_called_once_with(model_config, runtime=runtime)
-        objective.assert_called_once_with(runtime.layout)
+        objective.assert_called_once_with(runtime.layout, runtime.audio_tokenizer)
         module.assert_called_once_with(
             ANY,
             model=model.return_value,
@@ -55,6 +55,7 @@ class PlModuleCompositionTest(unittest.TestCase):
             ),
             semantic_codec=Mock(),
             layout=Mock(),
+            audio_tokenizer=None,
             flow_matching=Mock(),
             backbone=SimpleNamespace(
                 get_input_embeddings=lambda: SimpleNamespace(
@@ -97,7 +98,7 @@ class PlModuleCompositionTest(unittest.TestCase):
     @patch("speech_to_speech.pl_module.composition.RVQObjective")
     @patch("speech_to_speech.pl_module.composition.RVQModel")
     def test_rvq_model_receives_only_decoder_options(self, model, objective, module):
-        runtime = SimpleNamespace(layout=Mock())
+        runtime = SimpleNamespace(layout=Mock(), audio_tokenizer=None)
         acoustic = SimpleNamespace(
             init_artifact=None,
             decoder=DecoderConfig(hidden_dim=None, layers=2, heads=1, ffn_ratio=3),
@@ -126,6 +127,7 @@ class PlModuleCompositionTest(unittest.TestCase):
         runtime = SimpleNamespace(
             codec=Mock(),
             layout=Mock(),
+            audio_tokenizer=None,
             backbone=SimpleNamespace(
                 get_input_embeddings=lambda: SimpleNamespace(
                     weight=SimpleNamespace(device=torch.device("cpu"))

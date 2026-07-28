@@ -7,7 +7,12 @@ from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
-from ..runtime.audio_tokenizer import BiCodecAudioTokenizer, semantic_codes_from_audio_tokens
+from ..audio_route import AudioStream, Config as AudioRouteConfig, StreamSource
+from ..runtime.audio_tokenizer import (
+    BiCodecAudioTokenizer,
+    BiCodecStreams,
+    semantic_codes_from_audio_tokens,
+)
 from ..runtime.types import (
     AcousticCodec,
     AudioTokenizer,
@@ -109,6 +114,80 @@ def decode_generated_bicodec_full(
         acoustic=torch.stack([row.acoustic for row in rows]),
     )
     return codec.detokenize(codes)
+
+
+def decode_generated_bicodec_route(
+    audio_token_ids: Tensor,
+    audio_context: SemanticAcousticCodes | None,
+    *,
+    route: AudioRouteConfig,
+    codec: StructuredCodec,
+    audio_tokenizer: BiCodecAudioTokenizer,
+    audio_token_range: tuple[int, int],
+) -> tuple[Tensor, SemanticAcousticCodes]:
+    """Resolve route-owned BiCodec streams and decode one generated row."""
+    if audio_token_ids.dim() != 1:
+        raise ValueError("BiCodec route decode expects one generated token row.")
+    local_ids = _local_ids(audio_token_ids[None], audio_token_range)[0]
+    output = audio_tokenizer.decode_streams(
+        local_ids,
+        route.output.canonical_streams,
+    )
+    semantic = _route_stream(
+        AudioStream.SEMANTIC,
+        route.decode.semantic,
+        output,
+        audio_context,
+    )
+    acoustic = _route_stream(
+        AudioStream.ACOUSTIC,
+        route.decode.acoustic,
+        output,
+        audio_context,
+    )
+    resolved = SemanticAcousticCodes(
+        semantic=semantic.to(device=audio_token_ids.device, dtype=torch.long),
+        acoustic=acoustic.to(device=audio_token_ids.device, dtype=torch.long),
+    )
+    waveform = codec.detokenize(
+        SemanticAcousticCodes(
+            semantic=resolved.semantic.unsqueeze(0),
+            acoustic=resolved.acoustic.unsqueeze(0),
+        )
+    )
+    if waveform.dim() < 1 or waveform.size(0) != 1:
+        raise ValueError("BiCodec detokenize must preserve a batch size of one.")
+    return waveform[0], resolved
+
+
+def _route_stream(
+    stream: AudioStream,
+    source: StreamSource,
+    output: BiCodecStreams,
+    audio_context: SemanticAcousticCodes | None,
+) -> Tensor:
+    if source is StreamSource.OUTPUT:
+        value = output.semantic if stream is AudioStream.SEMANTIC else output.acoustic
+        if value is None:
+            raise ValueError(
+                f"BiCodec output does not contain the decoded {stream.value} stream."
+            )
+        return value
+    if source is StreamSource.PROMPT:
+        if audio_context is None:
+            raise ValueError(
+                f"BiCodec route requires prompt {stream.value} codes for decoding."
+            )
+        return (
+            audio_context.semantic
+            if stream is AudioStream.SEMANTIC
+            else audio_context.acoustic
+        )
+    if source is StreamSource.GENERATOR:
+        raise ValueError(
+            "BiCodec token routes do not support generator-owned decode streams."
+        )
+    raise TypeError("BiCodec decode source must be a StreamSource.")
 
 
 def decode_generated_codes(

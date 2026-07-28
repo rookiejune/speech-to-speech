@@ -34,6 +34,71 @@ from speech_to_speech.task import Task
 
 
 class TaskSampleLoggingTest(unittest.TestCase):
+    def test_train_mt_panel_logs_translation_and_text_metrics(self):
+        sample = {
+            (Role.SOURCE, Modality.TEXT): TextItem(
+                views={TextView.TEXT: "hello source"},
+                meta={TextMeta.LANG: Lang.ZH},
+            ),
+            (Role.TARGET, Modality.TEXT): TextItem(
+                views={TextView.TEXT: "hello"},
+                meta={TextMeta.LANG: Lang.EN},
+            ),
+        }
+        batch = ModelBatch(
+            input_ids=torch.tensor([[1, 2]]),
+            token_labels=torch.tensor([[-100, 2]]),
+            acoustic_target=None,
+            tasks=[Task.MT],
+            pad_token_id=0,
+        )
+        datamodule = SimpleNamespace(
+            runtime=SimpleNamespace(
+                layout=Layout(text=(0, 10), audio=(10, 20)),
+                text_tokenizer=SimpleNamespace(decode=Mock(return_value="hello")),
+            ),
+            diagnostic_samples=Mock(return_value=[sample]),
+            diagnostic_collator=Mock(return_value=Mock(return_value=batch)),
+        )
+        experiment = Mock()
+        trainer = SimpleNamespace(
+            global_step=10,
+            is_global_zero=True,
+            logger=SimpleNamespace(experiment=experiment),
+            datamodule=datamodule,
+        )
+        module = SimpleNamespace(
+            model=Mock(),
+            materialize_batch=Mock(side_effect=lambda value: value),
+            generate=Mock(
+                return_value=[{"response_ids": torch.tensor([1]), "audio": None}]
+            ),
+        )
+        callback = TaskSampleLogger(
+            [0],
+            every_n_steps=1,
+            loader_name="mt",
+            split=SampleSplit.TRAIN,
+            task=Task.MT,
+            do_sample=False,
+        )
+
+        callback.on_fit_start(trainer, module)
+        callback.on_train_batch_start(trainer, module, batch, 0)
+
+        datamodule.diagnostic_samples.assert_called_once_with(
+            [0], split=SampleSplit.TRAIN, loader_name="mt"
+        )
+        datamodule.diagnostic_collator.assert_called_once_with(
+            Task.MT, split=SampleSplit.TRAIN, loader_name="mt"
+        )
+        experiment.add_audio.assert_not_called()
+        text_tags = {call.args[0] for call in experiment.add_text.call_args_list}
+        self.assertIn("task_sample/train/mt/mt/0/target", text_tags)
+        self.assertIn("task_sample/train/mt/mt/0/generated", text_tags)
+        scalar_tags = {call.args[0] for call in experiment.add_scalar.call_args_list}
+        self.assertIn("task_sample/train/mt/mt/0/text/cer", scalar_tags)
+
     def test_validation_asr_panel_logs_source_and_model_free_metrics(self):
         sample = _sample()
         batch = ModelBatch(

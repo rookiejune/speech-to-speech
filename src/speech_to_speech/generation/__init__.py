@@ -1,6 +1,7 @@
 from .decode import (
     decode_generated_audio,
     decode_generated_bicodec_full,
+    decode_generated_bicodec_route,
     decode_generated_codes,
     decode_generated_frame_codes,
     decode_reference_codes,
@@ -18,6 +19,7 @@ __all__ = [
     "TextProbeResult",
     "decode_generated_audio",
     "decode_generated_bicodec_full",
+    "decode_generated_bicodec_route",
     "decode_generated_codes",
     "decode_generated_frame_codes",
     "decode_reference_codes",

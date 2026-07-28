@@ -69,7 +69,8 @@ model 构造器不接收路径或执行文件 I/O。
   以及 waveform duration ratio、finite、RMS、peak、silence/clipping ratio；这些指标只使用已有
   text/waveform，不加载 ASR、MOS、speaker encoder 或其他评估模型，也不替代语义质量验收。每个
   callback 的 checkpoint state key 包含 split、loader、task、seed、indices 和 cadence，使 panel
-  实例可独立恢复。
+  实例可独立恢复。纯 text MT loader 支持 train panels，并记录 source/target/generated text 与
+  CER/exact-match；MT validation panel 当前被拒绝，因为 validation 数据源契约仍是 speech-only。
 - `TextRetentionLogger`：记录 text probe generation、reference NLL 与相对基线漂移。
 
 上述 callback 需要 logger experiment 时统一通过 `anytrain.lightning.experiment` 获取 text、scalar、

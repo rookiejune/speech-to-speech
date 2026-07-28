@@ -33,6 +33,7 @@ from omegaconf import DictConfig, OmegaConf
 from torch import nn
 from anydataset.dataset import MapStyleABC
 
+from speech_to_speech.audio_route import FULL_OUTPUT
 from speech_to_speech.callback import OnDeviceCodecMaterializer
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule._task import allocate_tasks
@@ -250,6 +251,7 @@ class ContractTest(unittest.TestCase):
             audio_view=AudioView.LONGCAT,
             codec_frame_rate=50.0,
             audio_representation=AudioRepresentation.DECOUPLED,
+            audio_route=None,
             semantic_codec_artifact=None,
             acoustic_layout=AcousticLayout.FRAME_ALIGNED,
             acoustic_unit_length=None,
@@ -504,6 +506,7 @@ class ContractTest(unittest.TestCase):
             _compose(
                 "runtime=unicodec",
                 "model/acoustic=none",
+                "audio_route=full_output",
                 "runtime.backbone=fake/backbone",
             )
         )
@@ -803,6 +806,7 @@ class ContractTest(unittest.TestCase):
             audio_view=AudioView.LONGCAT,
             codec_frame_rate=50.0,
             audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
+            audio_route=FULL_OUTPUT,
             semantic_codec_artifact=None,
             acoustic_layout=AcousticLayout.FRAME_ALIGNED,
             acoustic_unit_length=None,
@@ -1491,6 +1495,7 @@ class ContractTest(unittest.TestCase):
                 acoustic_target=None,
                 tasks=tasks,
                 pad_token_id=99,
+                generation_prompt_lengths=torch.ones(2, dtype=torch.long),
             )
 
         cases = (
@@ -1792,6 +1797,7 @@ def _data_runtime():
         audio_view=AudioView.LONGCAT,
         codec_frame_rate=50.0,
         audio_representation=AudioRepresentation.DECOUPLED,
+        audio_route=None,
         semantic_codec_artifact=None,
         acoustic_layout=AcousticLayout.FRAME_ALIGNED,
         acoustic_unit_length=None,

@@ -2,13 +2,14 @@
 defaults:
   - /model: toy
   - /model/acoustic: none
-  - /runtime: bicodec_semantic
+  - /runtime: bicodec_full_sequence
   - /data: qwen_tts_speaker
   - /pl_module: sft
   - /trainer: default
   - /logging: csv
   - override /stage: stage_1
   - override /parameter_policy: semantic_only
+  - override /audio_route: bicodec_reuse_prompt_acoustic
   - _self_
 
 task: tts

@@ -11,6 +11,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.cache_utils import Cache
 
 from ._buffer import register
+from ..audio_route import AudioStream
 from ._generation import (
     generate_bicodec_sequence,
     generate_flattened_sequence,
@@ -299,17 +300,17 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             raise TypeError(
                 "full codec sequence generation requires a structured audio tokenizer."
             )
+        route = self.runtime.audio_route
+        streams = (
+            (AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
+            if route is None
+            else route.output.canonical_streams
+        )
         return generate_bicodec_sequence(
             self,
             prompt_ids,
-            semantic_range=(0, tokenizer.semantic_vocab_size),
-            codec_token_id=tokenizer.codec_token_id,
-            semantic_token_id=tokenizer.semantic_token_id,
-            acoustic_token_id=tokenizer.acoustic_token_id,
-            end_token_id=tokenizer.end_token_id,
-            acoustic_offsets=tokenizer.acoustic_offsets,
-            acoustic_sizes=tokenizer.acoustic_codebook_sizes,
-            acoustic_unit_length=tokenizer.acoustic_unit_length,
+            tokenizer=tokenizer,
+            streams=streams,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,

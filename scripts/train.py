@@ -73,7 +73,7 @@ def run(config: StagedTrainConfig) -> None:
 
     pl.seed_everything(config.train.seed, workers=True)
     rt_config = runtime_config(config)
-    rt = Runtime(rt_config)
+    rt = Runtime(rt_config, audio_route=config.audio_route)
 
     torch.manual_seed(config.train.seed)
     acoustic_type = _composition(

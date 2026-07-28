@@ -9,6 +9,7 @@ defaults:
   - /logging: tensorboard
   - override /stage: stage_0
   - override /parameter_policy: full
+  - override /audio_route: full_output
   - _self_
 
 task: s2st

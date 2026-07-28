@@ -1,6 +1,7 @@
 defaults:
   - stage: stage_0
   - parameter_policy: full
+  - audio_route: semantic_generator
   - experiment: overfit
   - callback/performance@callbacks.performance
   - _self_

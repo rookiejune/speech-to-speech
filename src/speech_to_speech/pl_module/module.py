@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Generic, Protocol, TypeVar, cast
+from typing import Any, Generic, Protocol, TypeVar, cast
 
 import torch
 from anytrain.lightning import validation
@@ -11,11 +11,13 @@ from lightning.pytorch import LightningModule
 from torch import nn
 
 from ..datamodule.types import ModelBatch, RawSpeechBatch, TrainBatch, TrainInputBatch
+from ..audio_route import Config as AudioRouteConfig
 from ..generation.service import generate_responses
 from ..generation.text import TextProbe, TextProbeResult, evaluate_text
 from ..generation.types import Request, Result
 from ..loss import validation_metrics
 from ..loss.objective import Objective
+from ..loss.protocol import TokenObjectiveModel
 from ..loss.types import Outputs
 from ..generation.protocol import TextEvaluationModel
 
@@ -26,7 +28,12 @@ class Config:
     weight_decay: float = 0.01
 
 
-ModelT = TypeVar("ModelT", bound=TextEvaluationModel)
+class ModuleModel(TextEvaluationModel, TokenObjectiveModel, Protocol):
+    pass
+
+
+ModelT = TypeVar("ModelT", bound=ModuleModel)
+_AUDIO_ROUTE_KEY = "speech_to_speech_audio_route"
 
 
 class BatchMaterializer(Protocol):
@@ -126,6 +133,25 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
     def on_after_backward(self) -> None:
         self._current_loss_outputs = None
 
+    def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        checkpoint[_AUDIO_ROUTE_KEY] = _audio_route_payload(
+            self.model.runtime.audio_route
+        )
+
+    def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        expected = _audio_route_payload(self.model.runtime.audio_route)
+        if _AUDIO_ROUTE_KEY not in checkpoint:
+            if expected is not None:
+                raise ValueError(
+                    "checkpoint is missing the fixed audio route contract."
+                )
+            return
+        actual = checkpoint[_AUDIO_ROUTE_KEY]
+        if actual != expected:
+            raise ValueError(
+                f"checkpoint audio route does not match runtime: {actual!r} != {expected!r}."
+            )
+
     @torch.no_grad()
     def generate(
         self,
@@ -178,3 +204,22 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
             lr=self.config.learning_rate,
             weight_decay=self.config.weight_decay,
         )
+
+
+def _audio_route_payload(route: AudioRouteConfig | None) -> dict[str, object] | None:
+    if route is None:
+        return None
+    return {
+        "prompt": {
+            "source": route.prompt.source.value,
+            "streams": [stream.value for stream in route.prompt.canonical_streams],
+        },
+        "output": {
+            "streams": [stream.value for stream in route.output.canonical_streams],
+        },
+        "decode": {
+            "semantic": route.decode.semantic.value,
+            "acoustic": route.decode.acoustic.value,
+        },
+        "grammar": "audio-route-v1",
+    }

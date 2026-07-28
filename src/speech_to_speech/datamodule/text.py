@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+from anydataset import IterableAnyDataset
 from anydataset.types import Lang, Modality, Role, Sample, TextItem, TextMeta, TextView
 from torch.utils.data import Dataset
 
@@ -71,7 +72,9 @@ class ToyTextDataset(Dataset[Sample]):
         }
 
 
-def load_text_dataset(config: TextDatasetConfig):
+def load_text_dataset(
+    config: TextDatasetConfig,
+) -> Dataset[Sample] | IterableAnyDataset:
     if config.name is TextDatasetName.TOY:
         return ToyTextDataset(samples=config.toy_samples)
     if config.name is TextDatasetName.WMT19:

@@ -3,15 +3,13 @@ defaults:
   - override /stage: stage_4
   - override /parameter_policy: full
   - override /runtime: longcat_full_sequence
+  - override /audio_route: full_output
   - override /model/acoustic: none
   - override /trainer: static_ddp
   - _self_
 
 run_name: ${stage.name}-full-sequence-token
 output_subdir: 013-fdu-stage-smoke/${stage.name}/${run_name}
-
-stage:
-  batches_per_step: 1
 
 data:
   dataloader:
@@ -37,4 +35,3 @@ trainer:
 callbacks:
   checkpoint:
     every_n_train_steps: 1
-

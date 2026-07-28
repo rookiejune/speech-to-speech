@@ -5,6 +5,7 @@ defaults:
   - /model: default
   - /model/acoustic: rvq
   - /runtime: longcat_native
+  - /audio_route: semantic_generator
   - /data@data.dataset: wmt19_tts
   - /pl_module: sft
   - /trainer: default

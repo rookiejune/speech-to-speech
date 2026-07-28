@@ -3,6 +3,7 @@ defaults:
   - override /stage: stage_1
   - override /parameter_policy: speech_interface
   - override /runtime: stable_codec
+  - override /audio_route: full_output
   - override /model/acoustic: none
   - override /trainer: static_ddp
   - override /logging: tensorboard

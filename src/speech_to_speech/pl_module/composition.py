@@ -64,7 +64,7 @@ def token(
     module = SpeechToSpeechModule(
         config,
         model=model,
-        objective=TokenObjective(runtime.layout),
+        objective=TokenObjective(runtime.layout, runtime.audio_tokenizer),
     )
     return module, model
 
@@ -112,6 +112,7 @@ def flow(
     objective = FlowObjective(
         runtime.layout,
         runtime.flow_matching,
+        audio_tokenizer=runtime.audio_tokenizer,
         repa=(
             None
             if weight is None or teacher is None
@@ -137,7 +138,7 @@ def rvq(
     module = SpeechToSpeechModule[RVQCompositionModel](
         config,
         model=model,
-        objective=RVQObjective(runtime.layout),
+        objective=RVQObjective(runtime.layout, runtime.audio_tokenizer),
     )
     return module, model
 

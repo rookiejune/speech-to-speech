@@ -9,11 +9,22 @@ from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf
 
 from speech_to_speech.datamodule.config import SpeechConfig
 from speech_to_speech.datamodule.dataset import DatasetConfig, DatasetName
+from speech_to_speech.datamodule.joint import LoaderSchedule
 from speech_to_speech.datamodule.text import (
     TextConfig as TextDataConfig,
     TextDatasetName,
 )
 from speech_to_speech.datamodule.types import DataShape
+from speech_to_speech.audio_route import (
+    BICODEC_PREDICT_ACOUSTIC,
+    BICODEC_REUSE_PROMPT_ACOUSTIC,
+    FULL_OUTPUT,
+    SEMANTIC_GENERATOR,
+    AudioStream,
+    Config as AudioRouteConfig,
+    PromptSource,
+    StreamSource,
+)
 from speech_to_speech.model import AdapterType
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model.acoustic import AcousticType, DecoderConfig
@@ -224,6 +235,7 @@ class _OverfitConfig:
     output_dir: str = MISSING
     model: ModelConfig = field(default_factory=ModelConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    audio_route: AudioRouteConfig = MISSING
     data: FixedDataConfig = field(default_factory=FixedDataConfig)
     pl_module: ModuleConfig = field(default_factory=ModuleConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
@@ -262,6 +274,7 @@ class _StagedTrainConfig:
     output_dir: str = MISSING
     model: ModelConfig = field(default_factory=ModelConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    audio_route: AudioRouteConfig = MISSING
     data: SpeechConfig = MISSING
     text_data: TextDataConfig = MISSING
     pl_module: ModuleConfig = field(default_factory=ModuleConfig)
@@ -295,6 +308,12 @@ StagedTrainConfig = Union[
 
 
 ConfigT = TypeVar("ConfigT")
+AudioRouteEnumT = TypeVar(
+    "AudioRouteEnumT",
+    AudioStream,
+    PromptSource,
+    StreamSource,
+)
 
 
 def overfit(config: DictConfig) -> OverfitConfig:
@@ -310,6 +329,7 @@ def overfit(config: DictConfig) -> OverfitConfig:
     result = _parse(config, schema)
     _validate_output(result)
     _validate_audio_representation(result)
+    _validate_audio_route(result)
     _validate_backbone_initialization(result)
     if (
         result.callbacks.performance.enabled
@@ -336,9 +356,11 @@ def train(config: DictConfig) -> StagedTrainConfig:
     result = _parse(config, schema)
     _validate_output(result)
     _validate_audio_representation(result)
+    _validate_audio_route(result)
     _validate_backbone_initialization(result)
     if not result.stage.loaders:
         raise ValueError("formal train requires stage.loaders.")
+    _validate_static_ddp(result)
     _validate_task_samples(result)
     _validate_validation(result)
     return result
@@ -372,8 +394,7 @@ def _validate_task_samples(config: StagedTrainConfig) -> None:
                 f"task sample callback references unknown loader {loader_name!r}."
             )
         loader = config.stage.loaders[loader_name]
-        if _is_text_task_loader(loader.task_weights):
-            raise ValueError("task sample panels require speech loaders.")
+        text_loader = _is_text_task_loader(loader.task_weights)
         try:
             task = Task(panel.task)
         except ValueError as error:
@@ -400,11 +421,33 @@ def _validate_task_samples(config: StagedTrainConfig) -> None:
                 raise ValueError(f"duplicate task sample panel row: {key!r}.")
             seen.add(key)
         if panel.split == "validation":
+            if text_loader:
+                raise ValueError(
+                    "validation task sample panels require speech loaders."
+                )
             if not config.validation.enabled:
                 raise ValueError(
                     "validation task sample panels require validation.enabled=true."
                 )
             _validate_validation_dataset(config)
+
+
+def _validate_static_ddp(config: StagedTrainConfig) -> None:
+    if config.trainer.strategy not in {
+        "ddp",
+        "ddp_find_unused_parameters_false",
+    }:
+        return
+    loaders = config.stage.loaders
+    if len(loaders) > 1 and config.stage.batches_per_step == 1:
+        raise ValueError(
+            "static DDP with multiple stage loaders requires batches_per_step > 1 "
+            "so every optimizer step covers every loader."
+        )
+    LoaderSchedule(
+        config.stage.loader_weights(),
+        batches_per_step=config.stage.batches_per_step,
+    )
 
 
 def _is_text_task_loader(task_weights: dict[str, float]) -> bool:
@@ -509,6 +552,58 @@ def _validate_audio_representation(
         )
 
 
+def _validate_audio_route(
+    config: Union[OverfitConfig, StagedTrainConfig],
+) -> None:
+    route = config.audio_route
+    representation = config.runtime.audio_representation
+    acoustic = AcousticType(config.acoustic.type)
+    if config.runtime.audio_view is AudioView.BICODEC:
+        if route not in (
+            BICODEC_REUSE_PROMPT_ACOUSTIC,
+            BICODEC_PREDICT_ACOUSTIC,
+        ):
+            raise ValueError(
+                "BiCodec requires a reference reuse or reference predict audio route."
+            )
+        if representation is not AudioRepresentation.FULL_CODEC_SEQUENCE:
+            raise ValueError(
+                "BiCodec audio routes require the stable structured token vocabulary."
+            )
+        if acoustic is not AcousticType.NONE:
+            raise ValueError("BiCodec audio routes require model/acoustic=none.")
+        if config.runtime.semantic_codec_artifact is not None:
+            raise ValueError(
+                "BiCodec audio routes decode structured codes and must not configure "
+                "a semantic codec artifact."
+            )
+        dataset = (
+            config.data
+            if isinstance(config, _OverfitConfig)
+            else config.data.dataset
+        )
+        if dataset.name is not DatasetName.QWEN_TTS_SPEAKER:
+            raise ValueError(
+                "BiCodec reference routes currently require qwen_tts_speaker data."
+            )
+        return
+
+    if route.prompt.streams:
+        raise ValueError(
+            "audio prompt streams are currently implemented only for BiCodec."
+        )
+    if representation is AudioRepresentation.FULL_CODEC_SEQUENCE:
+        if route != FULL_OUTPUT:
+            raise ValueError(
+                "full codec sequence representation requires audio_route=full_output."
+            )
+        return
+    if route != SEMANTIC_GENERATOR:
+        raise ValueError(
+            "decoupled audio representation requires audio_route=semantic_generator."
+        )
+
+
 def _validate_backbone_initialization(
     config: Union[OverfitConfig, StagedTrainConfig],
 ) -> None:
@@ -551,6 +646,7 @@ def _prepare(config: DictConfig) -> DictConfig:
     _normalize_dataset(result.get("data", {}).get("dataset"))
     _normalize_data_shape(result.get("data"))
     _normalize_text_dataset(result.get("text_data", {}).get("dataset"))
+    _normalize_audio_route(result.get("audio_route"))
     runtime = result.get("runtime")
     if runtime is not None:
         initialization = runtime.get("backbone_initialization")
@@ -640,6 +736,28 @@ def _normalize_text_dataset(value: object) -> None:
         if raw in TextDatasetName.__members__
         else TextDatasetName(raw).name
     )
+
+
+def _normalize_audio_route(value: object) -> None:
+    if not isinstance(value, DictConfig):
+        return
+    prompt = value.get("prompt")
+    output = value.get("output")
+    decode = value.get("decode")
+    if not isinstance(prompt, DictConfig) or not isinstance(output, DictConfig):
+        return
+    if not isinstance(decode, DictConfig):
+        return
+    prompt.source = _enum_name(PromptSource, prompt.source)
+    prompt.streams = [_enum_name(AudioStream, stream) for stream in prompt.streams]
+    output.streams = [_enum_name(AudioStream, stream) for stream in output.streams]
+    decode.semantic = _enum_name(StreamSource, decode.semantic)
+    decode.acoustic = _enum_name(StreamSource, decode.acoustic)
+
+
+def _enum_name(enum: type[AudioRouteEnumT], value: object) -> str:
+    raw = str(value)
+    return enum[raw].name if raw in enum.__members__ else enum(raw).name
 
 
 def _parse(config: DictConfig, schema: Type[ConfigT]) -> ConfigT:

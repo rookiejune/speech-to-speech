@@ -14,8 +14,11 @@
 - `semantic_codec`：semantic token generation 的 waveform decoder。配置
   `semantic_codec_artifact` 时惰性加载 `semantic-acoustic-codec` artifact，并复用同一个
   structured backend；FrameCodec 不把 semantic-only codes 传给自身 `decode()`。
-- `audio_representation`：选择 audio token 序列契约，当前为 `decoupled` 或
-  `full_codec_sequence`。
+- `audio_representation`：只选择 FrameCodec 的 audio token 序列格式，当前为 `decoupled` 或
+  `full_codec_sequence`；不拥有 prompt/output/decode stream 的选择。
+- `audio_route`：本次 experiment 固定的 prompt、output、decode stream ownership。route 位于
+  `Runtime` 顶层而不属于 `runtime.Config`，并沿同一运行实例传给 DataModule、model 与 generation
+  service。
 - `backbone`：Qwen-compatible HF causal LM。
 - `layout`：text/audio global token blocks。
 - `pad/bos/eos_token_id` 与 `boa/eoa_token_id`。
@@ -23,9 +26,10 @@
 - `flow_matching`：训练 sample 与 generation ODE sampler 的共享 runtime。
 
 `runtime.Config.codec` 是 codec identity 的唯一配置源；`audio_view` 由字符串枚举转换，未知 codec
-显式报错。Hydra runtime preset 直接映射完整 `runtime.Config`，同时选择相互兼容的 codec、audio
-representation、audio tokenizer 与 backbone snapshot。`full_codec_sequence` 直接把完整 codec
-codebooks 编入 token 序列，因此不能同时配置 BPE audio tokenizer。ODE method、NFE 与 step 数直接使用 `flow_method`、`flow_nfe` 与
+显式报错。Hydra runtime preset 直接映射完整 `runtime.Config`，同时选择相互兼容的 codec、FrameCodec
+audio representation、audio tokenizer 与 backbone snapshot。`full_codec_sequence` 直接把完整
+FrameCodec codebooks 编入 token 序列，因此不能同时配置 BPE audio tokenizer；它不是 prompt/output
+route 的替代物。ODE method、NFE 与 step 数直接使用 `flow_method`、`flow_nfe` 与
 `flow_num_steps`，不再通过独立 sampler 组转换；`Config` 在构造时校验 method、正 NFE 和至少
 2 个 steps，因此 token/RVQ composition 也不会静默携带无效 runtime。model composition 由
 `model/acoustic` 选择。
@@ -67,13 +71,18 @@ LongCat 的 `DECOUPLED + model/acoustic=none` 必须配置 `semantic_codec_artif
 训练路径，仍由 `Codec.decode_features()` 消费生成的 features；它不代表 anytrain 提供
 semantic-only decoder。
 
-BiCodec 使用同一个 structured backend，但保留两条互斥的 TTS 路线：
+BiCodec 使用同一个 structured backend。`FULL_CODEC_SEQUENCE` 下，固定的 `audio_route` 同时
+决定 prompt/output/decode 的 stream ownership；`audio_representation` 只负责说明这是 structured
+full sequence，而不决定 route：
 
-- `DECOUPLED + semantic_codec_artifact` 只生成 semantic units，固定长度 acoustic units 由
-  `semantic-acoustic-codec` artifact 采样并解码。
-- `FULL_CODEC_SEQUENCE` 生成显式的 structured token layout：codec marker、semantic marker、
-  semantic tokens、acoustic marker、slot-major acoustic codebooks、end marker。解码时恢复
-  `SemanticAcousticCodes`，直接调用 BiCodec `detokenize()`。
+- `bicodec_reuse_prompt_acoustic` 的 prompt 含 reference 的 acoustic、semantic 两条 stream，
+  output 只含 semantic，解码使用 output semantic 与 prompt acoustic。
+- `bicodec_predict_acoustic` 的 prompt 同样含 reference 的两条 stream，output 同时含 acoustic、
+  semantic，解码使用 output 的两条 stream。
+- 输出 grammar 按 route 固定为 `codec, semantic_marker, semantic..., end`（reuse）或
+  `codec, acoustic_marker, acoustic..., semantic_marker, semantic..., end`（predict）；prompt
+  序列则按 `prompt.streams` 序列化。acoustic payload 使用 slot-major 固定长度布局，semantic
+  token 仍是逐单元序列。markers 与 end marker 属于 grammar，强制位置不作为可训练 payload。
 
 BiCodec 的 acoustic 轴是 `FIXED_LENGTH`，不能广播到 semantic frame 轴，也不能接入当前
 frame-aligned Flow/RVQ side channel。
@@ -92,8 +101,9 @@ frame-aligned Flow/RVQ side channel。
   metadata。marker 的 frame span 为 0，首个 codebook token 的 frame span 为 1，用于 generation
   统计输出帧数。
 - `TorchCodecBPE`：为 CodecBPE 增加 tensor API。
-- `BiCodecAudioTokenizer`：分别支持 semantic-only token 和 fixed-length structured full
-  sequence；full sequence 的 acoustic payload 使用 slot-major 顺序。
+- `BiCodecAudioTokenizer`：支持 semantic-only token，以及按 `audio_route` 选择 stream 的
+  fixed-length structured sequence；full sequence 的 acoustic payload 使用 slot-major 顺序，
+  并公开 route grammar 所需的 prediction groups/ranges。
 - `semantic_codes_from_audio_tokens()`：把 audio token IDs 解码为
   `[frames, semantic_codebooks]`。
 
@@ -108,6 +118,10 @@ encode/decode 保持原 device，并直接使用向量视图，不经过逐标�
 顶层入口直接通过 `Runtime(config)` 创建本次运行的资源聚合对象，并把它显式传给 model、
 DataModule 与 generation service。runtime 不保存进程级 singleton；同一进程需要多套配置时，
 每套配置各自拥有一个 `Runtime`，其惰性资源缓存互不共享。
+
+`Runtime.audio_route` 在入口解析时一次确定，DataModule worker 使用的 `DataRuntimeSnapshot` 也携带
+同一 route。运行中不从请求或 batch 字段重写 route；checkpoint 的严格匹配由
+`SpeechToSpeechModule` 负责，runtime 只提供可比较的 route 资源边界。
 
 文件职责保持分离：`runtime/runtime.py` 实现配置与资源聚合，`runtime/codec.py` 隔离 codec
 adapter 和加载。DataModule/Collator 接收显式 `DataRuntime`；parser、sample builder、batch

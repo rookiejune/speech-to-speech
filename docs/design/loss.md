@@ -15,7 +15,9 @@ position 语义见 [总览 §2.4](../model-design.md)。
   训练契约。
 - `TokenLoss`：按 batch task 的 target modality 在对应局部词表上计算 CE，每行必须至少包含一个
   非 `-100` target；causal shift 在此完成，只把有效 predictor hidden states 交给
-  `model.token_logits(hidden, modality)`，text/audio head 不做跨模态 softmax 竞争。
+  `model.token_logits(hidden, modality)`，text/audio head 不做跨模态 softmax 竞争。BiCodec route
+  额外消费逐位置 `token_groups` 与 `model.selected_logits()`，只在当前 semantic、semantic-or-end
+  或 acoustic codebook candidate group 上计算 restricted CE。
 - `AcousticFlowLoss`：直接复用 `semantic-acoustic-codec.loss.FlowLoss`；S2S 只保留 joint
   token/acoustic objective 的组合。
 - `CausalAcousticLoss`：直接复用 `anytrain.loss.MaskedCodebookCrossEntropyLoss`；训练 forward
@@ -37,7 +39,8 @@ position 语义见 [总览 §2.4](../model-design.md)。
 
 ## Objective 组合
 
-三个组合入口共享 token forward：
+三个组合入口共享 token forward；route 不在 objective 内动态切换，sample builder 已经把固定
+`audio_route.output.streams` 编译成 labels 和 prediction groups：
 
 ```python
 hidden_states = model.token_hidden_states(
@@ -87,7 +90,14 @@ rvq = self.rvq(logits, target_data["codes"], batch.acoustic_target_mask)
 
 所有 batch 都计算 token CE。是否增加 acoustic objective 只由
 `batch.acoustic_target is not None` 决定，不通过 task modality 猜测 codec
-representation，也不通过模式布尔开关表达组合。结构化 target fields 不完整时直接报错。
+representation，也不通过模式布尔开关表达组合。BiCodec route 的 structured acoustic payload 是
+token objective 的 grouped CE，不是 frame-aligned `acoustic_target`；结构化 target fields 或
+prediction groups 不完整时直接报错。
+
+BiCodec grouped CE 的 candidate group 由 tokenizer 唯一拥有：codec/stream markers 使用 forced
+group，不计算 loss；semantic 首 token 使用 semantic group，后续 semantic tokens 与 sequence
+end 使用 semantic-or-end group；每个 fixed-length acoustic slot 使用对应 acoustic codebook
+range。`selected_logits()` 返回与该候选集合同序的 logits，target 不在集合内时显式失败。
 
 `TokenObjective` 不要求 model 提供 acoustic 能力。`FlowObjective` 固定组合 token CE 与
 flow matching；传入包含正数 `weight` 和 `teacher` 的 `RepaConfig` 时显式加入 REPA。
@@ -115,6 +125,9 @@ teacher features。acoustic-only codec screening 与 legacy oracle checkpoint �
 - 子 objective 在 `__init__` 中构造完毕，forward 不挂载新 submodule。
 - flow matching、RVQ CE 和 REPA 在非线性 loss 计算前把无效 frame 替换为安全值，并只归约
   boolean mask 选中的 frame；padding 位置的 NaN/Inf 不参与 forward，也不产生梯度。
+- `audio_route` 不改变 Flow/RVQ acoustic objective 的 frame-aligned contract；它只约束 structured
+  token route 的 prompt/output/decode ownership。BiCodec reuse/predict 路线都不会把 target acoustic
+  stream 静默泄漏到 prompt，prompt/reference codes 也不作为 token labels。
 - `causal_lm.py` 只实现离散 acoustic RVQ objective，不读取 model/runtime 或重复 condition
   对齐；其稳定输出键是 `rvq`。
 - REPA teacher 始终保持 eval/frozen；teacher features detach，梯度只进入 DiT 与 student

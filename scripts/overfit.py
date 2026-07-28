@@ -80,7 +80,7 @@ def run(config: OverfitConfig) -> None:
 
     pl.seed_everything(config.train.seed, workers=True)
     rt_config = runtime_config(config)
-    rt = Runtime(rt_config)
+    rt = Runtime(rt_config, audio_route=config.audio_route)
     codec = rt.codec
     task = Task(config.task)
     datamodule = DataModule(

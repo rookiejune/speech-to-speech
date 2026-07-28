@@ -6,7 +6,7 @@
 ## 对外能力
 
 - `base.TokenModel`：接收显式 runtime，提供 text/semantic-audio embedding、token
-  logits、frame condition 对齐与 token generation 原语。
+  logits、route-aware structured token generation 与 frame condition 对齐原语。
 - `acoustic.FlowModel`：在基础模型上组合 SAC 维护的 `AcousticDiT`，提供
   flow target、sampling 和 `generate_audio_features()`。
 - `acoustic.RVQModel`：组合 SAC 维护的 `AcousticRVQDecoder`，提供 teacher-forced
@@ -45,6 +45,7 @@ def token_logits(
     hidden_state: Tensor,
     modality: Modality | None = None,
 ) -> Tensor: ...
+def selected_logits(hidden_state: Tensor, token_ids: Tensor) -> Tensor: ...
 def generation_step(...) -> CausalLMOutputWithPast: ...
 def generate_tokens(...) -> Tensor: ...
 ```
@@ -60,6 +61,8 @@ def generate_tokens(...) -> Tensor: ...
   global text+audio logits。
 - backbone 直接调用 HF causal LM 的 `base_model`；自带 text LM head 不会先计算再丢弃。
 - text/audio output head 分别产生 local logits，layout offset 只负责恢复 global token ID。
+- `selected_logits()` 只计算调用方给出的候选 global IDs；BiCodec route 的 grouped CE 用它避免为
+  每个 marker/codebook 位置计算完整 audio vocabulary。
 - generation 按 modality 只计算最后一个位置的目标 head；text 屏蔽 PAD/BOS，audio 屏蔽 BOA。
 - text/audio vocabulary head 位于私有 `_head.py` mixin；参数仍只注册在 `TokenModel` 的原始
   embedding/adapter/backbone ownership path 下。
@@ -89,8 +92,11 @@ codebook 的 `codebook_embeddings`，但没有 REPA 参数。Hydra 使用
 codebooks 的 unified-token codec 必须使用 `model/acoustic=none`；有独立 acoustic codebook 的
 codec 也可以显式选择 `none` 作为 token-only baseline。入口不根据 codec 静默覆盖用户选择。
 fixed-length structured codec（例如 BiCodec）使用独立的 model-facing token layout。它只支持
-semantic-only artifact 或 full structured sequence 两种 TTS 路线，不接入当前 frame-aligned
-Flow/RVQ acoustic side channel。
+按 `audio_route` 固定的 structured sequence 路线，不接入当前 frame-aligned Flow/RVQ acoustic
+side channel。`bicodec_reuse_prompt_acoustic` 的 model output 只有 semantic stream；
+`bicodec_predict_acoustic` 的 model output 同时包含 acoustic 与 semantic stream。两者使用同一套
+稳定 vocabulary，route 只改变 grammar 的 output groups 与 decode stream ownership，不按 request
+动态改变模型 head。
 
 底层 acoustic decoder 的所有权在 `semantic-acoustic-codec`：S2S 的 Flow/RVQ model 只负责
 从 backbone hidden state 取 frame-aligned condition，经 `HiddenConditionAdapter` 映射后送入 SAC 的
@@ -108,7 +114,9 @@ semantic-audio token IDs
     -> semantic audio adapter
 
 Native/BPE semantic tokenizers 使用 codec codebook 初始化；完整 codec sequence tokenizer
-使用随机初始化，因为它的 vocab 同时包含多 codebook offset tokens 和 codec/codebook markers。
+使用随机初始化，因为它的 vocab 同时包含多 codebook offset tokens、BiCodec semantic/acoustic
+ranges 与 codec/stream/end markers。BiCodec 的 semantic payload、各 fixed-length acoustic slot
+和 marker 共用这一稳定 global vocabulary，候选范围由 route grammar 在每个位置收窄。
 随机初始化只读取 codec 声明的 semantic feature dimension，并使用 backbone embedding 作为
 device reference，不要求 backend 暴露虚构的 codebook tensor。新建的 semantic embedding、
 input/output adapter 和 acoustic decoder 一律使用 FP32 参数存储；frozen backbone 可以保持
@@ -153,8 +161,14 @@ frame condition 的 `generate_sequence()` 循环位于私有
 `model/_generation.py`，只通过有类型的 `generation_step()` 驱动模型。
 `generate_full_codec_sequence()` 按 audio tokenizer 分派：frame-aligned
 `FlattenedAudioTokenizer` 使用 codebook-block 状态机，首码本决定 frame count 并约束后续等长
-payload；fixed-length `BiCodecAudioTokenizer` 使用 semantic/acoustic slot 状态机。service 不复制
-marker、range 或 block-length 规则。
+payload；fixed-length `BiCodecAudioTokenizer` 使用 `audio_route.output.streams` 选择 grammar：
+reuse route 生成 `codec, semantic_marker, semantic..., end`，predict route 生成
+`codec, acoustic_marker, acoustic..., semantic_marker, semantic..., end`。service 不复制 marker、
+range 或 block-length 规则。
+
+route 的 prompt 属于调用前已序列化的 token context，model 只生成固定的 output streams；model 不
+从 target labels 推断 prompt 边界，也不允许 request 临时切换 route。`SpeechToSpeechModule` 保存
+规范化 route metadata 到 checkpoint，并在恢复时严格比较当前 runtime route；缺失或不匹配直接失败。
 
 具体模型不跨文件调用 `_generate()` 或 `_acoustic_features()`。KV cache 只属于一次调用；
 首步编码完整 semantic-token prompt，后续只输入新 token。frame span lookup 是非持久 buffer，

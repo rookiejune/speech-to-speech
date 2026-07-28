@@ -150,6 +150,7 @@ class _Runtime:
         self.audio_view = AudioView.LONGCAT
         self.codec_frame_rate = 50.0
         self.audio_representation = AudioRepresentation.DECOUPLED
+        self.audio_route = None
         self.semantic_codec_artifact = None
         self.acoustic_layout = AcousticLayout.FRAME_ALIGNED
         self.acoustic_unit_length = None

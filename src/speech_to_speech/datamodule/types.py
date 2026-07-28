@@ -3,11 +3,12 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from functools import cached_property
+from collections.abc import Iterator, Mapping
 from typing import TypeVar, TypedDict, Union
 
 import torch
-from anytrain.codec import AcousticLayout
-from anydataset.types import Modality
+from anytrain.codec import AcousticLayout, SemanticAcousticCodes
+from anydataset.types import Item, Modality, Reference, Sample
 from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
 
@@ -16,6 +17,23 @@ from .._tensor import is_signed_integer_dtype
 from ..task import Task
 
 ACOUSTIC_PAD_ID = -1
+
+
+@dataclass(frozen=True)
+class AudioContextSample(Mapping[Reference, Item]):
+    """Keep an enrollment utterance separate from task source/target roles."""
+
+    sample: Sample
+    audio_context: Sample
+
+    def __getitem__(self, key: Reference) -> Item:
+        return self.sample[key]
+
+    def __iter__(self) -> Iterator[Reference]:
+        return iter(self.sample)
+
+    def __len__(self) -> int:
+        return len(self.sample)
 
 
 class DataShape(StrEnum):
@@ -161,16 +179,26 @@ class SpeechTaskSample:
     source: Union[Speech, Text, RawSpeech, None]
     target: Union[Speech, Text, RawSpeech]
     task: Task
+    audio_context: Union[Speech, RawSpeech, None] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.task, Task):
             raise TypeError("speech task sample task must be a Task.")
         _validate_task_item(self.source, self.task.source_modality, name="source")
         _validate_task_item(self.target, self.task.target_modality, name="target")
+        if self.audio_context is not None and not isinstance(
+            self.audio_context,
+            (Speech, RawSpeech),
+        ):
+            raise TypeError("speech task audio_context must be Speech or RawSpeech.")
 
     @property
     def needs_codec(self) -> bool:
-        return isinstance(self.source, RawSpeech) or isinstance(self.target, RawSpeech)
+        return (
+            isinstance(self.source, RawSpeech)
+            or isinstance(self.target, RawSpeech)
+            or isinstance(self.audio_context, RawSpeech)
+        )
 
     def pin_memory(self) -> SpeechTaskSample:
         target = _pin_task_item(self.target)
@@ -180,6 +208,7 @@ class SpeechTaskSample:
             source=_pin_task_item(self.source),
             target=target,
             task=self.task,
+            audio_context=_audio_context(_pin_task_item(self.audio_context)),
         )
 
 
@@ -258,6 +287,14 @@ def _pin_task_item(
     )
 
 
+def _audio_context(
+    item: Speech | Text | RawSpeech | None,
+) -> Speech | RawSpeech | None:
+    if item is None or isinstance(item, (Speech, RawSpeech)):
+        return item
+    raise TypeError("speech task audio_context must not contain text.")
+
+
 class AcousticTarget(TypedDict):
     semantic_codes: Tensor
     codes: Tensor
@@ -270,7 +307,10 @@ class ModelSample:
     token_labels: Tensor
     acoustic_target: AcousticTarget | None
     task: Task
+    token_groups: Tensor | None = None
     audio_seconds: float = 0.0
+    generation_prompt_length: int | None = None
+    audio_context: SemanticAcousticCodes | None = None
 
 
 @dataclass
@@ -280,7 +320,10 @@ class ModelBatch:
     acoustic_target: AcousticTarget | None
     tasks: list[Task]
     pad_token_id: int
+    token_groups: Tensor | None = None
     audio_seconds: Tensor | None = None
+    generation_prompt_lengths: Tensor | None = None
+    audio_contexts: tuple[SemanticAcousticCodes | None, ...] | None = None
 
     def __post_init__(self) -> None:
         if self.input_ids.dim() != 2 or self.token_labels.shape != self.input_ids.shape:
@@ -293,6 +336,17 @@ class ModelBatch:
             raise TypeError(
                 "batch input ids and token labels must use signed integer dtypes."
             )
+        if self.token_groups is not None:
+            if self.token_groups.shape != self.input_ids.shape:
+                raise ValueError(
+                    "batch token groups must align with input ids and token labels."
+                )
+            if not is_signed_integer_dtype(self.token_groups.dtype):
+                raise TypeError("batch token groups must use a signed integer dtype.")
+            if bool((self.token_labels.eq(-100) & self.token_groups.ne(-1)).any()):
+                raise ValueError("ignored token labels must use the forced token group.")
+            if bool((self.token_labels.ne(-100) & self.token_groups.lt(0)).any()):
+                raise ValueError("supervised token labels require prediction groups.")
         batch_size = self.input_ids.size(0)
         if batch_size < 1:
             raise ValueError("ModelBatch requires at least one row.")
@@ -304,6 +358,20 @@ class ModelBatch:
                 dtype=torch.float32,
             )
         _validate_audio_seconds(self.audio_seconds, batch_size)
+        if self.generation_prompt_lengths is None:
+            self.generation_prompt_lengths = _generation_prompt_lengths(
+                self.token_labels
+            )
+        _validate_generation_prompt_lengths(
+            self.generation_prompt_lengths,
+            self.input_ids,
+        )
+        if self.audio_contexts is None:
+            self.audio_contexts = (None,) * batch_size
+        if len(self.audio_contexts) != batch_size:
+            raise ValueError("ModelBatch audio_contexts must provide one value per row.")
+        for context in self.audio_contexts:
+            _validate_audio_context(context)
         if any(not isinstance(task, Task) for task in self.tasks):
             raise TypeError("ModelBatch tasks must contain Task values.")
         signatures = {
@@ -340,10 +408,16 @@ class ModelBatch:
         return cls(
             input_ids=_pad([sample.input_ids for sample in samples], pad_token_id),
             token_labels=_pad([sample.token_labels for sample in samples], -100),
+            token_groups=_optional_tensor(
+                [sample.token_groups for sample in samples],
+                padding_value=-1,
+            ),
             acoustic_target=_target([sample.acoustic_target for sample in samples]),
             tasks=[sample.task for sample in samples],
             pad_token_id=pad_token_id,
             audio_seconds=_audio_seconds(samples),
+            generation_prompt_lengths=_sample_prompt_lengths(samples),
+            audio_contexts=tuple(sample.audio_context for sample in samples),
         )
 
     @cached_property
@@ -359,15 +433,26 @@ class ModelBatch:
 
     def pin_memory(self) -> ModelBatch:
         audio_seconds = self.audio_seconds
+        prompt_lengths = self.generation_prompt_lengths
+        audio_contexts = self.audio_contexts
         if audio_seconds is None:
             raise RuntimeError("ModelBatch audio_seconds is unavailable after validation.")
+        if prompt_lengths is None or audio_contexts is None:
+            raise RuntimeError("ModelBatch generation fields are unavailable after validation.")
         return ModelBatch(
             input_ids=self.input_ids.pin_memory(),
             token_labels=self.token_labels.pin_memory(),
+            token_groups=(
+                None if self.token_groups is None else self.token_groups.pin_memory()
+            ),
             acoustic_target=_pin_target(self.acoustic_target),
             tasks=list(self.tasks),
             pad_token_id=self.pad_token_id,
             audio_seconds=audio_seconds.pin_memory(),
+            generation_prompt_lengths=prompt_lengths.pin_memory(),
+            audio_contexts=tuple(
+                _pin_audio_context(value) for value in audio_contexts
+            ),
         )
 
     def row(self, index: int) -> ModelBatch:
@@ -376,15 +461,26 @@ class ModelBatch:
         if index < 0 or index >= self.input_ids.size(0):
             raise IndexError(f"ModelBatch row index is out of range: {index}.")
         audio_seconds = self.audio_seconds
+        prompt_lengths = self.generation_prompt_lengths
+        audio_contexts = self.audio_contexts
         if audio_seconds is None:
             raise RuntimeError("ModelBatch audio_seconds is unavailable after validation.")
+        if prompt_lengths is None or audio_contexts is None:
+            raise RuntimeError("ModelBatch generation fields are unavailable after validation.")
         return ModelBatch(
             input_ids=self.input_ids[index : index + 1],
             token_labels=self.token_labels[index : index + 1],
+            token_groups=(
+                None
+                if self.token_groups is None
+                else self.token_groups[index : index + 1]
+            ),
             acoustic_target=_target_row(self.acoustic_target, index),
             tasks=[self.tasks[index]],
             pad_token_id=self.pad_token_id,
             audio_seconds=audio_seconds[index : index + 1],
+            generation_prompt_lengths=prompt_lengths[index : index + 1],
+            audio_contexts=(audio_contexts[index],),
         )
 
 
@@ -416,6 +512,17 @@ def _target(values: list[AcousticTarget | None]) -> AcousticTarget | None:
     )
 
 
+def _optional_tensor(
+    values: list[Tensor | None],
+    *,
+    padding_value: int,
+) -> Tensor | None:
+    present = _present(values)
+    if present is None:
+        return None
+    return _pad(present, padding_value)
+
+
 def _pin_target(value: AcousticTarget | None) -> AcousticTarget | None:
     if value is None:
         return None
@@ -440,6 +547,72 @@ def _audio_seconds(samples: list[ModelSample]) -> Tensor:
     return samples[0].input_ids.new_tensor(
         [sample.audio_seconds for sample in samples],
         dtype=torch.float32,
+    )
+
+
+def _sample_prompt_lengths(samples: list[ModelSample]) -> Tensor:
+    values = []
+    for sample in samples:
+        value = sample.generation_prompt_length
+        if value is None:
+            positions = sample.token_labels.ne(-100).nonzero(as_tuple=False)
+            if positions.numel() == 0:
+                raise ValueError("model sample must contain at least one target token.")
+            value = int(positions[0].item())
+        values.append(value)
+    return samples[0].input_ids.new_tensor(values, dtype=torch.long)
+
+
+def _generation_prompt_lengths(token_labels: Tensor) -> Tensor:
+    values = []
+    for labels in token_labels:
+        positions = labels.ne(-100).nonzero(as_tuple=False)
+        if positions.numel() == 0:
+            raise ValueError("each token label row must contain at least one target token.")
+        values.append(int(positions[0].item()))
+    return token_labels.new_tensor(values, dtype=torch.long)
+
+
+def _validate_generation_prompt_lengths(value: Tensor, input_ids: Tensor) -> None:
+    if not isinstance(value, Tensor):
+        raise TypeError("ModelBatch generation_prompt_lengths must be a Tensor.")
+    if value.shape != (input_ids.size(0),):
+        raise ValueError(
+            "ModelBatch generation_prompt_lengths must have shape [batch]."
+        )
+    if not is_signed_integer_dtype(value.dtype):
+        raise TypeError(
+            "ModelBatch generation_prompt_lengths must use a signed integer dtype."
+        )
+    if bool((value < 1).any()) or bool((value >= input_ids.size(1)).any()):
+        raise ValueError(
+            "generation prompt lengths must leave a non-empty generated response."
+        )
+
+
+def _validate_audio_context(value: SemanticAcousticCodes | None) -> None:
+    if value is None:
+        return
+    for name, codes in (
+        ("semantic", value.semantic),
+        ("acoustic", value.acoustic),
+    ):
+        if codes.dim() != 2:
+            raise ValueError(
+                f"audio context {name} codes must have shape [units, codebooks]."
+            )
+        if not is_signed_integer_dtype(codes.dtype):
+            raise TypeError(f"audio context {name} codes must use a signed integer dtype.")
+
+
+def _pin_audio_context(
+    value: SemanticAcousticCodes | None,
+) -> SemanticAcousticCodes | None:
+    if value is None:
+        return None
+    return SemanticAcousticCodes(
+        semantic=value.semantic.pin_memory(),
+        acoustic=value.acoustic.pin_memory(),
     )
 
 
@@ -474,6 +647,25 @@ def _validate_sample(sample: ModelSample, pad_token_id: int) -> None:
         raise ValueError(
             "sample input ids and token labels must be aligned 1D tensors."
         )
+    if sample.token_groups is not None:
+        if sample.token_groups.shape != sample.input_ids.shape:
+            raise ValueError("sample token groups must align with input ids.")
+        if not is_signed_integer_dtype(sample.token_groups.dtype):
+            raise TypeError("sample token groups must use a signed integer dtype.")
+        if bool((sample.token_labels.eq(-100) & sample.token_groups.ne(-1)).any()):
+            raise ValueError("ignored sample labels must use the forced token group.")
+        if bool((sample.token_labels.ne(-100) & sample.token_groups.lt(0)).any()):
+            raise ValueError("supervised sample labels require prediction groups.")
+
+    prompt_length = sample.generation_prompt_length
+    if prompt_length is not None:
+        if isinstance(prompt_length, bool) or not isinstance(prompt_length, int):
+            raise TypeError("generation_prompt_length must be an integer or None.")
+        if prompt_length < 1 or prompt_length >= sample.input_ids.numel():
+            raise ValueError(
+                "generation_prompt_length must leave a non-empty generated response."
+            )
+    _validate_audio_context(sample.audio_context)
 
     target = sample.acoustic_target
     if target is not None:

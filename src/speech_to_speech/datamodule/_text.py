@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from itertools import islice
 from typing import cast
 
-from torch.utils.data import DataLoader
+from anydataset import IterableAnyDataset
+from anydataset.types import Sample as RawSample
+from torch.utils.data import DataLoader, Dataset
 
 from ..task import Task
 from .collator import TextCollator
@@ -22,7 +25,7 @@ class TextLoader:
         self.config = config
         self.runtime = runtime
         self.collator = TextCollator(runtime, task_weights)
-        self._train_dataset = None
+        self._train_dataset: Dataset[RawSample] | IterableAnyDataset | None = None
 
     def setup(self, stage: str | None = None) -> None:
         del stage
@@ -32,6 +35,14 @@ class TextLoader:
 
     def set_task_weights(self, task_weights: Mapping[Task, float]) -> None:
         self.collator.set_task_weights(task_weights)
+
+    def train_samples(self, indices: Sequence[int]) -> list[RawSample]:
+        if self._train_dataset is None:
+            raise RuntimeError("TextLoader.setup() must run before reading samples.")
+        return _samples(self._train_dataset, indices)
+
+    def diagnostic_collator(self, task: Task) -> TextCollator:
+        return TextCollator(self.runtime, {task: 1.0})
 
     def train_dataloader(self) -> Iterable[ModelBatch]:
         if self._train_dataset is None:
@@ -53,6 +64,31 @@ class TextLoader:
             persistent_workers=(loader.persistent_workers and num_workers > 0),
             collate_fn=self.collator,
         )
+
+
+def _samples(
+    dataset: Dataset[RawSample] | IterableAnyDataset,
+    indices: Sequence[int],
+) -> list[RawSample]:
+    if not indices:
+        return []
+    if any(isinstance(index, bool) or not isinstance(index, int) for index in indices):
+        raise TypeError("text sample indices must contain integers.")
+    if any(index < 0 for index in indices):
+        raise ValueError("text sample indices must be non-negative.")
+    if not isinstance(dataset, IterableAnyDataset):
+        return [dataset[index] for index in indices]
+
+    selected: dict[int, RawSample] = {}
+    requested = set(indices)
+    iterator: Iterator[RawSample] = dataset.iter_shard(1, 0)
+    for index, sample in enumerate(islice(iterator, max(requested) + 1)):
+        if index in requested:
+            selected[index] = sample
+    missing = requested - set(selected)
+    if missing:
+        raise IndexError(f"text sample index {min(missing)} is outside the dataset.")
+    return [selected[index] for index in indices]
 
 
 __all__ = ["TextLoader"]

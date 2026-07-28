@@ -6,6 +6,7 @@ from itertools import islice
 from unittest.mock import Mock, patch
 
 import torch
+from anydataset import IterableAnyDataset
 
 from speech_to_speech.datamodule.dataset import DatasetConfig
 from speech_to_speech.datamodule.joint import LoaderSchedule, ScheduledDataLoader
@@ -55,6 +56,16 @@ class _BatchSamplerEpochLoader:
     def __iter__(self) -> Iterator[ModelBatch]:
         self.iteration_epochs.append(self.batch_sampler.epoch)
         yield from (self.batch for _ in range(self.batches))
+
+
+class _IterableSamples(IterableAnyDataset):
+    def __init__(self, samples: list[object]) -> None:
+        self.samples = samples
+        self.shards: list[tuple[int, int]] = []
+
+    def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[object]:
+        self.shards.append((num_shards, shard_id))
+        yield from self.samples
 
 
 class ScheduledDataLoaderTest(unittest.TestCase):
@@ -159,6 +170,41 @@ class ScheduledDataLoaderTest(unittest.TestCase):
         self.assertEqual(validation, [validation_samples[2]])
         self.assertEqual(collator.tasks, [Task.T2ST])
 
+    def test_text_diagnostic_panel_reads_global_iterable_indices(self) -> None:
+        spec = LoaderSpec.text(
+            TextConfig(dataloader=DataLoaderConfig(batch_size=2, num_workers=0)),
+            {Task.MT: 1.0},
+        )
+        samples = [object(), object(), object()]
+        dataset = _IterableSamples(samples)
+
+        with patch(
+            "speech_to_speech.datamodule._text.load_text_dataset",
+            return_value=dataset,
+        ):
+            datamodule = DataModule(Mock(), {"mt": spec})
+            datamodule.setup("fit")
+            selected = datamodule.diagnostic_samples(
+                [2, 0],
+                split=SampleSplit.TRAIN,
+                loader_name="mt",
+            )
+            collator = datamodule.diagnostic_collator(
+                Task.MT,
+                split=SampleSplit.TRAIN,
+                loader_name="mt",
+            )
+
+        self.assertEqual(selected, [samples[2], samples[0]])
+        self.assertEqual(dataset.shards, [(1, 0)])
+        self.assertEqual(collator.tasks, [Task.MT])
+        with self.assertRaisesRegex(ValueError, "validation.*speech loader"):
+            datamodule.diagnostic_samples(
+                [0],
+                split=SampleSplit.VALIDATION,
+                loader_name="mt",
+            )
+
     def test_datamodule_without_validation_does_not_build_a_val_loader(self) -> None:
         spec = LoaderSpec.speech(
             SpeechConfig(
@@ -245,8 +291,8 @@ def _rank_events() -> tuple[list[int], list[int]]:
 
 def _batch(task: Task) -> ModelBatch:
     return ModelBatch(
-        input_ids=torch.tensor([[1]], dtype=torch.long),
-        token_labels=torch.tensor([[1]], dtype=torch.long),
+        input_ids=torch.tensor([[1, 2]], dtype=torch.long),
+        token_labels=torch.tensor([[-100, 2]], dtype=torch.long),
         acoustic_target=None,
         tasks=[task],
         pad_token_id=0,

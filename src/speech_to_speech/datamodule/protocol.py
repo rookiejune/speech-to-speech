@@ -8,6 +8,7 @@ from anydataset.types import AudioView
 from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 
+from ..audio_route import Config as AudioRouteConfig
 from ..runtime import AudioRepresentation
 from ..runtime.protocol import DataRuntime
 from ..runtime.types import AudioTokenizer, CodecBackend, TextTokenizer
@@ -60,6 +61,7 @@ class DataRuntimeSnapshot:
     """Pickleable worker view of the data-only runtime capabilities."""
 
     codec_name: str
+    audio_route: AudioRouteConfig | None
     audio_view: AudioView
     codec_frame_rate: float
     audio_representation: AudioRepresentation
@@ -78,6 +80,7 @@ class DataRuntimeSnapshot:
     def from_runtime(cls, runtime: DataRuntime) -> DataRuntimeSnapshot:
         return cls(
             codec_name=runtime.codec_name,
+            audio_route=runtime.audio_route,
             audio_view=runtime.audio_view,
             codec_frame_rate=runtime.codec_frame_rate,
             audio_representation=runtime.audio_representation,

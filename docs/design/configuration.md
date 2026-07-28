@@ -6,8 +6,10 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
 
 ## 源码模块
 
-- `runtime`：完整映射 `runtime.Config`，统一拥有 codec、audio representation、backbone、backbone
-  initialization、audio tokenizer、device、dtype、attention backend 与 flow sampling。`longcat`、`longcat_native`、
+- `runtime`：完整映射 `runtime.Config`，统一拥有 codec、FrameCodec audio representation、backbone、backbone
+  initialization、audio tokenizer、device、dtype、attention backend 与 flow sampling。顶层 `audio_route`
+  由运行入口一起注入 `Runtime`，固定本次 experiment 的 prompt/output/decode stream ownership。
+  `longcat`、`longcat_native`、
   `longcat_full_sequence`、`unicodec` 表示相互兼容的资源 snapshot；不再拆分 `codec` 和
   `sampler` 组。
 - `model`：完整映射 `model.Config` 的三个 adapter 与可选 `ToyConfig`。`model=toy` 只替换
@@ -74,6 +76,9 @@ Hydra metadata 与 `metrics.json` 写入 `output_dir`；TensorBoard/CSV logger �
 map-style dataset 通过 `MapStyleABC.dataloader()` 暴露 deterministic shuffle 与 batch planning；
 UniCodec DDP smoke 则要求每个 rank
 重复读取同一个固定样本，因此仅该 experiment 显式设置 `use_distributed_sampler: false`。
+正式 staged train 的入口策略为 `ddp_find_unused_parameters_false`；当 stage 包含多个 loader
+时，配置校验要求每个 optimizer step 通过 `batches_per_step` 覆盖全部非零 loader，禁止退化为
+单子 batch 轮转，否则不同 task 的可训练分支会违反 static DDP 的 unused-parameter 前提。
 
 完整链路实验分别负责其 composition、数据范围、trainer、callback 和 step budget：
 
@@ -100,7 +105,9 @@ flat experiment 名称。`configs/train.yaml` 仅组合 `entry=train` 和可选 
   parameter policy；入口消费 `configs/stage/stage_*.yaml` 中的 loader/task 契约并构造唯一
   `DataModule`。每个 speech loader 使用
   `LoaderSpec.speech(...)`，纯文本 MT loader 使用 `LoaderSpec.text(...)`，多 loader 调度由
-  `LoaderSchedule` 持有。
+  `LoaderSchedule` 持有。四个正式 stage 都启用每 10,000 optimizer steps 的 train fixed panels；
+  Stage 2-4 的 panels 包含 MT。MT panel 只允许 train split，validation panel 仍要求 speech
+  loader 与独立 validation dataset。
 - `train/parameter_policy_smoke`：参数冻结专用两步实验。它固定 toy model/data 与 CPU trainer，
   只通过 `parameter_policy=<name>` 切换冻结策略，不借用正式长跑配置充当策略测试夹具。
 - `toy_smoke`：正式 LongCat runtime 加 tiny model/in-memory dataset 的 CPU 两步训练契约测试；
@@ -117,8 +124,8 @@ training job 传递 `repo_output_root`、相对 `output_subdir` 和 `"$@"` 参�
 `jobs/011/02_rvq_native_stage_smoke.sh` 仍使用 `scripts/overfit.py` 验证每个 stage 的 freeze
 配置能完成 fixed-sample 两步训练。`jobs/011/03_staged_joint_train.sh` 是正式 staged joint
 training wrapper，调用 `scripts/train.py`，默认 `trainer=static_ddp`，并根据
-`SPEECH_TO_SPEECH_STAGE=stage_1..stage_4` 选择对应的 `train/staged_joint_stage_*` experiment，
-由 experiment 同时绑定 stage 和 parameter policy。正式 train 入口通过
+  `SPEECH_TO_SPEECH_STAGE=stage_1..stage_4` 选择对应的 `train/staged_joint_stage_*` experiment，
+  由 experiment 同时绑定 stage 和 parameter policy。正式 train 入口通过
 `train.ckpt_path=<checkpoint>` 显式恢复 Lightning checkpoint；默认值为空，普通训练不走 resume。
 该字段只属于 staged train，overfit 配置不接受它；命名为 resume 的 experiment 必须把
 `train.ckpt_path` 标为必填，避免绕过 wrapper 时静默从头训练。
@@ -159,6 +166,8 @@ runtime device、Trainer、performance callback 与 acoustic composition 边界�
 schema，不重复声明字段；`scripts/train.py` 直接把解析后的 data config 交给 `LoaderSpec`，不做
 同构对象转换。OmegaConf 对字符串枚举只接受成员
 名，入口在合并前把公开的小写 value 转成 enum member name；除此之外不做兼容重写。
+`audio_route` 是 root schema 的独立公开结构，不属于 `runtime.Config`；入口解析后把同一份 route
+传给 `Runtime`、DataModule、model 和 generation service。
 
 两个入口分别解析为：
 
@@ -172,17 +181,25 @@ schema，不重复声明字段；`scripts/train.py` 直接把解析后的 data c
 
 - `model/acoustic=none|flow|rvq` 显式选择下游 acoustic path；`none` 只训练
   audio token，flow/RVQ 才启用 acoustic objective，RVQ schema 不接受 REPA。
-- `runtime.audio_representation=full_codec_sequence` 只允许 `model/acoustic=none`，因为完整
-  codec codes 已作为 token objective 训练，不能再同时构造 acoustic side channel。
+- `runtime.audio_representation=full_codec_sequence` 只切换 FrameCodec 的完整 codebook 序列化格式，
+  只允许 `model/acoustic=none`，因为完整 codec codes 已作为 token objective 训练，不能再同时构造
+  frame-aligned acoustic side channel。它不决定 prompt 使用哪些 stream，也不决定 output 的 decode
+  所有权。
+- `audio_route` 是 experiment/checkpoint 级的固定音频流契约。`prompt.source` 选择 source 或独立
+  reference，`prompt.streams` 声明进入 prompt 的 acoustic/semantic stream，`output.streams` 声明
+  自回归实际预测的 stream，`decode` 分别声明 semantic/acoustic 由 prompt、output 或 generator
+  提供。route 不属于 `Request`，一次运行中不能按请求切换。
 - `runtime.backbone_initialization=random` 从 `runtime.backbone` 读取 tokenizer 与完整 HF config，
   但不读取预训练权重；它不能与 `model=toy` 组合，并要求 `parameter_policy=full`。
 - `runtime.semantic_codec_artifact` 为 `semantic-acoustic-codec` 的 semantic-only waveform
-  support artifact；LongCat 和 BiCodec 都可使用，但只允许 `model/acoustic=none` 的
-  `DECOUPLED` 路径。BiCodec 另提供 `runtime=bicodec_full_sequence`，生成 structured full
-  sequence 并调用 backend `detokenize()`；它不接入 Flow/RVQ composition。两份 BiCodec smoke
-  都选择 `data=qwen_tts_speaker` 和 `data.shape=single`，直接消费 workspace prepared grid 的
-  flat cells；可用 `data.speaker=<id>` 限制到一个 speaker。FrameCodec 的 token-only 路径仍使用
-  flattened full-code sequence。
+  support artifact；LongCat 的 `DECOUPLED` token-only 路径可使用它。BiCodec 的 structured
+  `FULL_CODEC_SEQUENCE` 路径由 `audio_route` 选择 stream ownership，并调用 backend
+  `detokenize()`；它不接入 Flow/RVQ composition。`bicodec_reuse_prompt_acoustic` 使用 reference
+  的 acoustic+semantic prompt，只预测 semantic，decode 复用 prompt acoustic；
+  `bicodec_predict_acoustic` 使用同样的 prompt，但同时预测并 decode acoustic+semantic。两份
+  BiCodec smoke 都选择 `data=qwen_tts_speaker` 和 `data.shape=single`，直接消费 workspace
+  prepared grid 的 flat cells；可用 `data.speaker=<id>` 限制到一个 speaker。FrameCodec 的
+  token-only 路径仍使用 `audio_representation=full_codec_sequence`。
 - `acoustic.init_artifact` 是 Flow/RVQ 联合训练的 generator 初始化路径，与
   `runtime.semantic_codec_artifact` 不同。composition 加载 artifact 后校验 route、frame-aligned layout、
   decoder/REPA 配置和 acoustic backend metadata，再把已加载对象交给 model；semantic conditioner 不进入
@@ -193,6 +210,10 @@ schema，不重复声明字段；`scripts/train.py` 直接把解析后的 data c
 - flow method、NFE 和 step 数直接覆盖 `runtime.flow_*`；RVQ/token 中保留这些字段是
   `runtime.Config` 的稳定 shape，不需要再为未使用字段创建 variant schema。
 - flow/RVQ 必须有独立 acoustic codebook；`none` 不要求 codec 缺少 acoustic codebook，入口不自动改写 composition。
+
+route 不是服务请求参数，而是实验与 checkpoint 的不变量。`SpeechToSpeechModule` 保存规范化后的
+route metadata；恢复 checkpoint 时要求 metadata 存在且与当前 `Runtime.audio_route` 严格相等，缺失
+或不一致都直接失败，避免用错误的 prompt/output/decode 语义继续训练或生成。
 
 ## Stage 与参数策略
 
