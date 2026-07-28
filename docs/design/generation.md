@@ -103,8 +103,10 @@ semantic artifact 路径选择。
 `FULL_CODEC_SEQUENCE` 对普通 `FrameCodec` 仍调用 `decode(full_codes)`；flattened codec 使用受约束
 状态机生成有序 marker、各 codebook 等长 payload 和 EOA，避免 audio head 产生不可解析序列；
 多码本每行可独立决定 frame count，返回 batch 以 EOA padding 对齐。BiCodec 使用另一套受约束的
-structured state machine 生成 marker、semantic token 和固定数量的 slot-major acoustic
-codebook token，恢复 `SemanticAcousticCodes` 后调用 `detokenize()`。配置
+structured state machine，根据固定 route.output 生成 marker、semantic token 和可选的固定数量
+slot-major acoustic codebook token，恢复 `SemanticAcousticCodes` 后按 route.decode 合并 prompt
+与 output stream，再调用 `detokenize()`。reuse route 只生成 semantic 并复用 prompt acoustic；
+predict route 生成并使用 output acoustic。配置
 `runtime.semantic_codec_artifact` 后，service 只处理 structured backend 的 semantic tokens，
 并把 waveform decode 交给 `SemanticCodecRuntime`；普通 frame codec 的 `decode()` 不再接收
 semantic-only codes。BiCodec 的 semantic-only 与 full-sequence 路线都在配置阶段显式选择，
@@ -118,8 +120,9 @@ runtime。三层不重复推导同一约束。
 
 ## 训练桥接与文本评估
 
-`generation.batch.requests_from_batch()` 仅供 teacher-forcing 日志使用：它以每行第一个非
-`-100` label 为 prompt 边界并去掉 batch padding。核心 service 不依赖 `ModelBatch`。
+`generation.batch.requests_from_batch()` 仅供 teacher-forcing 日志使用：它直接读取
+`ModelBatch.generation_prompt_lengths` 切出每行显式 prompt，并携带对应 `audio_contexts`，再去掉
+batch padding。它不从第一个非 `-100` label 猜 prompt 边界；核心 service 不依赖 `ModelBatch`。
 
 `decode_reference_codes()` 是 raw task sample 的统一重建边界：二维 frame-code tensor 通过
 `frame_codec().decode()`，structured mapping 恢复为 `SemanticAcousticCodes` 后通过
@@ -140,6 +143,8 @@ callback 只调用该诊断函数，不在脚本私有模块中维护平行实�
 - `Request` 表达真实推理，不能用缺 target 的 `ModelBatch` 代替。
 - `response_ids` 始终保留 layout global ID 空间且不含 stop token；调用方需要文本时再通过
   runtime layout 与 tokenizer 解码。
+- route-aware BiCodec decode 必须同时拥有 route 所声明的 prompt/output stream；缺失
+  `audio_context` 或 output stream 时显式失败，不用 target codes 或另一条 route 静默补齐。
 - service 只依赖 Protocol，不依赖具体 flow/RVQ model 或 LightningModule。
 - `generate_responses()` / `evaluate_text()` 使用 `no_grad`，但不切换 model 的 train/eval mode；
   直接调用包级入口时由调用方先进入 eval mode，`SpeechToSpeechModule` 才会代为切换并恢复状态。

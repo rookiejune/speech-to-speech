@@ -10,7 +10,7 @@ from torch import Tensor
 from .._tensor import is_signed_integer_dtype
 from ..runtime import AudioRepresentation
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
-from ..audio_route import StreamSource
+from ..audio_route import PromptSource, StreamSource
 from ..runtime.types import (
     acoustic_codec,
     codec_sample_rate,
@@ -214,12 +214,16 @@ def _validate_request(request: Request, model: TokenGenerator) -> None:
     if not bool(inside.all()):
         raise ValueError("prompt ids must belong to the runtime layout.")
     route = model.runtime.audio_route
-    if route is not None and (
-        route.decode.semantic is StreamSource.PROMPT
-        or route.decode.acoustic is StreamSource.PROMPT
-    ):
-        context = request["audio_context"]
-        if context is None:
+    if route is not None:
+        context = request.get("audio_context")
+        requires_context = (
+            route.prompt.source is PromptSource.REFERENCE
+            and bool(route.prompt.streams)
+        ) or (
+            route.decode.semantic is StreamSource.PROMPT
+            or route.decode.acoustic is StreamSource.PROMPT
+        )
+        if requires_context and context is None:
             raise ValueError("audio route requires structured prompt audio context.")
 
 
