@@ -10,7 +10,7 @@ from anytrain.codec import AcousticLayout
 from anydataset.types import AudioView, Modality
 from anytrain.module.idspace import Layout
 from torch import nn
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from .audio_tokenizer import (
     BiCodecAudioTokenizer,
@@ -63,10 +63,16 @@ class AudioRepresentation(StrEnum):
     FULL_CODEC_SEQUENCE = auto()
 
 
+class BackboneInitialization(StrEnum):
+    PRETRAINED = auto()
+    RANDOM = auto()
+
+
 @dataclass(frozen=True)
 class Config:
     codec: str = "longcat"
     backbone: str = "Qwen/Qwen3-0.6B"
+    backbone_initialization: BackboneInitialization = BackboneInitialization.PRETRAINED
     audio_representation: AudioRepresentation = AudioRepresentation.DECOUPLED
     audio_tokenizer: Optional[Union[str, Path]] = None
     semantic_codec_artifact: Optional[str] = None
@@ -78,6 +84,8 @@ class Config:
     flow_num_steps: int = 10
 
     def __post_init__(self) -> None:
+        if not isinstance(self.backbone_initialization, BackboneInitialization):
+            raise TypeError("backbone_initialization must be a BackboneInitialization.")
         if not isinstance(self.audio_representation, AudioRepresentation):
             raise TypeError("audio_representation must be an AudioRepresentation.")
         if (
@@ -189,7 +197,14 @@ class Runtime:
             kwargs["dtype"] = dtype(self.config.dtype)
         if self.config.attn_implementation is not None:
             kwargs["attn_implementation"] = self.config.attn_implementation
-        backbone = AutoModelForCausalLM.from_pretrained(self.config.backbone, **kwargs)
+        if self.config.backbone_initialization is BackboneInitialization.PRETRAINED:
+            backbone = AutoModelForCausalLM.from_pretrained(
+                self.config.backbone,
+                **kwargs,
+            )
+        else:
+            config = AutoConfig.from_pretrained(self.config.backbone)
+            backbone = AutoModelForCausalLM.from_config(config, **kwargs)
         if self.config.device is not None:
             backbone = cast(nn.Module, cast(object, backbone)).to(self.config.device)
         return cast(Backbone, cast(object, backbone))

@@ -1,5 +1,6 @@
 codec: bicodec
 backbone: Qwen/Qwen3-0.6B
+backbone_initialization: pretrained
 audio_representation: decoupled
 audio_tokenizer:
 semantic_codec_artifact: ${oc.env:SPEECH_TO_SPEECH_BICODEC_SEMANTIC_ARTIFACT}

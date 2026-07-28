@@ -18,7 +18,11 @@ from speech_to_speech.model import AdapterType
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model.acoustic import AcousticType, DecoderConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
-from speech_to_speech.runtime import AudioRepresentation, Config as RuntimeConfig
+from speech_to_speech.runtime import (
+    AudioRepresentation,
+    BackboneInitialization,
+    Config as RuntimeConfig,
+)
 from speech_to_speech.stage import (
     ParameterGroup,
     ParameterPolicyConfig,
@@ -296,6 +300,7 @@ def overfit(config: DictConfig) -> OverfitConfig:
     result = _parse(config, schema)
     _validate_output(result)
     _validate_audio_representation(result)
+    _validate_backbone_initialization(result)
     if (
         result.callbacks.performance.enabled
         and result.callbacks.task_sample.enabled
@@ -321,6 +326,7 @@ def train(config: DictConfig) -> StagedTrainConfig:
     result = _parse(config, schema)
     _validate_output(result)
     _validate_audio_representation(result)
+    _validate_backbone_initialization(result)
     if not result.stage.loaders:
         raise ValueError("formal train requires stage.loaders.")
     _validate_task_samples(result)
@@ -443,6 +449,29 @@ def _validate_audio_representation(
         )
 
 
+def _validate_backbone_initialization(
+    config: Union[OverfitConfig, StagedTrainConfig],
+) -> None:
+    if config.runtime.backbone_initialization is not BackboneInitialization.RANDOM:
+        return
+    if config.model.toy is not None:
+        raise ValueError(
+            "runtime.backbone_initialization=random cannot be combined with model.toy."
+        )
+    policy = config.parameter_policy.spec()
+    if (
+        ParameterGroup.BACKBONE not in policy.trainable_groups
+        or (
+            policy.backbone_top_fraction is not None
+            and policy.backbone_top_fraction < 1
+        )
+    ):
+        raise ValueError(
+            "random backbone initialization requires a fully trainable backbone; "
+            "select parameter_policy=full."
+        )
+
+
 def _prepare(config: DictConfig) -> DictConfig:
     result = cast(DictConfig, OmegaConf.create(OmegaConf.to_container(config)))
     OmegaConf.resolve(result)
@@ -464,6 +493,14 @@ def _prepare(config: DictConfig) -> DictConfig:
     _normalize_text_dataset(result.get("text_data", {}).get("dataset"))
     runtime = result.get("runtime")
     if runtime is not None:
+        initialization = runtime.get("backbone_initialization")
+        if initialization is not None:
+            raw = str(initialization)
+            runtime.backbone_initialization = (
+                BackboneInitialization[raw].name
+                if raw in BackboneInitialization.__members__
+                else BackboneInitialization(raw).name
+            )
         representation = runtime.get("audio_representation")
         if representation is not None:
             raw = str(representation)

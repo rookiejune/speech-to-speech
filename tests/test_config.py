@@ -49,7 +49,7 @@ from speech_to_speech.model import (
 )
 from speech_to_speech.model.acoustic import AcousticType, DecoderConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
-from speech_to_speech.runtime import Config as RuntimeConfig
+from speech_to_speech.runtime import BackboneInitialization, Config as RuntimeConfig
 from speech_to_speech.stage import (
     ParameterGroup,
     ParameterPolicyName,
@@ -135,6 +135,41 @@ class ConfigTest(unittest.TestCase):
         selected = overfit(_compose("overfit", "model=toy", "data=toy"))
         self.assertIsInstance(selected.model.toy, ToyConfig)
         self.assertIs(selected.data.name, DatasetName.TOY)
+
+    def test_random_backbone_requires_unambiguous_full_training(self):
+        random = overfit(
+            _compose("overfit", "runtime.backbone_initialization=random")
+        )
+
+        self.assertIs(
+            random.runtime.backbone_initialization,
+            BackboneInitialization.RANDOM,
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be combined with model.toy"):
+            overfit(
+                _compose(
+                    "overfit",
+                    "model=toy",
+                    "data=toy",
+                    "runtime.backbone_initialization=random",
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "fully trainable backbone"):
+            parse_train(
+                _compose("train", "runtime.backbone_initialization=random")
+            )
+
+        train = parse_train(
+            _compose(
+                "train",
+                "runtime.backbone_initialization=random",
+                "parameter_policy=full",
+            )
+        )
+        self.assertIs(
+            train.runtime.backbone_initialization,
+            BackboneInitialization.RANDOM,
+        )
 
     def test_full_codec_sequence_smoke_is_token_only_comparison(self):
         config = overfit(_compose("overfit", "experiment=longcat_full_sequence_smoke"))

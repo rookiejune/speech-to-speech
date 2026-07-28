@@ -30,6 +30,12 @@ codebooks 编入 token 序列，因此不能同时配置 BPE audio tokenizer。O
 2 个 steps，因此 token/RVQ composition 也不会静默携带无效 runtime。model composition 由
 `model/acoustic` 选择。
 
+`backbone_initialization` 显式选择 backbone 权重来源：`pretrained` 使用
+`AutoModelForCausalLM.from_pretrained()`；`random` 仍从 `backbone` snapshot 读取 tokenizer 与完整
+HF config，但通过 `AutoModelForCausalLM.from_config()` 随机构造同架构模型，不读取 checkpoint
+权重。随机初始化由训练入口的 `train.seed` 控制，并要求 `parameter_policy=full`，避免随机 backbone
+被全部或部分冻结。`model.toy` 自己构造 tiny Qwen，不能与 `random` 同时启用。
+
 ## 协议
 
 `runtime/types.py` 定义资源对象的 `SemanticCodec`、`Codec`、`StructuredCodec`、
@@ -111,6 +117,7 @@ padding、objective 与 generation service 不读取全局 runtime 状态。
 
 - runtime 只加载并暴露资源，不包含 task、objective 或 Trainer 逻辑。
 - device、dtype 与 attention backend 来自显式配置，不依赖 Transformers 环境默认值。
+- backbone snapshot 同时定义 tokenizer 与模型 config；初始化方式只决定是否读取其中的模型权重。
 - layout、backbone/tokenizer vocabulary 与 codec/audio-tokenizer vocabulary 属于同一 snapshot。
 - Runtime 不是 `nn.Module`；optimizer/checkpoint ownership 只由 model 属性决定。
 - LongCat 直接使用 anytrain 的 semantic-acoustic backend；`UnifiedCodec` 只保留给没有独立

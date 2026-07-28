@@ -77,7 +77,8 @@ def generate_tokens(...) -> Tensor: ...
 三个字段都使用公开 `AdapterType`；`linear` 是默认值，`mlp` 使用 gated SiLU adapter，`None`
 只在输入输出 dimension 相同时合法。`toy=None` 时模型使用 `runtime.backbone`；非空时由
 `ToyConfig` 构造随机 tiny Qwen，runtime 仍负责 tokenizer、codec、layout、special IDs 与 flow
-sampler。Hydra `model` preset 与这些字段一一对应，overfit/train root schema 直接复用
+sampler。完整 Qwen 架构的随机初始化属于 `runtime.backbone_initialization=random`，不通过 toy
+参数近似。Hydra `model` preset 与这些字段一一对应，overfit/train root schema 直接复用
 `model.Config`。
 
 decoder 使用独立 `DecoderConfig(hidden_dim, layers, heads, ffn_ratio)`。flow 可额外接收

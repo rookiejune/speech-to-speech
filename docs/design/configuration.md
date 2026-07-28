@@ -6,8 +6,8 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
 
 ## 源码模块
 
-- `runtime`：完整映射 `runtime.Config`，统一拥有 codec、audio representation、backbone、
-  audio tokenizer、device、dtype、attention backend 与 flow sampling。`longcat`、`longcat_native`、
+- `runtime`：完整映射 `runtime.Config`，统一拥有 codec、audio representation、backbone、backbone
+  initialization、audio tokenizer、device、dtype、attention backend 与 flow sampling。`longcat`、`longcat_native`、
   `longcat_full_sequence`、`unicodec` 表示相互兼容的资源 snapshot；不再拆分 `codec` 和
   `sampler` 组。
 - `model`：完整映射 `model.Config` 的三个 adapter 与可选 `ToyConfig`。`model=toy` 只替换
@@ -171,6 +171,8 @@ schema，不重复声明字段；`scripts/train.py` 直接把解析后的 data c
   audio token，flow/RVQ 才启用 acoustic objective，RVQ schema 不接受 REPA。
 - `runtime.audio_representation=full_codec_sequence` 只允许 `model/acoustic=none`，因为完整
   codec codes 已作为 token objective 训练，不能再同时构造 acoustic side channel。
+- `runtime.backbone_initialization=random` 从 `runtime.backbone` 读取 tokenizer 与完整 HF config，
+  但不读取预训练权重；它不能与 `model=toy` 组合，并要求 `parameter_policy=full`。
 - `runtime.semantic_codec_artifact` 为 `semantic-acoustic-codec` 的 semantic-only waveform
   support artifact；LongCat 和 BiCodec 都可使用，但只允许 `model/acoustic=none` 的
   `DECOUPLED` 路径。BiCodec 另提供 `runtime=bicodec_full_sequence`，生成 structured full
