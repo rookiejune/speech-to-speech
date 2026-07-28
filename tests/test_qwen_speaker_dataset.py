@@ -32,6 +32,7 @@ from speech_to_speech.datamodule.dataset import (
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.single import SingleCollator
 from speech_to_speech.datamodule.types import ModelBatch
+from speech_to_speech.audio_route import BICODEC_REUSE_PROMPT_ACOUSTIC
 from speech_to_speech.runtime import AudioRepresentation
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.task import Task
@@ -94,6 +95,37 @@ class SpeakerGridDatasetTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not present"):
             SpeakerGridCellsDataset(_grid(), speaker="unknown")
 
+    def test_reference_context_pairs_same_speaker_and_wraps_rows(self):
+        dataset = SpeakerGridCellsDataset(_grid(), with_audio_context=True)
+
+        first = dataset[0]
+        last = dataset[2]
+
+        self.assertEqual(
+            first[(Role.DEFAULT, Modality.TEXT)].views[TextView.SPEAKERS],
+            first.audio_context[(Role.DEFAULT, Modality.TEXT)].views[
+                TextView.SPEAKERS
+            ],
+        )
+        self.assertEqual(
+            first.audio_context[(Role.DEFAULT, Modality.TEXT)].meta[
+                TextMeta.SOURCE_INDEX
+            ],
+            1,
+        )
+        self.assertEqual(
+            last.audio_context[(Role.DEFAULT, Modality.TEXT)].meta[
+                TextMeta.SOURCE_INDEX
+            ],
+            0,
+        )
+
+    def test_reference_context_requires_two_rows(self):
+        one_row = SpeakerAudioGrid(_Cells(_cells()[:2]), ("alice", "bob"))
+
+        with self.assertRaisesRegex(ValueError, "at least two"):
+            SpeakerGridCellsDataset(one_row, with_audio_context=True)
+
     @patch("zhuyin.datasets.qwen_tts_speech.qwen_tts_speaker_codec_grid")
     def test_loader_selects_runtime_codec_and_speaker(self, load: Mock):
         load.return_value = _grid()
@@ -117,6 +149,20 @@ class SpeakerGridDatasetTest(unittest.TestCase):
             split="train",
         )
 
+    @patch("zhuyin.datasets.qwen_tts_speech.qwen_tts_speaker_codec_grid")
+    def test_loader_enables_reference_context_for_reference_route(self, load: Mock):
+        load.return_value = _grid()
+        dataset = load_dataset(
+            DatasetConfig(name=DatasetName.QWEN_TTS_SPEAKER),
+            SimpleNamespace(
+                codec_name="bicodec",
+                audio_route=BICODEC_REUSE_PROMPT_ACOUSTIC,
+            ),
+        )
+
+        self.assertIsInstance(dataset, SpeakerGridCellsDataset)
+        self.assertTrue(dataset.with_audio_context)
+
     def test_loader_rejects_unsupported_codec(self):
         config = DatasetConfig(name=DatasetName.QWEN_TTS_SPEAKER)
 
@@ -136,6 +182,40 @@ class SpeakerGridDatasetTest(unittest.TestCase):
 
 
 class BiCodecSpeakerCellTest(unittest.TestCase):
+    def test_reference_route_keeps_target_semantic_out_of_prompt(self):
+        runtime = _runtime(AudioRepresentation.FULL_CODEC_SEQUENCE)
+        runtime.audio_route = BICODEC_REUSE_PROMPT_ACOUSTIC
+        sample = SpeakerGridCellsDataset(
+            _grid(),
+            with_audio_context=True,
+        )[0]
+
+        batch = SingleCollator(runtime, {Task.TTS: 1.0})([sample])
+
+        self.assertIsInstance(batch, ModelBatch)
+        if batch.audio_contexts is None or batch.audio_contexts[0] is None:
+            self.fail("reference audio context was dropped from the model batch")
+        torch.testing.assert_close(
+            batch.audio_contexts[0].semantic,
+            torch.tensor([[2], [3]]),
+        )
+        row = batch.input_ids[0]
+        boa_positions = (row == runtime.boa_token_id).nonzero(as_tuple=False).flatten()
+        self.assertGreaterEqual(boa_positions.numel(), 2)
+        prompt_boa = int(boa_positions[0].item())
+        prompt_eoa = int(
+            (row[prompt_boa + 1 :] == runtime.eoa_token_id)
+            .nonzero(as_tuple=False)[0]
+            .item()
+        ) + prompt_boa + 1
+        local_prompt = row[prompt_boa + 1 : prompt_eoa] - 10
+        decoded = runtime.audio_tokenizer.decode_streams(
+            local_prompt,
+            BICODEC_REUSE_PROMPT_ACOUSTIC.prompt.canonical_streams,
+        )
+        torch.testing.assert_close(decoded.semantic, torch.tensor([[2], [3]]))
+        self.assertFalse(torch.equal(decoded.semantic, torch.tensor([[0], [1]])))
+
     def test_semantic_only_and_full_sequence_build_tts_batches(self):
         cell = _cells()[0]
 

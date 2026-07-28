@@ -131,6 +131,72 @@ class BiCodecDecodeTest(unittest.TestCase):
         torch.testing.assert_close(codec.codes.semantic, expected.semantic[None])
         torch.testing.assert_close(codec.codes.acoustic, expected.acoustic[None])
 
+    def test_route_decode_reuses_prompt_acoustic_codes(self):
+        tokenizer = BiCodecAudioTokenizer(
+            semantic_vocab_size=8,
+            acoustic_codebook_sizes=(3,),
+            acoustic_unit_length=2,
+        )
+        context = SemanticAcousticCodes(
+            semantic=torch.tensor([[5], [6]]),
+            acoustic=torch.tensor([[2], [1]]),
+        )
+        output = SemanticAcousticCodes(
+            semantic=torch.tensor([[1], [2]]),
+            acoustic=torch.tensor([[0], [1]]),
+        )
+        tokens = tokenizer.encode_streams(
+            output,
+            BICODEC_REUSE_PROMPT_ACOUSTIC.output.canonical_streams,
+        )
+        codec = _StructuredCodec()
+
+        waveform, resolved = decode_generated_bicodec_route(
+            tokens + 10,
+            context,
+            route=BICODEC_REUSE_PROMPT_ACOUSTIC,
+            codec=codec,
+            audio_tokenizer=tokenizer,
+            audio_token_range=(10, 10 + tokenizer.vocab_size),
+        )
+
+        self.assertEqual(waveform.shape, (1, 2))
+        torch.testing.assert_close(resolved.semantic, output.semantic)
+        torch.testing.assert_close(resolved.acoustic, context.acoustic)
+        if codec.codes is None:
+            self.fail("structured codec was not called")
+        torch.testing.assert_close(codec.codes.semantic[0], output.semantic)
+        torch.testing.assert_close(codec.codes.acoustic[0], context.acoustic)
+
+    def test_route_decode_predicts_both_streams_from_output(self):
+        tokenizer = BiCodecAudioTokenizer(
+            semantic_vocab_size=8,
+            acoustic_codebook_sizes=(3,),
+            acoustic_unit_length=2,
+        )
+        output = SemanticAcousticCodes(
+            semantic=torch.tensor([[1], [2]]),
+            acoustic=torch.tensor([[0], [1]]),
+        )
+        tokens = tokenizer.encode_streams(
+            output,
+            BICODEC_PREDICT_ACOUSTIC.output.canonical_streams,
+        )
+        _, resolved = decode_generated_bicodec_route(
+            tokens + 10,
+            SemanticAcousticCodes(
+                semantic=torch.tensor([[7]]),
+                acoustic=torch.tensor([[2], [2]]),
+            ),
+            route=BICODEC_PREDICT_ACOUSTIC,
+            codec=_StructuredCodec(),
+            audio_tokenizer=tokenizer,
+            audio_token_range=(10, 10 + tokenizer.vocab_size),
+        )
+
+        torch.testing.assert_close(resolved.semantic, output.semantic)
+        torch.testing.assert_close(resolved.acoustic, output.acoustic)
+
     def test_state_machine_emits_a_complete_structured_sequence(self):
         tokenizer = BiCodecAudioTokenizer(
             semantic_vocab_size=8,
