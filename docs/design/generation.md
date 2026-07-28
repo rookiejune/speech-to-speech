@@ -109,8 +109,9 @@ slot-major acoustic codebook token，恢复 `SemanticAcousticCodes` 后按 route
 predict route 生成并使用 output acoustic。配置
 `runtime.semantic_codec_artifact` 后，service 只处理 structured backend 的 semantic tokens，
 并把 waveform decode 交给 `SemanticCodecRuntime`；普通 frame codec 的 `decode()` 不再接收
-semantic-only codes。BiCodec 的 semantic-only 与 full-sequence 路线都在配置阶段显式选择，
-不会把 fixed-length acoustic units 伪装成 frame-aligned codes。
+semantic-only codes。semantic-artifact 与 structured full-sequence 是配置阶段选择的两条解码路径；
+structured full-sequence 内部的 prompt/output/decode stream 仍由固定 `audio_route` 决定，不会把
+fixed-length acoustic units 伪装成 frame-aligned codes。
 
 自回归 cache、sampling、动态 allowed IDs、逐行 stop 状态和 frame condition 收集属于 model。已有行
 生成 stop token 后，后续步骤只对剩余 active rows 执行 backbone 与 sampling；cache 同步收缩，
