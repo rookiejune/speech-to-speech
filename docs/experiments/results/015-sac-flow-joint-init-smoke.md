@@ -2,8 +2,8 @@
 
 2026-07-28 在 FDU `145` 的 GPU 7（RTX 4090 D, 24 GB）完成真实
 `semantic-acoustic-codec` Flow 与 RVQ `codebook_ar` generator 到 S2S hidden-state joint 路线验收。
-本结果证明两条 route 的初始化、forward/backward/optimizer 和生成执行契约，并完成 Flow 的正式
-checkpoint resume；不支持质量或收敛结论，RVQ checkpoint resume 未单独验证。
+本结果证明两条 route 的初始化、forward/backward/optimizer 和生成执行契约，并完成 Flow 与 RVQ
+的正式 checkpoint resume；不支持质量或收敛结论。
 
 ## Flow Artifact 与隔离环境
 
@@ -148,6 +148,39 @@ Phase A semantic codes 作为 decoder condition。结果位于：
 - 同目录 `metrics.json`、`generation.json`、`evaluation.json` 与 Hydra config
 - TensorBoard：`/tmp/s2s-joint-init-20260728/rvq-output/tensorboard/002-single-batch-overfit/tts/rvq-8l/version_0`
 
+## RVQ Formal Checkpoint Resume
+
+同日在 FDU `145` 的 GPU 7，从已推送的 S2S `b27392c` 和 SAC `e3fe922` 新建隔离 checkout
+`/tmp/s2s-rvq-resume-20260728/repos`。测试复用上节的 debug-migrated schema 7 RVQ artifact、
+pami201 32-sample WMT19 root、Qwen3-0.6B 本地 snapshot 和 LongCat 本地 cache；使用正式
+`scripts/train.py`、Stage 1、`speech_interface`、batch size 1、BF16 mixed precision、关闭
+validation，并每个 optimizer step 归档 checkpoint。source 先运行到 step 1，再从
+`source/checkpoints/step-00000001.ckpt` 恢复到独立 `resumed` 目录并把 `max_steps` 提高到 2；
+日志明确记录 `Restoring states` 和 `Restored all states`，恢复后只执行新增的 step 2。
+
+| Step | Total loss | Token loss | RVQ loss |
+| ---: | ---: | ---: | ---: |
+| 1 | `15.856222152709961` | `6.679051876068115` | `9.208091735839844` |
+| 2 after resume | `15.223969459533691` | `6.487730026245117` | `8.765504837036133` |
+
+step 1 checkpoint 的 `global_step=1`，step 2 为 `global_step=2`；两者各包含 1 个 optimizer 和
+107 个 optimizer state entry。107 个 AdamW step counter 全部从 1 推进到 2，`exp_avg` 与
+`exp_avg_sq` 的 107 个 entry 全部变化、保持 finite，L2 delta 分别为
+`0.10031208678270583` 和 `8.570555144138487e-05`。模型 checkpoint delta 为：
+
+| Module | Changed keys | Changed values | L2 delta | Finite |
+| --- | ---: | ---: | ---: | --- |
+| `model.acoustic_condition` | `4 / 4` | `1051647 / 1051648` | `0.01749579272240093` | true |
+| `model.acoustic_decoder` | `98 / 100` | `159233170 / 184031980` | `0.20533761588171665` | true |
+| `model.backbone` | `0 / 311` | `0 / 751632384` | `0.0` | true |
+
+两个未变化的 decoder state 是无梯度的 `codebook_embeddings.2.weight` 和单 token
+`decoder.embed_tokens.weight`，与上节 optimizer step 前直接统计的 98 个 decoder gradient
+参数一致。checkpoint 中没有 runtime 或 codec state key。`resumed/checkpoints` 只包含
+`step-00000002.ckpt` 和 `last.ckpt`，固定 `last.ckpt` 的 `global_step=2`，没有
+`last-v*.ckpt`；step archive 和 `last.ckpt` 大小分别为 `3504364341` 和 `3504364405` bytes。
+最终输出位于 `145:/tmp/s2s-rvq-resume-20260728/output`。
+
 ## 实测暴露并修复的边界
 
 1. generator-only loader 不再受无关 conditioner schema 阻断，同时保持 generator strict load。
@@ -158,5 +191,5 @@ Phase A semantic codes 作为 decoder condition。结果位于：
 6. RVQ joint initialization 只接受 frame-aligned `codebook_ar` artifact；默认 MTP 不作为兼容替代。
 
 本地验收：S2S `296 tests OK / 1 CUDA skip`、basedpyright 0 errors，Ruff、compileall 与
-`git diff --check` 通过。SAC 全量测试为 `66 passed`，Ruff、compileall 与
+`git diff --check` 通过。SAC 全量测试为 `68 passed`，Ruff、compileall 与
 `git diff --check` 通过。
