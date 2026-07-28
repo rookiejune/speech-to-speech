@@ -135,6 +135,7 @@ class FlattenedAudioTokenizerTest(unittest.TestCase):
                 "codec:longcat:codebook:1": 16,
             },
         )
+        self.assertEqual(self.tokenizer.codebook_ranges, ((0, 4), (4, 14)))
 
     def test_round_trip_preserves_full_codec_frames(self):
         frames = torch.tensor([[1, 5], [2, 6]], dtype=torch.int32)

@@ -39,7 +39,7 @@ class TokenGenerator(Protocol):
 
 
 @runtime_checkable
-class StructuredTokenGenerator(TokenGenerator, Protocol):
+class FullCodecSequenceGenerator(TokenGenerator, Protocol):
     def generate_full_codec_sequence(
         self,
         prompt_ids: Tensor,

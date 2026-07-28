@@ -26,10 +26,14 @@
 `generation.protocol` 定义 service 所依赖的窄模型协议：
 
 - `TokenGenerator`：公开 runtime、backbone 和 `generate_tokens()`。
+- `FullCodecSequenceGenerator`：在基础 token generation 上增加受 tokenizer grammar 约束的
+  `generate_full_codec_sequence()`；frame-aligned flattened codec 与 fixed-length BiCodec
+  共用这一 service 能力边界。
 - `AcousticFeatureGeneration`：只描述可选的 `generate_audio_features()` 能力。service 的
   `model` 参数仍由 `TokenGenerator` 表达基础契约；需要独立 acoustic codebook 时再检查这个窄
   runtime 协议，避免把 registered `nn.Module` backbone 等无关成员纳入能力识别。
-- `AcousticFeatureGenerator`：组合上述两个协议，供训练 composition 静态表达完整模型契约。
+- `AcousticFeatureGenerator`：组合 `TokenGenerator` 与 `AcousticFeatureGeneration`，供训练
+  composition 静态表达完整模型契约。
 - `TextEvaluationModel`：在 token generation 之外增加 hidden state 与 modality-local logits，
   用于 reference NLL。
 
@@ -47,9 +51,11 @@ class Result(TypedDict):
 
 `prompt_ids` 必须是调用方已经准备好的完整 generation prompt。service 不渲染 chat template、
 不插入 instruction；按 task builder 契约构造的 audio-target request 已经以 BOA 结束。
-单码本 `FlattenedAudioTokenizer` 的 codec/codebook marker 是 codec serialization grammar，service
-会把它们追加到模型 prompt，并把后续采样限制为该码本 code range 与 EOA；marker 计入
-`max_new_tokens`，也保留在 `response_ids` 中供 frame count 与 decode 使用。
+`FlattenedAudioTokenizer` 的 codec/codebook marker 和各 codebook range 是 codec serialization
+grammar。model 侧 full-sequence generation 强制 marker 顺序，首个 codebook 生成至少一个
+payload 并决定 frame count，其余 codebook 只能生成相同数量、属于各自 range 的 payload，完整
+block 结束后才允许 EOA。marker 与 EOA 都计入 `max_new_tokens`，marker 也保留在
+`response_ids` 中供 frame count 与 decode 使用。单码本是同一契约的批量化简化路径。
 `generation.batch.requests_from_batch()` 会从 teacher-forcing batch 保留 task prefix，直接构造
 request 的调用方负责保持相同 task 状态机。
 当前 prompt 只由 layout global token IDs 表达；audio-source 内容也编码为 semantic audio token，
@@ -70,7 +76,7 @@ text target
     -> Result(audio=None)
 
 audio target + token-only model
-    -> generate_tokens(stop=EOA), or BiCodec structured state machine
+    -> generate_tokens(stop=EOA), or constrained full-codec state machine
     -> FrameCodec full-code decode, BiCodec detokenize, or SAC SemanticCodecRuntime decode
 
 audio target + runtime acoustic side channel + acoustic feature generator
@@ -87,9 +93,9 @@ codebooks 而进入 Flow/RVQ acoustic feature generation。flow 与 RVQ 都返�
 `AcousticGeneration`；`model/acoustic=none` 即使搭配 LongCat 这类带 acoustic codebook 的
 codec，也只走 token-only generation 分支；实际 waveform decoder 仍按 full-code sequence 或
 semantic artifact 路径选择。
-`FULL_CODEC_SEQUENCE` 对普通 `FrameCodec` 仍调用 `decode(full_codes)`；单码本 flattened codec
-使用固定 marker prefix 和 code-range sampling，避免随机初始化的 audio head 产生不可解析序列；
-BiCodec 则使用受约束的
+`FULL_CODEC_SEQUENCE` 对普通 `FrameCodec` 仍调用 `decode(full_codes)`；flattened codec 使用受约束
+状态机生成有序 marker、各 codebook 等长 payload 和 EOA，避免 audio head 产生不可解析序列；
+多码本每行可独立决定 frame count，返回 batch 以 EOA padding 对齐。BiCodec 使用另一套受约束的
 structured state machine 生成 marker、semantic token 和固定数量的 slot-major acoustic
 codebook token，恢复 `SemanticAcousticCodes` 后调用 `detokenize()`。配置
 `runtime.semantic_codec_artifact` 后，service 只处理 structured backend 的 semantic tokens，
@@ -97,7 +103,7 @@ codebook token，恢复 `SemanticAcousticCodes` 后调用 `detokenize()`。配�
 semantic-only codes。BiCodec 的 semantic-only 与 full-sequence 路线都在配置阶段显式选择，
 不会把 fixed-length acoustic units 伪装成 frame-aligned codes。
 
-自回归 cache、sampling、allowed IDs、逐行 stop 状态和 frame condition 收集属于 model。已有行
+自回归 cache、sampling、动态 allowed IDs、逐行 stop 状态和 frame condition 收集属于 model。已有行
 生成 stop token 后，后续步骤只对剩余 active rows 执行 backbone 与 sampling；cache 同步收缩，
 最终 sequence 仍保持原 batch 顺序。请求
 分组、输入校验、结果裁剪与 decode 属于 service；ID range、token frame span 与 codec 能力属于

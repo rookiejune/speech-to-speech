@@ -97,6 +97,13 @@ class FlattenedAudioTokenizer:
         return self._codebook_sizes
 
     @property
+    def codebook_ranges(self) -> tuple[tuple[int, int], ...]:
+        return tuple(
+            (offset, offset + size)
+            for offset, size in zip(self._offsets, self.codebook_sizes)
+        )
+
+    @property
     def vocab_size(self) -> int:
         return self._vocab_size
 

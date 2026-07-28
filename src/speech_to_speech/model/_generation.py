@@ -33,6 +33,78 @@ class GenerationStepModel(Protocol):
     ) -> CausalLMOutputWithPast: ...
 
 
+class _RowGenerator:
+    def __init__(
+        self,
+        model: GenerationStepModel,
+        prompt_ids: Tensor,
+        *,
+        attention_mask: Tensor,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        do_sample: bool,
+        use_cache: bool,
+        grammar: str,
+    ) -> None:
+        self._model = model
+        self.sequence = prompt_ids.clone()
+        self._attention = attention_mask.clone()
+        self._current = self.sequence
+        self._max_new_tokens = max_new_tokens
+        self._temperature = temperature
+        self._top_p = top_p
+        self._do_sample = do_sample
+        self._use_cache = use_cache
+        self._grammar = grammar
+        self._past_key_values: Cache | None = None
+        self._emitted = 0
+
+    def step(self, allowed: Tensor) -> int:
+        if self._emitted >= self._max_new_tokens:
+            raise ValueError(f"{self._grammar} exceeded max_new_tokens.")
+        output = self._model.generation_step(
+            self._current,
+            attention_mask=self._attention,
+            output_hidden_states=False,
+            token_ids=allowed,
+            modality=None,
+            past_key_values=self._past_key_values,
+            use_cache=self._use_cache,
+        )
+        if output.logits is None:
+            raise RuntimeError("model did not return generation logits.")
+        logits = output.logits[:, -1] / self._temperature
+        if allowed.numel() == 1:
+            index = logits.argmax(dim=-1)
+        else:
+            if self._top_p < 1.0:
+                logits = top_p_filter(logits, self._top_p)
+            index = (
+                torch.distributions.Categorical(logits=logits).sample()
+                if self._do_sample
+                else logits.argmax(dim=-1)
+            )
+        next_id = int(allowed[index].item())
+        self.sequence = torch.cat(
+            (self.sequence, self.sequence.new_tensor([[next_id]])),
+            dim=1,
+        )
+        self._attention = torch.cat(
+            (self._attention, self._attention.new_ones((1, 1))),
+            dim=1,
+        )
+        self._emitted += 1
+        if self._use_cache:
+            self._past_key_values = output.past_key_values
+            if self._past_key_values is None:
+                raise RuntimeError("backbone did not return a generation cache.")
+            self._current = self.sequence[:, -1:]
+        else:
+            self._current = self.sequence
+        return next_id
+
+
 def generate_sequence(
     model: GenerationStepModel,
     prompt_ids: Tensor,
@@ -206,6 +278,162 @@ def generate_sequence(
     return generated, condition, frame_spans
 
 
+def generate_flattened_sequence(
+    model: GenerationStepModel,
+    prompt_ids: Tensor,
+    *,
+    codebook_ranges: Sequence[tuple[int, int]],
+    codec_token_id: int,
+    codebook_token_ids: Sequence[int],
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    prompt_attention_mask: Tensor | None,
+    do_sample: bool,
+    use_cache: bool,
+) -> Tensor:
+    """Generate frame-aligned codebook blocks with the flattened codec grammar."""
+    if prompt_ids.dim() != 2 or prompt_ids.size(0) < 1:
+        raise ValueError("generation requires at least one prompt row.")
+    if temperature <= 0 or not 0 < top_p <= 1:
+        raise ValueError("invalid generation parameters")
+    if not codebook_ranges or len(codebook_ranges) != len(codebook_token_ids):
+        raise ValueError("flattened generation requires one marker per codebook range.")
+    if any(start < 0 or end <= start for start, end in codebook_ranges):
+        raise ValueError("flattened generation codebook ranges must be non-empty.")
+    minimum_tokens = 2 * len(codebook_ranges) + 2
+    if max_new_tokens < minimum_tokens:
+        raise ValueError(
+            "flattened full sequence max_new_tokens must include codec/codebook "
+            f"markers, one payload per codebook, and EOA ({minimum_tokens} minimum)."
+        )
+    if prompt_attention_mask is None:
+        prompt_attention_mask = torch.ones_like(prompt_ids, dtype=torch.bool)
+    if prompt_attention_mask.shape != prompt_ids.shape:
+        raise ValueError("prompt attention mask must align with prompt ids.")
+    if not bool(prompt_attention_mask.any(dim=1).all()):
+        raise ValueError("each generation prompt must contain at least one token.")
+
+    audio_start, _ = model.runtime.codec_audio_range
+    if len(codebook_ranges) == 1:
+        prefix = prompt_ids.new_tensor(
+            [
+                audio_start + codec_token_id,
+                audio_start + codebook_token_ids[0],
+            ]
+        )
+        batch_prefix = prefix.unsqueeze(0).expand(prompt_ids.size(0), -1)
+        prefixed = torch.cat((prompt_ids, batch_prefix), dim=1)
+        prefix_mask = torch.ones_like(batch_prefix, dtype=torch.bool)
+        attention = torch.cat((prompt_attention_mask, prefix_mask), dim=1)
+        start, end = codebook_ranges[0]
+        allowed = (
+            *range(audio_start + start, audio_start + end),
+            model.runtime.eoa_token_id,
+        )
+        generated, _, _ = generate_sequence(
+            model,
+            prefixed,
+            max_new_tokens=max_new_tokens - prefix.numel(),
+            temperature=temperature,
+            top_p=top_p,
+            prompt_attention_mask=attention,
+            stop_token_id=model.runtime.eoa_token_id,
+            generation_modality=None,
+            allowed_token_ids=allowed,
+            do_sample=do_sample,
+            use_cache=use_cache,
+            collect_audio_condition=False,
+        )
+        continuation = generated[:, prefixed.size(1) :]
+        if not bool(continuation.eq(model.runtime.eoa_token_id).any(dim=1).all()):
+            raise ValueError(
+                "flattened full sequence did not produce EOA within max_new_tokens."
+            )
+        return generated
+
+    rows = [
+        _generate_flattened_row(
+            model,
+            prompt_ids[row : row + 1],
+            prompt_attention_mask=prompt_attention_mask[row : row + 1],
+            codebook_ranges=codebook_ranges,
+            codec_token_id=codec_token_id,
+            codebook_token_ids=codebook_token_ids,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            do_sample=do_sample,
+            use_cache=use_cache,
+        )
+        for row in range(prompt_ids.size(0))
+    ]
+    width = max(row.size(1) for row in rows)
+    output = prompt_ids.new_full((len(rows), width), model.runtime.eoa_token_id)
+    for index, row in enumerate(rows):
+        output[index, : row.size(1)] = row[0]
+    return output
+
+
+def _generate_flattened_row(
+    model: GenerationStepModel,
+    prompt_ids: Tensor,
+    *,
+    prompt_attention_mask: Tensor,
+    codebook_ranges: Sequence[tuple[int, int]],
+    codec_token_id: int,
+    codebook_token_ids: Sequence[int],
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    do_sample: bool,
+    use_cache: bool,
+) -> Tensor:
+    row = _RowGenerator(
+        model,
+        prompt_ids,
+        attention_mask=prompt_attention_mask,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        do_sample=do_sample,
+        use_cache=use_cache,
+        grammar="flattened full sequence",
+    )
+
+    audio_start, _ = model.runtime.codec_audio_range
+
+    def local(value: int) -> Tensor:
+        return prompt_ids.new_tensor([audio_start + value], dtype=torch.long)
+
+    def range_ids(value: tuple[int, int]) -> Tensor:
+        start, end = value
+        return torch.arange(
+            audio_start + start,
+            audio_start + end,
+            device=prompt_ids.device,
+            dtype=torch.long,
+        )
+
+    row.step(local(codec_token_id))
+    row.step(local(codebook_token_ids[0]))
+    first_ids = range_ids(codebook_ranges[0])
+    row.step(first_ids)
+    frame_count = 1
+    transition = local(codebook_token_ids[1])
+    while row.step(torch.cat((first_ids, transition))) != int(transition.item()):
+        frame_count += 1
+
+    for codebook in range(1, len(codebook_ranges)):
+        if codebook > 1:
+            row.step(local(codebook_token_ids[codebook]))
+        payload_ids = range_ids(codebook_ranges[codebook])
+        for _ in range(frame_count):
+            row.step(payload_ids)
+    row.step(prompt_ids.new_tensor([model.runtime.eoa_token_id], dtype=torch.long))
+    return row.sequence
+
+
 def generate_bicodec_sequence(
     model: GenerationStepModel,
     prompt_ids: Tensor,
@@ -283,84 +511,51 @@ def _generate_bicodec_row(
     do_sample: bool,
     use_cache: bool,
 ) -> Tensor:
-    generated = prompt_ids.clone()
-    attention = prompt_attention_mask.clone()
-    past_key_values: Cache | None = None
-    current = generated
-    emitted = 0
-
-    def step(allowed: Tensor, *, force: bool = False) -> int:
-        nonlocal generated, attention, past_key_values, current, emitted
-        if emitted >= max_new_tokens:
-            raise ValueError("BiCodec full sequence exceeded max_new_tokens.")
-        output = model.generation_step(
-            current,
-            attention_mask=attention,
-            output_hidden_states=False,
-            token_ids=allowed,
-            modality=None,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-        )
-        if output.logits is None:
-            raise RuntimeError("model did not return generation logits.")
-        logits = output.logits[:, -1] / temperature
-        if force or allowed.numel() == 1:
-            index = logits.argmax(dim=-1)
-        else:
-            if top_p < 1.0:
-                logits = top_p_filter(logits, top_p)
-            index = (
-                torch.distributions.Categorical(logits=logits).sample()
-                if do_sample
-                else logits.argmax(dim=-1)
-            )
-        next_id = int(allowed[index].item())
-        generated = torch.cat((generated, generated.new_tensor([[next_id]])), dim=1)
-        attention = torch.cat((attention, attention.new_ones((1, 1))), dim=1)
-        emitted += 1
-        if use_cache:
-            past_key_values = output.past_key_values
-            if past_key_values is None:
-                raise RuntimeError("backbone did not return a generation cache.")
-            current = generated[:, -1:]
-        else:
-            current = generated
-        return next_id
+    row = _RowGenerator(
+        model,
+        prompt_ids,
+        attention_mask=prompt_attention_mask,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        do_sample=do_sample,
+        use_cache=use_cache,
+        grammar="BiCodec full sequence",
+    )
 
     audio_start, _ = model.runtime.audio_head_range
 
     def local(value: int) -> Tensor:
-        return generated.new_tensor([audio_start + value], dtype=torch.long)
+        return prompt_ids.new_tensor([audio_start + value], dtype=torch.long)
 
     def range_ids(start: int, size: int) -> Tensor:
         return torch.arange(
             audio_start + start,
             audio_start + start + size,
-            device=generated.device,
+            device=prompt_ids.device,
             dtype=torch.long,
         )
 
-    step(local(codec_token_id), force=True)
-    step(local(semantic_token_id), force=True)
+    row.step(local(codec_token_id))
+    row.step(local(semantic_token_id))
     semantic_count = 0
     semantic_ids = range_ids(*semantic_range)
     transition = local(acoustic_token_id)
     while semantic_count < 1:
-        step(semantic_ids)
+        row.step(semantic_ids)
         semantic_count += 1
     while True:
-        next_id = step(torch.cat((semantic_ids, transition)))
+        next_id = row.step(torch.cat((semantic_ids, transition)))
         if next_id == int(transition.item()):
             break
         semantic_count += 1
 
     for _ in range(acoustic_unit_length):
         for offset, size in zip(acoustic_offsets, acoustic_sizes):
-            step(range_ids(offset, size))
-    step(local(end_token_id), force=True)
-    step(local(model.runtime.eoa_token_id - audio_start), force=True)
-    return generated
+            row.step(range_ids(offset, size))
+    row.step(local(end_token_id))
+    row.step(local(model.runtime.eoa_token_id - audio_start))
+    return row.sequence
 
 
 def _rows(value: Tensor | None, rows: Tensor) -> Tensor | None:

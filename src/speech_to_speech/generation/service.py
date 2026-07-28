@@ -9,7 +9,7 @@ from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
 from ..runtime import AudioRepresentation
-from ..runtime.audio_tokenizer import BiCodecAudioTokenizer, FlattenedAudioTokenizer
+from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..runtime.types import (
     acoustic_codec,
     codec_sample_rate,
@@ -23,7 +23,7 @@ from .decode import (
     decode_generated_frame_codes,
     decode_generated_semantic,
 )
-from .protocol import AcousticFeatureGeneration, StructuredTokenGenerator, TokenGenerator
+from .protocol import AcousticFeatureGeneration, FullCodecSequenceGenerator, TokenGenerator
 from .types import AcousticGeneration, AudioOutput, Request, Result
 
 
@@ -73,36 +73,19 @@ def generate_responses(
             sequence = acoustic_generation["sequence"]
         elif (
             modality is Modality.AUDIO
-            and model.runtime.structured_full_sequence
+            and model.runtime.audio_representation
+            is AudioRepresentation.FULL_CODEC_SEQUENCE
         ):
-            if not isinstance(model, StructuredTokenGenerator):
-                raise TypeError("BiCodec full sequence requires structured token generation.")
+            if not isinstance(model, FullCodecSequenceGenerator):
+                raise TypeError(
+                    "full codec sequence requires constrained token generation."
+                )
             sequence = model.generate_full_codec_sequence(
                 prompt,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_p=top_p,
                 prompt_attention_mask=prompt_mask,
-                do_sample=do_sample,
-                use_cache=use_cache,
-            )
-        elif modality is Modality.AUDIO and _single_codebook_flattened(model):
-            prompt, prompt_mask, allowed_token_ids, remaining_tokens = (
-                _flattened_generation_inputs(
-                    prompt,
-                    prompt_mask,
-                    model,
-                    max_new_tokens=max_new_tokens,
-                )
-            )
-            sequence = model.generate_tokens(
-                prompt,
-                max_new_tokens=remaining_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                prompt_attention_mask=prompt_mask,
-                stop_token_id=stop_token_id,
-                allowed_token_ids=allowed_token_ids,
                 do_sample=do_sample,
                 use_cache=use_cache,
             )
@@ -189,54 +172,6 @@ def _inputs(
         prompt_mask[row, -value.numel() :] = True
 
     return prompt, prompt_mask
-
-
-def _single_codebook_flattened(model: TokenGenerator) -> bool:
-    tokenizer = model.runtime.audio_tokenizer
-    return (
-        model.runtime.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE
-        and isinstance(tokenizer, FlattenedAudioTokenizer)
-        and len(tokenizer.codebook_sizes) == 1
-    )
-
-
-def _flattened_generation_inputs(
-    prompt: Tensor,
-    prompt_mask: Tensor,
-    model: TokenGenerator,
-    *,
-    max_new_tokens: int,
-) -> tuple[Tensor, Tensor, tuple[int, ...], int]:
-    tokenizer = model.runtime.audio_tokenizer
-    if not isinstance(tokenizer, FlattenedAudioTokenizer):
-        raise TypeError("flattened generation requires FlattenedAudioTokenizer.")
-    if len(tokenizer.codebook_sizes) != 1:
-        raise ValueError("constrained flattened generation requires one codebook.")
-    start, _ = model.runtime.codec_audio_range
-    prefix = prompt.new_tensor(
-        [start + tokenizer.codec_token_id, start + tokenizer.codebook_token_ids[0]]
-    )
-    remaining_tokens = max_new_tokens - prefix.numel()
-    if remaining_tokens < 1:
-        raise ValueError(
-            "single-codebook full sequence generation requires max_new_tokens "
-            "to include the codec prefix and at least one payload token."
-        )
-    batch_prefix = prefix.unsqueeze(0).expand(prompt.size(0), -1)
-    prompt = torch.cat((prompt, batch_prefix), dim=1)
-    prompt_mask = torch.cat(
-        (
-            prompt_mask,
-            torch.ones_like(batch_prefix, dtype=torch.bool),
-        ),
-        dim=1,
-    )
-    codebook_size = tokenizer.codebook_sizes[0]
-    allowed_token_ids = (
-        *range(start, start + codebook_size),
-        model.runtime.eoa_token_id,
-    )
-    return prompt, prompt_mask, allowed_token_ids, remaining_tokens
 
 
 def _validate_request(request: Request, model: TokenGenerator) -> None:

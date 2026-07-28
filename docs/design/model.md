@@ -150,6 +150,10 @@ RVQ 只接收 `codebook_ar` generator。route、decoder topology、REPA 和 acou
 sequence、padded features 与每行有效 frame count。通用 cache、stop state、allowed IDs 和
 frame condition 的 `generate_sequence()` 循环位于私有
 `model/_generation.py`，只通过有类型的 `generation_step()` 驱动模型。
+`generate_full_codec_sequence()` 按 audio tokenizer 分派：frame-aligned
+`FlattenedAudioTokenizer` 使用 codebook-block 状态机，首码本决定 frame count 并约束后续等长
+payload；fixed-length `BiCodecAudioTokenizer` 使用 semantic/acoustic slot 状态机。service 不复制
+marker、range 或 block-length 规则。
 
 具体模型不跨文件调用 `_generate()` 或 `_acoustic_features()`。KV cache 只属于一次调用；
 首步编码完整 semantic-token prompt，后续只输入新 token。frame span lookup 是非持久 buffer，

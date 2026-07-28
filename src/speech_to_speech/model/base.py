@@ -11,8 +11,12 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.cache_utils import Cache
 
 from ._buffer import register
-from ._generation import generate_bicodec_sequence, generate_sequence
-from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
+from ._generation import (
+    generate_bicodec_sequence,
+    generate_flattened_sequence,
+    generate_sequence,
+)
+from ..runtime.audio_tokenizer import BiCodecAudioTokenizer, FlattenedAudioTokenizer
 from ._head import VocabularyHeadMixin
 from .adapter import AdapterType, create_adapter
 from .embedding import create_semantic_audio_modules
@@ -277,8 +281,24 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         use_cache: bool = True,
     ) -> torch.Tensor:
         tokenizer = self.runtime.audio_tokenizer
+        if isinstance(tokenizer, FlattenedAudioTokenizer):
+            return generate_flattened_sequence(
+                self,
+                prompt_ids,
+                codebook_ranges=tokenizer.codebook_ranges,
+                codec_token_id=tokenizer.codec_token_id,
+                codebook_token_ids=tokenizer.codebook_token_ids,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                prompt_attention_mask=prompt_attention_mask,
+                do_sample=do_sample,
+                use_cache=use_cache,
+            )
         if not isinstance(tokenizer, BiCodecAudioTokenizer):
-            raise TypeError("full structured generation requires BiCodecAudioTokenizer.")
+            raise TypeError(
+                "full codec sequence generation requires a structured audio tokenizer."
+            )
         return generate_bicodec_sequence(
             self,
             prompt_ids,

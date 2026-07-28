@@ -82,8 +82,9 @@ frame-aligned Flow/RVQ side channel。
 
 - `NativeAudioTokenizer`：单 semantic codebook identity tokenizer。
 - `FlattenedAudioTokenizer`：完整 codec codebook token 序列，先写 codec marker，再按 codebook
-  block 写 marker 和 offset 后的 code IDs；marker 的 frame span 为 0，首个 codebook token 的
-  frame span 为 1，用于 generation 统计输出帧数。
+  block 写 marker 和 offset 后的 code IDs；公开 `codebook_ranges` 作为 generation grammar
+  metadata。marker 的 frame span 为 0，首个 codebook token 的 frame span 为 1，用于 generation
+  统计输出帧数。
 - `TorchCodecBPE`：为 CodecBPE 增加 tensor API。
 - `BiCodecAudioTokenizer`：分别支持 semantic-only token 和 fixed-length structured full
   sequence；full sequence 的 acoustic payload 使用 slot-major 顺序。

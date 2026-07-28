@@ -965,37 +965,60 @@ class GenerationTest(unittest.TestCase):
         self.assertEqual(model.runtime.codec.decode_calls, 1)
 
     def test_full_codec_sequence_generation_decodes_complete_codes(self):
-        model = _FullSequenceGenerationModel()
-        request = Request(prompt_ids=torch.tensor([1]), task=Task.TTS)
+        for use_cache in (False, True):
+            with self.subTest(use_cache=use_cache):
+                model = _FullSequenceGenerationModel()
+                request = Request(prompt_ids=torch.tensor([1]), task=Task.TTS)
 
-        result = generate_responses(
-            [request],
-            model,
-            max_new_tokens=8,
-            do_sample=False,
-            use_cache=False,
-        )[0]
+                result = generate_responses(
+                    [request],
+                    model,
+                    max_new_tokens=8,
+                    do_sample=False,
+                    use_cache=use_cache,
+                )[0]
 
-        start, _ = model.runtime.codec_audio_range
-        expected_local = model.runtime.audio_tokenizer.encode(
-            torch.tensor([[1, 5], [2, 6]])
-        )
-        expected_response = expected_local + start
-        self.assertTrue(torch.equal(result["response_ids"], expected_response))
-        self.assertIsNotNone(result["audio"])
-        audio = result["audio"]
-        if audio is None:
-            self.fail("audio generation did not return an audio payload")
-        self.assertIsNone(audio["features"])
-        self.assertEqual(model.sample_calls, 0)
-        self.assertEqual(model.runtime.codec.decode_calls, 1)
-        self.assertTrue(
-            torch.equal(
-                model.runtime.codec.decoded_codes,
-                torch.tensor([[[1, 5], [2, 6]]]),
-            )
-        )
-        self.assertTrue(torch.equal(audio["waveform"], torch.tensor([6.0, 8.0])))
+                start, _ = model.runtime.codec_audio_range
+                tokenizer = model.runtime.audio_tokenizer
+                expected_local = tokenizer.encode(
+                    torch.tensor([[1, 5], [2, 6]])
+                )
+                expected_response = expected_local + start
+                self.assertTrue(
+                    torch.equal(result["response_ids"], expected_response)
+                )
+                self.assertEqual(
+                    [
+                        None if ids is None else ids.tolist()
+                        for ids in model.allowed_token_ids
+                    ],
+                    [
+                        [start + tokenizer.codec_token_id],
+                        [start + tokenizer.codebook_token_ids[0]],
+                        list(range(start, start + 4)),
+                        [*range(start, start + 4), start + tokenizer.codebook_token_ids[1]],
+                        [*range(start, start + 4), start + tokenizer.codebook_token_ids[1]],
+                        list(range(start + 4, start + 14)),
+                        list(range(start + 4, start + 14)),
+                        [model.runtime.eoa_token_id],
+                    ],
+                )
+                self.assertIsNotNone(result["audio"])
+                audio = result["audio"]
+                if audio is None:
+                    self.fail("audio generation did not return an audio payload")
+                self.assertIsNone(audio["features"])
+                self.assertEqual(model.sample_calls, 0)
+                self.assertEqual(model.runtime.codec.decode_calls, 1)
+                self.assertTrue(
+                    torch.equal(
+                        model.runtime.codec.decoded_codes,
+                        torch.tensor([[[1, 5], [2, 6]]]),
+                    )
+                )
+                self.assertTrue(
+                    torch.equal(audio["waveform"], torch.tensor([6.0, 8.0]))
+                )
 
     def test_single_codebook_full_sequence_forces_prefix_and_code_range(self):
         codes = torch.tensor([[1], [2]])
@@ -1042,17 +1065,64 @@ class GenerationTest(unittest.TestCase):
                     )
                 )
 
-    def test_single_codebook_prefix_counts_toward_generation_budget(self):
+    def test_flattened_markers_count_toward_generation_budget(self):
         model = _FullSequenceGenerationModel(
             torch.tensor([[1]]),
             codebook_sizes=(4,),
         )
 
-        with self.assertRaisesRegex(ValueError, "include the codec prefix"):
+        with self.assertRaisesRegex(ValueError, "markers.*EOA.*4 minimum"):
             generate_responses(
                 [Request(prompt_ids=torch.tensor([1]), task=Task.TTS)],
                 model,
                 max_new_tokens=2,
+                do_sample=False,
+                use_cache=False,
+            )
+
+        multi_codebook = _FullSequenceGenerationModel(
+            torch.tensor([[1, 5]]),
+            codebook_sizes=(4, 10),
+        )
+        with self.assertRaisesRegex(ValueError, "markers.*EOA.*6 minimum"):
+            generate_responses(
+                [Request(prompt_ids=torch.tensor([1]), task=Task.TTS)],
+                multi_codebook,
+                max_new_tokens=5,
+                do_sample=False,
+                use_cache=False,
+            )
+
+    def test_incomplete_flattened_sequence_fails_explicitly(self):
+        model = _FullSequenceGenerationModel()
+        start, _ = model.runtime.codec_audio_range
+        tokenizer = model.runtime.audio_tokenizer
+        model._tokens = [
+            start + tokenizer.codec_token_id,
+            start + tokenizer.codebook_token_ids[0],
+            *([start + 1] * 8),
+        ]
+
+        with self.assertRaisesRegex(ValueError, "exceeded max_new_tokens"):
+            generate_responses(
+                [Request(prompt_ids=torch.tensor([1]), task=Task.TTS)],
+                model,
+                max_new_tokens=8,
+                do_sample=False,
+                use_cache=False,
+            )
+
+        single_codebook = _FullSequenceGenerationModel(
+            torch.tensor([[1]]),
+            codebook_sizes=(4,),
+        )
+        start, _ = single_codebook.runtime.codec_audio_range
+        single_codebook._tokens = [start + 1] * 4
+        with self.assertRaisesRegex(ValueError, "did not produce EOA"):
+            generate_responses(
+                [Request(prompt_ids=torch.tensor([1]), task=Task.TTS)],
+                single_codebook,
+                max_new_tokens=4,
                 do_sample=False,
                 use_cache=False,
             )
