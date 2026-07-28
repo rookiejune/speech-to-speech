@@ -20,10 +20,11 @@ from speech_to_speech.task import Task
 class _RandomGenerationModule:
     def __init__(self, *, use_cuda: bool = False) -> None:
         self.use_cuda = use_cuda
+        self.draws: list[Tensor] = []
 
     def generate(self, requests: object, **kwargs: object) -> list[Result]:
         del requests, kwargs
-        torch.rand(4)
+        self.draws.append(torch.rand(4))
         if self.use_cuda:
             torch.rand(4, device=torch.device("cuda", torch.cuda.current_device()))
         return [Result(response_ids=torch.tensor([1]), audio=None)]
@@ -97,6 +98,16 @@ class RNGCallbackTest(unittest.TestCase):
         logger.on_train_batch_start(trainer, module, None, 0)
 
         self.assertTrue(torch.equal(torch.random.get_rng_state(), before))
+
+    def test_task_sample_logger_reuses_its_fixed_seed(self):
+        logger, trainer = task_sample_logger_fixture()
+        module = _RandomGenerationModule()
+
+        logger.on_train_batch_start(trainer, module, None, 0)
+        logger.on_train_batch_start(trainer, module, None, 1)
+
+        self.assertEqual(len(module.draws), 2)
+        self.assertTrue(torch.equal(module.draws[0], module.draws[1]))
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
     def test_task_sample_logger_preserves_current_cuda_rng(self):

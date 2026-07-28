@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Type, TypeVar, Union, cast
 
-from anydataset.types import AudioView
+from anydataset.types import AudioView, Modality
 from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf
 
 from speech_to_speech.datamodule.config import SpeechConfig
@@ -30,6 +30,7 @@ from speech_to_speech.stage import (
     StageConfig,
     StageName,
 )
+from speech_to_speech.task import Task
 
 
 @dataclass
@@ -129,11 +130,20 @@ class TaskSampleCallbackConfig:
 
 
 @dataclass
+class TaskSamplePanelConfig:
+    split: str = "train"
+    loader: str = MISSING
+    task: str = MISSING
+    indices: list[int] = field(default_factory=list)
+
+
+@dataclass
 class StagedTaskSampleCallbackConfig:
     enabled: bool = False
     every_n_steps: int = 10_000
     every_audio_seconds: Optional[float] = None
-    indices_by_loader: dict[str, list[int]] = field(default_factory=dict)
+    panels: list[TaskSamplePanelConfig] = field(default_factory=list)
+    seed: int = 0
     max_new_tokens: int = 256
     temperature: float = 1.0
     top_p: float = 1.0
@@ -344,28 +354,78 @@ def _validate_task_samples(config: StagedTrainConfig) -> None:
         raise ValueError("task sample every_n_steps must be a positive integer.")
     if not callback.enabled:
         return
-    if not callback.indices_by_loader:
-        raise ValueError(
-            "enabled staged task samples require indices_by_loader."
-        )
-    for loader_name, indices in callback.indices_by_loader.items():
+    if isinstance(callback.seed, bool) or not isinstance(callback.seed, int):
+        raise TypeError("task sample seed must be an integer.")
+    if callback.seed < 0:
+        raise ValueError("task sample seed must be non-negative.")
+    if not callback.panels:
+        raise ValueError("enabled staged task samples require panels.")
+    seen: set[tuple[str, str, str, int]] = set()
+    for panel in callback.panels:
+        if panel.split not in {"train", "validation"}:
+            raise ValueError("task sample split must be 'train' or 'validation'.")
+        loader_name = panel.loader
         if not isinstance(loader_name, str) or not loader_name:
             raise TypeError("task sample loader names must be non-empty strings.")
         if loader_name not in config.stage.loaders:
             raise ValueError(
                 f"task sample callback references unknown loader {loader_name!r}."
             )
-        if not indices:
+        loader = config.stage.loaders[loader_name]
+        if _is_text_task_loader(loader.task_weights):
+            raise ValueError("task sample panels require speech loaders.")
+        try:
+            task = Task(panel.task)
+        except ValueError as error:
+            raise ValueError(f"unknown task sample task {panel.task!r}.") from error
+        if loader.task_weights.get(task.value, 0.0) <= 0:
+            raise ValueError(
+                f"task sample task {task.value!r} is not active in loader "
+                f"{loader_name!r}."
+            )
+        if not panel.indices:
             raise ValueError(
                 f"task sample indices for loader {loader_name!r} must not be empty."
             )
         if any(
             isinstance(index, bool) or not isinstance(index, int) or index < 0
-            for index in indices
+            for index in panel.indices
         ):
             raise ValueError(
                 f"task sample indices for loader {loader_name!r} must be non-negative integers."
             )
+        for index in panel.indices:
+            key = (panel.split, loader_name, task.value, index)
+            if key in seen:
+                raise ValueError(f"duplicate task sample panel row: {key!r}.")
+            seen.add(key)
+        if panel.split == "validation":
+            if not config.validation.enabled:
+                raise ValueError(
+                    "validation task sample panels require validation.enabled=true."
+                )
+            _validate_validation_dataset(config)
+
+
+def _is_text_task_loader(task_weights: dict[str, float]) -> bool:
+    tasks = [Task(name) for name, weight in task_weights.items() if weight > 0]
+    return all(
+        task.source_modality is not Modality.AUDIO
+        and task.target_modality is Modality.TEXT
+        for task in tasks
+    )
+
+
+def _validate_validation_dataset(config: StagedTrainConfig) -> None:
+    dataset = config.data.dataset
+    if dataset.split_manifest is None:
+        raise ValueError(
+            "validation task sample panels require data.dataset.split_manifest."
+        )
+    if config.validation.split_label == dataset.split_label:
+        raise ValueError(
+            "validation task sample split must differ from the train split_label."
+        )
 
 
 def _validate_validation(config: StagedTrainConfig) -> None:

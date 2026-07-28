@@ -130,11 +130,14 @@ training wrapper，调用 `scripts/train.py`，默认 `trainer=static_ddp`，并
 
 `jobs/015/01_stable_codec_stage1.sh` 是 Stable Codec 的默认长跑入口：固定
 `runtime=stable_codec`、`full_codec_sequence`（不使用 audio BPE）、stage 1 的 ASR/TTS
-双 loader、1,000,000 optimizer steps 和每 10,000 steps 的 checkpoint。它还为两个
-loader 各启用 fixed-sample callback；Stable 的 FrameCodec 路径没有独立的 acoustic
-teacher-forcing，因此 TTS TensorBoard audio 记录 codec 重建的 `target` 和自回归
-`generated`。只有 Flow/RVQ acoustic 路径才会额外记录 `reference_generation`；ASR
-记录 target/reference 与 generated text。
+双 loader、1,000,000 optimizer steps 和每 10,000 steps 的 checkpoint。它启用每 10,000 steps
+  的 teacher-forcing dev validation，并为 ASR/TTS 各配置 train/dev 三条固定样本 panel；panel
+  显式绑定 split、loader、task 与 indices，不依赖 mixed-task allocation。Stable 的 FrameCodec
+  路径没有独立的 acoustic
+  teacher-forcing，因此 TTS TensorBoard audio 记录 codec 重建的 `target` 和自回归
+  `generated`。只有 Flow/RVQ acoustic 路径才会额外记录 `reference_generation`；ASR 记录
+  source audio、target/generated text 与无外部模型的字符回归指标。所有 panel 使用固定 seed；
+  waveform health 指标也只基于现有生成结果，不加载 ASR/MOS/speaker evaluator。
 该 wrapper 要求显式设置 `SPEECH_TO_SPEECH_STABLE_PYTHON`，因为 Stable Codec 的
 `stable-codec` 依赖使用独立兼容环境，不能默认复用普通训练 Python。
 

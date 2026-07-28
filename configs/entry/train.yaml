@@ -62,7 +62,8 @@ callbacks:
     enabled: false
     every_n_steps: 10000
     every_audio_seconds:
-    indices_by_loader: {}
+    panels: []
+    seed: 0
     max_new_tokens: 256
     temperature: 1.0
     top_p: 1.0

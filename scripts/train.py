@@ -20,7 +20,7 @@ from speech_to_speech.callback.logging import (
     OutputsLogger,
     TaskSampleLogger,
 )
-from speech_to_speech.datamodule import DataModule
+from speech_to_speech.datamodule import DataModule, SampleSplit
 from speech_to_speech.datamodule.joint import LoaderSchedule
 from speech_to_speech.datamodule.module import LoaderSpec
 from speech_to_speech.model.acoustic import AcousticType
@@ -247,16 +247,20 @@ def training_callbacks(
     if validation_history is not None:
         callbacks.append(validation_history)
     if config.callbacks.task_sample.enabled:
-        for loader_name, indices in config.callbacks.task_sample.indices_by_loader.items():
+        for panel in config.callbacks.task_sample.panels:
+            loader_name = panel.loader
             if loader_name not in config.stage.loaders:
                 raise ValueError(
                     f"task sample callback references unknown loader {loader_name!r}."
                 )
             callbacks.append(
                 TaskSampleLogger(
-                    indices,
+                    panel.indices,
                     config.callbacks.task_sample.every_n_steps,
                     loader_name=loader_name,
+                    split=SampleSplit(panel.split),
+                    task=Task(panel.task),
+                    seed=config.callbacks.task_sample.seed,
                     every_audio_seconds=config.callbacks.task_sample.every_audio_seconds,
                     max_new_tokens=config.callbacks.task_sample.max_new_tokens,
                     temperature=config.callbacks.task_sample.temperature,

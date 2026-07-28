@@ -15,6 +15,7 @@ from ._text import TextLoader
 from .collator import Collator
 from .config import DataLoaderConfig, SpeechConfig
 from .dataset import load_dataset
+from .diagnostic import SampleSplit
 from .joint import LoaderSchedule, ScheduledDataLoader
 from .protocol import (
     DataRuntime,
@@ -155,6 +156,17 @@ class _SpeechLoader:
             raise RuntimeError("DataModule.setup() must run before reading samples.")
         return [self._dataset[index] for index in indices]
 
+    def diagnostic_collator(
+        self,
+        task: Task,
+    ) -> Callable[[list[RawSample]], ConcreteTrainInput]:
+        return _collator(
+            self.config.shape,
+            self.runtime,
+            {task: 1.0},
+            encode_missing_codes=self.config.encode_missing_codes,
+        )
+
     def train_dataloader(self) -> Iterable[ConcreteTrainInput]:
         return self._dataloader(shuffle=True)
 
@@ -285,6 +297,24 @@ class DataModule(LightningDataModule):
         loader = self._single_loader(loader_name, "read collator")
         return loader.collator
 
+    def diagnostic_samples(
+        self,
+        indices: Sequence[int],
+        *,
+        split: SampleSplit,
+        loader_name: str,
+    ) -> list[RawSample]:
+        return self._diagnostic_loader(split, loader_name).train_samples(indices)
+
+    def diagnostic_collator(
+        self,
+        task: Task,
+        *,
+        split: SampleSplit,
+        loader_name: str,
+    ) -> Callable[[list[RawSample]], ConcreteTrainInput]:
+        return self._diagnostic_loader(split, loader_name).diagnostic_collator(task)
+
     def train_dataloader(self) -> Iterable[TrainInputBatch]:
         loaders = {
             name: loader.train_dataloader() for name, loader in self._loaders.items()
@@ -312,6 +342,32 @@ class DataModule(LightningDataModule):
             return self._loaders[loader_name]
         except KeyError as error:
             raise ValueError(f"unknown loader {loader_name!r}.") from error
+
+    def _diagnostic_loader(
+        self,
+        split: SampleSplit,
+        loader_name: str,
+    ) -> _SpeechLoader:
+        if not isinstance(split, SampleSplit):
+            raise TypeError("diagnostic split must be a SampleSplit.")
+        try:
+            spec = self.loader_specs[loader_name]
+        except KeyError as error:
+            raise ValueError(f"unknown loader {loader_name!r}.") from error
+        if spec.kind is not LoaderKind.SPEECH:
+            raise ValueError("diagnostic samples require a speech loader.")
+        loader = (
+            self._loaders[loader_name]
+            if split is SampleSplit.TRAIN
+            else self._validation_loader
+        )
+        if loader is None:
+            raise RuntimeError(
+                "validation diagnostic samples require a validation dataset."
+            )
+        if not isinstance(loader, _SpeechLoader):
+            raise TypeError("diagnostic samples require an internal speech loader.")
+        return loader
 
 
 def _build_loader(

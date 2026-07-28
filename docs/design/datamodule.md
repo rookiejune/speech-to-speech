@@ -84,6 +84,8 @@ checkpoint 的收敛和生成音质仍需单独验收。
   加载已持有的数据集。fixed-sample overfit 只是 speech spec 的 `sample_index` 变体，仍复用
   `train_samples()` 边界供 callback 读取 raw sample。可选 `validation` 是独立的 `LoaderSpec`；
   `val_dataloader()` 不进入 train schedule，也不复用 train loader instance。
+  `diagnostic_samples()` 显式选择 train/validation 数据源；`diagnostic_collator()` 为 panel 指定的
+  单一 task 构造独立 collator，不修改训练 loader 的共享 task weights。
 
 ## 输入输出
 
@@ -206,6 +208,8 @@ acoustic_target: AcousticTarget | None
 - validation speech loader 使用同一公开 batch planner 和 distributed partition，但显式关闭
   shuffle。正式 train 入口从一个现有 stage speech loader 复制 task weights 与 speech config，
   只把复制后的 `DatasetConfig.split_label` 改为 dev；训练 spec 与 dataset config 保持不变。
+  validation diagnostic panel 读取该独立数据源，但使用 panel 的 task-specific collator，因此同一
+  paired speech split 可同时监督 ASR 与 TTS generation。
 - train loader 与 validation loader 使用独立的窄 Protocol。没有 validation spec 时
   `DataModule.val_dataloader()` 返回空 iterable，Lightning 不运行 validation；text loader 不提供
   `validation_dataloader()`，把 text spec 作为 validation 传入时在 DataModule 构造边界直接报错，

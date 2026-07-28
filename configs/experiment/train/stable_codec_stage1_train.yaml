@@ -13,6 +13,13 @@ output_subdir: stable-codec-stage1/${run_name}
 train:
   max_steps: 1000000
 
+validation:
+  enabled: true
+  loader: tts
+  split_label: dev
+  every_n_steps: 10000
+  sanity_steps: 0
+
 trainer:
   log_every_n_steps: 10
   enable_checkpointing: true
@@ -21,9 +28,24 @@ callbacks:
   task_sample:
     enabled: true
     every_n_steps: 10000
-    indices_by_loader:
-      asr: [0]
-      tts: [0]
+    seed: 0
+    panels:
+      - split: train
+        loader: asr
+        task: asr
+        indices: [0, 1, 2]
+      - split: validation
+        loader: asr
+        task: asr
+        indices: [0, 1, 2]
+      - split: train
+        loader: tts
+        task: tts
+        indices: [0, 1, 2]
+      - split: validation
+        loader: tts
+        task: tts
+        indices: [0, 1, 2]
     max_new_tokens: 512
     temperature: 1.0
     top_p: 1.0

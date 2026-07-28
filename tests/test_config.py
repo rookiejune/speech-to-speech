@@ -653,7 +653,11 @@ class ConfigTest(unittest.TestCase):
 
     def test_stable_codec_stage1_long_run_enables_fixed_samples_for_asr_and_tts(self):
         config = parse_train(
-            _compose("train", "experiment=train/stable_codec_stage1_train")
+            _compose(
+                "train",
+                "experiment=train/stable_codec_stage1_train",
+                "data.dataset.split_manifest=/tmp/splits.json",
+            )
         )
 
         self.assertEqual(config.train.max_steps, 1_000_000)
@@ -662,11 +666,31 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.runtime.audio_representation.value, "full_codec_sequence")
         self.assertIsNone(config.runtime.audio_tokenizer)
         self.assertTrue(config.callbacks.task_sample.enabled)
+        self.assertTrue(config.validation.enabled)
+        self.assertEqual(config.validation.every_n_steps, 10_000)
+        self.assertEqual(config.validation.sanity_steps, 0)
         self.assertEqual(
-            config.callbacks.task_sample.indices_by_loader,
-            {"asr": [0], "tts": [0]},
+            [
+                (panel.split, panel.loader, panel.task, panel.indices)
+                for panel in config.callbacks.task_sample.panels
+            ],
+            [
+                ("train", "asr", "asr", [0, 1, 2]),
+                ("validation", "asr", "asr", [0, 1, 2]),
+                ("train", "tts", "tts", [0, 1, 2]),
+                ("validation", "tts", "tts", [0, 1, 2]),
+            ],
         )
         self.assertEqual(config.callbacks.checkpoint.every_n_train_steps, 10_000)
+
+    def test_validation_sample_panel_requires_validation_dataset(self):
+        with self.assertRaisesRegex(ValueError, "split_manifest"):
+            parse_train(
+                _compose(
+                    "train",
+                    "experiment=train/stable_codec_stage1_train",
+                )
+            )
 
     def test_fdu_stage_smoke_configs_cover_formal_train_stages(self):
         stage_0 = overfit(_compose("overfit", "experiment=fdu_stage_0_smoke"))

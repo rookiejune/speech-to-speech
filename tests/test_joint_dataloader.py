@@ -11,6 +11,7 @@ from speech_to_speech.datamodule.dataset import DatasetConfig
 from speech_to_speech.datamodule.joint import LoaderSchedule, ScheduledDataLoader
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.module import DataModule, LoaderSpec
+from speech_to_speech.datamodule.diagnostic import SampleSplit
 from speech_to_speech.datamodule.text import TextConfig
 from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.task import Task
@@ -112,6 +113,51 @@ class ScheduledDataLoaderTest(unittest.TestCase):
         train_loader.train_dataloader.assert_called_once_with()
         validation_loader.validation_dataloader.assert_called_once_with()
         validation_loader.train_dataloader.assert_not_called()
+
+    def test_diagnostic_panels_select_train_or_validation_data_and_one_task(self) -> None:
+        train_spec = LoaderSpec.speech(
+            SpeechConfig(
+                codec="longcat",
+                dataloader=DataLoaderConfig(batch_size=2, num_workers=0),
+                dataset=DatasetConfig(split_label="train"),
+            ),
+            {Task.TTS: 0.5, Task.T2ST: 0.5},
+        )
+        validation_spec = LoaderSpec.speech(
+            SpeechConfig(
+                codec="longcat",
+                dataloader=DataLoaderConfig(batch_size=2, num_workers=0),
+                dataset=DatasetConfig(split_label="dev"),
+            ),
+            {Task.TTS: 0.5, Task.T2ST: 0.5},
+        )
+        train_samples = [object(), object()]
+        validation_samples = [object(), object(), object()]
+        runtime = Mock(codec_name="longcat")
+
+        with patch(
+            "speech_to_speech.datamodule.module.load_dataset",
+            side_effect=[train_samples, validation_samples],
+        ):
+            datamodule = DataModule(
+                runtime,
+                {"speech": train_spec},
+                validation=validation_spec,
+            )
+            datamodule.setup("fit")
+            train = datamodule.diagnostic_samples(
+                [1], split=SampleSplit.TRAIN, loader_name="speech"
+            )
+            validation = datamodule.diagnostic_samples(
+                [2], split=SampleSplit.VALIDATION, loader_name="speech"
+            )
+            collator = datamodule.diagnostic_collator(
+                Task.T2ST, split=SampleSplit.VALIDATION, loader_name="speech"
+            )
+
+        self.assertEqual(train, [train_samples[1]])
+        self.assertEqual(validation, [validation_samples[2]])
+        self.assertEqual(collator.tasks, [Task.T2ST])
 
     def test_datamodule_without_validation_does_not_build_a_val_loader(self) -> None:
         spec = LoaderSpec.speech(

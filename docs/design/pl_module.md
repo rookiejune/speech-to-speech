@@ -55,15 +55,21 @@ model 构造器不接收路径或执行文件 I/O。
   并把可恢复的 report 写入 `metrics.json`。本项目不重复实现 history state 或 scalar 校验。
 - `AcousticEvaluation`：对 fixed-sample acoustic model 使用本地 generator seeds 采样，记录 feature、
   waveform 与 STFT 距离；纯评估函数位于 `generation.evaluation`，不留在脚本私有模块。
-- `TaskSampleLogger`：只在 global zero 读取 datamodule 的公开 `train_samples()`/`collator_for()`，
-  通过 module 的 `materialize_batch()` 获得标准 batch，并用 `ModelBatch.row()` 保持 raw sample、
+- `TaskSampleLogger`：只在 global zero 读取 datamodule 的公开 fixed-sample/diagnostic API，正式训练
+  panel 显式绑定 `train|validation + loader + task + indices`，因此 mixed-task loader 不依赖训练
+  collator 的 task allocation。dev panel 复用正式 validation 的独立数据源；通过 module 的
+  `materialize_batch()` 获得标准 batch，并用 `ModelBatch.row()` 保持 raw sample、
   generation request 与 teacher-forcing reference 逐行对齐。pair 数据严格读取 source/target role，
-  single 数据严格读取 `Role.DEFAULT`，不靠缺项 fallback 猜测形态。callback 可按 loader 固定样本，
-  按真实 task 记录 source/target/generated；TTS acoustic batch 还记录
+  single 数据严格读取 `Role.DEFAULT`，不靠缺项 fallback 猜测形态。audio-source task 记录可播放的
+  source waveform；所有 panel 按真实 task 记录 source/target/generated。TTS acoustic batch 还记录
   target waveform 与 teacher-forced `reference_generation`，并复用一次自回归 generation 的
   token、features 与 waveform。Stable Codec 的 full-code 路径没有 acoustic teacher-forcing，
-  因此只记录 codec 重建的 target 与自回归 generated。它不重复计算 loss。每个 callback 的
-  checkpoint state key 包含 loader、固定样本 indices 和 cadence，使 ASR/TTS 多实例可独立恢复。
+  因此只记录 codec 重建的 target 与自回归 generated。callback 在隔离 RNG context 内应用固定 seed，
+  使不同 step 的生成可比较。它还记录 generation 长度/截断、规范化字符错误率与 exact match，
+  以及 waveform duration ratio、finite、RMS、peak、silence/clipping ratio；这些指标只使用已有
+  text/waveform，不加载 ASR、MOS、speaker encoder 或其他评估模型，也不替代语义质量验收。每个
+  callback 的 checkpoint state key 包含 split、loader、task、seed、indices 和 cadence，使 panel
+  实例可独立恢复。
 - `TextRetentionLogger`：记录 text probe generation、reference NLL 与相对基线漂移。
 
 上述 callback 需要 logger experiment 时统一通过 `anytrain.lightning.experiment` 获取 text、scalar、
@@ -76,7 +82,7 @@ Protocol/helper。
 `anytrain` 不接收这个契约，因为它不拥有下游 batch schema 或 `AudioMeta.DURATION` 语义。
 
 Task sample/evaluation callback 在隔离 RNG context 内运行，不改变后续训练的 CPU 或当前 CUDA
-random state。
+random state；固定 seed 只服务于同一样本跨 step 比较。
 
 ## performance
 

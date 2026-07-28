@@ -4,10 +4,16 @@ from typing import Union
 
 from anydataset import types
 
+from .._compat import StrEnum, auto
 from ..task import Task
 
 SampleItem = Union[types.AudioItem, types.TextItem]
 SampleRef = tuple[types.Role, SampleItem]
+
+
+class SampleSplit(StrEnum):
+    TRAIN = auto()
+    VALIDATION = auto()
 
 
 def source_item(sample: types.Sample, task: Task) -> SampleRef | None:
@@ -50,4 +56,10 @@ def _item(
     return role, item
 
 
-__all__ = ["SampleItem", "SampleRef", "source_item", "target_item"]
+__all__ = [
+    "SampleItem",
+    "SampleRef",
+    "SampleSplit",
+    "source_item",
+    "target_item",
+]
