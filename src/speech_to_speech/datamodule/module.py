@@ -406,10 +406,12 @@ def _collator(
     *,
     encode_missing_codes: bool = False,
 ):
-    if encode_missing_codes and shape is not DataShape.SINGLE:
-        raise ValueError("encode_missing_codes requires data shape single.")
     if shape is DataShape.PAIR:
-        return Collator(runtime, task_weights)
+        return Collator(
+            runtime,
+            task_weights,
+            encode_missing_codes=encode_missing_codes,
+        )
     if shape is DataShape.SINGLE:
         return SingleCollator(
             runtime,

@@ -18,6 +18,8 @@
   `AudioView` 与 runtime `audio_representation`，将解耦路线的 LongCat codebooks 分成
   semantic/acoustic codes，或在 `full_codec_sequence` 下把完整 codec codes 作为 token
   supervision，并生成 text/audio token IDs 与 audio token spans。
+- `parser.parse_task_sample()`：按 `Task` 只解析实际消费的 source/target modality。pair/single
+  只决定 role 映射；codec view 缺失时是否使用 waveform fallback 与数据 shape 无关。
 - `single.SingleCollator` / `single.parse_single_sample()`：处理 single utterance 数据形态，
   即同一条 utterance 同时提供 text 与 audio/codes。TTS、ASR、TEXT_AR、AUDIO_AR 共用该
   path，由 task 决定同一 utterance 的哪个 modality 作为 source/target；pair translation path
@@ -27,7 +29,9 @@
   positions。
 - `single.build_single_sample()`：复用同一 `ModelSample` / `ModelBatch` 输出契约，把 single
   utterance 组装成 text->audio 或 audio->text 序列；`pl_module` 不区分 batch 来源。
-- `types.Speech` / `types.SpeechPair`：raw sample 的 codec、token 和语言逻辑视图。
+- `types.Speech` / `types.SpeechPair`：prepared sample 的 codec、token 和语言逻辑视图；
+  `RawSpeech` / `SpeechTaskSample` / `RawSpeechBatch` 表达 task 已选择、但部分 audio item 尚待
+  codec encode 的中间状态。
 - `types.ModelSample` / `types.ModelBatch`：单条和 batch 级模型输入；
   `ModelBatch.from_samples(..., pad_token_id=...)` 完成校验与 padding，mask 由 padding 字段
   派生并缓存。
@@ -103,10 +107,12 @@ raw Sample(Role.DEFAULT)
     -> ModelBatch.from_samples(pad_token_id=runtime.pad_token_id) -> ModelBatch
 ```
 
-debug fallback 可显式设置 `encode_missing_codes=true`，在缺少 codec codes 但存在
-`AudioView.WAVEFORM` 时让 collator 返回 `RawSingleBatch`。该 batch 不能直接进入 objective；
-训练入口必须给 `SpeechToSpeechModule` 挂 `OnDeviceCodecMaterializer`，在 GPU/device 上调用
-runtime codec encode 后再构造标准 `ModelBatch`。
+debug fallback 可显式设置 `encode_missing_codes=true`。pair 与 single collator 都只检查当前 task
+实际消费的 audio item：已有 runtime codec view 时直接解析；缺少 codes 但存在
+`AudioView.WAVEFORM` 时返回 `RawSpeechBatch`；既没有 codes 也没有 waveform 时明确报错。该 batch
+不能直接进入 objective；训练入口必须给 `SpeechToSpeechModule` 挂
+`OnDeviceCodecMaterializer`，在 GPU/device 上调用 runtime codec encode 后再构造标准
+`ModelBatch`。同一 batch 可以混合 prepared-code item 和 raw waveform item。
 
 `ModelSample` 和 `ModelBatch` 使用同一组核心字段：
 
@@ -134,12 +140,15 @@ acoustic_target: AcousticTarget | None
   协议。datamodule 不自行选择 tokenizer、layout 或 special tokens。
 - datamodule 按数据形态拆分 pair/single，而不是按 TTS/ASR 拆分。pair path 拥有 source/target
   role 选择；single path 拥有同一 utterance 内 text/audio 的方向选择。`Task.uses_source_role`
-  只服务 pair path，single path 不用它推断 dataset role。
+  只服务 pair path，single path 不用它推断 dataset role。在线 codec encode 不属于 shape 规则；
+  它只由 task 实际消费的 audio item 是否缺少 runtime codec view 决定。
 - `SpeakerAudioGrid.rows` 是检查/对比 speaker 轴的 grouped view，不进入训练。Qwen TTS 训练只消费
   `cells`，并要求每个 cell 在 `Role.DEFAULT` 下同时提供 text/audio；adapter 不静默重写 role。
 - 正式训练路径优先使用预先 materialize 的 codec codes。训练时 wav->codes 只作为显式 debug
   fallback：普通 DataLoader worker 不持有 codec/CUDA module，fallback batch 必须在
-  `pl_module` loss 前经 on-device materializer 转为 `ModelBatch`。
+  `pl_module` loss 前经 on-device materializer 转为 `ModelBatch`。materializer 对 S2ST 编码 source
+  和 target，对 S2TT/ASR 只编码音频 source，对 T2ST/TTS 只编码音频 target；纯文本 task 不调用
+  codec。
 - toy dataset 只读取正式 runtime 的 codec identity 与 codebook metadata；它不提供 tokenizer、
   codec、layout 或 special token，因此不存在 toy runtime 分支。
 - `parser.py` 只解释 raw dataset representation；`sample.py` 只实现任务序列规则；

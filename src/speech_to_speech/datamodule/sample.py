@@ -14,8 +14,10 @@ from .types import (
     AcousticTarget,
     Language,
     ModelSample,
+    RawSpeech,
     Speech,
     SpeechPair,
+    SpeechTaskSample,
     Text,
     TextPair,
 )
@@ -33,6 +35,22 @@ def build_sample(
     return build_speech_sample(source, target, task, runtime, prompt=prompt)
 
 
+def build_task_sample(sample: SpeechTaskSample, runtime: DataRuntime) -> ModelSample:
+    if sample.needs_codec:
+        raise ValueError("raw speech task samples must be materialized before building.")
+    source = sample.source
+    target = sample.target
+    if isinstance(source, RawSpeech) or isinstance(target, RawSpeech):
+        raise AssertionError("materialized task samples must not contain RawSpeech.")
+    return _build_modal_sample(
+        source,
+        target,
+        sample.task,
+        runtime,
+        prompt=chat_prompt(target.language, sample.task, runtime),
+    )
+
+
 def build_speech_sample(
     source: Speech,
     target: Speech,
@@ -41,9 +59,22 @@ def build_speech_sample(
     *,
     prompt: str,
 ) -> ModelSample:
+    return _build_modal_sample(source, target, task, runtime, prompt=prompt)
+
+
+def _build_modal_sample(
+    source: Speech | Text | None,
+    target: Speech | Text,
+    task: Task,
+    runtime: DataRuntime,
+    *,
+    prompt: str,
+) -> ModelSample:
     source_modality = task.source_modality
     target_modality = task.target_modality
     if source_modality is not None:
+        if source is None:
+            raise ValueError("tasks with a source modality require a source item.")
         prefix_text, suffix_text = _split(prompt, _PLACEHOLDER)
         tokenizer = runtime.text_tokenizer
         prefix = token_ids(prefix_text, tokenizer)
@@ -61,8 +92,12 @@ def build_speech_sample(
     target_acoustic_codes = None
     target_semantic_codes = None
     target_audio_token_positions = None
+    audio_target: Speech | None = None
 
     if target_modality is Modality.AUDIO:
+        if not isinstance(target, Speech):
+            raise TypeError("audio target must be Speech.")
+        audio_target = target
         response_ids = _boa_eoa(response_ids, runtime)
         if target.acoustic_codes is not None and runtime.semantic_codec_artifact is None and (
             runtime.audio_representation is not AudioRepresentation.FULL_CODEC_SEQUENCE
@@ -81,13 +116,15 @@ def build_speech_sample(
         token_labels[len(input_ids) :] = response_ids
 
     if target_acoustic_codes is not None:
+        if audio_target is None:
+            raise AssertionError("acoustic target requires an audio target.")
         target_audio_token_positions = torch.repeat_interleave(
             torch.arange(
                 len(input_ids) + 1,
-                len(input_ids) + 1 + target.audio_token_ids.numel(),
+                len(input_ids) + 1 + audio_target.audio_token_ids.numel(),
                 dtype=torch.long,
             ),
-            target.audio_token_spans,
+            audio_target.audio_token_spans,
         )
         if target_audio_token_positions.numel() != target_acoustic_codes.size(0):
             raise ValueError("target acoustic frames and audio tokens must align.")
@@ -201,12 +238,16 @@ def _source_target(speech_pair: SpeechPair, task: Task) -> tuple[Speech, Speech]
     return speech_pair.target, speech_pair.target
 
 
-def _audio_seconds(source: Speech, target: Speech, task: Task) -> float:
+def _audio_seconds(
+    source: Speech | Text | None,
+    target: Speech | Text,
+    task: Task,
+) -> float:
     seconds = 0.0
     if task.source_modality is Modality.AUDIO:
-        seconds += _duration(source, role="source")
+        seconds += _duration(_speech(source, role="source"), role="source")
     if task.target_modality is Modality.AUDIO:
-        seconds += _duration(target, role="target")
+        seconds += _duration(_speech(target, role="target"), role="target")
     return seconds
 
 
@@ -218,6 +259,12 @@ def _duration(speech: Speech, *, role: str) -> float:
             "from codec frames."
         )
     return float(speech.duration_seconds)
+
+
+def _speech(item: Speech | Text | None, *, role: str) -> Speech:
+    if not isinstance(item, Speech):
+        raise TypeError(f"audio {role} must be Speech.")
+    return item
 
 
 def _text_source_target(text_pair: TextPair, task: Task) -> tuple[Text, Text]:
@@ -234,14 +281,14 @@ def _split(sequence: str, delimiter: str) -> tuple[str, str]:
 
 
 def _global_ids(
-    speech: Speech,
+    item: Speech | Text,
     modality: Modality,
     runtime: DataRuntime,
 ) -> Tensor:
     if modality is Modality.TEXT:
-        local_ids = speech.text_token_ids
+        local_ids = item.text_token_ids
     elif modality is Modality.AUDIO:
-        local_ids = speech.audio_token_ids
+        local_ids = _speech(item, role="item").audio_token_ids
     else:
         raise ValueError(f"unsupported modality: {modality.value}")
     return runtime.layout.to_global(modality.value, local_ids)

@@ -10,7 +10,7 @@ from anytrain.optim.llm import create_optimizer
 from lightning.pytorch import LightningModule
 from torch import nn
 
-from ..datamodule.types import ModelBatch, RawSingleBatch, TrainBatch, TrainInputBatch
+from ..datamodule.types import ModelBatch, RawSpeechBatch, TrainBatch, TrainInputBatch
 from ..generation.service import generate_responses
 from ..generation.text import TextProbe, TextProbeResult, evaluate_text
 from ..generation.types import Request, Result
@@ -107,9 +107,9 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
 
     def materialize_batch(self, batch: TrainInputBatch) -> TrainBatch:
         if self.batch_materializer is None:
-            if isinstance(batch, RawSingleBatch) or (
+            if isinstance(batch, RawSpeechBatch) or (
                 isinstance(batch, tuple)
-                and any(isinstance(item, RawSingleBatch) for item in batch)
+                and any(isinstance(item, RawSpeechBatch) for item in batch)
             ):
                 raise TypeError(
                     "raw waveform batches require a batch materializer before loss."

@@ -42,8 +42,6 @@ class SpeechConfig:
             raise TypeError("data shape must be a DataShape.")
         if not isinstance(self.encode_missing_codes, bool):
             raise TypeError("encode_missing_codes must be a boolean.")
-        if self.encode_missing_codes and self.shape is not DataShape.SINGLE:
-            raise ValueError("encode_missing_codes requires data shape single.")
         if (
             self.dataset.name is DatasetName.QWEN_TTS_SPEAKER
             and self.shape is not DataShape.SINGLE

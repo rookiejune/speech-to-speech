@@ -11,9 +11,18 @@ from torch import Tensor
 
 from ._tokenization import token_ids
 from .protocol import DataRuntime, TextRuntime
-from .types import Language, Speech, SpeechPair, Text, TextPair
+from .types import (
+    Language,
+    RawSpeech,
+    Speech,
+    SpeechPair,
+    SpeechTaskSample,
+    Text,
+    TextPair,
+)
 from ..runtime import AudioRepresentation
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
+from ..task import Task
 
 
 def parse_sample(sample: types.Sample, runtime: DataRuntime) -> SpeechPair:
@@ -21,6 +30,33 @@ def parse_sample(sample: types.Sample, runtime: DataRuntime) -> SpeechPair:
         _parse_role(sample, types.Role.SOURCE, runtime),
         _parse_role(sample, types.Role.TARGET, runtime),
     )
+
+
+def parse_task_sample(
+    sample: types.Sample,
+    task: Task,
+    runtime: DataRuntime,
+    *,
+    encode_missing_codes: bool = False,
+) -> SpeechTaskSample:
+    source = None
+    if task.source_modality is not None:
+        source_role = types.Role.SOURCE if task.uses_source_role else types.Role.TARGET
+        source = _parse_task_item(
+            sample,
+            source_role,
+            task.source_modality,
+            runtime,
+            encode_missing_codes=encode_missing_codes,
+        )
+    target = _parse_task_item(
+        sample,
+        types.Role.TARGET,
+        task.target_modality,
+        runtime,
+        encode_missing_codes=encode_missing_codes,
+    )
+    return SpeechTaskSample(source=source, target=target, task=task)
 
 
 def parse_text_sample(sample: types.Sample, runtime: TextRuntime) -> TextPair:
@@ -122,8 +158,16 @@ def _parse_role(
     role: types.Role,
     runtime: DataRuntime,
 ) -> Speech:
-    audio_item = cast(types.AudioItem, sample[(role, types.Modality.AUDIO)])
-    text_item = cast(types.TextItem, sample[(role, types.Modality.TEXT)])
+    audio_item = _audio_item(sample, role)
+    text_item = _text_item(sample, role)
+    return _speech(audio_item, text_item, runtime)
+
+
+def _speech(
+    audio_item: types.AudioItem,
+    text_item: types.TextItem,
+    runtime: DataRuntime,
+) -> Speech:
     text = text_item.views[types.TextView.TEXT]
     codes = audio_item.views[runtime.audio_view]
     return speech_from_codes(
@@ -139,6 +183,35 @@ def _parse_role(
     )
 
 
+def raw_speech(
+    audio_item: types.AudioItem,
+    text_item: types.TextItem,
+    runtime: DataRuntime,
+) -> RawSpeech:
+    value = audio_item.views.get(types.AudioView.WAVEFORM)
+    if value is None:
+        raise ValueError(
+            "waveform fallback requires AudioView.WAVEFORM when codec codes are missing."
+        )
+    if not isinstance(value, tuple) or len(value) != 2:
+        raise TypeError("AudioView.WAVEFORM must be a (waveform, sample_rate) tuple.")
+    waveform, sample_rate = value
+    if not isinstance(waveform, Tensor):
+        raise TypeError("AudioView.WAVEFORM waveform must be a Tensor.")
+    if isinstance(sample_rate, bool) or not isinstance(sample_rate, int):
+        raise TypeError("AudioView.WAVEFORM sample_rate must be an integer.")
+    if sample_rate <= 0:
+        raise ValueError("AudioView.WAVEFORM sample_rate must be positive.")
+    text = text_item.views[types.TextView.TEXT]
+    return RawSpeech(
+        text_token_ids=token_ids(text, runtime.text_tokenizer),
+        waveform=waveform,
+        sample_rate=sample_rate,
+        language=Language(text_item.meta[types.TextMeta.LANG]),
+        duration_seconds=_raw_duration_seconds(audio_item, waveform, sample_rate),
+    )
+
+
 def _parse_text_role(
     sample: types.Sample,
     role: types.Role,
@@ -150,6 +223,51 @@ def _parse_text_role(
         text_token_ids=token_ids(text, runtime.text_tokenizer),
         language=Language(text_item.meta[types.TextMeta.LANG]),
     )
+
+
+def _parse_task_item(
+    sample: types.Sample,
+    role: types.Role,
+    modality: types.Modality,
+    runtime: DataRuntime,
+    *,
+    encode_missing_codes: bool,
+) -> Speech | Text | RawSpeech:
+    if modality is types.Modality.TEXT:
+        return _parse_text_role(sample, role, runtime)
+    if modality is not types.Modality.AUDIO:
+        raise ValueError(f"unsupported speech task modality: {modality.value}")
+    audio_item = _audio_item(sample, role)
+    text_item = _text_item(sample, role)
+    if runtime.audio_view in audio_item.views:
+        return _speech(audio_item, text_item, runtime)
+    if not encode_missing_codes:
+        raise ValueError(
+            f"{role.value} audio sample is missing {runtime.audio_view.value!r} codec "
+            "codes; materialize codec views before training or enable explicit "
+            "waveform fallback."
+        )
+    return raw_speech(audio_item, text_item, runtime)
+
+
+def _audio_item(sample: types.Sample, role: types.Role) -> types.AudioItem:
+    try:
+        item = sample[(role, types.Modality.AUDIO)]
+    except KeyError as error:
+        raise ValueError(f"sample is missing {role.value}/audio.") from error
+    if not isinstance(item, types.AudioItem):
+        raise TypeError(f"sample {role.value}/audio must be an AudioItem.")
+    return item
+
+
+def _text_item(sample: types.Sample, role: types.Role) -> types.TextItem:
+    try:
+        item = sample[(role, types.Modality.TEXT)]
+    except KeyError as error:
+        raise ValueError(f"sample is missing {role.value}/text.") from error
+    if not isinstance(item, types.TextItem):
+        raise TypeError(f"sample {role.value}/text must be a TextItem.")
+    return item
 
 def _frame_codes(codes: Tensor) -> Tensor:
     if codes.dim() == 1:
@@ -187,6 +305,22 @@ def _frames_to_seconds(frames: int, frame_rate: float) -> float:
     if not math.isfinite(rate) or rate <= 0:
         raise ValueError("codec frame_rate must be finite and positive.")
     return float(frames) / rate
+
+
+def _raw_duration_seconds(
+    audio_item: types.AudioItem,
+    waveform: Tensor,
+    sample_rate: int,
+) -> float:
+    value = audio_item.meta.get(types.AudioMeta.DURATION)
+    if value is not None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError("AudioMeta.DURATION must be a number of seconds.")
+        duration = float(value)
+        if not math.isfinite(duration) or duration < 0:
+            raise ValueError("AudioMeta.DURATION must be finite and non-negative.")
+        return duration
+    return float(waveform.size(-1)) / float(sample_rate)
 
 
 def _as_tensor(value: Tensor | list[int]) -> Tensor:

@@ -5,19 +5,22 @@ from collections.abc import Mapping
 from anydataset.types import Sample as RawSample
 
 from ._task import TaskWeights, allocate_tasks
-from .parser import parse_sample, parse_text_sample
+from .parser import parse_task_sample, parse_text_sample
 from .protocol import DataRuntime, TextRuntime
-from .sample import build_sample, build_text_sample
+from .sample import build_task_sample, build_text_sample
 from ..task import Task
-from .types import ModelBatch, ModelSample
+from .types import ModelBatch, ModelSample, RawSpeechBatch, SpeechTaskSample
 
 class Collator:
     def __init__(
         self,
         runtime: DataRuntime,
         task_weights: Mapping[Task, float],
+        *,
+        encode_missing_codes: bool = False,
     ) -> None:
         self.runtime = runtime
+        self.encode_missing_codes = encode_missing_codes
         self._task_weights = TaskWeights(task_weights)
 
     def set_task_weights(self, task_weights: Mapping[Task, float]) -> None:
@@ -28,17 +31,28 @@ class Collator:
         tasks, _ = self._task_weights.get()
         return tasks
 
-    def _model_samples(self, samples: list[RawSample]) -> list[ModelSample]:
+    def _task_samples(self, samples: list[RawSample]) -> list[SpeechTaskSample]:
         available, weights = self._task_weights.get()
         tasks = allocate_tasks(available, weights, len(samples))
         return [
-            build_sample(parse_sample(sample, self.runtime), task, self.runtime)
+            parse_task_sample(
+                sample,
+                task,
+                self.runtime,
+                encode_missing_codes=self.encode_missing_codes,
+            )
             for sample, task in zip(samples, tasks)
         ]
 
-    def __call__(self, samples: list[RawSample]) -> ModelBatch:
+    def __call__(self, samples: list[RawSample]) -> ModelBatch | RawSpeechBatch:
+        task_samples = self._task_samples(samples)
+        if any(sample.needs_codec for sample in task_samples):
+            return RawSpeechBatch(
+                samples=tuple(task_samples),
+                pad_token_id=self.runtime.pad_token_id,
+            )
         return ModelBatch.from_samples(
-            self._model_samples(samples),
+            [build_task_sample(sample, self.runtime) for sample in task_samples],
             pad_token_id=self.runtime.pad_token_id,
         )
 

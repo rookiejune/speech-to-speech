@@ -115,79 +115,147 @@ class TextPair:
 
 
 @dataclass
-class RawSingleSample:
+class RawSpeech:
     text_token_ids: Tensor
     waveform: Tensor
     sample_rate: int
     language: Language
-    task: Task
     duration_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if self.text_token_ids.dim() != 1:
-            raise ValueError("raw single text_token_ids must have shape [tokens].")
+            raise ValueError("raw speech text_token_ids must have shape [tokens].")
         if not is_signed_integer_dtype(self.text_token_ids.dtype):
-            raise TypeError("raw single text_token_ids must use signed integer dtype.")
+            raise TypeError("raw speech text_token_ids must use signed integer dtype.")
         if self.waveform.dim() not in {1, 2}:
-            raise ValueError("raw single waveform must have shape [time] or [channel, time].")
+            raise ValueError("raw speech waveform must have shape [time] or [channel, time].")
         if self.waveform.numel() == 0:
-            raise ValueError("raw single waveform must not be empty.")
+            raise ValueError("raw speech waveform must not be empty.")
         if isinstance(self.sample_rate, bool) or not isinstance(self.sample_rate, int):
-            raise TypeError("raw single sample_rate must be an integer.")
+            raise TypeError("raw speech sample_rate must be an integer.")
         if self.sample_rate <= 0:
-            raise ValueError("raw single sample_rate must be positive.")
+            raise ValueError("raw speech sample_rate must be positive.")
         if not isinstance(self.language, Language):
-            raise TypeError("raw single language must be a Language.")
-        if not isinstance(self.task, Task):
-            raise TypeError("raw single task must be a Task.")
+            raise TypeError("raw speech language must be a Language.")
         if self.duration_seconds is not None:
             if isinstance(self.duration_seconds, bool) or not isinstance(
                 self.duration_seconds,
                 (int, float),
             ):
-                raise TypeError("raw single duration_seconds must be a number or None.")
+                raise TypeError("raw speech duration_seconds must be a number or None.")
             if not math.isfinite(float(self.duration_seconds)) or self.duration_seconds < 0:
-                raise ValueError("raw single duration_seconds must be finite and non-negative.")
+                raise ValueError("raw speech duration_seconds must be finite and non-negative.")
 
-    def pin_memory(self) -> RawSingleSample:
-        return RawSingleSample(
+    def pin_memory(self) -> RawSpeech:
+        return RawSpeech(
             text_token_ids=self.text_token_ids.pin_memory(),
             waveform=self.waveform.pin_memory(),
             sample_rate=self.sample_rate,
             language=self.language,
-            task=self.task,
             duration_seconds=self.duration_seconds,
         )
 
 
 @dataclass
-class RawSingleBatch:
-    samples: tuple[RawSingleSample, ...]
+class SpeechTaskSample:
+    source: Union[Speech, Text, RawSpeech, None]
+    target: Union[Speech, Text, RawSpeech]
+    task: Task
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task, Task):
+            raise TypeError("speech task sample task must be a Task.")
+        _validate_task_item(self.source, self.task.source_modality, name="source")
+        _validate_task_item(self.target, self.task.target_modality, name="target")
+
+    @property
+    def needs_codec(self) -> bool:
+        return isinstance(self.source, RawSpeech) or isinstance(self.target, RawSpeech)
+
+    def pin_memory(self) -> SpeechTaskSample:
+        target = _pin_task_item(self.target)
+        if target is None:
+            raise AssertionError("speech task target must not be None.")
+        return SpeechTaskSample(
+            source=_pin_task_item(self.source),
+            target=target,
+            task=self.task,
+        )
+
+
+@dataclass
+class RawSpeechBatch:
+    samples: tuple[SpeechTaskSample, ...]
     pad_token_id: int
 
     def __post_init__(self) -> None:
         if not self.samples:
-            raise ValueError("RawSingleBatch requires at least one sample.")
+            raise ValueError("RawSpeechBatch requires at least one sample.")
         if isinstance(self.pad_token_id, bool) or not isinstance(self.pad_token_id, int):
-            raise TypeError("RawSingleBatch pad_token_id must be an integer.")
+            raise TypeError("RawSpeechBatch pad_token_id must be an integer.")
+        if not any(sample.needs_codec for sample in self.samples):
+            raise ValueError("RawSpeechBatch requires at least one waveform to encode.")
         signatures = {
             (sample.task.source_modality, sample.task.target_modality)
             for sample in self.samples
         }
         if len(signatures) != 1:
             raise ValueError(
-                "all raw single samples in a batch must use the same source and target modalities."
+                "all raw speech samples in a batch must use the same source and target modalities."
             )
 
     @property
     def tasks(self) -> list[Task]:
         return [sample.task for sample in self.samples]
 
-    def pin_memory(self) -> RawSingleBatch:
-        return RawSingleBatch(
+    def pin_memory(self) -> RawSpeechBatch:
+        return RawSpeechBatch(
             samples=tuple(sample.pin_memory() for sample in self.samples),
             pad_token_id=self.pad_token_id,
         )
+
+
+def _validate_task_item(
+    item: Speech | Text | RawSpeech | None,
+    modality: Modality | None,
+    *,
+    name: str,
+) -> None:
+    if modality is None:
+        if item is not None:
+            raise ValueError(f"modality-free task {name} must be None.")
+        return
+    expected = (Speech, RawSpeech) if modality is Modality.AUDIO else (Text,)
+    if not isinstance(item, expected):
+        expected_names = " or ".join(value.__name__ for value in expected)
+        raise TypeError(f"{name} {modality.value} must be {expected_names}.")
+
+
+def _pin_task_item(
+    item: Speech | Text | RawSpeech | None,
+) -> Speech | Text | RawSpeech | None:
+    if item is None:
+        return None
+    if isinstance(item, RawSpeech):
+        return item.pin_memory()
+    if isinstance(item, Text):
+        return Text(
+            text_token_ids=item.text_token_ids.pin_memory(),
+            language=item.language,
+        )
+    return Speech(
+        semantic_codes=item.semantic_codes.pin_memory(),
+        acoustic_codes=(
+            None if item.acoustic_codes is None else item.acoustic_codes.pin_memory()
+        ),
+        acoustic_layout=item.acoustic_layout,
+        acoustic_unit_length=item.acoustic_unit_length,
+        text_token_ids=item.text_token_ids.pin_memory(),
+        audio_token_ids=item.audio_token_ids.pin_memory(),
+        audio_token_spans=item.audio_token_spans.pin_memory(),
+        language=item.language,
+        duration_seconds=item.duration_seconds,
+    )
 
 
 class AcousticTarget(TypedDict):
@@ -320,7 +388,7 @@ class ModelBatch:
         )
 
 
-ConcreteTrainInput = Union[ModelBatch, RawSingleBatch]
+ConcreteTrainInput = Union[ModelBatch, RawSpeechBatch]
 TrainInputBatch = Union[ConcreteTrainInput, tuple[ConcreteTrainInput, ...]]
 TrainBatch = Union[ModelBatch, tuple[ModelBatch, ...]]
 

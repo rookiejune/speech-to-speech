@@ -8,6 +8,7 @@ from pathlib import Path
 import torch
 
 from speech_to_speech.datamodule.collator import Collator
+from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.generation.batch import requests_from_batch
 from speech_to_speech.generation.reporting import compare, summary
 from speech_to_speech.model.acoustic import FlowModel
@@ -41,7 +42,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
     )
     dataset = wmt19_tts_codec(codec=args.codec, split=args.split)
-    batch = Collator(runtime, {Task.S2ST: 1.0})([dataset[args.sample_index]])
+    batch = _prepared_batch(
+        Collator(runtime, {Task.S2ST: 1.0})([dataset[args.sample_index]])
+    )
     request = requests_from_batch(batch)[0]
 
     model = FlowModel(runtime=runtime).eval()
@@ -65,7 +68,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     batch_sizes = _batch_sizes(args.batch_sizes)
     batch_requests = [
         requests_from_batch(
-            Collator(runtime, {Task.S2ST: 1.0})([dataset[index]])
+            _prepared_batch(Collator(runtime, {Task.S2ST: 1.0})([dataset[index]]))
         )[0]
         for index in range(args.sample_index, args.sample_index + max(batch_sizes))
     ]
@@ -115,6 +118,12 @@ def _batch_sizes(value: str) -> list[int]:
     if not sizes or any(size < 1 for size in sizes):
         raise ValueError("batch sizes must be positive integers.")
     return sizes
+
+
+def _prepared_batch(batch: ModelBatch | object) -> ModelBatch:
+    if not isinstance(batch, ModelBatch):
+        raise TypeError("generation smoke requires prepared codec data.")
+    return batch
 
 
 def parser() -> argparse.ArgumentParser:

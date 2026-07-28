@@ -5,12 +5,17 @@ from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
 from ..datamodule.protocol import DatasetRuntime
-from ..datamodule.single import build_single_sample_from_codes
+from ..datamodule.parser import speech_from_codes
+from ..datamodule.sample import build_task_sample
 from ..datamodule.types import (
     AcousticTarget,
     ConcreteTrainInput,
     ModelBatch,
-    RawSingleBatch,
+    RawSpeech,
+    RawSpeechBatch,
+    Speech,
+    SpeechTaskSample,
+    Text,
     TrainBatch,
     TrainInputBatch,
 )
@@ -42,46 +47,86 @@ class OnDeviceCodecMaterializer:
     ) -> ModelBatch:
         if isinstance(batch, ModelBatch):
             return _move_model_batch(batch, device)
-        if isinstance(batch, RawSingleBatch):
-            return self._raw_single(batch, device=device)
+        if isinstance(batch, RawSpeechBatch):
+            return self._raw_speech(batch, device=device)
         raise TypeError(f"unsupported train batch: {type(batch).__name__}")
 
-    def _raw_single(
+    def _raw_speech(
         self,
-        batch: RawSingleBatch,
+        batch: RawSpeechBatch,
         *,
         device: torch.device | None,
     ) -> ModelBatch:
-        samples = []
-        for sample in batch.samples:
-            waveform = sample.waveform
-            if device is not None:
-                waveform = waveform.to(device=device)
-            batched_waveform = _batched_waveform(waveform)
-            if supports_structured(self.runtime.codec):
-                encoded = structured_codec(self.runtime.codec).tokenize(
-                    batched_waveform,
-                    sample.sample_rate,
-                )
-                if not isinstance(encoded, SemanticAcousticCodes):
-                    raise TypeError("structured codec tokenize must return SemanticAcousticCodes.")
-                if encoded.semantic.size(0) != 1 or encoded.acoustic.size(0) != 1:
-                    raise ValueError("per-sample codec fallback expects one encoded item.")
-                codes: object = SemanticAcousticCodes(
-                    semantic=encoded.semantic[0].detach().cpu(),
-                    acoustic=encoded.acoustic[0].detach().cpu(),
-                )
-            else:
-                codes = _encoded_codes(
-                    frame_codec(self.runtime.codec).encode(
-                        batched_waveform,
-                        sample.sample_rate,
-                    )
-                )
-            samples.append(build_single_sample_from_codes(sample, codes, self.runtime))
+        samples = [
+            build_task_sample(self._task_sample(sample, device=device), self.runtime)
+            for sample in batch.samples
+        ]
         return _move_model_batch(
             ModelBatch.from_samples(samples, pad_token_id=batch.pad_token_id),
             device,
+        )
+
+    def _task_sample(
+        self,
+        sample: SpeechTaskSample,
+        *,
+        device: torch.device | None,
+    ) -> SpeechTaskSample:
+        source = self._item(sample.source, device=device)
+        target = self._item(sample.target, device=device)
+        if target is None:
+            raise AssertionError("speech task target must not be None.")
+        return SpeechTaskSample(
+            source=source,
+            target=target,
+            task=sample.task,
+        )
+
+    def _item(
+        self,
+        item: Speech | Text | RawSpeech | None,
+        *,
+        device: torch.device | None,
+    ) -> Speech | Text | None:
+        if not isinstance(item, RawSpeech):
+            return item
+        codes = self._encode(item, device=device)
+        return speech_from_codes(
+            codes,
+            text_token_ids=item.text_token_ids.cpu(),
+            language=item.language,
+            duration_seconds=item.duration_seconds,
+            runtime=self.runtime,
+        )
+
+    def _encode(
+        self,
+        sample: RawSpeech,
+        *,
+        device: torch.device | None,
+    ) -> object:
+        waveform = sample.waveform
+        if device is not None:
+            waveform = waveform.to(device=device)
+        batched_waveform = _batched_waveform(waveform)
+        if supports_structured(self.runtime.codec):
+            encoded = structured_codec(self.runtime.codec).tokenize(
+                batched_waveform,
+                sample.sample_rate,
+            )
+            if not isinstance(encoded, SemanticAcousticCodes):
+                raise TypeError("structured codec tokenize must return SemanticAcousticCodes.")
+            if encoded.semantic.size(0) != 1 or encoded.acoustic.size(0) != 1:
+                raise ValueError("per-sample codec fallback expects one encoded item.")
+            return SemanticAcousticCodes(
+                semantic=encoded.semantic[0].detach().cpu(),
+                acoustic=encoded.acoustic[0].detach().cpu(),
+            )
+        return _encoded_codes(
+            frame_codec(self.runtime.codec).encode(
+                batched_waveform,
+                sample.sample_rate,
+            )
         )
 
 

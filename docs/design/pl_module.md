@@ -15,9 +15,10 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
   `anytrain.lightning.validation.log()`；它不解析 objective 名、RVQ detail key 或有效单位。Lightning
   在 epoch 结束时同步各 rank 的加权和与计数，因此不同 batch/rank 的长度差异不会退化为 batch mean
   或 rank mean。
-- 可选 `batch_materializer` 只处理显式 raw waveform fallback：当 datamodule single path 返回
-  `RawSingleBatch` 时，materializer 在当前训练 device 上调用 codec encode，并在 objective 前
-  转成标准 `ModelBatch`。没有 materializer 时，`training_step()` 只接受已 materialize 的
+- 可选 `batch_materializer` 只处理显式 raw waveform fallback：当 datamodule pair 或 single path
+  返回 `RawSpeechBatch` 时，materializer 在当前训练 device 上对 task 实际消费且缺少 codes 的
+  audio item 调用 codec encode，并在 objective 前转成标准 `ModelBatch`。没有 materializer 时，
+  `training_step()` 只接受已 materialize 的
   `ModelBatch` / joint `ModelBatch` tuple。
 - `current_loss_outputs()`：只在当前 training step 的 backward 完成前返回仍连接计算图的
   `Outputs`，供 `GradLogger` 计算指定分项梯度；其他时机显式报错。
@@ -43,8 +44,8 @@ model 构造器不接收路径或执行文件 I/O。
 - `GradLogger` / `GradNormLogger`：只接入 S2S `TrainInterval`；指定分项或全局梯度范数的通用日志逻辑来自
   `anytrain.lightning`。
 - `OnDeviceCodecMaterializer`：训练时 wav->codes 的显式 fallback。正式数据仍应提前 materialize
-  codec codes；该 fallback 只把 `RawSingleBatch` 规范化为 `ModelBatch`，不改变 objective 或 task
-  loss contract。
+  codec codes；该 fallback 只把 pair/single 共用的 `RawSpeechBatch` 规范化为 `ModelBatch`，不改变
+  objective 或 task loss contract。
 - `FlowMatchingLogger`：显式接收 flow runtime，不向下读取 model runtime；time histogram 和 bucketed
   loss 日志来自 `anytrain.lightning.LossTimeBucketLoggerCallback`。
 - `LossSummary`：只注入 S2S objective 顺序；训练输出 total loss 与分项 `LossItem` 窗口摘要来自

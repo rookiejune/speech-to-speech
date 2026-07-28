@@ -3,16 +3,22 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from anydataset import types
-from anytrain.codec import SemanticAcousticCodes
-from torch import Tensor
 
 from ..task import Task
 from ._task import TaskWeights, allocate_tasks
 from ._tokenization import token_ids
-from .parser import parse_audio_codes, speech_from_codes
+from .parser import parse_audio_codes, raw_speech, speech_from_codes
 from .protocol import DataRuntime
-from .sample import build_speech_sample, chat_prompt
-from .types import ModelBatch, ModelSample, RawSingleBatch, RawSingleSample, Speech
+from .sample import build_speech_sample, build_task_sample, chat_prompt
+from .types import (
+    ModelBatch,
+    ModelSample,
+    RawSpeech,
+    RawSpeechBatch,
+    Speech,
+    SpeechTaskSample,
+    Text,
+)
 
 _SINGLE_TASKS = frozenset({Task.ASR, Task.AUDIO_AR, Task.TEXT_AR, Task.TTS})
 
@@ -39,7 +45,7 @@ class SingleCollator:
         tasks, _ = self._task_weights.get()
         return tasks
 
-    def _items(self, samples: list[types.Sample]) -> list[ModelSample | RawSingleSample]:
+    def _items(self, samples: list[types.Sample]) -> list[SpeechTaskSample]:
         available, weights = self._task_weights.get()
         tasks = allocate_tasks(available, weights, len(samples))
         return [
@@ -52,23 +58,16 @@ class SingleCollator:
             for sample, task in zip(samples, tasks)
         ]
 
-    def __call__(self, samples: list[types.Sample]) -> ModelBatch | RawSingleBatch:
+    def __call__(self, samples: list[types.Sample]) -> ModelBatch | RawSpeechBatch:
         items = self._items(samples)
-        model_samples = [item for item in items if isinstance(item, ModelSample)]
-        if len(model_samples) == len(items):
-            return ModelBatch.from_samples(
-                model_samples,
+        if any(item.needs_codec for item in items):
+            return RawSpeechBatch(
+                samples=tuple(items),
                 pad_token_id=self.runtime.pad_token_id,
             )
-        raw_samples = [item for item in items if isinstance(item, RawSingleSample)]
-        if len(raw_samples) == len(items):
-            return RawSingleBatch(
-                samples=tuple(raw_samples),
-                pad_token_id=self.runtime.pad_token_id,
-            )
-        raise ValueError(
-            "a single batch cannot mix precomputed codec samples and raw waveform "
-            "fallback samples."
+        return ModelBatch.from_samples(
+            [build_task_sample(item, self.runtime) for item in items],
+            pad_token_id=self.runtime.pad_token_id,
         )
 
 
@@ -100,66 +99,60 @@ def build_single_sample(
     return build_speech_sample(utterance, utterance, task, runtime, prompt=prompt)
 
 
-def build_single_sample_from_codes(
-    sample: RawSingleSample,
-    codes: object,
-    runtime: DataRuntime,
-) -> ModelSample:
-    if isinstance(codes, Tensor):
-        codes = codes.cpu()
-    elif isinstance(codes, SemanticAcousticCodes):
-        codes = SemanticAcousticCodes(
-            semantic=codes.semantic.cpu(),
-            acoustic=codes.acoustic.cpu(),
-        )
-    else:
-        raise TypeError("single codec codes must be a Tensor or SemanticAcousticCodes.")
-    speech = speech_from_codes(
-        codes,
-        text_token_ids=sample.text_token_ids.cpu(),
-        language=sample.language,
-        duration_seconds=sample.duration_seconds,
-        runtime=runtime,
-    )
-    return build_single_sample(speech, sample.task, runtime)
-
-
 def _build_item(
     sample: types.Sample,
     task: Task,
     runtime: DataRuntime,
     *,
     encode_missing_codes: bool,
-) -> ModelSample | RawSingleSample:
+) -> SpeechTaskSample:
     _validate_single_tasks([task])
-    audio_item, _ = _single_items(sample)
+    audio_item, text_item = _single_items(sample)
+    text = Text(
+        text_token_ids=token_ids(
+            text_item.views[types.TextView.TEXT],
+            runtime.text_tokenizer,
+        ),
+        language=_language(text_item),
+    )
+    if (
+        task.source_modality is not types.Modality.AUDIO
+        and task.target_modality is not types.Modality.AUDIO
+    ):
+        return SpeechTaskSample(source=None, target=text, task=task)
     if runtime.audio_view in audio_item.views:
-        return build_single_sample(parse_single_sample(sample, runtime), task, runtime)
-    if not encode_missing_codes:
-        raise ValueError(
-            f"single audio sample is missing {runtime.audio_view.value!r} codec "
-            "codes; materialize codec views before training or enable explicit "
-            "waveform fallback."
-        )
-    return parse_raw_single_sample(sample, runtime, task)
+        utterance: Speech | RawSpeech = parse_single_sample(sample, runtime)
+    else:
+        if not encode_missing_codes:
+            raise ValueError(
+                f"single audio sample is missing {runtime.audio_view.value!r} codec "
+                "codes; materialize codec views before training or enable explicit "
+                "waveform fallback."
+            )
+        utterance = parse_raw_single_sample(sample, runtime)
+    return _task_sample(utterance, text, task)
 
 
 def parse_raw_single_sample(
     sample: types.Sample,
     runtime: DataRuntime,
-    task: Task,
-) -> RawSingleSample:
+) -> RawSpeech:
     audio_item, text_item = _single_items(sample)
-    waveform, sample_rate = _waveform(audio_item)
-    text = text_item.views[types.TextView.TEXT]
-    return RawSingleSample(
-        text_token_ids=token_ids(text, runtime.text_tokenizer),
-        waveform=waveform,
-        sample_rate=sample_rate,
-        language=_language(text_item),
-        task=task,
-        duration_seconds=_raw_duration_seconds(audio_item, waveform, sample_rate),
-    )
+    return raw_speech(audio_item, text_item, runtime)
+
+
+def _task_sample(
+    utterance: Speech | RawSpeech,
+    text: Text,
+    task: Task,
+) -> SpeechTaskSample:
+    source = None
+    if task.source_modality is types.Modality.AUDIO:
+        source = utterance
+    elif task.source_modality is types.Modality.TEXT:
+        source = text
+    target = utterance if task.target_modality is types.Modality.AUDIO else text
+    return SpeechTaskSample(source=source, target=target, task=task)
 
 
 def _single_items(sample: types.Sample) -> tuple[types.AudioItem, types.TextItem]:
@@ -185,40 +178,6 @@ def _codec_codes(audio_item: types.AudioItem, runtime: DataRuntime) -> object:
             f"single audio sample is missing {runtime.audio_view.value!r} codec codes."
         ) from error
     return codes
-
-
-def _waveform(audio_item: types.AudioItem) -> tuple[Tensor, int]:
-    value = audio_item.views.get(types.AudioView.WAVEFORM)
-    if value is None:
-        raise ValueError(
-            "waveform fallback requires AudioView.WAVEFORM when codec codes are missing."
-        )
-    if not isinstance(value, tuple) or len(value) != 2:
-        raise TypeError("AudioView.WAVEFORM must be a (waveform, sample_rate) tuple.")
-    waveform, sample_rate = value
-    if not isinstance(waveform, Tensor):
-        raise TypeError("AudioView.WAVEFORM waveform must be a Tensor.")
-    if isinstance(sample_rate, bool) or not isinstance(sample_rate, int):
-        raise TypeError("AudioView.WAVEFORM sample_rate must be an integer.")
-    if sample_rate <= 0:
-        raise ValueError("AudioView.WAVEFORM sample_rate must be positive.")
-    return waveform, sample_rate
-
-
-def _raw_duration_seconds(
-    audio_item: types.AudioItem,
-    waveform: Tensor,
-    sample_rate: int,
-) -> float:
-    value = audio_item.meta.get(types.AudioMeta.DURATION)
-    if value is not None:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise TypeError("AudioMeta.DURATION must be a number of seconds.")
-        duration = float(value)
-        if not math.isfinite(duration) or duration < 0:
-            raise ValueError("AudioMeta.DURATION must be finite and non-negative.")
-        return duration
-    return float(waveform.size(-1)) / float(sample_rate)
 
 
 def _duration_seconds(
