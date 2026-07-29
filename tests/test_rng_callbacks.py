@@ -104,6 +104,7 @@ class RNGCallbackTest(unittest.TestCase):
         module = _RandomGenerationModule()
 
         logger.on_train_batch_start(trainer, module, None, 0)
+        trainer.global_step = 2
         logger.on_train_batch_start(trainer, module, None, 1)
 
         self.assertEqual(len(module.draws), 2)
@@ -183,7 +184,7 @@ def task_sample_logger_fixture() -> tuple[TaskSampleLogger, object]:
     )
     experiment = SimpleNamespace(add_text=Mock())
     trainer = SimpleNamespace(
-        global_step=0,
+        global_step=1,
         is_global_zero=True,
         logger=SimpleNamespace(experiment=experiment),
         datamodule=SimpleNamespace(

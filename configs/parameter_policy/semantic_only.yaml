@@ -2,8 +2,10 @@ name: semantic_only
 trainable_groups:
   - semantic_audio_embedding
   - semantic_audio_adapter
+  - audio_input_adapter
   - semantic_audio_output
 frozen_groups:
   - backbone
+  - backbone_adapter
   - acoustic_decoder
 backbone_top_fraction: 0.0

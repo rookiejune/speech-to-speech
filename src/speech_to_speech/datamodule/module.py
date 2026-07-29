@@ -274,7 +274,7 @@ class DataModule(LightningDataModule):
     def set_loader_weights(self, weights: Mapping[str, float]) -> None:
         schedule = LoaderSchedule(
             dict(weights),
-            batches_per_step=self.schedule.batches_per_step,
+            accumulate_grad_batches=self.schedule.accumulate_grad_batches,
         )
         _validate_loader_names(self.loader_specs, schedule.weights)
         self.schedule = schedule
@@ -326,7 +326,7 @@ class DataModule(LightningDataModule):
         loaders = {
             name: loader.train_dataloader() for name, loader in self._loaders.items()
         }
-        if len(loaders) == 1 and self.schedule.batches_per_step == 1:
+        if len(loaders) == 1:
             return cast(Iterable[TrainInputBatch], next(iter(loaders.values())))
         return ScheduledDataLoader(loaders, self.schedule)
 

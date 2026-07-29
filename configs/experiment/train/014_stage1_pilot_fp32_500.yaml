@@ -2,7 +2,7 @@
 defaults:
   - override /stage: stage_1
   - override /parameter_policy: speech_interface
-  - override /trainer: static_ddp
+  - override /trainer: ddp
   - _self_
 
 output_subdir: 014-longcat-stable-stage1/pilot-fp32-500/${run_name}

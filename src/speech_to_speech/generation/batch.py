@@ -8,6 +8,7 @@ def requests_from_batch(batch: ModelBatch) -> list[Request]:
     """Build unpadded inference requests from teacher-forcing samples."""
     requests: list[Request] = []
     prompt_lengths = batch.generation_prompt_lengths
+    audio_input_positions = batch.audio_input_positions
     audio_contexts = batch.audio_contexts
     if prompt_lengths is None or audio_contexts is None:
         raise RuntimeError("model batch generation fields are unavailable.")
@@ -18,6 +19,13 @@ def requests_from_batch(batch: ModelBatch) -> list[Request]:
             Request(
                 prompt_ids=batch.input_ids[index, :prompt_end],
                 task=task,
+                audio_input_positions=(
+                    None
+                    if audio_input_positions is None
+                    else audio_input_positions[index][
+                        audio_input_positions[index].ge(0)
+                    ]
+                ),
                 audio_context=audio_contexts[index],
             )
         )

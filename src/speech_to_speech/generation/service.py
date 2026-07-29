@@ -51,7 +51,11 @@ def generate_responses(
         groups.setdefault(task.target_modality, []).append((index, request))
 
     for modality, group in groups.items():
-        prompt, prompt_mask = _inputs([request for _, request in group], model, device)
+        prompt, prompt_mask, audio_input_positions = _inputs(
+            [request for _, request in group],
+            model,
+            device,
+        )
         response_start = prompt.size(1)
         stop_token_id = (
             model.runtime.eoa_token_id
@@ -64,15 +68,27 @@ def generate_responses(
             and model.runtime.acoustic_side_channel
             and isinstance(model, AcousticFeatureGeneration)
         ):
-            acoustic_generation = model.generate_audio_features(
-                prompt,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                prompt_attention_mask=prompt_mask,
-                do_sample=do_sample,
-                use_cache=use_cache,
-            )
+            if audio_input_positions is None:
+                acoustic_generation = model.generate_audio_features(
+                    prompt,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    prompt_attention_mask=prompt_mask,
+                    do_sample=do_sample,
+                    use_cache=use_cache,
+                )
+            else:
+                acoustic_generation = model.generate_audio_features(
+                    prompt,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    prompt_attention_mask=prompt_mask,
+                    audio_input_positions=audio_input_positions,
+                    do_sample=do_sample,
+                    use_cache=use_cache,
+                )
             sequence = acoustic_generation["sequence"]
         elif (
             modality is Modality.AUDIO
@@ -83,27 +99,53 @@ def generate_responses(
                 raise TypeError(
                     "full codec sequence requires constrained token generation."
                 )
-            sequence = model.generate_full_codec_sequence(
-                prompt,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                prompt_attention_mask=prompt_mask,
-                do_sample=do_sample,
-                use_cache=use_cache,
-            )
+            if audio_input_positions is None:
+                sequence = model.generate_full_codec_sequence(
+                    prompt,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    prompt_attention_mask=prompt_mask,
+                    do_sample=do_sample,
+                    use_cache=use_cache,
+                )
+            else:
+                sequence = model.generate_full_codec_sequence(
+                    prompt,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    prompt_attention_mask=prompt_mask,
+                    audio_input_positions=audio_input_positions,
+                    do_sample=do_sample,
+                    use_cache=use_cache,
+                )
         else:
-            sequence = model.generate_tokens(
-                prompt,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                prompt_attention_mask=prompt_mask,
-                stop_token_id=stop_token_id,
-                generation_modality=modality,
-                do_sample=do_sample,
-                use_cache=use_cache,
-            )
+            if audio_input_positions is None:
+                sequence = model.generate_tokens(
+                    prompt,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    prompt_attention_mask=prompt_mask,
+                    stop_token_id=stop_token_id,
+                    generation_modality=modality,
+                    do_sample=do_sample,
+                    use_cache=use_cache,
+                )
+            else:
+                sequence = model.generate_tokens(
+                    prompt,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    prompt_attention_mask=prompt_mask,
+                    audio_input_positions=audio_input_positions,
+                    stop_token_id=stop_token_id,
+                    generation_modality=modality,
+                    do_sample=do_sample,
+                    use_cache=use_cache,
+                )
 
         responses = [
             _response(sequence[row], response_start, stop_token_id)
@@ -185,7 +227,7 @@ def _inputs(
     requests: list[Request],
     model: TokenGenerator,
     device: torch.device,
-) -> tuple[Tensor, Tensor]:
+) -> tuple[Tensor, Tensor, Tensor | None]:
     prompts = [request["prompt_ids"].to(device=device) for request in requests]
     width = max(prompt.numel() for prompt in prompts)
     prompt = torch.full(
@@ -199,7 +241,23 @@ def _inputs(
         prompt[row, -value.numel() :] = value
         prompt_mask[row, -value.numel() :] = True
 
-    return prompt, prompt_mask
+    position_values = [request.get("audio_input_positions") for request in requests]
+    if not any(value is not None for value in position_values):
+        return prompt, prompt_mask, None
+    width_frames = max(
+        0 if value is None else int(value.numel()) for value in position_values
+    )
+    positions = torch.full(
+        (len(requests), width_frames),
+        -1,
+        dtype=torch.long,
+        device=device,
+    )
+    for row, value in enumerate(position_values):
+        if value is not None and value.numel():
+            offset = width - prompts[row].numel()
+            positions[row, : value.numel()] = value.to(device=device) + offset
+    return prompt, prompt_mask, positions
 
 
 def _validate_request(request: Request, model: TokenGenerator) -> None:
@@ -214,6 +272,31 @@ def _validate_request(request: Request, model: TokenGenerator) -> None:
         inside |= prompt.ge(start) & prompt.lt(end)
     if not bool(inside.all()):
         raise ValueError("prompt ids must belong to the runtime layout.")
+    positions_value = request.get("audio_input_positions")
+    if positions_value is not None:
+        positions = _integer_tensor(
+            positions_value,
+            "audio input positions",
+            dimensions=1,
+        )
+        if task.source_modality is not Modality.AUDIO:
+            raise ValueError(
+                "audio input positions require an audio-source generation task."
+            )
+        if bool((positions < 0).any()) or bool(
+            (positions >= prompt.numel()).any()
+        ):
+            raise ValueError("audio input positions must be valid prompt positions.")
+        if positions.numel() != torch.unique(positions).numel():
+            raise ValueError("audio input positions must not repeat positions.")
+        codec_start, codec_end = model.runtime.codec_audio_range
+        selected = prompt.index_select(0, positions.to(device=prompt.device))
+        if bool((selected < codec_start).any()) or bool(
+            (selected >= codec_end).any()
+        ):
+            raise ValueError(
+                "audio input positions must point to visible codec audio payload tokens."
+            )
     route = model.runtime.audio_route
     context = request.get("audio_context")
     if context is not None and not isinstance(context, SemanticAcousticCodes):

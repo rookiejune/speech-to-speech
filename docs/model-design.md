@@ -23,6 +23,7 @@ Raw Sample
     -> ModelSample
     -> ModelBatch
     -> FlowModel | RVQModel
+         -> source audio payload -> AudioInputTower (optional) -> selected input embeddings
          -> token backbone
          -> text / semantic-audio token heads
          -> aligned hidden state -> HiddenConditionAdapter -> flow | RVQ acoustic decoder
@@ -31,11 +32,13 @@ Raw Sample
 设计原则：
 
 1. 全局 token 序列同时容纳 text token 与 semantic-audio token。
-2. acoustic stream 只为已经可见的 speech token span 提供 side channel；response acoustic target 不注入 backbone。
-3. backbone 和 acoustic decoder 通过 frame-aligned hidden-state contract 连接；adapter 显式隔离
+2. source audio 的可配置 input tower 只 overlay 已显式标记的 payload 位置；BOA/EOA、target/generated
+   audio 和 route reference context 不进入该 tower。
+3. acoustic stream 只为已经可见的 speech token span 提供 side channel；response acoustic target 不注入 backbone。
+4. backbone 和 acoustic decoder 通过 frame-aligned hidden-state contract 连接；adapter 显式隔离
    backbone hidden dimension 与 acoustic generator condition dimension。
-4. runtime 在入口创建并显式传给 model 与 datamodule；底层 model/data 代码不读取 singleton。
-5. flow 与 RVQ 是显式组合，非法配置不能通过未消费字段静默进入模型。
+5. runtime 在入口创建并显式传给 model 与 datamodule；底层 model/data 代码不读取 singleton。
+6. flow 与 RVQ 是显式组合，非法配置不能通过未消费字段静默进入模型。
 
 ## 2. 数据契约
 
@@ -93,6 +96,7 @@ class ModelBatch:
     input_ids: Tensor
     token_labels: Tensor
     acoustic_target: AcousticTarget | None
+    audio_input_positions: Tensor | None
     tasks: list[Task]
     pad_token_id: int
 ```
@@ -101,6 +105,8 @@ class ModelBatch:
 
 - `acoustic_target`：`semantic_codes`、`codes` 与 `token_positions` 共同表示 decoder target、
   codec/REPA 输入和逐帧全局 audio token 位置。
+- `audio_input_positions`：`[batch, frames]` 的 source audio payload 位置；右侧 `-1` 是 batch
+  padding，不包含 BOA/EOA、target/generated audio 或 route reference context。
 
 padding 与 mask：
 
@@ -115,6 +121,8 @@ padding 与 mask：
 - acoustic target 以完整结构出现；未 padding 的 codes 必须是非空二维非负整数 tensor，
   内部 tensor 共用 frame 轴。
 - position 必须指向序列内非 padding token。
+- `audio_input_positions` 中的有效位置必须唯一，并指向 runtime codec audio range；source 不是
+  audio 时该字段为 `None`。
 - 同一 batch 的 task 必须具有相同 source/target modality 执行签名。
 
 真实推理不使用缺 target 的半成品 `ModelBatch`，而使用独立的 `generation.Request`。
@@ -131,6 +139,10 @@ padding 与 mask：
 - `target_frame_label_condition(token_labels, positions)` 直接读取并嵌入 `token_labels[p]`。
 
 generation 每采样出一个 codec-decodable audio token，就收集预测该 token 的最后一个 hidden，并按 `audio_token_spans` 展开为 frame condition。EOA/EOS 不进入 acoustic condition。
+
+`audio_input_positions` 是另一套 position contract：它记录 source audio payload token 自身在完整
+prompt 中的位置，只供 `AudioInputTower` 做输入 embedding overlay；不能与 target 的
+`acoustic_target.token_positions` 混用。
 
 ## 3. 任务定义
 
@@ -160,7 +172,8 @@ Runtime 聚合互相兼容的 backbone、text/audio tokenizer、codec、layout�
 
 ## 5. Model 与 Objective
 
-`model.Config` 只配置 token backbone 周边的 semantic-audio input/output adapter。acoustic composition 使用独立结构：
+`model.Config` 配置 token backbone 周边的 semantic-audio input/output adapter，以及可选的 source-audio
+input tower；acoustic composition 使用独立结构：
 
 ```python
 @dataclass(frozen=True)
@@ -208,6 +221,21 @@ support 做 waveform reconstruction，不初始化联合训练 decoder，并继�
 backend metadata。新增 adapter 改变了 Flow/RVQ checkpoint schema；旧 S2S checkpoint 缺少
 `acoustic_condition.*`，strict resume 会显式失败，不做隐式补参。
 
+source-audio input tower 的数据流是：
+
+```text
+source audio semantic token IDs
+    -> semantic_audio_embedding
+    -> AudioInputTower (none | mlp | transformer)
+    -> overlay inputs_embeds at audio_input_positions
+    -> Qwen backbone
+```
+
+`mlp` 是逐帧 gated projection；`transformer` 是保持帧数的非 causal encoder。tower 只服务输入
+表示，不能读取或修改生成中的新 token，也不参与 `semantic_audio_output_adapter`、Flow/RVQ decoder
+或 audio response grammar。显式位置由 datamodule/sample builder 和 generation request 传递；
+没有 source audio 时为 `None`。
+
 model 的训练能力是：
 
 - `token_hidden_states()`：返回完整 backbone 表示，不构造 vocabulary logits。
@@ -254,8 +282,10 @@ model 对外提供：
 移除，只让 active rows 继续计算。cache 只属于单次调用。
 
 当前 generation 只接收已经映射到 layout global ID 空间的 semantic-token prompt；audio-source
-内容和 text-source 内容都编码在 `Request.prompt_ids` 中，不存在独立 acoustic side-channel prompt。
-service 只按 target modality 分组，左 padding 变长 prompt，逐行追踪 EOS/EOA，并恢复原请求顺序。
+内容和 text-source 内容都编码在 `Request.prompt_ids` 中。audio-source request 可额外携带
+`audio_input_positions`，让可配置 `AudioInputTower` 只覆盖 source payload 的 embedding，不改变
+序列长度或 generation grammar。service 只按 target modality 分组，左 padding 变长 prompt，逐行
+追踪 EOS/EOA，并恢复原请求顺序；KV cache 首步之后不再重复运行 source tower。
 
 状态机：
 
@@ -275,18 +305,25 @@ collate 时读取；worker 侧 runtime 是不含 backbone/codec 的数据快照�
 
 同一组 task weights 只能包含相同 source/target modality 的任务，权重必须有限、非负且总和为
 正，以保证每个子 batch 的执行签名稳定。task 与 loader 权重只控制进入训练 step 的数据频率，
-不额外乘到 loss 上；token、flow、RVQ 与 REPA loss 跨联合子 batch 按有效 token/frame 数聚合。
+不额外乘到 loss 上；每个 microbatch 独立按有效 token/frame 归约 token、flow、RVQ 与 REPA loss，
+再由 Lightning 在 accumulation window 内累积梯度。
 
 `scripts/overfit.py` 只用于 fixed-sample overfit、smoke 和参数冻结合同验收；正式训练入口是
 `scripts/train.py`。`configs/stage/stage_*.yaml` 是 Stage 0-4 的数据计划契约：每个 stage 显式声明 loader
-权重、loader 内 task 权重和 `batches_per_step`。独立的 `parameter_policy` 显式声明可训练参数组、
+权重、loader 内 task 权重和 `accumulate_grad_batches`。多 loader schedule 在每个 accumulation
+window 内按权重交错单个 homogeneous microbatch，不构造联合 batch tuple。独立的
+`parameter_policy` 显式声明可训练参数组、
 冻结参数组和 `backbone_top_fraction`，入口在 Trainer 创建前应用一次。正式
 `experiment=train/staged_joint_stage_1..4` 当前约定
 Stage 1-2 使用 speech-interface policy，Stage 3 解冻 Qwen 顶部 1/3 block 与 final norm，
 Stage 4 使用 full policy；stage 本身不隐式选择 policy。RVQ decoder 的结构性冻结参数始终保持
-frozen。正式 joint entry 以
-`find_unused_parameters=False` 为目标时，同一 optimizer step 必须通过 joint batch 覆盖所有
-仍可训练的执行路径，或在进入该 step 前冻结未使用参数组。
+frozen。正式 joint entry 使用 `ddp_find_unused_parameters_true`，因为一个 microbatch 只执行自身
+task 分支；optimizer step 在配置数量的 microbatch 后发生。
+
+需要参数高效适配时，`model.lora` 使用 Hugging Face PEFT 向现有 Qwen backbone 注入 LoRA，并与
+`parameter_policy=lora` 成对选择；项目不维护轻量 LoRA 层。原始 backbone 保持冻结，adapter 与
+speech/acoustic interface 按 policy 训练。LoRA 的正式文本保真度先由固定
+`TextRetentionLogger` baseline 验证。
 
 这里的 Stage 0-4 只表示 S2S 数据、任务和参数策略日程，不是上文 Phase A/B。SAC generator pretraining
 在进入任一使用 `acoustic.init_artifact` 的 S2S experiment 之前独立完成；S2S stage 不在运行中创建或

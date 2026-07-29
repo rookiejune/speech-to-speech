@@ -13,14 +13,17 @@ from ._compat import StrEnum, auto
 
 class ParameterGroup(StrEnum):
     BACKBONE = auto()
+    BACKBONE_ADAPTER = auto()
     SEMANTIC_AUDIO_EMBEDDING = auto()
     SEMANTIC_AUDIO_ADAPTER = auto()
+    AUDIO_INPUT_ADAPTER = auto()
     SEMANTIC_AUDIO_OUTPUT = auto()
     ACOUSTIC_DECODER = auto()
 
 
 class ParameterPolicyName(StrEnum):
     FULL = auto()
+    LORA = auto()
     SPEECH_INTERFACE = auto()
     SEMANTIC_ONLY = auto()
     ACOUSTIC_ONLY = auto()
@@ -119,16 +122,16 @@ class StageLoaderConfig:
 class StageConfig:
     name: StageName = StageName.STAGE_0
     loaders: dict[str, StageLoaderConfig] = field(default_factory=dict)
-    batches_per_step: int = 1
+    accumulate_grad_batches: int = 1
 
     def __post_init__(self) -> None:
         if (
-            isinstance(self.batches_per_step, bool)
-            or not isinstance(self.batches_per_step, int)
+            isinstance(self.accumulate_grad_batches, bool)
+            or not isinstance(self.accumulate_grad_batches, int)
         ):
-            raise TypeError("stage batches_per_step must be an integer.")
-        if self.batches_per_step < 1:
-            raise ValueError("stage batches_per_step must be positive.")
+            raise TypeError("stage accumulate_grad_batches must be an integer.")
+        if self.accumulate_grad_batches < 1:
+            raise ValueError("stage accumulate_grad_batches must be positive.")
         if not isinstance(self.loaders, Mapping):
             raise TypeError("stage loaders must be a mapping.")
         if self.loaders:
@@ -151,6 +154,7 @@ SPEECH_INTERFACE_GROUPS = frozenset(
     {
         ParameterGroup.SEMANTIC_AUDIO_EMBEDDING,
         ParameterGroup.SEMANTIC_AUDIO_ADAPTER,
+        ParameterGroup.AUDIO_INPUT_ADAPTER,
         ParameterGroup.SEMANTIC_AUDIO_OUTPUT,
         ParameterGroup.ACOUSTIC_DECODER,
     }
@@ -160,6 +164,7 @@ SEMANTIC_GROUPS = frozenset(
     {
         ParameterGroup.SEMANTIC_AUDIO_EMBEDDING,
         ParameterGroup.SEMANTIC_AUDIO_ADAPTER,
+        ParameterGroup.AUDIO_INPUT_ADAPTER,
         ParameterGroup.SEMANTIC_AUDIO_OUTPUT,
     }
 )
@@ -176,6 +181,14 @@ PARAMETER_POLICY_SPECS: Mapping[ParameterPolicyName, ParameterPolicySpec] = {
         frozenset(ParameterGroup),
         frozenset(),
         backbone_top_fraction=1.0,
+    ),
+    ParameterPolicyName.LORA: ParameterPolicySpec(
+        ParameterPolicyName.LORA,
+        SPEECH_INTERFACE_GROUPS | {ParameterGroup.BACKBONE_ADAPTER},
+        frozenset(ParameterGroup)
+        - SPEECH_INTERFACE_GROUPS
+        - {ParameterGroup.BACKBONE_ADAPTER},
+        backbone_top_fraction=0.0,
     ),
     ParameterPolicyName.SPEECH_INTERFACE: ParameterPolicySpec(
         ParameterPolicyName.SPEECH_INTERFACE,
@@ -197,7 +210,8 @@ PARAMETER_POLICY_SPECS: Mapping[ParameterPolicyName, ParameterPolicySpec] = {
     ),
     ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD: ParameterPolicySpec(
         ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD,
-        SPEECH_INTERFACE_GROUPS | {ParameterGroup.BACKBONE},
+        SPEECH_INTERFACE_GROUPS
+        | {ParameterGroup.BACKBONE, ParameterGroup.BACKBONE_ADAPTER},
         frozenset(),
         backbone_top_fraction=1.0 / 3.0,
     ),
@@ -238,11 +252,15 @@ def apply_parameter_policy(
 
 def parameter_group(name: str) -> ParameterGroup:
     if name.startswith("backbone."):
+        if ".lora_A." in name or ".lora_B." in name:
+            return ParameterGroup.BACKBONE_ADAPTER
         return ParameterGroup.BACKBONE
     if name.startswith("semantic_audio_embedding."):
         return ParameterGroup.SEMANTIC_AUDIO_EMBEDDING
     if name.startswith("semantic_audio_adapter."):
         return ParameterGroup.SEMANTIC_AUDIO_ADAPTER
+    if name.startswith("audio_input_adapter."):
+        return ParameterGroup.AUDIO_INPUT_ADAPTER
     if name.startswith("semantic_audio_output_adapter."):
         return ParameterGroup.SEMANTIC_AUDIO_OUTPUT
     if (

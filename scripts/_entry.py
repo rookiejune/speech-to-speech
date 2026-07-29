@@ -88,6 +88,7 @@ def trainer(
     *,
     logger: Any,
     factory: Callable[..., Any],
+    accumulate_grad_batches: int = 1,
     val_check_interval: int | float | None = None,
     num_sanity_val_steps: int | None = None,
 ) -> Any:
@@ -103,6 +104,7 @@ def trainer(
         "log_every_n_steps": config.trainer.log_every_n_steps,
         "enable_checkpointing": config.trainer.enable_checkpointing,
         "gradient_clip_val": config.trainer.gradient_clip_val,
+        "accumulate_grad_batches": accumulate_grad_batches,
         "strategy": config.trainer.strategy,
         "use_distributed_sampler": config.trainer.use_distributed_sampler,
     }

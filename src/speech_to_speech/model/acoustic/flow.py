@@ -198,6 +198,7 @@ class FlowModel(TokenModel):
         temperature: float = 1.0,
         top_p: float = 1.0,
         prompt_attention_mask: Tensor | None = None,
+        audio_input_positions: Tensor | None = None,
         do_sample: bool = True,
         use_cache: bool = True,
     ) -> AcousticGeneration:
@@ -207,6 +208,7 @@ class FlowModel(TokenModel):
             temperature=temperature,
             top_p=top_p,
             prompt_attention_mask=prompt_attention_mask,
+            audio_input_positions=audio_input_positions,
             do_sample=do_sample,
             use_cache=use_cache,
         )

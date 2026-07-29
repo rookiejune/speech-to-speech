@@ -2,7 +2,7 @@
 defaults:
   - override /stage: stage_1
   - override /parameter_policy: speech_interface
-  - override /trainer: static_ddp
+  - override /trainer: ddp
   - _self_
 
 output_subdir: 013-fdu-stage-smoke/${stage.name}/${run_name}

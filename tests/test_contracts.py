@@ -5,6 +5,7 @@ import multiprocessing
 import pickle
 import sys
 import unittest
+from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import ModuleType, SimpleNamespace
@@ -26,14 +27,14 @@ from anydataset.types import (
     TextView,
 )
 from hydra import compose, initialize_config_dir
-from anytrain.codec import AcousticLayout
+from anytrain.codec import AcousticLayout, SemanticAcousticCodes
 from anytrain.module.idspace import Layout
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig, OmegaConf
 from torch import nn
 from anydataset.dataset import MapStyleABC
 
-from speech_to_speech.audio_route import FULL_OUTPUT
+from speech_to_speech.audio_route import BICODEC_GENERATE_GLOBAL, FULL_OUTPUT
 from speech_to_speech.callback import OnDeviceCodecMaterializer
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule._task import allocate_tasks
@@ -74,6 +75,7 @@ from speech_to_speech.model import Config as ModelConfig, ToyConfig
 from speech_to_speech.runtime import AudioRepresentation, Config, Runtime
 from speech_to_speech.runtime.runtime import audio_tokenizer, dtype
 from speech_to_speech.runtime.audio_tokenizer import (
+    BiCodecAudioTokenizer,
     FlattenedAudioTokenizer,
     NativeAudioTokenizer,
     TorchCodecBPE,
@@ -673,11 +675,59 @@ class ContractTest(unittest.TestCase):
             encode_missing_codes=True,
         )([_raw_single_waveform_sample()])
 
-        batch = OnDeviceCodecMaterializer(runtime)(raw, device=torch.device("cpu"))
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            batch = OnDeviceCodecMaterializer(runtime)(
+                raw,
+                device=torch.device("cpu"),
+            )
 
         self.assertIsInstance(batch, ModelBatch)
         self.assertEqual(batch.tasks, [Task.TTS])
         self.assertIsNotNone(batch.acoustic_target)
+        self.assertEqual(runtime.codec.calls, [((1, 1, 4), 4)])
+        self.assertEqual(runtime.codec.input_dtypes, [torch.float32])
+        self.assertEqual(runtime.codec.autocast_enabled, [False])
+
+    def test_bicodec_online_tokenize_stays_fp32_outside_autocast(self):
+        runtime = _bicodec_data_runtime()
+        raw = SingleCollator(
+            runtime,
+            {Task.TTS: 1.0},
+            encode_missing_codes=True,
+        )([_raw_single_waveform_sample()])
+
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            batch = OnDeviceCodecMaterializer(runtime)(
+                raw,
+                device=torch.device("cpu"),
+            )
+
+        self.assertIsInstance(batch, ModelBatch)
+        self.assertEqual(batch.tasks, [Task.TTS])
+        self.assertEqual(runtime.codec.calls, [((1, 1, 4), 4)])
+        self.assertEqual(runtime.codec.input_dtypes, [torch.float32])
+        self.assertEqual(runtime.codec.autocast_enabled, [False])
+
+    def test_longcat_route_uses_frame_encode_when_codec_has_both_capabilities(self):
+        runtime = _data_runtime()
+        runtime.text_tokenizer = _ChatTokenizer(10)
+        runtime.codec = _EncodingCodec()
+        raw = SingleCollator(
+            runtime,
+            {Task.TTS: 1.0},
+            encode_missing_codes=True,
+        )([_raw_single_waveform_sample()])
+
+        with patch(
+            "speech_to_speech.callback.codec.supports_structured",
+            return_value=True,
+        ), patch(
+            "speech_to_speech.callback.codec.structured_codec",
+        ) as structured:
+            batch = OnDeviceCodecMaterializer(runtime)(raw, device=torch.device("cpu"))
+
+        self.assertIsInstance(batch, ModelBatch)
+        structured.assert_not_called()
         self.assertEqual(runtime.codec.calls, [((1, 1, 4), 4)])
 
     def test_pair_waveform_fallback_encodes_both_s2st_roles(self):
@@ -948,20 +998,29 @@ class ContractTest(unittest.TestCase):
             [Task.TTS, Task.MT, Task.TTS, Task.TTS, Task.MT, Task.TTS],
         )
 
-    def test_scheduled_dataloader_can_emit_fixed_joint_steps(self):
+    def test_scheduled_dataloader_interleaves_one_accumulation_window(self):
         speech = ModelBatch.from_samples([_sample(Task.TTS)], pad_token_id=99)
         mt = ModelBatch.from_samples([_sample(Task.MT)], pad_token_id=99)
         with self.assertRaisesRegex(ValueError, "too small"):
-            LoaderSchedule({"speech": 9.0, "mt": 1.0}, batches_per_step=8)
+            LoaderSchedule(
+                {"speech": 9.0, "mt": 1.0},
+                accumulate_grad_batches=8,
+            )
         loader = ScheduledDataLoader(
             {"speech": [speech], "mt": [mt]},
-            LoaderSchedule({"speech": 2.0, "mt": 1.0}, batches_per_step=3),
+            LoaderSchedule(
+                {"speech": 2.0, "mt": 1.0},
+                accumulate_grad_batches=3,
+            ),
         )
 
-        batch = next(iter(loader))
+        batches = list(islice(loader, 3))
 
-        self.assertIsInstance(batch, tuple)
-        self.assertEqual([item.tasks[0] for item in batch], [Task.TTS, Task.TTS, Task.MT])
+        self.assertTrue(all(isinstance(batch, ModelBatch) for batch in batches))
+        self.assertEqual(
+            [batch.tasks[0] for batch in batches],
+            [Task.TTS, Task.MT, Task.TTS],
+        )
 
     def test_datamodule_sets_up_loaders_and_returns_scheduled_loader(self):
         runtime = _data_runtime()
@@ -991,7 +1050,10 @@ class ContractTest(unittest.TestCase):
         datamodule = DataModule(
             runtime,
             {"speech": speech, "mt": mt},
-            LoaderSchedule({"speech": 1.0, "mt": 1.0}, batches_per_step=2),
+            LoaderSchedule(
+                {"speech": 1.0, "mt": 1.0},
+                accumulate_grad_batches=2,
+            ),
         )
 
         datamodule.set_loader_weights({"speech": 1.0, "mt": 1.0})
@@ -999,10 +1061,9 @@ class ContractTest(unittest.TestCase):
         loader = datamodule.train_dataloader()
         iterator = iter(loader)
 
-        self.assertEqual(datamodule.schedule.batches_per_step, 2)
-        batch = next(iterator)
-        self.assertIsInstance(batch, tuple)
-        self.assertEqual([item.tasks[0] for item in batch], [Task.TTS, Task.MT])
+        self.assertEqual(datamodule.schedule.accumulate_grad_batches, 2)
+        batches = [next(iterator), next(iterator)]
+        self.assertEqual([batch.tasks[0] for batch in batches], [Task.TTS, Task.MT])
 
     def test_datamodule_validates_loader_names(self):
         runtime = _data_runtime()
@@ -1812,6 +1873,34 @@ def _data_runtime():
     )
 
 
+def _bicodec_data_runtime():
+    tokenizer = BiCodecAudioTokenizer(
+        semantic_vocab_size=8,
+        acoustic_codebook_sizes=(3,),
+        acoustic_unit_length=2,
+    )
+    audio_start = 10
+    boa_token_id = audio_start + tokenizer.vocab_size
+    return SimpleNamespace(
+        codec_name="bicodec",
+        audio_view=AudioView.BICODEC,
+        codec_frame_rate=50.0,
+        audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
+        audio_route=BICODEC_GENERATE_GLOBAL,
+        semantic_codec_artifact=None,
+        acoustic_layout=AcousticLayout.FIXED_LENGTH,
+        acoustic_unit_length=2,
+        text_tokenizer=_ChatTokenizer(10),
+        audio_tokenizer=tokenizer,
+        layout=Layout(text=(0, 10), audio=(audio_start, boa_token_id + 2)),
+        pad_token_id=0,
+        eos_token_id=1,
+        boa_token_id=boa_token_id,
+        eoa_token_id=boa_token_id + 1,
+        codec=_StructuredEncodingCodec(),
+    )
+
+
 def _loader(batch_size: int = 1) -> DataLoaderConfig:
     return DataLoaderConfig(batch_size=batch_size, num_workers=0)
 
@@ -1837,13 +1926,61 @@ class _EncodingCodec:
 
     def __init__(self) -> None:
         self.calls: list[tuple[tuple[int, ...], int]] = []
+        self.input_dtypes: list[torch.dtype] = []
+        self.autocast_enabled: list[bool] = []
 
     def encode(self, audio: torch.Tensor, sample_rate: int) -> torch.Tensor:
         self.calls.append((tuple(audio.shape), sample_rate))
+        self.input_dtypes.append(audio.dtype)
+        self.autocast_enabled.append(torch.is_autocast_enabled(audio.device.type))
         return audio.new_tensor([[[0, 2], [1, 3]]], dtype=torch.long)
 
     def decode(self, codes: torch.Tensor) -> torch.Tensor:
         return codes.new_zeros((codes.size(0), 1, codes.size(1)), dtype=torch.float32)
+
+
+class _StructuredEncodingCodec:
+    sample_rate = 16_000
+    frame_rate = 50.0
+    semantic_codebook = torch.zeros(8, 4)
+    semantic_codebook_sizes = (8,)
+    acoustic_codebook_sizes = (3,)
+    acoustic_layout = AcousticLayout.FIXED_LENGTH
+    acoustic_unit_length = 2
+    acoustic_feature_dim = 4
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[tuple[int, ...], int]] = []
+        self.input_dtypes: list[torch.dtype] = []
+        self.autocast_enabled: list[bool] = []
+
+    def tokenize(
+        self,
+        audio: torch.Tensor,
+        sample_rate: int,
+    ) -> SemanticAcousticCodes:
+        self.calls.append((tuple(audio.shape), sample_rate))
+        self.input_dtypes.append(audio.dtype)
+        self.autocast_enabled.append(torch.is_autocast_enabled(audio.device.type))
+        return SemanticAcousticCodes(
+            semantic=torch.tensor([[[1], [2]]], device=audio.device),
+            acoustic=torch.tensor([[[0], [1]]], device=audio.device),
+        )
+
+    def detokenize(self, codes: object) -> torch.Tensor:
+        del codes
+        return torch.zeros(1, 1, 1)
+
+    def acoustic_codes_to_features(self, acoustic_codes: torch.Tensor) -> torch.Tensor:
+        return acoustic_codes.to(dtype=torch.float32)
+
+    def decode_features(
+        self,
+        semantic_codes: torch.Tensor,
+        acoustic_features: torch.Tensor,
+    ) -> torch.Tensor:
+        del semantic_codes
+        return acoustic_features.new_zeros((1, 1, 1))
 
 
 def _raw_sample(index: int = 0):

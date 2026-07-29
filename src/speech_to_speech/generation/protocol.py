@@ -30,6 +30,7 @@ class TokenGenerator(Protocol):
         temperature: float = 1.0,
         top_p: float = 1.0,
         prompt_attention_mask: Tensor | None = None,
+        audio_input_positions: Tensor | None = None,
         stop_token_id: int | None = None,
         generation_modality: Modality | None = None,
         allowed_token_ids: Sequence[int] | Tensor | None = None,
@@ -48,6 +49,7 @@ class FullCodecSequenceGenerator(TokenGenerator, Protocol):
         temperature: float = 1.0,
         top_p: float = 1.0,
         prompt_attention_mask: Tensor | None = None,
+        audio_input_positions: Tensor | None = None,
         do_sample: bool = True,
         use_cache: bool = True,
     ) -> Tensor: ...
@@ -62,6 +64,7 @@ class TextEvaluationModel(TokenGenerator, Protocol):
         input_ids: Tensor,
         *,
         attention_mask: Tensor | None = None,
+        audio_input_positions: Tensor | None = None,
     ) -> Tensor: ...
 
     def token_logits(
@@ -83,6 +86,7 @@ class AcousticFeatureGeneration(Protocol):
         temperature: float = 1.0,
         top_p: float = 1.0,
         prompt_attention_mask: Tensor | None = None,
+        audio_input_positions: Tensor | None = None,
         do_sample: bool = True,
         use_cache: bool = True,
     ) -> AcousticGeneration: ...

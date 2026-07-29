@@ -25,6 +25,10 @@
 
 ## 其他工程欠账
 
+- Interleave 方案暂缓：其定义是冻结现有 Qwen layers，并在相邻层之间插入可训练 Transformer
+  blocks，不是 LoRA 或解冻原层。该结构会改变 checkpoint key/恢复契约、KV cache 与 generation
+  路径、FLOPs 口径，并存在文本能力退化风险；先用 PEFT LoRA 加固定 `TextRetentionLogger`
+  baseline 验证参数高效适配与文本保真度，再决定是否实现 Interleave。
 - stage 1 companion manifest 需要绑定 checkpoint、tokenizer/native-or-BPE、semantic vocab、
   RVQ codebook、decoder config、state-dict prefix whitelist 和 split fingerprint。
 - 后续进入 Qwen partial/full joint 前，再补齐 stage-specific FLOPs provider、sample archive

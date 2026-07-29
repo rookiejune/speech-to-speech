@@ -11,6 +11,7 @@ from ..task import Task
 class Request(TypedDict):
     prompt_ids: Tensor
     task: Task
+    audio_input_positions: Tensor | None
     audio_context: SemanticAcousticCodes | None
 
 

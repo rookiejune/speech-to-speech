@@ -4,7 +4,7 @@ from typing import Any, cast
 
 from anytrain.lightning import LossItemLoggerCallback
 
-from ...datamodule.types import ModelBatch, TrainBatch
+from ...datamodule.types import ModelBatch
 from ...loss.types import loss_items
 
 
@@ -19,17 +19,7 @@ class OutputsLogger(LossItemLoggerCallback):
 
 
 def _tasks(objective: str, batch: Any) -> list[object]:
-    train_batch = cast(TrainBatch, batch)
-    return _batch_or_tuple_tasks(train_batch, objective)
-
-
-def _batch_or_tuple_tasks(batch: TrainBatch, objective: str) -> list[object]:
-    if not isinstance(batch, tuple):
-        return _batch_tasks(batch, objective)
-    tasks = []
-    for item in batch:
-        tasks.extend(_batch_tasks(item, objective))
-    return tasks
+    return _batch_tasks(cast(ModelBatch, batch), objective)
 
 
 def _batch_tasks(batch: ModelBatch, objective: str) -> list[object]:

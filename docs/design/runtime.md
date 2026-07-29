@@ -145,7 +145,9 @@ padding、objective 与 generation service 不读取全局 runtime 状态。
 ## 资源边界
 
 - runtime 只加载并暴露资源，不包含 task、objective 或 Trainer 逻辑。
-- device、dtype 与 attention backend 来自显式配置，不依赖 Transformers 环境默认值。
+- device、backbone dtype 与 attention backend 来自显式配置，不依赖 Transformers 环境默认值；
+  `runtime.Config.dtype` 只控制 backbone 加载精度。在线 waveform fallback 的 codec encode 是独立
+  FP32 预处理边界，由 materializer 关闭 Trainer autocast，不把 backbone BF16 传播给 codec。
 - backbone snapshot 同时定义 tokenizer 与模型 config；初始化方式只决定是否读取其中的模型权重。
 - layout、backbone/tokenizer vocabulary 与 codec/audio-tokenizer vocabulary 属于同一 snapshot。
 - Runtime 不是 `nn.Module`；optimizer/checkpoint ownership 只由 model 属性决定。

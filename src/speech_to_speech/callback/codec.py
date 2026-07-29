@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 from anytrain.codec import SemanticAcousticCodes
+from anydataset.types import AudioView
 from torch import Tensor
 
 from ..datamodule.protocol import DatasetRuntime
@@ -34,8 +35,6 @@ class OnDeviceCodecMaterializer:
         *,
         device: torch.device | None = None,
     ) -> TrainBatch:
-        if isinstance(batch, tuple):
-            return tuple(self._concrete(item, device=device) for item in batch)
         return self._concrete(batch, device=device)
 
     def _concrete(
@@ -108,29 +107,41 @@ class OnDeviceCodecMaterializer:
         *,
         device: torch.device | None,
     ) -> object:
-        waveform = sample.waveform
+        # Codec backends are materialization dependencies, not part of the model's
+        # mixed-precision graph. Keep their input and internal kernels in FP32.
+        waveform = sample.waveform.to(dtype=torch.float32)
         if device is not None:
             waveform = waveform.to(device=device)
         batched_waveform = _batched_waveform(waveform)
-        if supports_structured(self.runtime.codec):
-            encoded = structured_codec(self.runtime.codec).tokenize(
-                batched_waveform,
-                sample.sample_rate,
+        with torch.autocast(
+            device_type=batched_waveform.device.type,
+            enabled=False,
+        ):
+            if self.runtime.audio_view is AudioView.BICODEC:
+                if not supports_structured(self.runtime.codec):
+                    raise TypeError(
+                        "BiCodec waveform fallback requires a structured codec."
+                    )
+                encoded = structured_codec(self.runtime.codec).tokenize(
+                    batched_waveform,
+                    sample.sample_rate,
+                )
+                if not isinstance(encoded, SemanticAcousticCodes):
+                    raise TypeError(
+                        "structured codec tokenize must return SemanticAcousticCodes."
+                    )
+                if encoded.semantic.size(0) != 1 or encoded.acoustic.size(0) != 1:
+                    raise ValueError("per-sample codec fallback expects one encoded item.")
+                return SemanticAcousticCodes(
+                    semantic=encoded.semantic[0].detach().cpu(),
+                    acoustic=encoded.acoustic[0].detach().cpu(),
+                )
+            return _encoded_codes(
+                frame_codec(self.runtime.codec).encode(
+                    batched_waveform,
+                    sample.sample_rate,
+                )
             )
-            if not isinstance(encoded, SemanticAcousticCodes):
-                raise TypeError("structured codec tokenize must return SemanticAcousticCodes.")
-            if encoded.semantic.size(0) != 1 or encoded.acoustic.size(0) != 1:
-                raise ValueError("per-sample codec fallback expects one encoded item.")
-            return SemanticAcousticCodes(
-                semantic=encoded.semantic[0].detach().cpu(),
-                acoustic=encoded.acoustic[0].detach().cpu(),
-            )
-        return _encoded_codes(
-            frame_codec(self.runtime.codec).encode(
-                batched_waveform,
-                sample.sample_rate,
-            )
-        )
 
 
 def _batched_waveform(waveform: Tensor) -> Tensor:

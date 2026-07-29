@@ -35,6 +35,7 @@ class TrainInterval:
         self.every_audio_seconds = every_audio_seconds
         self.audio_seconds = 0.0
         self._next_audio_seconds = every_audio_seconds
+        self._last_step: int | None = None
 
     @property
     def uses_audio_seconds(self) -> bool:
@@ -48,7 +49,13 @@ class TrainInterval:
     ) -> bool:
         if self.every_audio_seconds is None:
             assert self.every_n_steps is not None
-            return int(trainer.global_step) % self.every_n_steps == 0
+            step = int(trainer.global_step)
+            if self._last_step == step:
+                return False
+            if self._last_step is not None and step < self._last_step:
+                raise RuntimeError("trainer global_step moved backwards.")
+            self._last_step = step
+            return step > 0 and step % self.every_n_steps == 0
         return self._advance_audio_seconds(trainer, pl_module, batch)
 
     def state_dict(self) -> dict[str, float]:
@@ -59,6 +66,7 @@ class TrainInterval:
                 if self._next_audio_seconds is not None
                 else math.nan
             ),
+            "last_step": -1.0 if self._last_step is None else float(self._last_step),
         }
 
     def load_state_dict(self, state: dict[str, float]) -> None:
@@ -66,6 +74,14 @@ class TrainInterval:
         if not math.isfinite(audio_seconds) or audio_seconds < 0:
             raise ValueError("interval audio_seconds state must be finite and non-negative.")
         self.audio_seconds = audio_seconds
+        last_step = float(state.get("last_step", -1.0))
+        if (
+            not math.isfinite(last_step)
+            or last_step < -1
+            or not last_step.is_integer()
+        ):
+            raise ValueError("interval last_step state must be -1 or a non-negative integer.")
+        self._last_step = None if last_step == -1 else int(last_step)
         if self.every_audio_seconds is None:
             self._next_audio_seconds = None
             return
@@ -96,11 +112,9 @@ class TrainInterval:
 
 
 def processed_audio_seconds(batch: TrainBatch) -> float:
-    if isinstance(batch, ModelBatch):
-        return _batch_seconds(batch)
-    if isinstance(batch, tuple):
-        return math.fsum(_batch_seconds(item) for item in batch)
-    raise TypeError("processed audio seconds require a ModelBatch or tuple of ModelBatch.")
+    if not isinstance(batch, ModelBatch):
+        raise TypeError("processed audio seconds require a ModelBatch.")
+    return _batch_seconds(batch)
 
 
 def _batch_seconds(batch: ModelBatch) -> float:

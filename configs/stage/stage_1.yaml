@@ -8,4 +8,4 @@ loaders:
     weight: 0.5
     task_weights:
       tts: 1.0
-batches_per_step: 2
+accumulate_grad_batches: 2

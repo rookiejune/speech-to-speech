@@ -46,9 +46,8 @@ class GradLogger(GradientLoggerCallback):
         trainer: Trainer,
         pl_module: LightningModule,
     ) -> bool:
-        if self.interval.uses_audio_seconds:
-            return self._run_current_batch
-        return super().should_run(trainer, pl_module)
+        del trainer, pl_module
+        return self._run_current_batch
 
     def state_dict(self) -> dict[str, dict[str, float]]:
         return {"interval": self.interval.state_dict()}

@@ -5,7 +5,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from .types import ConcreteTrainInput, TrainInputBatch
+from .types import ConcreteTrainInput
 
 
 @runtime_checkable
@@ -16,19 +16,19 @@ class _EpochSetter(Protocol):
 @dataclass(frozen=True)
 class LoaderSchedule:
     weights: dict[str, float]
-    batches_per_step: int = 1
+    accumulate_grad_batches: int = 1
 
     def __post_init__(self) -> None:
         _validate_weights(self.weights)
         if (
-            isinstance(self.batches_per_step, bool)
-            or not isinstance(self.batches_per_step, int)
+            isinstance(self.accumulate_grad_batches, bool)
+            or not isinstance(self.accumulate_grad_batches, int)
         ):
-            raise TypeError("batches_per_step must be an integer.")
-        if self.batches_per_step < 1:
-            raise ValueError("batches_per_step must be positive.")
-        if self.batches_per_step > 1:
-            _allocate_loaders(self.weights, self.batches_per_step)
+            raise TypeError("accumulate_grad_batches must be an integer.")
+        if self.accumulate_grad_batches < 1:
+            raise ValueError("accumulate_grad_batches must be positive.")
+        if self.accumulate_grad_batches > 1:
+            _accumulation_window(self.weights, self.accumulate_grad_batches)
 
 
 class ScheduledDataLoader:
@@ -50,18 +50,19 @@ class ScheduledDataLoader:
         self.loaders = dict(loaders)
         self.schedule = schedule
 
-    def __iter__(self) -> Iterator[TrainInputBatch]:
+    def __iter__(self) -> Iterator[ConcreteTrainInput]:
         keys = tuple(self.schedule.weights)
         weights = self.schedule.weights
         iterators = {key: iter(self.loaders[key]) for key in keys}
         cycles = {key: 0 for key in keys}
-        if self.schedule.batches_per_step > 1:
-            fixed = _allocate_loaders(weights, self.schedule.batches_per_step)
+        if self.schedule.accumulate_grad_batches > 1:
+            window = _accumulation_window(
+                weights,
+                self.schedule.accumulate_grad_batches,
+            )
             while True:
-                yield tuple(
-                    _next_batch(key, iterators, self.loaders, cycles)
-                    for key in fixed
-                )
+                for key in window:
+                    yield _next_batch(key, iterators, self.loaders, cycles)
 
         total = sum(weights.values())
         credits = {key: 0.0 for key in keys}
@@ -86,20 +87,20 @@ def _validate_weights(weights: Mapping[str, float]) -> None:
         raise ValueError("loader names must not be empty.")
 
 
-def _allocate_loaders(
+def _accumulation_window(
     weights: Mapping[str, float],
-    batches_per_step: int,
+    accumulate_grad_batches: int,
 ) -> tuple[str, ...]:
     keys = tuple(weights)
     total = sum(weights.values())
-    targets = [weights[key] * batches_per_step / total for key in keys]
+    targets = [weights[key] * accumulate_grad_batches / total for key in keys]
     if any(target < 1 for target in targets if target > 0):
         raise ValueError(
-            "batches_per_step is too small for fixed loader weights; each non-zero "
-            "loader must receive at least one batch."
+            "accumulate_grad_batches is too small for fixed loader weights; each "
+            "non-zero loader must receive at least one microbatch."
         )
     counts = [math.floor(target) for target in targets]
-    remaining = batches_per_step - sum(counts)
+    remaining = accumulate_grad_batches - sum(counts)
     order = sorted(
         range(len(keys)),
         key=lambda index: (targets[index] - counts[index], -index),
@@ -107,7 +108,25 @@ def _allocate_loaders(
     )
     for index in order[:remaining]:
         counts[index] += 1
-    return tuple(key for key, count in zip(keys, counts) for _ in range(count))
+    return _interleave(keys, counts)
+
+
+def _interleave(keys: tuple[str, ...], counts: list[int]) -> tuple[str, ...]:
+    total = sum(counts)
+    credits = [0 for _ in counts]
+    remaining = list(counts)
+    result = []
+    for _ in range(total):
+        for index, count in enumerate(counts):
+            credits[index] += count
+        selected = max(
+            (index for index, count in enumerate(remaining) if count > 0),
+            key=lambda index: (credits[index], -index),
+        )
+        credits[selected] -= total
+        remaining[selected] -= 1
+        result.append(keys[selected])
+    return tuple(result)
 
 
 def _next_batch(

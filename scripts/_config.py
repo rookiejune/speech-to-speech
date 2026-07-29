@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Type, TypeVar, Union, cast
@@ -21,7 +22,7 @@ from speech_to_speech.audio_route import (
     PromptSource,
     StreamSource,
 )
-from speech_to_speech.model import AdapterType
+from speech_to_speech.model import AdapterType, AudioInputAdapterType
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model.acoustic import AcousticType, DecoderConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
@@ -160,6 +161,21 @@ class StagedTaskSampleCallbackConfig:
 
 
 @dataclass
+class TextProbeConfig:
+    instruction: str = MISSING
+    reference: str = MISSING
+
+
+@dataclass
+class TextRetentionCallbackConfig:
+    enabled: bool = False
+    every_n_steps: int = 10_000
+    every_audio_seconds: Optional[float] = None
+    max_new_tokens: int = 128
+    probes: dict[str, TextProbeConfig] = field(default_factory=dict)
+
+
+@dataclass
 class EvaluationCallbackConfig:
     enabled: bool = True
     every_audio_seconds: Optional[float] = None
@@ -211,6 +227,9 @@ class OverfitCallbacksConfig:
 class StagedCallbacksConfig:
     task_sample: StagedTaskSampleCallbackConfig = field(
         default_factory=StagedTaskSampleCallbackConfig
+    )
+    text_retention: TextRetentionCallbackConfig = field(
+        default_factory=TextRetentionCallbackConfig
     )
     grad_norm: GradNormCallbackConfig = field(default_factory=GradNormCallbackConfig)
     checkpoint: CheckpointCallbackConfig = field(
@@ -328,6 +347,7 @@ def overfit(config: DictConfig) -> OverfitConfig:
     _validate_audio_representation(result)
     _validate_audio_route(result)
     _validate_backbone_initialization(result)
+    _validate_lora(result)
     if (
         result.callbacks.performance.enabled
         and result.callbacks.task_sample.enabled
@@ -355,10 +375,12 @@ def train(config: DictConfig) -> StagedTrainConfig:
     _validate_audio_representation(result)
     _validate_audio_route(result)
     _validate_backbone_initialization(result)
+    _validate_lora(result)
     if not result.stage.loaders:
         raise ValueError("formal train requires stage.loaders.")
-    _validate_static_ddp(result)
+    _validate_loader_schedule(result)
     _validate_task_samples(result)
+    _validate_text_retention(result)
     _validate_validation(result)
     return result
 
@@ -429,21 +451,63 @@ def _validate_task_samples(config: StagedTrainConfig) -> None:
             _validate_validation_dataset(config)
 
 
-def _validate_static_ddp(config: StagedTrainConfig) -> None:
-    if config.trainer.strategy not in {
+def _validate_text_retention(config: StagedTrainConfig) -> None:
+    callback = config.callbacks.text_retention
+    if (
+        isinstance(callback.every_n_steps, bool)
+        or not isinstance(callback.every_n_steps, int)
+        or callback.every_n_steps <= 0
+    ):
+        raise ValueError("text retention every_n_steps must be a positive integer.")
+    if (
+        isinstance(callback.max_new_tokens, bool)
+        or not isinstance(callback.max_new_tokens, int)
+        or callback.max_new_tokens <= 0
+    ):
+        raise ValueError("text retention max_new_tokens must be a positive integer.")
+    _validate_optional_positive_number(
+        callback.every_audio_seconds,
+        "text retention every_audio_seconds",
+    )
+    if not callback.enabled:
+        return
+    if not callback.probes:
+        raise ValueError("enabled text retention requires at least one probe.")
+    for name, probe in callback.probes.items():
+        if not isinstance(name, str) or not name:
+            raise TypeError("text retention probe names must be non-empty strings.")
+        if not isinstance(probe.instruction, str) or not probe.instruction:
+            raise TypeError(
+                f"text retention probe {name!r} instruction must be a non-empty string."
+            )
+        if not isinstance(probe.reference, str) or not probe.reference:
+            raise TypeError(
+                f"text retention probe {name!r} reference must be a non-empty string."
+            )
+
+
+def _validate_optional_positive_number(value: object, name: str) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a number or None.")
+    if not math.isfinite(float(value)) or value <= 0:
+        raise ValueError(f"{name} must be finite and positive.")
+
+
+def _validate_loader_schedule(config: StagedTrainConfig) -> None:
+    loaders = config.stage.loaders
+    if len(loaders) > 1 and config.trainer.strategy in {
         "ddp",
         "ddp_find_unused_parameters_false",
     }:
-        return
-    loaders = config.stage.loaders
-    if len(loaders) > 1 and config.stage.batches_per_step == 1:
         raise ValueError(
-            "static DDP with multiple stage loaders requires batches_per_step > 1 "
-            "so every optimizer step covers every loader."
+            "multi-loader gradient accumulation requires DDP unused-parameter "
+            "detection; select trainer=ddp instead of a static DDP strategy."
         )
     LoaderSchedule(
         config.stage.loader_weights(),
-        batches_per_step=config.stage.batches_per_step,
+        accumulate_grad_batches=config.stage.accumulate_grad_batches,
     )
 
 
@@ -598,6 +662,20 @@ def _validate_backbone_initialization(
         )
 
 
+def _validate_lora(config: Union[OverfitConfig, StagedTrainConfig]) -> None:
+    enabled = config.model.lora.enabled
+    selected = config.parameter_policy.name is ParameterPolicyName.LORA
+    if enabled != selected:
+        raise ValueError(
+            "model.lora.enabled and parameter_policy=lora must be selected together."
+        )
+    if enabled and config.callbacks.performance.enabled:
+        raise ValueError(
+            "LoRA training FLOPs are not supported by the current performance provider; "
+            "set callbacks.performance.enabled=false."
+        )
+
+
 def _prepare(config: DictConfig) -> DictConfig:
     result = cast(DictConfig, OmegaConf.create(OmegaConf.to_container(config)))
     OmegaConf.resolve(result)
@@ -612,6 +690,16 @@ def _prepare(config: DictConfig) -> DictConfig:
                 AdapterType[raw].name
                 if raw in AdapterType.__members__
                 else AdapterType(raw).name
+            )
+    audio_input = result.model.get("audio_input_adapter")
+    if isinstance(audio_input, DictConfig):
+        value = audio_input.get("type")
+        if value is not None:
+            raw = str(value)
+            audio_input.type = (
+                AudioInputAdapterType[raw].name
+                if raw in AudioInputAdapterType.__members__
+                else AudioInputAdapterType(raw).name
             )
     _normalize_dataset(result.get("data"))
     _normalize_dataset(result.get("data", {}).get("dataset"))

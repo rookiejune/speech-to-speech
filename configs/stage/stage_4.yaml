@@ -18,4 +18,4 @@ loaders:
     weight: 0.1
     task_weights:
       mt: 1.0
-batches_per_step: 10
+accumulate_grad_batches: 10

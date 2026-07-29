@@ -46,7 +46,7 @@ class TextRetentionLogger(Callback):
 
     def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         module = cast(_Module, cast(object, pl_module))
-        self._log(trainer, module, baseline=True)
+        self._log(trainer, module, baseline=not self._baseline_nll)
 
     def on_train_batch_end(
         self,

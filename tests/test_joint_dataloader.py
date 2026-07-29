@@ -258,11 +258,11 @@ class ScheduledDataLoaderTest(unittest.TestCase):
             {"speech": direct, "text": fallback},
             LoaderSchedule(
                 {"speech": 1.0, "text": 1.0},
-                batches_per_step=2,
+                accumulate_grad_batches=2,
             ),
         )
 
-        list(islice(loader, 3))
+        list(islice(loader, 6))
 
         self.assertEqual(direct.epochs, [1, 2])
         self.assertEqual(direct.iteration_epochs, [0, 1, 2])

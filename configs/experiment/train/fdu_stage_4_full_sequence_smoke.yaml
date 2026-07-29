@@ -5,7 +5,7 @@ defaults:
   - override /runtime: longcat_full_sequence
   - override /audio_route: full_output
   - override /model/acoustic: none
-  - override /trainer: static_ddp
+  - override /trainer: ddp
   - _self_
 
 run_name: ${stage.name}-full-sequence-token

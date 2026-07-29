@@ -5,7 +5,7 @@ defaults:
   - override /model/acoustic: none
   - override /runtime: longcat_full_sequence
   - override /audio_route: full_output
-  - override /trainer: static_ddp
+  - override /trainer: ddp
   - _self_
 
 output_subdir: 013-fdu-stage-smoke/${stage.name}/${run_name}

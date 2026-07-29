@@ -45,9 +45,9 @@
   配置为 anydataset `WMT19` preset 或 deterministic toy text samples，不消费 codec/audio
   tokenizer。
 - `LoaderSchedule` / `ScheduledDataLoader`：为唯一 `DataModule` 组织多个 homogeneous loader。
-  默认按 optimizer step 确定性轮转；配置 `batches_per_step > 1` 时，一个 optimizer step 返回
-  多个子 batch，供静态 DDP 覆盖多条可训练执行路径。每个子 loader 自己保持单一 execution
-  signature。
+  `accumulate_grad_batches=1` 时按 batch 确定性轮转；大于 1 时构造固定长度的 accumulation window，
+  按 loader 权重交错产出单个 microbatch。每个子 loader 自己保持单一 execution signature，
+  Lightning 负责跨 microbatch 累积梯度，DataLoader 不返回联合 batch tuple。
 - `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts`、`qwen_tts_speaker` prepared data
   或确定性的内存 `toy` data。`qwen_tts_speaker` 通过 workspace 加载
   `SpeakerAudioGrid`，再由 `SpeakerGridCellsDataset` 暴露 `Role.DEFAULT` flat cells；默认覆盖
@@ -121,7 +121,11 @@ debug fallback 可显式设置 `encode_missing_codes=true`。pair 与 single col
 `AudioView.WAVEFORM` 时返回 `RawSpeechBatch`；既没有 codes 也没有 waveform 时明确报错。该 batch
 不能直接进入 objective；训练入口必须给 `SpeechToSpeechModule` 挂
 `OnDeviceCodecMaterializer`，在 GPU/device 上调用 runtime codec encode 后再构造标准
-`ModelBatch`。同一 batch 可以混合 prepared-code item 和 raw waveform item。
+`ModelBatch`。materializer 把 waveform 显式转为 FP32，并在关闭当前 device autocast 的上下文内
+执行完整 codec encode/tokenize，因此不继承 Trainer 的 `bf16-mixed` 计算精度。BiCodec view 走
+structured `tokenize()`；LongCat、Stable Codec 与 UniCodec frame view 走完整 `encode()`，不能仅因
+LongCat 同时暴露 structured capability 就改变数据表示。同一 batch 可以混合 prepared-code item
+和 raw waveform item。
 
 `ModelSample` 和 `ModelBatch` 使用同一组核心字段：
 
@@ -130,6 +134,7 @@ input_ids: Tensor
 token_labels: Tensor
 token_groups: Tensor | None
 acoustic_target: AcousticTarget | None
+audio_input_positions: Tensor | None
 generation_prompt_length: int
 audio_context: SemanticAcousticCodes | None
 ```
@@ -153,6 +158,12 @@ codec/stream marker 与外层 EOA 不进入监督。
 显式 prompt boundary，不从第一个非 `-100` label 反推。audio-target boundary 包含 response BOA，
 因此即使后续 grammar marker 不受监督，真实生成仍从相同状态开始。
 
+`audio_input_positions` 是每条序列中 source audio payload token 的位置，按 `[frames]` 保存，batch
+padding 后为 `[batch, frames]`，右侧填充 `-1`。sample builder 只为
+`task.source_modality == Modality.AUDIO` 的 source payload 记录位置；source BOA/EOA、target audio
+response、generated token 以及 BiCodec route 的 reference `audio_context` 不进入该字段。它与
+`audio_context` 是两条独立契约：前者服务 backbone 输入 tower，后者服务 route-aware decode。
+
 ## 边界
 
 - 包级 `speech_to_speech.datamodule` 只导出唯一运行入口 `DataModule`。`LoaderSpec`、配置结构、
@@ -171,7 +182,7 @@ codec/stream marker 与外层 EOA 不进入监督。
   fallback：普通 DataLoader worker 不持有 codec/CUDA module，fallback batch 必须在
   `pl_module` loss 前经 on-device materializer 转为 `ModelBatch`。materializer 对 S2ST 编码 source
   和 target，对 S2TT/ASR 只编码音频 source，对 T2ST/TTS 只编码音频 target；纯文本 task 不调用
-  codec。
+  codec。在线编码是 FP32 预处理边界，不属于 backbone/acoustic decoder 的 autocast graph。
 - toy dataset 只读取正式 runtime 的 codec identity 与 codebook metadata；它不提供 tokenizer、
   codec、layout 或 special token，因此不存在 toy runtime 分支。
 - `parser.py` 只解释 raw dataset representation；`sample.py` 只实现任务序列规则；
@@ -202,6 +213,8 @@ codec/stream marker 与外层 EOA 不进入监督。
 - `ACOUSTIC_PAD_ID=-1` 只由 batch padding 引入，不能出现在未 padding 的 `ModelSample`
   中；因此派生的 frame mask 只包含右侧 padding，不会形成内部空洞。
 - `ModelBatch` 只表达训练或 teacher-forcing evaluation，不表达缺少 target 的真实推理请求。
+- `audio_input_positions` 只表达可见 source audio payload 的 overlay 位置；其值必须唯一、落在
+  当前序列内并指向 runtime codec audio range。没有 source audio 时必须为 `None`。
 - `ModelBatch.generation_prompt_lengths` 与 `audio_contexts` 是 teacher-forcing 到真实推理的显式桥接
   字段；route 需要 prompt stream 时缺少对应 structured context 必须失败，不能回退到 target codes。
 - `AudioMeta.DURATION` 的单位是秒，不是 codec frame 或 waveform sample。parser 优先读取并校验
@@ -214,12 +227,14 @@ codec/stream marker 与外层 EOA 不进入监督。
   更新在替换现有权重前报错。DataModule 构造时必须提供初始权重；正式入口不会在运行中调用
   `set_task_weights()`。权重使用进程共享数组，因此显式更新时持久 worker 会在下一次 collate
   看到新值，不要求重建 DataLoader。
-- `LoaderSchedule.batches_per_step=1` 保留单子 batch 轮转；`batches_per_step > 1` 使用固定
-  loader 分配，任一非 0 权重 loader 拿不到至少 1 个子 batch 会报错。loss 聚合不使用 loader
-  权重，权重只改变数据进入训练 step 的频率。每个子 loader 独立维护从 0 开始的 cycle；耗尽后
+- `LoaderSchedule.accumulate_grad_batches=1` 保留逐 batch 轮转；大于 1 时，每个 accumulation
+  window 按 loader 权重分配并交错排列 microbatch，任一非 0 权重 loader 拿不到至少 1 个
+  microbatch 会报错。loss 不额外乘 loader 权重，权重只改变数据进入训练的频率；每次
+  `training_step()` 只消费一个 `ModelBatch`，梯度缩放与 optimizer-step cadence 由 Lightning 的
+  `accumulate_grad_batches` 负责。每个子 loader 独立维护从 0 开始的 cycle；耗尽后
   先推进到下一 cycle，再通过 loader 的 `set_epoch()` 或其 `batch_sampler.set_epoch()` 更新
   deterministic shuffle，然后重建 iterator。同一 schedule 和 per-rank batch count 下，各 rank
-  会在相同 optimizer step 推进相同子 loader 的 epoch。
+  会在相同 accumulation-window 位置推进相同子 loader 的 epoch。
 - `DataModule` 在构造 loader 前把 collator 的完整 runtime 替换为 `DataRuntimeSnapshot`；主进程
   仍持有正式 runtime 供 dataset setup 使用。`persistent_workers` 只在 `num_workers > 0` 时启用，
   `pin_memory` 由入口显式配置。

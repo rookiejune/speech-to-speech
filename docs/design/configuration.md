@@ -12,9 +12,11 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
   `longcat`、`longcat_native`、
   `longcat_full_sequence`、`unicodec` 表示相互兼容的资源 snapshot；不再拆分 `codec` 和
   `sampler` 组。
-- `model`：完整映射 `model.Config` 的三个 adapter 与可选 `ToyConfig`。`model=toy` 只替换
-  backbone；`model/acoustic` 选择 flow/RVQ composition，preset package 仍是顶层 `acoustic`，
-  避免把 subtype 字段混入基础 `model.Config`。
+- `model`：完整映射 `model.Config` 的 semantic adapter、可选 source-audio input adapter、
+  `ToyConfig` 与 `LoraConfig`。
+  `model=toy` 只替换 backbone；`model.lora.enabled=true` 使用 Hugging Face PEFT 向现有 backbone
+  注入 adapter，不维护项目内轻量 LoRA 实现；`model/acoustic` 选择 flow/RVQ composition，preset
+  package 仍是顶层 `acoustic`，避免把 subtype 字段混入基础 `model.Config`。
 - `data`：overfit 数据源 preset；`data=toy` 使用 `DatasetConfig` 选择内存 codec samples，
   production/fixed-sample experiment 默认仍使用 WMT19 TTS prepared data。需要固定正式
   train/dev/test 子集时，通过 `DatasetConfig.split_manifest` 和 `split_label` 显式选择
@@ -39,7 +41,15 @@ fixed-sample experiment 默认启用，随机输出不构成质量结论的 `toy
 speech-to-speech 自有日志 callback 默认仍按 `every_n_steps` 触发；需要让 expensive callback 跟随
 实际处理音频量时，配置对应的 `every_audio_seconds`，入口会用 `ModelBatch.audio_seconds` 统计 DDP
 全局 processed audio seconds。该字段只适用于消费 `ModelBatch` 的项目 callback，不进入 anytrain
-的 task-agnostic callback 契约。
+的 task-agnostic callback 契约。正式 staged train 默认启用 `callbacks.text_retention`，用固定 T2TT
+probe 在 fit 开始建立 reference-NLL baseline，并持续记录 greedy generation 与 NLL delta；启用时
+至少配置一条非空 instruction/reference，cadence 和 generation budget 在入口解析时校验。
+
+`model.audio_input_adapter` 默认 `type=none`。可显式选择 `mlp` 或 `transformer`，并配置
+`layers`、`heads`、`ffn_ratio` 与 `dropout`；两者都只作用于 `audio_input_positions` 标记的 source
+audio payload。这个配置与 `semantic_audio_adapter`、`semantic_audio_output_adapter` 独立：它不
+处理 target/generated audio，也不替换 Flow/RVQ acoustic decoder。启用 transformer 时要求
+backbone hidden size 能被 `heads` 整除。
 
 ## 生产默认与完整链路测试
 
@@ -59,6 +69,10 @@ fixed-sample 验收默认承担性能测试。显式启用时必须同时关闭 
 step time，却不属于 provider 统计的训练 FLOPs。DDP 默认在下一 batch timer 启动前执行 barrier，
 避免仅 rank zero 执行的 batch-end 诊断使各 rank 起点错位。
 
+启用 `model.audio_input_adapter` 时，`TrainingFlops` 会把 source tower 的 dense 投影和 transformer
+attention 纳入 forward 估算；由于标准 tower 在 padded `[batch, frames]` 张量上执行计算，统计按完整
+frame 宽度计数，mask 不会把 padding 误报为零成本。
+
 训练输出由 `repo_output_root`、相对的 `output_subdir` 和派生的 `output_dir` 组成。checkpoint、音频、
 Hydra metadata 与 `metrics.json` 写入 `output_dir`；TensorBoard/CSV logger 的路径由 logging preset
 统一计算。TensorBoard 运行目录为
@@ -76,9 +90,11 @@ Hydra metadata 与 `metrics.json` 写入 `output_dir`；TensorBoard/CSV logger �
 map-style dataset 通过 `MapStyleABC.dataloader()` 暴露 deterministic shuffle 与 batch planning；
 UniCodec DDP smoke 则要求每个 rank
 重复读取同一个固定样本，因此仅该 experiment 显式设置 `use_distributed_sampler: false`。
-正式 staged train 的入口策略为 `ddp_find_unused_parameters_false`；当 stage 包含多个 loader
-时，配置校验要求每个 optimizer step 通过 `batches_per_step` 覆盖全部非零 loader，禁止退化为
-单子 batch 轮转，否则不同 task 的可训练分支会违反 static DDP 的 unused-parameter 前提。
+正式 staged train 的入口策略为 `ddp_find_unused_parameters_true`。stage 通过
+`accumulate_grad_batches` 定义一个 optimizer step 的 microbatch 数；多 loader schedule 在每个
+accumulation window 内按权重确定性分配并交错单个 microbatch，Lightning 负责梯度累积。配置要求
+每个非零 loader 在 window 内至少出现一次；由于各 microbatch 只执行自身 task 分支，正式入口保留
+unused-parameter detection，`trainer=static_ddp` 只适用于不会跨 microbatch 轮转分支的实验。
 
 完整链路实验分别负责其 composition、数据范围、trainer、callback 和 step budget：
 
@@ -106,8 +122,8 @@ flat experiment 名称。`configs/train.yaml` 仅组合 `entry=train` 和可选 
   `DataModule`。每个 speech loader 使用
   `LoaderSpec.speech(...)`，纯文本 MT loader 使用 `LoaderSpec.text(...)`，多 loader 调度由
   `LoaderSchedule` 持有。四个正式 stage 都启用每 10,000 optimizer steps 的 train fixed panels；
-  Stage 2-4 的 panels 包含 MT。MT panel 只允许 train split，validation panel 仍要求 speech
-  loader 与独立 validation dataset。
+  Stage 2-4 的 panels 包含 MT；正式 entry 还默认启用独立的 text-retention baseline。MT panel 只允许
+  train split，validation panel 仍要求 speech loader 与独立 validation dataset。
 - `train/parameter_policy_smoke`：参数冻结专用两步实验。它固定 toy model/data 与 CPU trainer，
   只通过 `parameter_policy=<name>` 切换冻结策略，不借用正式长跑配置充当策略测试夹具。
 - `toy_smoke`：正式 LongCat runtime 加 tiny model/in-memory dataset 的 CPU 两步训练契约测试；
@@ -123,7 +139,7 @@ training job 传递 `repo_output_root`、相对 `output_subdir` 和 `"$@"` 参�
 临时 `/tmp` 路径写死进 Hydra preset。
 `jobs/011/02_rvq_native_stage_smoke.sh` 仍使用 `scripts/overfit.py` 验证每个 stage 的 freeze
 配置能完成 fixed-sample 两步训练。`jobs/011/03_staged_joint_train.sh` 是正式 staged joint
-training wrapper，调用 `scripts/train.py`，默认 `trainer=static_ddp`，并根据
+training wrapper，调用 `scripts/train.py`，默认 `trainer=ddp`，并根据
   `SPEECH_TO_SPEECH_STAGE=stage_1..stage_4` 选择对应的 `train/staged_joint_stage_*` experiment，
   由 experiment 同时绑定 stage 和 parameter policy。正式 train 入口通过
 `train.ckpt_path=<checkpoint>` 显式恢复 Lightning checkpoint；默认值为空，普通训练不走 resume。
@@ -150,9 +166,10 @@ training wrapper，调用 `scripts/train.py`，默认 `trainer=static_ddp`，并
 
 正式 train 的 `validation` 默认关闭。启用时，`loader` 必须选择当前 stage 的一个 speech loader，
 且 `data.dataset.split_manifest` 必须存在、`split_label` 必须与训练 split 不同。入口复制该 loader
-的 task weights 与 speech data config，仅替换 dev `split_label`；`every_n_steps` 直接作为
-optimizer-step `val_check_interval`，`sanity_steps=-1` 表示 fit 前遍历完整 dev split，非负值表示
-对应 sanity batch 数。为了让 step interval 不受 epoch 边界控制，入口同时设置
+的 task weights 与 speech data config，仅替换 dev `split_label`；配置的 `every_n_steps` 使用
+optimizer-step 语义，入口乘以 `stage.accumulate_grad_batches` 后传给 Lightning 的 batch 级
+`val_check_interval`。`sanity_steps=-1` 表示 fit 前遍历完整 dev split，非负值表示对应 sanity batch
+数。为了让 step interval 不受 epoch 边界控制，入口同时设置
 `check_val_every_n_epoch=None`。每次 sanity/interval 结果按 step 记录到 `metrics.json.validation`。
 
 ## 入口边界
@@ -220,13 +237,18 @@ route metadata；恢复 checkpoint 时要求 metadata 存在且与当前 `Runtim
 
 ## Stage 与参数策略
 
-`configs/stage/stage_*.yaml` 只描述 loader/task schedule 与 `batches_per_step`。参数冻结和
+`configs/stage/stage_*.yaml` 只描述 loader/task schedule 与 `accumulate_grad_batches`。参数冻结和
 backbone top-fraction 抽象为顶层 `parameter_policy` 组，入口解析为
 `ParameterPolicyConfig`，并在 Trainer/optimizer 创建前一次性应用。一个正式 job 只选择一个
 experiment，运行中不切换数据计划或参数冻结。`train/staged_joint_stage_*` 显式保留约定组合：
 stage 0/4 使用 `full`，stage 1/2 使用 `speech_interface`，stage 3 使用
 `speech_interface_top_third`；这不是 `StageName` 的隐式映射。需要只训练 semantic token
 interface 时在专用 experiment 中显式选择 `parameter_policy=semantic_only`。
+
+PEFT LoRA 必须同时选择 `model.lora.enabled=true` 与 `parameter_policy=lora`，避免注入 adapter 后被
+其它 policy 意外冻结，或选择 policy 却没有 adapter 参数。该 policy 训练 backbone adapter 与现有
+speech/acoustic interface，冻结原始 backbone；当前 performance FLOPs provider 不支持 LoRA，入口
+拒绝同时启用 performance callback。
 
 Stage 0-4 是 S2S 内部的数据/任务/参数策略日程，不等同于“先在 SAC 预训练 generator、再在 S2S
 用 hidden state 联合训练”的两个 phase。artifact 初始化只在 model composition 时发生一次，stage 不拥有

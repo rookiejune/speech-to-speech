@@ -38,6 +38,7 @@ from speech_to_speech.loss.flow_matching import AcousticFlowLoss
 from speech_to_speech.loss.token import TokenLoss
 from speech_to_speech.loss.types import combine_outputs
 from speech_to_speech.model.base import Config, TokenModel
+from speech_to_speech.model.lora import LoraConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.pl_module import SpeechToSpeechModule
 from speech_to_speech.runtime.audio_tokenizer import (
@@ -303,7 +304,8 @@ class ModelLossContractTest(unittest.TestCase):
 
     def test_checkpoint_audio_route_is_immutable(self):
         model = SimpleNamespace(
-            runtime=SimpleNamespace(audio_route=BICODEC_REUSE_PROMPT_ACOUSTIC)
+            runtime=SimpleNamespace(audio_route=BICODEC_REUSE_PROMPT_ACOUSTIC),
+            lora_config=LoraConfig(),
         )
         module = SpeechToSpeechModule(
             ModuleConfig(),
@@ -318,6 +320,57 @@ class ModelLossContractTest(unittest.TestCase):
         model.runtime.audio_route = BICODEC_PREDICT_ACOUSTIC
         with self.assertRaisesRegex(ValueError, "does not match"):
             module.on_load_checkpoint(checkpoint)
+
+    def test_checkpoint_lora_contract_roundtrips_complete_config(self):
+        config = LoraConfig(
+            enabled=True,
+            rank=8,
+            alpha=16,
+            dropout=0.1,
+            target_modules=["v_proj", "q_proj"],
+            use_rslora=True,
+        )
+        module = _checkpoint_module(config)
+        checkpoint: dict[str, object] = {}
+
+        module.on_save_checkpoint(checkpoint)
+        module.on_load_checkpoint(checkpoint)
+
+        self.assertEqual(
+            checkpoint["speech_to_speech_lora"],
+            {
+                "grammar": "peft-lora-v1",
+                "backend": "huggingface-peft",
+                "adapter_name": "speech",
+                "bias": "none",
+                "enabled": True,
+                "rank": 8,
+                "alpha": 16,
+                "dropout": 0.1,
+                "target_modules": ["q_proj", "v_proj"],
+                "use_rslora": True,
+            },
+        )
+
+    def test_checkpoint_requires_lora_contract_only_when_enabled(self):
+        legacy_checkpoint = {"speech_to_speech_audio_route": None}
+
+        _checkpoint_module(LoraConfig()).on_load_checkpoint(legacy_checkpoint)
+        with self.assertRaisesRegex(ValueError, "missing the PEFT LoRA contract"):
+            _checkpoint_module(
+                LoraConfig(enabled=True),
+            ).on_load_checkpoint(legacy_checkpoint)
+
+    def test_checkpoint_rejects_lora_config_mismatch(self):
+        checkpoint: dict[str, object] = {}
+        _checkpoint_module(
+            LoraConfig(enabled=True, alpha=16),
+        ).on_save_checkpoint(checkpoint)
+
+        with self.assertRaisesRegex(ValueError, "LoRA contract does not match"):
+            _checkpoint_module(
+                LoraConfig(enabled=True, alpha=32),
+            ).on_load_checkpoint(checkpoint)
 
     def test_transfer_batch_rebuilds_frozen_audio_context(self):
         context = SemanticAcousticCodes(
@@ -371,13 +424,6 @@ class ModelLossContractTest(unittest.TestCase):
             ),
             pad_token_id=99,
         )
-        prepared = ModelBatch(
-            input_ids=torch.tensor([[0, 1]]),
-            token_labels=torch.tensor([[-100, 1]]),
-            acoustic_target=None,
-            tasks=[Task.TTS],
-            pad_token_id=99,
-        )
         module = SpeechToSpeechModule(
             ModuleConfig(),
             model=cast(Any, SimpleNamespace()),
@@ -389,13 +435,10 @@ class ModelLossContractTest(unittest.TestCase):
             LightningModule,
             "transfer_batch_to_device",
             autospec=True,
-            return_value=prepared,
         ) as transfer:
-            moved = module.transfer_batch_to_device((raw, prepared), device, 0)
+            moved = module.transfer_batch_to_device(raw, device, 0)
 
-        self.assertIs(moved[0], raw)
-        self.assertIsInstance(moved[1], ModelBatch)
-        self.assertIsNot(moved[1], prepared)
+        self.assertIs(moved, raw)
         raw_target = raw.samples[0].target
         self.assertIsInstance(raw_target, RawSpeech)
         self.assertEqual(raw_target.waveform.device.type, "cpu")
@@ -538,7 +581,7 @@ class ModelLossContractTest(unittest.TestCase):
             ),
         )
 
-    def test_training_step_reduces_tuple_batches_by_effective_tokens(self):
+    def test_training_step_consumes_one_accumulation_microbatch(self):
         objective = _BatchObjective()
         module = SpeechToSpeechModule(
             ModuleConfig(),
@@ -549,10 +592,12 @@ class ModelLossContractTest(unittest.TestCase):
         mt = _batch(Task.MT, token_labels=torch.tensor([[-100, 1]]))
 
         with patch.object(module, "log"):
-            outputs = module.training_step((asr, mt), 0)
+            first = module.training_step(asr, 0)
+            second = module.training_step(mt, 1)
 
         self.assertEqual(objective.tasks, [Task.ASR, Task.MT])
-        torch.testing.assert_close(outputs["loss"], torch.tensor(2.5))
+        torch.testing.assert_close(first["loss"], torch.tensor(1.0))
+        torch.testing.assert_close(second["loss"], torch.tensor(3.0))
 
     def test_validation_step_logs_effective_unit_weighted_metrics(self):
         module = SpeechToSpeechModule(
@@ -872,6 +917,18 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertTrue(torch.equal(model.positions, positions))
         self.assertEqual(outputs["loss"].shape, ())
         self.assertTrue(torch.isfinite(outputs["loss"]))
+
+
+def _checkpoint_module(config: LoraConfig) -> SpeechToSpeechModule[Any]:
+    model = SimpleNamespace(
+        runtime=SimpleNamespace(audio_route=None),
+        lora_config=config,
+    )
+    return SpeechToSpeechModule(
+        ModuleConfig(),
+        model=cast(Any, model),
+        objective=cast(Any, SimpleNamespace()),
+    )
 
 
 def _batch(

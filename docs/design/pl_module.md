@@ -7,9 +7,10 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
 `SpeechToSpeechModule[ModelT]` 是薄 Lightning wrapper：
 
 - 构造时通过 `Objective[ModelT]` 保留 model/objective 类型配对。
-- `training_step()` 接收单个 `ModelBatch` 或多个 homogeneous 子 batch；联合 batch 会逐个调用
-  objective，并按有效 token/frame 聚合分项 loss。它跨 rank 归约并记录一次 total loss，同时保留
-  分项到 backward 完成。
+- `training_step()` 每次只接收一个 homogeneous `ModelBatch`，调用一次 objective 并记录该
+  microbatch 的 total loss；多 loader 比例由 dataloader 的 accumulation window 决定，Lightning
+  在 `accumulate_grad_batches` 个 microbatch 后执行 optimizer step。module 不接收或归约联合 batch
+  tuple，并把当前分项保留到对应 backward 完成。
 - `validation_step()` 复用同一 materialize 路径，通过 `Objective.validation()` 做 teacher-forcing
   dev 评估，并把 loss 模块提供的 `evaluator.weighted.Metric` 交给
   `anytrain.lightning.validation.log()`；它不解析 objective 名、RVQ detail key 或有效单位。Lightning
@@ -18,8 +19,7 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
 - 可选 `batch_materializer` 只处理显式 raw waveform fallback：当 datamodule pair 或 single path
   返回 `RawSpeechBatch` 时，materializer 在当前训练 device 上对 task 实际消费且缺少 codes 的
   audio item 调用 codec encode，并在 objective 前转成标准 `ModelBatch`。没有 materializer 时，
-  `training_step()` 只接受已 materialize 的
-  `ModelBatch` / joint `ModelBatch` tuple。Lightning device transfer 通过
+  `training_step()` 只接受当前已 materialize 的单个 `ModelBatch`。Lightning device transfer 通过
   `ModelBatch.to(device)` 显式重建 `ModelBatch`，保留 frozen structured audio context 的不可变
   契约；`RawSpeechBatch` 在 materialize 前整体留在 CPU，避免同一 fallback batch 的 prepared
   codes 与现场 codec 产物落在不同 device。
@@ -48,7 +48,9 @@ model 构造器不接收路径或执行文件 I/O。
   `anytrain.lightning`。
 - `OnDeviceCodecMaterializer`：训练时 wav->codes 的显式 fallback。正式数据仍应提前 materialize
   codec codes；该 fallback 只把 pair/single 共用的 `RawSpeechBatch` 规范化为 `ModelBatch`，不改变
-  objective 或 task loss contract。
+  objective 或 task loss contract。它把 waveform 转成 FP32，在关闭当前 device autocast 的上下文
+  中执行 codec，避免 `bf16-mixed` Trainer 把 codec 预处理算子降精度；BiCodec structured view 与
+  frame-code view 按数据表示分派，不按重叠 capability 猜测。
 - `FlowMatchingLogger`：显式接收 flow runtime，不向下读取 model runtime；time histogram 和 bucketed
   loss 日志来自 `anytrain.lightning.LossTimeBucketLoggerCallback`。
 - `LossSummary`：只注入 S2S objective 顺序；训练输出 total loss 与分项 `LossItem` 窗口摘要来自
@@ -74,13 +76,18 @@ model 构造器不接收路径或执行文件 I/O。
   callback 的 checkpoint state key 包含 split、loader、task、seed、indices 和 cadence，使 panel
   实例可独立恢复。纯 text MT loader 支持 train panels，并记录 source/target/generated text 与
   CER/exact-match；MT validation panel 当前被拒绝，因为 validation 数据源契约仍是 speech-only。
-- `TextRetentionLogger`：记录 text probe generation、reference NLL 与相对基线漂移。
+- `TextRetentionLogger`：正式 staged train 默认启用一条固定 T2TT probe；fit 开始时记录 greedy text
+  generation、reference NLL 基线，后续按 `every_n_steps` 或 `every_audio_seconds` 记录 generation、
+  NLL 与相对基线漂移；checkpoint resume 保留最初 baseline，并在新 fit 开始时直接记录相对该 baseline
+  的当前漂移。probe 名、instruction、reference 与 generation budget 都来自严格配置；它只在 global
+  zero 执行，不把 probe batch 混入训练数据或 loss。
 
 上述 callback 需要 logger experiment 时统一通过 `anytrain.lightning.experiment` 获取 text、scalar、
 audio 或 histogram 能力；本项目只负责 rank、cadence、tag 和领域数据转换，不再维护重复的 logger
 Protocol/helper。
 
-`TrainInterval` 是项目内 callback cadence 接口。默认保留历史 `every_n_steps` optimizer-step 行为；
+`TrainInterval` 是项目内 callback cadence 接口。`every_n_steps` 按 optimizer step 触发，同一个
+accumulation window 内即使多个 microbatch 共享 `global_step` 也只能运行一次；
 配置 `every_audio_seconds` 时改为按 `ModelBatch.audio_seconds` 累计全局 processed audio seconds
 触发，DDP 下通过 strategy sum 聚合各 rank，gradient accumulation 下每个 train batch 都计入。
 `anytrain` 不接收这个契约，因为它不拥有下游 batch schema 或 `AudioMeta.DURATION` 语义。
@@ -104,8 +111,8 @@ MFU 同时运行，会增加实测 step time，但没有对应的模型训练 FL
 可通过 `callbacks.performance.sync_distributed` 显式关闭。
 
 当前 provider 的支持边界是标准 Qwen3 FlashAttention 2 backbone、标准 adapter/Flow/RVQ decoder
-和全量训练。它校验 objective/model 配对及实际输出分支；REPA、分阶段冻结、替换后的模块或无法
-识别的结构会明确报错，不用不完整公式继续记录 MFU。
+和全量训练。它校验 objective/model 配对及实际输出分支；PEFT LoRA、REPA、分阶段冻结、替换后的
+模块或无法识别的结构会明确报错，不用不完整公式继续记录 MFU。
 
 估算口径统计 Linear 与 attention matrix multiplication，并按 forward 的两倍估算 backward；lookup、
 scatter、normalization、activation、loss 和冻结 codec feature extraction 不计入模型 FLOPs，但对应
@@ -124,9 +131,9 @@ FlashAttention 或其他 custom op 也可能不在通用算子计数覆盖范围
   request/result；validation、batching 和 decode 仍由 generation service 负责。
 - callback 只依赖 `Outputs`/`LossItem`、datamodule 与 pl_module 公共能力；`GradLogger` 额外要求
   LightningModule 实现 `current_loss_outputs()` 生命周期契约。
-- `OutputsLogger` 按 objective 的 `LossItem` 行粒度记录 task 指标。token loss 覆盖 joint batch
-  中所有子 batch；RVQ、Flow 和 REPA 只覆盖带 acoustic target 的子 batch。若 loss 行数与该
-  objective 对应 task 行数不一致，callback 直接报错，不把不匹配的 task mask 静默套到 loss 上。
+- `OutputsLogger` 按当前 `ModelBatch` 中 objective 的 `LossItem` 行粒度记录 task 指标。token loss
+  覆盖当前 batch 的有效 token；RVQ、Flow 和 REPA 只覆盖带 acoustic target 的样本。若 loss 行数与
+  该 objective 对应 task 行数不一致，callback 直接报错，不把不匹配的 task mask 静默套到 loss 上。
 - `TrainingFlops` 负责解释 speech-to-speech 的模型、batch 与 objective；`PerformanceCallback` 只负责
   optimizer-step 聚合、计时、硬件峰值推断和 MFU 记录，不内置任务 batch schema。
 - overfit performance composition 不包含 `TaskSampleLogger`、`GradLogger` 或 `GradNormLogger`；前者由
@@ -136,3 +143,6 @@ FlashAttention 或其他 custom op 也可能不在通用算子计数覆盖范围
   仍由 generation callback 与独立结果文档验收。
 - 正式 `scripts/train.py` 使用 `anytrain.lightning.ModelCheckpoint` 的默认异步保存；checkpoint
   目录、命名、保留数量和触发步数仍由本项目配置拥有。
+- `SpeechToSpeechModule` 负责保存并校验固定 audio route 和 `peft-lora-v1` 配置 metadata。LoRA
+  payload 严格比较影响 adapter 语义的全部字段，但不绑定 PEFT 包版本；只有当前未启用 LoRA 时，
+  才允许加载缺少 LoRA metadata 的旧 checkpoint。

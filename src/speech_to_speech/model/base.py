@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections.abc import Sequence
-from typing import Optional
+from typing import Optional, cast
 
 import torch
 from anydataset.types import Modality
@@ -12,6 +12,7 @@ from transformers.cache_utils import Cache
 
 from ._buffer import register
 from ..audio_route import AudioStream
+from .._tensor import is_signed_integer_dtype
 from ._generation import (
     generate_bicodec_sequence,
     generate_flattened_sequence,
@@ -20,23 +21,39 @@ from ._generation import (
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer, FlattenedAudioTokenizer
 from ._head import VocabularyHeadMixin
 from .adapter import AdapterType, create_adapter
+from .audio_input import (
+    AudioInputAdapterConfig,
+    AudioInputAdapterType,
+    AudioInputTower,
+    create_audio_input_adapter,
+)
 from .embedding import create_semantic_audio_modules
+from .lora import LoraConfig, inject as inject_lora
 from .protocol import TokenModelRuntime
 from .toy import ToyConfig, create_toy_backbone
-from ..runtime.types import BackboneOutput
+from ..runtime.types import Backbone, BackboneOutput
 
 
 @dataclass
 class Config:
     semantic_audio_adapter: Optional[AdapterType] = AdapterType.LINEAR
     semantic_audio_output_adapter: Optional[AdapterType] = AdapterType.LINEAR
+    audio_input_adapter: AudioInputAdapterConfig = field(
+        default_factory=AudioInputAdapterConfig
+    )
     toy: Optional[ToyConfig] = None
+    lora: LoraConfig = field(default_factory=LoraConfig)
 
 
 class TokenModel(VocabularyHeadMixin, nn.Module):
     """Shared text and semantic-audio token modeling."""
 
     audio_token_frame_spans: torch.Tensor
+    audio_input_adapter: AudioInputTower | None
+
+    @property
+    def lora_config(self) -> LoraConfig:
+        return self.config.lora
 
     def __init__(
         self,
@@ -54,6 +71,11 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             self.runtime.backbone
             if self.config.toy is None
             else create_toy_backbone(self.config.toy, text_end - text_start)
+        )
+        backbone = cast(nn.Module, cast(object, self.backbone))
+        self.backbone = cast(
+            Backbone,
+            cast(object, inject_lora(backbone, self.config.lora)),
         )
         (
             self.semantic_audio_embedding,
@@ -83,6 +105,15 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             persistent=False,
         )
         semantic_audio_weight = self.semantic_audio_embedding.weight
+        self.audio_input_adapter = (
+            None
+            if self.config.audio_input_adapter.type is AudioInputAdapterType.NONE
+            else create_audio_input_adapter(
+                self.config.audio_input_adapter,
+                semantic_audio_weight.size(1),
+                hidden_size,
+            ).to(device=backbone_weight.device)
+        )
         self.semantic_audio_output_adapter = create_adapter(
             self.config.semantic_audio_output_adapter,
             hidden_size,
@@ -94,6 +125,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         input_ids: torch.Tensor,
         *,
         attention_mask: torch.Tensor | None = None,
+        audio_input_positions: torch.Tensor | None = None,
         output_hidden_states: bool = False,
         past_key_values: Cache | None = None,
         use_cache: bool = False,
@@ -103,6 +135,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         backbone_output = self._backbone_output(
             input_ids,
             attention_mask=attention_mask,
+            audio_input_positions=audio_input_positions,
             past_key_values=past_key_values,
             use_cache=use_cache,
             position_ids=position_ids,
@@ -124,6 +157,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         modality: Modality | None,
         past_key_values: Cache | None,
         use_cache: bool,
+        audio_input_positions: torch.Tensor | None = None,
     ) -> CausalLMOutputWithPast:
         """Run one autoregressive step with an explicit output-head selection."""
         if token_ids is not None and modality is not None:
@@ -133,6 +167,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         backbone_output = self._backbone_output(
             input_ids,
             attention_mask=attention_mask,
+            audio_input_positions=audio_input_positions,
             past_key_values=past_key_values,
             use_cache=use_cache,
         )
@@ -170,11 +205,13 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         input_ids: torch.Tensor,
         *,
         attention_mask: torch.Tensor | None = None,
+        audio_input_positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Encode one training batch without constructing vocabulary logits."""
         return self._backbone_output(
             input_ids,
             attention_mask=attention_mask,
+            audio_input_positions=audio_input_positions,
             use_cache=False,
         ).last_hidden_state
 
@@ -183,6 +220,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         input_ids: torch.Tensor,
         *,
         attention_mask: torch.Tensor | None,
+        audio_input_positions: torch.Tensor | None = None,
         past_key_values: Cache | None = None,
         use_cache: bool = False,
         position_ids: torch.Tensor | None = None,
@@ -190,7 +228,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
     ) -> BackboneOutput:
         if input_ids.dim() != 2:
             raise ValueError("input_ids must have shape [batch, sequence].")
-        inputs_embeds = self._input_embedding(input_ids)
+        inputs_embeds = self._input_embedding(input_ids, audio_input_positions)
 
         return self.backbone.base_model(
             inputs_embeds=inputs_embeds,
@@ -210,6 +248,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         temperature: float = 1.0,
         top_p: float = 1.0,
         prompt_attention_mask: torch.Tensor | None = None,
+        audio_input_positions: torch.Tensor | None = None,
         stop_token_id: int | None = None,
         generation_modality: Modality | None = None,
         allowed_token_ids: Sequence[int] | torch.Tensor | None = None,
@@ -223,6 +262,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             temperature=temperature,
             top_p=top_p,
             prompt_attention_mask=prompt_attention_mask,
+            audio_input_positions=audio_input_positions,
             stop_token_id=stop_token_id,
             generation_modality=generation_modality,
             allowed_token_ids=allowed_token_ids,
@@ -240,6 +280,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         temperature: float = 1.0,
         top_p: float = 1.0,
         prompt_attention_mask: torch.Tensor | None = None,
+        audio_input_positions: torch.Tensor | None = None,
         do_sample: bool = True,
         use_cache: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -251,6 +292,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             temperature=temperature,
             top_p=top_p,
             prompt_attention_mask=prompt_attention_mask,
+            audio_input_positions=audio_input_positions,
             stop_token_id=self.runtime.eoa_token_id,
             generation_modality=Modality.AUDIO,
             allowed_token_ids=None,
@@ -278,6 +320,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         temperature: float = 1.0,
         top_p: float = 1.0,
         prompt_attention_mask: torch.Tensor | None = None,
+        audio_input_positions: torch.Tensor | None = None,
         do_sample: bool = True,
         use_cache: bool = True,
     ) -> torch.Tensor:
@@ -293,6 +336,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
                 temperature=temperature,
                 top_p=top_p,
                 prompt_attention_mask=prompt_attention_mask,
+                audio_input_positions=audio_input_positions,
                 do_sample=do_sample,
                 use_cache=use_cache,
             )
@@ -315,6 +359,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             temperature=temperature,
             top_p=top_p,
             prompt_attention_mask=prompt_attention_mask,
+            audio_input_positions=audio_input_positions,
             do_sample=do_sample,
             use_cache=use_cache,
         )
@@ -359,7 +404,11 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         condition = self._input_embedding(safe_labels)
         return condition.masked_fill(~valid[..., None], 0)
 
-    def _input_embedding(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def _input_embedding(
+        self,
+        input_ids: torch.Tensor,
+        audio_input_positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         text_start, text_end = self.layout.blocks["text"]
         audio_start, audio_end = self.layout.blocks["audio"]
         text_mask = input_ids.ge(text_start) & input_ids.lt(text_end)
@@ -376,6 +425,54 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             self.semantic_audio_embedding(audio_token_ids)
         )
         output[audio_mask] = audio.to(dtype=output.dtype)
+        if self.audio_input_adapter is not None and audio_input_positions is not None:
+            output = self._overlay_audio_input(
+                output,
+                input_ids,
+                audio_input_positions,
+            )
+        return output
+
+    def _overlay_audio_input(
+        self,
+        output: torch.Tensor,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        if positions.dim() != 2 or positions.size(0) != input_ids.size(0):
+            raise ValueError("audio_input_positions must have shape [batch, frames].")
+        if not is_signed_integer_dtype(positions.dtype):
+            raise TypeError("audio_input_positions must use a signed integer dtype.")
+        if positions.device != input_ids.device:
+            raise ValueError("audio_input_positions must be on the input device.")
+        if positions.numel() == 0:
+            return output
+
+        valid = positions.ge(0)
+        safe_positions = positions.clamp(0, input_ids.size(1) - 1)
+        selected_ids = input_ids.gather(1, safe_positions)
+        codec_start, codec_end = self.runtime.codec_audio_range
+        if bool((valid & (selected_ids < codec_start)).any()) or bool(
+            (valid & (selected_ids >= codec_end)).any()
+        ):
+            raise ValueError(
+                "audio_input_positions must point to visible codec audio payload tokens."
+            )
+        audio_start, _ = self.layout.blocks["audio"]
+        local_ids = (selected_ids - audio_start).clamp(
+            0,
+            self.semantic_audio_embedding.num_embeddings - 1,
+        )
+        features = self.semantic_audio_embedding(local_ids)
+        adapter = self.audio_input_adapter
+        if adapter is None:
+            raise RuntimeError("audio input adapter is unavailable.")
+        projected = adapter(features, mask=valid)
+        rows = torch.arange(input_ids.size(0), device=input_ids.device)[:, None]
+        rows = rows.expand_as(safe_positions)
+        output[rows[valid], safe_positions[valid]] = projected[valid].to(
+            dtype=output.dtype
+        )
         return output
 
 

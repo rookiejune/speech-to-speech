@@ -8,6 +8,7 @@ import torch
 
 from speech_to_speech.callback.logging import (
     FlowMatchingLogger,
+    GradLogger,
     GradNormLogger,
     LossSummary,
     OutputsLogger,
@@ -24,7 +25,6 @@ class LoggingTest(unittest.TestCase):
         objective = Mock()
         outputs = Outputs(loss=torch.tensor(2.0))
         objective.forward.return_value = outputs
-        objective.reduce.side_effect = lambda values: values[0]
         module = SpeechToSpeechModule(Config(), model=Mock(), objective=objective)
         batch = _batch(Task.TTS)
 
@@ -32,7 +32,7 @@ class LoggingTest(unittest.TestCase):
             result = module.training_step(batch)
 
         self.assertIs(result, outputs)
-        objective.reduce.assert_called_once_with([outputs])
+        objective.forward.assert_called_once_with(batch, module.model)
         log.assert_called_once_with(
             "train/loss",
             outputs["loss"],
@@ -62,6 +62,19 @@ class LoggingTest(unittest.TestCase):
         self.assertEqual(module.log.call_args.args[0], "train/grad_norm")
         torch.testing.assert_close(module.log.call_args.args[1], torch.tensor(13.0))
 
+    def test_grad_logger_runs_once_for_an_accumulated_global_step(self):
+        callback = GradLogger(("token", "rvq"), "weight", every_n_steps=2)
+        trainer = SimpleNamespace(global_step=2)
+        module = SimpleNamespace()
+
+        callback.on_train_batch_start(trainer, module, None, 0)
+        first = callback.should_run(trainer, module)
+        callback.on_train_batch_start(trainer, module, None, 1)
+        second = callback.should_run(trainer, module)
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+
     def test_audio_interval_counts_processed_batch_seconds(self):
         interval = TrainInterval(every_n_steps=100, every_audio_seconds=2.0)
         trainer = SimpleNamespace(global_step=0, world_size=1)
@@ -71,7 +84,8 @@ class LoggingTest(unittest.TestCase):
 
         self.assertFalse(interval.should_run(trainer, module, first))
         self.assertTrue(interval.should_run(trainer, module, second))
-        self.assertEqual(processed_audio_seconds((first, second)), 2.25)
+        self.assertEqual(processed_audio_seconds(first), 1.5)
+        self.assertEqual(processed_audio_seconds(second), 0.75)
 
     def test_audio_interval_sums_distributed_rank_seconds(self):
         reduce_ops = []
@@ -87,6 +101,22 @@ class LoggingTest(unittest.TestCase):
 
         self.assertTrue(interval.should_run(trainer, module, _batch(Task.TTS, 1.0)))
         self.assertEqual(reduce_ops, ["sum"])
+
+    def test_step_interval_runs_once_per_global_step_during_accumulation(self):
+        interval = TrainInterval(every_n_steps=2)
+        trainer = SimpleNamespace(global_step=0)
+        module = SimpleNamespace()
+
+        observed = []
+        for step in (0, 0, 1, 1, 2, 2):
+            trainer.global_step = step
+            observed.append(interval.should_run(trainer, module, None))
+
+        self.assertEqual(observed, [False, False, False, False, True, False])
+
+        restored = TrainInterval(every_n_steps=2)
+        restored.load_state_dict(interval.state_dict())
+        self.assertFalse(restored.should_run(trainer, module, None))
 
     def test_loss_summary_uses_stable_objective_order(self):
         item = LossItem(torch.ones(1), details=None)
@@ -167,19 +197,16 @@ class LoggingTest(unittest.TestCase):
         )
         self.assertEqual(strategy.reduce.call_count, 2)
 
-    def test_outputs_logger_accepts_tuple_train_batches(self):
+    def test_outputs_logger_uses_homogeneous_microbatch_tasks(self):
         module = SimpleNamespace(log=Mock())
         trainer = SimpleNamespace()
         callback = OutputsLogger()
-        batch = (
-            _batch(Task.ASR),
-            _batch(Task.MT),
-        )
+        batch = _batch(Task.MT)
         outputs = Outputs(
             loss=torch.tensor(2.0),
             token=LossItem(
-                torch.tensor([1.0, 3.0]),
-                details={"tokens": torch.tensor([4.0, 8.0])},
+                torch.tensor([3.0]),
+                details={"tokens": torch.tensor([8.0])},
             ),
         )
 
@@ -189,8 +216,6 @@ class LoggingTest(unittest.TestCase):
         self.assertEqual(
             names,
             [
-                "token_loss/asr",
-                "token_tokens/asr",
                 "token_loss/mt",
                 "token_tokens/mt",
             ],
@@ -200,15 +225,12 @@ class LoggingTest(unittest.TestCase):
         module = SimpleNamespace(log=Mock())
         trainer = SimpleNamespace()
         callback = OutputsLogger()
-        batch = (
-            _batch(Task.MT),
-            _acoustic_batch(Task.TTS),
-        )
+        batch = _acoustic_batch(Task.TTS)
         outputs = Outputs(
             loss=torch.tensor(2.0),
             token=LossItem(
-                torch.tensor([1.0, 3.0]),
-                details={"tokens": torch.tensor([4.0, 8.0])},
+                torch.tensor([3.0]),
+                details={"tokens": torch.tensor([8.0])},
             ),
             rvq=LossItem(
                 torch.tensor([5.0]),
@@ -222,8 +244,6 @@ class LoggingTest(unittest.TestCase):
         self.assertEqual(
             names,
             [
-                "token_loss/mt",
-                "token_tokens/mt",
                 "token_loss/tts",
                 "token_tokens/tts",
                 "rvq_loss/tts",

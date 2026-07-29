@@ -69,6 +69,7 @@ def prepare_bicodec_tts_request(
     return Request(
         prompt_ids=prompt_ids,
         task=task,
+        audio_input_positions=None,
         audio_context=reference_codes,
     )
 
@@ -96,7 +97,12 @@ def prepare_bicodec_global_tts_request(
     prompt_ids = torch.cat(
         (text_ids, text_ids.new_tensor([runtime.boa_token_id]))
     )
-    return Request(prompt_ids=prompt_ids, task=task, audio_context=None)
+    return Request(
+        prompt_ids=prompt_ids,
+        task=task,
+        audio_input_positions=None,
+        audio_context=None,
+    )
 
 
 def _validate_tts_arguments(text: str, language: str, task: Task) -> None:

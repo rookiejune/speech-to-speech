@@ -15,6 +15,7 @@ from transformers import Qwen3ForCausalLM, Qwen3Model
 
 from ._flops import (
     adapter,
+    audio_input_tower,
     flow_decoder,
     linear,
     qwen_backbone,
@@ -249,6 +250,19 @@ def _token_path(model: TokenModel, core: Qwen3Model, batch: ModelBatch) -> int:
         out_features=hidden,
         name="semantic audio adapter",
     )
+    audio_positions = batch.audio_input_positions
+    audio_tower = model.audio_input_adapter
+    if audio_tower is not None and audio_positions is not None:
+        if audio_positions.dim() != 2 or audio_positions.size(0) != batch_size:
+            raise ValueError(
+                "training FLOPs audio input positions must have shape [batch, frames]."
+            )
+        if audio_positions.size(1) > 0:
+            forward += audio_input_tower(
+                audio_tower,
+                batch=batch_size,
+                frames=audio_positions.size(1),
+            )
     forward += qwen_backbone(
         core,
         batch=batch_size,

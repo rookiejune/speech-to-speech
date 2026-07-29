@@ -25,7 +25,11 @@ from speech_to_speech.callback.logging.task_sample import TaskSampleLogger
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.module import DataModule, LoaderSpec
 from speech_to_speech.datamodule.types import ModelBatch
-from speech_to_speech.model import ToyConfig
+from speech_to_speech.model import (
+    AudioInputAdapterConfig,
+    AudioInputAdapterType,
+    ToyConfig,
+)
 from speech_to_speech.model.acoustic import FlowModel
 from speech_to_speech.model.base import Config as ModelConfig
 from speech_to_speech.model.base import TokenModel
@@ -573,6 +577,70 @@ class _VariableStopModel(_UnifiedGenerationModel):
 
 
 class GenerationTest(unittest.TestCase):
+    def test_audio_input_adapter_overlays_only_source_positions(self):
+        model = TokenModel(
+            ModelConfig(
+                semantic_audio_adapter=None,
+                semantic_audio_output_adapter=None,
+                audio_input_adapter=AudioInputAdapterConfig(
+                    type=AudioInputAdapterType.MLP,
+                ),
+                toy=ToyConfig(
+                    hidden_size=8,
+                    intermediate_size=16,
+                    layers=1,
+                    heads=2,
+                    max_position_embeddings=32,
+                ),
+            ),
+            runtime=_TinyRuntime(),
+        ).eval()
+        input_ids = torch.tensor([[1, 8, 9, 10, 11, 2]])
+        legacy = model._input_embedding(input_ids)
+        adapted = model._input_embedding(
+            input_ids,
+            torch.tensor([[1, 2]], dtype=torch.long),
+        )
+
+        torch.testing.assert_close(adapted[:, 0], legacy[:, 0])
+        torch.testing.assert_close(adapted[:, 3:], legacy[:, 3:])
+        self.assertFalse(torch.equal(adapted[:, 1:3], legacy[:, 1:3]))
+
+        with self.assertRaisesRegex(ValueError, "codec audio payload"):
+            model._input_embedding(input_ids, torch.tensor([[3]]))
+
+    def test_cached_generation_runs_audio_input_adapter_once(self):
+        model = TokenModel(
+            ModelConfig(
+                semantic_audio_adapter=None,
+                semantic_audio_output_adapter=None,
+                audio_input_adapter=AudioInputAdapterConfig(
+                    type=AudioInputAdapterType.MLP,
+                ),
+                toy=ToyConfig(
+                    hidden_size=8,
+                    intermediate_size=16,
+                    layers=1,
+                    heads=2,
+                    max_position_embeddings=32,
+                ),
+            ),
+            runtime=_TinyRuntime(),
+        ).eval()
+        adapter = model.audio_input_adapter
+        if adapter is None:
+            self.fail("audio input adapter was not constructed")
+        with patch.object(adapter, "forward", wraps=adapter.forward) as forward:
+            model.generate_tokens(
+                torch.tensor([[1, 8, 9, 11]]),
+                audio_input_positions=torch.tensor([[1, 2]]),
+                max_new_tokens=2,
+                generation_modality=Modality.TEXT,
+                do_sample=False,
+                use_cache=True,
+            )
+        self.assertEqual(forward.call_count, 1)
+
     def test_frame_span_buffer_follows_the_backbone_device(self):
         runtime = _TinyRuntime()
         model = TokenModel(
@@ -1255,7 +1323,7 @@ class GenerationTest(unittest.TestCase):
         )
         experiment = Mock()
         trainer = SimpleNamespace(
-            global_step=0,
+            global_step=1,
             logger=SimpleNamespace(experiment=experiment),
             datamodule=datamodule,
         )
@@ -1285,7 +1353,7 @@ class GenerationTest(unittest.TestCase):
         audio_call = experiment.add_audio.call_args_list[1]
         self.assertEqual(audio_call.args[0], "task_sample/tts/0/generated")
         self.assertTrue(torch.equal(audio_call.args[1], result["audio"]["waveform"]))
-        self.assertEqual(audio_call.args[2], 0)
+        self.assertEqual(audio_call.args[2], 1)
         self.assertEqual(audio_call.kwargs, {"sample_rate": 16_000})
         experiment.add_text.assert_called_once()
         metadata_call = experiment.add_text.call_args
@@ -1337,7 +1405,7 @@ class GenerationTest(unittest.TestCase):
         )
         experiment = SimpleNamespace(add_text=Mock())
         trainer = SimpleNamespace(
-            global_step=0,
+            global_step=1,
             is_global_zero=True,
             logger=SimpleNamespace(experiment=experiment),
             datamodule=SimpleNamespace(
@@ -1369,7 +1437,7 @@ class GenerationTest(unittest.TestCase):
         )
         experiment = SimpleNamespace(add_text=Mock())
         trainer = SimpleNamespace(
-            global_step=0,
+            global_step=1,
             is_global_zero=True,
             logger=SimpleNamespace(experiment=experiment),
             datamodule=SimpleNamespace(
@@ -1388,7 +1456,7 @@ class GenerationTest(unittest.TestCase):
 
     def test_task_sample_logger_skips_nonzero_ranks(self):
         module = SimpleNamespace(generate=Mock())
-        trainer = SimpleNamespace(global_step=0, is_global_zero=False)
+        trainer = SimpleNamespace(global_step=1, is_global_zero=False)
         logger = TaskSampleLogger([0], every_n_steps=1)
 
         logger.on_train_batch_start(trainer, module, None, 0)

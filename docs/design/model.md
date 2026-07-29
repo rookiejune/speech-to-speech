@@ -7,6 +7,9 @@
 
 - `base.TokenModel`：接收显式 runtime，提供 text/semantic-audio embedding、token
   logits、route-aware structured token generation 与 frame condition 对齐原语。
+- `audio_input.AudioInputTower`：把 source audio payload 的 semantic embedding 按显式位置
+  编码为 backbone hidden states；支持 `none`、同长度 `mlp` 与非 causal `transformer`，只属于
+  input path，不参与 semantic-audio output head 或 acoustic generation。
 - `acoustic.FlowModel`：在基础模型上组合 SAC 维护的 `AcousticDiT`，提供
   flow target、sampling 和 `generate_audio_features()`。
 - `acoustic.RVQModel`：组合 SAC 维护的 `AcousticRVQDecoder`，提供 teacher-forced
@@ -20,8 +23,10 @@
   typing，`TextEvaluationModel` 组合 token generation 与 reference scoring。
 - `runtime.protocol.TokenModelRuntime` / `model.protocol.FlowModelRuntime`：token 与 flow
   model 各自消费的 runtime 资源边界。
-- `AdapterType`：基础 `Config` 三个 adapter 字段的 `linear|mlp` 字符串枚举；`None` 表示输入输出
+- `AdapterType`：semantic input/output adapter 的 `linear|mlp` 字符串枚举；`None` 表示输入输出
   dimension 相同的 identity adapter。
+- `AudioInputAdapterType` / `AudioInputAdapterConfig`：source audio tower 的 `none|mlp|transformer`
+  配置；`transformer` 使用同长度、非 causal 的 encoder layer。
 - `ToyConfig` / `create_toy_backbone()`：构造随机初始化的一层或少层 Qwen backbone，用于 CPU
   model/data 契约测试；词表大小来自 runtime layout，但不读取 `runtime.backbone`。
 - `AcousticType`、`DecoderConfig`、`FlowRepaConfig`：组合入口的严格配置结构。
@@ -33,6 +38,7 @@ def forward(
     input_ids: Tensor,
     *,
     attention_mask: Tensor | None = None,
+    audio_input_positions: Tensor | None = None,
     output_hidden_states: bool = False,
     past_key_values: Cache | None = None,
     use_cache: bool = False,
@@ -53,6 +59,9 @@ def generate_tokens(...) -> Tensor: ...
 - `forward()` 返回 global text+audio logits，不接收 labels 或计算 loss。
 - `forward()` 支持 HF backbone 的 cache/position 参数；sampling、stop 和 output-head selection
   参数不进入该通用接口。
+- `audio_input_positions` 是 `[batch, frames]` 的完整序列位置，`-1` 只用于 batch padding。它只
+  指向 source audio payload token；BOA/EOA、target audio token、generated token 和 BiCodec
+  reference `audio_context` 都不经过 `AudioInputTower`。
 - `generation_step()` 只返回最后位置的目标 modality 或显式 token 子集 logits，并把 cache
   状态传给 backbone。
 - 训练先用 `token_hidden_states()` 取得完整表示，再由 objective 只选有效 predictor rows，并用
@@ -75,14 +84,33 @@ def generate_tokens(...) -> Tensor: ...
 
 - `semantic_audio_adapter`
 - `semantic_audio_output_adapter`
+- `audio_input_adapter`
 - `toy`
+- `lora`
 
-三个字段都使用公开 `AdapterType`；`linear` 是默认值，`mlp` 使用 gated SiLU adapter，`None`
+前两个 adapter 字段使用公开 `AdapterType`；`linear` 是默认值，`mlp` 使用 gated SiLU adapter，`None`
 只在输入输出 dimension 相同时合法。`toy=None` 时模型使用 `runtime.backbone`；非空时由
 `ToyConfig` 构造随机 tiny Qwen，runtime 仍负责 tokenizer、codec、layout、special IDs 与 flow
 sampler。完整 Qwen 架构的随机初始化属于 `runtime.backbone_initialization=random`，不通过 toy
 参数近似。Hydra `model` preset 与这些字段一一对应，overfit/train root schema 直接复用
 `model.Config`。
+
+`audio_input_adapter` 默认 `type=none`。启用 `mlp` 时，source audio payload 的 semantic embedding
+逐帧经过 gated MLP 投影到 backbone hidden dimension；启用 `transformer` 时，先做输入投影，再用
+同长度、非 causal 的 Transformer encoder 跨 source frames 建立上下文。两种 tower 都保持 frame
+数量不变，并在 overlay 到 `inputs_embeds` 前清零 padding。训练和完整 prompt 的首步会传入显式
+`audio_input_positions`；启用 KV cache 后后续 token 只走 backbone，不重复运行 source tower。
+该配置不会改变生成 grammar，也不会替换现有 `semantic_audio_output_adapter` 或 Flow/RVQ
+`HiddenConditionAdapter`。
+
+`lora.enabled=true` 通过 Hugging Face PEFT 的 `inject_adapter_in_model()` 注入标准 LoRA adapter，
+target modules、rank、alpha、dropout 与 rsLoRA 开关由 `LoraConfig` 显式配置；本项目不实现平行的
+轻量 LoRA layer。混合精度 backbone 注入后使用 PEFT 的 mixed-precision cast 规则。入口要求它与
+`parameter_policy=lora` 同时选择，使原始 backbone 冻结、LoRA adapter 与现有 speech/acoustic
+interface 可训练。checkpoint 保存 `peft-lora-v1` metadata，严格绑定 backend、adapter name、bias、
+enabled、rank、alpha、dropout、排序后的 target modules 与 rsLoRA 开关；这些配置会改变 adapter
+语义，因此恢复时必须完全一致。启用 LoRA 时不接受缺少该 metadata 的旧 checkpoint；当前未启用
+LoRA 时仍允许加载旧 checkpoint。PEFT 包版本不属于严格相等条件。
 
 decoder 使用独立 `DecoderConfig(hidden_dim, layers, heads, ffn_ratio)`。flow 可额外接收
 `FlowRepaConfig(feature_dim, student_layer)`；RVQ 可额外接收初始化 decoder 各 acoustic
@@ -116,6 +144,11 @@ text_token_ids
 semantic-audio token IDs
     -> codec-initialized or representation-defined random audio embedding
     -> semantic audio adapter
+
+source audio payload positions
+    -> semantic audio embedding
+    -> AudioInputTower (none | mlp | transformer)
+    -> overlay selected inputs_embeds only
 
 Native/BPE semantic tokenizers 使用 codec codebook 初始化；完整 codec sequence tokenizer
 使用随机初始化，因为它的 vocab 同时包含多 codebook offset tokens、BiCodec semantic/global
@@ -172,9 +205,11 @@ range 或 block-length 规则。
 
 route 的 prompt 属于调用前已序列化的 token context，model 只生成固定的 output streams；model 不
 从 target labels 推断 prompt 边界，也不允许 request 临时切换 route。`SpeechToSpeechModule` 保存
-规范化 route metadata 到 checkpoint，并在恢复时严格比较当前 runtime route；缺失或不匹配直接失败。
+规范化 route metadata 和 LoRA 语义 metadata 到 checkpoint，并在恢复时严格比较当前 runtime/model
+配置；启用相应能力时缺失 metadata 或配置不匹配都会直接失败。
 
 具体模型不跨文件调用 `_generate()` 或 `_acoustic_features()`。KV cache 只属于一次调用；
-首步编码完整 semantic-token prompt，后续只输入新 token。frame span lookup 是非持久 buffer，
+首步编码完整 semantic-token prompt，并在有 `audio_input_positions` 时只对 source audio payload
+运行 input tower；后续只输入新 token，不再次处理 source audio。frame span lookup 是非持久 buffer，
 token-only audio decode 和 acoustic feature generation 都复用该 buffer 统计帧数，避免在
 generation service 中重复调用 tokenizer。condition 在设备侧累计并一次展开。

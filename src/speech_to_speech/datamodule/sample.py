@@ -89,6 +89,7 @@ def _build_modal_sample(
 ) -> ModelSample:
     source_modality = task.source_modality
     target_modality = task.target_modality
+    audio_input_positions: Tensor | None = None
     if source_modality is not None:
         if source is None:
             raise ValueError("tasks with a source modality require a source item.")
@@ -99,6 +100,13 @@ def _build_modal_sample(
         source_ids = _global_ids(source, source_modality, runtime)
 
         if source_modality is Modality.AUDIO:
+            source_length = source_ids.numel()
+            audio_input_positions = torch.arange(
+                len(prefix) + 1,
+                len(prefix) + 1 + source_length,
+                dtype=torch.long,
+                device=source_ids.device,
+            )
             source_ids = _boa_eoa(source_ids, runtime)
 
         input_ids = torch.cat([prefix, source_ids, suffix])
@@ -218,6 +226,7 @@ def _build_modal_sample(
             if target_modality is Modality.AUDIO
             else len(input_ids)
         ),
+        audio_input_positions=audio_input_positions,
         audio_context=audio_prompt,
     )
 

@@ -20,6 +20,7 @@ from ..loss.objective import Objective
 from ..loss.protocol import TokenObjectiveModel
 from ..loss.types import Outputs
 from ..generation.protocol import TextEvaluationModel
+from ..model.lora import LoraConfig, LoraModel, checkpoint_payload
 
 
 @dataclass(frozen=True)
@@ -28,12 +29,13 @@ class Config:
     weight_decay: float = 0.01
 
 
-class ModuleModel(TextEvaluationModel, TokenObjectiveModel, Protocol):
+class ModuleModel(TextEvaluationModel, TokenObjectiveModel, LoraModel, Protocol):
     pass
 
 
 ModelT = TypeVar("ModelT", bound=ModuleModel)
 _AUDIO_ROUTE_KEY = "speech_to_speech_audio_route"
+_LORA_KEY = "speech_to_speech_lora"
 
 
 class BatchMaterializer(Protocol):
@@ -98,11 +100,6 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
             return batch
         if isinstance(batch, ModelBatch):
             return batch.to(device)
-        if isinstance(batch, tuple):
-            return tuple(
-                self.transfer_batch_to_device(item, device, dataloader_idx)
-                for item in batch
-            )
         return super().transfer_batch_to_device(batch, device, dataloader_idx)
 
     def _loss_outputs(self, batch: TrainBatch) -> Outputs:
@@ -113,30 +110,16 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         batch: TrainBatch,
         objective: Callable[[ModelBatch, ModelT], Outputs],
     ) -> Outputs:
-        if not isinstance(batch, tuple):
-            if not isinstance(batch, ModelBatch):
-                raise TypeError(
-                    "training_step requires ModelBatch unless a batch materializer "
-                    "converts the incoming batch."
-                )
-            outputs = [objective(batch, self.model)]
-        else:
-            if any(not isinstance(item, ModelBatch) for item in batch):
-                raise TypeError(
-                    "joint training batches must contain ModelBatch values after "
-                    "materialization."
-                )
-            outputs = [objective(item, self.model) for item in batch]
-        return self.objective.reduce(
-            outputs,
-        )
+        if not isinstance(batch, ModelBatch):
+            raise TypeError(
+                "training_step requires ModelBatch unless a batch materializer "
+                "converts the incoming batch."
+            )
+        return objective(batch, self.model)
 
     def materialize_batch(self, batch: TrainInputBatch) -> TrainBatch:
         if self.batch_materializer is None:
-            if isinstance(batch, RawSpeechBatch) or (
-                isinstance(batch, tuple)
-                and any(isinstance(item, RawSpeechBatch) for item in batch)
-            ):
+            if isinstance(batch, RawSpeechBatch):
                 raise TypeError(
                     "raw waveform batches require a batch materializer before loss."
                 )
@@ -156,20 +139,12 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         checkpoint[_AUDIO_ROUTE_KEY] = _audio_route_payload(
             self.model.runtime.audio_route
         )
+        checkpoint[_LORA_KEY] = checkpoint_payload(self.model.lora_config)
 
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         expected = _audio_route_payload(self.model.runtime.audio_route)
-        if _AUDIO_ROUTE_KEY not in checkpoint:
-            if expected is not None:
-                raise ValueError(
-                    "checkpoint is missing the fixed audio route contract."
-                )
-            return
-        actual = checkpoint[_AUDIO_ROUTE_KEY]
-        if actual != expected:
-            raise ValueError(
-                f"checkpoint audio route does not match runtime: {actual!r} != {expected!r}."
-            )
+        _validate_audio_route_checkpoint(checkpoint, expected)
+        _validate_lora_checkpoint(checkpoint, self.model.lora_config)
 
     @torch.no_grad()
     def generate(
@@ -222,6 +197,40 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
             optimizer="adamw",
             lr=self.config.learning_rate,
             weight_decay=self.config.weight_decay,
+        )
+
+
+def _validate_audio_route_checkpoint(
+    checkpoint: dict[str, Any],
+    expected: dict[str, object] | None,
+) -> None:
+    if _AUDIO_ROUTE_KEY not in checkpoint:
+        if expected is not None:
+            raise ValueError(
+                "checkpoint is missing the fixed audio route contract."
+            )
+        return
+    actual = checkpoint[_AUDIO_ROUTE_KEY]
+    if actual != expected:
+        raise ValueError(
+            f"checkpoint audio route does not match runtime: {actual!r} != {expected!r}."
+        )
+
+
+def _validate_lora_checkpoint(
+    checkpoint: dict[str, Any],
+    config: LoraConfig,
+) -> None:
+    expected = checkpoint_payload(config)
+    if _LORA_KEY not in checkpoint:
+        if config.enabled:
+            raise ValueError("checkpoint is missing the PEFT LoRA contract.")
+        return
+    actual = checkpoint[_LORA_KEY]
+    if actual != expected:
+        raise ValueError(
+            f"checkpoint PEFT LoRA contract does not match model: "
+            f"{actual!r} != {expected!r}."
         )
 
 

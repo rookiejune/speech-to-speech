@@ -32,6 +32,7 @@ class GenerationStepModel(Protocol):
         modality: Modality | None,
         past_key_values: Cache | None,
         use_cache: bool,
+        audio_input_positions: Tensor | None = None,
     ) -> CausalLMOutputWithPast: ...
 
 
@@ -48,6 +49,7 @@ class _RowGenerator:
         do_sample: bool,
         use_cache: bool,
         grammar: str,
+        audio_input_positions: Tensor | None,
     ) -> None:
         self._model = model
         self.sequence = prompt_ids.clone()
@@ -60,6 +62,7 @@ class _RowGenerator:
         self._use_cache = use_cache
         self._grammar = grammar
         self._past_key_values: Cache | None = None
+        self._audio_input_positions = audio_input_positions
         self._emitted = 0
 
     def step(self, allowed: Tensor) -> int:
@@ -73,6 +76,11 @@ class _RowGenerator:
             modality=None,
             past_key_values=self._past_key_values,
             use_cache=self._use_cache,
+            audio_input_positions=(
+                self._audio_input_positions
+                if not self._use_cache or self._past_key_values is None
+                else None
+            ),
         )
         if output.logits is None:
             raise RuntimeError("model did not return generation logits.")
@@ -115,6 +123,7 @@ def generate_sequence(
     temperature: float,
     top_p: float,
     prompt_attention_mask: Tensor | None,
+    audio_input_positions: Tensor | None,
     stop_token_id: int | None,
     generation_modality: Modality | None,
     allowed_token_ids: Sequence[int] | Tensor | None,
@@ -141,6 +150,11 @@ def generate_sequence(
         prompt_attention_mask = torch.ones_like(prompt_ids, dtype=torch.bool)
     if prompt_attention_mask.shape != prompt_ids.shape:
         raise ValueError("prompt attention mask must align with prompt ids.")
+    if audio_input_positions is not None and (
+        audio_input_positions.dim() != 2
+        or audio_input_positions.size(0) != prompt_ids.size(0)
+    ):
+        raise ValueError("audio_input_positions must have shape [batch, frames].")
     if not bool(prompt_attention_mask.any(dim=1).all()):
         raise ValueError("each generation prompt must contain at least one token.")
 
@@ -176,6 +190,7 @@ def generate_sequence(
             modality=generation_modality,
             past_key_values=past_key_values,
             use_cache=use_cache,
+            audio_input_positions=audio_input_positions,
         )
         if output.logits is None:
             raise RuntimeError("model did not return generation logits.")
@@ -238,6 +253,7 @@ def generate_sequence(
             continuing_rows = continuing.nonzero(as_tuple=False).flatten()
             active_rows = active_rows.index_select(0, continuing_rows)
         if use_cache:
+            audio_input_positions = None
             past_key_values = output.past_key_values
             if past_key_values is None:
                 raise RuntimeError("backbone did not return a generation cache.")
@@ -252,6 +268,10 @@ def generate_sequence(
                 else next_ids.index_select(0, continuing_rows)
             ).unsqueeze(-1)
         else:
+            if audio_input_positions is not None and continuing_rows is not None:
+                audio_input_positions = audio_input_positions.index_select(
+                    0, continuing_rows
+                )
             input_ids = (
                 generated[:, :length]
                 if continuing_rows is None
@@ -291,6 +311,7 @@ def generate_flattened_sequence(
     temperature: float,
     top_p: float,
     prompt_attention_mask: Tensor | None,
+    audio_input_positions: Tensor | None = None,
     do_sample: bool,
     use_cache: bool,
 ) -> Tensor:
@@ -340,6 +361,20 @@ def generate_flattened_sequence(
             temperature=temperature,
             top_p=top_p,
             prompt_attention_mask=attention,
+            audio_input_positions=(
+                None
+                if audio_input_positions is None
+                else torch.cat(
+                    (
+                        audio_input_positions,
+                        audio_input_positions.new_full(
+                            (audio_input_positions.size(0), prefix.numel()),
+                            -1,
+                        ),
+                    ),
+                    dim=1,
+                )
+            ),
             stop_token_id=model.runtime.eoa_token_id,
             generation_modality=None,
             allowed_token_ids=allowed,
@@ -359,6 +394,11 @@ def generate_flattened_sequence(
             model,
             prompt_ids[row : row + 1],
             prompt_attention_mask=prompt_attention_mask[row : row + 1],
+            audio_input_positions=(
+                None
+                if audio_input_positions is None
+                else audio_input_positions[row : row + 1]
+            ),
             codebook_ranges=codebook_ranges,
             codec_token_id=codec_token_id,
             codebook_token_ids=codebook_token_ids,
@@ -382,6 +422,7 @@ def _generate_flattened_row(
     prompt_ids: Tensor,
     *,
     prompt_attention_mask: Tensor,
+    audio_input_positions: Tensor | None,
     codebook_ranges: Sequence[tuple[int, int]],
     codec_token_id: int,
     codebook_token_ids: Sequence[int],
@@ -401,6 +442,7 @@ def _generate_flattened_row(
         do_sample=do_sample,
         use_cache=use_cache,
         grammar="flattened full sequence",
+        audio_input_positions=audio_input_positions,
     )
 
     audio_start, _ = model.runtime.codec_audio_range
@@ -446,6 +488,7 @@ def generate_bicodec_sequence(
     temperature: float,
     top_p: float,
     prompt_attention_mask: Tensor | None,
+    audio_input_positions: Tensor | None = None,
     do_sample: bool,
     use_cache: bool,
 ) -> Tensor:
@@ -467,6 +510,11 @@ def generate_bicodec_sequence(
                 model,
                 prompt_ids[row : row + 1],
                 prompt_attention_mask=prompt_attention_mask[row : row + 1],
+                audio_input_positions=(
+                    None
+                    if audio_input_positions is None
+                    else audio_input_positions[row : row + 1]
+                ),
                 tokenizer=tokenizer,
                 streams=streams,
                 max_new_tokens=max_new_tokens,
@@ -488,6 +536,7 @@ def _generate_bicodec_row(
     prompt_ids: Tensor,
     *,
     prompt_attention_mask: Tensor,
+    audio_input_positions: Tensor | None,
     tokenizer: BiCodecAudioTokenizer,
     streams: tuple[AudioStream, ...],
     max_new_tokens: int,
@@ -506,6 +555,7 @@ def _generate_bicodec_row(
         do_sample=do_sample,
         use_cache=use_cache,
         grammar="BiCodec full sequence",
+        audio_input_positions=audio_input_positions,
     )
 
     audio_start, _ = model.runtime.audio_head_range

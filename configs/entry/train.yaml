@@ -53,7 +53,7 @@ validation:
   sanity_steps: -1
 
 trainer:
-  strategy: ddp_find_unused_parameters_false
+  strategy: ddp_find_unused_parameters_true
   use_distributed_sampler: false
   log_every_n_steps: 10
   enable_checkpointing: true
@@ -70,6 +70,15 @@ callbacks:
     top_p: 1.0
     do_sample: false
     use_cache: true
+  text_retention:
+    enabled: true
+    every_n_steps: 10000
+    every_audio_seconds:
+    max_new_tokens: 64
+    probes:
+      zh_en:
+        instruction: "Translate into English: \u6628\u665a\u7684\u66b4\u96e8\u5bfc\u81f4\u4e09\u8d9f\u5217\u8f66\u665a\u70b9\u3002"
+        reference: "Last night's heavy rain delayed three trains."
   grad_norm:
     enabled: false
     every_n_steps: 100

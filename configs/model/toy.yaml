@@ -1,8 +1,21 @@
 semantic_audio_adapter: linear
 semantic_audio_output_adapter: linear
+audio_input_adapter:
+  type: none
+  layers: 2
+  heads: 8
+  ffn_ratio: 4.0
+  dropout: 0.0
 toy:
   hidden_size: 32
   intermediate_size: 64
   layers: 1
   heads: 2
   max_position_embeddings: 256
+lora:
+  enabled: false
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  use_rslora: false

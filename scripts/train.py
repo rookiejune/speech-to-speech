@@ -19,6 +19,7 @@ from speech_to_speech.callback.logging import (
     LossSummary,
     OutputsLogger,
     TaskSampleLogger,
+    TextRetentionLogger,
 )
 from speech_to_speech.datamodule import DataModule, SampleSplit
 from speech_to_speech.datamodule.joint import LoaderSchedule
@@ -116,7 +117,7 @@ def run(config: StagedTrainConfig) -> None:
             }
             for name, loader in config.stage.loaders.items()
         },
-        "batches_per_step": config.stage.batches_per_step,
+        "accumulate_grad_batches": config.stage.accumulate_grad_batches,
         "max_steps": config.train.max_steps,
         "composition": acoustic_type.value,
         "parameters": {
@@ -147,7 +148,7 @@ def build_datamodule(config: StagedTrainConfig, runtime: Runtime) -> DataModule:
         loaders,
         LoaderSchedule(
             config.stage.loader_weights(),
-            batches_per_step=config.stage.batches_per_step,
+            accumulate_grad_batches=config.stage.accumulate_grad_batches,
         ),
         validation=(
             _validation_spec(config) if config.validation.enabled else None
@@ -211,8 +212,10 @@ def build_trainer(
             callbacks,
             logger=build_logger(config.logging),
             factory=pl.Trainer,
+            accumulate_grad_batches=config.stage.accumulate_grad_batches,
             val_check_interval=(
                 config.validation.every_n_steps
+                * config.stage.accumulate_grad_batches
                 if config.validation.enabled
                 else None
             ),
@@ -269,6 +272,23 @@ def training_callbacks(
                     use_cache=config.callbacks.task_sample.use_cache,
                 )
             )
+    if config.callbacks.text_retention.enabled:
+        callbacks.append(
+            TextRetentionLogger(
+                {
+                    name: {
+                        "instruction": probe.instruction,
+                        "reference": probe.reference,
+                    }
+                    for name, probe in config.callbacks.text_retention.probes.items()
+                },
+                every_n_steps=config.callbacks.text_retention.every_n_steps,
+                every_audio_seconds=(
+                    config.callbacks.text_retention.every_audio_seconds
+                ),
+                max_new_tokens=config.callbacks.text_retention.max_new_tokens,
+            )
+        )
     if config.callbacks.grad_norm.enabled and performance is None:
         callbacks.append(
             GradNormLogger(

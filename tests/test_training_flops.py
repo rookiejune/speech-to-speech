@@ -12,6 +12,7 @@ from torch import Tensor, nn
 
 from speech_to_speech._flops import (
     adapter,
+    audio_input_tower,
     flow_decoder,
     linear,
     qwen_backbone,
@@ -21,6 +22,8 @@ from speech_to_speech.datamodule.types import AcousticTarget, ModelBatch
 from speech_to_speech.loss import FlowObjective, LossItem, RVQObjective, TokenObjective
 from speech_to_speech.model import (
     AdapterType,
+    AudioInputAdapterConfig,
+    AudioInputAdapterType,
     Config as ModelConfig,
     TokenModel,
     ToyConfig,
@@ -87,6 +90,44 @@ class TrainingFlopsTest(unittest.TestCase):
         expected = _token_expected(model, batch)
 
         self.assertEqual(_flops(module, batch), expected)
+
+    def test_audio_input_tower_counts_padded_source_rows(self):
+        positions = torch.tensor([[1, 2], [1, -1]])
+        batch = _batch(
+            input_ids=torch.tensor([[1, 7, 8, 2], [1, 7, 0, 0]]),
+            labels=torch.tensor([[-100, 7, 8, -100], [-100, 9, -100, -100]]),
+            tasks=[Task.TTS, Task.TTS],
+            audio_input_positions=positions,
+        )
+        for adapter_type in (
+            AudioInputAdapterType.MLP,
+            AudioInputAdapterType.TRANSFORMER,
+        ):
+            config = AudioInputAdapterConfig(
+                type=adapter_type,
+                layers=1,
+                heads=2,
+                ffn_ratio=2,
+            )
+            model = _token_model(_model_config(audio_input_adapter=config))
+            module = _module(model, TokenObjective(_layout()))
+            tower = model.audio_input_adapter
+            if tower is None:
+                self.fail("audio input tower was not created")
+            expected = _token_expected(model, batch) + 3 * audio_input_tower(
+                tower,
+                batch=positions.size(0),
+                frames=positions.size(1),
+            )
+            self.assertEqual(_flops(module, batch), expected)
+
+            without_positions = _batch(
+                input_ids=batch.input_ids,
+                labels=batch.token_labels,
+                tasks=batch.tasks,
+            )
+            baseline = _token_expected(model, without_positions)
+            self.assertEqual(_flops(module, without_positions), baseline)
 
     def test_flow_uses_padded_target_frames(self):
         model = _flow_model()
@@ -230,10 +271,13 @@ class _Runtime:
     flow_matching = _flow_runtime()
 
 
-def _model_config() -> ModelConfig:
+def _model_config(
+    *, audio_input_adapter: AudioInputAdapterConfig | None = None
+) -> ModelConfig:
     return ModelConfig(
         semantic_audio_adapter=AdapterType.LINEAR,
         semantic_audio_output_adapter=AdapterType.LINEAR,
+        audio_input_adapter=audio_input_adapter or AudioInputAdapterConfig(),
         toy=ToyConfig(
             hidden_size=4,
             intermediate_size=8,
@@ -244,8 +288,8 @@ def _model_config() -> ModelConfig:
     )
 
 
-def _token_model() -> TokenModel:
-    model = TokenModel(_model_config(), runtime=cast(Any, _Runtime()))
+def _token_model(config: ModelConfig | None = None) -> TokenModel:
+    model = TokenModel(config or _model_config(), runtime=cast(Any, _Runtime()))
     model.backbone.config._attn_implementation = "flash_attention_2"
     return model
 
@@ -284,6 +328,7 @@ def _batch(
     labels: Tensor,
     tasks: list[Task],
     acoustic_target: AcousticTarget | None = None,
+    audio_input_positions: Tensor | None = None,
 ) -> ModelBatch:
     return ModelBatch(
         input_ids=input_ids,
@@ -291,6 +336,7 @@ def _batch(
         acoustic_target=acoustic_target,
         tasks=tasks,
         pad_token_id=0,
+        audio_input_positions=audio_input_positions,
     )
 
 

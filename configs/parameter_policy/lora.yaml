@@ -1,11 +1,11 @@
-name: full
+name: lora
 trainable_groups:
-  - backbone
   - backbone_adapter
   - semantic_audio_embedding
   - semantic_audio_adapter
   - audio_input_adapter
   - semantic_audio_output
   - acoustic_decoder
-frozen_groups: []
-backbone_top_fraction: 1.0
+frozen_groups:
+  - backbone
+backbone_top_fraction: 0.0

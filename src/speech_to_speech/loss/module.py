@@ -50,6 +50,7 @@ class TokenObjective(Objective[TokenObjectiveModel]):
         hidden_states = model.token_hidden_states(
             batch.input_ids,
             attention_mask=batch.attention_mask,
+            audio_input_positions=batch.audio_input_positions,
         )
         token = self.token(
             hidden_states,
@@ -95,6 +96,7 @@ class FlowObjective(Objective[FlowObjectiveModel]):
         hidden_states = model.token_hidden_states(
             batch.input_ids,
             attention_mask=batch.attention_mask,
+            audio_input_positions=batch.audio_input_positions,
         )
         token = self.token(
             hidden_states,
@@ -191,6 +193,7 @@ class RVQObjective(Objective[RVQObjectiveModel]):
         hidden_states = model.token_hidden_states(
             batch.input_ids,
             attention_mask=batch.attention_mask,
+            audio_input_positions=batch.audio_input_positions,
         )
         token = self.token(
             hidden_states,

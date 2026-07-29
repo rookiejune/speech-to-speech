@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import math
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import Mock, patch
 
 import torch
 from anydataset.types import Modality
 from anytrain.module.idspace import Layout
+from hydra import compose, initialize_config_dir
 from torch import Tensor, nn
 
+from scripts import train as train_script
+from scripts._config import _validate_text_retention, train as parse_train
 from speech_to_speech.callback.logging import TextRetentionLogger
 from speech_to_speech.task import Task
 from speech_to_speech.loss import TokenObjective
@@ -171,6 +176,134 @@ class TextRetentionTest(unittest.TestCase):
         trainer.global_step = 4
         logger.on_train_batch_end(trainer, module, None, None, 2)
         self.assertEqual(evaluate_text.call_count, 2)
+
+    def test_callback_preserves_checkpoint_baseline_on_resume(self):
+        evaluate_text = Mock(
+            return_value={
+                name: {"generated": "resumed text", "nll": 3.0}
+                for name in PROBES
+            }
+        )
+        module = SimpleNamespace(evaluate_text=evaluate_text)
+        experiment = Mock()
+        trainer = SimpleNamespace(
+            global_step=20,
+            is_global_zero=True,
+            logger=SimpleNamespace(experiment=experiment),
+        )
+        logger = TextRetentionLogger(PROBES, every_n_steps=10)
+        logger.load_state_dict(
+            {
+                "interval": {},
+                "baseline_nll": {name: 1.0 for name in PROBES},
+            }
+        )
+
+        logger.on_fit_start(trainer, module)
+
+        deltas = [
+            call.args[1]
+            for call in experiment.add_scalar.call_args_list
+            if call.args[0].endswith("/nll_delta")
+        ]
+        self.assertEqual(deltas, [2.0, 2.0])
+        self.assertEqual(
+            logger.state_dict()["baseline_nll"],
+            {name: 1.0 for name in PROBES},
+        )
+
+
+@patch.dict(
+    "os.environ",
+    {
+        "DYNAMIC_HOME": "/tmp/dynamic",
+        "SPEECH_TO_SPEECH_AUDIO_TOKENIZER": "/tmp/audio-tokenizer",
+    },
+)
+class TextRetentionConfigTest(unittest.TestCase):
+    def test_formal_train_enables_a_valid_text_probe(self):
+        config = parse_train(_compose_train())
+
+        callback = config.callbacks.text_retention
+        self.assertTrue(callback.enabled)
+        self.assertEqual(callback.every_n_steps, 10_000)
+        self.assertIsNone(callback.every_audio_seconds)
+        self.assertEqual(callback.max_new_tokens, 64)
+        self.assertEqual(set(callback.probes), {"zh_en"})
+        self.assertTrue(callback.probes["zh_en"].instruction)
+        self.assertTrue(callback.probes["zh_en"].reference)
+
+    def test_audio_cadence_requires_none_or_a_finite_positive_number(self):
+        valid = parse_train(_compose_train())
+        for value in (None, 1, 1.5):
+            with self.subTest(value=value):
+                cast(Any, valid.callbacks.text_retention).every_audio_seconds = value
+                _validate_text_retention(valid)
+
+        cases = (
+            (True, TypeError, "number or None"),
+            ("10", TypeError, "number or None"),
+            (0, ValueError, "finite and positive"),
+            (-1, ValueError, "finite and positive"),
+            (math.inf, ValueError, "finite and positive"),
+            (math.nan, ValueError, "finite and positive"),
+        )
+        for value, error, message in cases:
+            with self.subTest(value=value), self.assertRaisesRegex(error, message):
+                config = parse_train(_compose_train())
+                cast(Any, config.callbacks.text_retention).every_audio_seconds = value
+                _validate_text_retention(config)
+
+    def test_enabled_text_retention_requires_complete_probes(self):
+        empty = parse_train(_compose_train())
+        empty.callbacks.text_retention.probes = {}
+        with self.assertRaisesRegex(ValueError, "at least one probe"):
+            _validate_text_retention(empty)
+
+        missing_instruction = parse_train(_compose_train())
+        missing_instruction.callbacks.text_retention.probes["zh_en"].instruction = ""
+        with self.assertRaisesRegex(TypeError, "instruction"):
+            _validate_text_retention(missing_instruction)
+
+        missing_reference = parse_train(_compose_train())
+        missing_reference.callbacks.text_retention.probes["zh_en"].reference = ""
+        with self.assertRaisesRegex(TypeError, "reference"):
+            _validate_text_retention(missing_reference)
+
+    def test_formal_training_constructs_text_retention_callback(self):
+        config = parse_train(_compose_train())
+        callback = config.callbacks.text_retention
+        callback.every_n_steps = 17
+        callback.every_audio_seconds = 12.5
+        callback.max_new_tokens = 23
+        built = Mock()
+
+        with patch("scripts.train.TextRetentionLogger", return_value=built) as factory:
+            callbacks = train_script.training_callbacks(
+                config,
+                Path("/tmp/output"),
+                Mock(),
+            )
+
+        self.assertIn(built, callbacks)
+        factory.assert_called_once_with(
+            {
+                name: {
+                    "instruction": probe.instruction,
+                    "reference": probe.reference,
+                }
+                for name, probe in callback.probes.items()
+            },
+            every_n_steps=17,
+            every_audio_seconds=12.5,
+            max_new_tokens=23,
+        )
+
+
+def _compose_train(*overrides: str):
+    root = Path(__file__).parents[1]
+    with initialize_config_dir(version_base=None, config_dir=str(root / "configs")):
+        return compose(config_name="train", overrides=list(overrides))
 
 
 if __name__ == "__main__":

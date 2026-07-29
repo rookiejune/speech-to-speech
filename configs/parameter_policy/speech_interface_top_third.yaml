@@ -1,8 +1,10 @@
 name: speech_interface_top_third
 trainable_groups:
   - backbone
+  - backbone_adapter
   - semantic_audio_embedding
   - semantic_audio_adapter
+  - audio_input_adapter
   - semantic_audio_output
   - acoustic_decoder
 frozen_groups: []

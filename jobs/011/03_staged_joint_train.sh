@@ -16,7 +16,7 @@ cd "${SPEECH_TO_SPEECH_ROOT}"
 echo "{\"event\":\"job.launch\",\"entry\":\"scripts/train.py\",\"experiment\":\"${experiment}\",\"stage\":\"${stage}\",\"devices\":\"${visible_devices}\"}"
 CUDA_VISIBLE_DEVICES="${visible_devices}" "${SPEECH_TO_SPEECH_PYTHON}" scripts/train.py \
   "experiment=${experiment}" \
-  "trainer=static_ddp" \
+  "trainer=ddp" \
   "repo_output_root=${SPEECH_TO_SPEECH_TRAIN_ROOT}" \
   "runtime.backbone=${qwen_root}" \
   "${FDU_DATA_ARGS[@]}" \

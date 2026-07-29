@@ -50,6 +50,7 @@ from speech_to_speech.datamodule.dataset import DatasetName
 from speech_to_speech.datamodule.types import DataShape
 from speech_to_speech.model import (
     AdapterType,
+    AudioInputAdapterType,
     Config as ModelConfig,
     ToyConfig,
 )
@@ -597,12 +598,12 @@ class ConfigTest(unittest.TestCase):
         )
         self.assertIn(ParameterGroup.BACKBONE, stage_1.parameter_policy.frozen_groups)
         self.assertEqual(set(stage_1.stage.loaders), {"asr", "tts"})
-        self.assertEqual(stage_1.stage.batches_per_step, 2)
+        self.assertEqual(stage_1.stage.accumulate_grad_batches, 2)
 
         stage_2 = overfit(_compose("overfit", "stage=stage_2"))
         self.assertEqual(set(stage_2.stage.loaders), {"asr", "tts", "mt"})
         self.assertEqual(stage_2.stage.loaders["mt"].task_weights, {"mt": 1.0})
-        self.assertEqual(stage_2.stage.batches_per_step, 10)
+        self.assertEqual(stage_2.stage.accumulate_grad_batches, 10)
 
         stage_4 = overfit(_compose("overfit", "stage=stage_4"))
         self.assertEqual(
@@ -611,7 +612,7 @@ class ConfigTest(unittest.TestCase):
         )
         self.assertEqual(stage_4.stage.loaders["s2st"].weight, 0.70)
 
-    def test_train_root_uses_stage_config_and_static_ddp(self):
+    def test_train_root_uses_stage_config_and_accumulation_safe_ddp(self):
         default = parse_train(_compose("train"))
 
         self.assertIsInstance(default, StagedTrainRVQConfig)
@@ -623,13 +624,17 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(default.validation.sanity_steps, -1)
         self.assertFalse(default.callbacks.performance.enabled)
         self.assertFalse(default.trainer.use_distributed_sampler)
+        self.assertEqual(
+            default.trainer.strategy,
+            "ddp_find_unused_parameters_true",
+        )
         with self.assertRaises(AttributeError):
             getattr(default.data, "sample_index")
 
         config = parse_train(_compose("train", "stage=stage_2"))
         self.assertEqual(config.stage.name, StageName.STAGE_2)
         self.assertEqual(set(config.stage.loaders), {"asr", "tts", "mt"})
-        self.assertEqual(config.stage.batches_per_step, 10)
+        self.assertEqual(config.stage.accumulate_grad_batches, 10)
         self.assertEqual(config.data.codec, "longcat")
         self.assertEqual(config.data.dataset.name, DatasetName.WMT19_TTS)
         self.assertEqual(config.text_data.dataset.name.value, "wmt19")
@@ -639,11 +644,14 @@ class ConfigTest(unittest.TestCase):
         resumed = parse_train(_compose("train", "train.ckpt_path=/tmp/last.ckpt"))
         self.assertEqual(resumed.train.ckpt_path, "/tmp/last.ckpt")
 
-        ddp = parse_train(_compose("train", "trainer=static_ddp", "stage=stage_4"))
-
-        self.assertEqual(ddp.trainer.strategy, "ddp_find_unused_parameters_false")
-        self.assertFalse(ddp.trainer.use_distributed_sampler)
-        self.assertEqual(set(ddp.stage.loaders), {"asr_s2tt", "tts_t2st", "s2st", "mt"})
+        with self.assertRaisesRegex(ValueError, "unused-parameter"):
+            parse_train(
+                _compose(
+                    "train",
+                    "stage=stage_4",
+                    "trainer.strategy=ddp_find_unused_parameters_false",
+                )
+            )
 
         token = parse_train(
             _compose(
@@ -663,6 +671,7 @@ class ConfigTest(unittest.TestCase):
     def test_parameter_policy_smoke_composes_each_supported_policy(self):
         policies = (
             ParameterPolicyName.FULL,
+            ParameterPolicyName.LORA,
             ParameterPolicyName.SPEECH_INTERFACE,
             ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD,
             ParameterPolicyName.SEMANTIC_ONLY,
@@ -671,12 +680,14 @@ class ConfigTest(unittest.TestCase):
 
         for policy in policies:
             with self.subTest(policy=policy.value):
+                overrides = [
+                    "experiment=train/parameter_policy_smoke",
+                    f"parameter_policy={policy.value}",
+                ]
+                if policy is ParameterPolicyName.LORA:
+                    overrides.append("model.lora.enabled=true")
                 config = parse_train(
-                    _compose(
-                        "train",
-                        "experiment=train/parameter_policy_smoke",
-                        f"parameter_policy={policy.value}",
-                    )
+                    _compose("train", *overrides)
                 )
 
                 self.assertIs(config.parameter_policy.name, policy)
@@ -727,9 +738,9 @@ class ConfigTest(unittest.TestCase):
                 self.assertIs(config.parameter_policy.name, policy)
                 self.assertEqual(
                     config.trainer.strategy,
-                    "ddp_find_unused_parameters_false",
+                    "ddp_find_unused_parameters_true",
                 )
-                self.assertGreater(config.stage.batches_per_step, 1)
+                self.assertGreater(config.stage.accumulate_grad_batches, 1)
                 self.assertTrue(config.callbacks.task_sample.enabled)
                 self.assertEqual(config.callbacks.task_sample.every_n_steps, 10_000)
                 self.assertEqual(
@@ -746,13 +757,13 @@ class ConfigTest(unittest.TestCase):
                     )
                 )
 
-    def test_static_ddp_rejects_rotating_multi_loader_steps(self):
-        with self.assertRaisesRegex(ValueError, "every optimizer step"):
+    def test_static_ddp_rejects_multi_loader_gradient_accumulation(self):
+        with self.assertRaisesRegex(ValueError, "unused-parameter"):
             parse_train(
                 _compose(
                     "train",
                     "stage=stage_4",
-                    "stage.batches_per_step=1",
+                    "trainer.strategy=ddp_find_unused_parameters_false",
                 )
             )
 
@@ -831,7 +842,7 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual(config.train.max_steps, 2)
                 self.assertEqual(
                     config.trainer.strategy,
-                    "ddp_find_unused_parameters_false",
+                    "ddp_find_unused_parameters_true",
                 )
                 self.assertFalse(config.trainer.use_distributed_sampler)
                 self.assertFalse(config.trainer.enable_checkpointing)
@@ -870,7 +881,7 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual(config.train.max_steps, 2)
                 self.assertEqual(
                     config.trainer.strategy,
-                    "ddp_find_unused_parameters_false",
+                    "ddp_find_unused_parameters_true",
                 )
                 self.assertFalse(config.trainer.use_distributed_sampler)
                 self.assertFalse(config.trainer.enable_checkpointing)
@@ -881,7 +892,7 @@ class ConfigTest(unittest.TestCase):
         full_sequence = parse_train(
             _compose("train", "experiment=train/fdu_stage_4_full_sequence_smoke")
         )
-        self.assertEqual(full_sequence.stage.batches_per_step, 10)
+        self.assertEqual(full_sequence.stage.accumulate_grad_batches, 10)
 
     def test_train_datamodule_routes_mt_to_text_loader(self):
         config = parse_train(_compose("train", "stage=stage_2"))
@@ -903,7 +914,7 @@ class ConfigTest(unittest.TestCase):
             LoaderKind.TEXT,
         )
         self.assertEqual(datamodule.schedule.weights, config.stage.loader_weights())
-        self.assertEqual(datamodule.schedule.batches_per_step, 10)
+        self.assertEqual(datamodule.schedule.accumulate_grad_batches, 10)
 
         config.stage.loaders["bad"] = StageLoaderConfig(
             weight=1.0,
@@ -1092,7 +1103,8 @@ class ConfigTest(unittest.TestCase):
 
         self.assertIs(trainer, entry.return_value)
         self.assertIs(entry.call_args.kwargs["logger"], logger.return_value)
-        self.assertEqual(entry.call_args.kwargs["val_check_interval"], 25)
+        self.assertEqual(entry.call_args.kwargs["accumulate_grad_batches"], 2)
+        self.assertEqual(entry.call_args.kwargs["val_check_interval"], 50)
         self.assertEqual(entry.call_args.kwargs["num_sanity_val_steps"], 2)
 
     def test_train_uses_async_checkpoint(self):
@@ -1185,6 +1197,65 @@ class ConfigTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             overfit(_compose("overfit", "model.semantic_audio_adapter=invalid"))
+
+    def test_audio_input_adapter_is_structured_and_disabled_by_default(self):
+        default = overfit(_compose("overfit"))
+        self.assertIs(
+            default.model.audio_input_adapter.type,
+            AudioInputAdapterType.NONE,
+        )
+        configured = overfit(
+            _compose("overfit", "model.audio_input_adapter.type=transformer")
+        )
+        self.assertIs(
+            configured.model.audio_input_adapter.type,
+            AudioInputAdapterType.TRANSFORMER,
+        )
+
+    def test_lora_model_and_parameter_policy_must_be_selected_together(self):
+        config = overfit(
+            _compose(
+                "overfit",
+                "model.lora.enabled=true",
+                "parameter_policy=lora",
+            )
+        )
+
+        self.assertTrue(config.model.lora.enabled)
+        self.assertEqual(config.model.lora.rank, 16)
+        self.assertIs(config.parameter_policy.name, ParameterPolicyName.LORA)
+        self.assertEqual(
+            config.parameter_policy.trainable_groups,
+            [
+                ParameterGroup.BACKBONE_ADAPTER,
+                ParameterGroup.SEMANTIC_AUDIO_EMBEDDING,
+                ParameterGroup.SEMANTIC_AUDIO_ADAPTER,
+                ParameterGroup.AUDIO_INPUT_ADAPTER,
+                ParameterGroup.SEMANTIC_AUDIO_OUTPUT,
+                ParameterGroup.ACOUSTIC_DECODER,
+            ],
+        )
+
+        for overrides in (
+            ("model.lora.enabled=true",),
+            ("parameter_policy=lora",),
+        ):
+            with (
+                self.subTest(overrides=overrides),
+                self.assertRaisesRegex(ValueError, "must be selected together"),
+            ):
+                overfit(_compose("overfit", *overrides))
+
+    def test_lora_rejects_unsupported_performance_provider(self):
+        with self.assertRaisesRegex(ValueError, "LoRA training FLOPs"):
+            overfit(
+                _compose(
+                    "overfit",
+                    "model.lora.enabled=true",
+                    "parameter_policy=lora",
+                    "callbacks.performance.enabled=true",
+                )
+            )
 
     def test_runtime_owns_codec_and_flow_sampling(self):
         config = overfit(
@@ -1393,7 +1464,7 @@ class ConfigTest(unittest.TestCase):
 
         self.assertIn("scripts/train.py", source)
         self.assertNotIn("scripts/overfit.py", source)
-        self.assertIn('"trainer=static_ddp"', source)
+        self.assertIn('"trainer=ddp"', source)
         self.assertIn("fdu_stage_data_args data.dataset.root", source)
         self.assertIn("SPEECH_TO_SPEECH_STAGE:-stage_1", source)
         self.assertIn('experiment="train/staged_joint_${stage}"', source)

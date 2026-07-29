@@ -310,6 +310,7 @@ class ModelSample:
     token_groups: Tensor | None = None
     audio_seconds: float = 0.0
     generation_prompt_length: int | None = None
+    audio_input_positions: Tensor | None = None
     audio_context: SemanticAcousticCodes | None = None
 
 
@@ -323,6 +324,7 @@ class ModelBatch:
     token_groups: Tensor | None = None
     audio_seconds: Tensor | None = None
     generation_prompt_lengths: Tensor | None = None
+    audio_input_positions: Tensor | None = None
     audio_contexts: tuple[SemanticAcousticCodes | None, ...] | None = None
 
     def __post_init__(self) -> None:
@@ -364,6 +366,10 @@ class ModelBatch:
             )
         _validate_generation_prompt_lengths(
             self.generation_prompt_lengths,
+            self.input_ids,
+        )
+        _validate_batch_audio_input_positions(
+            self.audio_input_positions,
             self.input_ids,
         )
         if self.audio_contexts is None:
@@ -417,6 +423,10 @@ class ModelBatch:
             pad_token_id=pad_token_id,
             audio_seconds=_audio_seconds(samples),
             generation_prompt_lengths=_sample_prompt_lengths(samples),
+            audio_input_positions=_optional_tensor(
+                [sample.audio_input_positions for sample in samples],
+                padding_value=-1,
+            ),
             audio_contexts=tuple(sample.audio_context for sample in samples),
         )
 
@@ -434,6 +444,7 @@ class ModelBatch:
     def pin_memory(self) -> ModelBatch:
         audio_seconds = self.audio_seconds
         prompt_lengths = self.generation_prompt_lengths
+        audio_input_positions = self.audio_input_positions
         audio_contexts = self.audio_contexts
         if audio_seconds is None:
             raise RuntimeError("ModelBatch audio_seconds is unavailable after validation.")
@@ -450,6 +461,11 @@ class ModelBatch:
             pad_token_id=self.pad_token_id,
             audio_seconds=audio_seconds.pin_memory(),
             generation_prompt_lengths=prompt_lengths.pin_memory(),
+            audio_input_positions=(
+                None
+                if audio_input_positions is None
+                else audio_input_positions.pin_memory()
+            ),
             audio_contexts=tuple(
                 _pin_audio_context(value) for value in audio_contexts
             ),
@@ -458,6 +474,7 @@ class ModelBatch:
     def to(self, device: torch.device) -> ModelBatch:
         audio_seconds = self.audio_seconds
         prompt_lengths = self.generation_prompt_lengths
+        audio_input_positions = self.audio_input_positions
         audio_contexts = self.audio_contexts
         if audio_seconds is None:
             raise RuntimeError("ModelBatch audio_seconds is unavailable after validation.")
@@ -474,6 +491,11 @@ class ModelBatch:
             pad_token_id=self.pad_token_id,
             audio_seconds=audio_seconds.to(device=device),
             generation_prompt_lengths=prompt_lengths.to(device=device),
+            audio_input_positions=(
+                None
+                if audio_input_positions is None
+                else audio_input_positions.to(device=device)
+            ),
             audio_contexts=tuple(
                 _to_audio_context(value, device) for value in audio_contexts
             ),
@@ -486,6 +508,7 @@ class ModelBatch:
             raise IndexError(f"ModelBatch row index is out of range: {index}.")
         audio_seconds = self.audio_seconds
         prompt_lengths = self.generation_prompt_lengths
+        audio_input_positions = self.audio_input_positions
         audio_contexts = self.audio_contexts
         if audio_seconds is None:
             raise RuntimeError("ModelBatch audio_seconds is unavailable after validation.")
@@ -504,13 +527,18 @@ class ModelBatch:
             pad_token_id=self.pad_token_id,
             audio_seconds=audio_seconds[index : index + 1],
             generation_prompt_lengths=prompt_lengths[index : index + 1],
+            audio_input_positions=(
+                None
+                if audio_input_positions is None
+                else audio_input_positions[index : index + 1]
+            ),
             audio_contexts=(audio_contexts[index],),
         )
 
 
 ConcreteTrainInput = Union[ModelBatch, RawSpeechBatch]
-TrainInputBatch = Union[ConcreteTrainInput, tuple[ConcreteTrainInput, ...]]
-TrainBatch = Union[ModelBatch, tuple[ModelBatch, ...]]
+TrainInputBatch = ConcreteTrainInput
+TrainBatch = ModelBatch
 
 
 def _pad(values: list[Tensor], padding_value: int) -> Tensor:
@@ -627,6 +655,30 @@ def _validate_generation_prompt_lengths(value: Tensor, input_ids: Tensor) -> Non
         )
 
 
+def _validate_batch_audio_input_positions(
+    value: Tensor | None,
+    input_ids: Tensor,
+) -> None:
+    if value is None:
+        return
+    if value.dim() != 2 or value.size(0) != input_ids.size(0):
+        raise ValueError(
+            "ModelBatch audio_input_positions must have shape [batch, frames]."
+        )
+    if not is_signed_integer_dtype(value.dtype):
+        raise TypeError(
+            "ModelBatch audio_input_positions must use a signed integer dtype."
+        )
+    if bool((value < -1).any()) or bool((value >= input_ids.size(1)).any()):
+        raise ValueError(
+            "ModelBatch audio_input_positions must use -1 padding or valid sequence positions."
+        )
+    for row in value:
+        valid = row[row.ge(0)]
+        if valid.numel() != torch.unique(valid).numel():
+            raise ValueError("ModelBatch audio_input_positions must not repeat positions.")
+
+
 def _validate_audio_context(value: SemanticAcousticCodes | None) -> None:
     if value is None:
         return
@@ -714,6 +766,18 @@ def _validate_sample(sample: ModelSample, pad_token_id: int) -> None:
             raise ValueError(
                 "generation_prompt_length must leave a non-empty generated response."
             )
+    positions = sample.audio_input_positions
+    if positions is not None:
+        if positions.dim() != 1:
+            raise ValueError("sample audio_input_positions must have shape [frames].")
+        if not is_signed_integer_dtype(positions.dtype):
+            raise TypeError("sample audio_input_positions must use a signed integer dtype.")
+        if bool((positions < 0).any()) or bool(
+            (positions >= sample.input_ids.numel()).any()
+        ):
+            raise ValueError("sample audio_input_positions must be valid sequence positions.")
+        if positions.numel() != torch.unique(positions).numel():
+            raise ValueError("sample audio_input_positions must not repeat positions.")
     _validate_audio_context(sample.audio_context)
 
     target = sample.acoustic_target

@@ -7,9 +7,10 @@
 
 包级 API 公开以下结构和入口：
 
-- `Request(prompt_ids, task, audio_context)`：无 target、无 batch padding 的单条推理输入。
+- `Request(prompt_ids, task, audio_input_positions, audio_context)`：无 target、无 batch padding 的单条推理输入。
   `prompt_ids` 是一维 layout global token IDs；当固定 `audio_route` 的 decode 需要 prompt stream
-  时，`audio_context` 提供同一 reference 的 structured semantic/acoustic codes。
+  时，`audio_context` 提供同一 reference 的 structured semantic/acoustic codes。可选的
+  `audio_input_positions` 只标记 source audio payload 在 prompt 中的位置，供 input tower 使用。
 - `Result(response_ids, audio)`：按原请求顺序返回的单条结果。`response_ids` 是不含 EOS/EOA
   的 layout global token IDs；text task 的 `audio=None`。
 - `AudioOutput(features, codes, waveform, sample_rate)`：audio task 的 decode 结果。`codes` 保存
@@ -49,6 +50,7 @@
 class Request(TypedDict):
     prompt_ids: Tensor
     task: Task
+    audio_input_positions: Tensor | None
     audio_context: SemanticAcousticCodes | None
 
 class Result(TypedDict):
@@ -74,14 +76,21 @@ block 结束后才允许 EOA。marker 与 EOA 都计入 `max_new_tokens`，marke
 `generation.batch.requests_from_batch()` 会从 teacher-forcing batch 保留 task prefix，直接构造
 request 的调用方负责保持相同 task 状态机。
 当前 prompt 只由 layout global token IDs 表达；普通 audio-source 内容编码为 semantic audio token，
-structured BiCodec route 另外通过 `audio_context` 携带 decode 所需的 reference global/semantic
-codes，其中 global 仍使用 `SemanticAcousticCodes.acoustic` 字段。`Request` 不接受可切换的
-acoustic feature side channel。
+并可通过 `audio_input_positions` 让 model 在这些 payload 的 embedding 上运行可配置的
+`AudioInputTower`。该 tower 只处理 source input，不改变 prompt 长度、generation grammar 或
+output head。structured BiCodec route 另外通过 `audio_context` 携带 decode 所需的 reference
+global/semantic codes，其中 global 仍使用 `SemanticAcousticCodes.acoustic` 字段；reference
+context 不是 `audio_input_positions` 的替代品，当前不会再次经过 source tower。`Request` 不接受
+可切换的 acoustic feature side channel。
 
 service 在 padding 前校验每条 request：
 
 - task 必须是 `Task`；prompt 必须是非空一维有符号整数 Tensor，且所有 ID 都属于 runtime
   layout。
+- `audio_input_positions` 若存在，必须是一维有符号整数 Tensor，非空位置唯一、位于 prompt 内、
+  任务 source modality 为 audio，并指向 runtime codec audio range。service 左 padding 时同步
+  偏移这些位置；model 使用 cache 时只在首个完整 prompt 传递它们，后续新 token 不重复运行
+  input tower。
 - 非空 `audio_context` 必须是 `SemanticAcousticCodes`；text request、没有 route 或 route 没有
   prompt streams 时禁止携带多余 context。reference/prompt-owned route 必须提供 context，且
   structured prompt streams 必须使用 `BiCodecAudioTokenizer`。
@@ -137,7 +146,8 @@ runtime。三层不重复推导同一约束。
 
 `generation.batch.requests_from_batch()` 仅供 teacher-forcing 日志使用：它直接读取
 `ModelBatch.generation_prompt_lengths` 切出每行显式 prompt，并携带对应 `audio_contexts`，再去掉
-batch padding。它不从第一个非 `-100` label 猜 prompt 边界；核心 service 不依赖 `ModelBatch`。
+batch padding；同时保留 `audio_input_positions` 的逐行 source payload 位置。它不从第一个非 `-100`
+label 猜 prompt 边界；核心 service 不依赖 `ModelBatch`。
 
 `decode_reference_codes()` 是 raw task sample 的统一重建边界：二维 frame-code tensor 通过
 `frame_codec().decode()`，structured mapping 恢复为 `SemanticAcousticCodes` 后通过

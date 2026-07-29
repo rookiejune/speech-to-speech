@@ -1,0 +1,197 @@
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Optional, Union, cast
+
+import torch
+from torch import Tensor, nn
+
+from .._compat import StrEnum, auto
+from .adapter import MLPAdapter
+
+
+class AudioInputAdapterType(StrEnum):
+    """Architecture used by the source-audio input tower."""
+
+    NONE = auto()
+    MLP = auto()
+    TRANSFORMER = auto()
+
+
+@dataclass(frozen=True)
+class AudioInputAdapterConfig:
+    """Configuration for a same-length source-audio input adapter.
+
+    ``mask`` passed to :class:`AudioInputTower` uses ``True`` for active
+    frames. The transformer variant is intentionally non-causal because this
+    tower only encodes source audio before the language-model forward pass.
+    """
+
+    type: AudioInputAdapterType = AudioInputAdapterType.NONE
+    layers: int = 2
+    heads: int = 8
+    ffn_ratio: float = 4.0
+    dropout: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.type, AudioInputAdapterType):
+            raise TypeError("audio input adapter type must be AudioInputAdapterType.")
+        if isinstance(self.layers, bool) or self.layers <= 0:
+            raise ValueError("audio input adapter layers must be positive.")
+        if isinstance(self.heads, bool) or self.heads <= 0:
+            raise ValueError("audio input adapter heads must be positive.")
+        if isinstance(self.ffn_ratio, bool) or self.ffn_ratio <= 0:
+            raise ValueError("audio input adapter ffn_ratio must be positive.")
+        if isinstance(self.dropout, bool) or not 0 <= self.dropout < 1:
+            raise ValueError("audio input adapter dropout must be in [0, 1).")
+
+
+def audio_input_options(
+    config: Optional[Union[AudioInputAdapterConfig, Mapping[str, object]]],
+) -> AudioInputAdapterConfig:
+    """Normalize a config object or a plain mapping at the module boundary."""
+    if config is None:
+        return AudioInputAdapterConfig()
+    if isinstance(config, AudioInputAdapterConfig):
+        return config
+    if not isinstance(config, Mapping):
+        raise TypeError("audio input adapter config must be a config or mapping.")
+
+    adapter_type = config.get("type", AudioInputAdapterType.NONE)
+    return AudioInputAdapterConfig(
+        type=AudioInputAdapterType(cast(str, adapter_type)),
+        layers=cast(int, config.get("layers", 2)),
+        heads=cast(int, config.get("heads", 8)),
+        ffn_ratio=cast(float, config.get("ffn_ratio", 4.0)),
+        dropout=cast(float, config.get("dropout", 0.0)),
+    )
+
+
+class AudioInputTower(nn.Module):
+    """Encode source-audio features without changing their frame length.
+
+    The tower accepts ``[B, F, D]`` features and returns ``[B, F, H]``. A
+    valid-frame mask can be supplied as ``[B, F]``; inactive frames are never
+    used as transformer keys and are always zero in the returned tensor.
+    Parameters are deliberately kept in FP32 so this module can sit at the
+    boundary of a lower-precision language-model backbone.
+    """
+
+    def __init__(
+        self,
+        config: AudioInputAdapterConfig,
+        in_features: int,
+        out_features: int,
+    ) -> None:
+        super().__init__()
+        if in_features <= 0:
+            raise ValueError("audio input adapter in_features must be positive.")
+        if out_features <= 0:
+            raise ValueError("audio input adapter out_features must be positive.")
+        self.config = config
+        self.in_features = in_features
+        self.out_features = out_features
+        self.input_projection: nn.Module = nn.Identity()
+        self.adapter: nn.Module
+
+        if config.type is AudioInputAdapterType.MLP:
+            self.adapter = MLPAdapter(in_features, out_features)
+        elif config.type is AudioInputAdapterType.TRANSFORMER:
+            if out_features % config.heads != 0:
+                raise ValueError(
+                    "audio input transformer out_features must be divisible by heads."
+                )
+            intermediate = max(1, int(round(config.ffn_ratio * out_features)))
+            self.input_projection = nn.Linear(in_features, out_features)
+            layer = nn.TransformerEncoderLayer(
+                d_model=out_features,
+                nhead=config.heads,
+                dim_feedforward=intermediate,
+                dropout=config.dropout,
+                activation="gelu",
+                batch_first=True,
+            )
+            self.adapter = nn.TransformerEncoder(layer, num_layers=config.layers)
+        elif config.type is AudioInputAdapterType.NONE:
+            raise ValueError("audio input adapter type=none does not build a tower.")
+        else:
+            raise AssertionError(f"unsupported audio input adapter type: {config.type}")
+
+        self.to(dtype=torch.float32)
+
+    def forward(self, features: Tensor, mask: Tensor | None = None) -> Tensor:
+        if features.dim() != 3:
+            raise ValueError(
+                "audio input features must have shape [batch, frames, dim]."
+            )
+        if features.size(-1) != self.in_features:
+            raise ValueError(
+                "audio input feature dimension does not match the adapter config."
+            )
+        if features.size(1) <= 0:
+            raise ValueError("audio input must contain at least one frame.")
+
+        valid = _valid_mask(features, mask)
+        values = features.to(dtype=torch.float32)
+        values = values.masked_fill(~valid[..., None], 0)
+
+        if self.config.type is AudioInputAdapterType.TRANSFORMER:
+            values = self.input_projection(values)
+            key_padding_mask = ~_safe_transformer_mask(valid)
+            values = self.adapter(values, src_key_padding_mask=key_padding_mask)
+        else:
+            values = self.adapter(values)
+
+        return values.masked_fill(~valid[..., None], 0)
+
+
+def create_audio_input_adapter(
+    config: Union[
+        AudioInputAdapterConfig,
+        AudioInputAdapterType,
+        Mapping[str, object],
+        str,
+    ],
+    in_features: int,
+    out_features: int,
+) -> AudioInputTower:
+    """Create a source-audio input tower with FP32 parameters."""
+    if isinstance(config, AudioInputAdapterConfig):
+        options = config
+    elif isinstance(config, (AudioInputAdapterType, str)):
+        options = AudioInputAdapterConfig(type=AudioInputAdapterType(config))
+    else:
+        options = audio_input_options(config)
+    return AudioInputTower(options, in_features, out_features)
+
+
+def _valid_mask(features: Tensor, mask: Tensor | None) -> Tensor:
+    if mask is None:
+        return torch.ones(
+            features.shape[:2],
+            device=features.device,
+            dtype=torch.bool,
+        )
+    if mask.dim() != 2 or mask.shape != features.shape[:2]:
+        raise ValueError("audio input mask must have shape [batch, frames].")
+    return mask.to(device=features.device, dtype=torch.bool)
+
+
+def _safe_transformer_mask(valid: Tensor) -> Tensor:
+    """Keep all-padding rows finite while their final outputs remain zero."""
+    if bool(valid.any(dim=1).all()):
+        return valid
+    safe = valid.clone()
+    empty = ~valid.any(dim=1)
+    safe[empty, 0] = True
+    return safe
+
+
+__all__ = [
+    "AudioInputAdapterConfig",
+    "AudioInputAdapterType",
+    "AudioInputTower",
+    "audio_input_options",
+    "create_audio_input_adapter",
+]

@@ -6,6 +6,7 @@ from typing import cast
 import torch
 from anytrain.module.dit import SequenceAttention
 from torch import Tensor, nn
+from torch.nn.modules.linear import NonDynamicallyQuantizableLinear
 from transformers import Qwen3Model
 from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3Attention,
@@ -16,6 +17,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
 from .model.acoustic.dit import AcousticDiT, DiTBlock, TimeEmbedding
 from .model.acoustic.rvq import AcousticRVQDecoder
 from .model.adapter import MLPAdapter
+from .model.audio_input import AudioInputAdapterType, AudioInputTower
 
 
 def adapter(
@@ -44,6 +46,134 @@ def adapter(
             for projection in (module.gate_proj, module.up_proj, module.down_proj)
         )
     raise TypeError(f"{name} uses an unsupported module: {type(module).__name__}.")
+
+
+def audio_input_tower(
+    tower: AudioInputTower,
+    *,
+    batch: int,
+    frames: int,
+) -> int:
+    """Count a dense source-audio input tower forward pass.
+
+    ``AudioInputTower`` receives a padded ``[B, F, D]`` tensor and applies its
+    adapter before masking the result. The estimate therefore counts all
+    ``B * F`` rows; the mask prevents padding from becoming context but does
+    not make the standard PyTorch encoder an unpadded operation.
+    """
+    if type(tower) is not AudioInputTower:
+        raise TypeError("audio input FLOPs require the standard AudioInputTower.")
+    if batch < 1 or frames < 1:
+        raise ValueError(
+            "audio input FLOPs batch and frame dimensions must be positive."
+        )
+
+    rows = batch * frames
+    in_features = tower.in_features
+    out_features = tower.out_features
+    if tower.config.type is AudioInputAdapterType.MLP:
+        if type(tower.input_projection) is not nn.Identity:
+            raise TypeError("audio input MLP must not use an input projection.")
+        return adapter(
+            tower.adapter,
+            rows=rows,
+            in_features=in_features,
+            out_features=out_features,
+            name="audio input adapter",
+        )
+
+    if tower.config.type is not AudioInputAdapterType.TRANSFORMER:
+        raise ValueError(
+            "audio input FLOPs require an enabled MLP or transformer tower."
+        )
+    if type(tower.input_projection) is not nn.Linear:
+        raise TypeError("audio input transformer must use a linear input projection.")
+    require_linear(
+        tower.input_projection,
+        in_features,
+        out_features,
+        "audio input input projection",
+    )
+    encoder = tower.adapter
+    if type(encoder) is not nn.TransformerEncoder:
+        raise TypeError("audio input transformer must use nn.TransformerEncoder.")
+
+    forward = linear(tower.input_projection, rows)
+    if len(encoder.layers) != tower.config.layers:
+        raise ValueError("audio input transformer depth does not match its config.")
+    for layer in encoder.layers:
+        forward += _audio_input_encoder_layer(
+            layer,
+            rows=rows,
+            batch=batch,
+            frames=frames,
+            hidden=out_features,
+            heads=tower.config.heads,
+        )
+    return forward
+
+
+def _audio_input_encoder_layer(
+    layer: nn.Module,
+    *,
+    rows: int,
+    batch: int,
+    frames: int,
+    hidden: int,
+    heads: int,
+) -> int:
+    if type(layer) is not nn.TransformerEncoderLayer:
+        raise TypeError(
+            "audio input FLOPs require standard TransformerEncoderLayer layers."
+        )
+    if not layer.self_attn.batch_first:
+        raise TypeError("audio input transformer must use batch-first attention.")
+    attention = layer.self_attn
+    if attention.embed_dim != hidden or attention.num_heads != heads:
+        raise ValueError("audio input transformer attention dimensions do not match config.")
+    if attention.head_dim * attention.num_heads != hidden:
+        raise ValueError("audio input transformer heads do not cover hidden size.")
+    in_projection = attention.in_proj_weight
+    if in_projection.shape != (3 * hidden, hidden):
+        raise ValueError("audio input transformer QKV projection shape is unsupported.")
+    output_projection = attention.out_proj
+    if type(output_projection) not in {
+        nn.Linear,
+        NonDynamicallyQuantizableLinear,
+    }:
+        raise TypeError("audio input transformer output projection must be linear.")
+    if (
+        output_projection.in_features,
+        output_projection.out_features,
+    ) != (hidden, hidden):
+        raise ValueError(
+            "audio input transformer output projection shape is unsupported."
+        )
+
+    linear1 = layer.linear1
+    linear2 = layer.linear2
+    if type(linear1) is not nn.Linear or type(linear2) is not nn.Linear:
+        raise TypeError("audio input transformer FFN projections must be linear.")
+    if linear1.in_features != hidden or linear2.out_features != hidden:
+        raise ValueError("audio input transformer FFN dimensions are unsupported.")
+    if linear2.in_features != linear1.out_features:
+        raise ValueError("audio input transformer FFN projections do not align.")
+
+    # MultiheadAttention stores Q/K/V in one [3H, H] projection. Its two
+    # attention matrix products are dense because this tower is not causal.
+    return (
+        2 * rows * hidden * (3 * hidden)
+        + _linear_module(output_projection, rows)
+        + linear(linear1, rows)
+        + linear(linear2, rows)
+        + 4 * batch * frames * frames * hidden
+    )
+
+
+def _linear_module(module: nn.Module, rows: int) -> int:
+    if type(module) not in {nn.Linear, NonDynamicallyQuantizableLinear}:
+        raise TypeError("linear FLOPs require an exact linear module.")
+    return _linear(cast(nn.Linear, module), rows)
 
 
 def flow_decoder(decoder: AcousticDiT, *, batch: int, frames: int) -> int:
@@ -354,6 +484,7 @@ def _lengths(
 
 __all__ = [
     "adapter",
+    "audio_input_tower",
     "flow_decoder",
     "linear",
     "qwen_backbone",
