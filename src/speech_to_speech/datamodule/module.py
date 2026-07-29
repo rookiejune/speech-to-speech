@@ -441,7 +441,7 @@ def _source_loader(
         return None
     batch_size = loader.batch_size
     return source.dataloader(
-        cost_fn=_unit_cost,
+        costs=1,
         max_batch_memory=batch_size,
         max_batch_samples=batch_size,
         shuffle=shuffle,
@@ -478,7 +478,3 @@ def _collator(
             encode_missing_codes=encode_missing_codes,
         )
     raise AssertionError(f"unsupported data shape: {shape}")
-
-
-def _unit_cost(_index: int) -> int:
-    return 1
