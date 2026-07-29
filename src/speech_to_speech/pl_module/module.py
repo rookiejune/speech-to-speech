@@ -92,16 +92,19 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         device: torch.device,
         dataloader_idx: int,
     ) -> Any:
-        del dataloader_idx
-        if isinstance(batch, ModelBatch):
-            return batch.to(device)
+        # Raw fallback items must stay together on CPU until the codec materializer
+        # rebuilds the complete batch on one device.
         if isinstance(batch, RawSpeechBatch):
             return batch
+        transfer = super().transfer_batch_to_device
         if isinstance(batch, tuple):
             return tuple(
-                self.transfer_batch_to_device(item, device, 0) for item in batch
+                item
+                if isinstance(item, RawSpeechBatch)
+                else transfer(item, device, dataloader_idx)
+                for item in batch
             )
-        raise TypeError(f"unsupported train batch: {type(batch).__name__}")
+        return transfer(batch, device, dataloader_idx)
 
     def _loss_outputs(self, batch: TrainBatch) -> Outputs:
         return self._outputs(batch, self.objective.forward)

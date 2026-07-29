@@ -9,10 +9,18 @@ import torch
 from anydataset.types import Modality
 from anytrain.codec import SemanticAcousticCodes
 from anytrain.module.idspace import Layout
+from lightning.pytorch import LightningModule
 from torch import Tensor, nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from speech_to_speech.datamodule.types import ModelBatch
+from speech_to_speech.datamodule.types import (
+    Language,
+    ModelBatch,
+    RawSpeech,
+    RawSpeechBatch,
+    SpeechTaskSample,
+    Text,
+)
 from speech_to_speech.audio_route import (
     AudioStream,
     BICODEC_PREDICT_ACOUSTIC,
@@ -340,6 +348,51 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertIsNot(moved_context[0], context)
         torch.testing.assert_close(moved_context[0].semantic, context.semantic)
         torch.testing.assert_close(moved_context[0].acoustic, context.acoustic)
+
+    def test_transfer_batch_keeps_raw_fallback_on_cpu(self):
+        raw = RawSpeechBatch(
+            samples=(
+                SpeechTaskSample(
+                    source=Text(torch.tensor([1]), Language.EN),
+                    target=RawSpeech(
+                        text_token_ids=torch.tensor([2]),
+                        waveform=torch.ones(4),
+                        sample_rate=4,
+                        language=Language.ZH,
+                    ),
+                    task=Task.TTS,
+                ),
+            ),
+            pad_token_id=99,
+        )
+        prepared = ModelBatch(
+            input_ids=torch.tensor([[0, 1]]),
+            token_labels=torch.tensor([[-100, 1]]),
+            acoustic_target=None,
+            tasks=[Task.TTS],
+            pad_token_id=99,
+        )
+        module = SpeechToSpeechModule(
+            ModuleConfig(),
+            model=cast(Any, SimpleNamespace()),
+            objective=cast(Any, SimpleNamespace()),
+        )
+        device = torch.device("meta")
+
+        with patch.object(
+            LightningModule,
+            "transfer_batch_to_device",
+            autospec=True,
+            return_value=prepared,
+        ) as transfer:
+            moved = module.transfer_batch_to_device((raw, prepared), device, 0)
+
+        self.assertIs(moved[0], raw)
+        self.assertIs(moved[1], prepared)
+        raw_target = raw.samples[0].target
+        self.assertIsInstance(raw_target, RawSpeech)
+        self.assertEqual(raw_target.waveform.device.type, "cpu")
+        transfer.assert_called_once_with(module, prepared, device, 0)
 
     def test_sparse_modality_logits_match_dense_modality_cross_entropy(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
