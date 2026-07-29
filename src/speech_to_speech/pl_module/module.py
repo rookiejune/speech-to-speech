@@ -96,15 +96,14 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         # rebuilds the complete batch on one device.
         if isinstance(batch, RawSpeechBatch):
             return batch
-        transfer = super().transfer_batch_to_device
+        if isinstance(batch, ModelBatch):
+            return batch.to(device)
         if isinstance(batch, tuple):
             return tuple(
-                item
-                if isinstance(item, RawSpeechBatch)
-                else transfer(item, device, dataloader_idx)
+                self.transfer_batch_to_device(item, device, dataloader_idx)
                 for item in batch
             )
-        return transfer(batch, device, dataloader_idx)
+        return super().transfer_batch_to_device(batch, device, dataloader_idx)
 
     def _loss_outputs(self, batch: TrainBatch) -> Outputs:
         return self._outputs(batch, self.objective.forward)

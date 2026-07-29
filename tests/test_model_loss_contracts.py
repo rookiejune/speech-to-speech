@@ -338,10 +338,16 @@ class ModelLossContractTest(unittest.TestCase):
             objective=cast(Any, SimpleNamespace()),
         )
 
-        moved = module.transfer_batch_to_device(batch, torch.device("cpu"), 0)
+        with patch.object(
+            LightningModule,
+            "transfer_batch_to_device",
+            autospec=True,
+        ) as transfer:
+            moved = module.transfer_batch_to_device(batch, torch.device("cpu"), 0)
 
         self.assertIsInstance(moved, ModelBatch)
         self.assertIsNot(moved, batch)
+        transfer.assert_not_called()
         moved_context = moved.audio_contexts
         if moved_context is None or moved_context[0] is None:
             self.fail("transferred batch lost its audio context")
@@ -377,7 +383,7 @@ class ModelLossContractTest(unittest.TestCase):
             model=cast(Any, SimpleNamespace()),
             objective=cast(Any, SimpleNamespace()),
         )
-        device = torch.device("meta")
+        device = torch.device("cpu")
 
         with patch.object(
             LightningModule,
@@ -388,11 +394,12 @@ class ModelLossContractTest(unittest.TestCase):
             moved = module.transfer_batch_to_device((raw, prepared), device, 0)
 
         self.assertIs(moved[0], raw)
-        self.assertIs(moved[1], prepared)
+        self.assertIsInstance(moved[1], ModelBatch)
+        self.assertIsNot(moved[1], prepared)
         raw_target = raw.samples[0].target
         self.assertIsInstance(raw_target, RawSpeech)
         self.assertEqual(raw_target.waveform.device.type, "cpu")
-        transfer.assert_called_once_with(module, prepared, device, 0)
+        transfer.assert_not_called()
 
     def test_sparse_modality_logits_match_dense_modality_cross_entropy(self):
         layout = Layout(text=(0, 4), audio=(4, 7))

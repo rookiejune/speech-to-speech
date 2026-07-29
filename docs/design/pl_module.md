@@ -19,9 +19,10 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
   返回 `RawSpeechBatch` 时，materializer 在当前训练 device 上对 task 实际消费且缺少 codes 的
   audio item 调用 codec encode，并在 objective 前转成标准 `ModelBatch`。没有 materializer 时，
   `training_step()` 只接受已 materialize 的
-  `ModelBatch` / joint `ModelBatch` tuple。Lightning device transfer 对 `ModelBatch` 使用默认
-  `.to()` 路径；`RawSpeechBatch` 在 materialize 前整体留在 CPU，避免同一 fallback batch 的
-  prepared codes 与现场 codec 产物落在不同 device。
+  `ModelBatch` / joint `ModelBatch` tuple。Lightning device transfer 通过
+  `ModelBatch.to(device)` 显式重建 `ModelBatch`，保留 frozen structured audio context 的不可变
+  契约；`RawSpeechBatch` 在 materialize 前整体留在 CPU，避免同一 fallback batch 的 prepared
+  codes 与现场 codec 产物落在不同 device。
 - `current_loss_outputs()`：只在当前 training step 的 backward 完成前返回仍连接计算图的
   `Outputs`，供 `GradLogger` 计算指定分项梯度；其他时机显式报错。
 - `configure_optimizers()` 委托 anytrain optimizer preset。
