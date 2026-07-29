@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import torch
 from anydataset.types import Modality
+from anytrain.codec import SemanticAcousticCodes
 from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -309,6 +310,36 @@ class ModelLossContractTest(unittest.TestCase):
         model.runtime.audio_route = BICODEC_PREDICT_ACOUSTIC
         with self.assertRaisesRegex(ValueError, "does not match"):
             module.on_load_checkpoint(checkpoint)
+
+    def test_transfer_batch_rebuilds_frozen_audio_context(self):
+        context = SemanticAcousticCodes(
+            semantic=torch.tensor([[1]]),
+            acoustic=torch.tensor([[2, 3]]),
+        )
+        batch = ModelBatch(
+            input_ids=torch.tensor([[0, 1]]),
+            token_labels=torch.tensor([[-100, 1]]),
+            acoustic_target=None,
+            tasks=[Task.TTS],
+            pad_token_id=99,
+            audio_contexts=(context,),
+        )
+        module = SpeechToSpeechModule(
+            ModuleConfig(),
+            model=cast(Any, SimpleNamespace()),
+            objective=cast(Any, SimpleNamespace()),
+        )
+
+        moved = module.transfer_batch_to_device(batch, torch.device("cpu"), 0)
+
+        self.assertIsInstance(moved, ModelBatch)
+        self.assertIsNot(moved, batch)
+        moved_context = moved.audio_contexts
+        if moved_context is None or moved_context[0] is None:
+            self.fail("transferred batch lost its audio context")
+        self.assertIsNot(moved_context[0], context)
+        torch.testing.assert_close(moved_context[0].semantic, context.semantic)
+        torch.testing.assert_close(moved_context[0].acoustic, context.acoustic)
 
     def test_sparse_modality_logits_match_dense_modality_cross_entropy(self):
         layout = Layout(text=(0, 4), audio=(4, 7))

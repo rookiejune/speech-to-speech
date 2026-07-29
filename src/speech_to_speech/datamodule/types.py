@@ -455,6 +455,30 @@ class ModelBatch:
             ),
         )
 
+    def to(self, device: torch.device) -> ModelBatch:
+        audio_seconds = self.audio_seconds
+        prompt_lengths = self.generation_prompt_lengths
+        audio_contexts = self.audio_contexts
+        if audio_seconds is None:
+            raise RuntimeError("ModelBatch audio_seconds is unavailable after validation.")
+        if prompt_lengths is None or audio_contexts is None:
+            raise RuntimeError("ModelBatch generation fields are unavailable after validation.")
+        return ModelBatch(
+            input_ids=self.input_ids.to(device=device),
+            token_labels=self.token_labels.to(device=device),
+            token_groups=(
+                None if self.token_groups is None else self.token_groups.to(device=device)
+            ),
+            acoustic_target=_to_target(self.acoustic_target, device),
+            tasks=list(self.tasks),
+            pad_token_id=self.pad_token_id,
+            audio_seconds=audio_seconds.to(device=device),
+            generation_prompt_lengths=prompt_lengths.to(device=device),
+            audio_contexts=tuple(
+                _to_audio_context(value, device) for value in audio_contexts
+            ),
+        )
+
     def row(self, index: int) -> ModelBatch:
         if isinstance(index, bool) or not isinstance(index, int):
             raise TypeError("ModelBatch row index must be an integer.")
@@ -530,6 +554,19 @@ def _pin_target(value: AcousticTarget | None) -> AcousticTarget | None:
         semantic_codes=value["semantic_codes"].pin_memory(),
         codes=value["codes"].pin_memory(),
         token_positions=value["token_positions"].pin_memory(),
+    )
+
+
+def _to_target(
+    value: AcousticTarget | None,
+    device: torch.device,
+) -> AcousticTarget | None:
+    if value is None:
+        return None
+    return AcousticTarget(
+        semantic_codes=value["semantic_codes"].to(device=device),
+        codes=value["codes"].to(device=device),
+        token_positions=value["token_positions"].to(device=device),
     )
 
 
@@ -613,6 +650,18 @@ def _pin_audio_context(
     return SemanticAcousticCodes(
         semantic=value.semantic.pin_memory(),
         acoustic=value.acoustic.pin_memory(),
+    )
+
+
+def _to_audio_context(
+    value: SemanticAcousticCodes | None,
+    device: torch.device,
+) -> SemanticAcousticCodes | None:
+    if value is None:
+        return None
+    return SemanticAcousticCodes(
+        semantic=value.semantic.to(device=device),
+        acoustic=value.acoustic.to(device=device),
     )
 
 

@@ -5,7 +5,6 @@ import time
 from typing import TYPE_CHECKING
 
 import torch
-from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
 from ..datamodule.types import ModelBatch
@@ -128,42 +127,7 @@ def reference_audio(
 
 
 def device_batch(batch: ModelBatch, device: torch.device) -> ModelBatch:
-    def move(value: Tensor | None) -> Tensor | None:
-        return None if value is None else value.to(device)
-
-    target = batch.acoustic_target
-    contexts = batch.audio_contexts
-    return ModelBatch(
-        input_ids=cast_tensor(move(batch.input_ids)),
-        token_labels=cast_tensor(move(batch.token_labels)),
-        token_groups=move(batch.token_groups),
-        acoustic_target=(
-            None
-            if target is None
-            else {
-                "semantic_codes": cast_tensor(move(target["semantic_codes"])),
-                "codes": cast_tensor(move(target["codes"])),
-                "token_positions": cast_tensor(move(target["token_positions"])),
-            }
-        ),
-        tasks=batch.tasks,
-        pad_token_id=batch.pad_token_id,
-        audio_seconds=cast_tensor(move(batch.audio_seconds)),
-        generation_prompt_lengths=move(batch.generation_prompt_lengths),
-        audio_contexts=(
-            None
-            if contexts is None
-            else tuple(
-                None
-                if value is None
-                else SemanticAcousticCodes(
-                    semantic=value.semantic.to(device),
-                    acoustic=value.acoustic.to(device),
-                )
-                for value in contexts
-            )
-        ),
-    )
+    return batch.to(device)
 
 
 def stft_distance(sample: Tensor, reference: Tensor) -> dict[str, Tensor]:

@@ -8,7 +8,6 @@ from ..datamodule.protocol import DatasetRuntime
 from ..datamodule.parser import speech_from_codes
 from ..datamodule.sample import build_task_sample
 from ..datamodule.types import (
-    AcousticTarget,
     ConcreteTrainInput,
     ModelBatch,
     RawSpeech,
@@ -155,55 +154,4 @@ def _encoded_codes(codes: Tensor) -> Tensor:
 
 
 def _move_model_batch(batch: ModelBatch, device: torch.device | None) -> ModelBatch:
-    if device is None:
-        return batch
-    return ModelBatch(
-        input_ids=batch.input_ids.to(device=device),
-        token_labels=batch.token_labels.to(device=device),
-        token_groups=(
-            None if batch.token_groups is None else batch.token_groups.to(device=device)
-        ),
-        acoustic_target=_move_target(batch.acoustic_target, device),
-        tasks=list(batch.tasks),
-        pad_token_id=batch.pad_token_id,
-        audio_seconds=(
-            None if batch.audio_seconds is None else batch.audio_seconds.to(device=device)
-        ),
-        generation_prompt_lengths=(
-            None
-            if batch.generation_prompt_lengths is None
-            else batch.generation_prompt_lengths.to(device=device)
-        ),
-        audio_contexts=(
-            None
-            if batch.audio_contexts is None
-            else tuple(
-                _move_audio_context(value, device) for value in batch.audio_contexts
-            )
-        ),
-    )
-
-
-def _move_target(
-    target: AcousticTarget | None,
-    device: torch.device,
-) -> AcousticTarget | None:
-    if target is None:
-        return None
-    return AcousticTarget(
-        semantic_codes=target["semantic_codes"].to(device=device),
-        codes=target["codes"].to(device=device),
-        token_positions=target["token_positions"].to(device=device),
-    )
-
-
-def _move_audio_context(
-    value: SemanticAcousticCodes | None,
-    device: torch.device,
-) -> SemanticAcousticCodes | None:
-    if value is None:
-        return None
-    return SemanticAcousticCodes(
-        semantic=value.semantic.to(device=device),
-        acoustic=value.acoustic.to(device=device),
-    )
+    return batch if device is None else batch.to(device)
