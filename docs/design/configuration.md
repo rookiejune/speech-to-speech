@@ -167,9 +167,8 @@ schema，不重复声明字段；`scripts/train.py` 直接把解析后的 data c
 同构对象转换。OmegaConf 对字符串枚举只接受成员
 名，入口在合并前把公开的小写 value 转成 enum member name；除此之外不做兼容重写。
 `audio_route` 是 root schema 的独立公开结构，不属于 `runtime.Config`；入口解析后把同一份 route
-传给 `Runtime`、DataModule、model 和 generation service。Hydra 的 list/enum 表示只存在于入口的
-私有 mutable transport schema；解析完成后入口立即构造 streams 为 tuple 的公开 frozen route，
-公开 route 不接受 list。
+传给 `Runtime`、DataModule、model 和 generation service。Hydra 的 list/enum 表示在入口归一化，
+再由公开 route dataclass 校验并把 streams 归一化为 tuple。
 
 两个入口分别解析为：
 

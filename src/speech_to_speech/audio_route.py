@@ -28,7 +28,7 @@ class StreamSource(StrEnum):
 _STREAM_ORDER = (AudioStream.GLOBAL, AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
 
 
-@dataclass(frozen=True)
+@dataclass
 class Prompt:
     source: PromptSource
     streams: tuple[AudioStream, ...]
@@ -36,26 +36,26 @@ class Prompt:
     def __post_init__(self) -> None:
         if not isinstance(self.source, PromptSource):
             raise TypeError("audio route prompt source must be a PromptSource.")
-        _streams(self.streams, name="prompt")
+        self.streams = _streams(self.streams, name="prompt")
 
     @property
     def canonical_streams(self) -> tuple[AudioStream, ...]:
         return _canonical_streams(self.streams)
 
 
-@dataclass(frozen=True)
+@dataclass
 class Output:
     streams: tuple[AudioStream, ...]
 
     def __post_init__(self) -> None:
-        _streams(self.streams, name="output")
+        self.streams = _streams(self.streams, name="output")
 
     @property
     def canonical_streams(self) -> tuple[AudioStream, ...]:
         return _canonical_streams(self.streams)
 
 
-@dataclass(frozen=True)
+@dataclass
 class Decode:
     semantic: StreamSource
     acoustic: StreamSource
@@ -74,7 +74,7 @@ class Decode:
         raise TypeError("audio route stream must be an AudioStream.")
 
 
-@dataclass(frozen=True)
+@dataclass
 class Config:
     prompt: Prompt
     output: Output
@@ -109,12 +109,12 @@ class Config:
 
 
 def _streams(
-    streams: tuple[AudioStream, ...],
+    streams: list[AudioStream] | tuple[AudioStream, ...],
     *,
     name: str,
-) -> None:
-    if not isinstance(streams, tuple):
-        raise TypeError(f"audio route {name} streams must be a tuple.")
+) -> tuple[AudioStream, ...]:
+    if not isinstance(streams, (list, tuple)):
+        raise TypeError(f"audio route {name} streams must be a list or tuple.")
     if any(not isinstance(stream, AudioStream) for stream in streams):
         raise TypeError(f"audio route {name} streams must contain AudioStream values.")
     if len(streams) != len(set(streams)):
@@ -124,6 +124,7 @@ def _streams(
             f"audio route {name} streams must not contain both global and "
             "legacy acoustic streams."
         )
+    return tuple(streams)
 
 
 def _canonical_streams(streams: tuple[AudioStream, ...]) -> tuple[AudioStream, ...]:

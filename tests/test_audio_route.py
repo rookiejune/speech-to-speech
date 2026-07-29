@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import unittest
-from dataclasses import FrozenInstanceError
 from typing import cast
 
 from speech_to_speech.audio_route import (
@@ -97,27 +96,11 @@ class AudioRouteTest(unittest.TestCase):
                 streams=(AudioStream.SEMANTIC,),
             )
 
-    def test_stream_lists_are_rejected(self):
-        with self.assertRaisesRegex(TypeError, "output streams must be a tuple"):
-            Output(streams=cast(tuple[AudioStream, ...], [AudioStream.SEMANTIC]))
-
-    def test_route_dataclasses_are_frozen(self):
-        prompt = Prompt(source=PromptSource.SOURCE, streams=())
-        output = Output(streams=(AudioStream.SEMANTIC,))
-        decode = Decode(
-            semantic=StreamSource.OUTPUT,
-            acoustic=StreamSource.GENERATOR,
+    def test_stream_lists_are_normalized(self):
+        output = Output(
+            streams=cast(tuple[AudioStream, ...], [AudioStream.SEMANTIC])
         )
-        route = Config(prompt=prompt, output=output, decode=decode)
-
-        with self.assertRaises(FrozenInstanceError):
-            prompt.source = PromptSource.REFERENCE
-        with self.assertRaises(FrozenInstanceError):
-            output.streams = ()
-        with self.assertRaises(FrozenInstanceError):
-            decode.acoustic = StreamSource.OUTPUT
-        with self.assertRaises(FrozenInstanceError):
-            route.output = Output(streams=())
+        self.assertEqual(output.streams, (AudioStream.SEMANTIC,))
 
     def test_bicodec_reuse_prompt_acoustic_preset(self):
         route = BICODEC_REUSE_PROMPT_ACOUSTIC
