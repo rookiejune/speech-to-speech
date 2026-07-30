@@ -3,10 +3,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Protocol, cast
 
+import torch
 from anytrain.lightning import experiment
 from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 
+from .._oom import report_oom, text_probe_report
 from ..interval import TrainInterval
 from ...generation import TextProbe, TextProbeResult
 
@@ -45,8 +47,7 @@ class TextRetentionLogger(Callback):
         self._baseline_nll: dict[str, float] = {}
 
     def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        module = cast(_Module, cast(object, pl_module))
-        self._log(trainer, module, baseline=not self._baseline_nll)
+        self._log(trainer, pl_module, baseline=not self._baseline_nll)
 
     def on_train_batch_end(
         self,
@@ -59,8 +60,7 @@ class TextRetentionLogger(Callback):
         del outputs, batch_idx
         if not self.interval.should_run(trainer, pl_module, batch):
             return
-        module = cast(_Module, cast(object, pl_module))
-        self._log(trainer, module, baseline=False)
+        self._log(trainer, pl_module, baseline=False)
 
     def state_dict(self) -> dict[str, dict[str, float] | dict[str, float]]:
         return {
@@ -79,7 +79,13 @@ class TextRetentionLogger(Callback):
             cast(dict[str, float], state_dict.get("baseline_nll", {}))
         )
 
-    def _log(self, trainer: Trainer, module: _Module, *, baseline: bool) -> None:
+    def _log(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        *,
+        baseline: bool,
+    ) -> None:
         if not trainer.is_global_zero:
             return
         scalar_writer = experiment.scalar(trainer)
@@ -87,10 +93,24 @@ class TextRetentionLogger(Callback):
         if scalar_writer is None and text_writer is None:
             return
 
-        results = module.evaluate_text(
-            self.probes,
-            max_new_tokens=self.max_new_tokens,
-        )
+        module = cast(_Module, cast(object, pl_module))
+        try:
+            results = module.evaluate_text(
+                self.probes,
+                max_new_tokens=self.max_new_tokens,
+            )
+        except torch.OutOfMemoryError as error:
+            report_oom(
+                trainer,
+                pl_module,
+                error,
+                phase="text_retention",
+                inputs=text_probe_report(
+                    self.probes,
+                    max_new_tokens=self.max_new_tokens,
+                ),
+            )
+            raise
         if baseline:
             self._baseline_nll = {
                 name: result["nll"] for name, result in results.items()

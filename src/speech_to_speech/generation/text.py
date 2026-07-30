@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from anydataset.types import Modality
 from torch import Tensor
 
+from .._oom import annotate, tensor_report
 from ..task import Task
 from .protocol import GenerationRuntime, TextEvaluationModel
 from .service import generate_responses
@@ -45,12 +46,30 @@ def evaluate_text(
         )
         for name in probes
     ]
-    generations = generate_responses(
-        requests,
-        model,
-        max_new_tokens=max_new_tokens,
-        do_sample=False,
-    )
+    try:
+        generations = generate_responses(
+            requests,
+            model,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+        )
+    except torch.OutOfMemoryError as error:
+        annotate(
+            error,
+            phase="text_evaluation_generation",
+            inputs={
+                "type": "TextGenerationRequests",
+                "prompt_ids": [tensor_report(value) for value in prompts.values()],
+                "padded_prompt_shape": [
+                    len(prompts),
+                    max((value.numel() for value in prompts.values()), default=0),
+                ],
+                "max_new_tokens": max_new_tokens,
+                "do_sample": False,
+                "use_cache": True,
+            },
+        )
+        raise
 
     results: dict[str, TextProbeResult] = {}
     for (name, probe), generation in zip(probes.items(), generations):
@@ -79,7 +98,7 @@ def _reference_nll(
     reference: str,
 ) -> float:
     runtime = model.runtime
-    text_start, text_end = runtime.layout.blocks[Modality.TEXT.value]
+    text_start, _ = runtime.layout.blocks[Modality.TEXT.value]
     local_reference = torch.tensor(
         runtime.text_tokenizer.encode(reference, add_special_tokens=False),
         dtype=torch.long,
@@ -88,16 +107,30 @@ def _reference_nll(
     response_ids = torch.cat(
         (reference_ids, torch.tensor([runtime.eos_token_id], dtype=torch.long))
     )
-    device = model.backbone.get_input_embeddings().weight.device
-    input_ids = torch.cat((prompt_ids, response_ids)).to(device=device)[None]
-    hidden_states = model.token_hidden_states(
-        input_ids,
-        attention_mask=torch.ones_like(input_ids, dtype=torch.bool),
-    )
-    predictors = hidden_states[0, prompt_ids.numel() - 1 : -1]
-    prediction = model.token_logits(predictors, Modality.TEXT).float()
-    target = input_ids[0, prompt_ids.numel() :] - text_start
-    return float(F.cross_entropy(prediction, target).detach().cpu())
+    input_shape = [1, prompt_ids.numel() + response_ids.numel()]
+    try:
+        device = model.backbone.get_input_embeddings().weight.device
+        input_ids = torch.cat((prompt_ids, response_ids)).to(device=device)[None]
+        hidden_states = model.token_hidden_states(
+            input_ids,
+            attention_mask=torch.ones_like(input_ids, dtype=torch.bool),
+        )
+        predictors = hidden_states[0, prompt_ids.numel() - 1 : -1]
+        prediction = model.token_logits(predictors, Modality.TEXT).float()
+        target = input_ids[0, prompt_ids.numel() :] - text_start
+        return float(F.cross_entropy(prediction, target).detach().cpu())
+    except torch.OutOfMemoryError as error:
+        annotate(
+            error,
+            phase="text_evaluation_reference_nll",
+            inputs={
+                "type": "TextReferenceNLL",
+                "input_ids_shape": input_shape,
+                "prompt_tokens": prompt_ids.numel(),
+                "reference_tokens_with_eos": response_ids.numel(),
+            },
+        )
+        raise
 
 
 def _decode(runtime: GenerationRuntime, token_ids: Tensor) -> str:

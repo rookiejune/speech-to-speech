@@ -12,7 +12,7 @@ from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig
 
-from speech_to_speech.callback import OnDeviceCodecMaterializer
+from speech_to_speech.callback import OOMDiagnostics, OnDeviceCodecMaterializer
 from speech_to_speech.callback.logging import (
     GradNormLogger,
     LossSummary,
@@ -201,6 +201,7 @@ def training_callbacks(
     performance_callback = performance(config.callbacks.performance)
     if performance_callback is not None:
         callbacks.append(performance_callback)
+    callbacks.append(OOMDiagnostics())
     callbacks.extend(
         cast(
             list[Callback],

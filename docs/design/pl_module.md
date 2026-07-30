@@ -42,9 +42,21 @@ model 构造器不接收路径或执行文件 I/O。
 
 ## callback
 
-`speech_to_speech.callback` 导出 on-device codec materializer 与 train-batch interval helper；
+`speech_to_speech.callback` 导出 OOM 诊断、on-device codec materializer 与 train-batch interval helper；
 以下日志 callback 从 `speech_to_speech.callback.logging` 导入：
 
+- `OOMDiagnostics`：正式 train 与 overfit 入口默认启用。它在 train/validation batch 开始时只缓存
+  `ModelBatch` / `RawSpeechBatch` 的 JSON-safe shape、dtype、device、task 和 role 元数据，不保留
+  batch 或 tensor 引用；在 backward、post-backward 和 optimizer 边界更新 phase。捕获
+  `torch.OutOfMemoryError` 后，每个 rank 独立向 stderr 写入一行带 epoch、global step、rank、输入摘要和
+  CUDA allocated/reserved/peak bytes 的 JSON，不执行 distributed collective、`empty_cache()` 或异常恢复，
+  原异常类型和 traceback 继续传播。CUDA memory 统计本身失败时把统计错误写入同一报告，不替换原 OOM。
+  performance 启用时仍保持 callback 列表第一位，OOM diagnostics 紧随其后并先于领域日志 callback。
+  `TaskSampleLogger` 的 fixed-sample generation 会覆盖外层 train batch 摘要，记录实际 request 的逐行
+  prompt/audio context shape、padding 后 shape、generation budget 和 cache 设置；`AcousticEvaluation` 使用
+  自身固定 `ModelBatch` 的摘要；text retention 在实际 autoregressive generation 与 reference-NLL forward
+  边界分别附加 token shape。batch 正常结束后清空摘要，避免后续 fetch 或 transfer 错误误报上一批输入。
+  Lightning 在 batch-start hook 前完成 device transfer，因此 transfer 自身的 OOM 不属于该 callback 的覆盖范围。
 - `OutputsLogger`：只提供 S2S objective 到 task label 的适配，按 label 聚合 `LossItem` 的通用日志逻辑来自
   `anytrain.lightning.LossItemLoggerCallback`。
 - `GradLogger` / `GradNormLogger`：只接入 S2S `TrainInterval`；指定分项或全局梯度范数的通用日志逻辑来自

@@ -10,7 +10,7 @@ from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig
 
-from speech_to_speech.callback import OnDeviceCodecMaterializer
+from speech_to_speech.callback import OOMDiagnostics, OnDeviceCodecMaterializer
 from speech_to_speech.callback.logging import (
     AcousticEvaluation,
     FlowMatchingLogger,
@@ -183,6 +183,7 @@ def run(config: OverfitConfig) -> None:
     performance_callback = performance(config.callbacks.performance)
     if performance_callback is not None:
         callbacks.insert(0, performance_callback)
+    callbacks.insert(1 if performance_callback is not None else 0, OOMDiagnostics())
     trainer = build_trainer(config, output_dir, callbacks)
     trainer.fit(module, datamodule=datamodule)
 

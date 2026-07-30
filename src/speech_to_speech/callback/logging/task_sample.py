@@ -34,6 +34,7 @@ from ...runtime.types import (
     codec_sample_rate,
 )
 from ...task import Task
+from .._oom import batch_report, generation_report, report_oom
 from ..interval import TrainInterval
 from .._lightning import attached_datamodule
 from ._sample_metrics import audio_metrics, text_metrics
@@ -192,7 +193,18 @@ class TaskSampleLogger(Callback):
             split=self.split,
             loader_name=self.loader_name,
         )
-        materialized = module.materialize_batch(collator(self.samples))
+        diagnostic_batch = collator(self.samples)
+        try:
+            materialized = module.materialize_batch(diagnostic_batch)
+        except torch.OutOfMemoryError as error:
+            report_oom(
+                trainer,
+                pl_module,
+                error,
+                phase="task_sample_materialize",
+                inputs=batch_report(diagnostic_batch),
+            )
+            raise
         if not isinstance(materialized, ModelBatch):
             raise TypeError("task sample logging requires one materialized ModelBatch.")
         sample_batch = materialized
@@ -207,6 +219,19 @@ class TaskSampleLogger(Callback):
                     torch.cuda.manual_seed(self.seed)
                 results = module.generate(requests, **generation)
         except Exception as error:
+            if report_oom(
+                trainer,
+                pl_module,
+                error,
+                phase="task_sample_generation",
+                inputs=generation_report(
+                    requests,
+                    max_new_tokens=generation["max_new_tokens"],
+                    do_sample=generation["do_sample"],
+                    use_cache=generation["use_cache"],
+                ),
+            ):
+                raise
             if text_writer is not None:
                 for dataset_index, sample, request in zip(
                     self.indices, self.samples, requests

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import torch
 from anydataset.types import (
@@ -29,11 +29,142 @@ from speech_to_speech.callback.logging.task_sample import (
 from speech_to_speech.callback.logging._sample_metrics import audio_metrics, text_metrics
 from speech_to_speech.generation import Request, decode_reference_codes
 from speech_to_speech.datamodule import SampleSplit
-from speech_to_speech.datamodule.types import ModelBatch
+from speech_to_speech.datamodule.types import (
+    Language,
+    ModelBatch,
+    RawSpeech,
+    RawSpeechBatch,
+    SpeechTaskSample,
+    Text,
+)
 from speech_to_speech.task import Task
 
 
 class TaskSampleLoggingTest(unittest.TestCase):
+    @patch(
+        "speech_to_speech.callback.logging.task_sample.report_oom",
+        return_value=True,
+    )
+    def test_materialization_oom_records_the_diagnostic_batch(self, report_oom):
+        sample = _sample()
+        diagnostic_batch = RawSpeechBatch(
+            samples=(
+                SpeechTaskSample(
+                    source=Text(torch.tensor([1, 2]), Language.EN),
+                    target=RawSpeech(
+                        text_token_ids=torch.tensor([3]),
+                        waveform=torch.zeros(2, 160),
+                        sample_rate=16_000,
+                        language=Language.EN,
+                    ),
+                    task=Task.TTS,
+                ),
+            ),
+            pad_token_id=0,
+        )
+        datamodule = SimpleNamespace(
+            runtime=SimpleNamespace(),
+            diagnostic_samples=Mock(return_value=[sample]),
+            diagnostic_collator=Mock(
+                return_value=Mock(return_value=diagnostic_batch)
+            ),
+        )
+        experiment = Mock()
+        trainer = SimpleNamespace(
+            global_step=10,
+            is_global_zero=True,
+            logger=SimpleNamespace(experiment=experiment),
+            datamodule=datamodule,
+        )
+        error = torch.OutOfMemoryError("codec allocation failed")
+        module = SimpleNamespace(
+            materialize_batch=Mock(side_effect=error),
+            generate=Mock(),
+        )
+        callback = TaskSampleLogger(
+            [0],
+            every_n_steps=1,
+            loader_name="tts",
+            task=Task.TTS,
+        )
+
+        callback.on_fit_start(trainer, module)
+        with self.assertRaises(torch.OutOfMemoryError) as raised:
+            callback.on_train_batch_start(trainer, module, diagnostic_batch, 0)
+
+        self.assertIs(raised.exception, error)
+        report_oom.assert_called_once()
+        self.assertEqual(
+            report_oom.call_args.kwargs["phase"],
+            "task_sample_materialize",
+        )
+        inputs = report_oom.call_args.kwargs["inputs"]
+        self.assertEqual(inputs["type"], "RawSpeechBatch")
+        self.assertEqual(
+            inputs["samples"][0]["target"]["waveform"]["shape"],
+            [2, 160],
+        )
+        module.generate.assert_not_called()
+
+    @patch(
+        "speech_to_speech.callback.logging.task_sample.report_oom",
+        return_value=True,
+    )
+    def test_generation_oom_records_the_fixed_sample_context(self, report_oom):
+        sample = _sample()
+        batch = ModelBatch(
+            input_ids=torch.tensor([[1, 2]]),
+            token_labels=torch.tensor([[-100, 2]]),
+            acoustic_target=None,
+            tasks=[Task.TTS],
+            pad_token_id=0,
+        )
+        datamodule = SimpleNamespace(
+            runtime=SimpleNamespace(),
+            diagnostic_samples=Mock(return_value=[sample]),
+            diagnostic_collator=Mock(return_value=Mock(return_value=batch)),
+        )
+        experiment = Mock()
+        trainer = SimpleNamespace(
+            global_step=10,
+            is_global_zero=True,
+            logger=SimpleNamespace(experiment=experiment),
+            datamodule=datamodule,
+        )
+        error = torch.OutOfMemoryError("generation allocation failed")
+        module = SimpleNamespace(
+            materialize_batch=Mock(side_effect=lambda value: value),
+            generate=Mock(side_effect=error),
+        )
+        callback = TaskSampleLogger(
+            [0],
+            every_n_steps=1,
+            loader_name="tts",
+            task=Task.TTS,
+            max_new_tokens=32,
+            do_sample=False,
+        )
+
+        callback.on_fit_start(trainer, module)
+        with self.assertRaises(torch.OutOfMemoryError) as raised:
+            callback.on_train_batch_start(trainer, module, batch, 0)
+
+        self.assertIs(raised.exception, error)
+        report_oom.assert_called_once()
+        self.assertEqual(
+            report_oom.call_args.kwargs["phase"],
+            "task_sample_generation",
+        )
+        self.assertEqual(
+            report_oom.call_args.kwargs["inputs"]["padded_prompt_shape"],
+            [1, 1],
+        )
+        self.assertEqual(
+            report_oom.call_args.kwargs["inputs"]["max_new_tokens"],
+            32,
+        )
+        experiment.add_text.assert_not_called()
+
     def test_train_mt_panel_logs_translation_and_text_metrics(self):
         sample = {
             (Role.SOURCE, Modality.TEXT): TextItem(

@@ -15,6 +15,8 @@ from torch import Tensor, nn
 
 from scripts import train as train_script
 from scripts._config import train as parse_train
+from speech_to_speech._oom import context as oom_context
+from speech_to_speech.callback import OOMDiagnostics
 from speech_to_speech.callback.logging import TextRetentionLogger
 from speech_to_speech.task import Task
 from speech_to_speech.loss import TokenObjective
@@ -95,6 +97,71 @@ PROBES = {
 
 
 class TextRetentionTest(unittest.TestCase):
+    @patch("speech_to_speech.generation.text.generate_responses")
+    def test_text_generation_oom_carries_exact_prompt_shape(self, generate_responses):
+        error = torch.OutOfMemoryError("generation allocation failed")
+        generate_responses.side_effect = error
+        model = _Model()
+        module = SpeechToSpeechModule(Config(), model=model, objective=Mock())
+
+        with self.assertRaises(torch.OutOfMemoryError) as raised:
+            module.evaluate_text(PROBES, max_new_tokens=16)
+
+        self.assertIs(raised.exception, error)
+        report = oom_context(raised.exception)
+        if report is None:
+            self.fail("text generation OOM context is unavailable")
+        self.assertEqual(report["phase"], "text_evaluation_generation")
+        self.assertEqual(report["inputs"]["padded_prompt_shape"], [2, 2])
+        self.assertEqual(report["inputs"]["max_new_tokens"], 16)
+
+    @patch("speech_to_speech.generation.text.generate_responses")
+    def test_reference_nll_oom_carries_teacher_forcing_shape(self, generate_responses):
+        generate_responses.return_value = [
+            Result(response_ids=torch.tensor([5]), audio=None) for _ in PROBES
+        ]
+        error = torch.OutOfMemoryError("reference allocation failed")
+        model = _Model()
+        module = SpeechToSpeechModule(Config(), model=model, objective=Mock())
+
+        with patch.object(model, "token_hidden_states", side_effect=error):
+            with self.assertRaises(torch.OutOfMemoryError) as raised:
+                module.evaluate_text(PROBES, max_new_tokens=16)
+
+        self.assertIs(raised.exception, error)
+        report = oom_context(raised.exception)
+        if report is None:
+            self.fail("reference NLL OOM context is unavailable")
+        self.assertEqual(report["phase"], "text_evaluation_reference_nll")
+        self.assertEqual(report["inputs"]["input_ids_shape"], [1, 5])
+
+    @patch(
+        "speech_to_speech.callback.logging.text.report_oom",
+        return_value=True,
+    )
+    def test_callback_records_text_probe_context_on_oom(self, report_oom):
+        error = torch.OutOfMemoryError("text probe allocation failed")
+        module = SimpleNamespace(evaluate_text=Mock(side_effect=error))
+        experiment = Mock()
+        trainer = SimpleNamespace(
+            global_step=0,
+            is_global_zero=True,
+            logger=SimpleNamespace(experiment=experiment),
+        )
+        logger = TextRetentionLogger(PROBES, max_new_tokens=16)
+
+        with self.assertRaises(torch.OutOfMemoryError) as raised:
+            logger.on_fit_start(trainer, module)
+
+        self.assertIs(raised.exception, error)
+        report_oom.assert_called_once()
+        self.assertEqual(report_oom.call_args.kwargs["phase"], "text_retention")
+        self.assertEqual(report_oom.call_args.kwargs["inputs"]["count"], 2)
+        self.assertEqual(
+            report_oom.call_args.kwargs["inputs"]["max_new_tokens"],
+            16,
+        )
+
     def test_objective_is_registered_as_a_child_module(self):
         model = _Model()
         objective = TokenObjective(model.runtime.layout)
@@ -298,6 +365,20 @@ class TextRetentionConfigTest(unittest.TestCase):
             every_audio_seconds=12.5,
             max_new_tokens=23,
         )
+
+    def test_oom_diagnostics_follows_performance_and_precedes_domain_callbacks(self):
+        config = parse_train(_compose_train())
+        performance = Mock()
+
+        with patch("scripts.train.performance", return_value=performance):
+            callbacks = train_script.training_callbacks(
+                config,
+                Path("/tmp/output"),
+                Mock(),
+            )
+
+        self.assertIs(callbacks[0], performance)
+        self.assertIsInstance(callbacks[1], OOMDiagnostics)
 
 
 def _compose_train(*overrides: str):

@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
+import torch
 from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 from torch import Tensor
@@ -13,6 +14,7 @@ from ...datamodule.types import ModelBatch
 from ...generation.evaluation import evaluate
 from ...model.acoustic import FlowModel, RVQModel
 from ...runtime.types import AcousticCodec
+from .._oom import batch_report, report_oom
 from ..interval import TrainInterval
 
 
@@ -42,9 +44,8 @@ class AcousticEvaluation(Callback):
         self.values: dict[int, dict[str, float]] = {}
 
     def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        del pl_module
         if trainer.is_global_zero:
-            self.evaluate(trainer, 0)
+            self.evaluate(trainer, pl_module, 0)
 
     def on_train_batch_end(
         self,
@@ -57,17 +58,31 @@ class AcousticEvaluation(Callback):
         del outputs, batch_idx
         should_run = self.interval.should_run(trainer, pl_module, batch)
         if trainer.is_global_zero and should_run:
-            self.evaluate(trainer, trainer.global_step)
+            self.evaluate(trainer, pl_module, trainer.global_step)
 
     def on_train_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        del pl_module
         if trainer.is_global_zero:
-            self.evaluate(trainer, trainer.global_step)
+            self.evaluate(trainer, pl_module, trainer.global_step)
 
-    def evaluate(self, trainer: Trainer, step: int) -> None:
+    def evaluate(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        step: int,
+    ) -> None:
         if step in self.values:
             return
-        metrics = evaluate(self.model, self.batch, self.codec, seeds=self.seeds)
+        try:
+            metrics = evaluate(self.model, self.batch, self.codec, seeds=self.seeds)
+        except torch.OutOfMemoryError as error:
+            report_oom(
+                trainer,
+                pl_module,
+                error,
+                phase="acoustic_evaluation",
+                inputs=batch_report(self.batch),
+            )
+            raise
         self.values[step] = metrics
         if trainer.logger is not None:
             trainer.logger.log_metrics(
