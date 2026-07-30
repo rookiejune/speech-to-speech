@@ -74,6 +74,14 @@ class TokenEmbeddingStructureTest(unittest.TestCase):
         text = model.text_logits(hidden)
         adapted, _ = model.project_audio_hidden(hidden)
         audio = model.semantic_audio_logits(adapted)
+        self.assertIsInstance(
+            model.token_embedding.embeddings["text"],
+            torch.nn.Embedding,
+        )
+        self.assertIs(
+            model.backbone.get_input_embeddings().weight,
+            model.token_embedding.embeddings["text"].weight,
+        )
         audio_table = model.token_embedding.embeddings["audio"]
         audio_adapter = getattr(
             model.token_embedding.adapters["audio"],

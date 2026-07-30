@@ -13,8 +13,10 @@ from speech_to_speech.model.acoustic import DecoderConfig, FlowModel, RVQModel
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
 from speech_to_speech.stage import (
     PARAMETER_POLICY_SPECS,
+    ParameterGroup,
     ParameterPolicyName,
     apply_parameter_policy,
+    parameter_group,
 )
 
 
@@ -26,11 +28,15 @@ class ModelDtypeTest(unittest.TestCase):
             PARAMETER_POLICY_SPECS[ParameterPolicyName.SPEECH_INTERFACE],
         )
 
-        backbone = list(model.backbone.parameters())
+        backbone = [
+            parameter
+            for name, parameter in model.named_parameters()
+            if parameter_group(name) is ParameterGroup.BACKBONE
+        ]
         speech = [
             parameter
             for name, parameter in model.named_parameters()
-            if not name.startswith("backbone.")
+            if parameter_group(name) is not ParameterGroup.BACKBONE
         ]
 
         self.assertTrue(backbone)

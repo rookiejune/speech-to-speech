@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, cast
 
-from anydataset.dataset import MapStyleABC, SpeakerAudioGrid
+from anydataset.dataset import MapStyleABC
+from anydataset.dataset.speaker import SpeakerAudioGrid
 import torch
 from anydataset.types import (
     AudioItem,

@@ -7,10 +7,10 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
 `SpeechToSpeechModule[ModelT]` 是薄 Lightning wrapper：
 
 - 构造时通过 `Objective[ModelT]` 保留 model/objective 类型配对。
-- `training_step()` 每次只接收一个 homogeneous `ModelBatch`，调用一次 objective 并记录该
-  microbatch 的 total loss；多 loader 比例由 dataloader 的 accumulation window 决定，Lightning
-  在 `accumulate_grad_batches` 个 microbatch 后执行 optimizer step。module 不接收或归约联合 batch
-  tuple，并把当前分项保留到对应 backward 完成。
+- `training_step()` 接收一个 homogeneous `ModelBatch` 或一个 `FusedBatch` window。普通 batch
+  路径调用一次 objective；fused 路径逐个 materialize/forward 子 microbatch，拼接分项输出，并按
+  原 Lightning accumulation 语义平均各 microbatch scalar loss 后返回一个 total loss。这样一次
+  backward 可以覆盖多 loader 动态分支，供 static DDP 使用。
 - `validation_step()` 复用同一 materialize 路径，通过 `Objective.validation()` 做 teacher-forcing
   dev 评估，并把 loss 模块提供的 `evaluator.weighted.Metric` 交给
   `anytrain.lightning.validation.log()`；它不解析 objective 名、RVQ detail key 或有效单位。Lightning

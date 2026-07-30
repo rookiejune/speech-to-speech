@@ -7,6 +7,7 @@ from anytrain.module.idspace import Embedding
 from torch import Tensor
 
 from .audio_output import AudioOutputAdapter
+from ._helper import require_embedding
 from .protocol import TokenModelRuntime
 
 
@@ -20,7 +21,10 @@ class VocabularyHeadMixin:
         hidden_state: Tensor,
         local_ids: Tensor | None = None,
     ) -> Tensor:
-        weight = self.token_embedding.embeddings["text"].weight
+        weight = require_embedding(
+            self.token_embedding.embeddings["text"],
+            "text token embedding",
+        ).weight
         if local_ids is not None:
             weight = weight.index_select(0, local_ids)
         return F.linear(hidden_state.to(dtype=weight.dtype), weight)
@@ -31,7 +35,10 @@ class VocabularyHeadMixin:
         local_ids: Tensor | None = None,
     ) -> Tensor:
         """Compute audio logits from already-adapted hidden states."""
-        weight = self.token_embedding.embeddings["audio"].weight
+        weight = require_embedding(
+            self.token_embedding.embeddings["audio"],
+            "semantic audio embedding",
+        ).weight
         if local_ids is not None:
             weight = weight.index_select(0, local_ids)
         return F.linear(hidden_state.to(dtype=weight.dtype), weight)

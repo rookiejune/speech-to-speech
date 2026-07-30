@@ -28,6 +28,7 @@ class ConfigSafetyTest(unittest.TestCase):
 
     def test_train_trainer_presets_are_not_overridden_by_the_entry(self) -> None:
         cases = {
+            "staged_static_ddp": ("ddp_find_unused_parameters_false", False),
             "staged_ddp": ("ddp_find_unused_parameters_true", False),
             "default": ("auto", True),
             "ddp": ("ddp_find_unused_parameters_true", True),

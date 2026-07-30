@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import cast
+from typing import TypedDict, cast
 
 import torch
 from torch import Tensor, nn
@@ -12,6 +12,13 @@ from .._compat import StrEnum, auto
 class AdapterType(StrEnum):
     LINEAR = auto()
     MLP = auto()
+
+
+class TowerFields(TypedDict):
+    layers: int
+    heads: int
+    ffn_ratio: float
+    dropout: float
 
 
 class MLPAdapter(nn.Module):
@@ -90,7 +97,7 @@ def validate_tower_fields(
         raise ValueError(f"{name} dropout must be in [0, 1).")
 
 
-def tower_fields(config: Mapping[str, object]) -> dict[str, int | float]:
+def tower_fields(config: Mapping[str, object]) -> TowerFields:
     return {
         "layers": cast(int, config.get("layers", 2)),
         "heads": cast(int, config.get("heads", 8)),
@@ -126,12 +133,17 @@ def safe_transformer_mask(valid: Tensor) -> Tensor:
     return safe
 
 
-class EmbeddingView(nn.Module):
-    """Expose an owned embedding to HF backbone APIs without re-parenting it."""
+def require_embedding(value: object, name: str) -> nn.Embedding:
+    if not isinstance(value, nn.Embedding):
+        raise TypeError(f"{name} must be a torch.nn.Embedding.")
+    return value
+
+
+class EmbeddingView:
+    """Reference an embedding for backbone APIs without taking Module ownership."""
 
     def __init__(self, embedding: nn.Embedding) -> None:
-        super().__init__()
-        object.__setattr__(self, "_embedding", embedding)
+        self._embedding = embedding
 
     @property
     def weight(self) -> torch.Tensor:
@@ -144,6 +156,9 @@ class EmbeddingView(nn.Module):
     @property
     def embedding_dim(self) -> int:
         return self._embedding.embedding_dim
+
+    def __call__(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self._embedding(input_ids)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self._embedding(input_ids)

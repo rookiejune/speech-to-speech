@@ -23,7 +23,14 @@ from ._generation import (
 )
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer, FlattenedAudioTokenizer
 from ._head import VocabularyHeadMixin
-from ._helper import AdapterType, CastOutput, EmbeddingView, create_adapter, register
+from ._helper import (
+    AdapterType,
+    CastOutput,
+    EmbeddingView,
+    create_adapter,
+    register,
+    require_embedding,
+)
 from .audio_input import (
     AudioInputAdapterConfig,
     AudioInputAdapterType,
@@ -110,45 +117,47 @@ class Model(VocabularyHeadMixin, nn.Module):
             )
         if text_source.num_embeddings != text_vocab_size:
             # Layout text block may be a prefix of a larger backbone table.
-            text_embedding: nn.Module = nn.Embedding.from_pretrained(
+            text_embedding = nn.Embedding.from_pretrained(
                 text_source.weight[:text_vocab_size].detach().clone(),
                 freeze=False,
             )
-            setter = getattr(self.backbone, "set_input_embeddings", None)
-            if setter is not None:
-                setter(EmbeddingView(text_embedding))
         else:
-            # View keeps ownership under the backbone; idspace only routes through it.
-            text_embedding = EmbeddingView(text_source)
+            text_embedding = text_source
+        # Backbone keeps a non-Module view; idspace owns the real embedding once.
+        _install_text_embedding_view(self.backbone, EmbeddingView(text_embedding))
         hidden_size = self.backbone.config.hidden_size
         audio_embedding = create_semantic_audio_embedding(
             self.runtime,
-            reference=text_source.weight,
+            reference=text_embedding.weight,
             embedding_dim=hidden_size,
-        ).to(device=text_source.weight.device, dtype=torch.float32)
-        audio_feature_dim = int(audio_embedding.weight.size(-1))
+        ).to(device=text_embedding.weight.device, dtype=torch.float32)
+        audio_weight = cast(torch.Tensor, audio_embedding.weight)
+        audio_feature_dim = int(audio_weight.shape[-1])
         audio_adapter = CastOutput(
             create_adapter(
                 _aligned_audio_adapter(self.config.semantic_audio_adapter, audio_feature_dim, hidden_size),
                 audio_feature_dim,
                 hidden_size,
-            ).to(device=text_source.weight.device, dtype=torch.float32),
-            dtype=text_source.weight.dtype,
+            ).to(device=text_embedding.weight.device, dtype=torch.float32),
+            dtype=text_embedding.weight.dtype,
         )
         self.token_embedding = Embedding(
             self.layout,
-            text=text_embedding,  # pyright: ignore[reportArgumentType]
+            text=text_embedding,
             audio=audio_embedding,  # pyright: ignore[reportArgumentType]
             adapters={"audio": audio_adapter},
         )
-        backbone_weight = text_source.weight
+        backbone_weight = text_embedding.weight
         register(
             self,
             "audio_token_frame_spans",
             _frame_span_lookup(self.runtime).to(device=backbone_weight.device),
             persistent=False,
         )
-        semantic_audio_weight = self.token_embedding.embeddings["audio"].weight
+        semantic_audio_weight = require_embedding(
+            self.token_embedding.embeddings["audio"],
+            "semantic audio embedding",
+        ).weight
         self.audio_input_adapter = (
             None
             if self.config.audio_input_adapter.type is AudioInputAdapterType.NONE
@@ -535,11 +544,15 @@ class Model(VocabularyHeadMixin, nn.Module):
                 "audio_input_positions must point to visible codec audio payload tokens."
             )
         audio_start, _ = self.layout.blocks["audio"]
+        audio_embedding = require_embedding(
+            self.token_embedding.embeddings["audio"],
+            "semantic audio embedding",
+        )
         local_ids = (selected_ids - audio_start).clamp(
             0,
-            self.token_embedding.embeddings["audio"].num_embeddings - 1,
+            audio_embedding.num_embeddings - 1,
         )
-        features = self.token_embedding.embeddings["audio"](local_ids)
+        features = audio_embedding(local_ids)
         adapter = self.audio_input_adapter
         if adapter is None:
             raise RuntimeError("audio input adapter is unavailable.")
@@ -550,6 +563,38 @@ class Model(VocabularyHeadMixin, nn.Module):
             dtype=output.dtype
         )
         return output
+
+
+def _install_text_embedding_view(backbone: Backbone, view: EmbeddingView) -> None:
+    """Point backbone text lookup at a non-owning view of the idspace table.
+
+    HuggingFace keeps ``embed_tokens`` in ``_modules``, so assigning a plain view
+    through ``set_input_embeddings`` fails. Drop the Module registration first,
+    then store the view as a normal attribute.
+    """
+    current = backbone.get_input_embeddings()
+    for parent in (
+        backbone,
+        getattr(backbone, "model", None),
+        getattr(backbone, "transformer", None),
+    ):
+        if parent is None or not isinstance(parent, nn.Module):
+            continue
+        module_parent = cast(nn.Module, parent)
+        modules = module_parent._modules
+        for name, child in list(modules.items()):
+            if child is not current:
+                continue
+            modules.pop(name)
+            setattr(module_parent, name, view)
+            return
+    if hasattr(backbone, "input_embeddings"):
+        backbone.input_embeddings = view  # type: ignore[attr-defined]
+        return
+    raise RuntimeError(
+        "backbone must expose a replaceable input embedding attribute so the "
+        "shared text table is referenced without dual Module ownership."
+    )
 
 
 def _frame_span_lookup(runtime: TokenModelRuntime) -> torch.Tensor:

@@ -23,7 +23,7 @@ from speech_to_speech.callback.logging import (
 )
 from speech_to_speech.datamodule import DataModule
 from speech_to_speech.datamodule.module import LoaderSpec
-from speech_to_speech.datamodule.types import ModelBatch
+from speech_to_speech.datamodule.types import FusedBatch, ModelBatch, TrainInput
 from speech_to_speech.generation.eval.acoustic import evaluate_autoregressive
 from speech_to_speech.model.acoustic import AcousticType, FlowModel, RVQModel
 from speech_to_speech.pl_module import SpeechToSpeechModule
@@ -97,13 +97,16 @@ def run(config: OverfitConfig) -> None:
     if uses_acoustic_decoder and config.callbacks.evaluation.enabled:
         datamodule.setup("fit")
         batch = next(iter(datamodule.train_dataloader()))
+        if isinstance(batch, FusedBatch):
+            raise TypeError("acoustic evaluation requires a single overfit batch.")
+        train_batch = cast(TrainInput, batch)
         if config.data.encode_missing_codes is True:
-            batch = module.materialize_batch(batch)
-            if not isinstance(batch, ModelBatch):
+            train_batch = module.materialize_batch(train_batch)
+            if not isinstance(train_batch, ModelBatch):
                 raise TypeError(
                     "acoustic evaluation requires a materialized ModelBatch."
                 )
-        evaluation_batch = cast(ModelBatch, batch)
+        evaluation_batch = cast(ModelBatch, train_batch)
         acoustic_model = cast(Union[FlowModel, RVQModel], model)
         evaluation = AcousticEvaluation(
             acoustic_model,

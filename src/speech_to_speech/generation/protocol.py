@@ -93,6 +93,9 @@ class TextEvaluationModel(TokenGenerator, Protocol):
         self,
         hidden_state: Tensor,
         modality: Modality | None = None,
+        *,
+        attention_mask: Tensor | None = None,
+        audio_hidden_state: Tensor | None = None,
     ) -> Tensor: ...
 
 

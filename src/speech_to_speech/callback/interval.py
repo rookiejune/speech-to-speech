@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 
 class TrainInterval:
     """Run at most once per optimizer step when ``step % every_n_steps == 0``.
@@ -27,7 +29,7 @@ class TrainInterval:
     def state_dict(self) -> dict[str, int | None]:
         return {"last_step": self._last_step}
 
-    def load_state_dict(self, state: dict[str, object]) -> None:
+    def load_state_dict(self, state: Mapping[str, object]) -> None:
         last_step = state.get("last_step")
         # Older checkpoints stored None as -1.0.
         if last_step is None or last_step == -1 or last_step == -1.0:

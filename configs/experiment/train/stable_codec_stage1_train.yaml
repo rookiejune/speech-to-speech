@@ -5,7 +5,7 @@ defaults:
   - override /runtime: stable_codec
   - override /audio_route: full_output
   - override /model/acoustic: none
-  - override /trainer: staged_ddp
+  - override /trainer: staged_static_ddp
   - override /logging: tensorboard
   - _self_
 

@@ -166,7 +166,7 @@ DiT/DiT+REPA/RVQ decoder。`acoustic.init_artifact` 可在 composition 边界加
 ```text
 global input_ids
     -> anytrain.module.idspace.Embedding
-         text: backbone input embedding（同一模块；tied head 读 weight）
+         text: owned nn.Embedding（backbone 经 EmbeddingView 引用）
          audio: codec/random semantic audio embedding
          adapters["audio"]: pointwise 投影到 backbone hidden
     -> AudioInputTower（非因果；仅 overlay source audio_input_positions）
@@ -174,9 +174,9 @@ global input_ids
 ```
 
 `idspace.Embedding` 只做 block 路由与输入侧 adapter；跨 block 输出 head 由 S2S 读取对应
-`embeddings[block].weight` 做 tied linear，不再使用 backbone LM head。text block 在词表对齐时用
-`EmbeddingView`（`model/_helper.py`）引用 backbone input embedding，避免把同一
-`nn.Embedding` 挂到两条 ownership path；audio adapter 经 `CastOutput` 在边界把 FP32 输出
+`embeddings[block].weight` 做 tied linear，不再使用 backbone LM head。text block 的真实
+`nn.Embedding` 只挂在 `token_embedding` 下；backbone 通过非 Module 的 `EmbeddingView`
+（`model/_helper.py`）引用同一张表，避免双重 ownership。audio adapter 经 `CastOutput` 在边界把 FP32 输出
 cast 到 backbone embedding dtype。`token_embedding.*` 为唯一参数路径；旧
 `semantic_audio_embedding.*` / `semantic_audio_adapter.*` checkpoint key 与现 schema 不兼容，
 strict resume 显式失败。

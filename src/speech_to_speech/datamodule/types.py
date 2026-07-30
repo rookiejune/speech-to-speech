@@ -762,6 +762,28 @@ class ModelBatch:
 TrainInput = Union[ModelBatch, RawSpeechBatch]
 
 
+@dataclass(frozen=True)
+class FusedBatch:
+    batches: tuple[TrainInput, ...]
+
+    def __post_init__(self) -> None:
+        if not self.batches:
+            raise ValueError("FusedBatch requires at least one microbatch.")
+        if any(
+            not isinstance(batch, (ModelBatch, RawSpeechBatch))
+            for batch in self.batches
+        ):
+            raise TypeError(
+                "FusedBatch microbatches must be ModelBatch or RawSpeechBatch."
+            )
+
+    def pin_memory(self) -> FusedBatch:
+        return FusedBatch(tuple(batch.pin_memory() for batch in self.batches))
+
+
+TrainBatch = Union[TrainInput, FusedBatch]
+
+
 def _pad(values: list[Tensor], padding_value: int) -> Tensor:
     return pad_sequence(
         values,

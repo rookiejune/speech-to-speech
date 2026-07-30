@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Any, cast
 
 import torch
 from anytrain.lightning import LossItemLoggerCallback
 from anytrain.loss import LossItem
-from lightning import LightningModule, Trainer
+from lightning import pytorch as pl
 from torch import Tensor
 
-from ...datamodule.types import ModelBatch
+from ...datamodule.types import FusedBatch, ModelBatch, RawSpeechBatch, TrainInput
 from ...loss.types import loss_items
 
 _OBJECTIVE_PREFIX = {
@@ -35,9 +36,9 @@ class OutputsLogger(LossItemLoggerCallback):
 
     def on_train_batch_end(
         self,
-        trainer: Trainer,
-        pl_module: LightningModule,
-        outputs: Tensor | dict[str, Any] | None,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        outputs: Tensor | Mapping[str, Any] | None,
         batch: Any,
         batch_idx: int,
     ) -> None:
@@ -51,12 +52,12 @@ class OutputsLogger(LossItemLoggerCallback):
                 raise ValueError(
                     f"{objective} loss rows must align with logged label rows."
                 )
-            self._log_item(trainer, pl_module, objective, item, labels)
+            self._log_output_item(trainer, pl_module, objective, item, labels)
 
-    def _log_item(
+    def _log_output_item(
         self,
-        trainer: Trainer,
-        pl_module: LightningModule,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
         objective: str,
         item: LossItem,
         labels: list[object],
@@ -106,9 +107,9 @@ class OutputsLogger(LossItemLoggerCallback):
     def state_dict(self) -> dict[str, dict[str, float]]:
         return {"counts": dict(self._counts)}
 
-    def load_state_dict(self, state_dict: dict[str, dict[str, float]]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         counts = state_dict.get("counts", {})
-        if not isinstance(counts, dict):
+        if not isinstance(counts, Mapping):
             raise TypeError("OutputsLogger state counts must be a mapping.")
         resolved: dict[str, float] = {}
         for key, value in counts.items():
@@ -124,22 +125,35 @@ class OutputsLogger(LossItemLoggerCallback):
 
 
 def _tasks(objective: str, batch: Any) -> list[object]:
-    return _batch_tasks(cast(ModelBatch, batch), objective)
+    if isinstance(batch, FusedBatch):
+        labels: list[object] = []
+        for child in batch.batches:
+            labels.extend(_batch_tasks(child, objective))
+        return labels
+    return _batch_tasks(cast(TrainInput, batch), objective)
 
 
-def _batch_tasks(batch: ModelBatch, objective: str) -> list[object]:
+def _batch_tasks(batch: TrainInput, objective: str) -> list[object]:
     if objective == "token":
         return list(batch.tasks)
     if objective in {"flow_matching", "repa", "rvq"}:
-        if batch.acoustic_target is not None:
+        if _has_acoustic_target(batch):
             return list(batch.tasks)
         return []
     raise ValueError(f"unsupported loss objective: {objective}")
 
 
+def _has_acoustic_target(batch: TrainInput) -> bool:
+    if isinstance(batch, ModelBatch):
+        return batch.acoustic_target is not None
+    if isinstance(batch, RawSpeechBatch):
+        return any(sample.prediction.supervises_audio for sample in batch.samples)
+    raise TypeError("training batch must be ModelBatch or RawSpeechBatch.")
+
+
 def _reduce_sum(
-    trainer: Trainer,
-    pl_module: LightningModule,
+    trainer: pl.Trainer,
+    pl_module: pl.LightningModule,
     value: Tensor,
 ) -> Tensor:
     del pl_module

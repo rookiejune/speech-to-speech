@@ -157,6 +157,7 @@ class StageConfig:
     name: StageName = StageName.STAGE_0
     loaders: dict[str, StageLoaderConfig] = field(default_factory=dict)
     accumulate_grad_batches: int = 1
+    fuse_loaders_per_step: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -166,6 +167,8 @@ class StageConfig:
             raise TypeError("stage accumulate_grad_batches must be an integer.")
         if self.accumulate_grad_batches < 1:
             raise ValueError("stage accumulate_grad_batches must be positive.")
+        if not isinstance(self.fuse_loaders_per_step, bool):
+            raise TypeError("stage fuse_loaders_per_step must be a boolean.")
         if not isinstance(self.loaders, Mapping):
             raise TypeError("stage loaders must be a mapping.")
         if self.loaders:

@@ -24,6 +24,7 @@ from ._flops import (
 from .datamodule.types import ModelBatch
 from .loss import FlowObjective, LossItem, RVQObjective, TokenObjective
 from .model import Model
+from .model._helper import require_embedding
 from .model.acoustic import FlowModel, HiddenConditionAdapter, RVQModel
 from .pl_module import SpeechToSpeechModule
 
@@ -233,9 +234,10 @@ def _token_path(model: Model, core: Qwen3Model, batch: ModelBatch) -> int:
     if not bool(lengths.gt(0).all()):
         raise ValueError("each training FLOPs input row must contain a valid token.")
 
-    embedding = model.token_embedding.embeddings["audio"]
-    if not hasattr(embedding, "num_embeddings") or not hasattr(embedding, "embedding_dim"):
-        raise TypeError("training FLOPs require a semantic audio embedding.")
+    embedding = require_embedding(
+        model.token_embedding.embeddings["audio"],
+        "semantic audio embedding",
+    )
     hidden = core.config.hidden_size
     audio_start, audio_end = model.layout.blocks[Modality.AUDIO.value]
     if embedding.num_embeddings != audio_end - audio_start:
@@ -301,7 +303,10 @@ def _token_head(model: Model, batch: ModelBatch) -> int:
             continue
         rows = int(mask.sum().item())
         if modality is Modality.TEXT:
-            weight = model.token_embedding.embeddings["text"].weight
+            weight = require_embedding(
+                model.token_embedding.embeddings["text"],
+                "text token embedding",
+            ).weight
             if weight.size(0) < end - start or weight.size(1) != hidden:
                 raise ValueError(
                     "text token embedding does not cover the text layout block."
@@ -309,7 +314,10 @@ def _token_head(model: Model, batch: ModelBatch) -> int:
             total += 2 * rows * hidden * (end - start)
             continue
         if modality is Modality.AUDIO:
-            embedding = model.token_embedding.embeddings["audio"]
+            embedding = require_embedding(
+                model.token_embedding.embeddings["audio"],
+                "semantic audio embedding",
+            )
             forward = adapter(
                 model.audio_output_adapter,
                 rows=rows,

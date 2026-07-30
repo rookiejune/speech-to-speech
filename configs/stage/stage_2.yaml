@@ -13,3 +13,4 @@ loaders:
     task_weights:
       mt: 1.0
 accumulate_grad_batches: 10
+fuse_loaders_per_step: true

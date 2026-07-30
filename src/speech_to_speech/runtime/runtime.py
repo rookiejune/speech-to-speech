@@ -420,7 +420,7 @@ def bind_chat_bos(tokenizer: object) -> None:
     unk = getattr(tokenizer, "unk_token_id", None)
     if unk is not None and token_id == int(unk):
         return
-    tokenizer.bos_token = _CHAT_BOS_TOKEN
+    setattr(tokenizer, "bos_token", _CHAT_BOS_TOKEN)
 
 
 def text_special_id(tokenizer: TextTokenizer, name: str) -> int:

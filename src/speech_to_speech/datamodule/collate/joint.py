@@ -5,7 +5,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from ..types import TrainInput
+from ..types import FusedBatch, TrainBatch, TrainInput
 
 
 @runtime_checkable
@@ -17,6 +17,7 @@ class _EpochSetter(Protocol):
 class LoaderSchedule:
     weights: dict[str, float]
     accumulate_grad_batches: int = 1
+    fuse_loaders_per_step: bool = False
 
     def __post_init__(self) -> None:
         _validate_weights(self.weights)
@@ -27,7 +28,9 @@ class LoaderSchedule:
             raise TypeError("accumulate_grad_batches must be an integer.")
         if self.accumulate_grad_batches < 1:
             raise ValueError("accumulate_grad_batches must be positive.")
-        if self.accumulate_grad_batches > 1:
+        if not isinstance(self.fuse_loaders_per_step, bool):
+            raise TypeError("fuse_loaders_per_step must be a boolean.")
+        if self.accumulate_grad_batches > 1 or self.fuse_loaders_per_step:
             _accumulation_window(self.weights, self.accumulate_grad_batches)
 
 
@@ -50,7 +53,7 @@ class ScheduledDataLoader:
         self.loaders = dict(loaders)
         self.schedule = schedule
 
-    def __iter__(self) -> Iterator[TrainInput]:
+    def __iter__(self) -> Iterator[TrainBatch]:
         keys = tuple(self.schedule.weights)
         weights = self.schedule.weights
         iterators = {key: iter(self.loaders[key]) for key in keys}
@@ -63,6 +66,14 @@ class ScheduledDataLoader:
                     self.schedule.accumulate_grad_batches,
                     credits=credits,
                 )
+                if self.schedule.fuse_loaders_per_step:
+                    yield FusedBatch(
+                        tuple(
+                            _next_batch(key, iterators, self.loaders, cycles)
+                            for key in window
+                        )
+                    )
+                    continue
                 for key in window:
                     yield _next_batch(key, iterators, self.loaders, cycles)
 

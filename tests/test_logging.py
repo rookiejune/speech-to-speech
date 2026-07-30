@@ -14,7 +14,7 @@ from speech_to_speech.callback.logging import (
     OutputsLogger,
 )
 from speech_to_speech.callback import TrainInterval
-from speech_to_speech.datamodule.types import ModelBatch, ModelSample
+from speech_to_speech.datamodule.types import FusedBatch, ModelBatch, ModelSample
 from speech_to_speech.loss import LossItem, Outputs, loss_items
 from speech_to_speech.pl_module import Config, SpeechToSpeechModule
 from speech_to_speech.task import Task
@@ -194,6 +194,32 @@ class LoggingTest(unittest.TestCase):
         )
         token_call = module.log.call_args_list[1]
         self.assertEqual(token_call.args[1], 8.0)
+
+    def test_outputs_logger_uses_fused_microbatch_tasks(self):
+        module = SimpleNamespace(log=Mock())
+        trainer = SimpleNamespace(world_size=1)
+        callback = OutputsLogger()
+        batch = FusedBatch((_batch(Task.ASR), _batch(Task.MT)))
+        outputs = Outputs(
+            loss=torch.tensor(2.0),
+            token=LossItem(
+                torch.tensor([1.0, 3.0]),
+                details={"tokens": torch.tensor([1.0, 3.0])},
+            ),
+        )
+
+        callback.on_train_batch_end(trainer, module, outputs, batch, 0)
+
+        names = [call.args[0] for call in module.log.call_args_list]
+        self.assertEqual(
+            names,
+            [
+                "token/loss/asr",
+                "token/tokens/asr",
+                "token/loss/mt",
+                "token/tokens/mt",
+            ],
+        )
 
     def test_outputs_logger_accumulates_token_counts(self):
         module = SimpleNamespace(log=Mock())

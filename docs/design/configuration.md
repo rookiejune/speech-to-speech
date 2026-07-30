@@ -96,18 +96,21 @@ Hydra metadata 与 `metrics.json` 写入 `output_dir`；TensorBoard/CSV logger �
 正式 staged train 使用 `anytrain.lightning.ModelCheckpoint` 的默认异步落盘，把本机临时保存与目标
 目录复制串行解耦；本项目的 checkpoint 配置只决定目录、文件名、归档 cadence 与保留策略。
 
-四个 trainer preset 都使用 `devices: auto`，由 Lightning 使用 `CUDA_VISIBLE_DEVICES` 中的全部
+五个 trainer preset 都使用 `devices: auto`，由 Lightning 使用 `CUDA_VISIBLE_DEVICES` 中的全部
 可见设备；设备数量不再作为运行时配置契约重复校验。job wrapper 只提供机器相关的默认可见设备，
 提交时可显式覆盖。`default`、`ddp`、`static_ddp` 保留通用 sampler 行为；正式 staged train
-通过 `trainer=staged_ddp` 选择 unused-parameter detection 并明确关闭 distributed sampler。LongCat prepared map-style dataset 通过
+通过 `trainer=staged_static_ddp` 选择 static DDP 并明确关闭 distributed sampler；
+`trainer=staged_ddp` 保留为 dynamic unused-parameter fallback。LongCat prepared map-style dataset 通过
 `MapStyleABC.dataloader()` 暴露 deterministic shuffle 与 batch planning；UniCodec DDP smoke
 同样要求每个 rank 重复读取同一个固定样本，因此其 experiment 也显式设置
 `use_distributed_sampler: false`。
-正式 staged train 的入口策略为 `ddp_find_unused_parameters_true`。stage 通过
-`accumulate_grad_batches` 定义一个 optimizer step 的 microbatch 数；多 loader schedule 在每个
-accumulation window 内按权重确定性分配并交错单个 microbatch，Lightning 负责梯度累积。配置要求
-每个非零 loader 在 window 内至少出现一次；由于各 microbatch 只执行自身 task 分支，正式入口保留
-unused-parameter detection，`trainer=static_ddp` 只适用于不会跨 microbatch 轮转分支的实验。
+正式 staged train 的入口策略为 `ddp_find_unused_parameters_false`。stage 通过
+`accumulate_grad_batches` 定义一个 optimizer step 的 loader microbatch 数；当
+`fuse_loaders_per_step=true` 时，多 loader schedule 在每个 window 内按权重交错 microbatch，
+并把整组 window 作为一个 fused training batch 返回。module 在一次 `training_step()` 内逐个
+forward，按原 Lightning accumulation 语义平均各 microbatch scalar loss，再执行一次 backward。
+配置要求每个非零 loader 在 fused window 内至少出现一次；未启用 fuse 的多 loader static DDP 会被
+入口拒绝。
 
 完整链路实验分别负责其 composition、数据范围、trainer、callback 和 step budget：
 
@@ -138,7 +141,7 @@ experiment 之前，以便非 LoRA experiment 用 `model.lora: null` 覆盖）�
 再传 `train.max_steps=2`。`jobs/004/01_s2st.sh` 是独立的 generation smoke，不属于训练入口。
 
 `jobs/011/03_staged_joint_train.sh` 是正式 staged joint training wrapper，调用
-`scripts/train.py`，固定 `trainer=staged_ddp`，并根据
+`scripts/train.py`，固定 `trainer=staged_static_ddp`，并根据
 `SPEECH_TO_SPEECH_STAGE=stage_1..stage_4` 选择对应的 `train/staged_joint_stage_*` experiment，
 由 experiment 同时绑定 stage 和 parameter policy；未设置时默认 `stage_1`。该 wrapper 在
 启动 Python 前拒绝通过末尾 `"$@"` 覆写 `experiment`、`task` 或 `stage`，需要切换 identity 时必须
@@ -163,8 +166,8 @@ experiment 之前，以便非 LoRA experiment 用 `model.lora: null` 覆盖）�
 正式 train 的 `validation` 默认关闭。启用时，`loader` 必须选择当前 stage 的一个 speech loader，
 且 `data.dataset.split_manifest` 必须存在、`split_label` 必须与训练 split 不同。入口复制该 loader
 的 task weights 与 speech data config，仅替换 dev `split_label`；配置的 `every_n_steps` 使用
-optimizer-step 语义，入口乘以 `stage.accumulate_grad_batches` 后传给 Lightning 的 batch 级
-`val_check_interval`。`sanity_steps=-1` 表示 fit 前遍历完整 dev split，非负值表示对应 sanity batch
+optimizer-step 语义；fused loader 下入口传给 Lightning 的 batch 级 `val_check_interval` 等于该
+step 数，非 fused accumulation 下才乘以 `stage.accumulate_grad_batches`。`sanity_steps=-1` 表示 fit 前遍历完整 dev split，非负值表示对应 sanity batch
 数。为了让 step interval 不受 epoch 边界控制，入口同时设置
 `check_val_every_n_epoch=None`。每次 sanity/interval 结果按 step 记录到 `metrics.json.validation`。
 
