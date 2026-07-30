@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from types import SimpleNamespace
 from typing import cast
@@ -1484,11 +1485,34 @@ class GenerationTest(unittest.TestCase):
             metadata_call.args[0],
             "sample/tts/0/metadata",
         )
-        self.assertIn('"task": "tts"', metadata_call.args[1])
-        self.assertIn('"dataset_index": 0', metadata_call.args[1])
-        self.assertIn('"duration_seconds": 0.0005', metadata_call.args[1])
-        self.assertIn('"status": "ok"', metadata_call.args[1])
-        self.assertIn('"waveform_finite": true', metadata_call.args[1])
+        metadata = json.loads(metadata_call.args[1])
+        self.assertEqual(
+            set(metadata),
+            {"chat_template", "labels", "generation"},
+        )
+        self.assertEqual(metadata["chat_template"]["task"], "tts")
+        self.assertEqual(metadata["chat_template"]["dataset_index"], 0)
+        self.assertEqual(
+            metadata["chat_template"]["prompt_ids"]["ids"],
+            [1, 6],
+        )
+        self.assertEqual(
+            metadata["chat_template"]["text"],
+            "generated<audio>",
+        )
+        self.assertEqual(
+            metadata["labels"]["supervised_token_ids"]["ids"],
+            [4, 7],
+        )
+        self.assertEqual(metadata["generation"]["status"], "ok")
+        self.assertEqual(metadata["generation"]["response_ids"]["ids"], [4])
+        self.assertEqual(
+            metadata["generation"]["result"]["duration_seconds"],
+            0.0005,
+        )
+        self.assertTrue(
+            metadata["generation"]["result"]["waveform_finite"]
+        )
 
     def test_task_sample_logger_loads_samples_from_real_datamodule(self):
         samples = [Mock(), Mock()]
@@ -1562,9 +1586,16 @@ class GenerationTest(unittest.TestCase):
             logger.on_train_batch_start(trainer, module, None, 0)
 
         experiment.add_text.assert_called_once()
-        metadata = experiment.add_text.call_args.args[1]
-        self.assertIn('"status": "failed"', metadata)
-        self.assertIn('"type": "RuntimeError"', metadata)
+        metadata = json.loads(experiment.add_text.call_args.args[1])
+        self.assertEqual(metadata["generation"]["status"], "failed")
+        self.assertEqual(
+            metadata["generation"]["error"]["type"],
+            "RuntimeError",
+        )
+        self.assertEqual(
+            metadata["labels"]["supervised_token_ids"]["ids"],
+            [2],
+        )
 
     def test_task_sample_logger_logs_row_count_mismatch(self):
         batch = ModelBatch(
@@ -1599,9 +1630,12 @@ class GenerationTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "wrong row count"):
             logger.on_train_batch_start(trainer, module, None, 0)
 
-        metadata = experiment.add_text.call_args.args[1]
-        self.assertIn('"status": "failed"', metadata)
-        self.assertIn("wrong row count", metadata)
+        metadata = json.loads(experiment.add_text.call_args.args[1])
+        self.assertEqual(metadata["generation"]["status"], "failed")
+        self.assertIn(
+            "wrong row count",
+            metadata["generation"]["error"]["message"],
+        )
 
     def test_task_sample_logger_skips_nonzero_ranks(self):
         module = SimpleNamespace(generate=Mock())

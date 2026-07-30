@@ -39,6 +39,8 @@ from ..interval import TrainInterval
 from .._lightning import attached_datamodule
 from ._sample_metrics import audio_metrics, text_metrics
 
+_TOKEN_PREVIEW_LIMIT = 128
+
 
 class _Module(Protocol):
     model: Any
@@ -230,21 +232,25 @@ class TaskSampleLogger(Callback):
             ):
                 raise
             if text_writer is not None:
-                for dataset_index, sample, request in zip(
-                    self.indices, self.samples, requests
+                for row, (dataset_index, sample, request) in enumerate(
+                    zip(self.indices, self.samples, requests)
                 ):
                     text_writer.add_text(
                         f"{self._tag(dataset_index)}/metadata",
                         _metadata_json(
-                            {
-                                **_request_metadata(dataset_index, sample, request),
-                                "status": "failed",
-                                "generation": generation_metadata,
-                                "error": {
+                            _sample_log_record(
+                                datamodule,
+                                sample_batch.row(row),
+                                dataset_index,
+                                sample,
+                                request,
+                                status="failed",
+                                generation_settings=generation_metadata,
+                                error={
                                     "type": type(error).__name__,
                                     "message": str(error),
                                 },
-                            }
+                            )
                         ),
                         trainer.global_step,
                     )
@@ -252,21 +258,25 @@ class TaskSampleLogger(Callback):
         if len(results) != len(requests):
             error = RuntimeError("task sample generation returned the wrong row count.")
             if text_writer is not None:
-                for dataset_index, sample, request in zip(
-                    self.indices, self.samples, requests
+                for row, (dataset_index, sample, request) in enumerate(
+                    zip(self.indices, self.samples, requests)
                 ):
                     text_writer.add_text(
                         f"{self._tag(dataset_index)}/metadata",
                         _metadata_json(
-                            {
-                                **_request_metadata(dataset_index, sample, request),
-                                "status": "failed",
-                                "generation": generation_metadata,
-                                "error": {
+                            _sample_log_record(
+                                datamodule,
+                                sample_batch.row(row),
+                                dataset_index,
+                                sample,
+                                request,
+                                status="failed",
+                                generation_settings=generation_metadata,
+                                error={
                                     "type": type(error).__name__,
                                     "message": str(error),
                                 },
-                            }
+                            )
                         ),
                         trainer.global_step,
                     )
@@ -275,6 +285,7 @@ class TaskSampleLogger(Callback):
             zip(self.indices, self.samples, requests, results)
         ):
             tag = self._tag(dataset_index)
+            row_batch = sample_batch.row(row)
             metrics: dict[str, float] = {}
             result_metadata = _result_metadata(
                 result,
@@ -317,7 +328,7 @@ class TaskSampleLogger(Callback):
                     audio_writer,
                     datamodule,
                     module,
-                    sample_batch.row(row),
+                    row_batch,
                     sample,
                     request["task"],
                     tag,
@@ -343,13 +354,19 @@ class TaskSampleLogger(Callback):
                 text_writer.add_text(
                     f"{tag}/metadata",
                     _metadata_json(
-                        {
-                            **_request_metadata(dataset_index, sample, request),
-                            "status": "ok",
-                            "generation": generation_metadata,
-                            "generated": result_metadata,
-                            "metrics": metrics,
-                        }
+                        _sample_log_record(
+                            datamodule,
+                            row_batch,
+                            dataset_index,
+                            sample,
+                            request,
+                            status="ok",
+                            generation_settings=generation_metadata,
+                            result_metadata=result_metadata,
+                            response_ids=result["response_ids"],
+                            generated_text=generated_text,
+                            metrics=metrics,
+                        )
                     ),
                     trainer.global_step,
                 )
@@ -416,6 +433,72 @@ def _request_metadata(
         "prompt_tokens": int(request["prompt_ids"].numel()),
         "source": _modality_metadata(source_item(sample, task), task.source_modality),
         "reference": _modality_metadata(target_item(sample, task), reference_modality),
+    }
+
+
+def _sample_log_record(
+    datamodule: _DataModule,
+    batch: ModelBatch,
+    dataset_index: int,
+    sample: types.Sample,
+    request: Request,
+    *,
+    status: str,
+    generation_settings: Mapping[str, Any],
+    result_metadata: Mapping[str, Any] | None = None,
+    response_ids: Tensor | None = None,
+    generated_text: str | None = None,
+    metrics: Mapping[str, float] | None = None,
+    error: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    request_metadata = _request_metadata(dataset_index, sample, request)
+    token_labels = batch.token_labels[0].detach().cpu()
+    supervised = token_labels[token_labels.ne(-100)]
+    prompt_ids = request["prompt_ids"].detach().cpu()
+    generation: dict[str, Any] = {
+        "status": status,
+        "settings": dict(generation_settings),
+    }
+    if result_metadata is not None:
+        generation["result"] = dict(result_metadata)
+    if response_ids is not None:
+        response_ids = response_ids.detach().cpu()
+        generation["response_ids"] = _token_sequence(response_ids)
+        decoded = generated_text or _decode_text(datamodule, response_ids)
+        if decoded is not None:
+            generation["text"] = decoded
+    if metrics is not None:
+        generation["metrics"] = dict(metrics)
+    if error is not None:
+        generation["error"] = dict(error)
+
+    chat_template: dict[str, Any] = {
+        "dataset_index": dataset_index,
+        "task": request_metadata["task"],
+        "prompt_tokens": request_metadata["prompt_tokens"],
+        "prompt_ids": _token_sequence(prompt_ids),
+        "source": request_metadata["source"],
+    }
+    prediction = request.get("prediction")
+    if prediction is not None:
+        chat_template["prediction"] = prediction.value
+    labels: dict[str, Any] = {
+        "token_labels": _token_sequence(token_labels),
+        "supervised_token_ids": _token_sequence(supervised),
+        "reference": request_metadata["reference"],
+    }
+    if error is None:
+        prompt_text = _decode_chat_template(datamodule, prompt_ids)
+        if prompt_text is not None:
+            chat_template["text"] = prompt_text
+        label_text = _decode_text(datamodule, supervised)
+        if label_text is not None:
+            labels["text"] = label_text
+
+    return {
+        "chat_template": chat_template,
+        "labels": labels,
+        "generation": generation,
     }
 
 
@@ -524,11 +607,78 @@ def _sample_audio(
 
 
 def _generated_text(datamodule: _DataModule, response_ids: Tensor) -> str | None:
-    runtime = datamodule.runtime
-    tokenizer = runtime.text_tokenizer
-    layout = runtime.layout
-    local_ids = layout.to_local(response_ids.detach().cpu())
-    return tokenizer.decode(local_ids.tolist(), skip_special_tokens=True)
+    return _decode_text(datamodule, response_ids)
+
+
+def _decode_chat_template(
+    datamodule: _DataModule,
+    token_ids: Tensor,
+) -> str | None:
+    if token_ids.numel() == 0:
+        return None
+    try:
+        runtime = datamodule.runtime
+        tokenizer = runtime.text_tokenizer
+        start, end = runtime.layout.block(types.Modality.TEXT.value)
+    except (AttributeError, KeyError):
+        return None
+    pieces: list[str] = []
+    text_ids: list[int] = []
+    audio_span = False
+
+    def flush_text() -> None:
+        if not text_ids:
+            return
+        try:
+            decoded = tokenizer.decode(text_ids, skip_special_tokens=False)
+        except TypeError:
+            decoded = tokenizer.decode(text_ids)
+        pieces.append(decoded)
+        text_ids.clear()
+
+    for value in token_ids.detach().cpu().reshape(-1).tolist():
+        token_id = int(value)
+        if start <= token_id < end:
+            if audio_span:
+                pieces.append("<audio>")
+                audio_span = False
+            text_ids.append(token_id - start)
+        else:
+            flush_text()
+            audio_span = True
+    flush_text()
+    if audio_span:
+        pieces.append("<audio>")
+    return "".join(pieces)
+
+
+def _decode_text(datamodule: _DataModule, token_ids: Tensor) -> str | None:
+    if token_ids.numel() == 0:
+        return None
+    try:
+        runtime = datamodule.runtime
+        tokenizer = runtime.text_tokenizer
+        start, end = runtime.layout.block(types.Modality.TEXT.value)
+    except (AttributeError, KeyError):
+        return None
+    ids = token_ids.detach().cpu()
+    inside = (ids >= start) & (ids < end)
+    if not bool(inside.all()):
+        return None
+    local_ids = (ids - start).tolist()
+    try:
+        return tokenizer.decode(local_ids, skip_special_tokens=True)
+    except TypeError:
+        return tokenizer.decode(local_ids)
+
+
+def _token_sequence(token_ids: Tensor) -> dict[str, Any]:
+    values = [int(value) for value in token_ids.reshape(-1).tolist()]
+    return {
+        "count": len(values),
+        "ids": values[:_TOKEN_PREVIEW_LIMIT],
+        "truncated": len(values) > _TOKEN_PREVIEW_LIMIT,
+    }
 
 
 def _target_text(sample: types.Sample, task: Task) -> str | None:
@@ -700,4 +850,4 @@ def _finite(tensor: Tensor) -> bool:
 
 
 def _metadata_json(value: dict[str, Any]) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return json.dumps(value, ensure_ascii=False, indent=2)
