@@ -259,8 +259,9 @@ global input_ids
 ```
 
 Stable / FSQ（`semantic_feature_dim == 1` 且 codec 暴露 `fsq_levels`）在 audio block 使用
-embedding 侧 unpack：序列仍是 product id，表示是 `Σ_j (b_j + q̃_j w_j)`，直接对齐 `d_model`；
-tokenizer 不展开 per-dim tokens。
+embedding 侧 unpack：序列仍是 product id，表示是 `Σ_j (b_j + q̃_j w_j)`，**默认维对齐
+backbone hidden**；tokenizer 不展开 per-dim tokens。`semantic_feature_dim == 1` 只标记 FSQ
+内在标量维。
 
 `mlp` input tower 是逐帧 gated projection；`transformer` input tower 是保持帧数的非 causal
 encoder。tower 只服务输入表示，不能读取或修改生成中的新 token，也不参与 output adapter、

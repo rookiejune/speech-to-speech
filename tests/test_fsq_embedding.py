@@ -6,6 +6,15 @@ import unittest
 import torch
 import torch.nn.functional as F
 
+from speech_to_speech.model.adapter import AdapterType
+from speech_to_speech.model.base import (
+    _aligned_audio_adapter,
+    _aligned_audio_output_adapter,
+)
+from speech_to_speech.model.audio_output import (
+    AudioOutputAdapterConfig,
+    AudioOutputAdapterType,
+)
 from speech_to_speech.model.embedding.fsq import (
     FsqAffineEmbedding,
     _level_scalars,
@@ -101,6 +110,37 @@ class FsqAffineEmbeddingTest(unittest.TestCase):
         self.assertEqual(embed.embedding_dim, 16)
         self.assertEqual(embed.num_embeddings, tokenizer.vocab_size + 3)
         self.assertEqual(embed.weight.shape, (tokenizer.vocab_size + 3, 16))
+
+    def test_fsq_embedding_requires_backbone_aligned_dim(self):
+        codec = StableCodec(_StableSource(codebook_sizes=(9,), fsq_levels=((3, 3),)))
+        tokenizer = FlattenedAudioTokenizer(
+            codebook_sizes=(9,),
+            codec_name="stable_codec",
+        )
+        with self.assertRaisesRegex(ValueError, "embedding_dim"):
+            create_semantic_audio_embedding(
+                _Runtime(codec, tokenizer),
+                reference=torch.empty(1),
+            )
+
+    def test_matched_dims_collapse_default_linear_adapters(self):
+        self.assertIsNone(
+            _aligned_audio_adapter(AdapterType.LINEAR, 64, 64)
+        )
+        self.assertIs(
+            _aligned_audio_adapter(AdapterType.MLP, 64, 64),
+            AdapterType.MLP,
+        )
+        self.assertIs(
+            _aligned_audio_adapter(AdapterType.LINEAR, 4, 64),
+            AdapterType.LINEAR,
+        )
+        output = _aligned_audio_output_adapter(
+            AudioOutputAdapterConfig(type=AudioOutputAdapterType.LINEAR),
+            64,
+            64,
+        )
+        self.assertIs(output.type, AudioOutputAdapterType.NONE)
 
     def test_fsq_levels_requires_dim_one(self):
         codec = _DimCodec(4, ((2, 2),))

@@ -101,7 +101,9 @@ def generate_tokens(...) -> Tensor: ...
 - `lora`
 
 `semantic_audio_adapter` 使用公开 `AdapterType`；`linear` 是默认值，`mlp` 使用 gated SiLU adapter，
-`None` 只在输入输出 dimension 相同时合法。`toy=None` 时模型使用 `runtime.backbone`；非空时由
+`None` 只在输入输出 dimension 相同时合法。当 audio embedding 输出维已经等于 backbone
+`hidden_size`（例如 Stable FSQ rank-1 embedding）时，默认的 `linear` 输入/输出 adapter 自动退化为
+identity/`none`，不再额外投影。`toy=None` 时模型使用 `runtime.backbone`；非空时由
 `ToyConfig` 构造随机 tiny Qwen，runtime 仍负责 tokenizer、codec、layout、special IDs 与 flow
 sampler。完整 Qwen 架构的随机初始化属于 `runtime.backbone_initialization=random`，不通过 toy
 参数近似。Hydra `model` preset 与这些字段一一对应，overfit/train root schema 直接复用
@@ -186,9 +188,10 @@ device reference，不要求 backend 暴露虚构的 codebook tensor。
 
 当 codec `semantic_feature_dim == 1` 且暴露 `fsq_levels`（Stable Codec）时，audio embedding
 改走 rank-1 affine：tokenizer 仍使用 packed product id，embedding 侧按 codec levels unpack，
-`e = Σ_j (b_j + q̃_j w_j)` 直接产出 `d_model`，marker / BOA/EOA/MASK 保留自由行；此时输入
-adapter 与默认 linear output adapter 退化为 identity，tied logits 仍读 materialize 后的
-`.weight`。不把 FSQ 展开进 tokenizer 序列。
+`e = Σ_j (b_j + q̃_j w_j)`，**默认输出维对齐 backbone `hidden_size`**；marker / BOA/EOA/MASK
+保留自由行。此时默认 linear input/output adapter 因维已对齐而退化为 identity/`none`，tied
+logits 仍读 materialize 后的 `.weight`。不把 FSQ 展开进 tokenizer 序列。codec 上的
+`semantic_feature_dim == 1` 只表示 FSQ 内在标量维，不是 LLM 接口维。
 
 新建的 semantic embedding、input/output adapter 和 acoustic decoder 一律使用 FP32 参数存储；
 frozen backbone 可以保持 BF16，forward 计算精度由 trainer autocast 控制。semantic head 与

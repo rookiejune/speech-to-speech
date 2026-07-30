@@ -38,7 +38,6 @@ from .audio_output import (
     create_audio_output_adapter,
 )
 from .embedding.audio import create_semantic_audio_embedding
-from .embedding.fsq import FsqAffineEmbedding
 from ._embedding import CastOutput, EmbeddingView
 from .protocol import TokenModelRuntime
 from .toy import ToyConfig, create_toy_backbone
@@ -130,13 +129,9 @@ class Model(VocabularyHeadMixin, nn.Module):
             embedding_dim=hidden_size,
         ).to(device=text_source.weight.device, dtype=torch.float32)
         audio_feature_dim = int(audio_embedding.weight.size(-1))
-        fsq_audio = isinstance(audio_embedding, FsqAffineEmbedding)
-        audio_adapter_type = (
-            None if fsq_audio else self.config.semantic_audio_adapter
-        )
         audio_adapter = CastOutput(
             create_adapter(
-                audio_adapter_type,
+                _aligned_audio_adapter(self.config.semantic_audio_adapter, audio_feature_dim, hidden_size),
                 audio_feature_dim,
                 hidden_size,
             ).to(device=text_source.weight.device, dtype=torch.float32),
@@ -165,17 +160,12 @@ class Model(VocabularyHeadMixin, nn.Module):
                 hidden_size,
             ).to(device=backbone_weight.device)
         )
-        output_config = self.config.audio_output_adapter
-        if fsq_audio and output_config.type is AudioOutputAdapterType.LINEAR:
-            output_config = AudioOutputAdapterConfig(
-                type=AudioOutputAdapterType.NONE,
-                layers=output_config.layers,
-                heads=output_config.heads,
-                ffn_ratio=output_config.ffn_ratio,
-                dropout=output_config.dropout,
-            )
         self.audio_output_adapter = create_audio_output_adapter(
-            output_config,
+            _aligned_audio_output_adapter(
+                self.config.audio_output_adapter,
+                hidden_size,
+                semantic_audio_weight.size(1),
+            ),
             hidden_size,
             semantic_audio_weight.size(1),
         ).to(
@@ -575,3 +565,31 @@ def _frame_span_lookup(runtime: TokenModelRuntime) -> torch.Tensor:
     if bool((spans < 0).any()) or not bool((spans > 0).any()):
         raise ValueError("audio token frame spans must be non-negative and non-empty.")
     return spans
+
+
+def _aligned_audio_adapter(
+    configured: AdapterType | None,
+    in_features: int,
+    out_features: int,
+) -> AdapterType | None:
+    """Use identity when dims already match and config asks for a plain linear map."""
+    if in_features == out_features and configured is AdapterType.LINEAR:
+        return None
+    return configured
+
+
+def _aligned_audio_output_adapter(
+    configured: AudioOutputAdapterConfig,
+    in_features: int,
+    out_features: int,
+) -> AudioOutputAdapterConfig:
+    """Drop the default linear projector when audio space already matches hidden."""
+    if in_features == out_features and configured.type is AudioOutputAdapterType.LINEAR:
+        return AudioOutputAdapterConfig(
+            type=AudioOutputAdapterType.NONE,
+            layers=configured.layers,
+            heads=configured.heads,
+            ffn_ratio=configured.ffn_ratio,
+            dropout=configured.dropout,
+        )
+    return configured

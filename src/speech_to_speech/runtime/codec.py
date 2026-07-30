@@ -159,6 +159,7 @@ class StableCodec:
 
     @property
     def semantic_feature_dim(self) -> int:
+        """FSQ intrinsic scalar dimension; LLM audio embedding uses backbone hidden."""
         return 1
 
     @property
