@@ -228,10 +228,10 @@ class TaskSampleLoggingTest(unittest.TestCase):
         )
         experiment.add_audio.assert_not_called()
         text_tags = {call.args[0] for call in experiment.add_text.call_args_list}
-        self.assertIn("task_sample/train/mt/mt/0/target", text_tags)
-        self.assertIn("task_sample/train/mt/mt/0/generated", text_tags)
+        self.assertIn("sample/mt/0/target", text_tags)
+        self.assertIn("sample/mt/0/generated", text_tags)
         scalar_tags = {call.args[0] for call in experiment.add_scalar.call_args_list}
-        self.assertIn("task_sample/train/mt/mt/0/text/cer", scalar_tags)
+        self.assertIn("sample/mt/0/text/cer", scalar_tags)
 
     def test_validation_asr_panel_logs_source_and_model_free_metrics(self):
         sample = _sample()
@@ -292,14 +292,14 @@ class TaskSampleLoggingTest(unittest.TestCase):
         )
         self.assertEqual(
             experiment.add_audio.call_args.args[0],
-            "task_sample/validation/asr/asr/0/source",
+            "sample/asr/0/source",
         )
         scalar_tags = {call.args[0] for call in experiment.add_scalar.call_args_list}
         self.assertIn(
-            "task_sample/validation/asr/asr/0/text/cer", scalar_tags
+            "sample/asr/0/text/cer", scalar_tags
         )
         self.assertIn(
-            "task_sample/validation/asr/asr/0/generation/response_tokens",
+            "sample/asr/0/generation/response_tokens",
             scalar_tags,
         )
         metadata = experiment.add_text.call_args_list[0].args[1]

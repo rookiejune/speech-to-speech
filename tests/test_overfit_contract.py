@@ -96,17 +96,12 @@ class OverfitContractTest(unittest.TestCase):
             _compose(
                 "overfit",
                 "callbacks.task_sample.every_n_steps=2",
-                "callbacks.task_sample.every_audio_seconds=2.5",
                 "callbacks.text_retention.every_n_steps=3",
-                "callbacks.text_retention.every_audio_seconds=3.5",
                 "callbacks.text_retention.max_new_tokens=9",
                 "callbacks.grad_norm.every_n_steps=4",
-                "callbacks.grad_norm.every_audio_seconds=4.5",
                 "callbacks.gradient_pair.every_n_steps=5",
-                "callbacks.gradient_pair.every_audio_seconds=5.5",
                 "callbacks.gradient_pair.full_parameter=full.weight",
                 "callbacks.flow_matching.every_n_steps=6",
-                "callbacks.flow_matching.every_audio_seconds=6.5",
             )
         )
         runtime = Mock()
@@ -157,24 +152,20 @@ class OverfitContractTest(unittest.TestCase):
         factories["FlowMatchingLogger"].assert_called_once_with(
             runtime.flow_matching,
             every_n_steps=6,
-            every_audio_seconds=6.5,
         )
         factories["GradLogger"].assert_called_once_with(
             ("token", "flow_matching"),
             "full.weight",
             every_n_steps=5,
-            every_audio_seconds=5.5,
         )
         factories["GradNormLogger"].assert_called_once_with(
             every_n_steps=4,
-            every_audio_seconds=4.5,
         )
         factories["TaskSampleLogger"].assert_called_once_with(
             [config.sample_index],
             every_n_steps=2,
             loader_name="train",
             task=Task.TTS,
-            every_audio_seconds=2.5,
         )
         factories["TextRetentionLogger"].assert_called_once_with(
             {
@@ -185,7 +176,6 @@ class OverfitContractTest(unittest.TestCase):
                 for name, probe in config.callbacks.text_retention.probes.items()
             },
             every_n_steps=3,
-            every_audio_seconds=3.5,
             max_new_tokens=9,
         )
 
@@ -301,11 +291,6 @@ class OverfitContractTest(unittest.TestCase):
                 "callbacks.gradient_pair.every_n_steps",
             ),
             (
-                "callbacks.gradient_pair.every_audio_seconds=0",
-                ValueError,
-                "callbacks.gradient_pair.every_audio_seconds",
-            ),
-            (
                 "callbacks.gradient_pair.full_parameter=''",
                 TypeError,
                 "callbacks.gradient_pair.full_parameter",
@@ -314,11 +299,6 @@ class OverfitContractTest(unittest.TestCase):
                 "callbacks.flow_matching.every_n_steps=0",
                 ValueError,
                 "callbacks.flow_matching.every_n_steps",
-            ),
-            (
-                "callbacks.flow_matching.every_audio_seconds=0",
-                ValueError,
-                "callbacks.flow_matching.every_audio_seconds",
             ),
         )
 

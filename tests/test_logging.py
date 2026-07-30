@@ -13,7 +13,7 @@ from speech_to_speech.callback.logging import (
     LossSummary,
     OutputsLogger,
 )
-from speech_to_speech.callback import TrainInterval, processed_audio_seconds
+from speech_to_speech.callback import TrainInterval
 from speech_to_speech.datamodule.types import ModelBatch, ModelSample
 from speech_to_speech.loss import LossItem, Outputs, loss_items
 from speech_to_speech.pl_module import Config, SpeechToSpeechModule
@@ -34,7 +34,7 @@ class LoggingTest(unittest.TestCase):
         self.assertIs(result, outputs)
         objective.forward.assert_called_once_with(batch, module.model)
         log.assert_called_once_with(
-            "train/loss",
+            "loss",
             outputs["loss"],
             prog_bar=True,
             on_step=True,
@@ -53,13 +53,15 @@ class LoggingTest(unittest.TestCase):
         trainer = SimpleNamespace(global_step=1)
         callback = GradNormLogger(every_n_steps=2)
 
+        callback.on_train_batch_start(trainer, module, None, 0)
         callback.on_before_optimizer_step(trainer, module, Mock())
         module.log.assert_not_called()
 
         trainer.global_step = 2
+        callback.on_train_batch_start(trainer, module, None, 0)
         callback.on_before_optimizer_step(trainer, module, Mock())
 
-        self.assertEqual(module.log.call_args.args[0], "train/grad_norm")
+        self.assertEqual(module.log.call_args.args[0], "grad_norm")
         torch.testing.assert_close(module.log.call_args.args[1], torch.tensor(13.0))
 
     def test_grad_logger_runs_once_for_an_accumulated_global_step(self):
@@ -75,48 +77,18 @@ class LoggingTest(unittest.TestCase):
         self.assertTrue(first)
         self.assertFalse(second)
 
-    def test_audio_interval_counts_processed_batch_seconds(self):
-        interval = TrainInterval(every_n_steps=100, every_audio_seconds=2.0)
-        trainer = SimpleNamespace(global_step=0, world_size=1)
-        module = SimpleNamespace(device=torch.device("cpu"))
-        first = _batch(Task.TTS, audio_seconds=1.5)
-        second = _batch(Task.TTS, audio_seconds=0.75)
-
-        self.assertFalse(interval.should_run(trainer, module, first))
-        self.assertTrue(interval.should_run(trainer, module, second))
-        self.assertEqual(processed_audio_seconds(first), 1.5)
-        self.assertEqual(processed_audio_seconds(second), 0.75)
-
-    def test_audio_interval_sums_distributed_rank_seconds(self):
-        reduce_ops = []
-
-        class Strategy:
-            def reduce(self, value, *, reduce_op):
-                reduce_ops.append(reduce_op)
-                return value + value.new_tensor(2.0)
-
-        interval = TrainInterval(every_n_steps=100, every_audio_seconds=3.0)
-        trainer = SimpleNamespace(global_step=0, world_size=2, strategy=Strategy())
-        module = SimpleNamespace(device=torch.device("cpu"))
-
-        self.assertTrue(interval.should_run(trainer, module, _batch(Task.TTS, 1.0)))
-        self.assertEqual(reduce_ops, ["sum"])
-
     def test_step_interval_runs_once_per_global_step_during_accumulation(self):
         interval = TrainInterval(every_n_steps=2)
-        trainer = SimpleNamespace(global_step=0)
-        module = SimpleNamespace()
 
         observed = []
         for step in (0, 0, 1, 1, 2, 2):
-            trainer.global_step = step
-            observed.append(interval.should_run(trainer, module, None))
+            observed.append(interval.should_run(step))
 
-        self.assertEqual(observed, [False, False, False, False, True, False])
+        self.assertEqual(observed, [True, False, False, False, True, False])
 
         restored = TrainInterval(every_n_steps=2)
         restored.load_state_dict(interval.state_dict())
-        self.assertFalse(restored.should_run(trainer, module, None))
+        self.assertFalse(restored.should_run(2))
 
     def test_loss_summary_uses_stable_objective_order(self):
         item = LossItem(torch.ones(1), details=None)
@@ -191,15 +163,15 @@ class LoggingTest(unittest.TestCase):
         self.assertEqual(
             scalar_calls,
             [
-                ("flow/loss_t/0.00_0.50", 2.0, 2),
-                ("flow/loss_t/0.50_1.00", 6.0, 2),
+                ("acoustic/flow_matching/loss_t/0.00_0.50", 2.0, 2),
+                ("acoustic/flow_matching/loss_t/0.50_1.00", 6.0, 2),
             ],
         )
         self.assertEqual(strategy.reduce.call_count, 2)
 
     def test_outputs_logger_uses_homogeneous_microbatch_tasks(self):
         module = SimpleNamespace(log=Mock())
-        trainer = SimpleNamespace()
+        trainer = SimpleNamespace(world_size=1)
         callback = OutputsLogger()
         batch = _batch(Task.MT)
         outputs = Outputs(
@@ -216,14 +188,59 @@ class LoggingTest(unittest.TestCase):
         self.assertEqual(
             names,
             [
-                "token_loss/mt",
-                "token_tokens/mt",
+                "token/loss/mt",
+                "token/tokens/mt",
             ],
         )
+        token_call = module.log.call_args_list[1]
+        self.assertEqual(token_call.args[1], 8.0)
+
+    def test_outputs_logger_accumulates_token_counts(self):
+        module = SimpleNamespace(log=Mock())
+        trainer = SimpleNamespace(world_size=1)
+        callback = OutputsLogger()
+        batch = _batch(Task.TTS)
+        outputs = Outputs(
+            loss=torch.tensor(2.0),
+            token=LossItem(
+                torch.tensor([3.0, 4.0]),
+                details={"tokens": torch.tensor([8.0, 2.0])},
+            ),
+        )
+        # Homogeneous batch helper only has one row; build two-row batch.
+        batch = ModelBatch.from_samples(
+            [
+                ModelSample(
+                    input_ids=torch.tensor([1, 2]),
+                    token_labels=torch.tensor([-100, 2]),
+                    acoustic_target=None,
+                    task=Task.TTS,
+                    prediction=Task.TTS.prediction_modality,
+                ),
+                ModelSample(
+                    input_ids=torch.tensor([1, 2, 3]),
+                    token_labels=torch.tensor([-100, 2, 3]),
+                    acoustic_target=None,
+                    task=Task.TTS,
+                    prediction=Task.TTS.prediction_modality,
+                ),
+            ],
+            pad_token_id=0,
+        )
+
+        callback.on_train_batch_end(trainer, module, outputs, batch, 0)
+        callback.on_train_batch_end(trainer, module, outputs, batch, 1)
+
+        token_values = [
+            call.args[1]
+            for call in module.log.call_args_list
+            if call.args[0] == "token/tokens/tts"
+        ]
+        self.assertEqual(token_values, [10.0, 20.0])
 
     def test_outputs_logger_uses_acoustic_tasks_for_acoustic_losses(self):
         module = SimpleNamespace(log=Mock())
-        trainer = SimpleNamespace()
+        trainer = SimpleNamespace(world_size=1)
         callback = OutputsLogger()
         batch = _acoustic_batch(Task.TTS)
         outputs = Outputs(
@@ -244,10 +261,10 @@ class LoggingTest(unittest.TestCase):
         self.assertEqual(
             names,
             [
-                "token_loss/tts",
-                "token_tokens/tts",
-                "rvq_loss/tts",
-                "rvq_frames/tts",
+                "token/loss/tts",
+                "token/tokens/tts",
+                "acoustic/rvq/loss/tts",
+                "acoustic/rvq/frames/tts",
             ],
         )
 

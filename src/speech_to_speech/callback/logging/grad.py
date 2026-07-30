@@ -11,8 +11,7 @@ class GradLogger(GradientLoggerCallback):
         self,
         loss_pair: tuple[str, str],
         parameter_name: str,
-        every_n_steps: int | None = 5_000,
-        every_audio_seconds: float | None = None,
+        every_n_steps: int = 5_000,
         eps: float = 1e-12,
     ) -> None:
         super().__init__(
@@ -21,10 +20,7 @@ class GradLogger(GradientLoggerCallback):
             every_n_steps=every_n_steps,
             eps=eps,
         )
-        self.interval = TrainInterval(
-            every_n_steps=every_n_steps,
-            every_audio_seconds=every_audio_seconds,
-        )
+        self.interval = TrainInterval(every_n_steps=every_n_steps)
         self._run_current_batch = False
 
     def on_train_batch_start(
@@ -35,11 +31,8 @@ class GradLogger(GradientLoggerCallback):
         batch_idx: int,
     ) -> None:
         del batch_idx
-        self._run_current_batch = self.interval.should_run(
-            trainer,
-            pl_module,
-            batch,
-        )
+        del batch
+        self._run_current_batch = self.interval.should_run(int(trainer.global_step))
 
     def should_run(
         self,
@@ -49,26 +42,22 @@ class GradLogger(GradientLoggerCallback):
         del trainer, pl_module
         return self._run_current_batch
 
-    def state_dict(self) -> dict[str, dict[str, float]]:
+    def state_dict(self) -> dict[str, dict[str, int | None]]:
         return {"interval": self.interval.state_dict()}
 
-    def load_state_dict(self, state_dict: dict[str, dict[str, float]]) -> None:
+    def load_state_dict(self, state_dict: dict[str, dict[str, int | None]]) -> None:
         self.interval.load_state_dict(state_dict.get("interval", {}))
 
 
 class GradNormLogger(GradientNormLoggerCallback):
     def __init__(
         self,
-        tag: str = "train/grad_norm",
-        every_n_steps: int | None = 100,
-        every_audio_seconds: float | None = None,
+        tag: str = "grad_norm",
+        every_n_steps: int = 100,
     ) -> None:
         super().__init__(tag=tag, every_n_steps=every_n_steps)
-        self.interval = TrainInterval(
-            every_n_steps=every_n_steps,
-            every_audio_seconds=every_audio_seconds,
-        )
-        self._pending_log = False
+        self.interval = TrainInterval(every_n_steps=every_n_steps)
+        self._run_current_batch = False
 
     def on_train_batch_start(
         self,
@@ -77,33 +66,19 @@ class GradNormLogger(GradientNormLoggerCallback):
         batch: object,
         batch_idx: int,
     ) -> None:
-        del batch_idx
-        self._pending_log = self._pending_log or self.interval.should_run(
-            trainer,
-            pl_module,
-            batch,
-        )
+        del batch_idx, batch
+        self._run_current_batch = self.interval.should_run(int(trainer.global_step))
 
     def should_run(
         self,
         trainer: Trainer,
         pl_module: LightningModule,
     ) -> bool:
-        if self.interval.uses_audio_seconds:
-            return self._pending_log
-        return super().should_run(trainer, pl_module)
-
-    def on_log_attempt(
-        self,
-        trainer: Trainer,
-        pl_module: LightningModule,
-    ) -> None:
         del trainer, pl_module
-        if self.interval.uses_audio_seconds:
-            self._pending_log = False
+        return getattr(self, "_run_current_batch", False)
 
-    def state_dict(self) -> dict[str, dict[str, float]]:
+    def state_dict(self) -> dict[str, dict[str, int | None]]:
         return {"interval": self.interval.state_dict()}
 
-    def load_state_dict(self, state_dict: dict[str, dict[str, float]]) -> None:
+    def load_state_dict(self, state_dict: dict[str, dict[str, int | None]]) -> None:
         self.interval.load_state_dict(state_dict.get("interval", {}))

@@ -294,32 +294,10 @@ class TextRetentionConfigTest(unittest.TestCase):
         callback = config.callbacks.text_retention
         self.assertTrue(callback.enabled)
         self.assertEqual(callback.every_n_steps, 10_000)
-        self.assertIsNone(callback.every_audio_seconds)
         self.assertEqual(callback.max_new_tokens, 64)
         self.assertEqual(set(callback.probes), {"zh_en"})
         self.assertTrue(callback.probes["zh_en"].instruction)
         self.assertTrue(callback.probes["zh_en"].reference)
-
-    def test_audio_cadence_requires_none_or_a_finite_positive_number(self):
-        valid = parse_train(_compose_train())
-        for value in (None, 1, 1.5):
-            with self.subTest(value=value):
-                cast(Any, valid.callbacks.text_retention).every_audio_seconds = value
-                valid.callbacks.text_retention.validate()
-
-        cases = (
-            (True, TypeError, "number or None"),
-            ("10", TypeError, "number or None"),
-            (0, ValueError, "finite and positive"),
-            (-1, ValueError, "finite and positive"),
-            (math.inf, ValueError, "finite and positive"),
-            (math.nan, ValueError, "finite and positive"),
-        )
-        for value, error, message in cases:
-            with self.subTest(value=value), self.assertRaisesRegex(error, message):
-                config = parse_train(_compose_train())
-                cast(Any, config.callbacks.text_retention).every_audio_seconds = value
-                config.callbacks.text_retention.validate()
 
     def test_enabled_text_retention_requires_complete_probes(self):
         empty = parse_train(_compose_train())
@@ -341,7 +319,6 @@ class TextRetentionConfigTest(unittest.TestCase):
         config = parse_train(_compose_train())
         callback = config.callbacks.text_retention
         callback.every_n_steps = 17
-        callback.every_audio_seconds = 12.5
         callback.max_new_tokens = 23
         built = Mock()
 
@@ -362,7 +339,6 @@ class TextRetentionConfigTest(unittest.TestCase):
                 for name, probe in callback.probes.items()
             },
             every_n_steps=17,
-            every_audio_seconds=12.5,
             max_new_tokens=23,
         )
 

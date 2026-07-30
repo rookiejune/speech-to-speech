@@ -127,8 +127,10 @@ teacher features。acoustic-only codec screening 与 oracle artifact 导出由
   `target_frame_condition()` 统一处理，objective 不重复偏移。
 - `SpeechToSpeechModule` 通过泛型 `Objective` 保留 model/objective 的配对类型，不在训练循环中
   cast。
-- validation 指标名、RVQ codebook detail 解释和有效单位由 loss 模块唯一负责；pl_module 只消费
-  `validation.Metric`，通过 `anytrain.lightning.validation.log()` 接入 Lightning epoch/DDP aggregation。
+- validation 指标名、RVQ codebook detail 解释和有效单位由 loss 模块唯一负责；名称与训练
+  TensorBoard 路径对齐（`token/loss`、`acoustic/rvq/...`、`acoustic/flow_matching/loss`、
+  `acoustic/repa/loss`），pl_module 只消费 `validation.Metric`，通过
+  `anytrain.lightning.validation.log()` 加 `val/` 前缀接入 Lightning epoch/DDP aggregation。
 - flow runtime 等 objective 资源在 `FlowObjective` 构造时显式传入，不通过
   `model.runtime` 向下读取。
 - 子 objective 在 `__init__` 中构造完毕，forward 不挂载新 submodule。
@@ -137,7 +139,8 @@ teacher features。acoustic-only codec screening 与 oracle artifact 导出由
 - token、flow matching、RVQ 与 REPA `LossItem` 必须分别携带 `tokens` 或 `frames` 有效单位；
   objective 不在单位缺失时静默退回逐行平均。
 - token 行损失是有效 token 的加权平均；`details` 中的 `text_loss` / `audio_loss` 仅供观测，不改变
-  训练标量。validation 暴露聚合 `token_ce`，暂不拆 `text_ce` / `audio_ce`。
+  训练标量。validation 暴露聚合 `token/loss`（经 `val/` 前缀写入 logger），暂不拆
+  `token/text_loss` / `token/audio_loss`。
 - generation 仍按 `Request.task.prediction_modality`（task 默认）分组；loader 的 prediction
   override 目前是训练专用，不通过 generation Request 传播。
 - `audio_route` 不改变 Flow/RVQ acoustic objective 的 frame-aligned contract；它只约束 structured

@@ -425,7 +425,7 @@ def generate_flattened_sequence(
         generated, _, _ = generate_sequence(
             model,
             prefixed,
-            max_new_tokens=max_new_tokens - prefix.numel() - 1,
+            max_new_tokens=max_new_tokens - prefix.numel(),
             temperature=temperature,
             top_p=top_p,
             prompt_attention_mask=attention,
@@ -451,19 +451,7 @@ def generate_flattened_sequence(
             collect_audio_condition=False,
             min_new_tokens=1,
         )
-        continuation = generated[:, prefixed.size(1) :]
-        if bool(continuation.eq(model.runtime.eoa_token_id).any(dim=1).all()):
-            return generated
-        return torch.cat(
-            (
-                generated,
-                generated.new_full(
-                    (generated.size(0), 1),
-                    model.runtime.eoa_token_id,
-                ),
-            ),
-            dim=1,
-        )
+        return generated
 
     rows = [
         _generate_flattened_row(

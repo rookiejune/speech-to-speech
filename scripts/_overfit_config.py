@@ -55,20 +55,17 @@ else:
 class TaskSampleCallbackConfig:
     enabled: bool = MISSING
     every_n_steps: int = MISSING
-    every_audio_seconds: Optional[float] = None
 
 
 @dataclass
 class EvaluationCallbackConfig:
     enabled: bool = True
-    every_audio_seconds: Optional[float] = None
 
 
 @dataclass
 class GradientPairCallbackConfig:
     enabled: bool = MISSING
     every_n_steps: int = MISSING
-    every_audio_seconds: Optional[float] = None
     full_parameter: str = MISSING
     partial_parameter: str = MISSING
 
@@ -77,7 +74,6 @@ class GradientPairCallbackConfig:
 class FlowMatchingCallbackConfig:
     enabled: bool = MISSING
     every_n_steps: int = MISSING
-    every_audio_seconds: Optional[float] = None
 
 
 @dataclass
@@ -172,30 +168,14 @@ def _validate_callbacks(config: OverfitCallbacksConfig) -> None:
         config.task_sample.every_n_steps,
         "callbacks.task_sample.every_n_steps",
     )
-    optional_positive_number(
-        config.task_sample.every_audio_seconds,
-        "callbacks.task_sample.every_audio_seconds",
-    )
-    optional_positive_number(
-        config.evaluation.every_audio_seconds,
-        "callbacks.evaluation.every_audio_seconds",
-    )
     config.text_retention.validate()
     positive_integer(
         config.grad_norm.every_n_steps,
         "callbacks.grad_norm.every_n_steps",
     )
-    optional_positive_number(
-        config.grad_norm.every_audio_seconds,
-        "callbacks.grad_norm.every_audio_seconds",
-    )
     positive_integer(
         config.gradient_pair.every_n_steps,
         "callbacks.gradient_pair.every_n_steps",
-    )
-    optional_positive_number(
-        config.gradient_pair.every_audio_seconds,
-        "callbacks.gradient_pair.every_audio_seconds",
     )
     non_empty_string(
         config.gradient_pair.full_parameter,
@@ -210,10 +190,6 @@ def _validate_callbacks(config: OverfitCallbacksConfig) -> None:
     positive_integer(
         config.flow_matching.every_n_steps,
         "callbacks.flow_matching.every_n_steps",
-    )
-    optional_positive_number(
-        config.flow_matching.every_audio_seconds,
-        "callbacks.flow_matching.every_audio_seconds",
     )
 
 

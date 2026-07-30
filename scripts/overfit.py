@@ -111,7 +111,6 @@ def run(config: OverfitConfig) -> None:
             acoustic_model.acoustic_codec,
             output_dir,
             every_n_steps=max(1, config.train.max_steps // 5),
-            every_audio_seconds=config.callbacks.evaluation.every_audio_seconds,
             seeds=range(4),
         )
     summary = LossSummary()
@@ -218,7 +217,6 @@ def training_callbacks(
             FlowMatchingLogger(
                 runtime.flow_matching,
                 every_n_steps=flow.every_n_steps,
-                every_audio_seconds=flow.every_audio_seconds,
             )
         )
     gradient = _gradient_logger(config, acoustic_type, loss_pair)
@@ -229,7 +227,6 @@ def training_callbacks(
         callbacks.append(
             GradNormLogger(
                 every_n_steps=grad_norm.every_n_steps,
-                every_audio_seconds=grad_norm.every_audio_seconds,
             )
         )
     task_sample = config.callbacks.task_sample
@@ -240,7 +237,6 @@ def training_callbacks(
                 every_n_steps=task_sample.every_n_steps,
                 loader_name="train",
                 task=task,
-                every_audio_seconds=task_sample.every_audio_seconds,
             )
         )
     text_retention = config.callbacks.text_retention
@@ -255,7 +251,6 @@ def training_callbacks(
                     for name, probe in text_retention.probes.items()
                 },
                 every_n_steps=text_retention.every_n_steps,
-                every_audio_seconds=text_retention.every_audio_seconds,
                 max_new_tokens=text_retention.max_new_tokens,
             )
         )
@@ -321,17 +316,10 @@ def _gradient_logger(
         if policy.backbone_top_fraction is not None and policy.backbone_top_fraction < 1
         else callback.full_parameter
     )
-    if callback.every_audio_seconds is None:
-        return GradLogger(
-            loss_pair,
-            parameter_name,
-            every_n_steps=callback.every_n_steps,
-        )
     return GradLogger(
         loss_pair,
         parameter_name,
         every_n_steps=callback.every_n_steps,
-        every_audio_seconds=callback.every_audio_seconds,
     )
 
 

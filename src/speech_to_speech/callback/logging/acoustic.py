@@ -26,8 +26,7 @@ class AcousticEvaluation(Callback):
         codec: AcousticCodec,
         output_dir: Path,
         *,
-        every_n_steps: int | None,
-        every_audio_seconds: float | None = None,
+        every_n_steps: int,
         seeds: Sequence[int],
     ) -> None:
         super().__init__()
@@ -36,10 +35,7 @@ class AcousticEvaluation(Callback):
         self.codec = codec
         self.path = output_dir / "evaluation.json"
         self.every_n_steps = every_n_steps
-        self.interval = TrainInterval(
-            every_n_steps=every_n_steps,
-            every_audio_seconds=every_audio_seconds,
-        )
+        self.interval = TrainInterval(every_n_steps=every_n_steps)
         self.seeds = tuple(seeds)
         self.values: dict[int, dict[str, float]] = {}
 
@@ -56,7 +52,7 @@ class AcousticEvaluation(Callback):
         batch_idx: int,
     ) -> None:
         del outputs, batch_idx
-        should_run = self.interval.should_run(trainer, pl_module, batch)
+        should_run = self.interval.should_run(int(trainer.global_step))
         if trainer.is_global_zero and should_run:
             self.evaluate(trainer, pl_module, trainer.global_step)
 
@@ -107,7 +103,7 @@ class AcousticEvaluation(Callback):
     def load_state_dict(self, state_dict: dict[str, object]) -> None:
         interval = state_dict.get("interval", {})
         if isinstance(interval, dict):
-            self.interval.load_state_dict(cast(dict[str, float], interval))
+            self.interval.load_state_dict(cast(dict[str, int | None], interval))
         values = state_dict.get("values", {})
         if isinstance(values, dict):
             self.values = {

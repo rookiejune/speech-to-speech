@@ -109,7 +109,6 @@ class TaskSampleLogger(Callback):
         task: Task,
         split: SampleSplit = SampleSplit.TRAIN,
         seed: int = 0,
-        every_audio_seconds: float | None = None,
         max_new_tokens: int = 256,
         temperature: float = 1.0,
         top_p: float = 1.0,
@@ -133,16 +132,15 @@ class TaskSampleLogger(Callback):
             raise TypeError("task sample seed must be an integer.")
         if seed < 0:
             raise ValueError("task sample seed must be non-negative.")
+        if every_n_steps is None:
+            raise ValueError("task sample every_n_steps must be set.")
         self.indices = list(indices)
         self.loader_name = loader_name
         self.split = split
         self.task = task
         self.seed = seed
         self.every_n_steps = every_n_steps
-        self.interval = TrainInterval(
-            every_n_steps=every_n_steps,
-            every_audio_seconds=every_audio_seconds,
-        )
+        self.interval = TrainInterval(every_n_steps=every_n_steps)
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.top_p = top_p
@@ -159,7 +157,6 @@ class TaskSampleLogger(Callback):
             seed=self.seed,
             indices=tuple(self.indices),
             every_n_steps=self.interval.every_n_steps,
-            every_audio_seconds=self.interval.every_audio_seconds,
         )
 
     def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
@@ -177,7 +174,7 @@ class TaskSampleLogger(Callback):
         self, trainer: Trainer, pl_module: LightningModule, batch: Any, batch_idx: int
     ) -> None:
         del batch_idx
-        if not self.interval.should_run(trainer, pl_module, batch):
+        if not self.interval.should_run(int(trainer.global_step)):
             return
         if not trainer.is_global_zero:
             return
@@ -309,7 +306,13 @@ class TaskSampleLogger(Callback):
                 target_text = _target_text(sample, request["task"])
                 if generated_text is not None and target_text is not None:
                     metrics.update(text_metrics(target_text, generated_text))
+                metrics["generation/stopped_without_eos"] = float(
+                    result_metadata["stopped_without_eos"]
+                )
             else:
+                metrics["generation/stopped_without_eoa"] = float(
+                    result_metadata["stopped_without_eoa"]
+                )
                 target_audio = _log_target_reference_audio(
                     audio_writer,
                     datamodule,
@@ -378,10 +381,7 @@ class TaskSampleLogger(Callback):
                     )
 
     def _tag(self, dataset_index: int) -> str:
-        return (
-            f"task_sample/{self.split.value}/{self.loader_name}/"
-            f"{self.task.value}/{dataset_index}"
-        )
+        return f"sample/{self.task.value}/{dataset_index}"
 
     def _generation_kwargs(self) -> _GenerationKwargs:
         return {
@@ -392,10 +392,10 @@ class TaskSampleLogger(Callback):
             "use_cache": self.use_cache,
         }
 
-    def state_dict(self) -> dict[str, dict[str, float]]:
+    def state_dict(self) -> dict[str, dict[str, int | None]]:
         return {"interval": self.interval.state_dict()}
 
-    def load_state_dict(self, state_dict: dict[str, dict[str, float]]) -> None:
+    def load_state_dict(self, state_dict: dict[str, dict[str, int | None]]) -> None:
         self.interval.load_state_dict(state_dict.get("interval", {}))
 
 
@@ -598,16 +598,22 @@ def _modality_metadata(
 def _result_metadata(result: Result, *, max_new_tokens: int) -> dict[str, Any]:
     response_ids = result["response_ids"]
     audio = result["audio"]
+    response_tokens = int(response_ids.numel())
+    # TEXT/AUDIO paths strip the stop token from response_ids. Hitting the budget
+    # therefore means generation ended without emitting EOS/EOA.
+    reached_max = response_tokens >= max_new_tokens
     metadata: dict[str, Any] = {
-        "response_tokens": int(response_ids.numel()),
-        "reached_max_new_tokens": bool(response_ids.numel() >= max_new_tokens),
+        "response_tokens": response_tokens,
+        "reached_max_new_tokens": reached_max,
     }
     if audio is None:
+        metadata["stopped_without_eos"] = reached_max
         return metadata
     waveform = audio["waveform"]
     features = audio["features"]
     return {
         **metadata,
+        "stopped_without_eoa": reached_max,
         "sample_rate": audio["sample_rate"],
         "waveform": _tensor_metadata(waveform),
         "waveform_samples": int(waveform.size(-1)),

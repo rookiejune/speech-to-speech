@@ -80,7 +80,6 @@ class TaskSamplePanelConfig:
 class StagedTaskSampleCallbackConfig:
     enabled: bool = False
     every_n_steps: int = 10_000
-    every_audio_seconds: Optional[float] = None
     panels: list[TaskSamplePanelConfig] = field(default_factory=list)
     seed: int = 0
     max_new_tokens: int = 256
@@ -193,10 +192,6 @@ def _validate_task_samples(config: StagedTrainConfig) -> None:
         callback.every_n_steps,
         "callbacks.task_sample.every_n_steps",
     )
-    optional_positive_number(
-        callback.every_audio_seconds,
-        "callbacks.task_sample.every_audio_seconds",
-    )
     non_negative_integer(callback.seed, "callbacks.task_sample.seed")
     positive_integer(
         callback.max_new_tokens,
@@ -206,7 +201,7 @@ def _validate_task_samples(config: StagedTrainConfig) -> None:
         return
     if not callback.panels:
         raise ValueError("enabled staged task samples require panels.")
-    seen: set[tuple[str, str, str, int]] = set()
+    seen: set[tuple[str, int]] = set()
     for panel in callback.panels:
         if panel.split not in {"train", "validation"}:
             raise ValueError("task sample split must be 'train' or 'validation'.")
@@ -240,9 +235,13 @@ def _validate_task_samples(config: StagedTrainConfig) -> None:
                 "non-negative integers."
             )
         for index in panel.indices:
-            key = (panel.split, loader_name, task.value, index)
+            key = (task.value, index)
             if key in seen:
-                raise ValueError(f"duplicate task sample panel row: {key!r}.")
+                raise ValueError(
+                    "duplicate task sample tag "
+                    f"sample/{task.value}/{index}; split/loader are fetch "
+                    "coordinates and must not collide on task+index."
+                )
             seen.add(key)
         if panel.split == "validation":
             if loader.is_text:
@@ -259,10 +258,6 @@ def _validate_callback_cadences(config: StagedCallbacksConfig) -> None:
     positive_integer(
         config.grad_norm.every_n_steps,
         "callbacks.grad_norm.every_n_steps",
-    )
-    optional_positive_number(
-        config.grad_norm.every_audio_seconds,
-        "callbacks.grad_norm.every_audio_seconds",
     )
     positive_integer(
         config.checkpoint.every_n_train_steps,

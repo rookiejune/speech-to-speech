@@ -19,20 +19,18 @@ class FlowMatchingLogger(LossTimeBucketLoggerCallback):
     def __init__(
         self,
         runtime: _FlowRuntime,
-        every_n_steps: int | None = 100,
-        every_audio_seconds: float | None = None,
+        every_n_steps: int = 100,
         time_bucket_count: int = 10,
     ) -> None:
         self.runtime = runtime
-        self.interval = TrainInterval(
-            every_n_steps=every_n_steps,
-            every_audio_seconds=every_audio_seconds,
-        )
+        self.interval = TrainInterval(every_n_steps=every_n_steps)
         super().__init__(
             item_name="flow_matching",
             detail_key="t",
-            histogram_tag="flow/time",
-            scalar_template="flow/loss_t/{lower:.2f}_{upper:.2f}",
+            histogram_tag="acoustic/flow_matching/time",
+            scalar_template=(
+                "acoustic/flow_matching/loss_t/{lower:.2f}_{upper:.2f}"
+            ),
             every_n_steps=every_n_steps,
             bucket_count=time_bucket_count,
             t_min=_sampler_bound(runtime.time_sampler, "t_min", 0.0),
@@ -52,7 +50,7 @@ class FlowMatchingLogger(LossTimeBucketLoggerCallback):
             for name in ("mean", "std", "t_min", "t_max")
             if name in config
         )
-        writer.add_text("flow/config", "\n".join(values), 0)
+        writer.add_text("acoustic/flow_matching/config", "\n".join(values), 0)
 
     def should_log(
         self,
@@ -60,12 +58,13 @@ class FlowMatchingLogger(LossTimeBucketLoggerCallback):
         pl_module: LightningModule,
         batch: object,
     ) -> bool:
-        return self.interval.should_run(trainer, pl_module, batch)
+        del pl_module, batch
+        return self.interval.should_run(int(trainer.global_step))
 
-    def state_dict(self) -> dict[str, dict[str, float]]:
+    def state_dict(self) -> dict[str, dict[str, int | None]]:
         return {"interval": self.interval.state_dict()}
 
-    def load_state_dict(self, state_dict: dict[str, dict[str, float]]) -> None:
+    def load_state_dict(self, state_dict: dict[str, dict[str, int | None]]) -> None:
         self.interval.load_state_dict(state_dict.get("interval", {}))
 
 

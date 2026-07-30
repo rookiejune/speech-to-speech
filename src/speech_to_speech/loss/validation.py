@@ -5,23 +5,22 @@ from torch import Tensor
 
 from .types import LossItem, Outputs, loss_items, loss_unit
 
+_OBJECTIVE_NAME = {
+    "token": "token/loss",
+    "flow_matching": "acoustic/flow_matching/loss",
+    "repa": "acoustic/repa/loss",
+    "rvq": "acoustic/rvq/loss",
+}
+
 
 def validation_metrics(outputs: Outputs) -> dict[str, Metric]:
     metrics: dict[str, Metric] = {}
     for objective, item in loss_items(outputs):
-        name = _NAMES[objective]
+        name = _OBJECTIVE_NAME[objective]
         metrics[name] = _metric(item, item.loss, loss_unit(objective))
         if objective == "rvq":
             metrics.update(_rvq_metrics(item))
     return metrics
-
-
-_NAMES = {
-    "token": "token_ce",
-    "flow_matching": "flow_matching",
-    "repa": "repa",
-    "rvq": "rvq_ce",
-}
 
 
 def _rvq_metrics(item: LossItem) -> dict[str, Metric]:
@@ -39,14 +38,14 @@ def _rvq_metrics(item: LossItem) -> dict[str, Metric]:
 def _rvq_name(key: str) -> str | None:
     parts = key.split("_")
     if len(parts) == 2 and parts[0] == "codebook" and parts[1].isdigit():
-        return f"rvq_{key}_ce"
+        return f"acoustic/rvq/{key}"
     if (
         len(parts) == 3
         and parts[0] == "codebook"
         and parts[1].isdigit()
         and parts[2] == "top1"
     ):
-        return f"rvq_{key}"
+        return f"acoustic/rvq/{key}"
     return None
 
 

@@ -230,7 +230,6 @@ def training_callbacks(
                     split=SampleSplit(panel.split),
                     task=Task(panel.task),
                     seed=config.callbacks.task_sample.seed,
-                    every_audio_seconds=config.callbacks.task_sample.every_audio_seconds,
                     max_new_tokens=config.callbacks.task_sample.max_new_tokens,
                     temperature=config.callbacks.task_sample.temperature,
                     top_p=config.callbacks.task_sample.top_p,
@@ -249,9 +248,6 @@ def training_callbacks(
                     for name, probe in config.callbacks.text_retention.probes.items()
                 },
                 every_n_steps=config.callbacks.text_retention.every_n_steps,
-                every_audio_seconds=(
-                    config.callbacks.text_retention.every_audio_seconds
-                ),
                 max_new_tokens=config.callbacks.text_retention.max_new_tokens,
             )
         )
@@ -259,7 +255,6 @@ def training_callbacks(
         callbacks.append(
             GradNormLogger(
                 every_n_steps=config.callbacks.grad_norm.every_n_steps,
-                every_audio_seconds=config.callbacks.grad_norm.every_audio_seconds,
             )
         )
     if config.trainer.enable_checkpointing:

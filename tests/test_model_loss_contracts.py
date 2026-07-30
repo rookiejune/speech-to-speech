@@ -476,10 +476,15 @@ class ModelLossContractTest(unittest.TestCase):
             },
         )
         metrics = validation_metrics({"loss": torch.tensor(1.5), "token": token, "rvq": rvq})
-        self.assertEqual(set(metrics), {"token_ce", "rvq_ce", "rvq_codebook_0_ce", "rvq_codebook_0_top1"})
-        self.assertEqual(float(metrics["token_ce"].values.sum()), 1.0)
-        self.assertEqual(float(metrics["token_ce"].weights.sum()), 2.0)
-        self.assertEqual(float(metrics["rvq_codebook_0_top1"].values.sum()), 1.0)
+        self.assertEqual(set(metrics), {
+            "token/loss",
+            "acoustic/rvq/loss",
+            "acoustic/rvq/codebook_0",
+            "acoustic/rvq/codebook_0_top1",
+        })
+        self.assertEqual(float(metrics["token/loss"].values.sum()), 1.0)
+        self.assertEqual(float(metrics["token/loss"].weights.sum()), 2.0)
+        self.assertEqual(float(metrics["acoustic/rvq/codebook_0_top1"].values.sum()), 1.0)
 
     def test_checkpoint_audio_route_is_immutable(self):
         model = SimpleNamespace(
@@ -856,14 +861,14 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertEqual(collect.call_args.args[1], module.objective.validation)
         calls = {item.args[0]: item for item in log.call_args_list}
         expected = {
-            "val/token_ce": (torch.tensor(2.5), 4),
-            "val/rvq_ce": (torch.tensor(3.0), 3),
-            "val/rvq_codebook_0_ce": (torch.tensor(2.0), 3),
-            "val/rvq_codebook_0_top1": (torch.tensor(2.0 / 3.0), 3),
-            "val/rvq_codebook_1_ce": (torch.tensor(4.0), 3),
-            "val/rvq_codebook_1_top1": (torch.tensor(2.0 / 3.0), 3),
-            "val/flow_matching": (torch.tensor(1.5), 4),
-            "val/repa": (torch.tensor(0.4), 2),
+            "val/token/loss": (torch.tensor(2.5), 4),
+            "val/acoustic/rvq/loss": (torch.tensor(3.0), 3),
+            "val/acoustic/rvq/codebook_0": (torch.tensor(2.0), 3),
+            "val/acoustic/rvq/codebook_0_top1": (torch.tensor(2.0 / 3.0), 3),
+            "val/acoustic/rvq/codebook_1": (torch.tensor(4.0), 3),
+            "val/acoustic/rvq/codebook_1_top1": (torch.tensor(2.0 / 3.0), 3),
+            "val/acoustic/flow_matching/loss": (torch.tensor(1.5), 4),
+            "val/acoustic/repa/loss": (torch.tensor(0.4), 2),
         }
         self.assertEqual(set(calls), set(expected))
         for name, (value, batch_size) in expected.items():

@@ -76,10 +76,9 @@ reference builder 生成的结尾严格为
 grammar。model 侧 full-sequence generation 强制 marker 顺序，首个 codebook 生成至少一个
 payload 并决定 frame count，其余 codebook 只能生成相同数量、属于各自 range 的 payload，完整
 block 结束后才允许 EOA。marker 与 EOA 都计入 `max_new_tokens`，marker 也保留在
-`response_ids` 中供 frame count 与 decode 使用。单码本是同一契约的批量化简化路径。
-单码本生成在第一个 payload 位置屏蔽 EOA，并为结尾预留一个 token；如果模型在 payload
-预算内没有选择 EOA，grammar 会强制补上 EOA，再解码已经完整生成的 frame。该恢复只适用于
-每个 payload 本身就是完整 frame 的单码本序列；多码本或 structured sequence 缺少后续
+`response_ids` 中供 frame count 与 decode 使用。单码本是同一契约的批量化简化路径：
+在第一个 payload 位置屏蔽 EOA；达到 `max_new_tokens` 仍未发出 EOA 时，与其它音频路径一样
+返回截断 token 并 decode，不强制补 EOA。多码本或 structured sequence 缺少后续
 codebook/stream 时仍显式失败，不把不完整结构交给 codec。
 `generation.batch.requests_from_batch()` 会从 teacher-forcing batch 保留 task prefix，直接构造
 request 的调用方负责保持相同 task 状态机。

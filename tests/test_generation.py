@@ -1266,7 +1266,7 @@ class GenerationTest(unittest.TestCase):
                 use_cache=False,
             )
 
-    def test_single_codebook_generation_recovers_missing_eoa(self):
+    def test_single_codebook_generation_truncates_without_forcing_eoa(self):
         model = _FullSequenceGenerationModel(
             torch.tensor([[1]]),
             codebook_sizes=(4,),
@@ -1283,8 +1283,15 @@ class GenerationTest(unittest.TestCase):
         )[0]
 
         self.assertIsNotNone(result["audio"])
+        self.assertFalse(
+            bool(result["response_ids"].eq(model.runtime.eoa_token_id).any())
+        )
+        self.assertEqual(int(result["response_ids"].numel()), 4)
         self.assertTrue(
-            torch.equal(model.runtime.codec.decoded_codes, torch.tensor([[[1]]]))
+            torch.equal(
+                model.runtime.codec.decoded_codes,
+                torch.tensor([[[1], [1]]]),
+            )
         )
 
     def test_single_codebook_generation_suppresses_zero_frame_eoa(self):
@@ -1468,7 +1475,7 @@ class GenerationTest(unittest.TestCase):
         audio_call = experiment.add_audio.call_args_list[1]
         self.assertEqual(
             audio_call.args[0],
-            "task_sample/train/tts/tts/0/generated",
+            "sample/tts/0/generated",
         )
         self.assertTrue(torch.equal(audio_call.args[1], result["audio"]["waveform"]))
         self.assertEqual(audio_call.args[2], 1)
@@ -1477,7 +1484,7 @@ class GenerationTest(unittest.TestCase):
         metadata_call = experiment.add_text.call_args
         self.assertEqual(
             metadata_call.args[0],
-            "task_sample/train/tts/tts/0/metadata",
+            "sample/tts/0/metadata",
         )
         self.assertIn('"task": "tts"', metadata_call.args[1])
         self.assertIn('"dataset_index": 0', metadata_call.args[1])

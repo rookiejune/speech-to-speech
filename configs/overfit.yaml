@@ -24,14 +24,11 @@ callbacks:
   task_sample:
     enabled: true
     every_n_steps: 1
-    every_audio_seconds:
   evaluation:
     enabled: true
-    every_audio_seconds:
   text_retention:
     enabled: true
     every_n_steps: 1
-    every_audio_seconds:
     max_new_tokens: 8
     probes:
       zh_en:
@@ -40,17 +37,14 @@ callbacks:
   grad_norm:
     enabled: true
     every_n_steps: 100
-    every_audio_seconds:
   gradient_pair:
     enabled: true
     every_n_steps: 1
-    every_audio_seconds:
     full_parameter: model.backbone.model.layers.0.self_attn.q_proj.weight
     partial_parameter: model.backbone.model.norm.weight
   flow_matching:
     enabled: true
     every_n_steps: 1
-    every_audio_seconds:
   performance:
     enabled: false
 
