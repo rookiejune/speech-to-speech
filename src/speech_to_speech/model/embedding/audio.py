@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from functools import cached_property
-from typing import Protocol, runtime_checkable
+from inspect import getattr_static
+from typing import Any, Protocol, cast, runtime_checkable
 
 import torch
 from torch import Tensor, nn
@@ -14,6 +15,25 @@ from ...runtime.types import (
     semantic_feature_dim,
 )
 from .fsq import FsqAffineEmbedding
+
+_MISSING = object()
+
+
+class SemanticAudioEmbedding(Protocol):
+    @property
+    def weight(self) -> Tensor: ...
+
+    @property
+    def num_embeddings(self) -> int: ...
+
+    @property
+    def embedding_dim(self) -> int: ...
+
+    def forward(self, input_ids: Tensor) -> Tensor: ...
+
+    def __call__(self, input_ids: Tensor) -> Tensor: ...
+
+    def to(self, *args: Any, **kwargs: Any) -> "SemanticAudioEmbedding": ...
 
 _ROPE_THETA = 10000.0
 _EMBEDDING_CHUNK_SIZE = 2_048
@@ -41,7 +61,7 @@ def create_semantic_audio_embedding(
     *,
     reference: Tensor,
     embedding_dim: int | None = None,
-) -> nn.Module:
+) -> SemanticAudioEmbedding:
     levels = fsq_levels(runtime.codec)
     if levels is not None:
         if embedding_dim is None:
@@ -62,6 +82,36 @@ def create_semantic_audio_embedding(
         runtime.audio_tokenizer,
         reference=reference,
     )
+
+
+def require_semantic_audio_embedding(
+    value: object,
+    name: str,
+) -> SemanticAudioEmbedding:
+    required = ("weight", "num_embeddings", "embedding_dim", "forward", "__call__", "to")
+    missing = [
+        attribute
+        for attribute in required
+        if not _has_semantic_audio_embedding_attribute(value, attribute)
+    ]
+    if missing:
+        raise TypeError(
+            f"{name} must implement the semantic audio embedding interface "
+            f"(missing {', '.join(missing)})."
+        )
+    return cast(SemanticAudioEmbedding, value)
+
+
+def _has_semantic_audio_embedding_attribute(value: object, attribute: str) -> bool:
+    if getattr_static(value, attribute, _MISSING) is not _MISSING:
+        return True
+    if isinstance(value, nn.Module):
+        return (
+            attribute in value._parameters
+            or attribute in value._buffers
+            or attribute in value._modules
+        )
+    return False
 
 
 def _merge(embeddings: Tensor) -> Tensor:

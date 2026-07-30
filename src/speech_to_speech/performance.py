@@ -26,6 +26,7 @@ from .loss import FlowObjective, LossItem, RVQObjective, TokenObjective
 from .model import Model
 from .model._helper import require_embedding
 from .model.acoustic import FlowModel, HiddenConditionAdapter, RVQModel
+from .model.embedding.audio import require_semantic_audio_embedding
 from .pl_module import SpeechToSpeechModule
 
 
@@ -234,7 +235,7 @@ def _token_path(model: Model, core: Qwen3Model, batch: ModelBatch) -> int:
     if not bool(lengths.gt(0).all()):
         raise ValueError("each training FLOPs input row must contain a valid token.")
 
-    embedding = require_embedding(
+    embedding = require_semantic_audio_embedding(
         model.token_embedding.embeddings["audio"],
         "semantic audio embedding",
     )
@@ -314,7 +315,7 @@ def _token_head(model: Model, batch: ModelBatch) -> int:
             total += 2 * rows * hidden * (end - start)
             continue
         if modality is Modality.AUDIO:
-            embedding = require_embedding(
+            embedding = require_semantic_audio_embedding(
                 model.token_embedding.embeddings["audio"],
                 "semantic audio embedding",
             )

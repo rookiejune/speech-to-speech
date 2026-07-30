@@ -8,6 +8,7 @@ from torch import Tensor
 
 from .audio_output import AudioOutputAdapter
 from ._helper import require_embedding
+from .embedding.audio import require_semantic_audio_embedding
 from .protocol import TokenModelRuntime
 
 
@@ -35,7 +36,7 @@ class VocabularyHeadMixin:
         local_ids: Tensor | None = None,
     ) -> Tensor:
         """Compute audio logits from already-adapted hidden states."""
-        weight = require_embedding(
+        weight = require_semantic_audio_embedding(
             self.token_embedding.embeddings["audio"],
             "semantic audio embedding",
         ).weight

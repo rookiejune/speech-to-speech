@@ -43,7 +43,10 @@ from .audio_output import (
     AudioOutputAdapterType,
     create_audio_output_adapter,
 )
-from .embedding.audio import create_semantic_audio_embedding
+from .embedding.audio import (
+    create_semantic_audio_embedding,
+    require_semantic_audio_embedding,
+)
 from .protocol import TokenModelRuntime
 from .toy import ToyConfig, create_toy_backbone
 from ..runtime.types import Backbone, BackboneOutput
@@ -154,7 +157,7 @@ class Model(VocabularyHeadMixin, nn.Module):
             _frame_span_lookup(self.runtime).to(device=backbone_weight.device),
             persistent=False,
         )
-        semantic_audio_weight = require_embedding(
+        semantic_audio_weight = require_semantic_audio_embedding(
             self.token_embedding.embeddings["audio"],
             "semantic audio embedding",
         ).weight
@@ -544,7 +547,7 @@ class Model(VocabularyHeadMixin, nn.Module):
                 "audio_input_positions must point to visible codec audio payload tokens."
             )
         audio_start, _ = self.layout.blocks["audio"]
-        audio_embedding = require_embedding(
+        audio_embedding = require_semantic_audio_embedding(
             self.token_embedding.embeddings["audio"],
             "semantic audio embedding",
         )
