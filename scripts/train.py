@@ -131,6 +131,7 @@ def build_datamodule(config: StagedTrainConfig, runtime: Runtime) -> DataModule:
         LoaderSchedule(
             config.stage.loader_weights(),
             accumulate_grad_batches=config.stage.accumulate_grad_batches,
+            fuse_loaders_per_step=config.stage.fuse_loaders_per_step,
         ),
         validation=(
             _validation_spec(config) if config.validation.enabled else None
@@ -157,6 +158,17 @@ def _loader_spec(
 
 def _validation_spec(config: StagedTrainConfig) -> LoaderSpec:
     loader = config.stage.loaders[config.validation.loader]
+    if loader.is_text:
+        dataset = replace(
+            config.text_data.dataset,
+            split=config.validation.text_split,
+        )
+        return LoaderSpec.text(
+            replace(config.text_data, dataset=dataset),
+            loader.tasks,
+            prediction=loader.prediction_modality,
+            max_samples=config.validation.max_samples,
+        )
     dataset = replace(
         config.data.dataset,
         split_label=config.validation.split_label,
@@ -181,10 +193,10 @@ def build_trainer(
             callbacks,
             logger=build_logger(config.logging),
             factory=pl.Trainer,
-            accumulate_grad_batches=config.stage.accumulate_grad_batches,
+            accumulate_grad_batches=_trainer_accumulate_grad_batches(config),
             val_check_interval=(
                 config.validation.every_n_steps
-                * config.stage.accumulate_grad_batches
+                * _trainer_accumulate_grad_batches(config)
                 if config.validation.enabled
                 else None
             ),
@@ -195,6 +207,10 @@ def build_trainer(
             ),
         ),
     )
+
+
+def _trainer_accumulate_grad_batches(config: StagedTrainConfig) -> int:
+    return 1 if config.stage.fuse_loaders_per_step else config.stage.accumulate_grad_batches
 
 
 def training_callbacks(

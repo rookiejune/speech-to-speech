@@ -74,7 +74,7 @@ def evaluate_text(
     results: dict[str, TextProbeResult] = {}
     for (name, probe), generation in zip(probes.items(), generations):
         results[name] = TextProbeResult(
-            generated=_decode(runtime, generation["response_ids"]),
+            generated=decode_text_ids(runtime, generation["response_ids"]),
             nll=_reference_nll(model, prompts[name], probe["reference"]),
         )
     return results
@@ -133,7 +133,7 @@ def _reference_nll(
         raise
 
 
-def _decode(runtime: GenerationRuntime, token_ids: Tensor) -> str:
+def decode_text_ids(runtime: GenerationRuntime, token_ids: Tensor) -> str:
     if token_ids.numel():
         local_ids = runtime.layout.to_local(token_ids).detach().cpu().tolist()
     else:
@@ -141,4 +141,4 @@ def _decode(runtime: GenerationRuntime, token_ids: Tensor) -> str:
     return runtime.text_tokenizer.decode(local_ids, skip_special_tokens=True)
 
 
-__all__ = ["TextProbe", "TextProbeResult", "evaluate_text"]
+__all__ = ["TextProbe", "TextProbeResult", "decode_text_ids", "evaluate_text"]

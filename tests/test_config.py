@@ -538,8 +538,9 @@ class ConfigTest(unittest.TestCase):
         self.assertFalse(default.trainer.use_distributed_sampler)
         self.assertEqual(
             default.trainer.strategy,
-            "ddp_find_unused_parameters_true",
+            "ddp_find_unused_parameters_false",
         )
+        self.assertTrue(default.stage.fuse_loaders_per_step)
         with self.assertRaises(AttributeError):
             getattr(default.data, "sample_index")
 
@@ -547,6 +548,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.stage.name, StageName.STAGE_2)
         self.assertEqual(set(config.stage.loaders), {"asr", "tts", "mt"})
         self.assertEqual(config.stage.accumulate_grad_batches, 10)
+        self.assertTrue(config.stage.fuse_loaders_per_step)
         self.assertEqual(config.data.codec, "longcat")
         self.assertEqual(config.data.dataset.name, DatasetName.WMT19_TTS)
         self.assertEqual(config.text_data.dataset.name.value, "wmt19")
@@ -561,6 +563,7 @@ class ConfigTest(unittest.TestCase):
                 _compose(
                     "train",
                     "stage=stage_4",
+                    "stage.fuse_loaders_per_step=false",
                     "trainer.strategy=ddp_find_unused_parameters_false",
                 )
             )
@@ -652,9 +655,10 @@ class ConfigTest(unittest.TestCase):
                 self.assertIs(config.parameter_policy.name, policy)
                 self.assertEqual(
                     config.trainer.strategy,
-                    "ddp_find_unused_parameters_true",
+                    "ddp_find_unused_parameters_false",
                 )
                 self.assertGreater(config.stage.accumulate_grad_batches, 1)
+                self.assertTrue(config.stage.fuse_loaders_per_step)
                 self.assertTrue(config.callbacks.task_sample.enabled)
                 self.assertEqual(config.callbacks.task_sample.every_n_steps, 10_000)
                 self.assertEqual(
@@ -671,12 +675,24 @@ class ConfigTest(unittest.TestCase):
                     )
                 )
 
-    def test_static_ddp_rejects_multi_loader_gradient_accumulation(self):
-        with self.assertRaisesRegex(ValueError, "unused-parameter"):
+    def test_static_ddp_rejects_multi_loader_dynamic_branches(self):
+        with self.assertRaisesRegex(ValueError, "one loader branch per microbatch"):
             parse_train(
                 _compose(
                     "train",
                     "stage=stage_4",
+                    "stage.fuse_loaders_per_step=false",
+                    "trainer.strategy=ddp_find_unused_parameters_false",
+                )
+            )
+
+    def test_fused_multi_loader_requires_a_full_window(self):
+        with self.assertRaisesRegex(ValueError, "too small"):
+            parse_train(
+                _compose(
+                    "train",
+                    "stage=stage_4",
+                    "stage.accumulate_grad_batches=1",
                     "trainer.strategy=ddp_find_unused_parameters_false",
                 )
             )
@@ -754,6 +770,7 @@ class ConfigTest(unittest.TestCase):
         )
         self.assertEqual(datamodule.schedule.weights, config.stage.loader_weights())
         self.assertEqual(datamodule.schedule.accumulate_grad_batches, 10)
+        self.assertTrue(datamodule.schedule.fuse_loaders_per_step)
 
         with self.assertRaisesRegex(ValueError, "cannot mix pure text and speech"):
             StageLoaderConfig(
@@ -788,6 +805,26 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(validation_config.dataset.split_label, "dev")
         self.assertEqual(validation.task_weights, {Task.TTS: 1.0})
 
+    def test_train_datamodule_builds_limited_wmt19_mt_validation(self):
+        config = parse_train(
+            _compose(
+                "train",
+                "stage=stage_2",
+                "validation.enabled=true",
+                "validation.loader=mt",
+            )
+        )
+
+        datamodule = build_train_datamodule(config, object())
+
+        validation = datamodule.validation_spec
+        if validation is None or validation.text_config is None:
+            self.fail("MT validation text loader was not configured")
+        self.assertIs(validation.kind, LoaderKind.TEXT)
+        self.assertEqual(validation.task_weights, {Task.MT: 1.0})
+        self.assertEqual(validation.text_config.dataset.split, "validation")
+        self.assertEqual(validation.max_samples, 1000)
+
     def test_enabled_validation_requires_a_distinct_manifest_split(self):
         with self.assertRaisesRegex(ValueError, "split_manifest"):
             parse_train(_compose("train", "validation.enabled=true"))
@@ -800,16 +837,16 @@ class ConfigTest(unittest.TestCase):
                     "data.dataset.split_manifest=/tmp/splits.json",
                 )
             )
-        with self.assertRaisesRegex(ValueError, "must be a speech loader"):
-            parse_train(
-                _compose(
-                    "train",
-                    "stage=stage_2",
-                    "validation.enabled=true",
-                    "validation.loader=mt",
-                    "data.dataset.split_manifest=/tmp/splits.json",
-                )
+        mt = parse_train(
+            _compose(
+                "train",
+                "stage=stage_2",
+                "validation.enabled=true",
+                "validation.loader=mt",
             )
+        )
+        self.assertEqual(mt.validation.text_split, "validation")
+        self.assertEqual(mt.validation.max_samples, 1000)
         with self.assertRaisesRegex(ValueError, "must differ"):
             parse_train(
                 _compose(
@@ -840,8 +877,8 @@ class ConfigTest(unittest.TestCase):
 
         self.assertIs(trainer, entry.return_value)
         self.assertIs(entry.call_args.kwargs["logger"], logger.return_value)
-        self.assertEqual(entry.call_args.kwargs["accumulate_grad_batches"], 2)
-        self.assertEqual(entry.call_args.kwargs["val_check_interval"], 50)
+        self.assertEqual(entry.call_args.kwargs["accumulate_grad_batches"], 1)
+        self.assertEqual(entry.call_args.kwargs["val_check_interval"], 25)
         self.assertEqual(entry.call_args.kwargs["num_sanity_val_steps"], 2)
 
     def test_train_uses_async_checkpoint(self):
@@ -1268,7 +1305,7 @@ class ConfigTest(unittest.TestCase):
 
         self.assertIn("scripts/train.py", source)
         self.assertNotIn("scripts/overfit.py", source)
-        self.assertIn('"trainer=staged_ddp"', source)
+        self.assertIn('"trainer=staged_static_ddp"', source)
         self.assertIn("fdu_stage_data_args data.dataset.root", source)
         self.assertIn("SPEECH_TO_SPEECH_STAGE:-stage_1", source)
         self.assertIn('experiment="train/staged_joint_${stage}"', source)

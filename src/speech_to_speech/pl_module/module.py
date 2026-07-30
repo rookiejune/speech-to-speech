@@ -6,22 +6,37 @@ from enum import Enum
 from typing import Any, Generic, Protocol, TypeVar, cast
 
 import torch
+from anytrain.evaluator.text import TextComparisonEvaluator
 from anytrain.lightning import validation
 from anytrain.optim.llm import create_optimizer
 from lightning.pytorch import LightningModule
 from peft import LoraConfig
 from torch import nn
 
-from ..datamodule.types import ModelBatch, RawSpeechBatch, TrainInput
+from ..datamodule.types import (
+    FusedBatch,
+    ModelBatch,
+    RawSpeechBatch,
+    TrainBatch,
+    TrainInput,
+)
 from ..audio_route import Config as AudioRouteConfig
+from ..generation.batch import requests_from_batch
 from ..generation.service import generate_responses
-from ..generation.eval.text import TextProbe, TextProbeResult, evaluate_text
+from ..generation.eval.text import (
+    TextProbe,
+    TextProbeResult,
+    decode_text_ids,
+    evaluate_text,
+)
 from ..generation.types import Request, Result
 from ..loss import validation_metrics
 from ..loss.objective import Objective
 from ..loss.protocol import TokenObjectiveModel
-from ..loss.types import Outputs
+from ..loss.types import Outputs, combine_outputs
 from ..generation.protocol import TextEvaluationModel
+from ..prediction import PredictionModality
+from ..task import Task
 
 
 @dataclass(frozen=True)
@@ -29,6 +44,12 @@ class Config:
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
     optimizer: str = "adamw"
+    mt_validation_max_new_tokens: int = 256
+
+    def __post_init__(self) -> None:
+        value = self.mt_validation_max_new_tokens
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("mt_validation_max_new_tokens must be positive.")
 
 
 class ModuleModel(TextEvaluationModel, TokenObjectiveModel, Protocol):
@@ -67,11 +88,12 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         self.objective = objective
         self.batch_materializer = batch_materializer
         self._current_loss_outputs: Outputs | None = None
+        self.mt_validation_evaluator = TextComparisonEvaluator()
+        self._mt_validation_seen = False
 
-    def training_step(self, batch: TrainInput, batch_idx: int = 0):
+    def training_step(self, batch: TrainBatch, batch_idx: int = 0):
         del batch_idx
-        batch = self.materialize_batch(batch)
-        outputs = self._loss_outputs(batch)
+        outputs = self._training_outputs(batch)
         self._current_loss_outputs = outputs
         self.log(
             "loss",
@@ -84,12 +106,50 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
 
     def validation_step(self, batch: TrainInput, batch_idx: int = 0):
         del batch_idx
-        outputs = self._outputs(
-            self.materialize_batch(batch),
-            self.objective.validation,
-        )
+        materialized = self.materialize_batch(batch)
+        if _is_mt_validation_batch(materialized):
+            return self._mt_validation_step(materialized)
+        outputs = self._outputs(materialized, self.objective.validation)
         validation.log(self, validation_metrics(outputs))
         return outputs
+
+    def on_validation_epoch_start(self) -> None:
+        self.mt_validation_evaluator.reset()
+        self._mt_validation_seen = False
+
+    def on_validation_epoch_end(self) -> None:
+        if not _distributed_any(self._mt_validation_seen, self.device):
+            return
+        metrics = self.mt_validation_evaluator.compute()
+        for name, value in sorted(metrics.items()):
+            self.log(
+                f"val/mt/{name}",
+                float(value),
+                on_step=False,
+                on_epoch=True,
+                sync_dist=False,
+            )
+
+    def _mt_validation_step(self, batch: ModelBatch) -> dict[str, torch.Tensor]:
+        generations = generate_responses(
+            requests_from_batch(batch),
+            self.model,
+            max_new_tokens=self.config.mt_validation_max_new_tokens,
+            do_sample=False,
+        )
+        predictions = [
+            decode_text_ids(self.model.runtime, result["response_ids"])
+            for result in generations
+        ]
+        references = _reference_texts(batch, self.model.runtime)
+        self.mt_validation_evaluator.update(predictions, references)
+        self._mt_validation_seen = True
+        return {
+            "mt_validation_samples": batch.input_ids.new_tensor(
+                len(predictions),
+                dtype=torch.float32,
+            )
+        }
 
     def transfer_batch_to_device(
         self,
@@ -103,7 +163,23 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
             return batch
         if isinstance(batch, ModelBatch):
             return batch.to(device)
+        if isinstance(batch, FusedBatch):
+            return FusedBatch(
+                tuple(
+                    self.transfer_batch_to_device(child, device, dataloader_idx)
+                    for child in batch.batches
+                )
+            )
         return super().transfer_batch_to_device(batch, device, dataloader_idx)
+
+    def _training_outputs(self, batch: TrainBatch) -> Outputs:
+        if isinstance(batch, FusedBatch):
+            outputs = [
+                self._loss_outputs(self.materialize_batch(child))
+                for child in batch.batches
+            ]
+            return _combine_training_outputs(outputs)
+        return self._loss_outputs(self.materialize_batch(batch))
 
     def _loss_outputs(self, batch: ModelBatch) -> Outputs:
         return self._outputs(batch, self.objective.forward)
@@ -201,6 +277,39 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
             lr=self.config.learning_rate,
             weight_decay=self.config.weight_decay,
         )
+
+
+def _combine_training_outputs(outputs: Sequence[Outputs]) -> Outputs:
+    if not outputs:
+        raise ValueError("cannot combine an empty fused training step.")
+    combined = combine_outputs(outputs)
+    combined["loss"] = torch.stack([output["loss"] for output in outputs]).mean()
+    return combined
+
+
+def _is_mt_validation_batch(batch: ModelBatch) -> bool:
+    return bool(batch.tasks) and all(
+        task is Task.MT and prediction is PredictionModality.TEXT
+        for task, prediction in zip(batch.tasks, batch.predictions)
+    )
+
+
+def _distributed_any(value: bool, device: torch.device) -> bool:
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return value
+    flag = torch.tensor([int(value)], device=device, dtype=torch.int64)
+    torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MAX)
+    return bool(flag.item())
+
+
+def _reference_texts(batch: ModelBatch, runtime: Any) -> list[str]:
+    references = []
+    for labels in batch.token_labels:
+        token_ids = labels[labels.ne(-100)]
+        if token_ids.numel() and int(token_ids[-1].item()) == runtime.eos_token_id:
+            token_ids = token_ids[:-1]
+        references.append(decode_text_ids(runtime, token_ids))
+    return references
 
 
 def _validate_audio_route_checkpoint(

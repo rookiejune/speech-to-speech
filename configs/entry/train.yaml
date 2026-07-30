@@ -8,7 +8,7 @@ defaults:
   - /audio_route: semantic_generator
   - /data@data.dataset: wmt19_tts
   - /pl_module: sft
-  - /trainer: staged_ddp
+  - /trainer: staged_static_ddp
   - /logging: tensorboard
   - /callback/performance@callbacks.performance
   - _self_
@@ -49,6 +49,8 @@ validation:
   enabled: false
   loader: tts
   split_label: dev
+  text_split: validation
+  max_samples: 1000
   every_n_steps: 1000
   sanity_steps: -1
 

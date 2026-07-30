@@ -8,7 +8,10 @@ from omegaconf import MISSING, DictConfig
 from speech_to_speech.audio_route import Config as AudioRouteConfig
 from speech_to_speech.datamodule.config import SpeechConfig
 from speech_to_speech.datamodule.collate.joint import LoaderSchedule
-from speech_to_speech.datamodule.dataset.text import TextConfig as TextDataConfig
+from speech_to_speech.datamodule.dataset.text import (
+    TextConfig as TextDataConfig,
+    TextDatasetName,
+)
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.pl_module import Config as ModuleConfig
@@ -64,6 +67,8 @@ class ValidationConfig:
     enabled: bool = False
     loader: str = "tts"
     split_label: str = "dev"
+    text_split: str = "validation"
+    max_samples: int = 1000
     every_n_steps: int = 1000
     sanity_steps: int = -1
 
@@ -266,18 +271,34 @@ def _validate_callback_cadences(config: StagedCallbacksConfig) -> None:
 
 
 def _validate_loader_schedule(config: StagedTrainConfig) -> None:
-    if len(config.stage.loaders) > 1 and config.trainer.strategy in {
-        "ddp",
-        "ddp_find_unused_parameters_false",
-    }:
+    if len(config.stage.loaders) > 1 and config.trainer.use_distributed_sampler:
         raise ValueError(
-            "multi-loader gradient accumulation requires DDP unused-parameter "
-            "detection; select trainer=staged_ddp instead of a static DDP strategy."
+            "multi-loader staged training requires trainer.use_distributed_sampler=false; "
+            "select trainer=staged_static_ddp or trainer=staged_ddp."
+        )
+    if _uses_static_ddp(config) and _requires_unused_parameter_detection(config):
+        raise ValueError(
+            "multi-loader staged training executes one loader branch per "
+            "microbatch and requires DDP unused-parameter detection; select "
+            "trainer=staged_static_ddp with stage.fuse_loaders_per_step=true, "
+            "or use trainer=staged_ddp."
         )
     LoaderSchedule(
         config.stage.loader_weights(),
         accumulate_grad_batches=config.stage.accumulate_grad_batches,
+        fuse_loaders_per_step=config.stage.fuse_loaders_per_step,
     )
+
+
+def _uses_static_ddp(config: StagedTrainConfig) -> bool:
+    return config.trainer.strategy in {
+        "ddp",
+        "ddp_find_unused_parameters_false",
+    }
+
+
+def _requires_unused_parameter_detection(config: StagedTrainConfig) -> bool:
+    return len(config.stage.loaders) > 1 and not config.stage.fuse_loaders_per_step
 
 
 def _validate_validation(config: StagedTrainConfig) -> None:
@@ -288,6 +309,9 @@ def _validate_validation(config: StagedTrainConfig) -> None:
         raise TypeError("validation loader must be a non-empty string.")
     if not isinstance(validation.split_label, str) or not validation.split_label:
         raise TypeError("validation split_label must be a non-empty string.")
+    if not isinstance(validation.text_split, str) or not validation.text_split:
+        raise TypeError("validation text_split must be a non-empty string.")
+    positive_integer(validation.max_samples, "validation.max_samples")
     if (
         isinstance(validation.every_n_steps, bool)
         or not isinstance(validation.every_n_steps, int)
@@ -304,8 +328,13 @@ def _validate_validation(config: StagedTrainConfig) -> None:
         return
     if validation.loader not in config.stage.loaders:
         raise ValueError(f"unknown validation loader {validation.loader!r}.")
-    if config.stage.loaders[validation.loader].is_text:
-        raise ValueError("validation loader must be a speech loader.")
+    loader = config.stage.loaders[validation.loader]
+    if loader.is_text:
+        if loader.tasks != {Task.MT: 1.0}:
+            raise ValueError("text validation loader must contain only MT.")
+        if config.text_data.dataset.name is not TextDatasetName.WMT19:
+            raise ValueError("MT text validation requires the WMT19 dataset.")
+        return
     dataset = config.data.dataset
     if dataset.split_manifest is None:
         raise ValueError("enabled validation requires data.dataset.split_manifest.")

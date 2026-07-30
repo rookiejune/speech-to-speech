@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence, Sized
 from itertools import islice
 from typing import cast
 
 from anydataset import IterableAnyDataset
 from anydataset.types import Sample as RawSample
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset, Subset
 
 from ...prediction import PredictionModality
 from ...task import Task
@@ -24,10 +24,12 @@ class TextLoader:
         task_weights: Mapping[Task, float],
         *,
         prediction: PredictionModality | None = None,
+        max_samples: int | None = None,
     ) -> None:
         self.config = config
         self.runtime = runtime
         self.collator = TextCollator(runtime, task_weights, prediction=prediction)
+        self.max_samples = max_samples
         self._train_dataset: Dataset[RawSample] | IterableAnyDataset | None = None
 
     def setup(self, stage: str | None = None) -> None:
@@ -49,9 +51,15 @@ class TextLoader:
         )
 
     def train_dataloader(self) -> Iterable[ModelBatch]:
+        return self._dataloader()
+
+    def validation_dataloader(self) -> Iterable[ModelBatch]:
+        return self._dataloader()
+
+    def _dataloader(self) -> Iterable[ModelBatch]:
         if self._train_dataset is None:
             raise RuntimeError(
-                "text loader setup() must run before train_dataloader()."
+                "text loader setup() must run before building a dataloader."
             )
         loader = self.config.dataloader
         num_workers = loader.num_workers
@@ -60,8 +68,9 @@ class TextLoader:
                 TextRuntime,
                 cast(object, TextRuntimeSnapshot.from_runtime(self.runtime)),
             )
+        dataset = _limit_dataset(self._train_dataset, self.max_samples)
         return DataLoader(
-            self._train_dataset,
+            dataset,
             batch_size=loader.batch_size,
             num_workers=num_workers,
             pin_memory=loader.pin_memory,
@@ -93,6 +102,34 @@ def _samples(
     if missing:
         raise IndexError(f"text sample index {min(missing)} is outside the dataset.")
     return [selected[index] for index in indices]
+
+
+def _limit_dataset(
+    dataset: Dataset[RawSample] | IterableAnyDataset,
+    max_samples: int | None,
+) -> Dataset[RawSample] | IterableAnyDataset | IterableDataset[RawSample]:
+    if max_samples is None:
+        return dataset
+    if isinstance(max_samples, bool) or not isinstance(max_samples, int):
+        raise TypeError("text max_samples must be an integer or None.")
+    if max_samples <= 0:
+        raise ValueError("text max_samples must be positive.")
+    if not isinstance(dataset, IterableAnyDataset):
+        length = len(cast(Sized, dataset))
+        return Subset(dataset, range(min(max_samples, length)))
+    return _LimitedAnyDataset(dataset, max_samples)
+
+
+class _LimitedAnyDataset(IterableDataset[RawSample]):
+    def __init__(self, dataset: IterableAnyDataset, max_samples: int) -> None:
+        self.dataset = dataset
+        self.max_samples = max_samples
+
+    def __iter__(self) -> Iterator[RawSample]:
+        for index, sample in self.dataset.iter_indexed_runtime_shard():
+            if index >= self.max_samples:
+                break
+            yield sample
 
 
 __all__ = ["TextLoader"]

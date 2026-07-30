@@ -974,6 +974,38 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(batch.tasks, [Task.MT, Task.MT])
         self.assertIsNone(batch.acoustic_target)
 
+    def test_text_validation_dataloader_limits_samples(self):
+        runtime = SimpleNamespace(
+            text_tokenizer=_ChatTokenizer(32),
+            layout=Layout(text=(0, 32), audio=(32, 36)),
+            pad_token_id=0,
+            eos_token_id=31,
+        )
+        text_config = TextConfig(
+            dataloader=_loader(4),
+            dataset=TextDatasetConfig(
+                name=TextDatasetName.TOY,
+                toy_samples=5,
+            ),
+        )
+        datamodule = DataModule(
+            runtime,
+            {"mt": LoaderSpec.text(text_config, {Task.MT: 1.0})},
+            validation=LoaderSpec.text(
+                text_config,
+                {Task.MT: 1.0},
+                max_samples=2,
+            ),
+        )
+
+        datamodule.setup()
+        batches = list(datamodule.val_dataloader())
+
+        self.assertEqual(sum(batch.input_ids.size(0) for batch in batches), 2)
+        self.assertTrue(
+            all(task is Task.MT for batch in batches for task in batch.tasks)
+        )
+
     def test_scheduled_dataloader_rotates_homogeneous_loaders_by_weight(self):
         speech = ModelBatch.from_samples([_sample(Task.TTS)], pad_token_id=99)
         mt = ModelBatch.from_samples([_sample(Task.MT)], pad_token_id=99)

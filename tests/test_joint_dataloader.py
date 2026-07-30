@@ -14,7 +14,7 @@ from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.module import DataModule, LoaderSpec
 from speech_to_speech.datamodule.diagnostic import SampleSplit
 from speech_to_speech.datamodule.dataset.text import TextConfig
-from speech_to_speech.datamodule.types import ModelBatch
+from speech_to_speech.datamodule.types import FusedBatch, ModelBatch
 from speech_to_speech.task import Task
 
 
@@ -229,7 +229,7 @@ class ScheduledDataLoaderTest(unittest.TestCase):
         self.assertIsNone(datamodule.validation_spec)
         self.assertEqual(tuple(datamodule.val_dataloader()), ())
 
-    def test_datamodule_rejects_text_validation(self) -> None:
+    def test_datamodule_accepts_text_validation(self) -> None:
         speech = LoaderSpec.speech(
             SpeechConfig(
                 codec="longcat",
@@ -242,14 +242,13 @@ class ScheduledDataLoaderTest(unittest.TestCase):
             {Task.MT: 1.0},
         )
 
-        with (
-            patch(
-                "speech_to_speech.datamodule.module._build_loader",
-                return_value=Mock(),
-            ),
-            self.assertRaisesRegex(ValueError, "validation requires a speech loader"),
+        with patch(
+            "speech_to_speech.datamodule.module._build_loader",
+            return_value=Mock(),
         ):
-            DataModule(Mock(), {"tts": speech}, validation=text)
+            datamodule = DataModule(Mock(), {"tts": speech}, validation=text)
+
+        self.assertIs(datamodule.validation_spec, text)
 
     def test_restart_advances_loader_or_batch_sampler_epoch(self) -> None:
         direct = _DirectEpochLoader(_batch(Task.TTS))
@@ -298,6 +297,42 @@ class ScheduledDataLoaderTest(unittest.TestCase):
             [9, 9, 2],
         )
 
+    def test_fused_schedule_returns_one_batch_per_accumulation_window(self) -> None:
+        loader = ScheduledDataLoader(
+            {
+                "asr": [_batch(Task.ASR)],
+                "tts": [_batch(Task.TTS)],
+                "mt": [_batch(Task.MT)],
+            },
+            LoaderSchedule(
+                {"asr": 0.45, "tts": 0.45, "mt": 0.1},
+                accumulate_grad_batches=10,
+                fuse_loaders_per_step=True,
+            ),
+        )
+
+        fused = next(iter(loader))
+
+        self.assertIsInstance(fused, FusedBatch)
+        if not isinstance(fused, FusedBatch):
+            self.fail("scheduled loader did not return a fused batch")
+        self.assertEqual(len(fused.batches), 10)
+        self.assertEqual(
+            [batch.tasks[0] for batch in fused.batches],
+            [
+                Task.ASR,
+                Task.TTS,
+                Task.ASR,
+                Task.TTS,
+                Task.ASR,
+                Task.MT,
+                Task.TTS,
+                Task.ASR,
+                Task.TTS,
+                Task.ASR,
+            ],
+        )
+
     def test_epoch_cycles_are_deterministic_across_ranks(self) -> None:
         events = [_rank_events(), _rank_events()]
 
@@ -323,6 +358,7 @@ def _batch(task: Task) -> ModelBatch:
         token_labels=torch.tensor([[-100, 2]], dtype=torch.long),
         acoustic_target=None,
         tasks=[task],
+        predictions=[task.prediction_modality],
         pad_token_id=0,
     )
 

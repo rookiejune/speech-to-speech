@@ -25,7 +25,7 @@ from .protocol import (
     TextRuntime,
 )
 from .build.single import SingleCollator
-from .types import DataShape, TrainInput
+from .types import DataShape, TrainBatch, TrainInput
 
 if TYPE_CHECKING:
     from .dataset.text import TextConfig
@@ -44,6 +44,7 @@ class LoaderSpec:
     text_config: TextConfig | None = None
     sample_index: int | None = None
     prediction: PredictionModality | None = None
+    max_samples: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, LoaderKind):
@@ -55,12 +56,15 @@ class LoaderSpec:
             PredictionModality,
         ):
             raise TypeError("loader prediction must be a PredictionModality or None.")
+        _validate_max_samples(self.max_samples)
         if self.kind is LoaderKind.SPEECH:
             if self.speech_config is None or self.text_config is not None:
                 raise ValueError(
                     "speech loaders require speech_config and must not set text_config."
                 )
             _validate_sample_index(self.sample_index)
+            if self.max_samples is not None:
+                raise ValueError("speech loaders do not support max_samples.")
         else:
             if self.text_config is None or self.speech_config is not None:
                 raise ValueError(
@@ -93,11 +97,13 @@ class LoaderSpec:
         task_weights: Mapping[Task, float],
         *,
         prediction: PredictionModality | None = None,
+        max_samples: int | None = None,
     ) -> LoaderSpec:
         return cls(
             kind=LoaderKind.TEXT,
             task_weights=task_weights,
             text_config=config,
+            max_samples=max_samples,
             prediction=prediction,
         )
 
@@ -303,12 +309,12 @@ class DataModule(LightningDataModule):
     ) -> Callable[[list[RawSample]], TrainInput]:
         return self._diagnostic_loader(split, loader_name).diagnostic_collator(task)
 
-    def train_dataloader(self) -> Iterable[TrainInput]:
+    def train_dataloader(self) -> Iterable[TrainBatch]:
         loaders = {
             name: loader.train_dataloader() for name, loader in self._loaders.items()
         }
         if len(loaders) == 1:
-            return cast(Iterable[TrainInput], next(iter(loaders.values())))
+            return cast(Iterable[TrainBatch], next(iter(loaders.values())))
         return ScheduledDataLoader(loaders, self.schedule)
 
     def val_dataloader(self) -> Iterable[TrainInput]:
@@ -361,6 +367,7 @@ def _build_loader(
         cast(TextRuntime, runtime),
         spec.task_weights,
         prediction=spec.prediction,
+        max_samples=spec.max_samples,
     )
 
 
@@ -368,15 +375,22 @@ def _build_validation_loader(
     spec: LoaderSpec,
     runtime: DatasetRuntime | TextRuntime,
 ) -> _ValidationLoader:
-    if spec.kind is not LoaderKind.SPEECH:
-        raise ValueError("validation requires a speech loader.")
-    assert spec.speech_config is not None
-    return _SpeechLoader(
-        spec.speech_config,
-        cast(DatasetRuntime, runtime),
+    if spec.kind is LoaderKind.SPEECH:
+        assert spec.speech_config is not None
+        return _SpeechLoader(
+            spec.speech_config,
+            cast(DatasetRuntime, runtime),
+            spec.task_weights,
+            sample_index=spec.sample_index,
+            prediction=spec.prediction,
+        )
+    assert spec.text_config is not None
+    return TextLoader(
+        spec.text_config,
+        cast(TextRuntime, runtime),
         spec.task_weights,
-        sample_index=spec.sample_index,
         prediction=spec.prediction,
+        max_samples=spec.max_samples,
     )
 
 
@@ -387,6 +401,15 @@ def _validate_sample_index(sample_index: int | None) -> None:
         raise TypeError("sample_index must be an integer or None.")
     if sample_index < 0:
         raise ValueError("sample_index must be non-negative.")
+
+
+def _validate_max_samples(max_samples: int | None) -> None:
+    if max_samples is None:
+        return
+    if isinstance(max_samples, bool) or not isinstance(max_samples, int):
+        raise TypeError("max_samples must be an integer or None.")
+    if max_samples <= 0:
+        raise ValueError("max_samples must be positive.")
 
 
 def _validate_loader_names(

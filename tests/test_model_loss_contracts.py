@@ -15,6 +15,7 @@ from torch import Tensor, nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from speech_to_speech.datamodule.types import (
+    FusedBatch,
     Language,
     ModelBatch,
     RawSpeech,
@@ -818,6 +819,29 @@ class ModelLossContractTest(unittest.TestCase):
         torch.testing.assert_close(first["loss"], torch.tensor(1.0))
         torch.testing.assert_close(second["loss"], torch.tensor(3.0))
 
+    def test_training_step_fuses_accumulation_window_for_static_ddp(self):
+        objective = _BatchObjective()
+        module = SpeechToSpeechModule(
+            ModuleConfig(),
+            model=cast(Any, SimpleNamespace()),
+            objective=objective,
+        )
+        asr = _batch(Task.ASR, token_labels=torch.tensor([[-100, 1]]))
+        mt = _batch(Task.MT, token_labels=torch.tensor([[-100, 1]]))
+
+        with patch.object(module, "log"):
+            outputs = module.training_step(FusedBatch((asr, mt)), 0)
+
+        self.assertEqual(objective.tasks, [Task.ASR, Task.MT])
+        torch.testing.assert_close(outputs["loss"], torch.tensor(2.0))
+        torch.testing.assert_close(outputs["token"].loss, torch.tensor([1.0, 3.0]))
+        if outputs["token"].details is None:
+            self.fail("fused token loss details are unavailable")
+        torch.testing.assert_close(
+            outputs["token"].details["tokens"],
+            torch.tensor([1.0, 3.0]),
+        )
+
     def test_validation_step_logs_effective_unit_weighted_metrics(self):
         module = SpeechToSpeechModule(
             ModuleConfig(),
@@ -883,6 +907,58 @@ class ModelLossContractTest(unittest.TestCase):
                         "batch_size": batch_size,
                     },
                 )
+
+    def test_mt_validation_generates_and_logs_anytrain_text_metrics(self):
+        class _Tokenizer:
+            def decode(self, token_ids, *, skip_special_tokens):
+                self.skip_special_tokens = skip_special_tokens
+                return " ".join(str(token_id) for token_id in token_ids)
+
+        tokenizer = _Tokenizer()
+        runtime = SimpleNamespace(
+            text_tokenizer=tokenizer,
+            layout=Layout(text=(0, 32), audio=(32, 36)),
+            pad_token_id=0,
+            eos_token_id=31,
+        )
+        module = SpeechToSpeechModule(
+            ModuleConfig(mt_validation_max_new_tokens=8),
+            model=cast(Any, SimpleNamespace(runtime=runtime)),
+            objective=_BatchObjective(),
+        )
+        batch = _batch(
+            Task.MT,
+            token_labels=torch.tensor([[-100, 4, 5, 31]]),
+        )
+
+        module.on_validation_epoch_start()
+        with (
+            patch(
+                "speech_to_speech.pl_module.module.generate_responses",
+                return_value=[
+                    {
+                        "response_ids": torch.tensor([4, 5]),
+                        "audio": None,
+                    }
+                ],
+            ) as generate,
+            patch.object(module, "log") as log,
+        ):
+            returned = module.validation_step(batch, 0)
+            module.on_validation_epoch_end()
+
+        self.assertEqual(float(returned["mt_validation_samples"]), 1.0)
+        self.assertTrue(tokenizer.skip_special_tokens)
+        self.assertEqual(generate.call_args.kwargs["max_new_tokens"], 8)
+        self.assertFalse(generate.call_args.kwargs["do_sample"])
+        metrics = {call.args[0]: call.args[1] for call in log.call_args_list}
+        self.assertEqual(
+            set(metrics),
+            {"val/mt/bleu", "val/mt/chrf", "val/mt/wer"},
+        )
+        self.assertEqual(metrics["val/mt/bleu"], 100.0)
+        self.assertEqual(metrics["val/mt/chrf"], 100.0)
+        self.assertEqual(metrics["val/mt/wer"], 0.0)
 
     def test_combined_outputs_use_effective_units_without_loader_weights(self):
         first = LossItem(
