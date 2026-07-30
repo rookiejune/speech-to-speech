@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
 from anydataset import types
 
 from ..task import Task
-from ._task import TaskWeights, allocate_tasks
+from ._duration import from_frames
+from ._task import TaskWeights
 from ._tokenization import token_ids
 from .parser import parse_audio_codes, raw_speech, speech_from_codes
 from .protocol import DataRuntime
@@ -37,18 +37,12 @@ class SingleCollator:
         _validate_single_tasks(_positive_tasks(task_weights))
         self._task_weights = TaskWeights(task_weights)
 
-    def set_task_weights(self, task_weights: Mapping[Task, float]) -> None:
-        _validate_single_tasks(_positive_tasks(task_weights))
-        self._task_weights.set(task_weights)
-
     @property
     def tasks(self) -> list[Task]:
-        tasks, _ = self._task_weights.get()
-        return tasks
+        return self._task_weights.tasks
 
     def _items(self, samples: list[types.Sample]) -> list[SpeechTaskSample]:
-        available, weights = self._task_weights.get()
-        tasks = allocate_tasks(available, weights, len(samples))
+        tasks = self._task_weights.allocate(len(samples))
         return [
             _build_item(
                 sample,
@@ -81,8 +75,8 @@ def parse_single_sample(sample: types.Sample, runtime: DataRuntime) -> Speech:
         codes,
         text_token_ids=token_ids(text, runtime.text_tokenizer),
         language=_language(text_item),
-        duration_seconds=_duration_seconds(
-            audio_item,
+        duration_seconds=from_frames(
+            audio_item.meta.get(types.AudioMeta.DURATION),
             frames=semantic_codes.size(0),
             frame_rate=runtime.codec_frame_rate,
         ),
@@ -209,28 +203,6 @@ def _codec_codes(audio_item: types.AudioItem, runtime: DataRuntime) -> object:
             f"single audio sample is missing {runtime.audio_view.value!r} codec codes."
         ) from error
     return codes
-
-
-def _duration_seconds(
-    audio_item: types.AudioItem,
-    *,
-    frames: int,
-    frame_rate: float,
-) -> float:
-    value = audio_item.meta.get(types.AudioMeta.DURATION)
-    if value is not None:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise TypeError("AudioMeta.DURATION must be a number of seconds.")
-        duration = float(value)
-        if not math.isfinite(duration) or duration < 0:
-            raise ValueError("AudioMeta.DURATION must be finite and non-negative.")
-        return duration
-    if frames < 0:
-        raise ValueError("audio frame count must be non-negative.")
-    rate = float(frame_rate)
-    if not math.isfinite(rate) or rate <= 0:
-        raise ValueError("codec frame_rate must be finite and positive.")
-    return float(frames) / rate
 
 
 def _language(text_item: types.TextItem):

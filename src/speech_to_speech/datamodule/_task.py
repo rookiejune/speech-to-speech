@@ -3,37 +3,41 @@ from __future__ import annotations
 import math
 import multiprocessing
 from collections.abc import Mapping
-from typing import Any
 
 from ..task import Task
-
-_TASKS = tuple(Task)
-_ABSENT = -1.0
 
 
 class TaskWeights:
     def __init__(self, values: Mapping[Task, float]) -> None:
-        self._values: Any = multiprocessing.Array(
-            "d",
-            [_ABSENT] * len(_TASKS),
-            lock=True,
-        )
-        self.set(values)
-
-    def set(self, values: Mapping[Task, float]) -> None:
         weights = dict(values)
         _validate_tasks(list(weights))
         _validate_weights(list(weights.values()))
-        updated = [float(weights.get(task, _ABSENT)) for task in _TASKS]
-        with self._values.get_lock():
-            self._values[:] = updated
+        self._tasks = tuple(task for task, weight in weights.items() if weight > 0)
+        self._weights = tuple(
+            float(weight) for weight in weights.values() if weight > 0
+        )
+        self._credits = multiprocessing.Array(
+            "d",
+            [0.0] * len(self._tasks),
+            lock=True,
+        )
 
-    def get(self) -> tuple[list[Task], list[float]]:
-        with self._values.get_lock():
-            values = list(self._values[:])
-        tasks = [task for task, weight in zip(_TASKS, values) if weight > 0]
-        weights = [weight for weight in values if weight > 0]
-        return tasks, weights
+    @property
+    def tasks(self) -> list[Task]:
+        return list(self._tasks)
+
+    def allocate(self, batch_size: int) -> list[Task]:
+        _validate_batch_size(batch_size)
+        with self._credits.get_lock():
+            credits = [self._credits[index] for index in range(len(self._tasks))]
+            allocated = _allocate_tasks(
+                list(self._tasks),
+                list(self._weights),
+                batch_size,
+                credits,
+            )
+            self._credits[:] = credits
+        return allocated
 
 
 def allocate_tasks(
@@ -41,25 +45,38 @@ def allocate_tasks(
     weights: list[float],
     batch_size: int,
 ) -> list[Task]:
+    _validate_batch_size(batch_size)
+    if len(tasks) != len(weights):
+        raise ValueError("tasks and weights must have the same length.")
+    _validate_weights(weights)
+    return _allocate_tasks(tasks, weights, batch_size, [0.0] * len(tasks))
+
+
+def _allocate_tasks(
+    tasks: list[Task],
+    weights: list[float],
+    batch_size: int,
+    credits: list[float],
+) -> list[Task]:
+    total = sum(weights)
+    allocated = []
+    for _ in range(batch_size):
+        for index, weight in enumerate(weights):
+            credits[index] += weight
+        selected = max(
+            range(len(tasks)),
+            key=lambda index: (credits[index], -index),
+        )
+        credits[selected] -= total
+        allocated.append(tasks[selected])
+    return allocated
+
+
+def _validate_batch_size(batch_size: int) -> None:
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int):
+        raise TypeError("task allocation batch size must be an integer.")
     if batch_size < 1:
         raise ValueError("task allocation requires a non-empty batch.")
-    total = sum(weights)
-    targets = [weight * batch_size / total for weight in weights]
-    if any(target < 1 for target in targets):
-        raise ValueError(
-            "batch size is too small for fixed task weights; each non-zero task "
-            "must receive at least one sample."
-        )
-    counts = [math.floor(target) for target in targets]
-    remaining = batch_size - sum(counts)
-    order = sorted(
-        range(len(tasks)),
-        key=lambda index: (targets[index] - counts[index], -index),
-        reverse=True,
-    )
-    for index in order[:remaining]:
-        counts[index] += 1
-    return [task for task, count in zip(tasks, counts) for _ in range(count)]
 
 
 def _validate_tasks(tasks: list[Task]) -> None:

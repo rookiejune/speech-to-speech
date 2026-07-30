@@ -35,6 +35,10 @@ from speech_to_speech.model.acoustic import (
     RVQModel,
 )
 from speech_to_speech.model.base import Config as ModelConfig
+from speech_to_speech.model.audio_output import (
+    AudioOutputAdapterConfig,
+    AudioOutputAdapterType,
+)
 from speech_to_speech.generation import (
     decode_generated_audio,
     decode_generated_codes,
@@ -444,7 +448,9 @@ class FakeClosureTest(unittest.TestCase):
 def _model_config() -> ModelConfig:
     return ModelConfig(
         semantic_audio_adapter=None,
-        semantic_audio_output_adapter=None,
+        audio_output_adapter=AudioOutputAdapterConfig(
+            type=AudioOutputAdapterType.NONE
+        ),
         toy=ToyConfig(
             hidden_size=4,
             intermediate_size=8,

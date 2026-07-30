@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Union, cast
+from typing import TYPE_CHECKING, Union, cast
 
 import hydra
 import torch
-from anytrain.lightning import PerformanceCallback
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig
@@ -27,11 +25,10 @@ from speech_to_speech.datamodule import DataModule
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.module import LoaderSpec
 from speech_to_speech.datamodule.types import ModelBatch
-from speech_to_speech.generation.batch import requests_from_batch
+from speech_to_speech.generation.evaluation import evaluate_autoregressive
 from speech_to_speech.model.acoustic import AcousticType, FlowModel, RVQModel
 from speech_to_speech.pl_module import SpeechToSpeechModule
-from speech_to_speech.pl_module.composition import flow, rvq, token
-from speech_to_speech.performance import TrainingFlops
+from speech_to_speech.pl_module.composition import build
 from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import Runtime
 from speech_to_speech.runtime.types import codec_sample_rate
@@ -44,26 +41,22 @@ if TYPE_CHECKING:
 if __package__:
     from ._config import (
         OverfitFlowConfig,
-        OverfitTokenConfig,
         overfit as parse_config,
     )
     from ._entry import (
-        acoustic_composition,
         performance,
-        runtime_config as entry_runtime_config,
+        runtime_config,
         trainer as entry_trainer,
     )
     from ._logging import build as build_logger
 else:
     from _config import (
         OverfitFlowConfig,
-        OverfitTokenConfig,
         overfit as parse_config,
     )
     from _entry import (
-        acoustic_composition,
         performance,
-        runtime_config as entry_runtime_config,
+        runtime_config,
         trainer as entry_trainer,
     )
     from _logging import build as build_logger
@@ -79,7 +72,7 @@ def run(config: OverfitConfig) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     pl.seed_everything(config.train.seed, workers=True)
-    rt_config = runtime_config(config)
+    rt_config = runtime_config(config.runtime)
     rt = Runtime(rt_config, audio_route=config.audio_route)
     codec = rt.codec
     task = Task(config.task)
@@ -100,25 +93,20 @@ def run(config: OverfitConfig) -> None:
         },
     )
 
-    repa_weight = None
     torch.manual_seed(config.train.seed)
-    acoustic_type = _composition(
-        config,
-        uses_acoustic_side_channel=rt.acoustic_side_channel,
+    acoustic_type, module, model = build(
+        rt,
+        config.pl_module,
+        config.model,
+        config.acoustic,
     )
     uses_acoustic_decoder = acoustic_type is not AcousticType.NONE
     evaluation: AcousticEvaluation | None = None
-    if isinstance(config, OverfitTokenConfig):
-        module, model = token(rt, config.pl_module, config.model)
-    elif isinstance(config, OverfitFlowConfig):
-        module, model, repa_weight = flow(
-            rt,
-            config.pl_module,
-            config.model,
-            config.acoustic,
-        )
-    else:
-        module, model = rvq(rt, config.pl_module, config.model, config.acoustic)
+    repa_weight = (
+        config.acoustic.repa.weight
+        if isinstance(config, OverfitFlowConfig)
+        else None
+    )
     apply_parameter_policy(model, config.parameter_policy.spec())
     if config.data.encode_missing_codes is True:
         module.batch_materializer = OnDeviceCodecMaterializer(rt)
@@ -177,6 +165,8 @@ def run(config: OverfitConfig) -> None:
             TaskSampleLogger(
                 [config.data.sample_index],
                 every_n_steps=config.callbacks.task_sample.every_n_steps,
+                loader_name="train",
+                task=task,
                 every_audio_seconds=config.callbacks.task_sample.every_audio_seconds,
             ),
         )
@@ -190,9 +180,9 @@ def run(config: OverfitConfig) -> None:
         )
     if uses_acoustic_decoder and acoustic_type is AcousticType.FLOW:
         callbacks.insert(1, FlowMatchingLogger(rt.flow_matching, every_n_steps=1))
-    performance = _performance(config)
-    if performance is not None:
-        callbacks.insert(0, performance)
+    performance_callback = performance(config.callbacks.performance)
+    if performance_callback is not None:
+        callbacks.insert(0, performance_callback)
     trainer = build_trainer(config, output_dir, callbacks)
     trainer.fit(module, datamodule=datamodule)
 
@@ -201,7 +191,7 @@ def run(config: OverfitConfig) -> None:
 
     if evaluation is not None:
         _prepare_generation_module(module, _device(rt_config))
-        generation = evaluate_generation(
+        generation = evaluate_autoregressive(
             module,
             evaluation.batch,
             sample_rate=codec_sample_rate(codec),
@@ -269,60 +259,8 @@ def _prepare_generation_module(
     return next(module.parameters()).device
 
 
-@torch.no_grad()
-def evaluate_generation(
-    module: SpeechToSpeechModule,
-    batch: ModelBatch,
-    *,
-    sample_rate: int,
-) -> dict[str, Any]:
-    device = next(module.parameters()).device
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-    started = time.perf_counter()
-    result = module.generate(
-        requests_from_batch(batch),
-        max_new_tokens=64,
-        do_sample=False,
-    )[0]
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-    elapsed = time.perf_counter() - started
-    audio = result["audio"]
-    if audio is None:
-        raise RuntimeError("acoustic task generation did not return audio.")
-    features = audio["features"]
-    waveform = audio["waveform"]
-    if features is None:
-        raise RuntimeError("LongCat generation did not return acoustic features.")
-    if not bool(torch.isfinite(features).all() and torch.isfinite(waveform).all()):
-        raise RuntimeError("generation returned non-finite acoustic output.")
-    duration = waveform.numel() / sample_rate
-    return {
-        "token_ids": result["response_ids"].detach().cpu().tolist(),
-        "feature_shape": list(features.shape),
-        "waveform_shape": list(waveform.shape),
-        "duration_seconds": duration,
-        "elapsed_seconds": elapsed,
-        "rtf": elapsed / duration,
-        "finite": True,
-    }
-
-
-def runtime_config(config: OverfitConfig) -> RuntimeConfig:
-    return entry_runtime_config(config.runtime)
-
-
 def _device(config: RuntimeConfig) -> torch.device | None:
     return None if config.device is None else torch.device(config.device)
-
-
-def _performance(config: OverfitConfig) -> Callback | None:
-    return performance(
-        config.callbacks.performance,
-        callback=PerformanceCallback,
-        flops=TrainingFlops(),
-    )
 
 
 def _gradient_logger(
@@ -347,18 +285,6 @@ def _gradient_logger(
         loss_pair,
         parameter_name,
         every_n_steps=1,
-    )
-
-
-def _composition(
-    config: OverfitConfig,
-    *,
-    uses_acoustic_side_channel: bool,
-) -> AcousticType:
-    return acoustic_composition(
-        config,
-        token_type=OverfitTokenConfig,
-        uses_acoustic_side_channel=uses_acoustic_side_channel,
     )
 
 

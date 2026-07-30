@@ -39,7 +39,7 @@ class _LoraStageModel(nn.Module):
         self.backbone.model.layers = nn.ModuleList([layer])
         self.semantic_audio_embedding = nn.Embedding(2, 2)
         self.semantic_audio_adapter = nn.Linear(2, 2)
-        self.semantic_audio_output_adapter = nn.Linear(2, 2)
+        self.audio_output_adapter = nn.Linear(2, 2)
         self.acoustic_decoder = nn.Linear(2, 2)
 
 

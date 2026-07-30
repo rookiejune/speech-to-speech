@@ -24,7 +24,7 @@ from .protocol import (
     TextRuntime,
 )
 from .single import SingleCollator
-from .types import ConcreteTrainInput, DataShape, TrainInputBatch
+from .types import DataShape, TrainInput
 
 if TYPE_CHECKING:
     from .text import TextConfig
@@ -100,20 +100,15 @@ class _DiagnosticLoader(_Loader, Protocol):
     def diagnostic_collator(
         self,
         task: Task,
-    ) -> Callable[[list[RawSample]], ConcreteTrainInput]: ...
+    ) -> Callable[[list[RawSample]], TrainInput]: ...
 
 
 class _TrainLoader(_DiagnosticLoader, Protocol):
-    @property
-    def collator(self) -> Callable[[list[RawSample]], ConcreteTrainInput]: ...
-
-    def set_task_weights(self, task_weights: Mapping[Task, float]) -> None: ...
-
-    def train_dataloader(self) -> Iterable[ConcreteTrainInput]: ...
+    def train_dataloader(self) -> Iterable[TrainInput]: ...
 
 
 class _ValidationLoader(_DiagnosticLoader, Protocol):
-    def validation_dataloader(self) -> Iterable[ConcreteTrainInput]: ...
+    def validation_dataloader(self) -> Iterable[TrainInput]: ...
 
 
 class _SpeechLoader:
@@ -157,9 +152,6 @@ class _SpeechLoader:
                 )
             self._subset = Subset(self._dataset, [self.sample_index])
 
-    def set_task_weights(self, task_weights: Mapping[Task, float]) -> None:
-        self.collator.set_task_weights(task_weights)
-
     def train_samples(self, indices: Sequence[int]) -> list[RawSample]:
         if self._dataset is None:
             raise RuntimeError("DataModule.setup() must run before reading samples.")
@@ -168,7 +160,7 @@ class _SpeechLoader:
     def diagnostic_collator(
         self,
         task: Task,
-    ) -> Callable[[list[RawSample]], ConcreteTrainInput]:
+    ) -> Callable[[list[RawSample]], TrainInput]:
         return _collator(
             self.config.shape,
             self.runtime,
@@ -176,13 +168,13 @@ class _SpeechLoader:
             encode_missing_codes=self.config.encode_missing_codes,
         )
 
-    def train_dataloader(self) -> Iterable[ConcreteTrainInput]:
+    def train_dataloader(self) -> Iterable[TrainInput]:
         return self._dataloader(shuffle=True)
 
-    def validation_dataloader(self) -> Iterable[ConcreteTrainInput]:
+    def validation_dataloader(self) -> Iterable[TrainInput]:
         return self._dataloader(shuffle=False)
 
-    def _dataloader(self, *, shuffle: bool) -> Iterable[ConcreteTrainInput]:
+    def _dataloader(self, *, shuffle: bool) -> Iterable[TrainInput]:
         if self._dataset is None:
             raise RuntimeError(
                 "speech loader setup() must run before building a loader."
@@ -207,7 +199,7 @@ class _SpeechLoader:
         )
         if source_loader is not None:
             if source_loader.dataset is self._dataset:
-                return cast(Iterable[ConcreteTrainInput], source_loader)
+                return cast(Iterable[TrainInput], source_loader)
             return DataLoader(
                 self._dataset,
                 batch_sampler=source_loader.batch_sampler,
@@ -271,39 +263,6 @@ class DataModule(LightningDataModule):
     def loader_names(self) -> tuple[str, ...]:
         return tuple(self.loader_specs)
 
-    def set_loader_weights(self, weights: Mapping[str, float]) -> None:
-        schedule = LoaderSchedule(
-            dict(weights),
-            accumulate_grad_batches=self.schedule.accumulate_grad_batches,
-        )
-        _validate_loader_names(self.loader_specs, schedule.weights)
-        self.schedule = schedule
-
-    def set_task_weights(
-        self,
-        task_weights: Mapping[Task, float],
-        *,
-        loader_name: str | None = None,
-    ) -> None:
-        loader = self._single_loader(loader_name, "set task weights")
-        loader.set_task_weights(task_weights)
-
-    def train_samples(
-        self,
-        indices: Sequence[int],
-        *,
-        loader_name: str | None = None,
-    ) -> list[RawSample]:
-        loader = self._single_loader(loader_name, "read samples")
-        return loader.train_samples(indices)
-
-    def collator_for(
-        self,
-        loader_name: str | None = None,
-    ) -> Callable[[list[RawSample]], ConcreteTrainInput]:
-        loader = self._single_loader(loader_name, "read collator")
-        return loader.collator
-
     def diagnostic_samples(
         self,
         indices: Sequence[int],
@@ -319,36 +278,24 @@ class DataModule(LightningDataModule):
         *,
         split: SampleSplit,
         loader_name: str,
-    ) -> Callable[[list[RawSample]], ConcreteTrainInput]:
+    ) -> Callable[[list[RawSample]], TrainInput]:
         return self._diagnostic_loader(split, loader_name).diagnostic_collator(task)
 
-    def train_dataloader(self) -> Iterable[TrainInputBatch]:
+    def train_dataloader(self) -> Iterable[TrainInput]:
         loaders = {
             name: loader.train_dataloader() for name, loader in self._loaders.items()
         }
         if len(loaders) == 1:
-            return cast(Iterable[TrainInputBatch], next(iter(loaders.values())))
+            return cast(Iterable[TrainInput], next(iter(loaders.values())))
         return ScheduledDataLoader(loaders, self.schedule)
 
-    def val_dataloader(self) -> Iterable[TrainInputBatch]:
+    def val_dataloader(self) -> Iterable[TrainInput]:
         if self._validation_loader is None:
             return ()
         return cast(
-            Iterable[TrainInputBatch],
+            Iterable[TrainInput],
             self._validation_loader.validation_dataloader(),
         )
-
-    def _single_loader(self, loader_name: str | None, operation: str) -> _TrainLoader:
-        if loader_name is None:
-            if len(self._loaders) != 1:
-                raise ValueError(
-                    f"{operation} requires loader_name when DataModule has multiple loaders."
-                )
-            loader_name = next(iter(self._loaders))
-        try:
-            return self._loaders[loader_name]
-        except KeyError as error:
-            raise ValueError(f"unknown loader {loader_name!r}.") from error
 
     def _diagnostic_loader(
         self,

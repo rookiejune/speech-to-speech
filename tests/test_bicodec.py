@@ -17,7 +17,7 @@ from speech_to_speech.generation.decode import (
     decode_generated_bicodec_full,
     decode_generated_bicodec_route,
 )
-from speech_to_speech.generation.service import _validate_request
+from speech_to_speech.generation._request import validate
 from speech_to_speech.task import Task
 from anytrain.module.idspace import Layout
 from speech_to_speech.runtime import AudioRepresentation, Config
@@ -155,7 +155,7 @@ class BiCodecDecodeTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "structured prompt audio context"):
-            _validate_request(
+            validate(
                 {"prompt_ids": torch.tensor([1]), "task": Task.TTS},
                 model,
             )

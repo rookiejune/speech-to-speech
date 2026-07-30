@@ -9,15 +9,13 @@ from ..datamodule.protocol import DatasetRuntime
 from ..datamodule.parser import speech_from_codes
 from ..datamodule.sample import build_task_sample
 from ..datamodule.types import (
-    ConcreteTrainInput,
     ModelBatch,
     RawSpeech,
     RawSpeechBatch,
     Speech,
     SpeechTaskSample,
     Text,
-    TrainBatch,
-    TrainInputBatch,
+    TrainInput,
 )
 from ..runtime.types import frame_codec, structured_codec, supports_structured
 
@@ -31,15 +29,15 @@ class OnDeviceCodecMaterializer:
     @torch.no_grad()
     def __call__(
         self,
-        batch: TrainInputBatch,
+        batch: TrainInput,
         *,
         device: torch.device | None = None,
-    ) -> TrainBatch:
+    ) -> ModelBatch:
         return self._concrete(batch, device=device)
 
     def _concrete(
         self,
-        batch: ConcreteTrainInput,
+        batch: TrainInput,
         *,
         device: torch.device | None,
     ) -> ModelBatch:

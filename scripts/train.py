@@ -7,8 +7,7 @@ from typing import TYPE_CHECKING, cast
 
 import hydra
 import torch
-from anydataset.types import Modality
-from anytrain.lightning import ModelCheckpoint, PerformanceCallback, validation
+from anytrain.lightning import ModelCheckpoint, validation
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig
@@ -24,10 +23,7 @@ from speech_to_speech.callback.logging import (
 from speech_to_speech.datamodule import DataModule, SampleSplit
 from speech_to_speech.datamodule.joint import LoaderSchedule
 from speech_to_speech.datamodule.module import LoaderSpec
-from speech_to_speech.model.acoustic import AcousticType
-from speech_to_speech.performance import TrainingFlops
-from speech_to_speech.pl_module.composition import flow, rvq, token
-from speech_to_speech.runtime import Config as RuntimeConfig
+from speech_to_speech.pl_module.composition import build
 from speech_to_speech.runtime import Runtime
 from speech_to_speech.stage import StageLoaderConfig, apply_parameter_policy
 from speech_to_speech.task import Task
@@ -36,28 +32,18 @@ if TYPE_CHECKING:
     from scripts._config import StagedTrainConfig
 
 if __package__:
-    from ._config import (
-        StagedTrainFlowConfig,
-        StagedTrainTokenConfig,
-        train as parse_config,
-    )
+    from ._config import train as parse_config
     from ._entry import (
-        acoustic_composition,
         performance,
-        runtime_config as entry_runtime_config,
+        runtime_config,
         trainer as entry_trainer,
     )
     from ._logging import build as build_logger
 else:
-    from _config import (
-        StagedTrainFlowConfig,
-        StagedTrainTokenConfig,
-        train as parse_config,
-    )
+    from _config import train as parse_config
     from _entry import (
-        acoustic_composition,
         performance,
-        runtime_config as entry_runtime_config,
+        runtime_config,
         trainer as entry_trainer,
     )
     from _logging import build as build_logger
@@ -73,20 +59,16 @@ def run(config: StagedTrainConfig) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     pl.seed_everything(config.train.seed, workers=True)
-    rt_config = runtime_config(config)
+    rt_config = runtime_config(config.runtime)
     rt = Runtime(rt_config, audio_route=config.audio_route)
 
     torch.manual_seed(config.train.seed)
-    acoustic_type = _composition(
-        config,
-        uses_acoustic_side_channel=rt.acoustic_side_channel,
+    acoustic_type, module, model = build(
+        rt,
+        config.pl_module,
+        config.model,
+        config.acoustic,
     )
-    if isinstance(config, StagedTrainTokenConfig):
-        module, model = token(rt, config.pl_module, config.model)
-    elif isinstance(config, StagedTrainFlowConfig):
-        module, model, _ = flow(rt, config.pl_module, config.model, config.acoustic)
-    else:
-        module, model = rvq(rt, config.pl_module, config.model, config.acoustic)
     if config.data.encode_missing_codes is True:
         module.batch_materializer = OnDeviceCodecMaterializer(rt)
     apply_parameter_policy(model, config.parameter_policy.spec())
@@ -160,43 +142,24 @@ def _loader_spec(
     config: StagedTrainConfig,
     loader: StageLoaderConfig,
 ):
-    task_weights = _task_weights(loader)
-    if _is_text_loader(task_weights):
+    if loader.is_text:
         return LoaderSpec.text(
             config.text_data,
-            task_weights,
+            loader.tasks,
         )
-    return LoaderSpec.speech(config.data, task_weights)
+    return LoaderSpec.speech(config.data, loader.tasks)
 
 
 def _validation_spec(config: StagedTrainConfig) -> LoaderSpec:
     loader = config.stage.loaders[config.validation.loader]
-    task_weights = _task_weights(loader)
-    if _is_text_loader(task_weights):
-        raise ValueError("validation loader must be a speech loader.")
     dataset = replace(
         config.data.dataset,
         split_label=config.validation.split_label,
     )
     return LoaderSpec.speech(
         replace(config.data, dataset=dataset),
-        task_weights,
+        loader.tasks,
     )
-
-
-def _task_weights(loader: StageLoaderConfig) -> dict[Task, float]:
-    return {Task(name): weight for name, weight in loader.task_weights.items()}
-
-
-def _is_text_loader(task_weights: dict[Task, float]) -> bool:
-    text_tasks = [
-        task.source_modality is not Modality.AUDIO
-        and task.target_modality is Modality.TEXT
-        for task in task_weights
-    ]
-    if any(text_tasks) and not all(text_tasks):
-        raise ValueError("a staged loader cannot mix pure text and speech tasks.")
-    return all(text_tasks)
 
 
 def build_trainer(
@@ -235,9 +198,9 @@ def training_callbacks(
     validation_history: Callback | None = None,
 ) -> list[Callback]:
     callbacks: list[Callback] = []
-    performance = _performance(config)
-    if performance is not None:
-        callbacks.append(performance)
+    performance_callback = performance(config.callbacks.performance)
+    if performance_callback is not None:
+        callbacks.append(performance_callback)
     callbacks.extend(
         cast(
             list[Callback],
@@ -252,10 +215,6 @@ def training_callbacks(
     if config.callbacks.task_sample.enabled:
         for panel in config.callbacks.task_sample.panels:
             loader_name = panel.loader
-            if loader_name not in config.stage.loaders:
-                raise ValueError(
-                    f"task sample callback references unknown loader {loader_name!r}."
-                )
             callbacks.append(
                 TaskSampleLogger(
                     panel.indices,
@@ -289,7 +248,7 @@ def training_callbacks(
                 max_new_tokens=config.callbacks.text_retention.max_new_tokens,
             )
         )
-    if config.callbacks.grad_norm.enabled and performance is None:
+    if config.callbacks.grad_norm.enabled and performance_callback is None:
         callbacks.append(
             GradNormLogger(
                 every_n_steps=config.callbacks.grad_norm.every_n_steps,
@@ -309,30 +268,6 @@ def training_callbacks(
             )
         )
     return callbacks
-
-
-def runtime_config(config: StagedTrainConfig) -> RuntimeConfig:
-    return entry_runtime_config(config.runtime)
-
-
-def _performance(config: StagedTrainConfig) -> Callback | None:
-    return performance(
-        config.callbacks.performance,
-        callback=PerformanceCallback,
-        flops=TrainingFlops(),
-    )
-
-
-def _composition(
-    config: StagedTrainConfig,
-    *,
-    uses_acoustic_side_channel: bool,
-) -> AcousticType:
-    return acoustic_composition(
-        config,
-        token_type=StagedTrainTokenConfig,
-        uses_acoustic_side_channel=uses_acoustic_side_channel,
-    )
 
 
 if __name__ == "__main__":

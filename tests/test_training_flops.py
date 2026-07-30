@@ -24,6 +24,8 @@ from speech_to_speech.model import (
     AdapterType,
     AudioInputAdapterConfig,
     AudioInputAdapterType,
+    AudioOutputAdapterConfig,
+    AudioOutputAdapterType,
     Config as ModelConfig,
     TokenModel,
     ToyConfig,
@@ -128,6 +130,23 @@ class TrainingFlopsTest(unittest.TestCase):
             )
             baseline = _token_expected(model, without_positions)
             self.assertEqual(_flops(module, without_positions), baseline)
+
+    def test_explicit_audio_output_adapter_is_counted(self):
+        batch = _batch(
+            input_ids=torch.tensor([[1, 7, 8, 2], [1, 7, 0, 0]]),
+            labels=torch.tensor([[-100, 7, 8, -100], [-100, 9, -100, -100]]),
+            tasks=[Task.TTS, Task.TTS],
+        )
+        for adapter_type in (
+            AudioOutputAdapterType.NONE,
+            AudioOutputAdapterType.LINEAR,
+            AudioOutputAdapterType.MLP,
+        ):
+            config = AudioOutputAdapterConfig(type=adapter_type)
+            model = _token_model(_model_config(audio_output_adapter=config))
+            module = _module(model, TokenObjective(_layout()))
+            expected = _token_expected(model, batch)
+            self.assertEqual(_flops(module, batch), expected)
 
     def test_flow_uses_padded_target_frames(self):
         model = _flow_model()
@@ -272,12 +291,15 @@ class _Runtime:
 
 
 def _model_config(
-    *, audio_input_adapter: AudioInputAdapterConfig | None = None
+    *,
+    audio_input_adapter: AudioInputAdapterConfig | None = None,
+    audio_output_adapter: AudioOutputAdapterConfig | None = None,
 ) -> ModelConfig:
     return ModelConfig(
         semantic_audio_adapter=AdapterType.LINEAR,
-        semantic_audio_output_adapter=AdapterType.LINEAR,
         audio_input_adapter=audio_input_adapter or AudioInputAdapterConfig(),
+        audio_output_adapter=audio_output_adapter
+        or AudioOutputAdapterConfig(),
         toy=ToyConfig(
             hidden_size=4,
             intermediate_size=8,
@@ -379,7 +401,7 @@ def _token_expected(model: TokenModel, batch: ModelBatch) -> int:
     start, end = model.layout.blocks[modality.value]
     if modality.value == "audio":
         forward += adapter(
-            model.semantic_audio_output_adapter,
+            model.audio_output_adapter,
             rows=count,
             in_features=hidden,
             out_features=embedding.embedding_dim,

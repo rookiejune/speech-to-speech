@@ -6,9 +6,11 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
+from anydataset.types import Modality
 from torch import nn
 
 from ._compat import StrEnum, auto
+from .task import Task
 
 
 class ParameterGroup(StrEnum):
@@ -17,7 +19,7 @@ class ParameterGroup(StrEnum):
     SEMANTIC_AUDIO_EMBEDDING = auto()
     SEMANTIC_AUDIO_ADAPTER = auto()
     AUDIO_INPUT_ADAPTER = auto()
-    SEMANTIC_AUDIO_OUTPUT = auto()
+    AUDIO_OUTPUT = auto()
     ACOUSTIC_DECODER = auto()
 
 
@@ -116,6 +118,23 @@ class StageLoaderConfig:
         ):
             raise ValueError("stage loader weight must be finite and positive.")
         _validate_weights(self.task_weights, name="stage loader task weights")
+        self.is_text
+
+    @property
+    def tasks(self) -> dict[Task, float]:
+        return {Task(name): weight for name, weight in self.task_weights.items()}
+
+    @property
+    def is_text(self) -> bool:
+        active = [task for task, weight in self.tasks.items() if weight > 0]
+        text = [
+            task.source_modality is not Modality.AUDIO
+            and task.target_modality is Modality.TEXT
+            for task in active
+        ]
+        if any(text) and not all(text):
+            raise ValueError("a staged loader cannot mix pure text and speech tasks.")
+        return all(text)
 
 
 @dataclass
@@ -143,19 +162,12 @@ class StageConfig:
     def loader_weights(self) -> dict[str, float]:
         return {name: loader.weight for name, loader in self.loaders.items()}
 
-    def task_weights_by_loader(self) -> dict[str, dict[str, float]]:
-        return {
-            name: dict(loader.task_weights)
-            for name, loader in self.loaders.items()
-        }
-
-
 SPEECH_INTERFACE_GROUPS = frozenset(
     {
         ParameterGroup.SEMANTIC_AUDIO_EMBEDDING,
         ParameterGroup.SEMANTIC_AUDIO_ADAPTER,
         ParameterGroup.AUDIO_INPUT_ADAPTER,
-        ParameterGroup.SEMANTIC_AUDIO_OUTPUT,
+        ParameterGroup.AUDIO_OUTPUT,
         ParameterGroup.ACOUSTIC_DECODER,
     }
 )
@@ -165,7 +177,7 @@ SEMANTIC_GROUPS = frozenset(
         ParameterGroup.SEMANTIC_AUDIO_EMBEDDING,
         ParameterGroup.SEMANTIC_AUDIO_ADAPTER,
         ParameterGroup.AUDIO_INPUT_ADAPTER,
-        ParameterGroup.SEMANTIC_AUDIO_OUTPUT,
+        ParameterGroup.AUDIO_OUTPUT,
     }
 )
 
@@ -261,8 +273,8 @@ def parameter_group(name: str) -> ParameterGroup:
         return ParameterGroup.SEMANTIC_AUDIO_ADAPTER
     if name.startswith("audio_input_adapter."):
         return ParameterGroup.AUDIO_INPUT_ADAPTER
-    if name.startswith("semantic_audio_output_adapter."):
-        return ParameterGroup.SEMANTIC_AUDIO_OUTPUT
+    if name.startswith("audio_output_adapter."):
+        return ParameterGroup.AUDIO_OUTPUT
     if (
         name.startswith("acoustic_condition.")
         or name.startswith("acoustic_decoder.")

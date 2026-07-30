@@ -10,6 +10,9 @@
 - `audio_input.AudioInputTower`：把 source audio payload 的 semantic embedding 按显式位置
   编码为 backbone hidden states；支持 `none`、同长度 `mlp` 与非 causal `transformer`，只属于
   input path，不参与 semantic-audio output head 或 acoustic generation。
+- `audio_output.AudioOutputAdapter`：把 backbone hidden states 逐 token 投影到 semantic-audio
+  feature space；支持 `none`、`linear` 与 `mlp`，不做序列混合，以兼容 cached autoregressive
+  generation。
 - `acoustic.FlowModel`：在基础模型上组合 SAC 维护的 `AcousticDiT`，提供
   flow target、sampling 和 `generate_audio_features()`。
 - `acoustic.RVQModel`：组合 SAC 维护的 `AcousticRVQDecoder`，提供 teacher-forced
@@ -27,6 +30,8 @@
   dimension 相同的 identity adapter。
 - `AudioInputAdapterType` / `AudioInputAdapterConfig`：source audio tower 的 `none|mlp|transformer`
   配置；`transformer` 使用同长度、非 causal 的 encoder layer。
+- `AudioOutputAdapterType` / `AudioOutputAdapterConfig`：semantic-audio output adapter 的
+  `none|linear|mlp` 配置。
 - `ToyConfig` / `create_toy_backbone()`：构造随机初始化的一层或少层 Qwen backbone，用于 CPU
   model/data 契约测试；词表大小来自 runtime layout，但不读取 `runtime.backbone`。
 - `AcousticType`、`DecoderConfig`、`FlowRepaConfig`：组合入口的严格配置结构。
@@ -83,24 +88,30 @@ def generate_tokens(...) -> Tensor: ...
 `model.Config` 只包含基础模型真正消费的设置：
 
 - `semantic_audio_adapter`
-- `semantic_audio_output_adapter`
+- `audio_output_adapter`
 - `audio_input_adapter`
 - `toy`
 - `lora`
 
-前两个 adapter 字段使用公开 `AdapterType`；`linear` 是默认值，`mlp` 使用 gated SiLU adapter，`None`
-只在输入输出 dimension 相同时合法。`toy=None` 时模型使用 `runtime.backbone`；非空时由
+`semantic_audio_adapter` 使用公开 `AdapterType`；`linear` 是默认值，`mlp` 使用 gated SiLU adapter，
+`None` 只在输入输出 dimension 相同时合法。`toy=None` 时模型使用 `runtime.backbone`；非空时由
 `ToyConfig` 构造随机 tiny Qwen，runtime 仍负责 tokenizer、codec、layout、special IDs 与 flow
 sampler。完整 Qwen 架构的随机初始化属于 `runtime.backbone_initialization=random`，不通过 toy
 参数近似。Hydra `model` preset 与这些字段一一对应，overfit/train root schema 直接复用
 `model.Config`。
+
+`audio_output_adapter` 是 semantic-audio token head 的显式结构化配置，支持 `none`、`linear` 或
+`mlp`。它在 teacher forcing、普通 token logits、候选 token
+logits 和 cached generation 中使用同一实例。输出 adapter 不使用 input tower 的 Transformer，
+因为 output head 每次 generation 只收到最后一个 hidden state；引入序列混合会额外改变 causal
+cache 契约。
 
 `audio_input_adapter` 默认 `type=none`。启用 `mlp` 时，source audio payload 的 semantic embedding
 逐帧经过 gated MLP 投影到 backbone hidden dimension；启用 `transformer` 时，先做输入投影，再用
 同长度、非 causal 的 Transformer encoder 跨 source frames 建立上下文。两种 tower 都保持 frame
 数量不变，并在 overlay 到 `inputs_embeds` 前清零 padding。训练和完整 prompt 的首步会传入显式
 `audio_input_positions`；启用 KV cache 后后续 token 只走 backbone，不重复运行 source tower。
-该配置不会改变生成 grammar，也不会替换现有 `semantic_audio_output_adapter` 或 Flow/RVQ
+该配置不会改变生成 grammar，也不会替换 Flow/RVQ
 `HiddenConditionAdapter`。
 
 `lora.enabled=true` 通过 Hugging Face PEFT 的 `inject_adapter_in_model()` 注入标准 LoRA adapter，

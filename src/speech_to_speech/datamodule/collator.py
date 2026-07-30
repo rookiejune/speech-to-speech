@@ -4,7 +4,7 @@ from collections.abc import Mapping
 
 from anydataset.types import Sample as RawSample
 
-from ._task import TaskWeights, allocate_tasks
+from ._task import TaskWeights
 from .parser import parse_task_sample, parse_text_sample
 from .protocol import DataRuntime, TextRuntime
 from .sample import build_task_sample, build_text_sample
@@ -23,17 +23,12 @@ class Collator:
         self.encode_missing_codes = encode_missing_codes
         self._task_weights = TaskWeights(task_weights)
 
-    def set_task_weights(self, task_weights: Mapping[Task, float]) -> None:
-        self._task_weights.set(task_weights)
-
     @property
     def tasks(self) -> list[Task]:
-        tasks, _ = self._task_weights.get()
-        return tasks
+        return self._task_weights.tasks
 
     def _task_samples(self, samples: list[RawSample]) -> list[SpeechTaskSample]:
-        available, weights = self._task_weights.get()
-        tasks = allocate_tasks(available, weights, len(samples))
+        tasks = self._task_weights.allocate(len(samples))
         return [
             parse_task_sample(
                 sample,
@@ -67,18 +62,12 @@ class TextCollator:
         _validate_text_tasks(_positive_tasks(task_weights))
         self._task_weights = TaskWeights(task_weights)
 
-    def set_task_weights(self, task_weights: Mapping[Task, float]) -> None:
-        _validate_text_tasks(_positive_tasks(task_weights))
-        self._task_weights.set(task_weights)
-
     @property
     def tasks(self) -> list[Task]:
-        tasks, _ = self._task_weights.get()
-        return tasks
+        return self._task_weights.tasks
 
     def _model_samples(self, samples: list[RawSample]) -> list[ModelSample]:
-        available, weights = self._task_weights.get()
-        tasks = allocate_tasks(available, weights, len(samples))
+        tasks = self._task_weights.allocate(len(samples))
         return [
             build_text_sample(parse_text_sample(sample, self.runtime), task, self.runtime)
             for sample, task in zip(samples, tasks)

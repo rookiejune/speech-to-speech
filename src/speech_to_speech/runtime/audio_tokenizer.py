@@ -294,10 +294,6 @@ class BiCodecAudioTokenizer:
         """Encode only BiCodec's fixed-length global speaker/style codes."""
         return self.encode_streams(value, (AudioStream.GLOBAL,))
 
-    def encode_acoustic(self, value: object) -> Tensor:
-        """Compatibility alias for :meth:`encode_global`."""
-        return self.encode_global(value)
-
     def encode_streams(
         self,
         value: object,

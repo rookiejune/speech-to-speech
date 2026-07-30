@@ -1,5 +1,6 @@
 semantic_audio_adapter: linear
-semantic_audio_output_adapter: linear
+audio_output_adapter:
+  type: linear
 audio_input_adapter:
   type: none
   layers: 2

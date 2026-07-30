@@ -5,7 +5,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from .types import ConcreteTrainInput
+from .types import TrainInput
 
 
 @runtime_checkable
@@ -34,7 +34,7 @@ class LoaderSchedule:
 class ScheduledDataLoader:
     def __init__(
         self,
-        loaders: Mapping[str, Iterable[ConcreteTrainInput]],
+        loaders: Mapping[str, Iterable[TrainInput]],
         schedule: LoaderSchedule,
     ) -> None:
         missing = set(schedule.weights) - set(loaders)
@@ -50,17 +50,19 @@ class ScheduledDataLoader:
         self.loaders = dict(loaders)
         self.schedule = schedule
 
-    def __iter__(self) -> Iterator[ConcreteTrainInput]:
+    def __iter__(self) -> Iterator[TrainInput]:
         keys = tuple(self.schedule.weights)
         weights = self.schedule.weights
         iterators = {key: iter(self.loaders[key]) for key in keys}
         cycles = {key: 0 for key in keys}
         if self.schedule.accumulate_grad_batches > 1:
-            window = _accumulation_window(
-                weights,
-                self.schedule.accumulate_grad_batches,
-            )
+            credits = [0.0 for _ in keys]
             while True:
+                window = _accumulation_window(
+                    weights,
+                    self.schedule.accumulate_grad_batches,
+                    credits=credits,
+                )
                 for key in window:
                     yield _next_batch(key, iterators, self.loaders, cycles)
 
@@ -90,6 +92,8 @@ def _validate_weights(weights: Mapping[str, float]) -> None:
 def _accumulation_window(
     weights: Mapping[str, float],
     accumulate_grad_batches: int,
+    *,
+    credits: list[float] | None = None,
 ) -> tuple[str, ...]:
     keys = tuple(weights)
     total = sum(weights.values())
@@ -101,12 +105,17 @@ def _accumulation_window(
         )
     counts = [math.floor(target) for target in targets]
     remaining = accumulate_grad_batches - sum(counts)
-    order = sorted(
-        range(len(keys)),
-        key=lambda index: (targets[index] - counts[index], -index),
-        reverse=True,
-    )
-    for index in order[:remaining]:
+    if credits is None:
+        credits = [0.0 for _ in keys]
+    if len(credits) != len(keys):
+        raise ValueError("accumulation credits must align with loader weights.")
+    for index, target in enumerate(targets):
+        credits[index] += target - counts[index]
+    available = set(range(len(keys)))
+    for _ in range(remaining):
+        index = max(available, key=lambda value: (credits[value], -value))
+        available.remove(index)
+        credits[index] -= 1.0
         counts[index] += 1
     return _interleave(keys, counts)
 
@@ -131,10 +140,10 @@ def _interleave(keys: tuple[str, ...], counts: list[int]) -> tuple[str, ...]:
 
 def _next_batch(
     key: str,
-    iterators: dict[str, Iterator[ConcreteTrainInput]],
-    loaders: Mapping[str, Iterable[ConcreteTrainInput]],
+    iterators: dict[str, Iterator[TrainInput]],
+    loaders: Mapping[str, Iterable[TrainInput]],
     cycles: dict[str, int],
-) -> ConcreteTrainInput:
+) -> TrainInput:
     try:
         return next(iterators[key])
     except StopIteration:
@@ -147,7 +156,7 @@ def _next_batch(
             raise RuntimeError(f"scheduled loader {key!r} produced no batches.") from error
 
 
-def _set_epoch(loader: Iterable[ConcreteTrainInput], epoch: int) -> None:
+def _set_epoch(loader: Iterable[TrainInput], epoch: int) -> None:
     if isinstance(loader, _EpochSetter):
         loader.set_epoch(epoch)
         return

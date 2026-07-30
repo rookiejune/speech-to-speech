@@ -130,8 +130,15 @@ def generate_sequence(
     do_sample: bool,
     use_cache: bool,
     collect_audio_condition: bool,
+    min_new_tokens: int = 0,
 ) -> tuple[Tensor, Tensor | None, Tensor | None]:
-    if max_new_tokens < 0 or temperature <= 0 or not 0 < top_p <= 1:
+    if (
+        max_new_tokens < 0
+        or min_new_tokens < 0
+        or min_new_tokens > max_new_tokens
+        or temperature <= 0
+        or not 0 < top_p <= 1
+    ):
         raise ValueError("invalid generation parameters")
     if generation_modality is not None and generation_modality not in {
         Modality.TEXT,
@@ -176,7 +183,7 @@ def generate_sequence(
     span_steps: list[Tensor] = []
     batch_size = prompt_ids.size(0)
     active_rows = torch.arange(batch_size, dtype=torch.long, device=prompt_ids.device)
-    for _ in range(max_new_tokens):
+    for step in range(max_new_tokens):
         active_attention_mask = (
             attention_mask
             if active_rows.numel() == batch_size
@@ -195,6 +202,14 @@ def generate_sequence(
         if output.logits is None:
             raise RuntimeError("model did not return generation logits.")
         logits = output.logits[:, -1] / temperature
+        if stop_token_id is not None and step < min_new_tokens:
+            _suppress_stop(
+                logits,
+                stop_token_id,
+                generation_token_ids,
+                generation_modality,
+                model.layout,
+            )
         if top_p < 1.0:
             logits = top_p_filter(logits, top_p)
         next_indices = (
@@ -300,6 +315,31 @@ def generate_sequence(
     return generated, condition, frame_spans
 
 
+def _suppress_stop(
+    logits: Tensor,
+    stop_token_id: int,
+    generation_token_ids: Tensor | None,
+    generation_modality: Modality | None,
+    layout: Layout,
+) -> None:
+    if generation_token_ids is not None:
+        stop = generation_token_ids.eq(stop_token_id)
+        if not bool(stop.any()):
+            return
+        logits[:, stop] = float("-inf")
+    elif generation_modality is not None:
+        start, end = layout.blocks[generation_modality.value]
+        if not start <= stop_token_id < end:
+            return
+        logits[:, stop_token_id - start] = float("-inf")
+    else:
+        if not 0 <= stop_token_id < logits.size(1):
+            return
+        logits[:, stop_token_id] = float("-inf")
+    if not bool(torch.isfinite(logits).any(dim=1).all()):
+        raise ValueError("minimum generation length left no non-stop token to sample.")
+
+
 def generate_flattened_sequence(
     model: GenerationStepModel,
     prompt_ids: Tensor,
@@ -357,7 +397,7 @@ def generate_flattened_sequence(
         generated, _, _ = generate_sequence(
             model,
             prefixed,
-            max_new_tokens=max_new_tokens - prefix.numel(),
+            max_new_tokens=max_new_tokens - prefix.numel() - 1,
             temperature=temperature,
             top_p=top_p,
             prompt_attention_mask=attention,
@@ -381,13 +421,21 @@ def generate_flattened_sequence(
             do_sample=do_sample,
             use_cache=use_cache,
             collect_audio_condition=False,
+            min_new_tokens=1,
         )
         continuation = generated[:, prefixed.size(1) :]
-        if not bool(continuation.eq(model.runtime.eoa_token_id).any(dim=1).all()):
-            raise ValueError(
-                "flattened full sequence did not produce EOA within max_new_tokens."
-            )
-        return generated
+        if bool(continuation.eq(model.runtime.eoa_token_id).any(dim=1).all()):
+            return generated
+        return torch.cat(
+            (
+                generated,
+                generated.new_full(
+                    (generated.size(0), 1),
+                    model.runtime.eoa_token_id,
+                ),
+            ),
+            dim=1,
+        )
 
     rows = [
         _generate_flattened_row(

@@ -7,5 +7,5 @@ frozen_groups:
   - semantic_audio_embedding
   - semantic_audio_adapter
   - audio_input_adapter
-  - semantic_audio_output
+  - audio_output
 backbone_top_fraction: 0.0

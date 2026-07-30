@@ -188,14 +188,19 @@ def task_sample_logger_fixture() -> tuple[TaskSampleLogger, object]:
         is_global_zero=True,
         logger=SimpleNamespace(experiment=experiment),
         datamodule=SimpleNamespace(
-            collator_for=Mock(return_value=Mock(return_value=batch)),
+            diagnostic_collator=Mock(return_value=Mock(return_value=batch)),
             runtime=SimpleNamespace(
                 layout=Layout(text=(0, 10), audio=(10, 20)),
                 text_tokenizer=SimpleNamespace(decode=Mock(return_value="generated")),
             ),
         ),
     )
-    logger = TaskSampleLogger([0], every_n_steps=1)
+    logger = TaskSampleLogger(
+        [0],
+        every_n_steps=1,
+        loader_name="train",
+        task=Task.T2TT,
+    )
     logger.samples = [
         {
             (Role.SOURCE, Modality.TEXT): TextItem(

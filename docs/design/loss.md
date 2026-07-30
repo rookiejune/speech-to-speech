@@ -28,7 +28,8 @@ position 语义见 [总览 §2.4](../model-design.md)。
   semantic/acoustic codes，以 16 kHz waveform 运行冻结 WavLM，取得配置层的 hidden states 并插值、
   写回原有效 frame 位置。
 - `MaskedCosineAlignmentLoss`：把选定 DiT block 的逐帧表示投影到 WavLM hidden dimension，再转给
-  `anytrain.loss.MaskedCosineAlignmentLoss` 与 stop-gradient teacher features 做 masked cosine distance。
+  `anytrain.loss.MaskedCosineAlignmentLoss` 与 stop-gradient teacher features 做 masked cosine distance；
+  输出必须携带逐行有效 `frames`，总 REPA loss 按该计数加权。
 - `types.Outputs`：上层日志与训练消费的 S2S objective mapping；`LossItem` 和通用 output 聚合来自
   `anytrain.loss`。
 - `types.loss_items()`：按 token、flow matching、REPA、RVQ 的稳定顺序遍历实际存在的
@@ -53,7 +54,10 @@ token = self.token(
     batch.tasks[0].target_modality,
     model.token_logits,
 )
-result = {"loss": token.loss.mean(), "token": token}
+result = {
+    "loss": loss_item_mean(token, unit="tokens", fallback_to_mean=False),
+    "token": token,
+}
 ```
 
 存在独立 acoustic target codes 时，flow 与 RVQ 入口再执行各自分支：
@@ -125,6 +129,8 @@ teacher features。acoustic-only codec screening 与 legacy oracle checkpoint �
 - 子 objective 在 `__init__` 中构造完毕，forward 不挂载新 submodule。
 - flow matching、RVQ CE 和 REPA 在非线性 loss 计算前把无效 frame 替换为安全值，并只归约
   boolean mask 选中的 frame；padding 位置的 NaN/Inf 不参与 forward，也不产生梯度。
+- token、flow matching、RVQ 与 REPA `LossItem` 必须分别携带 `tokens` 或 `frames` 有效单位；
+  objective 不在单位缺失时静默退回逐行平均。
 - `audio_route` 不改变 Flow/RVQ acoustic objective 的 frame-aligned contract；它只约束 structured
   token route 的 prompt/output/decode ownership。BiCodec reuse/predict 路线都不会把 target acoustic
   stream 静默泄漏到 prompt，prompt/reference codes 也不作为 token labels。

@@ -1,0 +1,474 @@
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Protocol, cast
+
+import torch
+from anydataset.types import Modality
+from anytrain.codec import SemanticAcousticCodes
+from torch import Tensor
+
+from .._tensor import is_signed_integer_dtype
+from ..audio_route import PromptSource, StreamSource
+from ..runtime import AudioRepresentation
+from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
+from ..runtime.types import (
+    AcousticCodec,
+    Codec,
+    SemanticCodec,
+    StructuredCodec,
+    acoustic_codec,
+    codec_sample_rate,
+    frame_codec,
+    structured_codec,
+)
+from .decode import (
+    decode_generated_audio,
+    decode_generated_bicodec_full,
+    decode_generated_bicodec_route,
+    decode_generated_frame_codes,
+    decode_generated_semantic,
+)
+from .protocol import AcousticFeatureGeneration, FullCodecSequenceGenerator, TokenGenerator
+from .types import AudioOutput, Request, Result
+
+
+@dataclass(frozen=True)
+class _Batch:
+    requests: Sequence[Request]
+    model: TokenGenerator
+    prompt: Tensor
+    prompt_mask: Tensor
+    audio_input_positions: Tensor | None
+    max_new_tokens: int
+    temperature: float
+    top_p: float
+    do_sample: bool
+    use_cache: bool
+
+
+class _Strategy(Protocol):
+    def generate(self, batch: _Batch) -> list[Result]: ...
+
+
+class _Decoder(Protocol):
+    sample_rate: int
+
+    def decode(self, token_ids: Tensor, features: Tensor | None) -> Tensor: ...
+
+
+def generate_audio_responses(
+    requests: Sequence[Request],
+    model: TokenGenerator,
+    prompt: Tensor,
+    prompt_mask: Tensor,
+    audio_input_positions: Tensor | None,
+    *,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    do_sample: bool,
+    use_cache: bool,
+) -> list[Result]:
+    """Generate and decode one homogeneous audio-target request batch."""
+    batch = _Batch(
+        requests=requests,
+        model=model,
+        prompt=prompt,
+        prompt_mask=prompt_mask,
+        audio_input_positions=audio_input_positions,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        do_sample=do_sample,
+        use_cache=use_cache,
+    )
+    return _strategy(model).generate(batch)
+
+
+def validate_audio_request(request: Request, model: TokenGenerator) -> None:
+    """Validate audio context against the runtime-owned route contract."""
+    if request["task"].target_modality is not Modality.AUDIO:
+        raise ValueError("audio generation validation requires an audio-target task.")
+    route = model.runtime.audio_route
+    context = request.get("audio_context")
+    if context is not None and not isinstance(context, SemanticAcousticCodes):
+        raise TypeError("generation audio context must be SemanticAcousticCodes.")
+    if route is None:
+        if context is not None:
+            raise ValueError(
+                "generation requests without an audio route cannot include audio context."
+            )
+        return
+
+    prompt_streams = route.prompt.canonical_streams
+    requires_context = (
+        route.prompt.source is PromptSource.REFERENCE and bool(prompt_streams)
+    ) or (
+        route.decode.semantic is StreamSource.PROMPT
+        or route.decode.acoustic is StreamSource.PROMPT
+    )
+    if requires_context and context is None:
+        raise ValueError("audio route requires structured prompt audio context.")
+    if not prompt_streams:
+        if context is not None:
+            raise ValueError(
+                "audio route without prompt streams cannot include audio context."
+            )
+        return
+    if context is None:
+        raise ValueError("audio route prompt streams require audio context.")
+
+    tokenizer = model.runtime.audio_tokenizer
+    if not isinstance(tokenizer, BiCodecAudioTokenizer):
+        raise TypeError("structured prompt streams require BiCodecAudioTokenizer.")
+    local_ids = tokenizer.encode_streams(context, prompt_streams)
+    prompt = request["prompt_ids"]
+    global_ids = model.runtime.layout.to_global(
+        Modality.AUDIO.value,
+        local_ids,
+    ).to(device=prompt.device)
+    expected = torch.cat(
+        (
+            prompt.new_tensor([model.runtime.boa_token_id]),
+            global_ids,
+            prompt.new_tensor(
+                [model.runtime.eoa_token_id, model.runtime.boa_token_id]
+            ),
+        )
+    )
+    if prompt.numel() < expected.numel() or not torch.equal(
+        prompt[-expected.numel() :],
+        expected,
+    ):
+        raise ValueError(
+            "generation audio context does not serialize to the prompt suffix."
+        )
+
+
+def _strategy(model: TokenGenerator) -> _Strategy:
+    if model.runtime.acoustic_side_channel and isinstance(
+        model, AcousticFeatureGeneration
+    ):
+        return _Acoustic(model)
+    if model.runtime.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE:
+        if not isinstance(model, FullCodecSequenceGenerator):
+            raise TypeError("full codec sequence requires constrained token generation.")
+        if model.runtime.structured_full_sequence:
+            return _Structured(model)
+        return _Frame(model)
+    return _Semantic(model)
+
+
+class _Semantic:
+    def __init__(self, model: TokenGenerator) -> None:
+        self.model = model
+        self.codec: SemanticCodec = model.runtime.semantic_codec
+        self.sample_rate = codec_sample_rate(self.codec)
+
+    def generate(self, batch: _Batch) -> list[Result]:
+        responses = _token_responses(batch)
+        return _decoded_results(
+            responses,
+            None,
+            _frame_counts(responses, self.model),
+            self,
+        )
+
+    def decode(self, token_ids: Tensor, features: Tensor | None) -> Tensor:
+        if features is not None:
+            raise ValueError("semantic-only generation must not provide features.")
+        return decode_generated_semantic(
+            token_ids,
+            codec=self.codec,
+            audio_tokenizer=self.model.runtime.audio_tokenizer,
+            audio_token_range=self.model.runtime.codec_audio_range,
+        )
+
+
+class _Acoustic:
+    def __init__(self, model: TokenGenerator) -> None:
+        self.model = model
+        self.generator = cast(AcousticFeatureGeneration, model)
+        self.codec: AcousticCodec = acoustic_codec(model.runtime.codec)
+        self.sample_rate = codec_sample_rate(self.codec)
+
+    def generate(self, batch: _Batch) -> list[Result]:
+        generated = self.generator.generate_audio_features(
+            batch.prompt,
+            max_new_tokens=batch.max_new_tokens,
+            temperature=batch.temperature,
+            top_p=batch.top_p,
+            prompt_attention_mask=batch.prompt_mask,
+            audio_input_positions=batch.audio_input_positions,
+            do_sample=batch.do_sample,
+            use_cache=batch.use_cache,
+        )
+        responses = _responses(
+            generated["sequence"],
+            batch.prompt.size(1),
+            self.model.runtime.eoa_token_id,
+        )
+        return _decoded_results(
+            responses,
+            generated["features"],
+            generated["frame_counts"],
+            self,
+        )
+
+    def decode(self, token_ids: Tensor, features: Tensor | None) -> Tensor:
+        if features is None:
+            raise ValueError("acoustic generation requires generated features.")
+        return decode_generated_audio(
+            token_ids,
+            features,
+            codec=self.codec,
+            audio_tokenizer=self.model.runtime.audio_tokenizer,
+            audio_token_range=self.model.runtime.codec_audio_range,
+        )
+
+
+class _Frame:
+    def __init__(self, model: FullCodecSequenceGenerator) -> None:
+        self.model = model
+        self.codec: Codec = frame_codec(model.runtime.codec)
+        self.sample_rate = codec_sample_rate(self.codec)
+
+    def generate(self, batch: _Batch) -> list[Result]:
+        responses = _full_responses(batch, self.model)
+        return _decoded_results(
+            responses,
+            None,
+            _frame_counts(responses, self.model),
+            self,
+        )
+
+    def decode(self, token_ids: Tensor, features: Tensor | None) -> Tensor:
+        if features is not None:
+            raise ValueError("full frame-code generation must not provide features.")
+        return decode_generated_frame_codes(
+            token_ids,
+            codec=self.codec,
+            audio_tokenizer=self.model.runtime.audio_tokenizer,
+            audio_token_range=self.model.runtime.codec_audio_range,
+        )
+
+
+class _Structured:
+    def __init__(self, model: FullCodecSequenceGenerator) -> None:
+        tokenizer = model.runtime.audio_tokenizer
+        if not isinstance(tokenizer, BiCodecAudioTokenizer):
+            raise TypeError("structured full sequence requires BiCodecAudioTokenizer.")
+        self.model = model
+        self.tokenizer = tokenizer
+        self.codec: StructuredCodec = structured_codec(model.runtime.codec)
+        self.sample_rate = codec_sample_rate(self.codec)
+
+    def generate(self, batch: _Batch) -> list[Result]:
+        responses = _full_responses(batch, self.model)
+        route = self.model.runtime.audio_route
+        if route is None:
+            return _decoded_results(
+                responses,
+                None,
+                _frame_counts(responses, self.model),
+                self,
+            )
+
+        results = []
+        for token_ids, request in zip(responses, batch.requests):
+            waveform, codes = decode_generated_bicodec_route(
+                token_ids,
+                request.get("audio_context"),
+                route=route,
+                codec=self.codec,
+                audio_tokenizer=self.tokenizer,
+                audio_token_range=self.model.runtime.codec_audio_range,
+            )
+            results.append(
+                Result(
+                    response_ids=token_ids,
+                    audio=AudioOutput(
+                        features=None,
+                        codes=codes,
+                        waveform=waveform,
+                        sample_rate=self.sample_rate,
+                    ),
+                )
+            )
+        return results
+
+    def decode(self, token_ids: Tensor, features: Tensor | None) -> Tensor:
+        if features is not None:
+            raise ValueError("structured full sequence must not provide features.")
+        return decode_generated_bicodec_full(
+            token_ids,
+            codec=self.codec,
+            audio_tokenizer=self.tokenizer,
+            audio_token_range=self.model.runtime.codec_audio_range,
+        )
+
+
+def _token_responses(batch: _Batch) -> list[Tensor]:
+    sequence = batch.model.generate_tokens(
+        batch.prompt,
+        max_new_tokens=batch.max_new_tokens,
+        temperature=batch.temperature,
+        top_p=batch.top_p,
+        prompt_attention_mask=batch.prompt_mask,
+        audio_input_positions=batch.audio_input_positions,
+        stop_token_id=batch.model.runtime.eoa_token_id,
+        generation_modality=Modality.AUDIO,
+        do_sample=batch.do_sample,
+        use_cache=batch.use_cache,
+    )
+    return _responses(
+        sequence,
+        batch.prompt.size(1),
+        batch.model.runtime.eoa_token_id,
+    )
+
+
+def _full_responses(
+    batch: _Batch,
+    model: FullCodecSequenceGenerator,
+) -> list[Tensor]:
+    sequence = model.generate_full_codec_sequence(
+        batch.prompt,
+        max_new_tokens=batch.max_new_tokens,
+        temperature=batch.temperature,
+        top_p=batch.top_p,
+        prompt_attention_mask=batch.prompt_mask,
+        audio_input_positions=batch.audio_input_positions,
+        do_sample=batch.do_sample,
+        use_cache=batch.use_cache,
+    )
+    return _responses(
+        sequence,
+        batch.prompt.size(1),
+        model.runtime.eoa_token_id,
+    )
+
+
+def _responses(sequence: Tensor, prompt_length: int, stop_token_id: int) -> list[Tensor]:
+    return [
+        _response(sequence[row], prompt_length, stop_token_id)
+        for row in range(sequence.size(0))
+    ]
+
+
+def _response(sequence: Tensor, prompt_length: int, stop_token_id: int) -> Tensor:
+    response = sequence[prompt_length:]
+    stops = response.eq(stop_token_id).nonzero()
+    if stops.numel():
+        return response[: int(stops[0].item())]
+    return response
+
+
+def _frame_counts(token_rows: list[Tensor], model: TokenGenerator) -> Tensor:
+    if any(token_ids.numel() == 0 for token_ids in token_rows):
+        raise ValueError("audio generation produced no codec-decodable tokens.")
+    start, _ = model.runtime.codec_audio_range
+    counts = []
+    span_lookup = model.audio_token_frame_spans
+    for token_ids in token_rows:
+        local = token_ids - start
+        if bool((local < 0).any()) or bool((local >= span_lookup.numel()).any()):
+            raise ValueError("audio generation produced non-codec audio tokens.")
+        spans = span_lookup.index_select(0, local.to(device=span_lookup.device))
+        counts.append(spans.sum().to(device=local.device))
+    return torch.stack(counts)
+
+
+def _decoded_results(
+    token_rows: list[Tensor],
+    features: Tensor | None,
+    frame_counts: Tensor,
+    decoder: _Decoder,
+) -> list[Result]:
+    row_features, waveforms = _decode_rows(
+        token_rows,
+        features,
+        frame_counts,
+        decoder,
+    )
+    return [
+        Result(
+            response_ids=token_ids,
+            audio=AudioOutput(
+                features=row_features[row],
+                codes=None,
+                waveform=waveforms[row],
+                sample_rate=decoder.sample_rate,
+            ),
+        )
+        for row, token_ids in enumerate(token_rows)
+    ]
+
+
+def _decode_rows(
+    token_rows: list[Tensor],
+    features: Tensor | None,
+    frame_counts: Tensor,
+    decoder: _Decoder,
+) -> tuple[list[Tensor | None], list[Tensor]]:
+    frame_counts = _integer_tensor(
+        frame_counts,
+        "generated audio frame counts",
+        dimensions=1,
+    )
+    if frame_counts.shape != (len(token_rows),):
+        raise ValueError("generated audio frame counts must provide one value per row.")
+    counts = frame_counts.detach().cpu().tolist()
+    if any(count < 1 for count in counts):
+        raise ValueError("each audio generation row must contain at least one frame.")
+
+    if features is not None:
+        if features.dim() != 3 or features.size(0) != len(token_rows):
+            raise ValueError(
+                "generated acoustic features must have shape [batch, frames, dim]."
+            )
+        if any(count > features.size(1) for count in counts):
+            raise ValueError("generated frame count exceeds acoustic feature padding.")
+        row_features: list[Tensor | None] = [
+            features[row, :count] for row, count in enumerate(counts)
+        ]
+    else:
+        row_features = [None] * len(token_rows)
+
+    groups: dict[tuple[int, int], list[int]] = {}
+    for row, (token_ids, count) in enumerate(zip(token_rows, counts)):
+        groups.setdefault((token_ids.numel(), count), []).append(row)
+
+    waveforms: list[Tensor | None] = [None] * len(token_rows)
+    for rows in groups.values():
+        token_batch = torch.stack([token_rows[row] for row in rows])
+        first_features = row_features[rows[0]]
+        feature_batch = (
+            None
+            if first_features is None
+            else torch.stack([cast(Tensor, row_features[row]) for row in rows])
+        )
+        decoded = decoder.decode(token_batch, feature_batch)
+        if decoded.dim() < 1 or decoded.size(0) != len(rows):
+            raise ValueError("codec decode must preserve the generation batch axis.")
+        for row, waveform in zip(rows, decoded):
+            waveforms[row] = waveform
+
+    if any(waveform is None for waveform in waveforms):
+        raise RuntimeError("codec decode did not produce every generation row.")
+    return row_features, cast(list[Tensor], waveforms)
+
+
+def _integer_tensor(value: object, name: str, *, dimensions: int) -> Tensor:
+    if not isinstance(value, Tensor):
+        raise TypeError(f"{name} must be a Tensor.")
+    if not is_signed_integer_dtype(value.dtype):
+        raise TypeError(f"{name} must contain integer ids using a signed dtype.")
+    if value.dim() != dimensions:
+        raise ValueError(f"{name} must have {dimensions} dimensions.")
+    return value
+
+
+__all__ = ["generate_audio_responses", "validate_audio_request"]

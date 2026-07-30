@@ -3,7 +3,7 @@ trainable_groups:
   - semantic_audio_embedding
   - semantic_audio_adapter
   - audio_input_adapter
-  - semantic_audio_output
+  - audio_output
   - acoustic_decoder
 frozen_groups:
   - backbone

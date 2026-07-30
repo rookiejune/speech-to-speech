@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Protocol
+from typing import Optional, Protocol, Union, cast
 
 from semantic_acoustic_codec.config import Route
 from semantic_acoustic_codec.runtime import AcousticGeneratorArtifact
@@ -9,6 +9,7 @@ from speech_to_speech.loss import FlowObjective, RVQObjective, TokenObjective, W
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model import TokenModel
 from speech_to_speech.model.acoustic import (
+    AcousticType,
     DecoderConfig,
     FlowRepaConfig,
     FlowModel,
@@ -36,7 +37,12 @@ class RepaConfig(Protocol):
     def student_layer(self) -> Optional[int]: ...
 
 
-class FlowConfig(Protocol):
+class AcousticConfig(Protocol):
+    @property
+    def type(self) -> str: ...
+
+
+class FlowConfig(AcousticConfig, Protocol):
     @property
     def init_artifact(self) -> Optional[str]: ...
 
@@ -47,12 +53,52 @@ class FlowConfig(Protocol):
     def repa(self) -> RepaConfig: ...
 
 
-class RVQConfig(Protocol):
+class RVQConfig(AcousticConfig, Protocol):
     @property
     def init_artifact(self) -> Optional[str]: ...
 
     @property
     def decoder(self) -> DecoderConfig: ...
+
+
+CompositionModule = Union[
+    SpeechToSpeechModule[TokenModel],
+    SpeechToSpeechModule[FlowCompositionModel],
+    SpeechToSpeechModule[RVQCompositionModel],
+]
+CompositionModel = Union[TokenModel, FlowModel, RVQModel]
+
+
+def build(
+    runtime: Runtime,
+    config: Config,
+    model_config: ModelConfig,
+    acoustic: AcousticConfig,
+) -> tuple[AcousticType, CompositionModule, CompositionModel]:
+    acoustic_type = AcousticType(acoustic.type)
+    if acoustic_type is AcousticType.NONE:
+        module, model = token(runtime, config, model_config)
+        return acoustic_type, module, model
+    if not runtime.acoustic_side_channel:
+        raise ValueError(
+            "runtime representation has no independent acoustic side channel; "
+            "configure model/acoustic=none."
+        )
+    if acoustic_type is AcousticType.FLOW:
+        module, model = flow(
+            runtime,
+            config,
+            model_config,
+            cast(FlowConfig, acoustic),
+        )
+    else:
+        module, model = rvq(
+            runtime,
+            config,
+            model_config,
+            cast(RVQConfig, acoustic),
+        )
+    return acoustic_type, module, model
 
 
 def token(
@@ -74,9 +120,7 @@ def flow(
     config: Config,
     model_config: ModelConfig,
     acoustic: FlowConfig,
-) -> tuple[
-    SpeechToSpeechModule[FlowCompositionModel], FlowModel, Optional[float]
-]:
+) -> tuple[SpeechToSpeechModule[FlowCompositionModel], FlowModel]:
     teacher = None
     weight = acoustic.repa.weight
     if weight is not None:
@@ -119,7 +163,7 @@ def flow(
             else {"weight": weight, "teacher": teacher}
         ),
     )
-    return SpeechToSpeechModule(config, model=model, objective=objective), model, weight
+    return SpeechToSpeechModule(config, model=model, objective=objective), model
 
 
 def rvq(

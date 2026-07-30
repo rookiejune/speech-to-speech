@@ -10,7 +10,7 @@ from anytrain.optim.llm import create_optimizer
 from lightning.pytorch import LightningModule
 from torch import nn
 
-from ..datamodule.types import ModelBatch, RawSpeechBatch, TrainBatch, TrainInputBatch
+from ..datamodule.types import ModelBatch, RawSpeechBatch, TrainInput
 from ..audio_route import Config as AudioRouteConfig
 from ..generation.service import generate_responses
 from ..generation.text import TextProbe, TextProbeResult, evaluate_text
@@ -41,10 +41,10 @@ _LORA_KEY = "speech_to_speech_lora"
 class BatchMaterializer(Protocol):
     def __call__(
         self,
-        batch: TrainInputBatch,
+        batch: TrainInput,
         *,
         device: torch.device | None = None,
-    ) -> TrainBatch: ...
+    ) -> ModelBatch: ...
 
 
 class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
@@ -65,7 +65,7 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         self.batch_materializer = batch_materializer
         self._current_loss_outputs: Outputs | None = None
 
-    def training_step(self, batch: TrainInputBatch, batch_idx: int = 0):
+    def training_step(self, batch: TrainInput, batch_idx: int = 0):
         del batch_idx
         batch = self.materialize_batch(batch)
         outputs = self._loss_outputs(batch)
@@ -79,7 +79,7 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         )
         return outputs
 
-    def validation_step(self, batch: TrainInputBatch, batch_idx: int = 0):
+    def validation_step(self, batch: TrainInput, batch_idx: int = 0):
         del batch_idx
         outputs = self._outputs(
             self.materialize_batch(batch),
@@ -102,12 +102,12 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
             return batch.to(device)
         return super().transfer_batch_to_device(batch, device, dataloader_idx)
 
-    def _loss_outputs(self, batch: TrainBatch) -> Outputs:
+    def _loss_outputs(self, batch: ModelBatch) -> Outputs:
         return self._outputs(batch, self.objective.forward)
 
     def _outputs(
         self,
-        batch: TrainBatch,
+        batch: ModelBatch,
         objective: Callable[[ModelBatch, ModelT], Outputs],
     ) -> Outputs:
         if not isinstance(batch, ModelBatch):
@@ -117,13 +117,13 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
             )
         return objective(batch, self.model)
 
-    def materialize_batch(self, batch: TrainInputBatch) -> TrainBatch:
+    def materialize_batch(self, batch: TrainInput) -> ModelBatch:
         if self.batch_materializer is None:
             if isinstance(batch, RawSpeechBatch):
                 raise TypeError(
                     "raw waveform batches require a batch materializer before loss."
                 )
-            return cast(TrainBatch, batch)
+            return batch
         return self.batch_materializer(batch, device=self.device)
 
     def current_loss_outputs(self) -> Outputs:

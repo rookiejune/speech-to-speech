@@ -25,17 +25,17 @@ from scripts._config import (
     overfit,
     train as parse_train,
 )
+from scripts._entry import (
+    performance as build_performance,
+    runtime_config,
+)
 from scripts._logging import build as build_logger
 from scripts import train as train_script
 from scripts.overfit import (
-    _composition,
     _gradient_logger,
-    _performance,
     _prepare_generation_module,
-    runtime_config,
 )
 from scripts.train import (
-    _is_text_loader,
     build_datamodule as build_train_datamodule,
 )
 from speech_to_speech.audio_route import (
@@ -51,6 +51,7 @@ from speech_to_speech.datamodule.types import DataShape
 from speech_to_speech.model import (
     AdapterType,
     AudioInputAdapterType,
+    AudioOutputAdapterType,
     Config as ModelConfig,
     ToyConfig,
 )
@@ -269,39 +270,6 @@ class ConfigTest(unittest.TestCase):
             BICODEC_PREDICT_ACOUSTIC,
         )
 
-    def test_composition_must_match_codec_capabilities(self):
-        flow = overfit(_compose("overfit"))
-        token = overfit(
-            _compose(
-                "overfit",
-                "runtime=unicodec",
-                "model/acoustic=none",
-                "audio_route=full_output",
-            )
-        )
-        token_with_semantic_support = overfit(
-            _compose(
-                "overfit",
-                "runtime=longcat_native",
-                "model/acoustic=none",
-                "runtime.semantic_codec_artifact=/tmp/semantic-codec",
-            )
-        )
-
-        self.assertIs(
-            _composition(token, uses_acoustic_side_channel=False),
-            AcousticType.NONE,
-        )
-        self.assertIs(
-            _composition(
-                token_with_semantic_support,
-                uses_acoustic_side_channel=False,
-            ),
-            AcousticType.NONE,
-        )
-        with self.assertRaisesRegex(ValueError, "model/acoustic=none"):
-            _composition(flow, uses_acoustic_side_channel=False)
-
     def test_root_schema_rejects_unknown_and_foreign_fields(self):
         cases = [
             (overfit, _compose("overfit", "+unknown=1"), "unknown"),
@@ -362,8 +330,8 @@ class ConfigTest(unittest.TestCase):
                 )
             )
 
-    @patch("scripts.overfit.TrainingFlops")
-    @patch("scripts.overfit.PerformanceCallback")
+    @patch("scripts._entry.TrainingFlops")
+    @patch("scripts._entry.PerformanceCallback")
     def test_overfit_performance_builds_the_dynamic_provider(
         self,
         performance,
@@ -379,8 +347,8 @@ class ConfigTest(unittest.TestCase):
             )
         )
 
-        self.assertIsNone(_performance(disabled))
-        callback = _performance(enabled)
+        self.assertIsNone(build_performance(disabled.callbacks.performance))
+        callback = build_performance(enabled.callbacks.performance)
 
         performance.assert_called_once_with(
             model_flops_per_batch=training_flops.return_value,
@@ -916,12 +884,11 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(datamodule.schedule.weights, config.stage.loader_weights())
         self.assertEqual(datamodule.schedule.accumulate_grad_batches, 10)
 
-        config.stage.loaders["bad"] = StageLoaderConfig(
-            weight=1.0,
-            task_weights={"mt": 1.0, "tts": 1.0},
-        )
         with self.assertRaisesRegex(ValueError, "cannot mix pure text and speech"):
-            build_train_datamodule(config, object())
+            StageLoaderConfig(
+                weight=1.0,
+                task_weights={"mt": 1.0, "tts": 1.0},
+            )
 
     def test_train_datamodule_clones_the_selected_loader_for_validation(self):
         config = parse_train(
@@ -1073,6 +1040,16 @@ class ConfigTest(unittest.TestCase):
                     "data.dataset.split_manifest=/tmp/splits.json",
                 )
             )
+        with self.assertRaisesRegex(ValueError, "must be a speech loader"):
+            parse_train(
+                _compose(
+                    "train",
+                    "stage=stage_2",
+                    "validation.enabled=true",
+                    "validation.loader=mt",
+                    "data.dataset.split_manifest=/tmp/splits.json",
+                )
+            )
         with self.assertRaisesRegex(ValueError, "must differ"):
             parse_train(
                 _compose(
@@ -1128,22 +1105,20 @@ class ConfigTest(unittest.TestCase):
     @patch("scripts.train.training_callbacks", return_value=[])
     @patch("scripts.train.build_datamodule")
     @patch("scripts.train.apply_parameter_policy")
-    @patch("scripts.train.rvq")
-    @patch("scripts.train._composition", return_value=AcousticType.RVQ)
+    @patch("scripts.train.build")
     @patch("scripts.train.Runtime")
     @patch("scripts.train.pl.seed_everything")
     def test_train_run_passes_ckpt_path_to_trainer_fit(
         self,
         seed,
         runtime,
-        composition,
-        rvq,
+        build,
         policy,
         datamodule,
         callbacks,
         trainer_factory,
     ):
-        del seed, composition, policy, callbacks
+        del seed, policy, callbacks
         config = parse_train(
             _compose(
                 "train",
@@ -1153,7 +1128,7 @@ class ConfigTest(unittest.TestCase):
         )
         module = Mock()
         model = Mock()
-        rvq.return_value = (module, model)
+        build.return_value = (AcousticType.RVQ, module, model)
         runtime.return_value = Mock(acoustic_side_channel=False)
         trainer = Mock(is_global_zero=False)
         trainer_factory.return_value = trainer
@@ -1167,7 +1142,13 @@ class ConfigTest(unittest.TestCase):
         )
 
     def test_text_ar_uses_the_text_loader(self):
-        self.assertTrue(_is_text_loader({Task.TEXT_AR: 1.0}))
+        loader = StageLoaderConfig(
+            weight=1.0,
+            task_weights={"text_ar": 1.0},
+        )
+
+        self.assertTrue(loader.is_text)
+        self.assertEqual(loader.tasks, {Task.TEXT_AR: 1.0})
 
     def test_removed_parallel_groups_are_not_composable(self):
         cases = [
@@ -1188,12 +1169,15 @@ class ConfigTest(unittest.TestCase):
             _compose(
                 "overfit",
                 "model.semantic_audio_adapter=mlp",
-                "model.semantic_audio_output_adapter=null",
+                "model.audio_output_adapter.type=none",
             )
         )
 
         self.assertIs(config.model.semantic_audio_adapter, AdapterType.MLP)
-        self.assertIsNone(config.model.semantic_audio_output_adapter)
+        self.assertIs(
+            config.model.audio_output_adapter.type,
+            AudioOutputAdapterType.NONE,
+        )
 
         with self.assertRaises(ValueError):
             overfit(_compose("overfit", "model.semantic_audio_adapter=invalid"))
@@ -1210,6 +1194,20 @@ class ConfigTest(unittest.TestCase):
         self.assertIs(
             configured.model.audio_input_adapter.type,
             AudioInputAdapterType.TRANSFORMER,
+        )
+
+    def test_audio_output_adapter_is_structured_and_linear_by_default(self):
+        default = overfit(_compose("overfit"))
+        self.assertIs(
+            default.model.audio_output_adapter.type,
+            AudioOutputAdapterType.LINEAR,
+        )
+        configured = overfit(
+            _compose("overfit", "model.audio_output_adapter.type=mlp")
+        )
+        self.assertIs(
+            configured.model.audio_output_adapter.type,
+            AudioOutputAdapterType.MLP,
         )
 
     def test_lora_model_and_parameter_policy_must_be_selected_together(self):
@@ -1231,7 +1229,7 @@ class ConfigTest(unittest.TestCase):
                 ParameterGroup.SEMANTIC_AUDIO_EMBEDDING,
                 ParameterGroup.SEMANTIC_AUDIO_ADAPTER,
                 ParameterGroup.AUDIO_INPUT_ADAPTER,
-                ParameterGroup.SEMANTIC_AUDIO_OUTPUT,
+                ParameterGroup.AUDIO_OUTPUT,
                 ParameterGroup.ACOUSTIC_DECODER,
             ],
         )
@@ -1268,7 +1266,7 @@ class ConfigTest(unittest.TestCase):
         )
 
         with patch.dict("os.environ", {"LOCAL_RANK": "1"}):
-            runtime = runtime_config(config)
+            runtime = runtime_config(config.runtime)
 
         self.assertEqual(runtime.codec, "longcat")
         self.assertEqual(runtime.device, "cuda:1")

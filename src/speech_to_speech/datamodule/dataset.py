@@ -276,7 +276,7 @@ class SpeakerGridCellsDataset(MapStyleABC):
                 yield tuple(positions)
 
 
-class ToyDataset(Dataset[Sample]):
+class ToyDataset(MapStyleABC):
     """Deterministic in-memory codec samples for model contract tests."""
 
     def __init__(

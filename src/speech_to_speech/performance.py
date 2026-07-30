@@ -300,7 +300,7 @@ def _token_head(model: TokenModel, batch: ModelBatch) -> int:
     if modality is Modality.AUDIO:
         embedding = model.semantic_audio_embedding
         forward = adapter(
-            model.semantic_audio_output_adapter,
+            model.audio_output_adapter,
             rows=rows,
             in_features=hidden,
             out_features=embedding.embedding_dim,

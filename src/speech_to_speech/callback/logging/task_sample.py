@@ -24,10 +24,8 @@ from ...datamodule.diagnostic import (
     target_item,
 )
 from ...datamodule.types import (
-    ConcreteTrainInput,
     ModelBatch,
-    TrainBatch,
-    TrainInputBatch,
+    TrainInput,
 )
 from ...runtime.types import (
     CodecBackend,
@@ -44,7 +42,7 @@ from ._sample_metrics import audio_metrics, text_metrics
 class _Module(Protocol):
     model: Any
 
-    def materialize_batch(self, batch: TrainInputBatch) -> TrainBatch: ...
+    def materialize_batch(self, batch: TrainInput) -> ModelBatch: ...
 
     def generate(
         self,
@@ -69,18 +67,6 @@ class _GenerationKwargs(TypedDict):
 class _DataModule(Protocol):
     runtime: _LoggingRuntime
 
-    def train_samples(
-        self,
-        indices: Sequence[int],
-        *,
-        loader_name: str | None = None,
-    ) -> list[types.Sample]: ...
-
-    def collator_for(
-        self,
-        loader_name: str | None = None,
-    ) -> Callable[[list[types.Sample]], ConcreteTrainInput]: ...
-
     def diagnostic_samples(
         self,
         indices: Sequence[int],
@@ -95,7 +81,7 @@ class _DataModule(Protocol):
         *,
         split: SampleSplit,
         loader_name: str,
-    ) -> Callable[[list[types.Sample]], ConcreteTrainInput]: ...
+    ) -> Callable[[list[types.Sample]], TrainInput]: ...
 
 
 class _LoggingRuntime(Protocol):
@@ -118,9 +104,9 @@ class TaskSampleLogger(Callback):
         indices: Sequence[int],
         every_n_steps: int | None,
         *,
-        loader_name: str | None = None,
+        loader_name: str,
+        task: Task,
         split: SampleSplit = SampleSplit.TRAIN,
-        task: Task | None = None,
         seed: int = 0,
         every_audio_seconds: float | None = None,
         max_new_tokens: int = 256,
@@ -138,12 +124,10 @@ class TaskSampleLogger(Callback):
             raise TypeError("indices must contain integer sample indices.")
         if not isinstance(split, SampleSplit):
             raise TypeError("task sample split must be a SampleSplit.")
-        if task is not None and not isinstance(task, Task):
-            raise TypeError("task sample task must be a Task or None.")
-        if task is not None and loader_name is None:
-            raise ValueError("task-aware sample logging requires loader_name.")
-        if task is None and split is not SampleSplit.TRAIN:
-            raise ValueError("legacy sample logging only supports the train split.")
+        if not loader_name:
+            raise ValueError("task sample loader_name must not be empty.")
+        if not isinstance(task, Task):
+            raise TypeError("task sample task must be a Task.")
         if isinstance(seed, bool) or not isinstance(seed, int):
             raise TypeError("task sample seed must be an integer.")
         if seed < 0:
@@ -170,7 +154,7 @@ class TaskSampleLogger(Callback):
         return self._generate_state_key(
             loader_name=self.loader_name,
             split=self.split.value,
-            task=None if self.task is None else self.task.value,
+            task=self.task.value,
             seed=self.seed,
             indices=tuple(self.indices),
             every_n_steps=self.interval.every_n_steps,
@@ -182,14 +166,10 @@ class TaskSampleLogger(Callback):
         if not trainer.is_global_zero:
             return
         datamodule = cast(_DataModule, attached_datamodule(trainer))
-        self.samples = (
-            datamodule.train_samples(self.indices, loader_name=self.loader_name)
-            if self.task is None
-            else datamodule.diagnostic_samples(
-                self.indices,
-                split=self.split,
-                loader_name=cast(str, self.loader_name),
-            )
+        self.samples = datamodule.diagnostic_samples(
+            self.indices,
+            split=self.split,
+            loader_name=self.loader_name,
         )
 
     def on_train_batch_start(
@@ -207,14 +187,10 @@ class TaskSampleLogger(Callback):
             return
         module = cast(_Module, cast(object, pl_module))
         datamodule = cast(_DataModule, attached_datamodule(trainer))
-        collator = (
-            datamodule.collator_for(self.loader_name)
-            if self.task is None
-            else datamodule.diagnostic_collator(
-                self.task,
-                split=self.split,
-                loader_name=cast(str, self.loader_name),
-            )
+        collator = datamodule.diagnostic_collator(
+            self.task,
+            split=self.split,
+            loader_name=self.loader_name,
         )
         materialized = module.materialize_batch(collator(self.samples))
         if not isinstance(materialized, ModelBatch):
@@ -377,8 +353,6 @@ class TaskSampleLogger(Callback):
                     )
 
     def _tag(self, dataset_index: int) -> str:
-        if self.task is None:
-            return _tag(dataset_index, self.loader_name)
         return (
             f"task_sample/{self.split.value}/{self.loader_name}/"
             f"{self.task.value}/{dataset_index}"
@@ -534,12 +508,6 @@ def _target_text(sample: types.Sample, task: Task) -> str | None:
     if not isinstance(item, types.TextItem):
         raise TypeError("text-target task sample must contain a TextItem.")
     return item.views[types.TextView.TEXT]
-
-
-def _tag(dataset_index: int, loader_name: str | None) -> str:
-    if loader_name is None:
-        return f"task_sample/{dataset_index}"
-    return f"task_sample/{loader_name}/{dataset_index}"
 
 
 def _modality_metadata(

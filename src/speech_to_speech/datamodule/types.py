@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from functools import cached_property
 from collections.abc import Iterator, Mapping
@@ -15,6 +14,7 @@ from torch.nn.utils.rnn import pad_sequence
 from .._compat import StrEnum, auto
 from .._tensor import is_signed_integer_dtype
 from ..task import Task
+from ._duration import seconds
 
 ACOUSTIC_PAD_ID = -1
 
@@ -95,23 +95,13 @@ class Speech:
             raise ValueError("audio token ids and spans must be aligned 1D tensors.")
         if int(self.audio_token_spans.sum().item()) != self.semantic_codes.size(0):
             raise ValueError("audio token spans must cover all semantic frames.")
-        if self.duration_seconds is not None:
-            if isinstance(self.duration_seconds, bool) or not isinstance(
-                self.duration_seconds,
-                (int, float),
-            ):
-                raise TypeError("speech duration_seconds must be a number or None.")
-            if not math.isfinite(float(self.duration_seconds)) or self.duration_seconds < 0:
-                raise ValueError("speech duration_seconds must be finite and non-negative.")
+        seconds(self.duration_seconds, name="speech duration_seconds")
 
 
 @dataclass
 class SpeechPair:
     source: Speech
     target: Speech
-
-
-SpeechUtterance = Speech
 
 
 @dataclass
@@ -155,14 +145,7 @@ class RawSpeech:
             raise ValueError("raw speech sample_rate must be positive.")
         if not isinstance(self.language, Language):
             raise TypeError("raw speech language must be a Language.")
-        if self.duration_seconds is not None:
-            if isinstance(self.duration_seconds, bool) or not isinstance(
-                self.duration_seconds,
-                (int, float),
-            ):
-                raise TypeError("raw speech duration_seconds must be a number or None.")
-            if not math.isfinite(float(self.duration_seconds)) or self.duration_seconds < 0:
-                raise ValueError("raw speech duration_seconds must be finite and non-negative.")
+        seconds(self.duration_seconds, name="raw speech duration_seconds")
 
     def pin_memory(self) -> RawSpeech:
         return RawSpeech(
@@ -536,9 +519,7 @@ class ModelBatch:
         )
 
 
-ConcreteTrainInput = Union[ModelBatch, RawSpeechBatch]
-TrainInputBatch = ConcreteTrainInput
-TrainBatch = ModelBatch
+TrainInput = Union[ModelBatch, RawSpeechBatch]
 
 
 def _pad(values: list[Tensor], padding_value: int) -> Tensor:

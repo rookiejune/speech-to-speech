@@ -38,6 +38,10 @@ from speech_to_speech.loss.flow_matching import AcousticFlowLoss
 from speech_to_speech.loss.token import TokenLoss
 from speech_to_speech.loss.types import combine_outputs
 from speech_to_speech.model.base import Config, TokenModel
+from speech_to_speech.model.audio_output import (
+    AudioOutputAdapterConfig,
+    AudioOutputAdapterType,
+)
 from speech_to_speech.model.lora import LoraConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.pl_module import SpeechToSpeechModule
@@ -696,7 +700,9 @@ class ModelLossContractTest(unittest.TestCase):
         model = TokenModel(
             Config(
                 semantic_audio_adapter=None,
-                semantic_audio_output_adapter=None,
+                audio_output_adapter=AudioOutputAdapterConfig(
+                    type=AudioOutputAdapterType.NONE
+                ),
             ),
             runtime=rt,
         )
@@ -720,7 +726,9 @@ class ModelLossContractTest(unittest.TestCase):
         model = TokenModel(
             Config(
                 semantic_audio_adapter=None,
-                semantic_audio_output_adapter=None,
+                audio_output_adapter=AudioOutputAdapterConfig(
+                    type=AudioOutputAdapterType.NONE
+                ),
             ),
             runtime=rt,
         )
@@ -747,7 +755,9 @@ class ModelLossContractTest(unittest.TestCase):
             TokenModel(
                 Config(
                     semantic_audio_adapter=None,
-                    semantic_audio_output_adapter=None,
+                    audio_output_adapter=AudioOutputAdapterConfig(
+                        type=AudioOutputAdapterType.NONE
+                    ),
                 ),
                 runtime=rt,
             )
@@ -891,6 +901,54 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertIn("repa", outputs)
         self.assertTrue(torch.isfinite(outputs["loss"]))
 
+    def test_repa_uses_frame_weighting_and_requires_frame_counts(self):
+        layout = Layout(text=(0, 4), audio=(4, 7))
+        model = _FlowModel(layout)
+        objective = FlowObjective(
+            layout,
+            _FlowRuntime(),
+            repa={"weight": 0.1, "teacher": _Teacher()},
+        )
+        batch = _batch(
+            Task.TTS,
+            token_labels=torch.tensor([[-100, 4], [-100, 4]]),
+            target_acoustic_codes=torch.tensor(
+                [[[2], [2], [2]], [[2], [-1], [-1]]]
+            ),
+            target_audio_token_positions=torch.tensor(
+                [[1, 1, 1], [1, -1, -1]]
+            ),
+        )
+        token = LossItem(
+            torch.zeros(2),
+            {"tokens": torch.ones(2)},
+        )
+        flow = LossItem(
+            torch.zeros(2),
+            {"frames": torch.tensor([3.0, 1.0])},
+        )
+        repa = LossItem(
+            torch.tensor([1.0, 3.0]),
+            {"frames": torch.tensor([3.0, 1.0])},
+        )
+        representation = torch.zeros(2, 3, 2)
+
+        with (
+            patch.object(objective.token, "forward", return_value=token),
+            patch.object(
+                objective.flow_matching,
+                "forward_with_features",
+                return_value=(flow, representation),
+            ),
+            patch.object(objective.repa_loss, "forward", return_value=repa) as loss,
+        ):
+            outputs = objective(batch, model)
+            torch.testing.assert_close(outputs["loss"], torch.tensor(0.15))
+
+            loss.return_value = LossItem(torch.tensor([1.0, 3.0]))
+            with self.assertRaisesRegex(ValueError, "frames"):
+                objective(batch, model)
+
     def test_audio_target_automatically_adds_rvq_objective(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
         model = _RVQModel(layout)
@@ -950,7 +1008,7 @@ def _batch(
                 "token_positions": target_audio_token_positions,
             }
         ),
-        tasks=[task],
+        tasks=[task] * token_labels.size(0),
         pad_token_id=99,
     )
     return batch

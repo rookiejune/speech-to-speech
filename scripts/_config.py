@@ -3,43 +3,41 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Type, TypeVar, Union, cast
+from typing import Optional, Type, Union
 
-from anydataset.types import AudioView, Modality
-from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf
+from anydataset.types import AudioView
+from omegaconf import MISSING, DictConfig
 
 from speech_to_speech.datamodule.config import SpeechConfig
 from speech_to_speech.datamodule.dataset import DatasetConfig, DatasetName
 from speech_to_speech.datamodule.joint import LoaderSchedule
 from speech_to_speech.datamodule.text import (
     TextConfig as TextDataConfig,
-    TextDatasetName,
 )
 from speech_to_speech.datamodule.types import DataShape
 from speech_to_speech.audio_route import (
-    AudioStream,
     Config as AudioRouteConfig,
-    PromptSource,
-    StreamSource,
 )
-from speech_to_speech.model import AdapterType, AudioInputAdapterType
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model.acoustic import AcousticType, DecoderConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
-from speech_to_speech.runtime import (
-    AudioRepresentation,
-    BackboneInitialization,
-    Config as RuntimeConfig,
-    validate_audio_route,
-)
+from speech_to_speech.runtime import AudioRepresentation, BackboneInitialization
+from speech_to_speech.runtime import Config as RuntimeConfig
+from speech_to_speech.runtime import validate_audio_route
 from speech_to_speech.stage import (
     ParameterGroup,
     ParameterPolicyConfig,
     ParameterPolicyName,
     StageConfig,
-    StageName,
 )
 from speech_to_speech.task import Task
+
+if __package__:
+    from ._config_normalization import parse as _parse
+    from ._config_normalization import prepare as _prepare
+else:
+    from _config_normalization import parse as _parse
+    from _config_normalization import prepare as _prepare
 
 
 @dataclass
@@ -173,6 +171,44 @@ class TextRetentionCallbackConfig:
     every_audio_seconds: Optional[float] = None
     max_new_tokens: int = 128
     probes: dict[str, TextProbeConfig] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        if (
+            isinstance(self.every_n_steps, bool)
+            or not isinstance(self.every_n_steps, int)
+            or self.every_n_steps <= 0
+        ):
+            raise ValueError("text retention every_n_steps must be a positive integer.")
+        if (
+            isinstance(self.max_new_tokens, bool)
+            or not isinstance(self.max_new_tokens, int)
+            or self.max_new_tokens <= 0
+        ):
+            raise ValueError("text retention max_new_tokens must be a positive integer.")
+        _validate_optional_positive_number(
+            self.every_audio_seconds,
+            "text retention every_audio_seconds",
+        )
+        if not self.enabled:
+            return
+        if not self.probes:
+            raise ValueError("enabled text retention requires at least one probe.")
+        for name, probe in self.probes.items():
+            if not isinstance(name, str) or not name:
+                raise TypeError(
+                    "text retention probe names must be non-empty strings."
+                )
+            if not isinstance(probe.instruction, str) or not probe.instruction:
+                raise TypeError(
+                    f"text retention probe {name!r} instruction must be a non-empty string."
+                )
+            if not isinstance(probe.reference, str) or not probe.reference:
+                raise TypeError(
+                    f"text retention probe {name!r} reference must be a non-empty string."
+                )
 
 
 @dataclass
@@ -323,15 +359,6 @@ StagedTrainConfig = Union[
 ]
 
 
-ConfigT = TypeVar("ConfigT")
-AudioRouteEnumT = TypeVar(
-    "AudioRouteEnumT",
-    AudioStream,
-    PromptSource,
-    StreamSource,
-)
-
-
 def overfit(config: DictConfig) -> OverfitConfig:
     config = _prepare(config)
     schema: Type[OverfitConfig]
@@ -343,11 +370,7 @@ def overfit(config: DictConfig) -> OverfitConfig:
     else:
         schema = OverfitRVQConfig
     result = _parse(config, schema)
-    _validate_output(result)
-    _validate_audio_representation(result)
-    _validate_audio_route(result)
-    _validate_backbone_initialization(result)
-    _validate_lora(result)
+    _validate_training(result)
     if (
         result.callbacks.performance.enabled
         and result.callbacks.task_sample.enabled
@@ -371,18 +394,21 @@ def train(config: DictConfig) -> StagedTrainConfig:
     else:
         schema = StagedTrainRVQConfig
     result = _parse(config, schema)
-    _validate_output(result)
-    _validate_audio_representation(result)
-    _validate_audio_route(result)
-    _validate_backbone_initialization(result)
-    _validate_lora(result)
+    _validate_training(result)
     if not result.stage.loaders:
         raise ValueError("formal train requires stage.loaders.")
     _validate_loader_schedule(result)
-    _validate_task_samples(result)
-    _validate_text_retention(result)
     _validate_validation(result)
+    _validate_task_samples(result)
     return result
+
+
+def _validate_training(config: Union[OverfitConfig, StagedTrainConfig]) -> None:
+    _validate_output(config)
+    _validate_audio_representation(config)
+    _validate_audio_route(config)
+    _validate_backbone_initialization(config)
+    _validate_lora(config)
 
 
 def _validate_task_samples(config: StagedTrainConfig) -> None:
@@ -413,12 +439,12 @@ def _validate_task_samples(config: StagedTrainConfig) -> None:
                 f"task sample callback references unknown loader {loader_name!r}."
             )
         loader = config.stage.loaders[loader_name]
-        text_loader = _is_text_task_loader(loader.task_weights)
+        text_loader = loader.is_text
         try:
             task = Task(panel.task)
         except ValueError as error:
             raise ValueError(f"unknown task sample task {panel.task!r}.") from error
-        if loader.task_weights.get(task.value, 0.0) <= 0:
+        if loader.tasks.get(task, 0.0) <= 0:
             raise ValueError(
                 f"task sample task {task.value!r} is not active in loader "
                 f"{loader_name!r}."
@@ -448,42 +474,6 @@ def _validate_task_samples(config: StagedTrainConfig) -> None:
                 raise ValueError(
                     "validation task sample panels require validation.enabled=true."
                 )
-            _validate_validation_dataset(config)
-
-
-def _validate_text_retention(config: StagedTrainConfig) -> None:
-    callback = config.callbacks.text_retention
-    if (
-        isinstance(callback.every_n_steps, bool)
-        or not isinstance(callback.every_n_steps, int)
-        or callback.every_n_steps <= 0
-    ):
-        raise ValueError("text retention every_n_steps must be a positive integer.")
-    if (
-        isinstance(callback.max_new_tokens, bool)
-        or not isinstance(callback.max_new_tokens, int)
-        or callback.max_new_tokens <= 0
-    ):
-        raise ValueError("text retention max_new_tokens must be a positive integer.")
-    _validate_optional_positive_number(
-        callback.every_audio_seconds,
-        "text retention every_audio_seconds",
-    )
-    if not callback.enabled:
-        return
-    if not callback.probes:
-        raise ValueError("enabled text retention requires at least one probe.")
-    for name, probe in callback.probes.items():
-        if not isinstance(name, str) or not name:
-            raise TypeError("text retention probe names must be non-empty strings.")
-        if not isinstance(probe.instruction, str) or not probe.instruction:
-            raise TypeError(
-                f"text retention probe {name!r} instruction must be a non-empty string."
-            )
-        if not isinstance(probe.reference, str) or not probe.reference:
-            raise TypeError(
-                f"text retention probe {name!r} reference must be a non-empty string."
-            )
 
 
 def _validate_optional_positive_number(value: object, name: str) -> None:
@@ -511,27 +501,6 @@ def _validate_loader_schedule(config: StagedTrainConfig) -> None:
     )
 
 
-def _is_text_task_loader(task_weights: dict[str, float]) -> bool:
-    tasks = [Task(name) for name, weight in task_weights.items() if weight > 0]
-    return all(
-        task.source_modality is not Modality.AUDIO
-        and task.target_modality is Modality.TEXT
-        for task in tasks
-    )
-
-
-def _validate_validation_dataset(config: StagedTrainConfig) -> None:
-    dataset = config.data.dataset
-    if dataset.split_manifest is None:
-        raise ValueError(
-            "validation task sample panels require data.dataset.split_manifest."
-        )
-    if config.validation.split_label == dataset.split_label:
-        raise ValueError(
-            "validation task sample split must differ from the train split_label."
-        )
-
-
 def _validate_validation(config: StagedTrainConfig) -> None:
     validation = config.validation
     if not isinstance(validation.enabled, bool):
@@ -556,6 +525,8 @@ def _validate_validation(config: StagedTrainConfig) -> None:
         return
     if validation.loader not in config.stage.loaders:
         raise ValueError(f"unknown validation loader {validation.loader!r}.")
+    if config.stage.loaders[validation.loader].is_text:
+        raise ValueError("validation loader must be a speech loader.")
     dataset = config.data.dataset
     if dataset.split_manifest is None:
         raise ValueError("enabled validation requires data.dataset.split_manifest.")
@@ -618,10 +589,7 @@ def _validate_audio_route(
 ) -> None:
     route = config.audio_route
     validate_audio_route(config.runtime, route)
-    acoustic = AcousticType(config.acoustic.type)
     if config.runtime.audio_view is AudioView.BICODEC:
-        if acoustic is not AcousticType.NONE:
-            raise ValueError("BiCodec audio routes require model/acoustic=none.")
         if config.runtime.semantic_codec_artifact is not None:
             raise ValueError(
                 "BiCodec audio routes decode structured codes and must not configure "
@@ -674,166 +642,3 @@ def _validate_lora(config: Union[OverfitConfig, StagedTrainConfig]) -> None:
             "LoRA training FLOPs are not supported by the current performance provider; "
             "set callbacks.performance.enabled=false."
         )
-
-
-def _prepare(config: DictConfig) -> DictConfig:
-    result = cast(DictConfig, OmegaConf.create(OmegaConf.to_container(config)))
-    OmegaConf.resolve(result)
-    for key in (
-        "semantic_audio_adapter",
-        "semantic_audio_output_adapter",
-    ):
-        value = result.model[key]
-        if value is not None:
-            raw = str(value)
-            result.model[key] = (
-                AdapterType[raw].name
-                if raw in AdapterType.__members__
-                else AdapterType(raw).name
-            )
-    audio_input = result.model.get("audio_input_adapter")
-    if isinstance(audio_input, DictConfig):
-        value = audio_input.get("type")
-        if value is not None:
-            raw = str(value)
-            audio_input.type = (
-                AudioInputAdapterType[raw].name
-                if raw in AudioInputAdapterType.__members__
-                else AudioInputAdapterType(raw).name
-            )
-    _normalize_dataset(result.get("data"))
-    _normalize_dataset(result.get("data", {}).get("dataset"))
-    _normalize_data_shape(result.get("data"))
-    _normalize_text_dataset(result.get("text_data", {}).get("dataset"))
-    _normalize_audio_route(result.get("audio_route"))
-    runtime = result.get("runtime")
-    if runtime is not None:
-        initialization = runtime.get("backbone_initialization")
-        if initialization is not None:
-            raw = str(initialization)
-            runtime.backbone_initialization = (
-                BackboneInitialization[raw].name
-                if raw in BackboneInitialization.__members__
-                else BackboneInitialization(raw).name
-            )
-        representation = runtime.get("audio_representation")
-        if representation is not None:
-            raw = str(representation)
-            runtime.audio_representation = (
-                AudioRepresentation[raw].name
-                if raw in AudioRepresentation.__members__
-                else AudioRepresentation(raw).name
-            )
-    stage = result.get("stage")
-    if stage is not None:
-        name = stage.get("name")
-        if name is not None:
-            raw = str(name)
-            stage.name = (
-                StageName[raw].name
-                if raw in StageName.__members__
-                else StageName(raw).name
-            )
-    policy = result.get("parameter_policy")
-    if policy is not None:
-        name = policy.get("name")
-        if name is not None:
-            raw = str(name)
-            policy.name = (
-                ParameterPolicyName[raw].name
-                if raw in ParameterPolicyName.__members__
-                else ParameterPolicyName(raw).name
-            )
-        for key in ("trainable_groups", "frozen_groups"):
-            groups = policy.get(key)
-            if groups is None:
-                continue
-            policy[key] = [
-                ParameterGroup[str(group)].name
-                if str(group) in ParameterGroup.__members__
-                else ParameterGroup(str(group)).name
-                for group in groups
-            ]
-    return result
-
-
-def _normalize_dataset(value: object) -> None:
-    if not isinstance(value, DictConfig):
-        return
-    dataset = value.get("name")
-    if dataset is None:
-        return
-    raw = str(dataset)
-    value.name = (
-        DatasetName[raw].name
-        if raw in DatasetName.__members__
-        else DatasetName(raw).name
-    )
-
-
-def _normalize_data_shape(value: object) -> None:
-    if not isinstance(value, DictConfig):
-        return
-    shape = value.get("shape")
-    if shape is None:
-        return
-    raw = str(shape)
-    value.shape = (
-        DataShape[raw].name if raw in DataShape.__members__ else DataShape(raw).name
-    )
-
-
-def _normalize_text_dataset(value: object) -> None:
-    if not isinstance(value, DictConfig):
-        return
-    dataset = value.get("name")
-    if dataset is None:
-        return
-    raw = str(dataset)
-    value.name = (
-        TextDatasetName[raw].name
-        if raw in TextDatasetName.__members__
-        else TextDatasetName(raw).name
-    )
-
-
-def _normalize_audio_route(value: object) -> None:
-    if not isinstance(value, DictConfig):
-        return
-    prompt = value.get("prompt")
-    output = value.get("output")
-    decode = value.get("decode")
-    if not isinstance(prompt, DictConfig) or not isinstance(output, DictConfig):
-        return
-    if not isinstance(decode, DictConfig):
-        return
-    prompt.source = _enum_name(PromptSource, prompt.source)
-    prompt.streams = [_enum_name(AudioStream, stream) for stream in prompt.streams]
-    output.streams = [_enum_name(AudioStream, stream) for stream in output.streams]
-    decode.semantic = _enum_name(StreamSource, decode.semantic)
-    decode.acoustic = _enum_name(StreamSource, decode.acoustic)
-
-
-def _enum_name(enum: type[AudioRouteEnumT], value: object) -> str:
-    raw = str(value)
-    return enum[raw].name if raw in enum.__members__ else enum(raw).name
-
-
-def _parse(config: DictConfig, schema: Type[ConfigT]) -> ConfigT:
-    structured = OmegaConf.structured(schema)
-    _writable(structured)
-    merged = OmegaConf.merge(structured, config)
-    OmegaConf.resolve(merged)
-    return cast(ConfigT, OmegaConf.to_object(merged))
-
-
-def _writable(config: Union[DictConfig, ListConfig]) -> None:
-    OmegaConf.set_readonly(config, False)
-    nodes = (
-        (config._get_node(key) for key in config.keys())
-        if isinstance(config, DictConfig)
-        else (config._get_node(index) for index in range(len(config)))
-    )
-    for node in nodes:
-        if isinstance(node, (DictConfig, ListConfig)):
-            _writable(node)

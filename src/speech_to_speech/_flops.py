@@ -18,6 +18,7 @@ from .model.acoustic.dit import AcousticDiT, DiTBlock, TimeEmbedding
 from .model.acoustic.rvq import AcousticRVQDecoder
 from .model.adapter import MLPAdapter
 from .model.audio_input import AudioInputAdapterType, AudioInputTower
+from .model.audio_output import AudioOutputAdapter
 
 
 def adapter(
@@ -44,6 +45,14 @@ def adapter(
         return sum(
             linear(projection, rows)
             for projection in (module.gate_proj, module.up_proj, module.down_proj)
+        )
+    if type(module) is AudioOutputAdapter:
+        return adapter(
+            module.adapter,
+            rows=rows,
+            in_features=in_features,
+            out_features=out_features,
+            name=name,
         )
     raise TypeError(f"{name} uses an unsupported module: {type(module).__name__}.")
 

@@ -173,7 +173,8 @@ Runtime 聚合互相兼容的 backbone、text/audio tokenizer、codec、layout�
 ## 5. Model 与 Objective
 
 `model.Config` 配置 token backbone 周边的 semantic-audio input/output adapter，以及可选的 source-audio
-input tower；acoustic composition 使用独立结构：
+input tower。semantic-audio output adapter 是逐 token 的 hidden-to-audio projection，必须保持
+pointwise 以兼容 cached generation；acoustic composition 使用独立结构：
 
 ```python
 @dataclass(frozen=True)
@@ -232,7 +233,7 @@ source audio semantic token IDs
 ```
 
 `mlp` 是逐帧 gated projection；`transformer` 是保持帧数的非 causal encoder。tower 只服务输入
-表示，不能读取或修改生成中的新 token，也不参与 `semantic_audio_output_adapter`、Flow/RVQ decoder
+表示，不能读取或修改生成中的新 token，也不参与 `audio_output_adapter`、Flow/RVQ decoder
 或 audio response grammar。显式位置由 datamodule/sample builder 和 generation request 传递；
 没有 source audio 时为 `None`。
 
@@ -255,7 +256,7 @@ token CE 的 softmax 只覆盖 task 的 target modality，不让 text/audio head
 训练与推理是两条独立路径：
 
 - `ModelBatch -> token_hidden_states -> sparse modality token_logits -> objective`
-- `Request -> generation service -> token/audio generation -> decode -> Result`
+- `Request -> generation service -> text generation | audio strategy -> decode -> Result`
 
 语义 seq2seq 是基础且完整的模型能力：`model/acoustic=none` 只预测 text token 或 audio token。
 音频重建按 backend capability 分成两条路径：FrameCodec 使用
@@ -267,7 +268,8 @@ SemanticAcousticCodec 只生成 semantic units，再由 `semantic-acoustic-codec
 训练显式要求 `AcousticCodec`；semantic-only waveform decoder 不属于 anytrain。UniCodec 虽然只有
 一个 codebook，也按 `FrameCodec` 的 full-code path 解码。
 
-`speech_to_speech.generation` 拥有 `Request`、`Result`、service、decode 与 text evaluation；`pl_module` 只负责 Lightning 集成。
+`speech_to_speech.generation` 拥有 `Request`、`Result`、通用 service、audio capability strategy、
+decode 与 text evaluation；`pl_module` 只负责 Lightning 集成。
 
 model 对外提供：
 

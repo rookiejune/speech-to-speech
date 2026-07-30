@@ -13,7 +13,7 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
   `longcat_full_sequence`、`unicodec` 表示相互兼容的资源 snapshot；不再拆分 `codec` 和
   `sampler` 组。
 - `model`：完整映射 `model.Config` 的 semantic adapter、可选 source-audio input adapter、
-  `ToyConfig` 与 `LoraConfig`。
+  `ToyConfig`、`AudioOutputAdapterConfig` 与 `LoraConfig`。
   `model=toy` 只替换 backbone；`model.lora.enabled=true` 使用 Hugging Face PEFT 向现有 backbone
   注入 adapter，不维护项目内轻量 LoRA 实现；`model/acoustic` 选择 flow/RVQ composition，preset
   package 仍是顶层 `acoustic`，避免把 subtype 字段混入基础 `model.Config`。
@@ -47,9 +47,14 @@ probe 在 fit 开始建立 reference-NLL baseline，并持续记录 greedy gener
 
 `model.audio_input_adapter` 默认 `type=none`。可显式选择 `mlp` 或 `transformer`，并配置
 `layers`、`heads`、`ffn_ratio` 与 `dropout`；两者都只作用于 `audio_input_positions` 标记的 source
-audio payload。这个配置与 `semantic_audio_adapter`、`semantic_audio_output_adapter` 独立：它不
+audio payload。这个配置与 `semantic_audio_adapter`、`audio_output_adapter` 独立：它不
 处理 target/generated audio，也不替换 Flow/RVQ acoustic decoder。启用 transformer 时要求
 backbone hidden size 能被 `heads` 整除。
+
+`model.audio_output_adapter` 使用 `none`、`linear` 或 `mlp` 时，模型通过显式的 pointwise
+`AudioOutputAdapter` 将 backbone hidden 投影到 semantic-audio feature space；该
+模块同时服务 teacher forcing、候选 logits 和 autoregressive generation，不引入跨 token 的
+sequence mixer。
 
 ## 生产默认与完整链路测试
 
@@ -174,14 +179,18 @@ optimizer-step 语义，入口乘以 `stage.accumulate_grad_batches` 后传给 L
 
 ## 入口边界
 
-`scripts/_config.py` 只定义入口专属结构，例如 task、Trainer、logging、callback 与 flow/RVQ
-acoustic config；`speech_to_speech.pl_module.composition` 负责 token/flow/RVQ 的
-model/objective/module 组装；`scripts/_entry.py` 只放 overfit/train 共享的
-runtime device、Trainer、performance callback 与 acoustic composition 边界校验。
+`scripts/_config.py` 只定义入口专属结构及组合业务校验，例如 task、Trainer、logging、callback 与
+flow/RVQ acoustic config；`scripts/_config_normalization.py` 隔离 OmegaConf 可写化、枚举规范化与
+structured dataclass 合并，不包含训练业务规则。`speech_to_speech.pl_module.composition` 负责 token/flow/RVQ 的
+model/objective/module 组装、基于 `acoustic.type` 的统一分发，以及 runtime acoustic side-channel
+约束；`scripts/_entry.py` 只放 overfit/train 共享的 runtime device、Trainer 与 performance callback
+组装。
 `runtime.Config`、`model.Config`、`pl_module.Config`、`model.DecoderConfig`、
 `datamodule.config.SpeechConfig`、`DataLoaderConfig` 和 `datamodule.text.TextConfig` 直接进入 root
 schema，不重复声明字段；`scripts/train.py` 直接把解析后的 data config 交给 `LoaderSpec`，不做
-同构对象转换。OmegaConf 对字符串枚举只接受成员
+同构对象转换。`StageLoaderConfig` 负责把字符串 task weights 暴露为 `Task` 映射，并根据非零任务
+维护 text-only 与 speech loader 不可混合的不变量；配置解析校验 validation/panel 选择，训练组装不
+重复这些条件。OmegaConf 对字符串枚举只接受成员
 名，入口在合并前把公开的小写 value 转成 enum member name；除此之外不做兼容重写。
 `audio_route` 是 root schema 的独立公开结构，不属于 `runtime.Config`；入口解析后把同一份 route
 传给 `Runtime`、DataModule、model 和 generation service。Hydra 的 list/enum 表示在入口归一化，

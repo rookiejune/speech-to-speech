@@ -33,9 +33,6 @@ class TextLoader:
             return
         self._train_dataset = load_text_dataset(self.config.dataset)
 
-    def set_task_weights(self, task_weights: Mapping[Task, float]) -> None:
-        self.collator.set_task_weights(task_weights)
-
     def train_samples(self, indices: Sequence[int]) -> list[RawSample]:
         if self._train_dataset is None:
             raise RuntimeError("TextLoader.setup() must run before reading samples.")

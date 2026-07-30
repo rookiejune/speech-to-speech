@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import multiprocessing
 import pickle
 import sys
 import unittest
@@ -9,7 +8,7 @@ from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import ModuleType, SimpleNamespace
-from typing import Any, Protocol, cast
+from typing import Any, cast
 from unittest.mock import Mock, patch
 
 import torch
@@ -37,7 +36,7 @@ from anydataset.dataset import MapStyleABC
 from speech_to_speech.audio_route import BICODEC_GENERATE_GLOBAL, FULL_OUTPUT
 from speech_to_speech.callback import OnDeviceCodecMaterializer
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
-from speech_to_speech.datamodule._task import allocate_tasks
+from speech_to_speech.datamodule._task import TaskWeights, allocate_tasks
 from speech_to_speech.datamodule.collator import Collator, TextCollator
 from speech_to_speech.datamodule.dataset import (
     DatasetConfig,
@@ -48,6 +47,7 @@ from speech_to_speech.datamodule.dataset import (
 )
 from speech_to_speech.datamodule.joint import LoaderSchedule, ScheduledDataLoader
 from speech_to_speech.datamodule.module import DataModule, LoaderSpec
+from speech_to_speech.datamodule.diagnostic import SampleSplit
 from speech_to_speech.datamodule.single import SingleCollator
 from speech_to_speech.datamodule.text import (
     TextConfig,
@@ -63,7 +63,7 @@ from speech_to_speech.datamodule.parser import (
 )
 from speech_to_speech.datamodule.sample import build_sample
 from speech_to_speech.datamodule.single import build_single_sample, parse_single_sample
-from speech_to_speech.datamodule.protocol import DataRuntime, DataRuntimeSnapshot
+from speech_to_speech.datamodule.protocol import DataRuntimeSnapshot
 from speech_to_speech.datamodule.types import (
     Language,
     ModelBatch,
@@ -72,6 +72,7 @@ from speech_to_speech.datamodule.types import (
     RawSpeechBatch,
 )
 from speech_to_speech.model import Config as ModelConfig, ToyConfig
+from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.runtime import AudioRepresentation, Config, Runtime
 from speech_to_speech.runtime.runtime import audio_tokenizer, dtype
 from speech_to_speech.runtime.audio_tokenizer import (
@@ -88,12 +89,12 @@ from speech_to_speech.stage import (
 )
 from speech_to_speech.task import Task
 from scripts._config import overfit as parse_overfit
+from scripts._entry import runtime_config
 from scripts.create_split_manifest import build_manifest
 from scripts.overfit import (
     _prepare_generation_module,
     build_trainer,
     run,
-    runtime_config,
 )
 
 
@@ -113,20 +114,6 @@ class _ChatTokenizer(_Tokenizer):
     def apply_chat_template(self, conversation, **kwargs) -> str:
         del kwargs
         return f"<user>{conversation[0]['content']}</user><assistant>"
-
-
-class _Event(Protocol):
-    def set(self) -> None: ...
-
-    def wait(self, timeout: float | None = None) -> bool: ...
-
-
-class _Queue(Protocol):
-    def put(self, value: list[Task]) -> None: ...
-
-    def get(self, *, timeout: float) -> list[Task]: ...
-
-    def close(self) -> None: ...
 
 
 class _StageBackbone(nn.Module):
@@ -154,20 +141,8 @@ class _StageModel(nn.Module):
         self.backbone = _StageBackbone()
         self.semantic_audio_embedding = nn.Embedding(1, 1)
         self.semantic_audio_adapter = nn.Linear(1, 1)
-        self.semantic_audio_output_adapter = nn.Linear(1, 1)
+        self.audio_output_adapter = nn.Linear(1, 1)
         self.acoustic_decoder = _StageAcousticDecoder()
-
-
-def _observe_task_updates(
-    collator: Collator,
-    ready: _Event,
-    updated: _Event,
-    output: _Queue,
-) -> None:
-    output.put(collator.tasks)
-    ready.set()
-    if updated.wait(timeout=5.0):
-        output.put(collator.tasks)
 
 
 class ContractTest(unittest.TestCase):
@@ -345,7 +320,7 @@ class ContractTest(unittest.TestCase):
         self.assertIsNone(runtime_config.audio_tokenizer)
         self.assertIsNone(runtime_config.device)
         self.assertEqual(model_config.semantic_audio_adapter, "linear")
-        self.assertEqual(model_config.semantic_audio_output_adapter, "linear")
+        self.assertEqual(model_config.audio_output_adapter.type, "linear")
 
     def test_acoustic_presets_expose_only_supported_options(self):
         flow = _compose()
@@ -395,7 +370,10 @@ class ContractTest(unittest.TestCase):
                 patch("scripts.overfit.runtime_config", return_value=Mock()),
                 patch("scripts.overfit.Runtime", return_value=runtime),
                 patch("scripts.overfit.DataModule", return_value=datamodule),
-                patch("scripts.overfit.flow", return_value=(Mock(), model, None)),
+                patch(
+                    "scripts.overfit.build",
+                    return_value=(AcousticType.FLOW, Mock(), model),
+                ),
                 patch("scripts.overfit.apply_parameter_policy") as apply_policy,
                 patch(
                     "scripts.overfit.AcousticEvaluation", side_effect=EvaluationReached
@@ -514,7 +492,7 @@ class ContractTest(unittest.TestCase):
         )
 
         with patch.dict("os.environ", {"LOCAL_RANK": "1"}):
-            result = runtime_config(config)
+            result = runtime_config(config.runtime)
 
         self.assertEqual(result.codec, "unicodec")
         self.assertIsNone(result.audio_tokenizer)
@@ -1056,7 +1034,6 @@ class ContractTest(unittest.TestCase):
             ),
         )
 
-        datamodule.set_loader_weights({"speech": 1.0, "mt": 1.0})
         datamodule.setup("fit")
         loader = datamodule.train_dataloader()
         iterator = iter(loader)
@@ -1083,24 +1060,6 @@ class ContractTest(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "finite positive"):
             LoaderSchedule({"speech": 0.0, "mt": 0.0})
-
-    def test_datamodule_keeps_schedule_when_loader_weight_update_is_invalid(self):
-        runtime = _data_runtime()
-        config = SpeechConfig(
-            codec="longcat",
-            dataloader=_loader(),
-            dataset=DatasetConfig(name=DatasetName.TOY),
-        )
-        datamodule = DataModule(
-            runtime,
-            {"speech": LoaderSpec.speech(config, {Task.TTS: 1.0})},
-        )
-        original = datamodule.schedule
-
-        with self.assertRaisesRegex(ValueError, "missing"):
-            datamodule.set_loader_weights({"other": 1.0})
-
-        self.assertIs(datamodule.schedule, original)
 
     @patch("speech_to_speech.datamodule.module.load_dataset")
     def test_datamodule_setup_loads_dataset_once(self, load_dataset):
@@ -1208,9 +1167,52 @@ class ContractTest(unittest.TestCase):
 
         datamodule.setup()
 
-        self.assertEqual(len(datamodule.train_samples([0, 1])), 2)
+        self.assertEqual(
+            len(
+                datamodule.diagnostic_samples(
+                    [0, 1],
+                    split=SampleSplit.TRAIN,
+                    loader_name="train",
+                )
+            ),
+            2,
+        )
         loader = cast(Any, datamodule.train_dataloader())
-        self.assertEqual(loader.batch_size, 1)
+        self.assertEqual(loader.batch_sampler.max_batch_samples, 1)
+
+    def test_datamodule_shards_child_loader_indices_across_ranks(self):
+        runtime = _data_runtime()
+        config = SpeechConfig(
+            codec="longcat",
+            dataloader=_loader(2),
+            dataset=DatasetConfig(
+                name=DatasetName.TOY,
+                toy_samples=6,
+                toy_frames=3,
+            ),
+        )
+        datamodule = DataModule(
+            runtime,
+            {"train": LoaderSpec.speech(config, {Task.TTS: 1.0})},
+        )
+        datamodule.setup()
+        sampler = cast(Any, datamodule.train_dataloader()).batch_sampler
+
+        rank_batches = []
+        for rank in range(2):
+            with patch(
+                "anydataset.dataset.batching._rank",
+                return_value=(2, rank),
+            ):
+                rank_batches.append(list(sampler))
+
+        rank_indices = [
+            {index for batch in batches for index in batch}
+            for batches in rank_batches
+        ]
+        self.assertTrue(rank_indices[0].isdisjoint(rank_indices[1]))
+        self.assertEqual(rank_indices[0] | rank_indices[1], set(range(6)))
+        self.assertEqual(len(rank_batches[0]), len(rank_batches[1]))
 
     def test_datamodule_uses_anydataset_batches_for_store_backed_data(self):
         with TemporaryDirectory() as tmpdir:
@@ -1251,7 +1253,16 @@ class ContractTest(unittest.TestCase):
                 self.assertEqual(sampler.max_batch_samples, 2)
                 self.assertTrue(sampler.shuffle)
                 _assert_store_local_batches(self, sampler)
-                self.assertEqual(len(datamodule.train_samples([0, 1])), 2)
+                self.assertEqual(
+                    len(
+                        datamodule.diagnostic_samples(
+                            [0, 1],
+                            split=SampleSplit.TRAIN,
+                            loader_name="train",
+                        )
+                    ),
+                    2,
+                )
 
     def test_datamodule_uses_store_backed_data_without_duration(self):
         with TemporaryDirectory() as tmpdir:
@@ -1299,7 +1310,16 @@ class ContractTest(unittest.TestCase):
                     batch.audio_seconds,
                     torch.tensor([0.08, 0.08]),
                 )
-                self.assertEqual(len(datamodule.train_samples([0, 1])), 2)
+                self.assertEqual(
+                    len(
+                        datamodule.diagnostic_samples(
+                            [0, 1],
+                            split=SampleSplit.TRAIN,
+                            loader_name="train",
+                        )
+                    ),
+                    2,
+                )
 
     def test_toy_settings_reject_invalid_dimensions(self):
         with self.assertRaisesRegex(ValueError, "divisible"):
@@ -1394,7 +1414,11 @@ class ContractTest(unittest.TestCase):
             self.assertEqual(loader.dataset.indices, (3, 1))
             self.assertIs(loader.batch_sampler.dataset, loader.dataset)
             self.assertTrue(loader.batch_sampler.shuffle)
-            samples = datamodule.train_samples([0, 1])
+            samples = datamodule.diagnostic_samples(
+                [0, 1],
+                split=SampleSplit.TRAIN,
+                loader_name="train",
+            )
             texts = [
                 sample[(Role.SOURCE, Modality.TEXT)].views[TextView.TEXT]
                 for sample in samples
@@ -1702,73 +1726,18 @@ class ContractTest(unittest.TestCase):
             with self.subTest(message=message), self.assertRaisesRegex(error, message):
                 ModelBatch.from_samples([sample], pad_token_id=99)
 
-    def test_collator_updates_the_existing_task_weights(self):
-        collator = Collator(Mock(), {Task.TTS: 1.0, Task.T2ST: 1.0})
-        original = collator
-        self.assertEqual(set(collator.tasks), {Task.TTS, Task.T2ST})
-
-        collator.set_task_weights({Task.ASR: 1.0, Task.S2TT: 1.0})
-
-        self.assertIs(collator, original)
-        self.assertEqual(set(collator.tasks), {Task.ASR, Task.S2TT})
-
-    def test_collator_task_updates_cross_worker_processes(self):
-        runtime = cast(DataRuntime, cast(object, None))
-        collator = Collator(runtime, {Task.TTS: 1.0})
-        context = multiprocessing.get_context()
-        ready = context.Event()
-        updated = context.Event()
-        output = context.Queue()
-        process = context.Process(
-            target=_observe_task_updates,
-            args=(collator, ready, updated, output),
-        )
-
-        process.start()
-        try:
-            self.assertTrue(ready.wait(timeout=5.0))
-            self.assertEqual(output.get(timeout=5.0), [Task.TTS])
-            collator.set_task_weights({Task.ASR: 1.0})
-            updated.set()
-            self.assertEqual(output.get(timeout=5.0), [Task.ASR])
-            process.join(timeout=5.0)
-            self.assertEqual(process.exitcode, 0)
-        finally:
-            if process.is_alive():
-                process.terminate()
-                process.join(timeout=5.0)
-            output.close()
-
-    def test_collator_rejects_invalid_task_weights_before_updating(self):
-        collator = Collator(Mock(), {Task.TTS: 1.0})
-        cases = (
-            ({Task.TTS: -1.0}, "finite and non-negative"),
-            ({Task.TTS: float("nan")}, "finite and non-negative"),
-            ({Task.TTS: float("inf")}, "finite and non-negative"),
-            ({Task.TTS: 0.0}, "finite positive total"),
-            (
-                {Task.TTS: 1e308, Task.T2ST: 1e308},
-                "finite positive total",
-            ),
-        )
-
-        for weights, message in cases:
-            with (
-                self.subTest(weights=weights),
-                self.assertRaisesRegex(ValueError, message),
-            ):
-                collator.set_task_weights(weights)
-            self.assertEqual(collator.tasks, [Task.TTS])
-
-    def test_fixed_task_allocation_uses_batch_size_and_rejects_tiny_batches(self):
-        self.assertEqual(
-            allocate_tasks([Task.T2ST, Task.TTS], [1.0, 2.0], 6),
-            [Task.T2ST, Task.T2ST, Task.TTS, Task.TTS, Task.TTS, Task.TTS],
-        )
+    def test_task_allocation_tracks_weights_across_tiny_batches(self):
+        allocation = allocate_tasks([Task.T2ST, Task.TTS], [1.0, 2.0], 6)
+        self.assertEqual(allocation.count(Task.T2ST), 2)
+        self.assertEqual(allocation.count(Task.TTS), 4)
         collator = Collator(Mock(), {Task.TTS: 1.0, Task.T2ST: 0.0})
         self.assertEqual(collator.tasks, [Task.TTS])
-        with self.assertRaisesRegex(ValueError, "too small"):
-            allocate_tasks([Task.MT, Task.TTS], [1.0, 9.0], 8)
+
+        weights = TaskWeights({Task.T2ST: 1.0, Task.TTS: 9.0})
+        tiny_batches = [weights.allocate(1)[0] for _ in range(10)]
+
+        self.assertEqual(tiny_batches.count(Task.T2ST), 1)
+        self.assertEqual(tiny_batches.count(Task.TTS), 9)
 
     def test_parameter_policy_freezes_explicit_parameter_groups(self):
         model = _StageModel()

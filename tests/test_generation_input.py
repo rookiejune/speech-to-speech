@@ -21,7 +21,7 @@ from speech_to_speech.generation import (
     prepare_bicodec_global_tts_request,
     prepare_bicodec_tts_request,
 )
-from speech_to_speech.generation.service import _validate_request
+from speech_to_speech.generation._request import validate
 from speech_to_speech.runtime import AudioRepresentation
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.runtime.protocol import GenerationRuntime
@@ -111,7 +111,7 @@ class BiCodecRequestInputTest(unittest.TestCase):
             request["prompt_ids"][-expected_suffix.numel() :],
             expected_suffix,
         )
-        _validate_request(request, _RouteModel(runtime, _codes()))
+        validate(request, _RouteModel(runtime, _codes()))
 
     def test_global_request_starts_output_without_audio_context(self) -> None:
         runtime = _runtime(route=BICODEC_GENERATE_GLOBAL)
@@ -162,20 +162,20 @@ class BiCodecRequestInputTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "does not serialize"):
-            _validate_request(request, _RouteModel(runtime, _codes()))
+            validate(request, _RouteModel(runtime, _codes()))
 
     def test_service_rejects_invalid_or_unexpected_context(self) -> None:
         runtime = _runtime()
         request = prepare_bicodec_tts_request("hello", _codes(), runtime)
         request["audio_context"] = cast(SemanticAcousticCodes, {"acoustic": []})
         with self.assertRaisesRegex(TypeError, "SemanticAcousticCodes"):
-            _validate_request(request, _RouteModel(runtime, _codes()))
+            validate(request, _RouteModel(runtime, _codes()))
 
         global_runtime = _runtime(route=BICODEC_GENERATE_GLOBAL)
         global_request = prepare_bicodec_global_tts_request("hello", global_runtime)
         global_request["audio_context"] = _codes()
         with self.assertRaisesRegex(ValueError, "without prompt streams"):
-            _validate_request(
+            validate(
                 global_request,
                 _RouteModel(global_runtime, _codes()),
             )
@@ -186,7 +186,7 @@ class BiCodecRequestInputTest(unittest.TestCase):
             audio_context=_codes(),
         )
         with self.assertRaisesRegex(ValueError, "text generation"):
-            _validate_request(text_request, _RouteModel(runtime, _codes()))
+            validate(text_request, _RouteModel(runtime, _codes()))
 
     def test_reference_request_generates_semantic_and_reuses_prompt_global(self) -> None:
         runtime = _runtime()
@@ -314,10 +314,19 @@ class _RouteModel:
         temperature: float = 1.0,
         top_p: float = 1.0,
         prompt_attention_mask: Tensor | None = None,
+        audio_input_positions: Tensor | None = None,
         do_sample: bool = True,
         use_cache: bool = True,
     ) -> Tensor:
-        del max_new_tokens, temperature, top_p, prompt_attention_mask, do_sample, use_cache
+        del (
+            max_new_tokens,
+            temperature,
+            top_p,
+            prompt_attention_mask,
+            audio_input_positions,
+            do_sample,
+            use_cache,
+        )
         response = self.response.to(device=prompt_ids.device).expand(
             prompt_ids.size(0),
             -1,
@@ -332,6 +341,7 @@ class _RouteModel:
         temperature: float = 1.0,
         top_p: float = 1.0,
         prompt_attention_mask: Tensor | None = None,
+        audio_input_positions: Tensor | None = None,
         stop_token_id: int | None = None,
         generation_modality: Modality | None = None,
         allowed_token_ids: Sequence[int] | Tensor | None = None,
@@ -344,6 +354,7 @@ class _RouteModel:
             temperature,
             top_p,
             prompt_attention_mask,
+            audio_input_positions,
             stop_token_id,
             generation_modality,
             allowed_token_ids,

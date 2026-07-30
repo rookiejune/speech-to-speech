@@ -7,7 +7,7 @@ import torch
 from lightning import LightningModule, Trainer
 from torch import Tensor
 
-from ..datamodule.types import ModelBatch, TrainBatch
+from ..datamodule.types import ModelBatch
 
 
 class TrainInterval:
@@ -111,7 +111,7 @@ class TrainInterval:
         return True
 
 
-def processed_audio_seconds(batch: TrainBatch) -> float:
+def processed_audio_seconds(batch: ModelBatch) -> float:
     if not isinstance(batch, ModelBatch):
         raise TypeError("processed audio seconds require a ModelBatch.")
     return _batch_seconds(batch)
@@ -126,7 +126,7 @@ def _global_audio_seconds(
     pl_module: LightningModule,
     batch: Any,
 ) -> float:
-    seconds = processed_audio_seconds(cast(TrainBatch, batch))
+    seconds = processed_audio_seconds(cast(ModelBatch, batch))
     world_size = int(getattr(trainer, "world_size", 1))
     if world_size <= 1:
         return seconds

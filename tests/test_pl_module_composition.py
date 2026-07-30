@@ -8,12 +8,65 @@ import torch
 from semantic_acoustic_codec.config import Route
 
 from speech_to_speech.model import Config as ModelConfig
-from speech_to_speech.model.acoustic import DecoderConfig
+from speech_to_speech.model.acoustic import AcousticType, DecoderConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
-from speech_to_speech.pl_module.composition import flow, rvq, token
+from speech_to_speech.pl_module.composition import build, flow, rvq, token
 
 
 class PlModuleCompositionTest(unittest.TestCase):
+    @patch("speech_to_speech.pl_module.composition.rvq")
+    @patch("speech_to_speech.pl_module.composition.flow")
+    @patch("speech_to_speech.pl_module.composition.token")
+    def test_build_dispatches_acoustic_composition(self, token, flow, rvq):
+        runtime = Mock(acoustic_side_channel=True)
+        module_config = ModuleConfig()
+        model_config = ModelConfig()
+        token.return_value = (Mock(), Mock())
+        flow.return_value = (Mock(), Mock())
+        rvq.return_value = (Mock(), Mock())
+
+        cases = (
+            (AcousticType.NONE, token, token.return_value),
+            (AcousticType.FLOW, flow, flow.return_value),
+            (AcousticType.RVQ, rvq, rvq.return_value),
+        )
+        for acoustic_type, factory, expected in cases:
+            with self.subTest(acoustic_type=acoustic_type):
+                acoustic = SimpleNamespace(type=acoustic_type.value)
+
+                result = build(runtime, module_config, model_config, acoustic)
+
+                self.assertEqual(result, (acoustic_type, *expected))
+                factory.assert_called_once()
+                token.reset_mock()
+                flow.reset_mock()
+                rvq.reset_mock()
+
+    @patch("speech_to_speech.pl_module.composition.flow")
+    @patch("speech_to_speech.pl_module.composition.token")
+    def test_build_owns_side_channel_constraint(self, token, flow):
+        runtime = Mock(acoustic_side_channel=False)
+        token.return_value = (Mock(), Mock())
+
+        result = build(
+            runtime,
+            ModuleConfig(),
+            ModelConfig(),
+            SimpleNamespace(type=AcousticType.NONE.value),
+        )
+
+        self.assertEqual(result, (AcousticType.NONE, *token.return_value))
+
+        with self.assertRaisesRegex(ValueError, "model/acoustic=none"):
+            build(
+                runtime,
+                ModuleConfig(),
+                ModelConfig(),
+                SimpleNamespace(type=AcousticType.FLOW.value),
+            )
+
+        flow.assert_not_called()
+
     @patch("speech_to_speech.pl_module.composition.SpeechToSpeechModule")
     @patch("speech_to_speech.pl_module.composition.TokenObjective")
     @patch("speech_to_speech.pl_module.composition.TokenModel")
@@ -75,7 +128,7 @@ class PlModuleCompositionTest(unittest.TestCase):
         )
         model_config = ModelConfig()
 
-        _, built_model, weight = flow(
+        _, built_model = flow(
             runtime,
             ModuleConfig(),
             model_config,
@@ -83,7 +136,6 @@ class PlModuleCompositionTest(unittest.TestCase):
         )
 
         self.assertIs(built_model, model.return_value)
-        self.assertEqual(weight, 0.2)
         self.assertIs(model.call_args.args[0], model_config)
         self.assertEqual(
             model.call_args.kwargs["repa"],

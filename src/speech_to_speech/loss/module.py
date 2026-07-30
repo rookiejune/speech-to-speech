@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TypedDict
 
 from anydataset.types import Modality
-from anytrain.loss import MaskedCosineAlignmentLoss
+from anytrain.loss import MaskedCosineAlignmentLoss, loss_item_mean
 from anytrain.module.idspace import Layout
 from torch import Tensor
 
@@ -23,10 +23,7 @@ from .types import LossItem, Outputs
 
 
 def _weighted_mean(item: LossItem, key: str) -> Tensor:
-    details = item.details
-    if details is None or key not in details:
-        return item.loss.mean()
-    return item.weighted_mean(details[key].to(dtype=item.loss.dtype))
+    return loss_item_mean(item, unit=key, fallback_to_mean=False)
 
 
 class RepaConfig(TypedDict):

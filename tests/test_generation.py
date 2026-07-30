@@ -26,8 +26,11 @@ from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.module import DataModule, LoaderSpec
 from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.model import (
+    AudioOutputAdapter,
     AudioInputAdapterConfig,
     AudioInputAdapterType,
+    AudioOutputAdapterConfig,
+    AudioOutputAdapterType,
     ToyConfig,
 )
 from speech_to_speech.model.acoustic import FlowModel
@@ -42,6 +45,7 @@ from speech_to_speech.generation import (
     generate_responses,
 )
 from speech_to_speech.generation.batch import requests_from_batch
+from speech_to_speech.generation.evaluation import evaluate_autoregressive
 from speech_to_speech.runtime.audio_tokenizer import (
     FlattenedAudioTokenizer,
     NativeAudioTokenizer,
@@ -481,7 +485,7 @@ class _FullSequenceGenerationModel(TokenModel):
                 raise AssertionError("generated id is outside allowed token_ids")
             logits = torch.full(
                 (input_ids.size(0), input_ids.size(1), token_ids.numel()),
-                float("-inf"),
+                -100.0,
             )
             logits[:, -1, int(matches[0, 0])] = 0
         elif modality is Modality.AUDIO:
@@ -577,11 +581,75 @@ class _VariableStopModel(_UnifiedGenerationModel):
 
 
 class GenerationTest(unittest.TestCase):
+    def test_autoregressive_evaluation_reports_generation_health(self):
+        module = Mock()
+        module.parameters.return_value = iter(
+            [SimpleNamespace(device=torch.device("cpu"))]
+        )
+        module.generate.return_value = [
+            Result(
+                response_ids=torch.tensor([7, 8]),
+                audio={
+                    "features": torch.ones(1, 2, 3),
+                    "codes": None,
+                    "waveform": torch.ones(4),
+                    "sample_rate": 4,
+                },
+            )
+        ]
+        requests = [Mock()]
+        with (
+            patch(
+                "speech_to_speech.generation.evaluation.requests_from_batch",
+                return_value=requests,
+            ),
+            patch(
+                "speech_to_speech.generation.evaluation.time.perf_counter",
+                side_effect=(1.0, 1.5),
+            ),
+        ):
+            report = evaluate_autoregressive(module, Mock(), sample_rate=4)
+
+        self.assertEqual(report["token_ids"], [7, 8])
+        self.assertEqual(report["feature_shape"], [1, 2, 3])
+        self.assertEqual(report["waveform_shape"], [4])
+        self.assertEqual(report["duration_seconds"], 1.0)
+        self.assertEqual(report["elapsed_seconds"], 0.5)
+        self.assertEqual(report["rtf"], 0.5)
+        self.assertTrue(report["finite"])
+
+    def test_explicit_audio_output_adapter_is_shared_by_logits_paths(self):
+        model = TokenModel(
+            ModelConfig(
+                semantic_audio_adapter=None,
+                audio_output_adapter=AudioOutputAdapterConfig(
+                    type=AudioOutputAdapterType.MLP,
+                ),
+                toy=ToyConfig(
+                    hidden_size=8,
+                    intermediate_size=16,
+                    layers=1,
+                    heads=2,
+                    max_position_embeddings=32,
+                ),
+            ),
+            runtime=_TinyRuntime(),
+        ).eval()
+
+        self.assertIsInstance(model.audio_output_adapter, AudioOutputAdapter)
+        hidden = torch.randn(1, 2, 8)
+        logits = model.semantic_audio_logits(hidden)
+
+        self.assertEqual(logits.shape[:2], (1, 2))
+        self.assertTrue(torch.isfinite(logits).all())
+
     def test_audio_input_adapter_overlays_only_source_positions(self):
         model = TokenModel(
             ModelConfig(
                 semantic_audio_adapter=None,
-                semantic_audio_output_adapter=None,
+                audio_output_adapter=AudioOutputAdapterConfig(
+                    type=AudioOutputAdapterType.NONE,
+                ),
                 audio_input_adapter=AudioInputAdapterConfig(
                     type=AudioInputAdapterType.MLP,
                 ),
@@ -613,7 +681,9 @@ class GenerationTest(unittest.TestCase):
         model = TokenModel(
             ModelConfig(
                 semantic_audio_adapter=None,
-                semantic_audio_output_adapter=None,
+                audio_output_adapter=AudioOutputAdapterConfig(
+                    type=AudioOutputAdapterType.NONE,
+                ),
                 audio_input_adapter=AudioInputAdapterConfig(
                     type=AudioInputAdapterType.MLP,
                 ),
@@ -1163,7 +1233,7 @@ class GenerationTest(unittest.TestCase):
                 use_cache=False,
             )
 
-    def test_incomplete_flattened_sequence_fails_explicitly(self):
+    def test_incomplete_multi_codebook_sequence_fails_explicitly(self):
         model = _FullSequenceGenerationModel()
         start, _ = model.runtime.codec_audio_range
         tokenizer = model.runtime.audio_tokenizer
@@ -1182,20 +1252,44 @@ class GenerationTest(unittest.TestCase):
                 use_cache=False,
             )
 
-        single_codebook = _FullSequenceGenerationModel(
+    def test_single_codebook_generation_recovers_missing_eoa(self):
+        model = _FullSequenceGenerationModel(
             torch.tensor([[1]]),
             codebook_sizes=(4,),
         )
-        start, _ = single_codebook.runtime.codec_audio_range
-        single_codebook._tokens = [start + 1] * 4
-        with self.assertRaisesRegex(ValueError, "did not produce EOA"):
-            generate_responses(
-                [Request(prompt_ids=torch.tensor([1]), task=Task.TTS)],
-                single_codebook,
-                max_new_tokens=4,
-                do_sample=False,
-                use_cache=False,
-            )
+        start, _ = model.runtime.codec_audio_range
+        model._tokens = [start + 1] * 4
+
+        result = generate_responses(
+            [Request(prompt_ids=torch.tensor([1]), task=Task.TTS)],
+            model,
+            max_new_tokens=4,
+            do_sample=False,
+            use_cache=False,
+        )[0]
+
+        self.assertIsNotNone(result["audio"])
+        self.assertTrue(
+            torch.equal(model.runtime.codec.decoded_codes, torch.tensor([[[1]]]))
+        )
+
+    def test_single_codebook_generation_suppresses_zero_frame_eoa(self):
+        model = _FullSequenceGenerationModel(
+            torch.tensor([[1]]),
+            codebook_sizes=(4,),
+        )
+        model._tokens = [model.runtime.eoa_token_id]
+
+        result = generate_responses(
+            [Request(prompt_ids=torch.tensor([1]), task=Task.TTS)],
+            model,
+            max_new_tokens=4,
+            do_sample=False,
+            use_cache=False,
+        )[0]
+
+        self.assertIsNotNone(result["audio"])
+        self.assertEqual(model.runtime.codec.decoded_codes.shape, (1, 1, 1))
 
     def test_generation_batches_variable_length_requests(self):
         model = _UnifiedGenerationModel()
@@ -1313,7 +1407,7 @@ class GenerationTest(unittest.TestCase):
             materialize_batch=Mock(side_effect=lambda value: value),
         )
         datamodule = SimpleNamespace(
-            collator_for=Mock(return_value=Mock(return_value=batch)),
+            diagnostic_collator=Mock(return_value=Mock(return_value=batch)),
             runtime=SimpleNamespace(
                 codec=_FullSequenceCodec(),
                 audio_view=AudioView.LONGCAT,
@@ -1327,7 +1421,12 @@ class GenerationTest(unittest.TestCase):
             logger=SimpleNamespace(experiment=experiment),
             datamodule=datamodule,
         )
-        logger = TaskSampleLogger([0], every_n_steps=1, loader_name="tts")
+        logger = TaskSampleLogger(
+            [0],
+            every_n_steps=1,
+            loader_name="tts",
+            task=Task.TTS,
+        )
         logger.samples = [
             {
                 (Role.SOURCE, Modality.TEXT): TextItem(
@@ -1351,13 +1450,19 @@ class GenerationTest(unittest.TestCase):
         module.generate.assert_called_once()
         self.assertEqual(experiment.add_audio.call_count, 2)
         audio_call = experiment.add_audio.call_args_list[1]
-        self.assertEqual(audio_call.args[0], "task_sample/tts/0/generated")
+        self.assertEqual(
+            audio_call.args[0],
+            "task_sample/train/tts/tts/0/generated",
+        )
         self.assertTrue(torch.equal(audio_call.args[1], result["audio"]["waveform"]))
         self.assertEqual(audio_call.args[2], 1)
         self.assertEqual(audio_call.kwargs, {"sample_rate": 16_000})
         experiment.add_text.assert_called_once()
         metadata_call = experiment.add_text.call_args
-        self.assertEqual(metadata_call.args[0], "task_sample/tts/0/metadata")
+        self.assertEqual(
+            metadata_call.args[0],
+            "task_sample/train/tts/tts/0/metadata",
+        )
         self.assertIn('"task": "tts"', metadata_call.args[1])
         self.assertIn('"dataset_index": 0', metadata_call.args[1])
         self.assertIn('"duration_seconds": 0.0005', metadata_call.args[1])
@@ -1377,16 +1482,27 @@ class GenerationTest(unittest.TestCase):
         with patch("speech_to_speech.datamodule.module.load_dataset", return_value=samples):
             datamodule.setup()
         trainer = SimpleNamespace(is_global_zero=True, datamodule=datamodule)
-        logger = TaskSampleLogger([1, 0], every_n_steps=1)
+        logger = TaskSampleLogger(
+            [1, 0],
+            every_n_steps=1,
+            loader_name="train",
+            task=Task.TTS,
+        )
 
         logger.on_fit_start(trainer, SimpleNamespace())
 
         self.assertEqual(logger.samples, [samples[1], samples[0]])
 
     def test_task_sample_logger_state_key_distinguishes_fixed_loaders(self):
-        asr = TaskSampleLogger([0], every_n_steps=10, loader_name="asr")
-        same_asr = TaskSampleLogger([0], every_n_steps=10, loader_name="asr")
-        tts = TaskSampleLogger([0], every_n_steps=10, loader_name="tts")
+        asr = TaskSampleLogger(
+            [0], every_n_steps=10, loader_name="asr", task=Task.ASR
+        )
+        same_asr = TaskSampleLogger(
+            [0], every_n_steps=10, loader_name="asr", task=Task.ASR
+        )
+        tts = TaskSampleLogger(
+            [0], every_n_steps=10, loader_name="tts", task=Task.TTS
+        )
 
         self.assertEqual(asr.state_key, same_asr.state_key)
         self.assertNotEqual(asr.state_key, tts.state_key)
@@ -1409,10 +1525,15 @@ class GenerationTest(unittest.TestCase):
             is_global_zero=True,
             logger=SimpleNamespace(experiment=experiment),
             datamodule=SimpleNamespace(
-                collator_for=Mock(return_value=Mock(return_value=batch))
+                diagnostic_collator=Mock(return_value=Mock(return_value=batch))
             ),
         )
-        logger = TaskSampleLogger([0], every_n_steps=1)
+        logger = TaskSampleLogger(
+            [0],
+            every_n_steps=1,
+            loader_name="train",
+            task=Task.T2TT,
+        )
         logger.samples = [_raw_sample()]
 
         with self.assertRaisesRegex(RuntimeError, "boom"):
@@ -1441,10 +1562,15 @@ class GenerationTest(unittest.TestCase):
             is_global_zero=True,
             logger=SimpleNamespace(experiment=experiment),
             datamodule=SimpleNamespace(
-                collator_for=Mock(return_value=Mock(return_value=batch))
+                diagnostic_collator=Mock(return_value=Mock(return_value=batch))
             ),
         )
-        logger = TaskSampleLogger([0], every_n_steps=1)
+        logger = TaskSampleLogger(
+            [0],
+            every_n_steps=1,
+            loader_name="train",
+            task=Task.T2TT,
+        )
         logger.samples = [_raw_sample()]
 
         with self.assertRaisesRegex(RuntimeError, "wrong row count"):
@@ -1457,7 +1583,12 @@ class GenerationTest(unittest.TestCase):
     def test_task_sample_logger_skips_nonzero_ranks(self):
         module = SimpleNamespace(generate=Mock())
         trainer = SimpleNamespace(global_step=1, is_global_zero=False)
-        logger = TaskSampleLogger([0], every_n_steps=1)
+        logger = TaskSampleLogger(
+            [0],
+            every_n_steps=1,
+            loader_name="train",
+            task=Task.T2TT,
+        )
 
         logger.on_train_batch_start(trainer, module, None, 0)
 
@@ -1467,7 +1598,9 @@ class GenerationTest(unittest.TestCase):
 def _model_config() -> ModelConfig:
     return ModelConfig(
         semantic_audio_adapter=None,
-        semantic_audio_output_adapter=None,
+        audio_output_adapter=AudioOutputAdapterConfig(
+            type=AudioOutputAdapterType.NONE,
+        ),
         toy=ToyConfig(
             hidden_size=8,
             intermediate_size=16,

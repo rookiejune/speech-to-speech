@@ -2,16 +2,62 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import Tensor
 
 from ..datamodule.types import ModelBatch
 from ..runtime.types import AcousticCodec, codec_sample_rate
+from .batch import requests_from_batch
+from .reporting import audio_output
 
 if TYPE_CHECKING:
     from ..model.acoustic import FlowModel, RVQModel
+    from ..pl_module import SpeechToSpeechModule
+
+
+@torch.no_grad()
+def evaluate_autoregressive(
+    module: SpeechToSpeechModule[Any],
+    batch: ModelBatch,
+    *,
+    sample_rate: int,
+) -> dict[str, object]:
+    requests = requests_from_batch(batch)
+    if len(requests) != 1:
+        raise ValueError("autoregressive evaluation requires exactly one sample.")
+    device = next(module.parameters()).device
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    started = time.perf_counter()
+    result = module.generate(
+        requests,
+        max_new_tokens=64,
+        do_sample=False,
+    )[0]
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elapsed = time.perf_counter() - started
+    audio = audio_output(result, "autoregressive evaluation")
+    features = audio["features"]
+    waveform = audio["waveform"]
+    if features is None:
+        raise RuntimeError("autoregressive evaluation did not return acoustic features.")
+    if waveform.numel() == 0:
+        raise RuntimeError("autoregressive evaluation returned an empty waveform.")
+    if not bool(torch.isfinite(features).all() and torch.isfinite(waveform).all()):
+        raise RuntimeError("autoregressive evaluation returned non-finite output.")
+    duration = waveform.numel() / sample_rate
+    return {
+        "token_ids": result["response_ids"].detach().cpu().tolist(),
+        "feature_shape": list(features.shape),
+        "waveform_shape": list(waveform.shape),
+        "duration_seconds": duration,
+        "elapsed_seconds": elapsed,
+        "rtf": elapsed / duration,
+        "finite": True,
+    }
 
 
 @torch.no_grad()

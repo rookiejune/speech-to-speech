@@ -4,12 +4,13 @@ import os
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Protocol, TypeVar, cast
+from typing import Any, Protocol
 
 import torch
+from anytrain.lightning import PerformanceCallback
 from lightning.pytorch.callbacks import Callback
 
-from speech_to_speech.model.acoustic import AcousticType
+from speech_to_speech.performance import TrainingFlops
 from speech_to_speech.runtime import Config as RuntimeConfig
 
 if __package__:
@@ -60,17 +61,6 @@ class EntryConfig(Protocol):
     def trainer(self) -> TrainerConfig: ...
 
 
-class AcousticConfig(Protocol):
-    type: str
-
-
-class AcousticEntryConfig(Protocol):
-    acoustic: AcousticConfig
-
-
-TokenConfigT = TypeVar("TokenConfigT")
-
-
 def runtime_config(config: RuntimeConfig) -> RuntimeConfig:
     device = None if config.device is None else torch.device(config.device)
     if device is not None and device.type == "cuda" and device.index is None:
@@ -118,14 +108,11 @@ def trainer(
 
 def performance(
     config: PerformanceConfig,
-    *,
-    callback: Callable[..., Callback],
-    flops: Any,
 ) -> Callback | None:
     if not config.enabled:
         return None
-    return callback(
-        model_flops_per_batch=flops,
+    return PerformanceCallback(
+        model_flops_per_batch=TrainingFlops(),
         hardware_peak_flops=config.hardware_peak_flops,
         log_every_n_steps=config.log_every_n_steps,
         warmup_steps=config.warmup_steps,
@@ -133,19 +120,3 @@ def performance(
         sync_cuda=config.sync_cuda,
         sync_distributed=config.sync_distributed,
     )
-
-
-def acoustic_composition(
-    config: object,
-    *,
-    token_type: type[TokenConfigT],
-    uses_acoustic_side_channel: bool,
-) -> AcousticType:
-    if isinstance(config, token_type):
-        return AcousticType.NONE
-    if not uses_acoustic_side_channel:
-        raise ValueError(
-            "runtime representation has no independent acoustic side channel; "
-            "configure model/acoustic=none."
-        )
-    return AcousticType(cast(AcousticEntryConfig, config).acoustic.type)

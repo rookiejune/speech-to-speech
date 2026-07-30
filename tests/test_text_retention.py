@@ -14,7 +14,7 @@ from hydra import compose, initialize_config_dir
 from torch import Tensor, nn
 
 from scripts import train as train_script
-from scripts._config import _validate_text_retention, train as parse_train
+from scripts._config import train as parse_train
 from speech_to_speech.callback.logging import TextRetentionLogger
 from speech_to_speech.task import Task
 from speech_to_speech.loss import TokenObjective
@@ -238,7 +238,7 @@ class TextRetentionConfigTest(unittest.TestCase):
         for value in (None, 1, 1.5):
             with self.subTest(value=value):
                 cast(Any, valid.callbacks.text_retention).every_audio_seconds = value
-                _validate_text_retention(valid)
+                valid.callbacks.text_retention.validate()
 
         cases = (
             (True, TypeError, "number or None"),
@@ -252,23 +252,23 @@ class TextRetentionConfigTest(unittest.TestCase):
             with self.subTest(value=value), self.assertRaisesRegex(error, message):
                 config = parse_train(_compose_train())
                 cast(Any, config.callbacks.text_retention).every_audio_seconds = value
-                _validate_text_retention(config)
+                config.callbacks.text_retention.validate()
 
     def test_enabled_text_retention_requires_complete_probes(self):
         empty = parse_train(_compose_train())
         empty.callbacks.text_retention.probes = {}
         with self.assertRaisesRegex(ValueError, "at least one probe"):
-            _validate_text_retention(empty)
+            empty.callbacks.text_retention.validate()
 
         missing_instruction = parse_train(_compose_train())
         missing_instruction.callbacks.text_retention.probes["zh_en"].instruction = ""
         with self.assertRaisesRegex(TypeError, "instruction"):
-            _validate_text_retention(missing_instruction)
+            missing_instruction.callbacks.text_retention.validate()
 
         missing_reference = parse_train(_compose_train())
         missing_reference.callbacks.text_retention.probes["zh_en"].reference = ""
         with self.assertRaisesRegex(TypeError, "reference"):
-            _validate_text_retention(missing_reference)
+            missing_reference.callbacks.text_retention.validate()
 
     def test_formal_training_constructs_text_retention_callback(self):
         config = parse_train(_compose_train())

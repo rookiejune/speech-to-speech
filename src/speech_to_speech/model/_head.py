@@ -13,7 +13,7 @@ class VocabularyHeadMixin:
     runtime: TokenModelRuntime
     backbone: Backbone
     semantic_audio_embedding: nn.Embedding
-    semantic_audio_output_adapter: nn.Module
+    audio_output_adapter: nn.Module
 
     def text_logits(
         self,
@@ -36,7 +36,7 @@ class VocabularyHeadMixin:
         local_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         weight = self.semantic_audio_embedding.weight
-        projected = self.semantic_audio_output_adapter(
+        projected = self.audio_output_adapter(
             hidden_state.to(dtype=weight.dtype)
         )
         if local_ids is not None:

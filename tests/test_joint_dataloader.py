@@ -270,6 +270,34 @@ class ScheduledDataLoaderTest(unittest.TestCase):
         self.assertEqual(fallback.batch_sampler.epochs, [1, 2])
         self.assertEqual(fallback.iteration_epochs, [0, 1, 2])
 
+    def test_fractional_loader_remainders_rotate_between_windows(self) -> None:
+        loader = ScheduledDataLoader(
+            {
+                "asr": [_batch(Task.ASR)],
+                "tts": [_batch(Task.TTS)],
+                "mt": [_batch(Task.MT)],
+            },
+            LoaderSchedule(
+                {"asr": 0.45, "tts": 0.45, "mt": 0.1},
+                accumulate_grad_batches=10,
+            ),
+        )
+
+        tasks = [batch.tasks[0] for batch in islice(loader, 20)]
+        windows = [tasks[:10], tasks[10:]]
+
+        self.assertEqual(
+            [
+                [window.count(Task.ASR), window.count(Task.TTS), window.count(Task.MT)]
+                for window in windows
+            ],
+            [[5, 4, 1], [4, 5, 1]],
+        )
+        self.assertEqual(
+            [tasks.count(Task.ASR), tasks.count(Task.TTS), tasks.count(Task.MT)],
+            [9, 9, 2],
+        )
+
     def test_epoch_cycles_are_deterministic_across_ranks(self) -> None:
         events = [_rank_events(), _rank_events()]
 

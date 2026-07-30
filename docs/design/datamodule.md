@@ -39,14 +39,13 @@
 - `task.Task` / `types.Language`：任务与语言枚举。`Task` 是 source/target modality、
   `uses_source_role` 和 instruction template 的唯一事实来源。
 - `Collator(runtime, task_weights)`：按任务权重为 raw samples 选择任务，依次调用 parser、
-  sample builder 和 batch padding；正式训练在构造时固定 task weights，`set_task_weights()` 只保留
-  为显式的低层控制入口。
+  sample builder 和 batch padding；task weights 在构造时固定。
 - `LoaderSpec.text(...)` / `TextCollator`：纯文本 MT loader，只读取 source/target text，当前可
   配置为 anydataset `WMT19` preset 或 deterministic toy text samples，不消费 codec/audio
   tokenizer。
 - `LoaderSchedule` / `ScheduledDataLoader`：为唯一 `DataModule` 组织多个 homogeneous loader。
   `accumulate_grad_batches=1` 时按 batch 确定性轮转；大于 1 时构造固定长度的 accumulation window，
-  按 loader 权重交错产出单个 microbatch。每个子 loader 自己保持单一 execution signature，
+  按 loader 权重交错产出单个 microbatch，小数配额跨相邻 window 结转。每个子 loader 自己保持单一 execution signature，
   Lightning 负责跨 microbatch 累积梯度，DataLoader 不返回联合 batch tuple。
 - `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts`、`qwen_tts_speaker` prepared data
   或确定性的内存 `toy` data。`qwen_tts_speaker` 通过 workspace 加载
@@ -72,7 +71,8 @@ checkpoint 的收敛和生成音质仍需单独验收。
   `scripts/create_split_manifest.py` 只消费 candidate、root audit 和 data-root 路径，输出带
   source artifact 与 root fingerprint 的 JSON；训练前必须先在 stable root 上完成该产物的独立
   校验。
-- `ToyDataset`：提供完整 source/target audio+text raw sample，不读取文件、不修改全局 RNG。
+- `ToyDataset`：提供完整 source/target audio+text raw sample，不读取文件、不修改全局 RNG；它实现
+  `MapStyleABC`，因此 DDP smoke 与正式 prepared data 使用同一 rank-local batch planner。
 - `config.DataLoaderConfig(batch_size, num_workers, pin_memory, persistent_workers)` /
   `SpeechConfig(codec, dataloader, shape, encode_missing_codes, dataset)`：公开的 DataLoader、
   dataset 与 DataModule dataclass 配置结构，字段和值域校验只在这里维护；Hydra staged train
@@ -82,17 +82,21 @@ checkpoint 的收敛和生成音质仍需单独验收。
 - `_task.py` 私有承载 loader task weights 校验与 batch task 分配；`_text.py` 私有承载 text dataset
   的 DataLoader 构造。相邻模块复用其中公开命名的 `TaskWeights`、`allocate_tasks` 与 `TextLoader`，
   不跨模块导入函数级私有名，也不把这些实现细节提升为包级 API。
+- `_duration.py` 统一校验显式音频时长，并在 metadata 缺失时按 codec frames 或 waveform samples
+  推导秒数；pair、single 与 raw waveform parser 不各自维护同一数值约束。
 - `DataModule(runtime, loaders, schedule=None, validation=None)`：唯一 Lightning 数据入口。`loaders` 是
   `name -> LoaderSpec` 映射；speech loader 使用 `LoaderSpec.speech(config, task_weights,
   sample_index=...)`，纯文本 loader 使用 `LoaderSpec.text(config, task_weights)`。`setup()` 加载
   所选 dataset，并在加载前校验 speech config 与 runtime 的 codec identity；重复调用不会重新
   加载已持有的数据集。fixed-sample overfit 只是 speech spec 的 `sample_index` 变体，仍复用
-  `train_samples()` 边界供 callback 读取 raw sample。可选 `validation` 是独立的 `LoaderSpec`；
+  `diagnostic_samples()` 边界供 callback 读取 raw sample。可选 `validation` 是独立的 `LoaderSpec`；
   `val_dataloader()` 不进入 train schedule，也不复用 train loader instance。
   `diagnostic_samples()` 显式选择 train/validation 数据源；`diagnostic_collator()` 为 panel 指定的
   单一 task 构造独立 collator，不修改训练 loader 的共享 task weights。speech 与 text train loader
   都提供这两个 diagnostic 边界；text loader 对 WMT19 iterable dataset 使用 global shard 的固定
   索引读取，不受 DDP rank 分片影响。validation 仍只接受独立的 speech loader。
+  schedule 在 DataModule 构造时固定；切换 stage 必须启动绑定新 stage 的 run，不提供运行时
+  loader-weight setter。
 
 ## 输入输出
 
@@ -111,7 +115,7 @@ materialize 出当前 runtime `AudioView` 的 codec codes：
 
 ```text
 raw Sample(Role.DEFAULT)
-    -> single.parse_single_sample(runtime) -> SpeechUtterance
+    -> single.parse_single_sample(runtime) -> Speech
     -> single.build_single_sample(task, runtime) -> ModelSample
     -> ModelBatch.from_samples(pad_token_id=runtime.pad_token_id) -> ModelBatch
 ```
@@ -223,13 +227,13 @@ response、generated token 以及 BiCodec route 的 reference `audio_context` �
   `ModelBatch.audio_seconds`；不能把真实音频静默计为 0。
 - 同一 `task_weights` 中的任务必须具有相同 source/target modality，保证 DDP 各 rank 走相同
   模型路径。0 权重任务不会参与 batch 分配；每项权重必须有限且非负，总和必须有限且为正；
-  按 batch size 固定分配时，任一非 0 权重任务拿不到至少 1 条 sample 会直接报错。非法权重
-  更新在替换现有权重前报错。DataModule 构造时必须提供初始权重；正式入口不会在运行中调用
-  `set_task_weights()`。权重使用进程共享数组，因此显式更新时持久 worker 会在下一次 collate
-  看到新值，不要求重建 DataLoader。
+  task allocator 把 weighted round-robin credit 跨 collate 调用保存在进程共享状态中。小 batch
+  可以暂时不含某个低权重 task，但不会丢弃尾批样本，并会在后续 batch 归还配额。DataModule
+  构造时必须提供 task weights，collator 构造后不可修改；切换任务组合必须构造新的 loader。
 - `LoaderSchedule.accumulate_grad_batches=1` 保留逐 batch 轮转；大于 1 时，每个 accumulation
   window 按 loader 权重分配并交错排列 microbatch，任一非 0 权重 loader 拿不到至少 1 个
-  microbatch 会报错。loss 不额外乘 loader 权重，权重只改变数据进入训练的频率；每次
+  microbatch 会报错。largest-remainder 的小数席位跨 window 累积，避免固定 tie-break 使长期
+  比例偏向同一个 loader。loss 不额外乘 loader 权重，权重只改变数据进入训练的频率；每次
   `training_step()` 只消费一个 `ModelBatch`，梯度缩放与 optimizer-step cadence 由 Lightning 的
   `accumulate_grad_batches` 负责。每个子 loader 独立维护从 0 开始的 cycle；耗尽后
   先推进到下一 cycle，再通过 loader 的 `set_epoch()` 或其 `batch_sampler.set_epoch()` 更新
@@ -253,8 +257,8 @@ response、generated token 以及 BiCodec route 的 reference `audio_context` �
   `DataModule.val_dataloader()` 返回空 iterable，Lightning 不运行 validation；text loader 不提供
   `validation_dataloader()`，把 text spec 作为 validation 传入时在 DataModule 构造边界直接报错，
   不用 training loader 伪装 validation。
-- `DataModule.train_samples()` 是 callback 按索引读取已 setup 训练样本的公开边界；callback
-  不读取私有 dataset 字段。text loader 的 iterable dataset 通过 `iter_shard(1, 0)` 读取固定
+- `DataModule.diagnostic_samples()` 是 callback 按 split、loader 和索引读取已 setup 样本的公开边界；
+  callback 不读取私有 dataset 字段。text loader 的 iterable dataset 通过 `iter_shard(1, 0)` 读取固定
   global indices，避免 callback 样本随 world size 变化。诊断代码通过 `diagnostic.source_item()` / `target_item()` 按 task
   解析 raw sample：pair sample 只接受 source/target role，single sample 只接受
   `Role.DEFAULT`，缺项或混用 role 直接报错。`ModelBatch.row()` 提供与该 raw sample 同行的

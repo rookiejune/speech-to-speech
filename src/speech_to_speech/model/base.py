@@ -20,12 +20,16 @@ from ._generation import (
 )
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer, FlattenedAudioTokenizer
 from ._head import VocabularyHeadMixin
-from .adapter import AdapterType, create_adapter
+from .adapter import AdapterType
 from .audio_input import (
     AudioInputAdapterConfig,
     AudioInputAdapterType,
     AudioInputTower,
     create_audio_input_adapter,
+)
+from .audio_output import (
+    AudioOutputAdapterConfig,
+    create_audio_output_adapter,
 )
 from .embedding import create_semantic_audio_modules
 from .lora import LoraConfig, inject as inject_lora
@@ -37,7 +41,9 @@ from ..runtime.types import Backbone, BackboneOutput
 @dataclass
 class Config:
     semantic_audio_adapter: Optional[AdapterType] = AdapterType.LINEAR
-    semantic_audio_output_adapter: Optional[AdapterType] = AdapterType.LINEAR
+    audio_output_adapter: AudioOutputAdapterConfig = field(
+        default_factory=AudioOutputAdapterConfig
+    )
     audio_input_adapter: AudioInputAdapterConfig = field(
         default_factory=AudioInputAdapterConfig
     )
@@ -114,11 +120,14 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
                 hidden_size,
             ).to(device=backbone_weight.device)
         )
-        self.semantic_audio_output_adapter = create_adapter(
-            self.config.semantic_audio_output_adapter,
+        self.audio_output_adapter = create_audio_output_adapter(
+            self.config.audio_output_adapter,
             hidden_size,
             semantic_audio_weight.size(1),
-        ).to(device=backbone_weight.device, dtype=torch.float32)
+        ).to(
+            device=backbone_weight.device,
+            dtype=torch.float32,
+        )
 
     def forward(
         self,
@@ -269,6 +278,12 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             do_sample=do_sample,
             use_cache=use_cache,
             collect_audio_condition=False,
+            min_new_tokens=(
+                1
+                if generation_modality is Modality.AUDIO
+                and stop_token_id == self.runtime.eoa_token_id
+                else 0
+            ),
         )
         return generated
 
@@ -299,6 +314,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             do_sample=do_sample,
             use_cache=use_cache,
             collect_audio_condition=True,
+            min_new_tokens=1,
         )
         if condition is None or frame_spans is None:
             raise ValueError(

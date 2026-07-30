@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
 from typing import cast
 
@@ -9,6 +8,7 @@ from anydataset import types
 from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
+from ._duration import from_frames, from_samples
 from ._tokenization import token_ids
 from .protocol import DataRuntime, TextRuntime
 from .types import (
@@ -192,8 +192,8 @@ def _speech(
         codes,
         text_token_ids=token_ids(text, runtime.text_tokenizer),
         language=Language(text_item.meta[types.TextMeta.LANG]),
-        duration_seconds=_duration_seconds(
-            audio_item,
+        duration_seconds=from_frames(
+            audio_item.meta.get(types.AudioMeta.DURATION),
             frames=_frame_codes(_split_audio_codes(codes, runtime.audio_view)[0]).size(0),
             frame_rate=runtime.codec_frame_rate,
         ),
@@ -226,7 +226,11 @@ def raw_speech(
         waveform=waveform,
         sample_rate=sample_rate,
         language=Language(text_item.meta[types.TextMeta.LANG]),
-        duration_seconds=_raw_duration_seconds(audio_item, waveform, sample_rate),
+        duration_seconds=from_samples(
+            audio_item.meta.get(types.AudioMeta.DURATION),
+            samples=waveform.size(-1),
+            sample_rate=sample_rate,
+        ),
     )
 
 
@@ -293,52 +297,6 @@ def _frame_codes(codes: Tensor) -> Tensor:
     if codes.dim() != 2:
         raise ValueError("audio codes must have shape [frames, codebooks].")
     return codes
-
-
-def _duration_seconds(
-    audio_item: types.AudioItem,
-    *,
-    frames: int,
-    frame_rate: float,
-) -> float:
-    value = audio_item.meta.get(types.AudioMeta.DURATION)
-    if value is None:
-        return _frames_to_seconds(frames, frame_rate)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError("AudioMeta.DURATION must be a number of seconds.")
-    duration = float(value)
-    if not math.isfinite(duration) or duration < 0:
-        raise ValueError("AudioMeta.DURATION must be finite and non-negative.")
-    return duration
-
-
-def _frames_to_seconds(frames: int, frame_rate: float) -> float:
-    if isinstance(frames, bool) or not isinstance(frames, int):
-        raise TypeError("audio frame count must be an integer.")
-    if frames < 0:
-        raise ValueError("audio frame count must be non-negative.")
-    if isinstance(frame_rate, bool) or not isinstance(frame_rate, (int, float)):
-        raise TypeError("codec frame_rate must be a number.")
-    rate = float(frame_rate)
-    if not math.isfinite(rate) or rate <= 0:
-        raise ValueError("codec frame_rate must be finite and positive.")
-    return float(frames) / rate
-
-
-def _raw_duration_seconds(
-    audio_item: types.AudioItem,
-    waveform: Tensor,
-    sample_rate: int,
-) -> float:
-    value = audio_item.meta.get(types.AudioMeta.DURATION)
-    if value is not None:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise TypeError("AudioMeta.DURATION must be a number of seconds.")
-        duration = float(value)
-        if not math.isfinite(duration) or duration < 0:
-            raise ValueError("AudioMeta.DURATION must be finite and non-negative.")
-        return duration
-    return float(waveform.size(-1)) / float(sample_rate)
 
 
 def _as_tensor(value: Tensor | list[int]) -> Tensor:
