@@ -34,3 +34,4 @@ class AcousticGeneration(TypedDict):
 class Result(TypedDict):
     response_ids: Tensor
     audio: AudioOutput | None
+    decode_error: NotRequired[dict[str, str]]

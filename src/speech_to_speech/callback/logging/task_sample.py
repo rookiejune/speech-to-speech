@@ -17,6 +17,8 @@ from ...generation import Request, Result
 from ...generation.batch import requests_from_batch
 from ...generation.decode import decode_reference_codes
 from ...generation.eval.acoustic import reference_audio
+from ...prediction import PredictionModality
+from ...runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ...datamodule.diagnostic import (
     SampleRef,
     SampleSplit,
@@ -36,7 +38,6 @@ from ...runtime.types import (
 from ...task import Task
 from .._oom import batch_report, generation_report, report_oom
 from ..interval import TrainInterval
-from .._lightning import attached_datamodule
 from ._sample_metrics import audio_metrics, text_metrics
 
 _TOKEN_PREVIEW_LIMIT = 128
@@ -95,10 +96,23 @@ class _LoggingRuntime(Protocol):
     def codec(self) -> CodecBackend: ...
 
     @property
+    def audio_tokenizer(self) -> object: ...
+
+    @property
+    def codec_audio_range(self) -> tuple[int, int]: ...
+
+    @property
     def text_tokenizer(self) -> TextTokenizer: ...
 
     @property
     def layout(self) -> Layout: ...
+
+
+def _attached_datamodule(trainer: Trainer) -> object:
+    value = getattr(trainer, "datamodule", None)
+    if value is None:
+        raise RuntimeError("callback requires Trainer.fit(..., datamodule=...).")
+    return value
 
 
 class TaskSampleLogger(Callback):
@@ -165,7 +179,7 @@ class TaskSampleLogger(Callback):
         del pl_module
         if not trainer.is_global_zero:
             return
-        datamodule = cast(_DataModule, attached_datamodule(trainer))
+        datamodule = cast(_DataModule, _attached_datamodule(trainer))
         self.samples = datamodule.diagnostic_samples(
             self.indices,
             split=self.split,
@@ -186,7 +200,7 @@ class TaskSampleLogger(Callback):
         if audio_writer is None and scalar_writer is None and text_writer is None:
             return
         module = cast(_Module, cast(object, pl_module))
-        datamodule = cast(_DataModule, attached_datamodule(trainer))
+        datamodule = cast(_DataModule, _attached_datamodule(trainer))
         collator = datamodule.diagnostic_collator(
             self.task,
             split=self.split,
@@ -287,9 +301,16 @@ class TaskSampleLogger(Callback):
             tag = self._tag(dataset_index)
             row_batch = sample_batch.row(row)
             metrics: dict[str, float] = {}
+            prediction = (
+                request.get("prediction") or request["task"].prediction_modality
+            )
+            decode_error = result.get("decode_error")
+            status = "partial" if decode_error is not None else "ok"
             result_metadata = _result_metadata(
                 result,
                 max_new_tokens=self.max_new_tokens,
+                prediction=prediction,
+                runtime=datamodule.runtime,
             )
             metrics.update(
                 {
@@ -313,17 +334,45 @@ class TaskSampleLogger(Callback):
             audio = result["audio"]
             generated_text = None
             if audio is None:
-                generated_text = _generated_text(datamodule, result["response_ids"])
-                target_text = _target_text(sample, request["task"])
-                if generated_text is not None and target_text is not None:
-                    metrics.update(text_metrics(target_text, generated_text))
-                metrics["generation/stopped_without_eos"] = float(
-                    result_metadata["stopped_without_eos"]
-                )
+                if prediction.supervises_audio:
+                    metrics["generation/stopped_without_eoa"] = float(
+                        result_metadata["stopped_without_eoa"]
+                    )
+                    metrics["generation/audio_available"] = 0.0
+                    if decode_error is not None:
+                        metrics["generation/audio_decode_failed"] = 1.0
+                    if audio_writer is not None:
+                        _log_target_reference_audio(
+                            audio_writer,
+                            datamodule,
+                            module,
+                            row_batch,
+                            sample,
+                            request["task"],
+                            tag,
+                            trainer.global_step,
+                        )
+                    if prediction.supervises_text:
+                        generated_text = _decode_chat_template(
+                            datamodule, result["response_ids"]
+                        )
+                elif prediction.supervises_text:
+                    generated_text = _generated_text(
+                        datamodule,
+                        result["response_ids"],
+                    )
+                    target_text = _target_text(sample, request["task"])
+                    if generated_text is not None and target_text is not None:
+                        metrics.update(text_metrics(target_text, generated_text))
+                    metrics["generation/stopped_without_eos"] = float(
+                        result_metadata["stopped_without_eos"]
+                    )
             else:
                 metrics["generation/stopped_without_eoa"] = float(
                     result_metadata["stopped_without_eoa"]
                 )
+                metrics["generation/audio_available"] = 1.0
+                metrics["generation/audio_decode_failed"] = 0.0
                 target_audio = _log_target_reference_audio(
                     audio_writer,
                     datamodule,
@@ -360,7 +409,7 @@ class TaskSampleLogger(Callback):
                             dataset_index,
                             sample,
                             request,
-                            status="ok",
+                            status=status,
                             generation_settings=generation_metadata,
                             result_metadata=result_metadata,
                             response_ids=result["response_ids"],
@@ -378,13 +427,14 @@ class TaskSampleLogger(Callback):
                     sample_rate=audio["sample_rate"],
                 )
             elif text_writer is not None:
-                target_text = _target_text(sample, request["task"])
-                if target_text is not None:
-                    text_writer.add_text(
-                        f"{tag}/target",
-                        target_text,
-                        trainer.global_step,
-                    )
+                if prediction.supervises_text:
+                    target_text = _target_text(sample, request["task"])
+                    if target_text is not None:
+                        text_writer.add_text(
+                            f"{tag}/target",
+                            target_text,
+                            trainer.global_step,
+                        )
                 text_writer.add_text(
                     f"{tag}/generated_ids",
                     " ".join(str(value) for value in result["response_ids"].tolist()),
@@ -500,6 +550,15 @@ def _sample_log_record(
         "labels": labels,
         "generation": generation,
     }
+
+
+def _prediction_modality(request: Request) -> PredictionModality:
+    prediction = request.get("prediction")
+    if prediction is None:
+        return request["task"].prediction_modality
+    if not isinstance(prediction, PredictionModality):
+        raise TypeError("generation request prediction must be a PredictionModality.")
+    return prediction
 
 
 def _log_target_reference_audio(
@@ -745,7 +804,13 @@ def _modality_metadata(
     raise AssertionError(f"unsupported sample modality: {modality.value}")
 
 
-def _result_metadata(result: Result, *, max_new_tokens: int) -> dict[str, Any]:
+def _result_metadata(
+    result: Result,
+    *,
+    max_new_tokens: int,
+    prediction: PredictionModality,
+    runtime: _LoggingRuntime,
+) -> dict[str, Any]:
     response_ids = result["response_ids"]
     audio = result["audio"]
     response_tokens = int(response_ids.numel())
@@ -756,6 +821,17 @@ def _result_metadata(result: Result, *, max_new_tokens: int) -> dict[str, Any]:
         "response_tokens": response_tokens,
         "reached_max_new_tokens": reached_max,
     }
+    decode_error = result.get("decode_error")
+    if decode_error is not None:
+        metadata["audio_decode_failed"] = True
+        metadata["audio_decode_error"] = dict(decode_error)
+    if prediction.supervises_audio:
+        metadata["stopped_without_eoa"] = reached_max
+        if audio is None:
+            bicodec = _partial_bicodec_metadata(runtime, response_ids)
+            if bicodec is not None:
+                metadata["bicodec_streams"] = bicodec
+            return metadata
     if audio is None:
         metadata["stopped_without_eos"] = reached_max
         return metadata
@@ -771,6 +847,89 @@ def _result_metadata(result: Result, *, max_new_tokens: int) -> dict[str, Any]:
         "waveform_finite": _finite(waveform),
         "features": None if features is None else _tensor_metadata(features),
     }
+
+
+def _partial_bicodec_metadata(
+    runtime: _LoggingRuntime,
+    response_ids: Tensor,
+) -> dict[str, Any] | None:
+    try:
+        tokenizer = runtime.audio_tokenizer
+        audio_token_range = runtime.codec_audio_range
+    except AttributeError:
+        return None
+    if not isinstance(tokenizer, BiCodecAudioTokenizer):
+        return None
+    ids = response_ids.detach().cpu().reshape(-1)
+    start, end = audio_token_range
+    audio_mask = ids.ge(start) & ids.lt(end)
+    local = ids[audio_mask] - start
+    values = [int(value) for value in local.tolist()]
+    expected_global = tokenizer.global_unit_length * len(
+        tokenizer.global_codebook_sizes
+    )
+    semantic_start, semantic_end = tokenizer.semantic_token_range
+    summary: dict[str, Any] = {
+        "expected_global_tokens": expected_global,
+        "global_tokens": 0,
+        "semantic_tokens": 0,
+        "has_end_marker": tokenizer.end_token_id in values,
+    }
+
+    global_marker_index = _first_index(values, tokenizer.global_token_id)
+    if global_marker_index is not None:
+        payload_start = global_marker_index + 1
+        payload_end = _first_marker_index(
+            values,
+            (
+                tokenizer.semantic_token_id,
+                tokenizer.end_token_id,
+            ),
+            start=payload_start,
+        )
+        if payload_end is None:
+            payload_end = len(values)
+        global_payload = values[payload_start:payload_end]
+        summary["global_tokens"] = len(global_payload)
+
+    semantic_marker_index = _first_index(values, tokenizer.semantic_token_id)
+    if semantic_marker_index is not None:
+        payload_start = semantic_marker_index + 1
+        payload_end = _first_marker_index(
+            values,
+            (tokenizer.end_token_id,),
+            start=payload_start,
+        )
+        if payload_end is None:
+            payload_end = len(values)
+        semantic_payload = values[payload_start:payload_end]
+        summary["semantic_tokens"] = sum(
+            1
+            for token_id in semantic_payload
+            if semantic_start <= token_id < semantic_end
+        )
+
+    return summary
+
+
+def _first_index(values: Sequence[int], target: int) -> int | None:
+    try:
+        return values.index(target)
+    except ValueError:
+        return None
+
+
+def _first_marker_index(
+    values: Sequence[int],
+    markers: Sequence[int],
+    *,
+    start: int,
+) -> int | None:
+    marker_set = set(markers)
+    for index in range(start, len(values)):
+        if values[index] in marker_set:
+            return index
+    return None
 
 
 def _codes_metadata(codes: object) -> dict[str, Any]:

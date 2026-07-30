@@ -94,7 +94,9 @@ model 构造器不接收路径或执行文件 I/O。
   因此只记录 codec 重建的 target 与自回归 generated。callback 在隔离 RNG context 内应用固定 seed，
   使不同 step 的生成可比较。它还记录 generation 长度、`reached_max_new_tokens`，以及按输出
   模态区分的 `stopped_without_eoa` / `stopped_without_eos`（TEXT/AUDIO 路径会裁掉 stop token，
-  因此撞上 budget 即表示未发出 EOS/EOA，截断音频仍会 decode 并写入 `generated`）、规范化
+  因此撞上 budget 即表示未发出 EOS/EOA；完整音频结果会写入 `generated`，structured BiCodec
+  decode 失败则作为 partial generation 记录 `decode_error` 与 `bicodec_streams`，不使 logging
+  本身失败）、规范化
   字符错误率与 exact match，以及 waveform duration ratio、finite、RMS、peak、silence/clipping
   ratio；这些指标只使用已有
   text/waveform，不加载 ASR、MOS、speaker encoder 或其他评估模型，也不替代语义质量验收。每个

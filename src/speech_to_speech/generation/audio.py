@@ -284,14 +284,29 @@ class _Structured:
 
         results = []
         for token_ids, request in zip(responses, batch.requests):
-            waveform, codes = decode_generated_bicodec_route(
-                token_ids,
-                request.get("audio_context"),
-                route=route,
-                codec=self.codec,
-                audio_tokenizer=self.tokenizer,
-                audio_token_range=self.model.runtime.codec_audio_range,
-            )
+            try:
+                waveform, codes = decode_generated_bicodec_route(
+                    token_ids,
+                    request.get("audio_context"),
+                    route=route,
+                    codec=self.codec,
+                    audio_tokenizer=self.tokenizer,
+                    audio_token_range=self.model.runtime.codec_audio_range,
+                )
+            except torch.OutOfMemoryError:
+                raise
+            except Exception as error:
+                results.append(
+                    Result(
+                        response_ids=token_ids,
+                        audio=None,
+                        decode_error={
+                            "type": type(error).__name__,
+                            "message": str(error),
+                        },
+                    )
+                )
+                continue
             results.append(
                 Result(
                     response_ids=token_ids,
