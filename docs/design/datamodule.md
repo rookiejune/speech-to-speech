@@ -148,8 +148,8 @@ audio_context: SemanticAcousticCodes | None
 
 BiCodec route 的 sample builder 先按 `prompt.source` 选择 source/reference，再只序列化
 `prompt.streams`；target 只按 `output.streams` 产生 response。`global` 表示 fixed-length
-speaker/style codes，仍存放在 structured codes 的 `acoustic` 字段；route 中的 `acoustic` 只为
-legacy metadata 保留。reference 的 semantic/global codes
+speaker/style codes，仍按共享 codec 契约存放在 structured codes 的 `acoustic` 字段；BiCodec
+route 本身只接受 `global`。reference 的 semantic/global codes
 作为 `audio_context` 独立保存供 route-aware decode 使用，target semantic 不会被放进 prompt。
 `token_groups` 只标记实际预测的 semantic、semantic-or-end 或各 acoustic codebook payload；forced
 codec/stream marker 与外层 EOA 不进入监督。

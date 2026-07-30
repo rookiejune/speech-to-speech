@@ -32,7 +32,7 @@ from speech_to_speech.datamodule.dataset import (
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.single import SingleCollator
 from speech_to_speech.datamodule.types import ModelBatch
-from speech_to_speech.audio_route import BICODEC_REUSE_PROMPT_ACOUSTIC
+from speech_to_speech.audio_route import BICODEC_REUSE_PROMPT_GLOBAL
 from speech_to_speech.runtime import AudioRepresentation
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.task import Task
@@ -156,7 +156,7 @@ class SpeakerGridDatasetTest(unittest.TestCase):
             DatasetConfig(name=DatasetName.QWEN_TTS_SPEAKER),
             SimpleNamespace(
                 codec_name="bicodec",
-                audio_route=BICODEC_REUSE_PROMPT_ACOUSTIC,
+                audio_route=BICODEC_REUSE_PROMPT_GLOBAL,
             ),
         )
 
@@ -184,7 +184,7 @@ class SpeakerGridDatasetTest(unittest.TestCase):
 class BiCodecSpeakerCellTest(unittest.TestCase):
     def test_reference_route_keeps_target_semantic_out_of_prompt(self):
         runtime = _runtime(AudioRepresentation.FULL_CODEC_SEQUENCE)
-        runtime.audio_route = BICODEC_REUSE_PROMPT_ACOUSTIC
+        runtime.audio_route = BICODEC_REUSE_PROMPT_GLOBAL
         sample = SpeakerGridCellsDataset(
             _grid(),
             with_audio_context=True,
@@ -211,10 +211,13 @@ class BiCodecSpeakerCellTest(unittest.TestCase):
         local_prompt = row[prompt_boa + 1 : prompt_eoa] - 10
         decoded = runtime.audio_tokenizer.decode_streams(
             local_prompt,
-            BICODEC_REUSE_PROMPT_ACOUSTIC.prompt.canonical_streams,
+            BICODEC_REUSE_PROMPT_GLOBAL.prompt.canonical_streams,
         )
-        torch.testing.assert_close(decoded.semantic, torch.tensor([[2], [3]]))
-        self.assertFalse(torch.equal(decoded.semantic, torch.tensor([[0], [1]])))
+        self.assertIsNone(decoded.semantic)
+        torch.testing.assert_close(
+            decoded.acoustic,
+            torch.tensor([[0, 1], [2, 3], [4, 5]]),
+        )
 
     def test_semantic_only_and_full_sequence_build_tts_batches(self):
         cell = _cells()[0]

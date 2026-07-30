@@ -10,7 +10,6 @@ from .audio_output import (
     AudioOutputAdapterType,
 )
 from .base import Config, TokenModel
-from .lora import LoraConfig
 from .toy import ToyConfig, create_toy_backbone
 
 __all__ = [
@@ -22,7 +21,6 @@ __all__ = [
     "AudioOutputAdapterConfig",
     "AudioOutputAdapterType",
     "Config",
-    "LoraConfig",
     "TokenModel",
     "ToyConfig",
     "create_toy_backbone",

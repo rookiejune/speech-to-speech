@@ -88,7 +88,7 @@ from speech_to_speech.stage import (
     apply_parameter_policy,
 )
 from speech_to_speech.task import Task
-from scripts._config import overfit as parse_overfit
+from scripts._overfit_config import overfit as parse_overfit
 from scripts._entry import runtime_config
 from scripts.create_split_manifest import build_manifest
 from scripts.overfit import (

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Generic, Protocol, TypeVar, cast
 
 import torch
 from anytrain.lightning import validation
 from anytrain.optim.llm import create_optimizer
 from lightning.pytorch import LightningModule
+from peft import LoraConfig
 from torch import nn
 
 from ..datamodule.types import ModelBatch, RawSpeechBatch, TrainInput
@@ -20,7 +22,6 @@ from ..loss.objective import Objective
 from ..loss.protocol import TokenObjectiveModel
 from ..loss.types import Outputs
 from ..generation.protocol import TextEvaluationModel
-from ..model.lora import LoraConfig, LoraModel, checkpoint_payload
 
 
 @dataclass(frozen=True)
@@ -29,13 +30,14 @@ class Config:
     weight_decay: float = 0.01
 
 
-class ModuleModel(TextEvaluationModel, TokenObjectiveModel, LoraModel, Protocol):
-    pass
+class ModuleModel(TextEvaluationModel, TokenObjectiveModel, Protocol):
+    @property
+    def lora_config(self) -> LoraConfig | None: ...
 
 
 ModelT = TypeVar("ModelT", bound=ModuleModel)
 _AUDIO_ROUTE_KEY = "speech_to_speech_audio_route"
-_LORA_KEY = "speech_to_speech_lora"
+_PEFT_KEY = "speech_to_speech_peft"
 
 
 class BatchMaterializer(Protocol):
@@ -139,12 +141,12 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         checkpoint[_AUDIO_ROUTE_KEY] = _audio_route_payload(
             self.model.runtime.audio_route
         )
-        checkpoint[_LORA_KEY] = checkpoint_payload(self.model.lora_config)
+        checkpoint[_PEFT_KEY] = _peft_payload(self.model.lora_config)
 
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         expected = _audio_route_payload(self.model.runtime.audio_route)
         _validate_audio_route_checkpoint(checkpoint, expected)
-        _validate_lora_checkpoint(checkpoint, self.model.lora_config)
+        _validate_peft_checkpoint(checkpoint, self.model.lora_config)
 
     @torch.no_grad()
     def generate(
@@ -217,21 +219,99 @@ def _validate_audio_route_checkpoint(
         )
 
 
-def _validate_lora_checkpoint(
+def _validate_peft_checkpoint(
     checkpoint: dict[str, Any],
-    config: LoraConfig,
+    config: LoraConfig | None,
 ) -> None:
-    expected = checkpoint_payload(config)
-    if _LORA_KEY not in checkpoint:
-        if config.enabled:
+    expected = _peft_payload(config)
+    if _PEFT_KEY not in checkpoint:
+        if config is not None:
             raise ValueError("checkpoint is missing the PEFT LoRA contract.")
         return
-    actual = checkpoint[_LORA_KEY]
-    if actual != expected:
+    actual = checkpoint[_PEFT_KEY]
+    if not _peft_payload_matches(actual, expected):
         raise ValueError(
             f"checkpoint PEFT LoRA contract does not match model: "
             f"{actual!r} != {expected!r}."
         )
+
+
+def _peft_payload(config: LoraConfig | None) -> dict[str, Any] | None:
+    if config is None:
+        return None
+    return {
+        "grammar": "peft-lora-v2",
+        "adapter_name": "speech",
+        "config": _peft_config(config),
+        "defaults": _peft_config(LoraConfig()),
+    }
+
+
+def _peft_config(config: LoraConfig) -> dict[str, Any]:
+    values = cast(dict[str, Any], _checkpoint_value(config.to_dict()))
+    values.pop("peft_version", None)
+    return values
+
+
+def _peft_payload_matches(
+    actual: object,
+    expected: dict[str, Any] | None,
+) -> bool:
+    if actual is None or expected is None:
+        return actual is expected
+    if not isinstance(actual, dict):
+        return False
+    if actual.get("grammar") != expected["grammar"]:
+        return False
+    if actual.get("adapter_name") != expected["adapter_name"]:
+        return False
+    actual_config = actual.get("config")
+    actual_defaults = actual.get("defaults")
+    expected_config = expected["config"]
+    expected_defaults = expected["defaults"]
+    if not isinstance(actual_config, dict) or not isinstance(actual_defaults, dict):
+        return False
+    common = actual_config.keys() & expected_config.keys()
+    if any(actual_config[key] != expected_config[key] for key in common):
+        return False
+    actual_only = actual_config.keys() - expected_config.keys()
+    if any(
+        key not in actual_defaults or actual_config[key] != actual_defaults[key]
+        for key in actual_only
+    ):
+        return False
+    expected_only = expected_config.keys() - actual_config.keys()
+    return not any(
+        key not in expected_defaults or expected_config[key] != expected_defaults[key]
+        for key in expected_only
+    )
+
+
+def _checkpoint_value(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return _checkpoint_value(value.value)
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("PEFT checkpoint config keys must be strings.")
+            result[key] = _checkpoint_value(item)
+        return result
+    if isinstance(value, (set, frozenset)):
+        items = [_checkpoint_value(item) for item in value]
+        try:
+            return sorted(items)
+        except TypeError as error:
+            raise TypeError(
+                "PEFT checkpoint config sets must contain sortable values."
+            ) from error
+    if isinstance(value, (list, tuple)):
+        return [_checkpoint_value(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    raise TypeError(
+        f"unsupported PEFT checkpoint config value: {type(value).__name__}."
+    )
 
 
 def _audio_route_payload(route: AudioRouteConfig | None) -> dict[str, object] | None:

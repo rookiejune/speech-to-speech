@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 
-from speech_to_speech.generation import Request, generate_responses
+from speech_to_speech.generation import Request, Result, generate_responses
 from speech_to_speech.generation.reporting import audio_output
 from speech_to_speech.model.acoustic import FlowModel
 
@@ -29,10 +29,8 @@ def benchmark_batch(
     serial_elapsed = time.perf_counter() - serial_started
     batch_results = batched["results"]
     token_count = sum(result["response_ids"].numel() for result in batch_results)
-    finite = all(
-        torch.isfinite(audio_output(result, "batch result")["waveform"]).all()
-        for result in batch_results
-    )
+    batch_finite = _finite(batch_results, "batch result")
+    serial_finite = _finite(serial_results, "serial result")
     return {
         "batch_size": len(requests),
         "prompt_tokens": [int(request["prompt_ids"].numel()) for request in requests],
@@ -49,7 +47,9 @@ def benchmark_batch(
             torch.equal(batch["response_ids"], serial["response_ids"])
             for batch, serial in zip(batch_results, serial_results)
         ),
-        "finite": bool(finite),
+        "finite": batch_finite and serial_finite,
+        "batch_finite": batch_finite,
+        "serial_finite": serial_finite,
         "batch_elapsed_seconds": batched["elapsed_seconds"],
         "serial_elapsed_seconds": serial_elapsed,
         "batch_tokens_per_second": token_count / batched["elapsed_seconds"],
@@ -65,11 +65,13 @@ def timed_generate(
     seed: int,
     max_new_tokens: int,
 ) -> dict[str, Any]:
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
-    torch.cuda.synchronize()
+    device = _model_device(model)
+    torch.set_rng_state(torch.Generator().manual_seed(seed).get_state())
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.synchronize(device)
     started = time.perf_counter()
     results = generate_responses(
         requests,
@@ -78,9 +80,24 @@ def timed_generate(
         do_sample=False,
         use_cache=True,
     )
-    torch.cuda.synchronize()
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+        peak_cuda_bytes = torch.cuda.max_memory_allocated(device)
+    else:
+        peak_cuda_bytes = 0
     return {
         "results": results,
         "elapsed_seconds": time.perf_counter() - started,
-        "peak_cuda_bytes": torch.cuda.max_memory_allocated(),
+        "peak_cuda_bytes": peak_cuda_bytes,
     }
+
+
+def _model_device(model: FlowModel) -> torch.device:
+    return model.backbone.get_input_embeddings().weight.device
+
+
+def _finite(results: Sequence[Result], name: str) -> bool:
+    return all(
+        bool(torch.isfinite(audio_output(result, name)["waveform"]).all())
+        for result in results
+    )

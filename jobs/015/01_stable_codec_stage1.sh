@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPOS_ROOT="${REPOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
-source "${REPOS_ROOT}/workspace/jobs/env.sh"
+JOB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "${JOB_DIR%/jobs/*}/jobs/env.sh"
 
 data_root="${SPEECH_TO_SPEECH_STABLE_DATA_ROOT:?set SPEECH_TO_SPEECH_STABLE_DATA_ROOT}"
 split_manifest="${SPEECH_TO_SPEECH_STABLE_SPLIT_MANIFEST:?set SPEECH_TO_SPEECH_STABLE_SPLIT_MANIFEST}"

@@ -32,8 +32,8 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
 acoustic composition 需要的独立 side channel，并组装
 `model + objective + SpeechToSpeechModule` 的 token/Flow/RVQ 组合；`token()`、`flow()`、`rvq()`
 分别封闭具体构造；返回值同时携带实际 `AcousticType`，入口不再重复解析或校验 composition。
-该模块通过窄 Protocol 消费 acoustic config，不反向依赖
-`scripts._config`。当 `acoustic.init_artifact` 非空时，composition 负责加载 SAC
+该模块通过窄 Protocol 消费 acoustic config，不反向依赖 scripts 入口 schema。当
+`acoustic.init_artifact` 非空时，composition 负责加载 SAC
 `AcousticGeneratorArtifact`，校验 route、frame layout 与 backend metadata，并把已加载对象传给 model；
 model 构造器不接收路径或执行文件 I/O。
 
@@ -159,6 +159,7 @@ FlashAttention 或其他 custom op 也可能不在通用算子计数覆盖范围
   仍由 generation callback 与独立结果文档验收。
 - 正式 `scripts/train.py` 使用 `anytrain.lightning.ModelCheckpoint` 的默认异步保存；checkpoint
   目录、命名、保留数量和触发步数仍由本项目配置拥有。
-- `SpeechToSpeechModule` 负责保存并校验固定 audio route 和 `peft-lora-v1` 配置 metadata。LoRA
-  payload 严格比较影响 adapter 语义的全部字段，但不绑定 PEFT 包版本；只有当前未启用 LoRA 时，
-  才允许加载缺少 LoRA metadata 的旧 checkpoint。
+- `SpeechToSpeechModule` 负责保存并校验固定 audio route 和 `peft-lora-v2` 配置 metadata。PEFT
+  payload 来自完整 `LoraConfig.to_dict()` 与同版本官方默认值，不绑定 `peft_version`。共同字段
+  严格比较；版本间新增或缺失字段只有保持官方默认值时才兼容。只有当前未启用 LoRA 时，才允许
+  加载缺少 PEFT metadata 的旧 checkpoint。

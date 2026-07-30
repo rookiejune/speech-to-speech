@@ -14,9 +14,9 @@ from speech_to_speech.performance import TrainingFlops
 from speech_to_speech.runtime import Config as RuntimeConfig
 
 if __package__:
-    from ._config import PerformanceConfig
+    from ._config_common import PerformanceConfig
 else:
-    from _config import PerformanceConfig
+    from _config_common import PerformanceConfig
 
 
 class TrainConfig(Protocol):

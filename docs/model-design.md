@@ -322,9 +322,10 @@ Stage 4 使用 full policy；stage 本身不隐式选择 policy。RVQ decoder �
 frozen。正式 joint entry 使用 `ddp_find_unused_parameters_true`，因为一个 microbatch 只执行自身
 task 分支；optimizer step 在配置数量的 microbatch 后发生。
 
-需要参数高效适配时，`model.lora` 使用 Hugging Face PEFT 向现有 Qwen backbone 注入 LoRA，并与
-`parameter_policy=lora` 成对选择；项目不维护轻量 LoRA 层。原始 backbone 保持冻结，adapter 与
-speech/acoustic interface 按 policy 训练。LoRA 的正式文本保真度先由固定
+需要参数高效适配时，`model.lora` 直接持有 Hugging Face `peft.LoraConfig`，通过
+`model/lora=qwen parameter_policy=lora` 成对选择；项目不维护本地 LoRA config、layer 或注入
+facade。PEFT 决定 backbone 内 trainable 参数，speech/acoustic interface 由 policy 一起训练。
+LoRA 的正式文本保真度先由固定
 `TextRetentionLogger` baseline 验证。
 
 这里的 Stage 0-4 只表示 S2S 数据、任务和参数策略日程，不是上文 Phase A/B。SAC generator pretraining

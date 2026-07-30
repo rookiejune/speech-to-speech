@@ -664,15 +664,15 @@ class GenerationTest(unittest.TestCase):
             runtime=_TinyRuntime(),
         ).eval()
         input_ids = torch.tensor([[1, 8, 9, 10, 11, 2]])
-        legacy = model._input_embedding(input_ids)
+        base = model._input_embedding(input_ids)
         adapted = model._input_embedding(
             input_ids,
             torch.tensor([[1, 2]], dtype=torch.long),
         )
 
-        torch.testing.assert_close(adapted[:, 0], legacy[:, 0])
-        torch.testing.assert_close(adapted[:, 3:], legacy[:, 3:])
-        self.assertFalse(torch.equal(adapted[:, 1:3], legacy[:, 1:3]))
+        torch.testing.assert_close(adapted[:, 0], base[:, 0])
+        torch.testing.assert_close(adapted[:, 3:], base[:, 3:])
+        self.assertFalse(torch.equal(adapted[:, 1:3], base[:, 1:3]))
 
         with self.assertRaisesRegex(ValueError, "codec audio payload"):
             model._input_embedding(input_ids, torch.tensor([[3]]))

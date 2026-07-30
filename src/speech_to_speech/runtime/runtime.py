@@ -35,8 +35,6 @@ from .types import (
 from .._compat import StrEnum, auto
 from ..audio_route import (
     BICODEC_GENERATE_GLOBAL,
-    BICODEC_PREDICT_ACOUSTIC,
-    BICODEC_REUSE_PROMPT_ACOUSTIC,
     BICODEC_REUSE_PROMPT_GLOBAL,
     FULL_OUTPUT,
     SEMANTIC_GENERATOR,
@@ -385,12 +383,9 @@ def validate_audio_route(
         if route not in (
             BICODEC_GENERATE_GLOBAL,
             BICODEC_REUSE_PROMPT_GLOBAL,
-            BICODEC_REUSE_PROMPT_ACOUSTIC,
-            BICODEC_PREDICT_ACOUSTIC,
         ):
             raise ValueError(
-                "BiCodec full codec sequence requires a supported global or legacy "
-                "acoustic route."
+                "BiCodec full codec sequence requires a supported global route."
             )
         return
     if route != FULL_OUTPUT:

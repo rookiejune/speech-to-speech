@@ -110,7 +110,7 @@ flow matching；传入包含正数 `weight` 和 `teacher` 的 `RepaConfig` 时�
 
 REPA 只属于 flow 组合。teacher 显式接收 `acoustic_target["semantic_codes"]`、
 `acoustic_target["codes"]` 和 `acoustic_target_mask`；dataset 不绑定 WavLM 型号、层号或
-teacher features。acoustic-only codec screening 与 legacy oracle checkpoint 导出由
+teacher features。acoustic-only codec screening 与 oracle artifact 导出由
 `semantic-acoustic-codec` 维护，本仓库只组合 joint token/Flow/RVQ objective。
 
 ## 边界

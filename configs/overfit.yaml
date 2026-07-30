@@ -2,14 +2,55 @@ defaults:
   - stage: stage_0
   - parameter_policy: full
   - audio_route: semantic_generator
-  - experiment: overfit
   - callback/performance@callbacks.performance
   - _self_
+  - experiment: overfit
+  - optional model/lora@model.lora: null
 
 repo_output_root: ${oc.env:SPEECH_TO_SPEECH_TRAIN_ROOT,${oc.env:DYNAMIC_HOME}/train/speech-to-speech}
 output_dir: ${repo_output_root}/${output_subdir}
 
+data:
+  codec: ${runtime.codec}
+  dataloader:
+    batch_size: 1
+    num_workers: 0
+    pin_memory: false
+    persistent_workers: false
+  shape: pair
+  encode_missing_codes: false
+
 callbacks:
+  task_sample:
+    enabled: true
+    every_n_steps: 1
+    every_audio_seconds:
+  evaluation:
+    enabled: true
+    every_audio_seconds:
+  text_retention:
+    enabled: true
+    every_n_steps: 1
+    every_audio_seconds:
+    max_new_tokens: 8
+    probes:
+      zh_en:
+        instruction: "Translate into English: \u6628\u665a\u7684\u66b4\u96e8\u5bfc\u81f4\u4e09\u8d9f\u5217\u8f66\u665a\u70b9\u3002"
+        reference: "Last night's heavy rain delayed three trains."
+  grad_norm:
+    enabled: true
+    every_n_steps: 100
+    every_audio_seconds:
+  gradient_pair:
+    enabled: true
+    every_n_steps: 1
+    every_audio_seconds:
+    full_parameter: model.backbone.model.layers.0.self_attn.q_proj.weight
+    partial_parameter: model.backbone.model.norm.weight
+  flow_matching:
+    enabled: true
+    every_n_steps: 1
+    every_audio_seconds:
   performance:
     enabled: false
 

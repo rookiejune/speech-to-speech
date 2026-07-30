@@ -3,7 +3,7 @@ defaults:
   - /model: default
   - /model/acoustic: none
   - /runtime: unicodec
-  - /data: wmt19_tts
+  - /data@data.dataset: wmt19_tts
   - /pl_module: sft
   - /trainer: default
   - /logging: tensorboard
@@ -14,8 +14,7 @@ task: tts
 run_name: token
 output_subdir: 005-codec-screening/unicodec/overfit
 
-data:
-  sample_index: 0
+sample_index: 0
 
 callbacks:
   task_sample:

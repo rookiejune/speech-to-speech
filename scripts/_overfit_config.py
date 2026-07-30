@@ -1,0 +1,231 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Optional, Type, Union
+
+from omegaconf import MISSING, DictConfig
+
+from speech_to_speech.audio_route import Config as AudioRouteConfig
+from speech_to_speech.datamodule.config import SpeechConfig
+from speech_to_speech.model import Config as ModelConfig
+from speech_to_speech.model.acoustic import AcousticType
+from speech_to_speech.pl_module import Config as ModuleConfig
+from speech_to_speech.runtime import Config as RuntimeConfig
+from speech_to_speech.stage import ParameterPolicyConfig, StageConfig
+
+if __package__:
+    from ._config_common import (
+        AcousticNoneConfig,
+        FlowConfig,
+        GradNormCallbackConfig,
+        LoggingConfig,
+        PerformanceConfig,
+        RVQConfig,
+        TextRetentionCallbackConfig,
+        TrainConfig,
+        TrainerConfig,
+        non_empty_string,
+        non_negative_integer,
+        optional_positive_number,
+        positive_integer,
+        validate_training,
+    )
+    from ._config_normalization import parse, peft_lora, prepare
+else:
+    from _config_common import (
+        AcousticNoneConfig,
+        FlowConfig,
+        GradNormCallbackConfig,
+        LoggingConfig,
+        PerformanceConfig,
+        RVQConfig,
+        TextRetentionCallbackConfig,
+        TrainConfig,
+        TrainerConfig,
+        non_empty_string,
+        non_negative_integer,
+        optional_positive_number,
+        positive_integer,
+        validate_training,
+    )
+    from _config_normalization import parse, peft_lora, prepare
+
+
+@dataclass
+class TaskSampleCallbackConfig:
+    enabled: bool = MISSING
+    every_n_steps: int = MISSING
+    every_audio_seconds: Optional[float] = None
+
+
+@dataclass
+class EvaluationCallbackConfig:
+    enabled: bool = True
+    every_audio_seconds: Optional[float] = None
+
+
+@dataclass
+class GradientPairCallbackConfig:
+    enabled: bool = MISSING
+    every_n_steps: int = MISSING
+    every_audio_seconds: Optional[float] = None
+    full_parameter: str = MISSING
+    partial_parameter: str = MISSING
+
+
+@dataclass
+class FlowMatchingCallbackConfig:
+    enabled: bool = MISSING
+    every_n_steps: int = MISSING
+    every_audio_seconds: Optional[float] = None
+
+
+@dataclass
+class OverfitCallbacksConfig:
+    task_sample: TaskSampleCallbackConfig = field(
+        default_factory=TaskSampleCallbackConfig
+    )
+    evaluation: EvaluationCallbackConfig = field(
+        default_factory=EvaluationCallbackConfig
+    )
+    text_retention: TextRetentionCallbackConfig = field(
+        default_factory=TextRetentionCallbackConfig
+    )
+    grad_norm: GradNormCallbackConfig = field(default_factory=GradNormCallbackConfig)
+    gradient_pair: GradientPairCallbackConfig = field(
+        default_factory=GradientPairCallbackConfig
+    )
+    flow_matching: FlowMatchingCallbackConfig = field(
+        default_factory=FlowMatchingCallbackConfig
+    )
+    performance: PerformanceConfig = field(default_factory=PerformanceConfig)
+
+
+@dataclass
+class _OverfitConfig:
+    task: str = MISSING
+    sample_index: int = MISSING
+    stage: StageConfig = field(default_factory=StageConfig)
+    parameter_policy: ParameterPolicyConfig = field(
+        default_factory=ParameterPolicyConfig
+    )
+    run_name: str = MISSING
+    repo_output_root: str = MISSING
+    output_subdir: str = MISSING
+    output_dir: str = MISSING
+    model: ModelConfig = field(default_factory=ModelConfig)
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    audio_route: AudioRouteConfig = MISSING
+    data: SpeechConfig = MISSING
+    pl_module: ModuleConfig = field(default_factory=ModuleConfig)
+    train: TrainConfig = field(default_factory=TrainConfig)
+    trainer: TrainerConfig = field(default_factory=TrainerConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
+    callbacks: OverfitCallbacksConfig = field(default_factory=OverfitCallbacksConfig)
+
+
+@dataclass
+class OverfitTokenConfig(_OverfitConfig):
+    acoustic: AcousticNoneConfig = field(default_factory=AcousticNoneConfig)
+
+
+@dataclass
+class OverfitFlowConfig(_OverfitConfig):
+    acoustic: FlowConfig = field(default_factory=FlowConfig)
+
+
+@dataclass
+class OverfitRVQConfig(_OverfitConfig):
+    acoustic: RVQConfig = field(default_factory=RVQConfig)
+
+
+OverfitConfig = Union[OverfitTokenConfig, OverfitFlowConfig, OverfitRVQConfig]
+
+
+def overfit(config: DictConfig) -> OverfitConfig:
+    config = prepare(config)
+    lora = peft_lora(config)
+    schema: Type[OverfitConfig]
+    acoustic = AcousticType(str(config.acoustic.type))
+    if acoustic is AcousticType.NONE:
+        schema = OverfitTokenConfig
+    elif acoustic is AcousticType.FLOW:
+        schema = OverfitFlowConfig
+    else:
+        schema = OverfitRVQConfig
+    result = parse(config, schema)
+    result.model.lora = lora
+    validate_training(result)
+    non_negative_integer(result.sample_index, "sample_index")
+    _validate_callbacks(result.callbacks)
+    if result.callbacks.performance.enabled and result.callbacks.task_sample.enabled:
+        raise ValueError(
+            "overfit performance requires callbacks.task_sample.enabled=false "
+            "because task sample generation cannot be excluded from distributed "
+            "step timing."
+        )
+    return result
+
+
+def _validate_callbacks(config: OverfitCallbacksConfig) -> None:
+    positive_integer(
+        config.task_sample.every_n_steps,
+        "callbacks.task_sample.every_n_steps",
+    )
+    optional_positive_number(
+        config.task_sample.every_audio_seconds,
+        "callbacks.task_sample.every_audio_seconds",
+    )
+    optional_positive_number(
+        config.evaluation.every_audio_seconds,
+        "callbacks.evaluation.every_audio_seconds",
+    )
+    config.text_retention.validate()
+    positive_integer(
+        config.grad_norm.every_n_steps,
+        "callbacks.grad_norm.every_n_steps",
+    )
+    optional_positive_number(
+        config.grad_norm.every_audio_seconds,
+        "callbacks.grad_norm.every_audio_seconds",
+    )
+    positive_integer(
+        config.gradient_pair.every_n_steps,
+        "callbacks.gradient_pair.every_n_steps",
+    )
+    optional_positive_number(
+        config.gradient_pair.every_audio_seconds,
+        "callbacks.gradient_pair.every_audio_seconds",
+    )
+    non_empty_string(
+        config.gradient_pair.full_parameter,
+        "callbacks.gradient_pair.full_parameter",
+    )
+    non_empty_string(
+        config.gradient_pair.partial_parameter,
+        "callbacks.gradient_pair.partial_parameter",
+    )
+    if config.gradient_pair.full_parameter == config.gradient_pair.partial_parameter:
+        raise ValueError("gradient pair full and partial parameters must differ.")
+    positive_integer(
+        config.flow_matching.every_n_steps,
+        "callbacks.flow_matching.every_n_steps",
+    )
+    optional_positive_number(
+        config.flow_matching.every_audio_seconds,
+        "callbacks.flow_matching.every_audio_seconds",
+    )
+
+
+__all__ = [
+    "EvaluationCallbackConfig",
+    "FlowMatchingCallbackConfig",
+    "GradientPairCallbackConfig",
+    "OverfitCallbacksConfig",
+    "OverfitConfig",
+    "OverfitFlowConfig",
+    "OverfitRVQConfig",
+    "OverfitTokenConfig",
+    "TaskSampleCallbackConfig",
+    "overfit",
+]

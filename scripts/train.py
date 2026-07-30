@@ -29,10 +29,10 @@ from speech_to_speech.stage import StageLoaderConfig, apply_parameter_policy
 from speech_to_speech.task import Task
 
 if TYPE_CHECKING:
-    from scripts._config import StagedTrainConfig
+    from scripts._train_config import StagedTrainConfig
 
 if __package__:
-    from ._config import train as parse_config
+    from ._train_config import train as parse_config
     from ._entry import (
         performance,
         runtime_config,
@@ -40,7 +40,7 @@ if __package__:
     )
     from ._logging import build as build_logger
 else:
-    from _config import train as parse_config
+    from _train_config import train as parse_config
     from _entry import (
         performance,
         runtime_config,

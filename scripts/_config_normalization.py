@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Type, TypeVar, cast
+from typing import Any, Type, TypeVar, cast
 
 from omegaconf import DictConfig, ListConfig, OmegaConf
+from peft import LoraConfig
 
 from speech_to_speech.audio_route import (
     AudioStream,
@@ -90,6 +91,24 @@ def parse(config: DictConfig, schema: Type[ConfigT]) -> ConfigT:
     merged = OmegaConf.merge(structured, config)
     OmegaConf.resolve(merged)
     return cast(ConfigT, OmegaConf.to_object(merged))
+
+
+def peft_lora(config: DictConfig) -> LoraConfig | None:
+    model = config.get("model")
+    if not isinstance(model, DictConfig):
+        raise TypeError("model config must be a mapping.")
+    value = model.get("lora")
+    model.lora = None
+    if value is None:
+        return None
+    if not isinstance(value, DictConfig):
+        raise TypeError("model.lora must be a mapping or null.")
+    kwargs = OmegaConf.to_container(value, resolve=True)
+    if not isinstance(kwargs, dict) or any(
+        not isinstance(key, str) for key in kwargs
+    ):
+        raise TypeError("model.lora must contain string keys.")
+    return LoraConfig(**cast(dict[str, Any], kwargs))
 
 
 def _dataset(value: object) -> None:

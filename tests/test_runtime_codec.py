@@ -10,8 +10,6 @@ from anytrain.codec import AcousticLayout
 
 from speech_to_speech.audio_route import (
     BICODEC_GENERATE_GLOBAL,
-    BICODEC_PREDICT_ACOUSTIC,
-    BICODEC_REUSE_PROMPT_ACOUSTIC,
     BICODEC_REUSE_PROMPT_GLOBAL,
     FULL_OUTPUT,
     SEMANTIC_GENERATOR,
@@ -189,7 +187,7 @@ class RuntimeAudioRouteTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires audio_route=full_output"):
             Runtime(config, audio_route=BICODEC_GENERATE_GLOBAL)
 
-    def test_bicodec_full_sequence_accepts_new_and_legacy_routes(self) -> None:
+    def test_bicodec_full_sequence_accepts_global_routes(self) -> None:
         config = Config(
             codec="bicodec",
             audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
@@ -198,8 +196,6 @@ class RuntimeAudioRouteTest(unittest.TestCase):
         for route in (
             BICODEC_GENERATE_GLOBAL,
             BICODEC_REUSE_PROMPT_GLOBAL,
-            BICODEC_REUSE_PROMPT_ACOUSTIC,
-            BICODEC_PREDICT_ACOUSTIC,
         ):
             with self.subTest(route=route):
                 Runtime(config, audio_route=route)
@@ -210,7 +206,7 @@ class RuntimeAudioRouteTest(unittest.TestCase):
             audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
         )
 
-        with self.assertRaisesRegex(ValueError, "supported global or legacy acoustic"):
+        with self.assertRaisesRegex(ValueError, "supported global route"):
             Runtime(config, audio_route=FULL_OUTPUT)
 
     def test_runtime_route_requires_an_output_stream(self) -> None:

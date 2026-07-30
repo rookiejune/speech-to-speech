@@ -645,19 +645,14 @@ def _audio_streams(streams: Sequence[AudioStream]) -> tuple[AudioStream, ...]:
         raise ValueError("BiCodec generation requires at least one output stream.")
     if any(not isinstance(stream, AudioStream) for stream in values):
         raise TypeError("BiCodec generation streams must contain AudioStream values.")
-    normalized = tuple(
-        AudioStream.GLOBAL if stream is AudioStream.ACOUSTIC else stream
-        for stream in values
-    )
-    if len(normalized) != len(set(normalized)):
+    if AudioStream.ACOUSTIC in values:
         raise ValueError(
-            "BiCodec generation streams must not contain both global and legacy "
-            "acoustic streams."
+            "BiCodec generation streams must use global instead of acoustic."
         )
     return tuple(
         stream
         for stream in (AudioStream.GLOBAL, AudioStream.SEMANTIC)
-        if stream in normalized
+        if stream in values
     )
 
 

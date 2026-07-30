@@ -8,7 +8,7 @@ defaults:
   - /audio_route: semantic_generator
   - /data@data.dataset: wmt19_tts
   - /pl_module: sft
-  - /trainer: default
+  - /trainer: staged_ddp
   - /logging: tensorboard
   - /callback/performance@callbacks.performance
   - _self_
@@ -52,12 +52,6 @@ validation:
   every_n_steps: 1000
   sanity_steps: -1
 
-trainer:
-  strategy: ddp_find_unused_parameters_true
-  use_distributed_sampler: false
-  log_every_n_steps: 10
-  enable_checkpointing: true
-
 callbacks:
   task_sample:
     enabled: false
@@ -82,6 +76,7 @@ callbacks:
   grad_norm:
     enabled: false
     every_n_steps: 100
+    every_audio_seconds:
   checkpoint:
     filename: step-{step:08d}
     save_last: true

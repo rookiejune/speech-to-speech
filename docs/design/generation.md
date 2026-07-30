@@ -143,8 +143,7 @@ semantic artifact 路径选择。
 structured state machine，根据固定 route.output 生成 marker、semantic token 和可选的固定数量
 slot-major global codebook token，恢复 `SemanticAcousticCodes` 后按 route.decode 合并 prompt
 与 output stream，再调用 `detokenize()`。global reuse route 只生成 semantic 并复用 prompt global；
-global generate route 生成并使用 output global。legacy acoustic route 在 tokenizer/model 边界规范为
-相同 global grammar。配置
+global generate route 生成并使用 output global。配置
 `runtime.semantic_codec_artifact` 后，semantic strategy 只处理 structured backend 的 semantic tokens，
 并把 waveform decode 交给 `SemanticCodecRuntime`；普通 frame codec 的 `decode()` 不再接收
 semantic-only codes。semantic-artifact 与 structured full-sequence 是配置阶段选择的两条解码路径；
@@ -184,6 +183,15 @@ text modality-local logits 计算，并包含 EOS target。`SpeechToSpeechModule
 `generation.evaluation` 提供 fixed-sample acoustic evaluation 复用的 waveform/STFT helper，
 并负责 overfit 结束后的单样本自回归生成健康度、耗时与 RTF 汇总；训练侧 callback 与脚本只负责
 cadence、设备编排、日志和落盘，不维护平行评估实现。
+
+## 诊断入口
+
+`scripts/generation_smoke.py` 通过公开的 `DatasetConfig + load_dataset()` 和
+`generate_responses()` 验证 cache/full-recompute 及 variable-batch 语义，不直接绑定 workspace 的
+具体 dataset provider。CPU 模式不调用 CUDA seed、同步或显存 API；CUDA 模式以模型实际所在 device
+同步和统计 peak memory。cached/full、batched/serial 任一 waveform 非 finite，或 greedy token 不一致，
+都会在写出 `metrics.json` 后让入口失败。sample index、batch sizes 与 generation token budget 在加载
+runtime 前完成边界校验。
 
 ## 边界
 

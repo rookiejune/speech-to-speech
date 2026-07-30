@@ -2,3 +2,11 @@ defaults:
   - entry: train
   - _self_
   - experiment: null
+  - optional model/lora@model.lora: null
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${output_dir}/hydra
+  output_subdir: config

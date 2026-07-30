@@ -14,9 +14,3 @@ toy:
   heads: 2
   max_position_embeddings: 256
 lora:
-  enabled: false
-  rank: 16
-  alpha: 32
-  dropout: 0.05
-  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
-  use_rslora: false

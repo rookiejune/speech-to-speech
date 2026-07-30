@@ -10,6 +10,7 @@ from anydataset.types import Modality
 from anytrain.codec import SemanticAcousticCodes
 from anytrain.module.idspace import Layout
 from lightning.pytorch import LightningModule
+from peft import LoraConfig
 from torch import Tensor, nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
@@ -23,8 +24,8 @@ from speech_to_speech.datamodule.types import (
 )
 from speech_to_speech.audio_route import (
     AudioStream,
-    BICODEC_PREDICT_ACOUSTIC,
-    BICODEC_REUSE_PROMPT_ACOUSTIC,
+    BICODEC_GENERATE_GLOBAL,
+    BICODEC_REUSE_PROMPT_GLOBAL,
 )
 from speech_to_speech.loss import (
     FlowObjective,
@@ -42,7 +43,6 @@ from speech_to_speech.model.audio_output import (
     AudioOutputAdapterConfig,
     AudioOutputAdapterType,
 )
-from speech_to_speech.model.lora import LoraConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.pl_module import SpeechToSpeechModule
 from speech_to_speech.runtime.audio_tokenizer import (
@@ -60,12 +60,18 @@ class _ConditionModel(TokenModel):
         return input_ids[..., None].to(dtype=torch.float32)
 
 
+class _BackboneConfig(SimpleNamespace):
+    def get(self, key: str, default: object = None) -> object:
+        return getattr(self, key, default)
+
+
 class _Backbone(nn.Module):
     def __init__(self, *, text_vocab_size: int = 4, embedding_rows: int = 4) -> None:
         super().__init__()
-        self.config = SimpleNamespace(hidden_size=2)
+        self.config = _BackboneConfig(hidden_size=2)
         self.input_embeddings = nn.Embedding(embedding_rows, 2)
         self.output_embeddings = nn.Linear(2, embedding_rows, bias=False)
+        self.q_proj = nn.Linear(2, 2, bias=False)
         self.text_vocab_size = text_vocab_size
 
     def get_input_embeddings(self) -> nn.Embedding:
@@ -263,13 +269,13 @@ class ModelLossContractTest(unittest.TestCase):
             acoustic_unit_length=1,
         )
         layout = Layout(text=(0, 4), audio=(4, 4 + tokenizer.vocab_size))
-        codes = {
-            "semantic": torch.tensor([[1]]),
-            "acoustic": torch.tensor([[0]]),
-        }
+        codes = SemanticAcousticCodes(
+            semantic=torch.tensor([[1]]),
+            acoustic=torch.tensor([[0]]),
+        )
         local_ids, local_groups = tokenizer.encode_streams_with_groups(
             codes,
-            (AudioStream.ACOUSTIC, AudioStream.SEMANTIC),
+            (AudioStream.GLOBAL, AudioStream.SEMANTIC),
         )
         global_ids = layout.to_global(Modality.AUDIO.value, local_ids)
         input_ids = torch.cat((torch.tensor([1]), global_ids)).unsqueeze(0)
@@ -308,8 +314,8 @@ class ModelLossContractTest(unittest.TestCase):
 
     def test_checkpoint_audio_route_is_immutable(self):
         model = SimpleNamespace(
-            runtime=SimpleNamespace(audio_route=BICODEC_REUSE_PROMPT_ACOUSTIC),
-            lora_config=LoraConfig(),
+            runtime=SimpleNamespace(audio_route=BICODEC_REUSE_PROMPT_GLOBAL),
+            lora_config=None,
         )
         module = SpeechToSpeechModule(
             ModuleConfig(),
@@ -321,17 +327,17 @@ class ModelLossContractTest(unittest.TestCase):
         module.on_save_checkpoint(checkpoint)
         module.on_load_checkpoint(checkpoint)
 
-        model.runtime.audio_route = BICODEC_PREDICT_ACOUSTIC
+        model.runtime.audio_route = BICODEC_GENERATE_GLOBAL
         with self.assertRaisesRegex(ValueError, "does not match"):
             module.on_load_checkpoint(checkpoint)
 
     def test_checkpoint_lora_contract_roundtrips_complete_config(self):
         config = LoraConfig(
-            enabled=True,
-            rank=8,
-            alpha=16,
-            dropout=0.1,
+            r=8,
+            lora_alpha=16,
+            lora_dropout=0.1,
             target_modules=["v_proj", "q_proj"],
+            exclude_modules=["down_proj", "k_proj"],
             use_rslora=True,
         )
         module = _checkpoint_module(config)
@@ -341,39 +347,72 @@ class ModelLossContractTest(unittest.TestCase):
         module.on_load_checkpoint(checkpoint)
 
         self.assertEqual(
-            checkpoint["speech_to_speech_lora"],
-            {
-                "grammar": "peft-lora-v1",
-                "backend": "huggingface-peft",
-                "adapter_name": "speech",
-                "bias": "none",
-                "enabled": True,
-                "rank": 8,
-                "alpha": 16,
-                "dropout": 0.1,
-                "target_modules": ["q_proj", "v_proj"],
-                "use_rslora": True,
-            },
+            checkpoint["speech_to_speech_peft"]["grammar"],
+            "peft-lora-v2",
         )
+        payload = checkpoint["speech_to_speech_peft"]["config"]
+        self.assertEqual(payload["r"], 8)
+        self.assertEqual(payload["lora_alpha"], 16)
+        self.assertEqual(payload["lora_dropout"], 0.1)
+        self.assertEqual(payload["target_modules"], ["q_proj", "v_proj"])
+        self.assertEqual(payload["exclude_modules"], ["down_proj", "k_proj"])
+        self.assertEqual(payload["peft_type"], "LORA")
+        self.assertTrue(payload["use_rslora"])
+        self.assertNotIn("peft_version", payload)
+        self.assertNotIn(
+            "peft_version",
+            checkpoint["speech_to_speech_peft"]["defaults"],
+        )
+
+    def test_checkpoint_accepts_only_default_peft_schema_additions(self):
+        config = LoraConfig(r=16, target_modules=["q_proj"])
+        module = _checkpoint_module(config)
+        checkpoint: dict[str, object] = {}
+        module.on_save_checkpoint(checkpoint)
+        payload = checkpoint["speech_to_speech_peft"]
+
+        payload["config"]["future_option"] = False
+        payload["defaults"]["future_option"] = False
+        module.on_load_checkpoint(checkpoint)
+
+        payload["config"]["future_option"] = True
+        with self.assertRaisesRegex(ValueError, "LoRA contract does not match"):
+            module.on_load_checkpoint(checkpoint)
+
+    def test_checkpoint_accepts_missing_default_peft_schema_fields(self):
+        config = LoraConfig(r=16, target_modules=["q_proj"])
+        module = _checkpoint_module(config)
+        checkpoint: dict[str, object] = {}
+        module.on_save_checkpoint(checkpoint)
+        payload = checkpoint["speech_to_speech_peft"]
+
+        payload["config"].pop("qalora_group_size")
+        payload["defaults"].pop("qalora_group_size")
+        module.on_load_checkpoint(checkpoint)
+
+        payload["config"].pop("r")
+        payload["defaults"].pop("r")
+        with self.assertRaisesRegex(ValueError, "LoRA contract does not match"):
+            module.on_load_checkpoint(checkpoint)
 
     def test_checkpoint_requires_lora_contract_only_when_enabled(self):
         legacy_checkpoint = {"speech_to_speech_audio_route": None}
 
-        _checkpoint_module(LoraConfig()).on_load_checkpoint(legacy_checkpoint)
+        _checkpoint_module(None).on_load_checkpoint(legacy_checkpoint)
         with self.assertRaisesRegex(ValueError, "missing the PEFT LoRA contract"):
             _checkpoint_module(
-                LoraConfig(enabled=True),
+                LoraConfig(),
             ).on_load_checkpoint(legacy_checkpoint)
 
     def test_checkpoint_rejects_lora_config_mismatch(self):
         checkpoint: dict[str, object] = {}
         _checkpoint_module(
-            LoraConfig(enabled=True, alpha=16),
+            LoraConfig(lora_alpha=16),
         ).on_save_checkpoint(checkpoint)
 
         with self.assertRaisesRegex(ValueError, "LoRA contract does not match"):
             _checkpoint_module(
-                LoraConfig(enabled=True, alpha=32),
+                LoraConfig(lora_alpha=32),
             ).on_load_checkpoint(checkpoint)
 
     def test_transfer_batch_rebuilds_frozen_audio_context(self):
@@ -715,6 +754,31 @@ class ModelLossContractTest(unittest.TestCase):
 
         self.assertEqual(paths, ["backbone.input_embeddings"])
 
+    def test_token_model_injects_the_configured_peft_adapter(self):
+        backbone = _Backbone()
+        rt = SimpleNamespace(
+            layout=Layout(text=(0, 4), audio=(4, 9)),
+            backbone=backbone,
+            codec=_Codec(),
+            audio_tokenizer=NativeAudioTokenizer(vocab_size=3),
+        )
+
+        model = TokenModel(
+            Config(
+                semantic_audio_adapter=None,
+                audio_output_adapter=AudioOutputAdapterConfig(
+                    type=AudioOutputAdapterType.NONE
+                ),
+                lora=LoraConfig(r=1, target_modules=["q_proj"]),
+            ),
+            runtime=rt,
+        )
+
+        self.assertIs(model.backbone, backbone)
+        self.assertIn("speech", backbone.q_proj.lora_A)
+        self.assertFalse(backbone.q_proj.base_layer.weight.requires_grad)
+        self.assertTrue(backbone.q_proj.lora_A["speech"].weight.requires_grad)
+
     def test_text_logits_only_cover_the_layout_vocabulary(self):
         backbone = _Backbone(text_vocab_size=4, embedding_rows=4)
         rt = SimpleNamespace(
@@ -977,7 +1041,7 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(outputs["loss"]))
 
 
-def _checkpoint_module(config: LoraConfig) -> SpeechToSpeechModule[Any]:
+def _checkpoint_module(config: LoraConfig | None) -> SpeechToSpeechModule[Any]:
     model = SimpleNamespace(
         runtime=SimpleNamespace(audio_route=None),
         lora_config=config,

@@ -6,6 +6,8 @@ from typing import Optional, cast
 
 import torch
 from anydataset.types import Modality
+from peft import LoraConfig, inject_adapter_in_model
+from peft.utils.other import cast_mixed_precision_params
 from torch import nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.cache_utils import Cache
@@ -32,7 +34,6 @@ from .audio_output import (
     create_audio_output_adapter,
 )
 from .embedding import create_semantic_audio_modules
-from .lora import LoraConfig, inject as inject_lora
 from .protocol import TokenModelRuntime
 from .toy import ToyConfig, create_toy_backbone
 from ..runtime.types import Backbone, BackboneOutput
@@ -48,7 +49,7 @@ class Config:
         default_factory=AudioInputAdapterConfig
     )
     toy: Optional[ToyConfig] = None
-    lora: LoraConfig = field(default_factory=LoraConfig)
+    lora: Optional[LoraConfig] = None
 
 
 class TokenModel(VocabularyHeadMixin, nn.Module):
@@ -58,7 +59,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
     audio_input_adapter: AudioInputTower | None
 
     @property
-    def lora_config(self) -> LoraConfig:
+    def lora_config(self) -> Optional[LoraConfig]:
         return self.config.lora
 
     def __init__(
@@ -79,10 +80,23 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             else create_toy_backbone(self.config.toy, text_end - text_start)
         )
         backbone = cast(nn.Module, cast(object, self.backbone))
-        self.backbone = cast(
-            Backbone,
-            cast(object, inject_lora(backbone, self.config.lora)),
-        )
+        if self.config.lora is not None:
+            adapted = inject_adapter_in_model(
+                self.config.lora,
+                backbone,
+                adapter_name="speech",
+            )
+            if adapted is not backbone:
+                raise RuntimeError(
+                    "PEFT adapter injection must preserve the backbone object."
+                )
+            reference = next(backbone.parameters(), None)
+            if reference is not None and reference.dtype in {
+                torch.float16,
+                torch.bfloat16,
+            }:
+                cast_mixed_precision_params(backbone, reference.dtype)
+        self.backbone = cast(Backbone, cast(object, backbone))
         (
             self.semantic_audio_embedding,
             self.semantic_audio_adapter,

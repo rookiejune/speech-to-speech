@@ -30,6 +30,7 @@ def run(
     calls: list[dict[str, int | bool]] = []
     allowed_logits: list[torch.Tensor] = []
     original_step = model.generation_step
+    device = _model_device(model)
 
     def observed_step(input_ids, **kwargs):
         attention_mask = kwargs["attention_mask"]
@@ -61,11 +62,12 @@ def run(
         allowed_logits.append(values.detach().float().cpu())
         return output
 
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
-    torch.cuda.synchronize()
+    torch.set_rng_state(torch.Generator().manual_seed(seed).get_state())
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.synchronize(device)
     started = time.perf_counter()
     with patch.object(model, "generation_step", side_effect=observed_step):
         result = generate_responses(
@@ -75,15 +77,23 @@ def run(
             do_sample=False,
             use_cache=use_cache,
         )[0]
-    torch.cuda.synchronize()
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+        peak_cuda_bytes = torch.cuda.max_memory_allocated(device)
+    else:
+        peak_cuda_bytes = 0
     return {
         "result": result,
         "calls": calls,
         "allowed_logits": allowed_logits,
         "allowed_ids": model.runtime.audio_generation_allowed_ids,
         "elapsed_seconds": time.perf_counter() - started,
-        "peak_cuda_bytes": torch.cuda.max_memory_allocated(),
+        "peak_cuda_bytes": peak_cuda_bytes,
     }
+
+
+def _model_device(model: FlowModel) -> torch.device:
+    return model.backbone.get_input_embeddings().weight.device
 
 
 @torch.no_grad()

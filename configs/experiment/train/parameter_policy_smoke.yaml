@@ -6,7 +6,7 @@ defaults:
   - override /model/acoustic: rvq
   - override /runtime: longcat_native
   - override /data@data.dataset: toy
-  - override /trainer: default
+  - override /trainer: staged_ddp
   - override /logging: csv
   - _self_
 

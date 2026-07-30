@@ -22,7 +22,6 @@ from speech_to_speech.callback.logging import (
     TextRetentionLogger,
 )
 from speech_to_speech.datamodule import DataModule
-from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.module import LoaderSpec
 from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.generation.evaluation import evaluate_autoregressive
@@ -36,10 +35,10 @@ from speech_to_speech.stage import ParameterGroup, apply_parameter_policy
 from speech_to_speech.task import Task
 
 if TYPE_CHECKING:
-    from scripts._config import OverfitConfig
+    from scripts._overfit_config import OverfitConfig
 
 if __package__:
-    from ._config import (
+    from ._overfit_config import (
         OverfitFlowConfig,
         overfit as parse_config,
     )
@@ -50,7 +49,7 @@ if __package__:
     )
     from ._logging import build as build_logger
 else:
-    from _config import (
+    from _overfit_config import (
         OverfitFlowConfig,
         overfit as parse_config,
     )
@@ -76,22 +75,7 @@ def run(config: OverfitConfig) -> None:
     rt = Runtime(rt_config, audio_route=config.audio_route)
     codec = rt.codec
     task = Task(config.task)
-    datamodule = DataModule(
-        rt,
-        {
-            "train": LoaderSpec.speech(
-                SpeechConfig(
-                    codec=config.runtime.codec,
-                    dataloader=DataLoaderConfig(batch_size=1, num_workers=0),
-                    shape=config.data.shape,
-                    encode_missing_codes=config.data.encode_missing_codes,
-                    dataset=config.data,
-                ),
-                {task: 1.0},
-                sample_index=config.data.sample_index,
-            )
-        },
-    )
+    datamodule = build_datamodule(config, rt, task)
 
     torch.manual_seed(config.train.seed)
     acoustic_type, module, model = build(
@@ -140,50 +124,15 @@ def run(config: OverfitConfig) -> None:
         )
     elif acoustic_type is AcousticType.RVQ:
         loss_pair = ("token", "rvq")
-    callbacks = cast(
-        list[Callback],
-        [
-            OutputsLogger(),
-            TextRetentionLogger(
-                {
-                    "zh_en": {
-                        "instruction": "Translate into English: 昨晚的暴雨导致三趟列车晚点。",
-                        "reference": "Last night's heavy rain delayed three trains.",
-                    },
-                },
-                every_n_steps=1,
-                max_new_tokens=8,
-            ),
-            summary,
-        ],
+    callbacks = training_callbacks(
+        config,
+        rt,
+        acoustic_type=acoustic_type,
+        loss_pair=loss_pair,
+        task=task,
+        summary=summary,
+        evaluation=evaluation,
     )
-    if not config.callbacks.performance.enabled:
-        callbacks.insert(1, GradNormLogger())
-    if config.callbacks.task_sample.enabled:
-        callbacks.insert(
-            2,
-            TaskSampleLogger(
-                [config.data.sample_index],
-                every_n_steps=config.callbacks.task_sample.every_n_steps,
-                loader_name="train",
-                task=task,
-                every_audio_seconds=config.callbacks.task_sample.every_audio_seconds,
-            ),
-        )
-    if evaluation is not None:
-        callbacks.append(evaluation)
-    gradient = _gradient_logger(config, acoustic_type, loss_pair)
-    if gradient is not None:
-        callbacks.insert(
-            1,
-            gradient,
-        )
-    if uses_acoustic_decoder and acoustic_type is AcousticType.FLOW:
-        callbacks.insert(1, FlowMatchingLogger(rt.flow_matching, every_n_steps=1))
-    performance_callback = performance(config.callbacks.performance)
-    if performance_callback is not None:
-        callbacks.insert(0, performance_callback)
-    callbacks.insert(1 if performance_callback is not None else 0, OOMDiagnostics())
     trainer = build_trainer(config, output_dir, callbacks)
     trainer.fit(module, datamodule=datamodule)
 
@@ -212,7 +161,7 @@ def run(config: OverfitConfig) -> None:
         "task": task.value,
         "parameter_policy": config.parameter_policy.name.value,
         "stage": config.stage.name.value,
-        "sample_index": config.data.sample_index,
+        "sample_index": config.sample_index,
         "max_steps": config.train.max_steps,
         "parameters": {
             "total": sum(parameter.numel() for parameter in model.parameters()),
@@ -228,6 +177,92 @@ def run(config: OverfitConfig) -> None:
     result_path = output_dir / "metrics.json"
     result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps(result, sort_keys=True))
+
+
+def build_datamodule(
+    config: OverfitConfig,
+    runtime: Runtime,
+    task: Task,
+) -> DataModule:
+    return DataModule(
+        runtime,
+        {
+            "train": LoaderSpec.speech(
+                config.data,
+                {task: 1.0},
+                sample_index=config.sample_index,
+            )
+        },
+    )
+
+
+def training_callbacks(
+    config: OverfitConfig,
+    runtime: Runtime,
+    *,
+    acoustic_type: AcousticType,
+    loss_pair: tuple[str, str] | None,
+    task: Task,
+    summary: LossSummary,
+    evaluation: AcousticEvaluation | None,
+) -> list[Callback]:
+    performance_callback = performance(config.callbacks.performance)
+    callbacks: list[Callback] = []
+    if performance_callback is not None:
+        callbacks.append(performance_callback)
+    callbacks.extend([OOMDiagnostics(), OutputsLogger()])
+
+    flow = config.callbacks.flow_matching
+    if flow.enabled and acoustic_type is AcousticType.FLOW:
+        callbacks.append(
+            FlowMatchingLogger(
+                runtime.flow_matching,
+                every_n_steps=flow.every_n_steps,
+                every_audio_seconds=flow.every_audio_seconds,
+            )
+        )
+    gradient = _gradient_logger(config, acoustic_type, loss_pair)
+    if gradient is not None:
+        callbacks.append(gradient)
+    grad_norm = config.callbacks.grad_norm
+    if grad_norm.enabled and performance_callback is None:
+        callbacks.append(
+            GradNormLogger(
+                every_n_steps=grad_norm.every_n_steps,
+                every_audio_seconds=grad_norm.every_audio_seconds,
+            )
+        )
+    task_sample = config.callbacks.task_sample
+    if task_sample.enabled:
+        callbacks.append(
+            TaskSampleLogger(
+                [config.sample_index],
+                every_n_steps=task_sample.every_n_steps,
+                loader_name="train",
+                task=task,
+                every_audio_seconds=task_sample.every_audio_seconds,
+            )
+        )
+    text_retention = config.callbacks.text_retention
+    if text_retention.enabled:
+        callbacks.append(
+            TextRetentionLogger(
+                {
+                    name: {
+                        "instruction": probe.instruction,
+                        "reference": probe.reference,
+                    }
+                    for name, probe in text_retention.probes.items()
+                },
+                every_n_steps=text_retention.every_n_steps,
+                every_audio_seconds=text_retention.every_audio_seconds,
+                max_new_tokens=text_retention.max_new_tokens,
+            )
+        )
+    callbacks.append(summary)
+    if evaluation is not None:
+        callbacks.append(evaluation)
+    return callbacks
 
 
 def build_trainer(
@@ -269,7 +304,12 @@ def _gradient_logger(
     acoustic_type: AcousticType,
     loss_pair: tuple[str, str] | None,
 ) -> GradLogger | None:
-    if acoustic_type is AcousticType.NONE or config.callbacks.performance.enabled:
+    callback = config.callbacks.gradient_pair
+    if (
+        not callback.enabled
+        or acoustic_type is AcousticType.NONE
+        or config.callbacks.performance.enabled
+    ):
         return None
     policy = config.parameter_policy.spec()
     if ParameterGroup.BACKBONE not in policy.trainable_groups:
@@ -277,15 +317,21 @@ def _gradient_logger(
     if loss_pair is None:
         raise RuntimeError("acoustic composition metadata is unavailable.")
     parameter_name = (
-        "model.backbone.model.norm.weight"
-        if policy.backbone_top_fraction is not None
-        and policy.backbone_top_fraction < 1
-        else "model.backbone.model.layers.0.self_attn.q_proj.weight"
+        callback.partial_parameter
+        if policy.backbone_top_fraction is not None and policy.backbone_top_fraction < 1
+        else callback.full_parameter
     )
+    if callback.every_audio_seconds is None:
+        return GradLogger(
+            loss_pair,
+            parameter_name,
+            every_n_steps=callback.every_n_steps,
+        )
     return GradLogger(
         loss_pair,
         parameter_name,
-        every_n_steps=1,
+        every_n_steps=callback.every_n_steps,
+        every_audio_seconds=callback.every_audio_seconds,
     )
 
 

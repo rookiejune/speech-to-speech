@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from numbers import Integral
 from typing import cast, overload
@@ -284,19 +284,19 @@ class BiCodecAudioTokenizer:
         tensor = _semantic_tensor(frames, self._semantic_vocab_size)
         return tensor[:, 0].to(dtype=torch.long)
 
-    def encode_full(self, value: object) -> Tensor:
+    def encode_full(self, value: SemanticAcousticCodes) -> Tensor:
         return self.encode_streams(
             value,
             (AudioStream.GLOBAL, AudioStream.SEMANTIC),
         )
 
-    def encode_global(self, value: object) -> Tensor:
+    def encode_global(self, value: SemanticAcousticCodes) -> Tensor:
         """Encode only BiCodec's fixed-length global speaker/style codes."""
         return self.encode_streams(value, (AudioStream.GLOBAL,))
 
     def encode_streams(
         self,
-        value: object,
+        value: SemanticAcousticCodes,
         streams: Sequence[AudioStream],
     ) -> Tensor:
         streams = _bicodec_streams(streams)
@@ -348,7 +348,7 @@ class BiCodecAudioTokenizer:
 
     def encode_streams_with_groups(
         self,
-        value: object,
+        value: SemanticAcousticCodes,
         streams: Sequence[AudioStream],
     ) -> tuple[Tensor, Tensor]:
         streams = _bicodec_streams(streams)
@@ -584,18 +584,12 @@ def _bicodec_streams(
         raise ValueError("BiCodec serialization requires at least one audio stream.")
     if any(not isinstance(stream, AudioStream) for stream in values):
         raise TypeError("BiCodec streams must contain AudioStream values.")
-    normalized = tuple(
-        AudioStream.GLOBAL if stream is AudioStream.ACOUSTIC else stream
-        for stream in values
-    )
-    if len(normalized) != len(set(normalized)):
-        raise ValueError(
-            "BiCodec streams must not contain both global and legacy acoustic streams."
-        )
+    if AudioStream.ACOUSTIC in values:
+        raise ValueError("BiCodec streams must use global instead of acoustic.")
     return tuple(
         stream
         for stream in (AudioStream.GLOBAL, AudioStream.SEMANTIC)
-        if stream in normalized
+        if stream in values
     )
 
 
@@ -767,35 +761,13 @@ def _validate_range(ids: Tensor, name: str, vocab_size: int) -> None:
 
 
 def _bicodec_units(
-    value: object,
+    value: SemanticAcousticCodes,
     streams: Sequence[AudioStream],
 ) -> tuple[Tensor | None, Tensor | None]:
-    if isinstance(value, SemanticAcousticCodes):
-        semantic: Tensor | None = value.semantic
-        acoustic: Tensor | None = value.acoustic
-    else:
-        if not isinstance(value, Mapping):
-            raise TypeError("BiCodec stream input must be a mapping or SemanticAcousticCodes.")
-        semantic_value = value.get("semantic")
-        global_value = value.get("global")
-        acoustic_value = value.get("acoustic")
-        semantic = semantic_value if isinstance(semantic_value, Tensor) else None
-        if isinstance(global_value, Tensor) and isinstance(acoustic_value, Tensor):
-            if not torch.equal(global_value, acoustic_value):
-                raise ValueError("BiCodec global and acoustic code fields disagree.")
-        acoustic = (
-            global_value
-            if isinstance(global_value, Tensor)
-            else acoustic_value
-            if isinstance(acoustic_value, Tensor)
-            else None
-        )
-    if AudioStream.SEMANTIC in streams and semantic is None:
-        raise TypeError("BiCodec semantic stream input must contain a Tensor semantic field.")
-    if AudioStream.GLOBAL in streams and acoustic is None:
-        raise TypeError(
-            "BiCodec global stream input must contain a Tensor global or acoustic field."
-        )
+    if not isinstance(value, SemanticAcousticCodes):
+        raise TypeError("BiCodec stream input must be SemanticAcousticCodes.")
+    semantic = value.semantic if AudioStream.SEMANTIC in streams else None
+    acoustic = value.acoustic if AudioStream.GLOBAL in streams else None
     return semantic, acoustic
 
 

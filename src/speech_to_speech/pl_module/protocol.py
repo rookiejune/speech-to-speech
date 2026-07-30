@@ -1,23 +1,24 @@
-from typing import Protocol
+from typing import Optional, Protocol
+
+from peft import LoraConfig
 
 from ..generation.protocol import AcousticFeatureGenerator
 from ..loss.protocol import FlowObjectiveModel, RVQObjectiveModel
-from ..model.lora import LoraModel
 
 
 class FlowCompositionModel(
     FlowObjectiveModel,
     AcousticFeatureGenerator,
-    LoraModel,
     Protocol,
 ):
-    pass
+    @property
+    def lora_config(self) -> Optional[LoraConfig]: ...
 
 
 class RVQCompositionModel(
     RVQObjectiveModel,
     AcousticFeatureGenerator,
-    LoraModel,
     Protocol,
 ):
-    pass
+    @property
+    def lora_config(self) -> Optional[LoraConfig]: ...

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import torch
 
 from speech_to_speech.datamodule.collator import Collator
+from speech_to_speech.datamodule.dataset import DatasetConfig, load_dataset
 from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.generation.batch import requests_from_batch
 from speech_to_speech.generation.reporting import compare, summary
@@ -15,7 +17,6 @@ from speech_to_speech.model.acoustic import FlowModel
 from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import Runtime
 from speech_to_speech.task import Task
-from zhuyin.datasets.wmt19_tts import wmt19_tts_codec
 
 if __package__:
     from ._generation_benchmark import benchmark_batch
@@ -30,7 +31,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     output_dir = Path(args.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    torch.manual_seed(args.seed)
+    _seed(args.seed, torch.device(args.device))
     runtime = Runtime(
         RuntimeConfig(
             codec=args.codec,
@@ -41,7 +42,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             attn_implementation=args.attn_implementation,
         )
     )
-    dataset = wmt19_tts_codec(codec=args.codec, split=args.split)
+    dataset = load_dataset(DatasetConfig(split=args.split), runtime)
     batch = _prepared_batch(
         Collator(runtime, {Task.S2ST: 1.0})([dataset[args.sample_index]])
     )
@@ -65,7 +66,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         use_cache=False,
     )
     comparison = compare(cached, full)
-    batch_sizes = _batch_sizes(args.batch_sizes)
+    batch_sizes = args.batch_sizes
     batch_requests = [
         requests_from_batch(
             _prepared_batch(Collator(runtime, {Task.S2ST: 1.0})([dataset[index]]))
@@ -105,19 +106,65 @@ def main(argv: Sequence[str] | None = None) -> None:
         json.dumps(result, indent=2, sort_keys=True) + "\n"
     )
     print(json.dumps(result, sort_keys=True))
+    _validate(comparison, batch_benchmark)
+
+
+def _validate(
+    comparison: Mapping[str, Any],
+    batch_benchmark: Sequence[Mapping[str, Any]],
+) -> None:
     if not comparison["tokens_equal"]:
         raise RuntimeError("cached and full-recompute greedy tokens differ.")
     if not comparison["cached_finite"] or not comparison["full_finite"]:
         raise RuntimeError("generation produced non-finite acoustic output.")
     if not all(item["tokens_equal"] for item in batch_benchmark):
         raise RuntimeError("batch and per-request greedy tokens differ.")
+    if not all(item["finite"] for item in batch_benchmark):
+        raise RuntimeError(
+            "batch or per-request generation produced non-finite acoustic output."
+        )
 
 
-def _batch_sizes(value: str) -> list[int]:
-    sizes = [int(item) for item in value.split(",")]
-    if not sizes or any(size < 1 for size in sizes):
+def _batch_sizes(value: object) -> list[int]:
+    if not isinstance(value, str):
+        raise TypeError("batch sizes must be a comma-separated string.")
+    items = value.split(",")
+    if not items or any(not item.strip() for item in items):
         raise ValueError("batch sizes must be positive integers.")
-    return sizes
+    try:
+        return [_positive_int(item) for item in items]
+    except (TypeError, ValueError) as error:
+        raise ValueError("batch sizes must be positive integers.") from error
+
+
+def _positive_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise TypeError("value must be a positive integer.")
+    try:
+        result = int(value)
+    except ValueError as error:
+        raise ValueError("value must be a positive integer.") from error
+    if result < 1:
+        raise ValueError("value must be a positive integer.")
+    return result
+
+
+def _non_negative_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise TypeError("value must be a non-negative integer.")
+    try:
+        result = int(value)
+    except ValueError as error:
+        raise ValueError("value must be a non-negative integer.") from error
+    if result < 0:
+        raise ValueError("value must be a non-negative integer.")
+    return result
+
+
+def _seed(seed: int, device: torch.device) -> None:
+    torch.set_rng_state(torch.Generator().manual_seed(seed).get_state())
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
 
 
 def _prepared_batch(batch: ModelBatch | object) -> ModelBatch:
@@ -130,10 +177,10 @@ def parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--audio-tokenizer", required=True)
-    parser.add_argument("--sample-index", type=int, default=0)
-    parser.add_argument("--batch-sizes", default="1,2,4")
+    parser.add_argument("--sample-index", type=_non_negative_int, default=0)
+    parser.add_argument("--batch-sizes", type=_batch_sizes, default="1,2,4")
     parser.add_argument("--split", default="train")
-    parser.add_argument("--max-new-tokens", type=int, default=2)
+    parser.add_argument("--max-new-tokens", type=_positive_int, default=2)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--codec", default="longcat")
     parser.add_argument("--backbone", default="Qwen/Qwen3-0.6B")

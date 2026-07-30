@@ -250,12 +250,26 @@ def apply_parameter_policy(
 ) -> dict[ParameterGroup, int]:
     counts = {group: 0 for group in ParameterGroup}
     for name, parameter in model.named_parameters():
-        group = parameter_group(name)
+        peft_trainable = (
+            spec.name is ParameterPolicyName.LORA
+            and name.startswith("backbone.")
+            and parameter.requires_grad
+        )
+        group = (
+            ParameterGroup.BACKBONE_ADAPTER
+            if peft_trainable
+            else parameter_group(name)
+        )
         counts[group] += parameter.numel()
         if _structurally_frozen(name, model):
             parameter.requires_grad_(False)
             continue
-        trainable = group in spec.trainable_groups
+        trainable = (
+            peft_trainable
+            if spec.name is ParameterPolicyName.LORA
+            and name.startswith("backbone.")
+            else group in spec.trainable_groups
+        )
         if group is ParameterGroup.BACKBONE and trainable:
             trainable = _backbone_trainable(name, model, spec.backbone_top_fraction)
         parameter.requires_grad_(trainable)

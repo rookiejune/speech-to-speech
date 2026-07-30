@@ -125,7 +125,14 @@ def speech_from_codes(
         tokenizer = runtime.audio_tokenizer
         if not isinstance(tokenizer, BiCodecAudioTokenizer):
             raise TypeError("BiCodec full sequence requires BiCodecAudioTokenizer.")
-        audio_token_ids = tokenizer.encode_full(codes)
+        if acoustic_codes is None:
+            raise ValueError("BiCodec full sequence requires acoustic codes.")
+        audio_token_ids = tokenizer.encode_full(
+            SemanticAcousticCodes(
+                semantic=semantic_codes,
+                acoustic=acoustic_codes,
+            )
+        )
     else:
         audio_token_ids = _as_tensor(runtime.audio_tokenizer.encode(semantic_codes))
     audio_token_spans = _as_tensor(

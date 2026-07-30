@@ -9,7 +9,6 @@ from ._compat import StrEnum, auto
 
 class AudioStream(StrEnum):
     GLOBAL = auto()
-    # Retained for frame-aligned codecs and legacy BiCodec route metadata.
     ACOUSTIC = auto()
     SEMANTIC = auto()
 
@@ -87,9 +86,6 @@ class Config:
             raise TypeError("audio route output must be an Output.")
         if not isinstance(self.decode, Decode):
             raise TypeError("audio route decode must be a Decode.")
-        # GLOBAL is the concrete BiCodec speaker/style stream. ACOUSTIC is an
-        # older name for the same structured backend field and remains valid in
-        # legacy route metadata.
         for stream in (AudioStream.GLOBAL, AudioStream.SEMANTIC):
             source = self.decode.source(stream)
             if source is StreamSource.PROMPT and not _provides_stream(
@@ -122,7 +118,7 @@ def _streams(
     if AudioStream.GLOBAL in streams and AudioStream.ACOUSTIC in streams:
         raise ValueError(
             f"audio route {name} streams must not contain both global and "
-            "legacy acoustic streams."
+            "acoustic streams."
         )
     return tuple(streams)
 
@@ -132,7 +128,7 @@ def _canonical_streams(streams: tuple[AudioStream, ...]) -> tuple[AudioStream, .
 
 
 def _stream_label(stream: AudioStream) -> str:
-    return "global/acoustic" if stream is AudioStream.GLOBAL else stream.value
+    return "global or acoustic" if stream is AudioStream.GLOBAL else stream.value
 
 
 def _provides_stream(
@@ -144,18 +140,6 @@ def _provides_stream(
     return stream in streams
 
 
-BICODEC_REUSE_PROMPT_ACOUSTIC = Config(
-    prompt=Prompt(
-        source=PromptSource.REFERENCE,
-        streams=(AudioStream.ACOUSTIC, AudioStream.SEMANTIC),
-    ),
-    output=Output(streams=(AudioStream.SEMANTIC,)),
-    decode=Decode(
-        semantic=StreamSource.OUTPUT,
-        acoustic=StreamSource.PROMPT,
-    ),
-)
-
 BICODEC_REUSE_PROMPT_GLOBAL = Config(
     prompt=Prompt(
         source=PromptSource.REFERENCE,
@@ -165,18 +149,6 @@ BICODEC_REUSE_PROMPT_GLOBAL = Config(
     decode=Decode(
         semantic=StreamSource.OUTPUT,
         acoustic=StreamSource.PROMPT,
-    ),
-)
-
-BICODEC_PREDICT_ACOUSTIC = Config(
-    prompt=Prompt(
-        source=PromptSource.REFERENCE,
-        streams=(AudioStream.ACOUSTIC, AudioStream.SEMANTIC),
-    ),
-    output=Output(streams=(AudioStream.ACOUSTIC, AudioStream.SEMANTIC)),
-    decode=Decode(
-        semantic=StreamSource.OUTPUT,
-        acoustic=StreamSource.OUTPUT,
     ),
 )
 
@@ -219,8 +191,6 @@ BICODEC_GENERATE_GLOBAL = Config(
 
 __all__ = [
     "BICODEC_GENERATE_GLOBAL",
-    "BICODEC_PREDICT_ACOUSTIC",
-    "BICODEC_REUSE_PROMPT_ACOUSTIC",
     "BICODEC_REUSE_PROMPT_GLOBAL",
     "FULL_OUTPUT",
     "SEMANTIC_GENERATOR",

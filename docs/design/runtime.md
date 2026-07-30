@@ -72,8 +72,8 @@ LongCat 的 `DECOUPLED + model/acoustic=none` 必须配置 `semantic_codec_artif
 semantic-only decoder。
 
 BiCodec 使用同一个 structured backend。它的 `global` stream 是固定长度的 speaker/style codes，
-底层继续存放在 `SemanticAcousticCodes.acoustic` 字段；`acoustic` 只作为旧 route metadata 的名称
-保留，并在 BiCodec tokenizer/model 边界规范为 `global`，两者不能同时出现在一个 stream 声明中。
+底层继续存放在 `SemanticAcousticCodes.acoustic` 字段；route 层只接受 `global`，不会把 FrameCodec
+使用的 `acoustic` stream 自动解释为 BiCodec global units。
 `FULL_CODEC_SEQUENCE` 下，固定的 `audio_route` 同时
 决定 prompt/output/decode 的 stream ownership；`audio_representation` 只负责说明这是 structured
 full sequence，而不决定 route：
@@ -82,10 +82,6 @@ full sequence，而不决定 route：
   解码使用 output semantic 与 prompt global。
 - `bicodec_generate_global` 没有 audio prompt，output 同时生成 global、semantic，解码使用 output
   的两条 stream。
-- `bicodec_reuse_prompt_acoustic` 的 prompt 含 reference 的 acoustic、semantic 两条 stream，
-  output 只含 semantic，解码使用 output semantic 与 prompt acoustic；这是 legacy route。
-- `bicodec_predict_acoustic` 的 prompt 同样含 reference 的两条 stream，output 同时含 acoustic、
-  semantic，解码使用 output 的两条 stream；这也是 legacy route。
 - 输出 grammar 按 route 固定为 `codec, semantic_marker, semantic..., end`（reuse）或
   `codec, global_marker, global..., semantic_marker, semantic..., end`（generate）；prompt
   序列则按 `prompt.streams` 序列化。global payload 使用 slot-major 固定长度布局，semantic
@@ -135,8 +131,8 @@ DataModule 与 generation service。runtime 不保存进程级 singleton；同�
 同一 route。运行中不从请求或 batch 字段重写 route；checkpoint 的严格匹配由
 `SpeechToSpeechModule` 负责。`audio_route=None` 只为独立 runtime/capability 测试保留；配置 route
 时必须有 output stream。`DECOUPLED` 只接受 `semantic_generator`；full codec sequence 禁止
-generator-owned decode，普通 FrameCodec 只接受 `full_output`，BiCodec 只接受上述两条 global route
-与两条 legacy acoustic route。
+generator-owned decode，普通 FrameCodec 只接受 `full_output`，BiCodec 只接受上述两条 global
+route。
 
 文件职责保持分离：`runtime/runtime.py` 实现配置与资源聚合，`runtime/codec.py` 隔离 codec
 adapter 和加载。DataModule/Collator 接收显式 `DataRuntime`；parser、sample builder、batch

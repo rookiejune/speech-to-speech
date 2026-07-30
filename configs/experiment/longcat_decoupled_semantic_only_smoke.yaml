@@ -3,7 +3,7 @@ defaults:
   - /model: toy
   - /model/acoustic: none
   - /runtime: longcat_native
-  - /data: toy
+  - /data@data.dataset: toy
   - /pl_module: sft
   - /trainer: default
   - /logging: csv
@@ -21,8 +21,7 @@ runtime:
   dtype: float32
   attn_implementation:
 
-data:
-  sample_index: 0
+sample_index: 0
 
 callbacks:
   task_sample:

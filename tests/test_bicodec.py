@@ -9,8 +9,6 @@ from types import SimpleNamespace
 from speech_to_speech.audio_route import (
     AudioStream,
     BICODEC_GENERATE_GLOBAL,
-    BICODEC_PREDICT_ACOUSTIC,
-    BICODEC_REUSE_PROMPT_ACOUSTIC,
     BICODEC_REUSE_PROMPT_GLOBAL,
 )
 from speech_to_speech.generation.decode import (
@@ -87,40 +85,39 @@ class BiCodecTokenizerTest(unittest.TestCase):
             acoustic=torch.tensor([[0, 1], [2, 3], [4, 5]]),
         )
 
-        reused = self.tokenizer.encode_streams(
+        semantic_tokens = self.tokenizer.encode_streams(
             codes,
-            BICODEC_REUSE_PROMPT_ACOUSTIC.output.canonical_streams,
+            BICODEC_REUSE_PROMPT_GLOBAL.output.canonical_streams,
         )
-        decoded_reused = self.tokenizer.decode_streams(
-            reused,
-            BICODEC_REUSE_PROMPT_ACOUSTIC.output.canonical_streams,
+        decoded_semantic = self.tokenizer.decode_streams(
+            semantic_tokens,
+            BICODEC_REUSE_PROMPT_GLOBAL.output.canonical_streams,
         )
-        self.assertIsNone(decoded_reused.acoustic)
-        torch.testing.assert_close(decoded_reused.semantic, codes.semantic)
+        self.assertIsNone(decoded_semantic.acoustic)
+        torch.testing.assert_close(decoded_semantic.semantic, codes.semantic)
 
-        predicted = self.tokenizer.encode_streams(
+        full_tokens = self.tokenizer.encode_streams(
             codes,
-            BICODEC_PREDICT_ACOUSTIC.output.canonical_streams,
+            BICODEC_GENERATE_GLOBAL.output.canonical_streams,
         )
-        decoded_predicted = self.tokenizer.decode_streams(
-            predicted,
-            BICODEC_PREDICT_ACOUSTIC.output.canonical_streams,
+        decoded_full = self.tokenizer.decode_streams(
+            full_tokens,
+            BICODEC_GENERATE_GLOBAL.output.canonical_streams,
         )
-        torch.testing.assert_close(decoded_predicted.semantic, codes.semantic)
-        torch.testing.assert_close(decoded_predicted.acoustic, codes.acoustic)
+        torch.testing.assert_close(decoded_full.semantic, codes.semantic)
+        torch.testing.assert_close(decoded_full.acoustic, codes.acoustic)
 
-    def test_global_only_accepts_global_and_legacy_acoustic_mapping_keys(self):
+    def test_global_only_uses_structured_codes(self):
         global_codes = torch.tensor([[0, 1], [2, 3], [4, 5]])
+        codes = SemanticAcousticCodes(
+            semantic=torch.tensor([[2], [4]]),
+            acoustic=global_codes,
+        )
         global_tokens = self.tokenizer.encode_streams(
-            {"global": global_codes},
+            codes,
             (AudioStream.GLOBAL,),
         )
-        legacy_tokens = self.tokenizer.encode_streams(
-            {"acoustic": global_codes},
-            (AudioStream.ACOUSTIC,),
-        )
 
-        torch.testing.assert_close(global_tokens, legacy_tokens)
         decoded = self.tokenizer.decode_streams(
             global_tokens,
             (AudioStream.GLOBAL,),
@@ -129,27 +126,34 @@ class BiCodecTokenizerTest(unittest.TestCase):
         torch.testing.assert_close(decoded.acoustic, global_codes)
 
     def test_global_only_does_not_require_semantic_codes(self):
-        codes = {"global": torch.tensor([[1, 2], [3, 4], [0, 5]])}
+        codes = SemanticAcousticCodes(
+            semantic=torch.empty((0, 1), dtype=torch.long),
+            acoustic=torch.tensor([[1, 2], [3, 4], [0, 5]]),
+        )
 
         tokens = self.tokenizer.encode_global(codes)
 
         decoded = self.tokenizer.decode_streams(tokens, (AudioStream.GLOBAL,))
         self.assertIsNone(decoded.semantic)
-        torch.testing.assert_close(decoded.acoustic, codes["global"])
+        torch.testing.assert_close(decoded.acoustic, codes.acoustic)
 
-    def test_global_and_legacy_acoustic_cannot_be_declared_together(self):
-        with self.assertRaisesRegex(ValueError, "global and legacy acoustic"):
+    def test_bicodec_rejects_acoustic_stream_name(self):
+        codes = SemanticAcousticCodes(
+            semantic=torch.tensor([[2], [4]]),
+            acoustic=torch.tensor([[1, 2], [3, 4], [0, 5]]),
+        )
+        with self.assertRaisesRegex(ValueError, "use global instead of acoustic"):
             self.tokenizer.encode_streams(
-                {"global": torch.tensor([[1, 2], [3, 4], [0, 5]])},
-                (AudioStream.GLOBAL, AudioStream.ACOUSTIC),
+                codes,
+                (AudioStream.ACOUSTIC,),
             )
 
 
 class BiCodecDecodeTest(unittest.TestCase):
-    def test_predict_route_still_requires_reference_prompt_context(self):
+    def test_reference_route_requires_prompt_context(self):
         model = SimpleNamespace(
             runtime=SimpleNamespace(
-                audio_route=BICODEC_PREDICT_ACOUSTIC,
+                audio_route=BICODEC_REUSE_PROMPT_GLOBAL,
                 layout=Layout(text=(0, 4), audio=(4, 30)),
             )
         )
@@ -185,44 +189,7 @@ class BiCodecDecodeTest(unittest.TestCase):
         torch.testing.assert_close(codec.codes.semantic, expected.semantic[None])
         torch.testing.assert_close(codec.codes.acoustic, expected.acoustic[None])
 
-    def test_route_decode_reuses_prompt_acoustic_codes(self):
-        tokenizer = BiCodecAudioTokenizer(
-            semantic_vocab_size=8,
-            acoustic_codebook_sizes=(3,),
-            acoustic_unit_length=2,
-        )
-        context = SemanticAcousticCodes(
-            semantic=torch.tensor([[5], [6]]),
-            acoustic=torch.tensor([[2], [1]]),
-        )
-        output = SemanticAcousticCodes(
-            semantic=torch.tensor([[1], [2]]),
-            acoustic=torch.tensor([[0], [1]]),
-        )
-        tokens = tokenizer.encode_streams(
-            output,
-            BICODEC_REUSE_PROMPT_ACOUSTIC.output.canonical_streams,
-        )
-        codec = _StructuredCodec()
-
-        waveform, resolved = decode_generated_bicodec_route(
-            tokens + 10,
-            context,
-            route=BICODEC_REUSE_PROMPT_ACOUSTIC,
-            codec=codec,
-            audio_tokenizer=tokenizer,
-            audio_token_range=(10, 10 + tokenizer.vocab_size),
-        )
-
-        self.assertEqual(waveform.shape, (1, 2))
-        torch.testing.assert_close(resolved.semantic, output.semantic)
-        torch.testing.assert_close(resolved.acoustic, context.acoustic)
-        if codec.codes is None:
-            self.fail("structured codec was not called")
-        torch.testing.assert_close(codec.codes.semantic[0], output.semantic)
-        torch.testing.assert_close(codec.codes.acoustic[0], context.acoustic)
-
-    def test_route_decode_predicts_both_streams_from_output(self):
+    def test_route_decode_uses_both_output_streams(self):
         tokenizer = BiCodecAudioTokenizer(
             semantic_vocab_size=8,
             acoustic_codebook_sizes=(3,),
@@ -234,7 +201,7 @@ class BiCodecDecodeTest(unittest.TestCase):
         )
         tokens = tokenizer.encode_streams(
             output,
-            BICODEC_PREDICT_ACOUSTIC.output.canonical_streams,
+            BICODEC_GENERATE_GLOBAL.output.canonical_streams,
         )
         _, resolved = decode_generated_bicodec_route(
             tokens + 10,
@@ -242,7 +209,7 @@ class BiCodecDecodeTest(unittest.TestCase):
                 semantic=torch.tensor([[7]]),
                 acoustic=torch.tensor([[2], [2]]),
             ),
-            route=BICODEC_PREDICT_ACOUSTIC,
+            route=BICODEC_GENERATE_GLOBAL,
             codec=_StructuredCodec(),
             audio_tokenizer=tokenizer,
             audio_token_range=(10, 10 + tokenizer.vocab_size),
@@ -293,7 +260,7 @@ class BiCodecDecodeTest(unittest.TestCase):
             model,
             torch.tensor([[1]]),
             tokenizer=tokenizer,
-            streams=(AudioStream.ACOUSTIC, AudioStream.SEMANTIC),
+            streams=(AudioStream.GLOBAL, AudioStream.SEMANTIC),
             max_new_tokens=32,
             temperature=1.0,
             top_p=1.0,

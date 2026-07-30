@@ -3,7 +3,7 @@ defaults:
   - /model: toy
   - /model/acoustic: none
   - /runtime: bicodec_full_sequence
-  - /data: qwen_tts_speaker
+  - /data@data.dataset: qwen_tts_speaker
   - /pl_module: sft
   - /trainer: default
   - /logging: csv
@@ -21,8 +21,9 @@ runtime:
   dtype: float32
   attn_implementation:
 
+sample_index: 0
+
 data:
-  sample_index: 0
   shape: single
 
 callbacks:

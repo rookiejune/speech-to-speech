@@ -114,14 +114,18 @@ cache 契约。
 该配置不会改变生成 grammar，也不会替换 Flow/RVQ
 `HiddenConditionAdapter`。
 
-`lora.enabled=true` 通过 Hugging Face PEFT 的 `inject_adapter_in_model()` 注入标准 LoRA adapter，
-target modules、rank、alpha、dropout 与 rsLoRA 开关由 `LoraConfig` 显式配置；本项目不实现平行的
-轻量 LoRA layer。混合精度 backbone 注入后使用 PEFT 的 mixed-precision cast 规则。入口要求它与
-`parameter_policy=lora` 同时选择，使原始 backbone 冻结、LoRA adapter 与现有 speech/acoustic
-interface 可训练。checkpoint 保存 `peft-lora-v1` metadata，严格绑定 backend、adapter name、bias、
-enabled、rank、alpha、dropout、排序后的 target modules 与 rsLoRA 开关；这些配置会改变 adapter
-语义，因此恢复时必须完全一致。启用 LoRA 时不接受缺少该 metadata 的旧 checkpoint；当前未启用
-LoRA 时仍允许加载旧 checkpoint。PEFT 包版本不属于严格相等条件。
+`lora` 直接持有 `peft.LoraConfig | None`，项目不再维护本地 LoRA config、layer 或注入 facade。
+选择 `model/lora=qwen parameter_policy=lora` 后，model 把该 config 直接传给 PEFT
+`inject_adapter_in_model()`；rank、alpha、dropout、target modules、初始化方法与 PEFT 后续支持的
+字段都沿用官方命名和校验。混合精度 backbone 注入后使用 PEFT 的 mixed-precision cast 规则。
+PEFT 决定 backbone 内的 trainable adapter/bias/modules-to-save 参数，parameter policy 额外组合现有
+speech/acoustic interface，不再通过本地 LoRA 参数名重新推断 PEFT 的训练语义。
+
+checkpoint 保存 `peft-lora-v2` metadata，包括固定 adapter name、规范化后的完整
+`LoraConfig.to_dict()` 和同版本 `LoraConfig()` 默认值；只移除不影响 adapter 语义的
+`peft_version`，set/enum 等结构递归转成稳定值。共同字段严格比较；跨 PEFT 版本新增或缺失的字段
+只有等于对应版本官方默认值时才兼容，非默认新语义仍明确失败。启用 LoRA 时缺少 metadata 也会
+失败；未启用时仍允许加载不含该 metadata 的旧 checkpoint。
 
 decoder 使用独立 `DecoderConfig(hidden_dim, layers, heads, ffn_ratio)`。flow 可额外接收
 `FlowRepaConfig(feature_dim, student_layer)`；RVQ 可额外接收初始化 decoder 各 acoustic
@@ -134,8 +138,8 @@ fixed-length structured codec（例如 BiCodec）使用独立的 model-facing to
 按 `audio_route` 固定的 structured sequence 路线，不接入当前 frame-aligned Flow/RVQ acoustic
 side channel。新 route 使用 `global` 表示固定长度 speaker/style stream：
 `bicodec_reuse_prompt_global` 只输出 semantic，`bicodec_generate_global` 同时输出 global 与
-semantic。legacy `acoustic` route 在 generation state machine 边界规范为同一 global grammar；
-global/acoustic 不能同时声明。所有 route 使用同一套稳定 vocabulary，route 只改变 grammar 的
+semantic。BiCodec route 不接受 FrameCodec 使用的 `acoustic` stream。两条 route 使用同一套稳定
+vocabulary，route 只改变 grammar 的
 output groups 与 decode stream ownership，不按 request 动态改变模型 head。
 无 reference 的 `bicodec_generate_global` 不自带 speaker ID；多 speaker 训练若没有额外条件或
 latent sampling，global 预测可能偏向数据中的主导 speaker，这属于模型条件设计而不是 codec
@@ -216,7 +220,7 @@ range 或 block-length 规则。
 
 route 的 prompt 属于调用前已序列化的 token context，model 只生成固定的 output streams；model 不
 从 target labels 推断 prompt 边界，也不允许 request 临时切换 route。`SpeechToSpeechModule` 保存
-规范化 route metadata 和 LoRA 语义 metadata 到 checkpoint，并在恢复时严格比较当前 runtime/model
+规范化 route metadata 和 PEFT config metadata 到 checkpoint，并在恢复时严格比较当前 runtime/model
 配置；启用相应能力时缺失 metadata 或配置不匹配都会直接失败。
 
 具体模型不跨文件调用 `_generate()` 或 `_acoustic_features()`。KV cache 只属于一次调用；
