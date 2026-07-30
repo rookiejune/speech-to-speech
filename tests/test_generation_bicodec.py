@@ -34,15 +34,22 @@ from speech_to_speech.task import Task
 class _TextTokenizer:
     def __init__(self) -> None:
         self.encoded: list[str] = []
+        self.conversations: list[list[dict[str, str]]] = []
 
     def apply_chat_template(self, conversation, **kwargs) -> str:
         del kwargs
-        return f"<user>{conversation[0]['content']}</user><assistant>"
+        normalized = [dict(message) for message in conversation]
+        self.conversations.append(normalized)
+        body = "".join(
+            f"<{message['role']}>{message['content']}</{message['role']}>"
+            for message in normalized
+        )
+        return f"{body}<assistant>"
 
     def encode(self, text: str, *, add_special_tokens: bool = False) -> list[int]:
         del add_special_tokens
         self.encoded.append(text)
-        if text == "hello world":
+        if "hello world" in text:
             return [2, 3]
         return [1]
 
@@ -97,7 +104,8 @@ class BiCodecRequestInputTest(unittest.TestCase):
 
         self.assertIs(request["audio_context"], codes)
         self.assertIs(request["task"], Task.TTS)
-        self.assertEqual(runtime.text_tokenizer.encoded[1], "hello world")
+        self.assertEqual(len(runtime.text_tokenizer.encoded), 1)
+        self.assertIn("hello world", runtime.text_tokenizer.encoded[0])
         local_audio = runtime.audio_tokenizer.encode_streams(
             codes,
             BICODEC_REUSE_PROMPT_GLOBAL.prompt.canonical_streams,
@@ -123,8 +131,9 @@ class BiCodecRequestInputTest(unittest.TestCase):
         self.assertIs(request["task"], Task.TTS)
         torch.testing.assert_close(
             request["prompt_ids"],
-            torch.tensor([1, 2, 3, 1, runtime.boa_token_id]),
+            torch.tensor([2, 3, runtime.boa_token_id]),
         )
+        self.assertEqual(len(runtime.text_tokenizer.encoded), 1)
 
     def test_builders_require_their_exact_route(self) -> None:
         with self.assertRaisesRegex(ValueError, "no-reference global route"):
@@ -311,6 +320,10 @@ class _RouteModel:
     def generation_step(self, *args, **kwargs):
         del args, kwargs
         raise AssertionError("structured route must use constrained generation")
+
+    def audio_output_adapter_batch_select(self, past_key_values, indices):
+        del past_key_values, indices
+        return None
 
     def generate_full_codec_sequence(
         self,

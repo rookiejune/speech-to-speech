@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+
 import torch
 from anydataset.types import Modality
 from anytrain.codec import SemanticAcousticCodes
@@ -18,15 +20,13 @@ from ..runtime.protocol import GenerationRuntime
 from ..task import Task
 from .types import Request
 
-_PLACEHOLDER = "$$$PLACEHOLDER$$$"
-
-
 def prepare_bicodec_tts_request(
     text: str,
     reference_codes: SemanticAcousticCodes,
     runtime: GenerationRuntime,
     *,
     language: str = "English",
+    messages: Sequence[Mapping[str, str]] | None = None,
     task: Task = Task.TTS,
 ) -> Request:
     """Build a reference-conditioned text-to-speech generation request.
@@ -53,7 +53,7 @@ def prepare_bicodec_tts_request(
 
     streams = route.prompt.canonical_streams
     local_audio_ids = tokenizer.encode_streams(reference_codes, streams)
-    text_ids = _text_prompt_ids(text, language, task, runtime)
+    text_ids = _text_prompt_ids(text, language, task, runtime, messages=messages)
     global_audio_ids = runtime.layout.to_global(
         Modality.AUDIO.value,
         local_audio_ids,
@@ -80,6 +80,7 @@ def prepare_bicodec_global_tts_request(
     runtime: GenerationRuntime,
     *,
     language: str = "English",
+    messages: Sequence[Mapping[str, str]] | None = None,
     task: Task = Task.TTS,
 ) -> Request:
     """Build an unconditioned BiCodec global-plus-semantic AR request.
@@ -94,7 +95,7 @@ def prepare_bicodec_global_tts_request(
             "BiCodec global requests require the no-reference global route."
         )
 
-    text_ids = _text_prompt_ids(text, language, task, runtime)
+    text_ids = _text_prompt_ids(text, language, task, runtime, messages=messages)
     prompt_ids = torch.cat(
         (text_ids, text_ids.new_tensor([runtime.boa_token_id]))
     )
@@ -156,10 +157,14 @@ def _text_prompt_ids(
     language: str,
     task: Task,
     runtime: GenerationRuntime,
+    *,
+    messages: Sequence[Mapping[str, str]] | None = None,
 ) -> Tensor:
-    instruction = task.templates[0].format(language=language, source=_PLACEHOLDER)
+    if messages is None:
+        instruction = _task_instruction(text, language, task)
+        messages = [{"role": "user", "content": instruction}]
     rendered = runtime.text_tokenizer.apply_chat_template(
-        [{"role": "user", "content": instruction}],
+        list(messages),
         tokenize=False,
         add_generation_prompt=True,
         enable_thinking=False,
@@ -167,20 +172,22 @@ def _text_prompt_ids(
     )
     if not isinstance(rendered, str):
         raise TypeError("text tokenizer chat template must return a string.")
-    parts = rendered.split(_PLACEHOLDER)
-    if len(parts) != 2:
-        raise ValueError("input placeholder must occur exactly once in chat template.")
-
-    local_ids = torch.cat(
-        (
-            _token_ids(parts[0], runtime),
-            _token_ids(text, runtime),
-            _token_ids(parts[1], runtime),
-        )
-    )
+    local_ids = _token_ids(rendered, runtime)
     if local_ids.numel() == 0:
         raise ValueError("text prompt must contain at least one token.")
     return runtime.layout.to_global(Modality.TEXT.value, local_ids)
+
+
+def _task_instruction(text: str, language: str, task: Task) -> str:
+    template = task.templates[0]
+    if "{source}" not in template:
+        raise ValueError(
+            f"{task.value} chat template must include a {{source}} placeholder."
+        )
+    kwargs: dict[str, str] = {"source": text}
+    if "{language}" in template:
+        kwargs["language"] = language
+    return template.format(**kwargs)
 
 
 def _token_ids(text: str, runtime: GenerationRuntime) -> Tensor:

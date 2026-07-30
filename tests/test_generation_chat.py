@@ -29,16 +29,27 @@ from speech_to_speech.task import Task
 
 
 class _TextTokenizer:
+    def __init__(self) -> None:
+        self.conversations: list[list[dict[str, str]]] = []
+        self.encoded: list[str] = []
+
     def apply_chat_template(self, conversation, **kwargs) -> str:
         del kwargs
-        return f"<user>{conversation[0]['content']}</user><assistant>"
+        normalized = [dict(message) for message in conversation]
+        self.conversations.append(normalized)
+        body = "".join(
+            f"<{message['role']}>{message['content']}</{message['role']}>"
+            for message in normalized
+        )
+        return f"{body}<assistant>"
 
     def encode(self, text: str, *, add_special_tokens: bool = False) -> list[int]:
         del add_special_tokens
-        if text == "hello":
-            return [2]
-        if text == "hello world":
+        self.encoded.append(text)
+        if "hello world" in text:
             return [2, 3]
+        if "hello" in text:
+            return [2]
         return [1]
 
     def decode(self, token_ids, *, skip_special_tokens: bool = True) -> str:
@@ -267,6 +278,40 @@ class ChatAdapterTest(unittest.TestCase):
         self.assertIs(private["task"], Task.T2TT)
         self.assertIsNone(private["audio_context"])
         self.assertGreater(private["prompt_ids"].numel(), 0)
+
+    def test_messages_history_is_preserved_and_encoded_once(self) -> None:
+        runtime = _runtime(route=BICODEC_GENERATE_GLOBAL)
+        request: ChatRequest = {
+            "messages": [
+                {"role": "system", "content": "Use terse wording."},
+                {"role": "user", "content": "Earlier turn."},
+                {"role": "assistant", "content": "Acknowledged."},
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hello world"}],
+                },
+            ],
+            "task": Task.T2TT,
+            "language": "English",
+        }
+
+        to_request(request, runtime)
+
+        tokenizer = cast(_TextTokenizer, runtime.text_tokenizer)
+        self.assertEqual(len(tokenizer.conversations), 1)
+        conversation = tokenizer.conversations[0]
+        self.assertEqual(
+            [message["role"] for message in conversation],
+            ["system", "user", "assistant", "user"],
+        )
+        self.assertEqual(conversation[0]["content"], "Use terse wording.")
+        self.assertEqual(conversation[1]["content"], "Earlier turn.")
+        self.assertEqual(conversation[2]["content"], "Acknowledged.")
+        self.assertIn("hello world", conversation[3]["content"])
+        self.assertNotEqual(conversation[3]["content"], "hello world")
+        self.assertEqual(len(tokenizer.encoded), 1)
+        self.assertIn("<system>Use terse wording.</system>", tokenizer.encoded[0])
+        self.assertIn("<assistant>Acknowledged.</assistant>", tokenizer.encoded[0])
 
     def test_codec_codes_passthrough_matches_bicodec_builder(self) -> None:
         runtime = _runtime()
