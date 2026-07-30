@@ -573,28 +573,43 @@ def _install_text_embedding_view(backbone: Backbone, view: EmbeddingView) -> Non
     then store the view as a normal attribute.
     """
     current = backbone.get_input_embeddings()
-    for parent in (
-        backbone,
-        getattr(backbone, "model", None),
-        getattr(backbone, "transformer", None),
-    ):
-        if parent is None or not isinstance(parent, nn.Module):
-            continue
-        module_parent = cast(nn.Module, parent)
-        modules = module_parent._modules
-        for name, child in list(modules.items()):
-            if child is not current:
-                continue
-            modules.pop(name)
-            setattr(module_parent, name, view)
-            return
-    if hasattr(backbone, "input_embeddings"):
-        backbone.input_embeddings = view  # type: ignore[attr-defined]
+    if _replace_registered_embedding(cast(nn.Module, backbone), current, view, seen=set()):
         return
+    if getattr(backbone, "input_embeddings", None) is current:
+        backbone.input_embeddings = view  # type: ignore[attr-defined]
+        if cast(object, backbone.get_input_embeddings()) is view:
+            return
+        raise RuntimeError(
+            "backbone input_embeddings replacement did not update "
+            "get_input_embeddings()."
+        )
     raise RuntimeError(
         "backbone must expose a replaceable input embedding attribute so the "
         "shared text table is referenced without dual Module ownership."
     )
+
+
+def _replace_registered_embedding(
+    parent: nn.Module,
+    current: nn.Module,
+    view: EmbeddingView,
+    *,
+    seen: set[int],
+) -> bool:
+    parent_id = id(parent)
+    if parent_id in seen:
+        return False
+    seen.add(parent_id)
+    for name, child in list(parent._modules.items()):
+        if child is None:
+            continue
+        if child is current:
+            parent._modules.pop(name)
+            setattr(parent, name, view)
+            return True
+        if _replace_registered_embedding(child, current, view, seen=seen):
+            return True
+    return False
 
 
 def _frame_span_lookup(runtime: TokenModelRuntime) -> torch.Tensor:

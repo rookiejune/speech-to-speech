@@ -1001,10 +1001,13 @@ class ModelLossContractTest(unittest.TestCase):
         paths = [
             name
             for name, module in model.named_modules(remove_duplicate=False)
-            if module is backbone.input_embeddings
+            if module is model.token_embedding.embeddings["text"]
         ]
 
-        self.assertEqual(paths, ["backbone.input_embeddings"])
+        text_embedding = cast(nn.Embedding, model.token_embedding.embeddings["text"])
+        backbone_view = cast(Any, backbone.get_input_embeddings())
+        self.assertEqual(paths, ["token_embedding.embeddings.text"])
+        self.assertIs(backbone_view.weight, text_embedding.weight)
 
     def test_token_model_injects_the_configured_peft_adapter(self):
         backbone = _Backbone()
