@@ -38,6 +38,7 @@ from speech_to_speech.loss import (
 from speech_to_speech.loss.flow_matching import AcousticFlowLoss
 from speech_to_speech.loss.token import TokenLoss
 from speech_to_speech.loss.types import combine_outputs
+from speech_to_speech.loss.validation import validation_metrics
 from speech_to_speech.model.base import Config, Model
 from speech_to_speech.model.audio_output import (
     AudioOutputAdapterConfig,
@@ -45,6 +46,7 @@ from speech_to_speech.model.audio_output import (
 )
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.pl_module import SpeechToSpeechModule
+from speech_to_speech.prediction import PredictionModality
 from speech_to_speech.runtime.audio_tokenizer import (
     BiCodecAudioTokenizer,
     NativeAudioTokenizer,
@@ -213,6 +215,8 @@ class _TokenForwardModel:
     def __init__(self, layout: Layout) -> None:
         self.layout = layout
         self.token_hidden_calls = 0
+        self.project_audio_calls = 0
+        self.selected_calls: list[Tensor] = []
         self.logit_rows = 0
         self.logit_modalities: list[Modality] = []
 
@@ -253,7 +257,22 @@ class _TokenForwardModel:
         use_cache: bool = False,
     ) -> tuple[Tensor, object | None]:
         del attention_mask, past_key_values, use_cache
+        self.project_audio_calls += 1
         return hidden_state, None
+
+    def selected_logits(
+        self,
+        hidden_state: Tensor,
+        token_ids: Tensor,
+        *,
+        attention_mask: Tensor | None = None,
+        audio_hidden_state: Tensor | None = None,
+        past_key_values: object | None = None,
+        use_cache: bool = False,
+    ) -> tuple[Tensor, object | None]:
+        del attention_mask, audio_hidden_state, past_key_values, use_cache
+        self.selected_calls.append(token_ids.detach().clone())
+        return torch.zeros(hidden_state.size(0), token_ids.numel()), None
 
 
 class _RVQModel(_FlowModel):
@@ -337,6 +356,130 @@ class ModelLossContractTest(unittest.TestCase):
             for group in (0, 1, 2)
         }
         self.assertEqual({tuple(call.tolist()) for call in calls}, expected)
+
+    def test_token_objective_supervises_parallel_text_and_audio_heads(self):
+        layout = Layout(text=(0, 4), audio=(4, 7))
+        model = _TokenForwardModel(layout)
+        batch = _batch(
+            Task.PARALLEL_AR,
+            token_labels=torch.tensor([[-100, 1, 4]]),
+            prediction=PredictionModality.PARALLEL,
+        )
+
+        outputs = TokenObjective(layout)(batch, model)
+
+        self.assertIn("token", outputs)
+        self.assertEqual(model.token_hidden_calls, 1)
+        self.assertEqual(model.project_audio_calls, 1)
+        self.assertEqual(model.logit_modalities, [Modality.AUDIO, Modality.TEXT])
+        self.assertEqual(model.logit_rows, 2)
+        details = outputs["token"].details
+        if details is None:
+            self.fail("token loss details are unavailable")
+        self.assertEqual(float(details["text_tokens"].sum()), 1.0)
+        self.assertEqual(float(details["audio_tokens"].sum()), 1.0)
+
+    def test_token_objective_supervises_interleaved_text_and_audio_heads(self):
+        layout = Layout(text=(0, 4), audio=(4, 7))
+        model = _TokenForwardModel(layout)
+        batch = _batch(
+            Task.INTERLEAVED_AR,
+            token_labels=torch.tensor([[-100, 4, 1, 5]]),
+            prediction=PredictionModality.INTERLEAVED,
+        )
+
+        outputs = TokenObjective(layout)(batch, model)
+
+        self.assertEqual(model.project_audio_calls, 1)
+        self.assertEqual(
+            set(model.logit_modalities),
+            {Modality.TEXT, Modality.AUDIO},
+        )
+        self.assertEqual(model.logit_rows, 3)
+        details = outputs["token"].details
+        if details is None:
+            self.fail("token loss details are unavailable")
+        self.assertEqual(float(details["text_tokens"].sum()), 1.0)
+        self.assertEqual(float(details["audio_tokens"].sum()), 2.0)
+
+    def test_token_objective_uses_selected_logits_for_bicodec_groups(self):
+        tokenizer = BiCodecAudioTokenizer(
+            semantic_vocab_size=4,
+            acoustic_codebook_sizes=(2,),
+            acoustic_unit_length=1,
+        )
+        layout = Layout(text=(0, 4), audio=(4, 4 + tokenizer.vocab_size))
+        codes = SemanticAcousticCodes(
+            semantic=torch.tensor([[1]]),
+            acoustic=torch.tensor([[0]]),
+        )
+        local_ids, local_groups = tokenizer.encode_streams_with_groups(
+            codes,
+            (AudioStream.GLOBAL, AudioStream.SEMANTIC),
+        )
+        global_ids = layout.to_global(Modality.AUDIO.value, local_ids)
+        input_ids = torch.cat((torch.tensor([1]), global_ids)).unsqueeze(0)
+        labels = torch.full_like(input_ids, -100)
+        groups = torch.full_like(input_ids, -1)
+        supervised = local_groups.ge(0)
+        labels[0, 1:][supervised] = global_ids[supervised]
+        groups[0, 1:][supervised] = local_groups[supervised]
+        model = _TokenForwardModel(layout)
+        batch = ModelBatch(
+            input_ids=input_ids,
+            token_labels=labels,
+            token_groups=groups,
+            acoustic_target=None,
+            tasks=[Task.TTS],
+            predictions=[PredictionModality.AUDIO],
+            pad_token_id=99,
+        )
+
+        outputs = TokenObjective(layout, tokenizer)(batch, model)
+
+        self.assertIn("token", outputs)
+        self.assertEqual(model.token_hidden_calls, 1)
+        self.assertEqual(model.project_audio_calls, 1)
+        self.assertEqual(model.logit_rows, 0)
+        self.assertEqual(len(model.selected_calls), 3)
+
+    def test_token_groups_reject_mixed_prediction(self):
+        layout = Layout(text=(0, 4), audio=(4, 7))
+        labels = torch.tensor([[-100, 4]])
+        groups = torch.tensor([[-1, 0]])
+        with self.assertRaisesRegex(
+            ValueError,
+            "token prediction groups are supported only for audio-only targets",
+        ):
+            TokenLoss(layout)(
+                torch.zeros(1, 2, 3),
+                labels,
+                PredictionModality.PARALLEL,
+                lambda hidden, modality: torch.empty(0),
+                token_groups=groups,
+                selected_logits=lambda hidden, allowed: torch.zeros(
+                    hidden.size(0), allowed.numel()
+                ),
+            )
+
+    def test_validation_metrics_maps_outputs_and_rvq_top1(self):
+        token = LossItem(
+            torch.tensor([1.0]),
+            {"tokens": torch.tensor([2.0])},
+        )
+        rvq = LossItem(
+            torch.tensor([0.5]),
+            {
+                "frames": torch.tensor([4.0]),
+                "codebook_0": torch.tensor([0.5]),
+                "codebook_0_top1": torch.tensor([1.0]),
+            },
+        )
+        metrics = validation_metrics({"loss": torch.tensor(1.5), "token": token, "rvq": rvq})
+        self.assertEqual(set(metrics), {"token_ce", "rvq_ce", "rvq_codebook_0_ce", "rvq_codebook_0_top1"})
+        self.assertEqual(float(metrics["token_ce"].values.sum()), 1.0)
+        self.assertEqual(float(metrics["token_ce"].weights.sum()), 2.0)
+        self.assertEqual(float(metrics["rvq_codebook_0_top1"].values.sum()), 1.0)
 
     def test_checkpoint_audio_route_is_immutable(self):
         model = SimpleNamespace(
@@ -1087,10 +1230,16 @@ def _batch(
     token_labels: Tensor,
     target_acoustic_codes: Tensor | None = None,
     target_audio_token_positions: Tensor | None = None,
+    prediction: PredictionModality | None = None,
+    token_groups: Tensor | None = None,
 ) -> ModelBatch:
+    resolved = (
+        task.prediction_modality if prediction is None else prediction
+    )
     batch = ModelBatch(
         input_ids=token_labels.masked_fill(token_labels.eq(-100), 0),
         token_labels=token_labels,
+        token_groups=token_groups,
         acoustic_target=(
             None
             if target_acoustic_codes is None or target_audio_token_positions is None
@@ -1101,7 +1250,7 @@ def _batch(
             }
         ),
         tasks=[task] * token_labels.size(0),
-        predictions=[task.prediction_modality] * token_labels.size(0),
+        predictions=[resolved] * token_labels.size(0),
         pad_token_id=99,
     )
     return batch

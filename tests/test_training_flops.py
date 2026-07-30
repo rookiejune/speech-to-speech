@@ -33,6 +33,7 @@ from speech_to_speech.model import (
 from speech_to_speech.model.acoustic import DecoderConfig, FlowModel, RVQModel
 from speech_to_speech.performance import TrainingFlops
 from speech_to_speech.pl_module import Config as ModuleConfig, SpeechToSpeechModule
+from speech_to_speech.prediction import PredictionModality
 from speech_to_speech.task import Task
 
 
@@ -92,6 +93,36 @@ class TrainingFlopsTest(unittest.TestCase):
         expected = _token_expected(model, batch)
 
         self.assertEqual(_flops(module, batch), expected)
+
+    def test_token_head_uses_batch_prediction_not_task_default(self):
+        model = _token_model()
+        module = _module(model, TokenObjective(_layout()))
+        mixed_labels = torch.tensor([[-100, 2, 8]])
+        audio_default = _batch(
+            input_ids=torch.tensor([[1, 2, 8]]),
+            labels=mixed_labels,
+            tasks=[Task.T2ST],
+            predictions=[PredictionModality.AUDIO],
+        )
+        with self.assertRaisesRegex(ValueError, "outside supervised blocks"):
+            _flops(module, audio_default)
+
+        parallel_mixed = _batch(
+            input_ids=torch.tensor([[1, 2, 8]]),
+            labels=mixed_labels,
+            tasks=[Task.T2ST],
+            predictions=[PredictionModality.PARALLEL],
+        )
+        parallel_audio_only = _batch(
+            input_ids=torch.tensor([[1, 8, 0]]),
+            labels=torch.tensor([[-100, 8, -100]]),
+            tasks=[Task.T2ST],
+            predictions=[PredictionModality.PARALLEL],
+        )
+        self.assertGreater(
+            _flops(module, parallel_mixed),
+            _flops(module, parallel_audio_only),
+        )
 
     def test_audio_input_tower_counts_padded_source_rows(self):
         positions = torch.tensor([[1, 2], [1, -1]])
@@ -354,13 +385,18 @@ def _batch(
     tasks: list[Task],
     acoustic_target: AcousticTarget | None = None,
     audio_input_positions: Tensor | None = None,
+    predictions: list[PredictionModality] | None = None,
 ) -> ModelBatch:
     return ModelBatch(
         input_ids=input_ids,
         token_labels=labels,
         acoustic_target=acoustic_target,
         tasks=tasks,
-        predictions=[task.prediction_modality for task in tasks],
+        predictions=(
+            [task.prediction_modality for task in tasks]
+            if predictions is None
+            else predictions
+        ),
         pad_token_id=0,
         audio_input_positions=audio_input_positions,
     )

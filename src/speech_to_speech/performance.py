@@ -281,7 +281,7 @@ def _token_head(model: Model, batch: ModelBatch) -> int:
         raise ValueError(
             "each training FLOPs token-label row must contain a valid target."
         )
-    modalities = batch.tasks[0].prediction_modality.supervised_modalities()
+    modalities = batch.prediction_modality.supervised_modalities()
     allowed = torch.zeros_like(valid)
     for modality in modalities:
         start, end = model.layout.blocks[modality.value]

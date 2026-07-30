@@ -458,7 +458,7 @@ class ModelBatch:
         _, prediction = next(iter(signatures))
         if not prediction.supervises_audio and self.acoustic_target is not None:
             raise ValueError(
-                "text-only prediction tasks must not provide acoustic target fields."
+                "text-only prediction batches must not provide acoustic target fields."
             )
         _validate_batch_acoustic(
             self.input_ids,
@@ -874,11 +874,10 @@ def _validate_sample(sample: ModelSample, pad_token_id: int) -> None:
             raise ValueError(
                 "target semantic and acoustic codes must share the frame axis."
             )
-    if (
-        not sample.task.prediction_modality.supervises_audio
-        and target is not None
-    ):
-        raise ValueError("text-only prediction tasks must not provide acoustic target fields.")
+    if not sample.prediction.supervises_audio and target is not None:
+        raise ValueError(
+            "text-only prediction samples must not provide acoustic target fields."
+        )
     if target is not None:
         positions = target["token_positions"].to(
             device=sample.token_labels.device,

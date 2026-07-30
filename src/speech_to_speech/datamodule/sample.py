@@ -284,6 +284,7 @@ def _build_modal_sample(
             source,
             target,
             task,
+            prediction,
             audio_context=audio_context if audio_prompt is not None else None,
         ),
         generation_prompt_length=(
@@ -354,6 +355,7 @@ def _parallel_response(
             source,
             target,
             task,
+            prediction,
             audio_context=audio_context,
         ),
         generation_prompt_length=input_ids.numel(),
@@ -460,13 +462,14 @@ def _audio_seconds(
     source: Speech | Text | None,
     target: Speech | Text,
     task: Task,
+    prediction: PredictionModality,
     *,
     audio_context: Speech | None = None,
 ) -> float:
     seconds = 0.0
     if task.source_layout.includes_audio:
         seconds += _duration(_speech(source, role="source"), role="source")
-    if task.prediction_modality.supervises_audio:
+    if prediction.supervises_audio:
         if source is not target:
             seconds += _duration(_speech(target, role="target"), role="target")
         elif not task.source_layout.includes_audio:

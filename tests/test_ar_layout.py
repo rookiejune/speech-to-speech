@@ -118,6 +118,34 @@ class AutoregressiveLayoutTest(unittest.TestCase):
         self.assertGreater(float(item.details["text_tokens"].sum()), 0)
         self.assertGreater(float(item.details["audio_tokens"].sum()), 0)
 
+    def test_token_loss_accepts_interleaved_prediction(self):
+        sample = build_ar_sample(
+            _speech(frames=4, text_ids=[2, 3, 4, 5], acoustic=False),
+            Task.INTERLEAVED_AR,
+            self.runtime,
+            prompt="marker",
+            interleave_audio_frames=2,
+        )
+        hidden = torch.randn(1, sample.input_ids.numel(), 4)
+        labels = sample.token_labels.unsqueeze(0)
+        modalities: list[Modality] = []
+
+        def logits(states: torch.Tensor, modality: Modality) -> torch.Tensor:
+            modalities.append(modality)
+            start, end = self.runtime.layout.blocks[modality.value]
+            return states.new_zeros(states.size(0), end - start)
+
+        item = TokenLoss(self.runtime.layout)(
+            hidden,
+            labels,
+            PredictionModality.INTERLEAVED,
+            logits,
+        )
+        self.assertTrue(torch.isfinite(item.loss).all())
+        self.assertEqual(set(modalities), {Modality.TEXT, Modality.AUDIO})
+        self.assertGreater(float(item.details["text_tokens"].sum()), 0)
+        self.assertGreater(float(item.details["audio_tokens"].sum()), 0)
+
     def test_masked_ar_inserts_mask_token_in_source(self):
         from speech_to_speech.datamodule.masked import build_masked_sample
 

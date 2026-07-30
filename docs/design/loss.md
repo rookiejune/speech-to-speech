@@ -13,7 +13,8 @@ position 语义见 [总览 §2.4](../model-design.md)。
   acoustic flow matching 和可选 REPA；`RVQObjective`：组合 token CE 与 acoustic RVQ CE。
   三者的 `forward(batch, model)` 都返回含标量总损失的 `Outputs`，直接满足 Lightning
   训练契约。
-- `TokenLoss`：按 batch task 的 `prediction_modality` 展开监督 head（TEXT / AUDIO / 两者），在对应
+- `TokenLoss`：按 `ModelBatch.prediction_modality`（有效 loader prediction，不是
+  `Task.prediction_modality` 默认值）展开监督 head（TEXT / AUDIO / 两者），在对应
   局部词表上计算 CE，每行必须至少包含一个非 `-100` target；causal shift 在此完成，只把有效
   predictor hidden states 交给 `model.token_logits(hidden, modality)`，text/audio head 不做跨模态
   softmax 竞争。`target_modality` 只是单模态 prediction 的便捷属性，mixed 时为 `None`，不作为
@@ -52,7 +53,7 @@ hidden_states = model.token_hidden_states(
 token = self.token(
     hidden_states,
     batch.token_labels,
-    batch.tasks[0].prediction_modality,
+    batch.prediction_modality,
     model.token_logits,
 )
 result = {
@@ -116,6 +117,9 @@ teacher features。acoustic-only codec screening 与 oracle artifact 导出由
 
 ## 边界
 
+- 训练侧有效 prediction 以 `ModelSample.prediction` / `ModelBatch.predictions`（`batch.prediction_modality`）
+  为准；`Task.prediction_modality` 只是 loader 未覆写时的默认值。loss、FLOPs、sample/batch 校验都消费
+  有效 prediction，不回退到 task 默认。
 - `TokenObjective`、`FlowObjective` 和 `RVQObjective` 只依赖结构化 Protocol 的
   `layout`、`token_hidden_states()`、`token_logits(hidden, modality)`、`target_frame_condition()`、
   `acoustic_decoder` 等公开能力，不依赖具体模型类。
@@ -132,6 +136,10 @@ teacher features。acoustic-only codec screening 与 oracle artifact 导出由
   boolean mask 选中的 frame；padding 位置的 NaN/Inf 不参与 forward，也不产生梯度。
 - token、flow matching、RVQ 与 REPA `LossItem` 必须分别携带 `tokens` 或 `frames` 有效单位；
   objective 不在单位缺失时静默退回逐行平均。
+- token 行损失是有效 token 的加权平均；`details` 中的 `text_loss` / `audio_loss` 仅供观测，不改变
+  训练标量。validation 暴露聚合 `token_ce`，暂不拆 `text_ce` / `audio_ce`。
+- generation 仍按 `Request.task.prediction_modality`（task 默认）分组；loader 的 prediction
+  override 目前是训练专用，不通过 generation Request 传播。
 - `audio_route` 不改变 Flow/RVQ acoustic objective 的 frame-aligned contract；它只约束 structured
   token route 的 prompt/output/decode ownership。BiCodec reuse/predict 路线都不会把 target acoustic
   stream 静默泄漏到 prompt，prompt/reference codes 也不作为 token labels。

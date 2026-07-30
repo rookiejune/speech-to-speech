@@ -45,7 +45,12 @@ class Task(StrEnum):
 
     @property
     def prediction_modality(self) -> PredictionModality:
-        """Default prediction modality when no loader override is set."""
+        """Default prediction when the loader does not override ``prediction``.
+
+        Training consumers must use ``ModelSample.prediction`` /
+        ``ModelBatch.prediction_modality`` (resolved via
+        ``task_spec.resolve_prediction``), not this default.
+        """
         if self in {Task.ASR, Task.MT, Task.S2TT, Task.TEXT_AR, Task.T2TT}:
             return PredictionModality.TEXT
         if self in {Task.PARALLEL_AR, Task.MASKED_AR}:
@@ -78,6 +83,7 @@ class Task(StrEnum):
 
     @property
     def execution_signature(self) -> tuple[SourceLayout, PredictionModality]:
+        """Default execution signature without a loader prediction override."""
         return (self.source_layout, self.prediction_modality)
 
     @property

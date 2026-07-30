@@ -230,7 +230,7 @@ response、generated token 以及 BiCodec route 的 reference `audio_context` �
   该元数据；缺失时用当前 codec view 的 frame count 除以 `runtime.codec_frame_rate` 推导
   `Speech.duration_seconds`。task sample builder 按 source/target modality 决定哪些角色计入
   `ModelBatch.audio_seconds`；不能把真实音频静默计为 0。
-- 同一 `task_weights` 中的任务必须具有相同 `(source_modality, prediction_modality)` 执行签名，保证 DDP 各 rank 走相同
+- 同一 `task_weights` 中的任务必须具有相同 `(source_layout, prediction)` 执行签名，保证 DDP 各 rank 走相同
   模型路径。0 权重任务不会参与 batch 分配；每项权重必须有限且非负，总和必须有限且为正；
   task allocator 把 weighted round-robin credit 跨 collate 调用保存在进程共享状态中。小 batch
   可以暂时不含某个低权重 task，但不会丢弃尾批样本，并会在后续 batch 归还配额。DataModule

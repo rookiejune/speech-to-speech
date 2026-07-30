@@ -104,7 +104,9 @@ service 在 padding 前校验每条 request 的通用外形，audio strategy 继
   structured prompt streams 必须使用 `BiCodecAudioTokenizer`。
 ## 执行流程
 
-`generate_responses()` 按 `prediction_modality` 分组。每组 prompt 左 padding，输出仍按原始请求顺序排列。
+`generate_responses()` 按 `Request.task.prediction_modality`（task 默认值）分组。loader 的
+prediction override 目前只作用于训练 `ModelSample` / `ModelBatch`，不写入 generation
+`Request`。每组 prompt 左 padding，输出仍按原始请求顺序排列。
 
 - `TEXT`：调用 `generate_tokens(generation_modality=TEXT, stop=EOS)`。
 - `AUDIO`：调用统一的 `generate_audio_responses()`，按 runtime/model capability 选择策略。

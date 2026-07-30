@@ -123,7 +123,7 @@ padding 与 mask：
 - position 必须指向序列内非 padding token。
 - `audio_input_positions` 中的有效位置必须唯一，并指向 runtime codec audio range；source 不是
   audio 时该字段为 `None`。
-- 同一 batch 的 task 必须具有相同 `(source_modality, prediction_modality)` 执行签名。
+- 同一 batch 的样本必须具有相同 `(source_layout, prediction)` 执行签名（有效 prediction，含 loader override）。
 
 真实推理不使用缺 target 的半成品 `ModelBatch`，而使用独立的 `generation.Request`。
 
@@ -169,6 +169,10 @@ prompt 中的位置，只供 `AudioInputTower` 做输入 embedding overlay；不
 
 同构 microbatch 比较 `execution_signature = (source_layout, prediction)`；loader 可为白名单
 任务覆写 `prediction`（例如 `T2ST`/`S2ST` 的 `audio|parallel`）。
+`Task.prediction_modality` 只表示未覆写时的默认值；训练侧有效 prediction 写在
+`ModelSample.prediction` / `ModelBatch.predictions`，由 `task_spec.resolve_prediction` 解析。
+`Task.execution_signature` 属性始终反映默认值；带 override 的签名用
+`task_spec.execution_signature(task, prediction=...)`。
 `target_modality` 只对单模态 prediction 返回 TEXT/AUDIO；mixed 时为 `None`。
 
 `Task` 仍拥有 `uses_source_role` 与 instruction template。
@@ -334,7 +338,7 @@ DataModule 显式持有 runtime 与 Collator。一个正式 job 只运行一个 
 DataModule 构造时确定，训练过程中保持不变。task weights 位于进程共享数组，持久 worker 在
 collate 时读取；worker 侧 runtime 是不含 backbone/codec 的数据快照。
 
-同一组 task weights 只能包含相同 `(source_modality, prediction_modality)` 执行签名的任务，权重必须有限、非负且总和为
+同一组 task weights 只能包含相同 `(source_layout, prediction)` 执行签名的任务，权重必须有限、非负且总和为
 正，以保证每个子 batch 的执行签名稳定。task 与 loader 权重只控制进入训练 step 的数据频率，
 不额外乘到 loss 上；每个 microbatch 独立按有效 token/frame 归约 token、flow、RVQ 与 REPA loss，
 再由 Lightning 在 accumulation window 内累积梯度。
