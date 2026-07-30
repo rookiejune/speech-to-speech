@@ -23,7 +23,7 @@ class DecoderConfig:
 
 class FlowRepaConfig(TypedDict):
     feature_dim: int
-    student_layer: int | None
+    student_layer: Optional[int]
 
 
 def decoder_options(

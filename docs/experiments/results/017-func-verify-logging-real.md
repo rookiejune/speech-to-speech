@@ -1,7 +1,7 @@
 # 017 Real-Resource Function Verify (Logging / Sample / Loss Tags)
 
 2026-07-30 在复旦真实 GPU 上验收当日 logging / sample / loss tag 改动，使用真实
-Qwen3-0.6B、LongCat codec 与 WMT19 prepared data。本结果只证明执行与日志契约，
+Qwen3-0.6B、LongCat / Stable codec 与 WMT19 prepared data。本结果只证明执行与日志契约，
 不支持质量或收敛结论。
 
 ## 范围
@@ -10,10 +10,11 @@ Qwen3-0.6B、LongCat codec 与 WMT19 prepared data。本结果只证明执行与
 | --- | --- | --- |
 | LongCat Flow joint overfit | `145` GPU 0 | 通过 |
 | LongCat RVQ joint overfit | `144` GPU 1 | 通过 |
-| Stable Codec stage 1（含 FSQ embedding） | `121` | 受阻，见下 |
+| Stable Codec stage 1（含 FSQ embedding） | `121` GPU 0 | 通过 |
 
-隔离代码：`/tmp/s2s-func-verify-20260730/repos`（含未提交的 logging 改动）。
-数据：`/mnt/pami201/zhuyin/datasets/wmt19_tts_stage1_small_32_20260727`。
+隔离代码：`/tmp/s2s-func-verify-20260730/repos`（含未提交的 logging / py39 兼容改动）。
+LongCat 数据：`/mnt/pami201/zhuyin/datasets/wmt19_tts_stage1_small_32_20260727`。
+Stable 数据：`/tmp/stable-stage1-data-20260728`（含临时 identity selection）。
 SAC artifact：`/tmp/s2s-joint-init-20260728/{artifact,rvq-artifact}`（schema 7）。
 
 ## Flow（通过）
@@ -41,33 +42,49 @@ SAC artifact：`/tmp/s2s-joint-init-20260728/{artifact,rvq-artifact}`（schema 7
   - `sample/tts/0/` audio + truncation flags，与 Flow 同形
 - 输出：`144:/tmp/s2s-func-verify-train-20260730/002-single-batch-overfit/tts/rvq-func-verify-s2/`
 
-## 契约问题：`TrainInterval` 与 `max_steps=1`
+## Stable Codec / FSQ（通过）
 
-新 `TrainInterval.should_run` 要求 `global_step > 0`。`TaskSampleLogger` 挂在
-`on_train_batch_start`，而第一步开始时 `global_step` 仍为 0，因此 **`max_steps=1`
-的 smoke 永远不会触发 sample callback**。Flow 首次 `max_steps=1` 跑通了 loss tag，
-但 TensorBoard 无任何 `sample/`；改为 `max_steps=2` 后 sample 在 step 1 正常写出。
+入口：`jobs/015/01_stable_codec_stage1.sh`，`/tmp/stable-codec-py39-env`（Torch 2.4 /
+Python 3.9），`max_steps=1`，`callbacks.task_sample.every_n_steps=1`，
+`callbacks.task_sample.max_new_tokens=34`。验收 follow-up 额外覆写
+`trainer.log_every_n_steps=1` 以写出 `token/` TB tags（正式配置默认 10）。
 
-正式长跑不受影响；单步 smoke 与 overfit 验收需要至少 2 optimizer steps，或改 interval /
-hook 边界。
+环境兼容改动（本验收依赖）：
 
-## Stable Codec / FSQ（受阻）
+1. OmegaConf structured dataclass 中会经 `get_type_hints` 求值的 `|` 改为
+   `Optional` / `Union`（例如 `StageLoaderConfig.prediction`、`FlowRepaConfig.student_layer`）。
+   `from __future__ import annotations` 不够：OmegaConf 会再求值注解，py39 仍炸。
+2. `anydataset` 的 `AudioLoader = Callable[[Union[str, Path]], ...]`（运行时类型别名）。
+3. 为 smoke root 发布 identity selection：
+   `/tmp/stable-stage1-data-20260728/selections/stable-1x46656_400bps/speech_translation_v1/train`
+   （Fudan 默认 filter 名；32 样本全量索引，再由 `smoke-splits.json` 子集化）。
 
-`jobs/015/01_stable_codec_stage1.sh` 仍依赖 `/tmp/stable-codec-py39-env`（Torch 2.4 /
-Python 3.9）。当前 S2S 配置 schema 大量使用 PEP 604 `X | None`；OmegaConf 2.3 在
-`get_type_hints` 后于 py39 上失败（`unsupported operand type(s) for |` /
-`_UnionGenericAlias`）。本地 unit 级 FSQ affine 构造未在该环境完成真实 codec 联跑。
+执行：
 
-可选后续：
+- exit `0`，`Trainer.fit` 因 `max_steps=1` 正常停止。
+- 总参数 `751376384`，可训练 `17408`（= `12×1024` FSQ bias/slope + `5×1024` free
+  marker rows，对应 `FsqAffineEmbedding` + Qwen3-0.6B hidden `1024`）。
+- `metrics.json`：token loss first/last `6.345 / 100.660`，均 finite。
+- TensorBoard（`.../stage_1-token/version_2/`）：
+  - `token/{loss,text_loss,audio_loss,tokens,text_tokens,audio_tokens}/{asr,tts}`
+  - `sample/asr/{0,1,2}/` source audio + text + generation flags
+  - `sample/tts/{0,1,2}/{target,generated}` audio，`audio/finite=1`
+  - **无** `reference_generation`（Stable token-only，不伪造 Flow/RVQ reference）
+- `TrainInterval` 去掉 `step > 0` 后，`max_steps=1` 即可在 `global_step=0` 写出 sample。
 
-1. 为 Stable 单独准备 Python ≥3.10 且兼容 `stable-codec` 的环境（推荐）。
-2. 把 Hydra structured dataclass 的 `|` 注解脱回 `Optional`/`Union`（改动面大）。
+日志：`121:/tmp/s2s-func-verify-20260730.stable3.log`；
+输出根：`121:/tmp/s2s-func-verify-train-20260730/stable-codec-stage1/`。
+
+## 契约修正：`TrainInterval`
+
+原先 `should_run` 要求 `global_step > 0`，导致 `max_steps=1` smoke 永远不触发
+`TaskSampleLogger`。已收成 `step % every_n_steps == 0` + 同 step 去重；Stable 单步
+smoke 已验证 sample 可写。
 
 ## 结论
 
 - 新 loss tag 分层（`token/...` 与 `acoustic/{flow_matching|rvq}/...`）在真实 Flow/RVQ
-  上正确。
-- 累计 `tokens` / `frames` 跨 step 累加正确。
+  上正确；Stable token-only 写出 `token/.../{asr,tts}`，无 acoustic side channel。
+- 累计 `tokens` / `frames` 跨 step 累加正确（Flow/RVQ `max_steps=2`）。
 - `sample/{task}/{index}/...`、截断标志与可播放 audio 在真实生成路径上正确。
-- Stable/FSQ 真实联跑仍被 py39 Stable 环境挡住；`max_steps=1` sample smoke 被新
-  interval 契约挡住。
+- Stable/FSQ 真实联跑在 py39 环境下通过，依赖 Optional/Union 注解与 selection 发布。

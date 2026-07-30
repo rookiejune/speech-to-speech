@@ -109,7 +109,7 @@ class ParameterPolicyConfig:
 class StageLoaderConfig:
     weight: float
     task_weights: dict[str, float]
-    prediction: str | None = None
+    prediction: Optional[str] = None
 
     def __post_init__(self) -> None:
         if (
