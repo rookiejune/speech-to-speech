@@ -124,9 +124,11 @@ adapter 前的 backbone hidden。
 `HiddenConditionAdapter`。
 
 `lora` 直接持有 `peft.LoraConfig | None`，项目不再维护本地 LoRA config、layer 或注入 facade。
-选择 `model/lora=qwen parameter_policy=lora` 后，model 把该 config 直接传给 PEFT
+正式 train 默认组合 `model/lora=qwen`（`init_lora_weights=pissa`）与 `parameter_policy=lora`。
+选择该组合后，model 把该 config 直接传给 PEFT
 `inject_adapter_in_model()`；rank、alpha、dropout、target modules、初始化方法与 PEFT 后续支持的
-字段都沿用官方命名和校验。混合精度 backbone 注入后使用 PEFT 的 mixed-precision cast 规则。
+字段都沿用官方命名和校验。PiSSA 保证 A/B 满秩，以便 `pl_module.optimizer=muon` 时 anytrain
+自动走 LoRA-Muon。混合精度 backbone 注入后使用 PEFT 的 mixed-precision cast 规则。
 PEFT 决定 backbone 内的 trainable adapter/bias/modules-to-save 参数，parameter policy 额外组合现有
 speech/acoustic interface，不再通过本地 LoRA 参数名重新推断 PEFT 的训练语义。
 

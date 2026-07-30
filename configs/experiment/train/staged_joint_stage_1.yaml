@@ -4,6 +4,9 @@ defaults:
   - override /parameter_policy: speech_interface
   - _self_
 
+model:
+  lora: null
+
 callbacks:
   task_sample:
     enabled: true

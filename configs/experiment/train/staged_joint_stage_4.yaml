@@ -4,6 +4,9 @@ defaults:
   - override /parameter_policy: full
   - _self_
 
+model:
+  lora: null
+
 callbacks:
   task_sample:
     enabled: true

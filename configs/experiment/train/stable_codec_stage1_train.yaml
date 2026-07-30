@@ -11,6 +11,9 @@ defaults:
 
 output_subdir: stable-codec-stage1/${run_name}
 
+model:
+  lora: null
+
 train:
   max_steps: 1000000
 
@@ -35,15 +38,7 @@ callbacks:
         loader: asr
         task: asr
         indices: [0, 1, 2]
-      - split: validation
-        loader: asr
-        task: asr
-        indices: [0, 1, 2]
       - split: train
-        loader: tts
-        task: tts
-        indices: [0, 1, 2]
-      - split: validation
         loader: tts
         task: tts
         indices: [0, 1, 2]

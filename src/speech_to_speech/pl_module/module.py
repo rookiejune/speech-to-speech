@@ -28,6 +28,7 @@ from ..generation.protocol import TextEvaluationModel
 class Config:
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
+    optimizer: str = "adamw"
 
 
 class ModuleModel(TextEvaluationModel, TokenObjectiveModel, Protocol):
@@ -73,7 +74,7 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         outputs = self._loss_outputs(batch)
         self._current_loss_outputs = outputs
         self.log(
-            "train/loss",
+            "loss",
             outputs["loss"],
             prog_bar=True,
             on_step=True,
@@ -196,7 +197,7 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         return create_optimizer(
             cast(nn.Module, cast(object, self.model)),
             preset="sft",
-            optimizer="adamw",
+            optimizer=self.config.optimizer,
             lr=self.config.learning_rate,
             weight_decay=self.config.weight_decay,
         )

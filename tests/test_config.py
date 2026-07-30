@@ -182,6 +182,7 @@ class ConfigTest(unittest.TestCase):
                 "train",
                 "runtime.backbone_initialization=random",
                 "parameter_policy=full",
+                "model.lora=null",
             )
         )
         self.assertIs(
@@ -522,6 +523,12 @@ class ConfigTest(unittest.TestCase):
 
         self.assertIsInstance(default, StagedTrainRVQConfig)
         self.assertEqual(default.stage.name, StageName.STAGE_1)
+        self.assertIs(default.parameter_policy.name, ParameterPolicyName.LORA)
+        self.assertIsInstance(default.model.lora, LoraConfig)
+        if default.model.lora is None:
+            self.fail("default train config must enable PEFT LoRA")
+        self.assertEqual(default.model.lora.init_lora_weights, "pissa")
+        self.assertEqual(default.pl_module.optimizer, "adamw")
         self.assertFalse(default.validation.enabled)
         self.assertEqual(default.validation.loader, "tts")
         self.assertEqual(default.validation.split_label, "dev")
@@ -591,6 +598,8 @@ class ConfigTest(unittest.TestCase):
                 ]
                 if policy is ParameterPolicyName.LORA:
                     overrides.append("model/lora=qwen")
+                else:
+                    overrides.append("model.lora=null")
                 config = parse_train(
                     _compose("train", *overrides)
                 )
@@ -697,9 +706,7 @@ class ConfigTest(unittest.TestCase):
             ],
             [
                 ("train", "asr", "asr", [0, 1, 2]),
-                ("validation", "asr", "asr", [0, 1, 2]),
                 ("train", "tts", "tts", [0, 1, 2]),
-                ("validation", "tts", "tts", [0, 1, 2]),
             ],
         )
         self.assertEqual(config.callbacks.checkpoint.every_n_train_steps, 10_000)
@@ -968,7 +975,6 @@ class ConfigTest(unittest.TestCase):
             _compose(
                 "overfit",
                 "model/lora=qwen",
-                "+model.lora.init_lora_weights=gaussian",
                 "parameter_policy=lora",
             )
         )
@@ -978,7 +984,7 @@ class ConfigTest(unittest.TestCase):
             self.fail("PEFT LoRA config was not composed")
         self.assertEqual(config.model.lora.r, 16)
         self.assertEqual(config.model.lora.lora_alpha, 32)
-        self.assertEqual(config.model.lora.init_lora_weights, "gaussian")
+        self.assertEqual(config.model.lora.init_lora_weights, "pissa")
         self.assertIs(config.parameter_policy.name, ParameterPolicyName.LORA)
         self.assertEqual(
             config.parameter_policy.trainable_groups,
@@ -1001,6 +1007,37 @@ class ConfigTest(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "must be selected together"),
             ):
                 overfit(_compose("overfit", *overrides))
+
+    def test_lora_muon_requires_pissa_initialization(self):
+        config = overfit(
+            _compose(
+                "overfit",
+                "model/lora=qwen",
+                "parameter_policy=lora",
+                "pl_module.optimizer=muon",
+            )
+        )
+        self.assertEqual(config.pl_module.optimizer, "muon")
+        self.assertEqual(config.model.lora.init_lora_weights, "pissa")
+
+        with self.assertRaisesRegex(ValueError, "pissa initialization"):
+            overfit(
+                _compose(
+                    "overfit",
+                    "model/lora=qwen",
+                    "model.lora.init_lora_weights=gaussian",
+                    "parameter_policy=lora",
+                    "pl_module.optimizer=muon",
+                )
+            )
+
+    def test_pl_module_optimizer_is_selectable(self):
+        default = parse_train(_compose("train"))
+        muon = parse_train(_compose("train", "pl_module.optimizer=muon"))
+
+        self.assertEqual(default.pl_module.optimizer, "adamw")
+        self.assertEqual(muon.pl_module.optimizer, "muon")
+        self.assertEqual(muon.model.lora.init_lora_weights, "pissa")
 
     def test_lora_rejects_unsupported_performance_provider(self):
         with self.assertRaisesRegex(ValueError, "LoRA training FLOPs"):

@@ -13,6 +13,7 @@ from speech_to_speech.datamodule.config import SpeechConfig
 from speech_to_speech.datamodule.dataset import DatasetName
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model.acoustic import AcousticType, DecoderConfig
+from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.runtime import AudioRepresentation, BackboneInitialization
 from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import validate_audio_route
@@ -115,7 +116,6 @@ class TextProbeConfig:
 class TextRetentionCallbackConfig:
     enabled: bool = False
     every_n_steps: int = 10_000
-    every_audio_seconds: Optional[float] = None
     max_new_tokens: int = 128
     probes: dict[str, TextProbeConfig] = field(default_factory=dict)
 
@@ -130,10 +130,6 @@ class TextRetentionCallbackConfig:
         positive_integer(
             self.max_new_tokens,
             "text retention max_new_tokens",
-        )
-        optional_positive_number(
-            self.every_audio_seconds,
-            "text retention every_audio_seconds",
         )
         if not self.enabled:
             return
@@ -155,7 +151,6 @@ class TextRetentionCallbackConfig:
 class GradNormCallbackConfig:
     enabled: bool = MISSING
     every_n_steps: int = MISSING
-    every_audio_seconds: Optional[float] = None
 
 
 class _TrainValues(Protocol):
@@ -195,6 +190,9 @@ class _EntryConfig(Protocol):
 
     @property
     def parameter_policy(self) -> ParameterPolicyConfig: ...
+
+    @property
+    def pl_module(self) -> ModuleConfig: ...
 
     @property
     def acoustic(self) -> AcousticConfig: ...
@@ -361,6 +359,13 @@ def _validate_lora(config: _EntryConfig) -> None:
             "LoRA training FLOPs are not supported by the current performance provider; "
             "set callbacks.performance.enabled=false."
         )
+    if enabled and config.pl_module.optimizer == "muon":
+        init = config.model.lora.init_lora_weights if config.model.lora is not None else None
+        if not isinstance(init, str) or not init.startswith("pissa"):
+            raise ValueError(
+                "pl_module.optimizer=muon with LoRA requires model.lora.init_lora_weights "
+                "to be a pissa initialization (for example 'pissa')."
+            )
 
 
 __all__ = [

@@ -25,7 +25,9 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
   codes 与现场 codec 产物落在不同 device。
 - `current_loss_outputs()`：只在当前 training step 的 backward 完成前返回仍连接计算图的
   `Outputs`，供 `GradLogger` 计算指定分项梯度；其他时机显式报错。
-- `configure_optimizers()` 委托 anytrain optimizer preset。
+- `configure_optimizers()` 委托 anytrain LLM optimizer preset（默认 `preset=sft`）。
+  `pl_module.Config.optimizer` 选择 `adamw` 或 `muon`；有 PEFT LoRA 时 `muon` 由 anytrain
+  自动路由到 LoRA-Muon + AdamW。
 - `generate()` / `evaluate_text()` 只负责切换 eval mode、调用 generation 包并恢复原 mode。
 
 `pl_module.composition.build()` 根据 `acoustic.type` 统一分发，校验 runtime 是否提供所选
@@ -57,17 +59,20 @@ model 构造器不接收路径或执行文件 I/O。
   自身固定 `ModelBatch` 的摘要；text retention 在实际 autoregressive generation 与 reference-NLL forward
   边界分别附加 token shape。batch 正常结束后清空摘要，避免后续 fetch 或 transfer 错误误报上一批输入。
   Lightning 在 batch-start hook 前完成 device transfer，因此 transfer 自身的 OOM 不属于该 callback 的覆盖范围。
-- `OutputsLogger`：只提供 S2S objective 到 task label 的适配，按 label 聚合 `LossItem` 的通用日志逻辑来自
-  `anytrain.lightning.LossItemLoggerCallback`。
+- `OutputsLogger`：把 S2S objective 映射到 `token/...` 与 `acoustic/{rvq|flow_matching|repa}/...`
+  tag；loss 与观测 detail 按 task 做 microbatch mean，`tokens` / `text_tokens` / `audio_tokens` /
+  `frames` 则跨 step 做 DDP-sum 后累计（可 checkpoint resume）。通用遍历顺序来自
+  `anytrain.lightning.LossItemLoggerCallback` 的契约，计数累计由本项目实现。
 - `GradLogger` / `GradNormLogger`：只接入 S2S `TrainInterval`；指定分项或全局梯度范数的通用日志逻辑来自
-  `anytrain.lightning`。
+  `anytrain.lightning`。`GradNormLogger` 默认 tag 为 `grad_norm`。
 - `OnDeviceCodecMaterializer`：训练时 wav->codes 的显式 fallback。正式数据仍应提前 materialize
   codec codes；该 fallback 只把 pair/single 共用的 `RawSpeechBatch` 规范化为 `ModelBatch`，不改变
   objective 或 task loss contract。它把 waveform 转成 FP32，在关闭当前 device autocast 的上下文
   中执行 codec，避免 `bf16-mixed` Trainer 把 codec 预处理算子降精度；BiCodec structured view 与
   frame-code view 按数据表示分派，不按重叠 capability 猜测。
 - `FlowMatchingLogger`：显式接收 flow runtime，不向下读取 model runtime；time histogram 和 bucketed
-  loss 日志来自 `anytrain.lightning.LossTimeBucketLoggerCallback`。
+  loss 写到 `acoustic/flow_matching/...`，通用逻辑来自
+  `anytrain.lightning.LossTimeBucketLoggerCallback`。
 - `LossSummary`：只注入 S2S objective 顺序；训练输出 total loss 与分项 `LossItem` 窗口摘要来自
   `anytrain.lightning.LossSummaryCallback`。
 - `anytrain.lightning.validation.History`：正式训练入口启用 validation 时挂载该通用 callback；它在
@@ -76,8 +81,10 @@ model 构造器不接收路径或执行文件 I/O。
 - `AcousticEvaluation`：对 fixed-sample acoustic model 使用本地 generator seeds 采样，记录 feature、
   waveform 与 STFT 距离；纯评估函数位于 `generation.evaluation`，不留在脚本私有模块。
 - `TaskSampleLogger`：只在 global zero 读取 datamodule 的公开 fixed-sample/diagnostic API，正式训练
-  panel 显式绑定 `train|validation + loader + task + indices`，因此 mixed-task loader 不依赖训练
-  collator 的 task allocation。dev panel 复用正式 validation 的独立数据源；通过 module 的
+  panel 显式绑定 `train|validation + loader + task + indices`（split/loader 是取数坐标），
+  因此 mixed-task loader 不依赖训练 collator 的 task allocation。TensorBoard tag 只保留
+  `sample/{task}/{index}/...`，同一 task+index 不允许跨 panel 碰撞。dev panel 复用正式
+  validation 的独立数据源；通过 module 的
   `materialize_batch()` 获得标准 batch，并用 `ModelBatch.row()` 保持 raw sample、
   generation request 与 teacher-forcing reference 逐行对齐。pair 数据严格读取 source/target role，
   single 数据严格读取 `Role.DEFAULT`，不靠缺项 fallback 猜测形态。audio-source task 记录可播放的
@@ -85,14 +92,17 @@ model 构造器不接收路径或执行文件 I/O。
   target waveform 与 teacher-forced `reference_generation`，并复用一次自回归 generation 的
   token、features 与 waveform。Stable Codec 的 full-code 路径没有 acoustic teacher-forcing，
   因此只记录 codec 重建的 target 与自回归 generated。callback 在隔离 RNG context 内应用固定 seed，
-  使不同 step 的生成可比较。它还记录 generation 长度/截断、规范化字符错误率与 exact match，
-  以及 waveform duration ratio、finite、RMS、peak、silence/clipping ratio；这些指标只使用已有
+  使不同 step 的生成可比较。它还记录 generation 长度、`reached_max_new_tokens`，以及按输出
+  模态区分的 `stopped_without_eoa` / `stopped_without_eos`（TEXT/AUDIO 路径会裁掉 stop token，
+  因此撞上 budget 即表示未发出 EOS/EOA，截断音频仍会 decode 并写入 `generated`）、规范化
+  字符错误率与 exact match，以及 waveform duration ratio、finite、RMS、peak、silence/clipping
+  ratio；这些指标只使用已有
   text/waveform，不加载 ASR、MOS、speaker encoder 或其他评估模型，也不替代语义质量验收。每个
   callback 的 checkpoint state key 包含 split、loader、task、seed、indices 和 cadence，使 panel
   实例可独立恢复。纯 text MT loader 支持 train panels，并记录 source/target/generated text 与
   CER/exact-match；MT validation panel 当前被拒绝，因为 validation 数据源契约仍是 speech-only。
 - `TextRetentionLogger`：正式 staged train 默认启用一条固定 T2TT probe；fit 开始时记录 greedy text
-  generation、reference NLL 基线，后续按 `every_n_steps` 或 `every_audio_seconds` 记录 generation、
+  generation、reference NLL 基线，后续按 `every_n_steps` 记录 generation、
   NLL 与相对基线漂移；checkpoint resume 保留最初 baseline，并在新 fit 开始时直接记录相对该 baseline
   的当前漂移。probe 名、instruction、reference 与 generation budget 都来自严格配置；它只在 global
   zero 执行，不把 probe batch 混入训练数据或 loss。
@@ -101,11 +111,8 @@ model 构造器不接收路径或执行文件 I/O。
 audio 或 histogram 能力；本项目只负责 rank、cadence、tag 和领域数据转换，不再维护重复的 logger
 Protocol/helper。
 
-`TrainInterval` 是项目内 callback cadence 接口。`every_n_steps` 按 optimizer step 触发，同一个
-accumulation window 内即使多个 microbatch 共享 `global_step` 也只能运行一次；
-配置 `every_audio_seconds` 时改为按 `ModelBatch.audio_seconds` 累计全局 processed audio seconds
-触发，DDP 下通过 strategy sum 聚合各 rank，gradient accumulation 下每个 train batch 都计入。
-`anytrain` 不接收这个契约，因为它不拥有下游 batch schema 或 `AudioMeta.DURATION` 语义。
+`TrainInterval` 是薄的 step cadence helper：`step % every_n_steps == 0` 时触发，并对同一
+`global_step` 去重，避免 `accumulate_grad_batches` 下重复跑昂贵 callback。
 
 Task sample/evaluation callback 在隔离 RNG context 内运行，不改变后续训练的 CPU 或当前 CUDA
 random state；固定 seed 只服务于同一样本跨 step 比较。
@@ -154,7 +161,10 @@ FlashAttention 或其他 custom op 也可能不在通用算子计数覆盖范围
   optimizer-step 聚合、计时、硬件峰值推断和 MFU 记录，不内置任务 batch schema。
 - overfit performance composition 不包含 `TaskSampleLogger`、`GradLogger` 或 `GradNormLogger`；前者由
   配置显式关闭，后两者由入口自动省略。
-- total loss 只由 LightningModule 以 `sync_dist=True` 记录一次，分项 logger 不重复记录。
+- total loss 只由 LightningModule 以 `sync_dist=True` 记录一次（tag `loss`），分项 logger 不重复记录。
+- `OutputsLogger` 的 TensorBoard tag 按通道归组：`token/{key}/{task}` 与
+  `acoustic/{rvq|flow_matching|repa}/{key}/{task}`；`repa` 与 `rvq` / `flow_matching` 平级，
+  不嵌套在 flow 下。验证指标使用同一路径并加 `val/` 前缀。
 - validation 是 teacher-forcing loss/accuracy 口径，不调用 autoregressive generation；真实生成质量
   仍由 generation callback 与独立结果文档验收。
 - 正式 `scripts/train.py` 使用 `anytrain.lightning.ModelCheckpoint` 的默认异步保存；checkpoint

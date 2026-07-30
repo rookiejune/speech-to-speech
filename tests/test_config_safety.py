@@ -49,17 +49,11 @@ class ConfigSafetyTest(unittest.TestCase):
             "callbacks.task_sample.every_n_steps=0": (
                 "callbacks.task_sample.every_n_steps"
             ),
-            "callbacks.task_sample.every_audio_seconds=0": (
-                "callbacks.task_sample.every_audio_seconds"
-            ),
             "callbacks.task_sample.max_new_tokens=0": (
                 "callbacks.task_sample.max_new_tokens"
             ),
             "callbacks.grad_norm.every_n_steps=0": (
                 "callbacks.grad_norm.every_n_steps"
-            ),
-            "callbacks.grad_norm.every_audio_seconds=0": (
-                "callbacks.grad_norm.every_audio_seconds"
             ),
             "callbacks.checkpoint.every_n_train_steps=0": (
                 "callbacks.checkpoint.every_n_train_steps"
@@ -88,12 +82,6 @@ class ConfigSafetyTest(unittest.TestCase):
             "callbacks.task_sample.every_n_steps=0": (
                 "callbacks.task_sample.every_n_steps"
             ),
-            "callbacks.task_sample.every_audio_seconds=0": (
-                "callbacks.task_sample.every_audio_seconds"
-            ),
-            "callbacks.evaluation.every_audio_seconds=0": (
-                "callbacks.evaluation.every_audio_seconds"
-            ),
         }
 
         for override, message in cases.items():
@@ -106,6 +94,8 @@ class ConfigSafetyTest(unittest.TestCase):
             train(
                 _compose(
                     "train",
+                    "parameter_policy=speech_interface",
+                    "model.lora=null",
                     "callbacks.performance.enabled=true",
                     "callbacks.task_sample.enabled=true",
                 )

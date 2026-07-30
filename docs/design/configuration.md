@@ -26,8 +26,10 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
   可追溯的 split manifest。它要求候选索引覆盖 audited `samples.parquet` 的全部行，绑定
   audit 文件 fingerprint，并把 split method 作为显式参数；它不是训练入口，也不会修改原始
   parquet 或 payload。
-- `pl_module`：完整映射 `pl_module.Config` 的 learning rate 与 weight decay；不再使用含义重复的
-  `optimizer` 组。
+- `pl_module`：完整映射 `pl_module.Config` 的 learning rate、weight decay 与 anytrain LLM
+  optimizer 选择（`adamw` / `muon`）；不再使用含义重复的独立 `optimizer` 组。默认
+  `optimizer=adamw`；Muon 对比时设 `pl_module.optimizer=muon`。有 PEFT LoRA 时，anytrain 会把
+  `muon` 自动路由到 LoRA-Muon（adapter）+ AdamW（其余可训参数）。
 
 Acoustic-only codec screening 已迁入 `semantic-acoustic-codec`。本仓库不再维护对应的 Hydra root、
 job wrapper 或 config schema；历史实验记录仍保存在 `docs/experiments/` 中。
@@ -40,10 +42,8 @@ fixed-sample experiment 默认启用，随机输出不构成质量结论的 `toy
 `callback/performance` preset 只暴露开关、
 硬件峰值 override、记录 cadence、warmup、窗口、CUDA 同步和分布式起点对齐；训练 dtype 与 FLOPs
 口径由实际入口和 provider 决定，不作为可脱离模型配置的 Hydra 字段。
-speech-to-speech 自有日志 callback 默认仍按 `every_n_steps` 触发；需要让 expensive callback 跟随
-实际处理音频量时，配置对应的 `every_audio_seconds`，入口会用 `ModelBatch.audio_seconds` 统计 DDP
-全局 processed audio seconds。该字段只适用于消费 `ModelBatch` 的项目 callback，不进入 anytrain
-的 task-agnostic callback 契约。正式 staged train 默认启用 `callbacks.text_retention`，用固定 T2TT
+speech-to-speech 自有日志 callback 按 `every_n_steps`（optimizer step）触发。正式 staged train
+默认启用 `callbacks.text_retention`，用固定 T2TT
 probe 在 fit 开始建立 reference-NLL baseline，并持续记录 greedy generation 与 NLL delta；启用时
 至少配置一条非空 instruction/reference，cadence 和 generation budget 在入口解析时校验。
 overfit 的可选 `text_retention`、`grad_norm`、`gradient_pair` 与 `flow_matching` 诊断同样由
@@ -113,7 +113,8 @@ unused-parameter detection，`trainer=static_ddp` 只适用于不会跨 microbat
 
 `configs/experiment/train/` 只放 `scripts/train.py` 消费的 staged experiments；仍位于
 `configs/experiment/` 顶层的文件由 `scripts/overfit.py` 消费。这样两个入口不会共享一组含义不明的
-flat experiment 名称。`configs/train.yaml` 仅组合 `entry=train` 和可选 experiment；可复用的
+flat experiment 名称。`configs/train.yaml` 组合 `entry=train`、默认 `model/lora=qwen`（须排在
+experiment 之前，以便非 LoRA experiment 用 `model.lora: null` 覆盖）和可选 experiment；可复用的
 百万步预算、数据加载和 callback cadence 位于 `configs/entry/train.yaml`。
 
 - `unicodec_overfit`：UniCodec fixed-sample 100-step overfit。
@@ -148,8 +149,9 @@ flat experiment 名称。`configs/train.yaml` 仅组合 `entry=train` 和可选 
 `jobs/015/01_stable_codec_stage1.sh` 是 Stable Codec 的默认长跑入口：固定
 `runtime=stable_codec`、`full_codec_sequence`（不使用 audio BPE）、stage 1 的 ASR/TTS
 双 loader、1,000,000 optimizer steps 和每 10,000 steps 的 checkpoint。它启用每 10,000 steps
-  的 teacher-forcing dev validation，并为 ASR/TTS 各配置 train/dev 三条固定样本 panel；panel
-  显式绑定 split、loader、task 与 indices，不依赖 mixed-task allocation。Stable 的 FrameCodec
+  的 teacher-forcing dev validation，并为 ASR/TTS 各配置三条 train 固定样本 panel；panel
+  显式绑定 split、loader、task 与 indices（取数坐标），TensorBoard 路径为
+  `sample/{task}/{index}/...`。Stable 的 FrameCodec
   路径没有独立的 acoustic
   teacher-forcing，因此 TTS TensorBoard audio 记录 codec 重建的 `target` 和自回归
   `generated`。只有 Flow/RVQ acoustic 路径才会额外记录 `reference_generation`；ASR 记录
@@ -240,15 +242,19 @@ backbone top-fraction 抽象为顶层 `parameter_policy` 组，入口解析为
 `ParameterPolicyConfig`，并在 Trainer/optimizer 创建前一次性应用。一个正式 job 只选择一个
 experiment，运行中不切换数据计划或参数冻结。`train/staged_joint_stage_*` 显式保留约定组合：
 stage 0/4 使用 `full`，stage 1/2 使用 `speech_interface`，stage 3 使用
-`speech_interface_top_third`；这不是 `StageName` 的隐式映射。需要只训练 semantic token
+`speech_interface_top_third`；这不是 `StageName` 的隐式映射。这些非 LoRA 对照 experiment 会在配置体中显式写 `model.lora: null`，以覆盖正式 train 的默认 LoRA。需要只训练 semantic token
 interface 时在专用 experiment 中显式选择 `parameter_policy=semantic_only`。
 
+正式 train 入口默认选择 `model/lora=qwen` 与 `parameter_policy=lora`（PiSSA 初始化）。
 PEFT LoRA 必须同时选择 `model/lora=qwen` 与 `parameter_policy=lora`，避免注入 adapter 后又选择
 其它训练策略，或选择 policy 却没有 adapter。OmegaConf 2.3 不能把 PEFT 的复杂 union 字段直接作为
 nested structured config 展开，因此 normalization 边界先用官方字段构造 `peft.LoraConfig`，再把
 该对象写回公开 `model.Config`；它不复制字段或二次校验。PEFT 负责 backbone 内参数的冻结语义，
 该 policy 再训练现有 speech/acoustic interface；当前 performance FLOPs provider 不支持 LoRA，入口
-拒绝同时启用 performance callback。
+拒绝同时启用 performance callback。`pl_module.optimizer=muon` 与 LoRA 组合时，要求
+`init_lora_weights` 为 PiSSA 系满秩初始化，否则入口早失败。
+
+overfit 入口继续默认 `parameter_policy=full` 且不启用 LoRA，专门验收全参闭环。
 
 Stage 0-4 是 S2S 内部的数据/任务/参数策略日程，不等同于“先在 SAC 预训练 generator、再在 S2S
 用 hidden state 联合训练”的两个 phase。artifact 初始化只在 model composition 时发生一次，stage 不拥有
