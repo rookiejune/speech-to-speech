@@ -12,10 +12,24 @@ from .protocol import TokenGenerator
 from .types import Request
 
 
+def prediction_of(request: Request) -> PredictionModality:
+    prediction = request.get("prediction")
+    if prediction is None:
+        return request["task"].prediction_modality
+    if not isinstance(prediction, PredictionModality):
+        raise TypeError("generation request prediction must be a PredictionModality.")
+    return prediction
+
+
 def validate(request: Request, model: TokenGenerator) -> None:
     task = request["task"]
     if not isinstance(task, Task):
         raise TypeError("generation request task must be a Task.")
+    prediction = prediction_of(request)
+    if prediction not in task.allowed_predictions:
+        raise ValueError(
+            f"{task.value} does not allow prediction={prediction.value}."
+        )
     prompt = _integer_tensor(request["prompt_ids"], "prompt ids", dimensions=1)
     if prompt.numel() == 0:
         raise ValueError("generation prompt must contain at least one token.")
@@ -49,11 +63,11 @@ def validate(request: Request, model: TokenGenerator) -> None:
             raise ValueError(
                 "audio input positions must point to visible codec audio payload tokens."
             )
-    if task.prediction_modality is PredictionModality.TEXT:
+    if prediction is PredictionModality.TEXT:
         if request.get("audio_context") is not None:
             raise ValueError("text generation requests cannot include audio context.")
         return
-    if task.prediction_modality.is_mixed:
+    if prediction.is_mixed:
         if request.get("audio_context") is not None:
             raise ValueError("mixed AR generation requests cannot include audio context.")
         return

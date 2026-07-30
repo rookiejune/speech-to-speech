@@ -7,14 +7,14 @@ from typing import TYPE_CHECKING, Any
 import torch
 from torch import Tensor
 
-from ..datamodule.types import ModelBatch
-from ..runtime.types import AcousticCodec, codec_sample_rate
-from .batch import requests_from_batch
+from ...datamodule.types import ModelBatch
+from ...runtime.types import AcousticCodec, codec_sample_rate
+from ..batch import requests_from_batch
 from .reporting import audio_output
 
 if TYPE_CHECKING:
-    from ..model.acoustic import FlowModel, RVQModel
-    from ..pl_module import SpeechToSpeechModule
+    from ...model.acoustic import FlowModel, RVQModel
+    from ...pl_module import SpeechToSpeechModule
 
 
 @torch.no_grad()

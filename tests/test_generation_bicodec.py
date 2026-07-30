@@ -18,6 +18,8 @@ from speech_to_speech.audio_route import (
 from speech_to_speech.generation import (
     Request,
     generate_responses,
+)
+from speech_to_speech.generation.bicodec import (
     prepare_bicodec_global_tts_request,
     prepare_bicodec_tts_request,
 )

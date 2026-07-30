@@ -5,12 +5,37 @@
 
 ## 对外能力
 
-包级 API 公开以下结构和入口：
+公开入口是 OpenAI 风格的 messages API（非 HTTP 服务）：
 
-- `Request(prompt_ids, task, audio_input_positions, audio_context)`：无 target、无 batch padding 的单条推理输入。
-  `prompt_ids` 是一维 layout global token IDs；当固定 `audio_route` 的 decode 需要 prompt stream
-  时，`audio_context` 提供同一 reference 的 structured semantic/acoustic codes。可选的
-  `audio_input_positions` 只标记 source audio payload 在 prompt 中的位置，供 input tower 使用。
+```text
+ChatRequest(messages, task, language?)
+    -> HF apply_chat_template (Qwen3)
+    -> audio | codec_codes materialize
+    -> private Request(prompt_ids, ...)
+    -> generate_responses
+    -> ChatCompletion(choices[].message)
+```
+
+- `create(ChatRequest, model, ...)`：对外 chat 入口。`messages` 使用
+  `{role, content}`；`content` 为字符串或 part 列表。
+- content parts：
+  - `text`：标准文本
+  - `audio`：`waveform` + `sample_rate`；入口侧用 runtime codec encode 成 codes
+  - `codec_codes`：已 materialize 的 codes，携带 `codec` 名（须等于 `runtime.codec_name`）与
+    `codes`（`SemanticAcousticCodes` 或 frame `[frames, codebooks]`）。不同 codec 的轴序/stream
+    排列只委托现有 audio tokenizer + `audio_route` + layout，不在 messages 层另造布局。
+- `task` / `language` 是旁路字段，不伪装成 OpenAI 官方 schema。
+- `ChatCompletion`：`choices[].message` 含 `role=assistant`、可选 text `content`、可选
+  `audio`（`AudioOutput`）。
+
+私有张量契约（service / strategy 仍使用，不作为包级推荐入口）：
+
+- `Request(prompt_ids, task, audio_input_positions, audio_context, prediction?)`：无 target、无
+  batch padding 的单条推理输入，与训练 `ModelSample.request` 共用同一类型。`prompt_ids` 是一维
+  layout global token IDs；当固定 `audio_route` 的 decode 需要 prompt stream 时，`audio_context`
+  提供同一 reference 的 structured semantic/acoustic codes。可选的 `audio_input_positions` 只标记
+  source audio payload 在 prompt 中的位置。可选的 `prediction` 覆写 task 默认 prediction；未设置
+  时与原先一样使用 `task.prediction_modality`。
 - `Result(response_ids, audio)`：按原请求顺序返回的单条结果。TEXT / AUDIO 路径的
   `response_ids` 是裁掉 stop token 后的 layout global token IDs；mixed 路径当前保留状态机产生的
   EOS/BOA/EOA，供 audio span 抽取。纯 text prediction 的 `audio=None`；AUDIO 与 token-only mixed
@@ -19,17 +44,12 @@
   route resolve 后的 structured semantic/acoustic codes；unified-token codec 没有独立 acoustic
   representation，因此 `features=None`。
 - `AcousticGeneration(sequence, features, frame_counts)`：acoustic model 与 audio strategy 之间的批量
-  返回契约；`features` 是带右侧 padding 的 `[batch, frames, dim]`，`frame_counts` 给出每行
-  有效 frame 数。
-- `generate_responses()`：校验通用请求外形、按 `prediction_modality` 分组、padding，并恢复原请求顺序；
-  TEXT / AUDIO 走既有 token 或 audio strategy，PARALLEL / INTERLEAVED 走 `generation.mixed`；
-  audio waveform decode 委托给 `generation.audio` 的 capability strategy。
-- `prepare_bicodec_tts_request()`：为 `bicodec_reuse_prompt_global` 构造 reference-conditioned TTS
-  request，只接收预编码的 `SemanticAcousticCodes`。
-- `prepare_bicodec_global_tts_request()`：为 `bicodec_generate_global` 构造无 audio context 的 TTS
-  request。
+  返回契约。
+- `generate_responses()`：校验私有 request、按有效 `prediction`（request 覆写或 task 默认）分组并生成。
+- `generation.bicodec`：BiCodec route 的私有 request 组装 helper；公开路径应走 `create` /
+  `to_request`。
 - `decode_generated_audio()` / `decode_generated_codes()`：分别把 audio token 配合 acoustic
-  feature/code 解码为 waveform。semantic/full/structured decode 由 audio strategy 选择。
+  feature/code 解码为 waveform。
 - `TextProbe` / `TextProbeResult` / `evaluate_text()`：greedy text generation 与 reference NLL
   评估。
 
@@ -56,14 +76,16 @@ class Request(TypedDict):
     task: Task
     audio_input_positions: Tensor | None
     audio_context: SemanticAcousticCodes | None
+    prediction: NotRequired[PredictionModality | None]
 
 class Result(TypedDict):
     response_ids: Tensor
     audio: AudioOutput | None
 ```
 
-`prompt_ids` 必须是调用方已经准备好的完整 generation prompt。service 不渲染 chat template、
-不插入 instruction；按 task builder 契约构造的 audio-target request 已经以 BOA 结束。
+`prompt_ids` 必须是调用方已经准备好的完整 generation prompt。公开 `create()` 负责 messages →
+HF chat template / codec materialize → 私有 `Request`；`generate_responses()` 本身不渲染 chat
+template、不插入 instruction。按 task builder 契约构造的 audio-target request 已经以 BOA 结束。
 prompt 中若包含 BiCodec reference stream，`prompt_ids` 已经包含 route 规定的 serialized stream，
 而 `audio_context` 保存同一份未序列化 codes，供 decode 复用 prompt-owned stream。route 是固定的
 experiment/checkpoint contract，不属于 `Request`，请求只能提供 context 数据，不能选择另一条 route。
@@ -72,7 +94,7 @@ reference builder 生成的结尾严格为
 它与整个后缀逐 token 相等。context 的 shape、dtype、值域和 global 固定长度由
 `BiCodecAudioTokenizer.encode_streams()` 在同一条路径校验，不接受“可解码但不是当前 prompt”的
 近似匹配。
-`FlattenedAudioTokenizer` 的 codec/codebook marker 和各 codebook range 是 codec serialization
+`FlattenedAudioTokenizer` 的 codebook marker 和各 codebook range 是 codec serialization
 grammar。model 侧 full-sequence generation 强制 marker 顺序，首个 codebook 生成至少一个
 payload 并决定 frame count，其余 codebook 只能生成相同数量、属于各自 range 的 payload，完整
 block 结束后才允许 EOA。marker 与 EOA 都计入 `max_new_tokens`，marker 也保留在
@@ -103,9 +125,11 @@ service 在 padding 前校验每条 request 的通用外形，audio strategy 继
   structured prompt streams 必须使用 `BiCodecAudioTokenizer`。
 ## 执行流程
 
-`generate_responses()` 按 `Request.task.prediction_modality`（task 默认值）分组。loader 的
-prediction override 目前只作用于训练 `ModelSample` / `ModelBatch`，不写入 generation
-`Request`。每组 prompt 左 padding，输出仍按原始请求顺序排列。
+`generate_responses()` 按有效 `prediction` 分组：优先 `Request.prediction`，否则
+`task.prediction_modality`。训练 bridge（`requests_from_batch`）会把
+`ModelBatch.predictions` 写入 Request，因此 loader override 可传到真实推理路径；
+`create` / `to_request` 不传 `prediction` 时行为与原先一致。每组 prompt 左 padding，输出仍按
+原始请求顺序排列。
 
 - `TEXT`：调用 `generate_tokens(generation_modality=TEXT, stop=EOS)`。
 - `AUDIO`：调用统一的 `generate_audio_responses()`，按 runtime/model capability 选择策略。
@@ -192,9 +216,9 @@ fixed-length global units 伪装成 frame-aligned codes。
 ## 训练桥接与文本评估
 
 `generation.batch.requests_from_batch()` 仅供 teacher-forcing 日志使用：它直接读取
-`ModelBatch.generation_prompt_lengths` 切出每行显式 prompt，并携带对应 `audio_contexts`，再去掉
-batch padding；同时保留 `audio_input_positions` 的逐行 source payload 位置。它不从第一个非 `-100`
-label 猜 prompt 边界；核心 service 不依赖 `ModelBatch`。
+`ModelBatch.generation_prompt_lengths` 切出每行显式 prompt，并携带对应 `audio_contexts` 与
+`predictions`，再去掉 batch padding；同时保留 `audio_input_positions` 的逐行 source payload
+位置。它不从第一个非 `-100` label 猜 prompt 边界；核心 service 不依赖 `ModelBatch`。
 
 `decode_reference_codes()` 是 raw task sample 的统一重建边界：二维 frame-code tensor 通过
 `frame_codec().decode()`，structured mapping 恢复为 `SemanticAcousticCodes` 后通过
@@ -205,11 +229,11 @@ acoustic units 当作 semantic frame 轴。
 text modality-local logits 计算，并包含 EOS target。`SpeechToSpeechModule.generate()` 与
 `evaluate_text()` 只提供 eval-mode/no-grad 的 Lightning 适配，不改变 generation 契约。
 
-`generation.reporting` 提供 generation smoke/probe 复用的比较和摘要 helper；它服务于诊断脚本，
+`generation.eval.reporting` 提供 generation smoke/probe 复用的比较和摘要 helper；它服务于诊断脚本，
 不进入包级 `generation` API，也不参与在线推理流程。
 `generation._request` 单点维护 prompt layout、source-audio positions、task 与 audio context 的请求
 约束；generation service 在分组和 padding 前调用它，相邻契约测试不再导入 service 的函数级私有实现。
-`generation.evaluation` 提供 fixed-sample acoustic evaluation 复用的 waveform/STFT helper，
+`generation.eval.acoustic` 提供 fixed-sample acoustic evaluation 复用的 waveform/STFT helper，
 并负责 overfit 结束后的单样本自回归生成健康度、耗时与 RTF 汇总；训练侧 callback 与脚本只负责
 cadence、设备编排、日志和落盘，不维护平行评估实现。
 

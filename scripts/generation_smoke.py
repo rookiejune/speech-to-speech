@@ -8,11 +8,11 @@ from typing import Any
 
 import torch
 
-from speech_to_speech.datamodule.collator import Collator
-from speech_to_speech.datamodule.dataset import DatasetConfig, load_dataset
+from speech_to_speech.datamodule.collate.collator import Collator
+from speech_to_speech.datamodule.dataset.speech import DatasetConfig, load_dataset
 from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.generation.batch import requests_from_batch
-from speech_to_speech.generation.reporting import compare, summary
+from speech_to_speech.generation.eval.reporting import compare, summary
 from speech_to_speech.model.acoustic import FlowModel
 from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import Runtime

@@ -8,10 +8,10 @@ from anydataset import types
 from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
-from ._duration import from_frames, from_samples
-from ._tokenization import token_ids
-from .protocol import DataRuntime, TextRuntime
-from .types import (
+from .._helper.duration import from_frames, from_samples
+from .._helper.tokenization import token_ids
+from ..protocol import DataRuntime, TextRuntime
+from ..types import (
     Language,
     AudioContextSample,
     RawSpeech,
@@ -21,12 +21,12 @@ from .types import (
     Text,
     TextPair,
 )
-from ..runtime import AudioRepresentation
-from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
-from ..source import SourceLayout
-from ..task import Task
-from ..task_spec import resolve_prediction
-from ..prediction import PredictionModality
+from ...runtime import AudioRepresentation
+from ...runtime.audio_tokenizer import BiCodecAudioTokenizer
+from ...source import SourceLayout
+from ...task import Task
+from ...task_spec import resolve_prediction
+from ...prediction import PredictionModality
 
 
 def parse_sample(sample: types.Sample, runtime: DataRuntime) -> SpeechPair:

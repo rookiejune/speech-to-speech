@@ -8,12 +8,12 @@ from anydataset import IterableAnyDataset
 from anydataset.types import Sample as RawSample
 from torch.utils.data import DataLoader, Dataset
 
-from ..prediction import PredictionModality
-from ..task import Task
-from .collator import TextCollator
-from .protocol import TextRuntime, TextRuntimeSnapshot
-from .text import TextConfig, load_text_dataset
-from .types import ModelBatch
+from ...prediction import PredictionModality
+from ...task import Task
+from ..collate.collator import TextCollator
+from ..protocol import TextRuntime, TextRuntimeSnapshot
+from ..dataset.text import TextConfig, load_text_dataset
+from ..types import ModelBatch
 
 
 class TextLoader:

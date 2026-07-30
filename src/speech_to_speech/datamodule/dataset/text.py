@@ -7,8 +7,8 @@ from anydataset import IterableAnyDataset
 from anydataset.types import Lang, Modality, Role, Sample, TextItem, TextMeta, TextView
 from torch.utils.data import Dataset
 
-from .._compat import StrEnum, auto
-from .config import DataLoaderConfig
+from ..._compat import StrEnum, auto
+from ..config import DataLoaderConfig
 
 
 class TextDatasetName(StrEnum):

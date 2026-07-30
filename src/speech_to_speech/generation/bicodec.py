@@ -1,4 +1,4 @@
-"""High-level request builders for generation inputs."""
+"""BiCodec TTS request builders."""
 
 from __future__ import annotations
 

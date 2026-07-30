@@ -16,7 +16,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3MLP,
 )
 
-from .model.adapter import MLPAdapter
+from .model._helper import MLPAdapter
 from .model.audio_input import AudioInputAdapterType, AudioInputTower
 from .model.audio_output import AudioOutputAdapter, AudioOutputAdapterType
 

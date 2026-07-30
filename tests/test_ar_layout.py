@@ -8,7 +8,7 @@ from anydataset.types import Modality
 from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 
-from speech_to_speech.datamodule.ar import build_ar_sample
+from speech_to_speech.datamodule.build.ar import build_ar_sample
 from speech_to_speech.datamodule.types import Language, Speech, Text
 from speech_to_speech.loss.token import TokenLoss
 from speech_to_speech.prediction import PredictionModality
@@ -147,7 +147,7 @@ class AutoregressiveLayoutTest(unittest.TestCase):
         self.assertGreater(float(item.details["audio_tokens"].sum()), 0)
 
     def test_masked_ar_inserts_mask_token_in_source(self):
-        from speech_to_speech.datamodule.masked import build_masked_sample
+        from speech_to_speech.datamodule.build.masked import build_masked_sample
 
         self.runtime.mask_token_id = 20
         self.runtime.layout = Layout(text=(0, 8), audio=(8, 21))
@@ -168,7 +168,7 @@ class AutoregressiveLayoutTest(unittest.TestCase):
         self.assertTrue(sample.token_labels[:prompt_len].eq(-100).all())
 
     def test_translation_parallel_override(self):
-        from speech_to_speech.datamodule.sample import build_speech_sample
+        from speech_to_speech.datamodule.build.sample import build_speech_sample
 
         sample = build_speech_sample(
             _speech(frames=2, text_ids=[2, 3], acoustic=False),

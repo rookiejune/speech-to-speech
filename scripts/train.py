@@ -21,7 +21,7 @@ from speech_to_speech.callback.logging import (
     TextRetentionLogger,
 )
 from speech_to_speech.datamodule import DataModule, SampleSplit
-from speech_to_speech.datamodule.joint import LoaderSchedule
+from speech_to_speech.datamodule.collate.joint import LoaderSchedule
 from speech_to_speech.datamodule.module import LoaderSpec
 from speech_to_speech.pl_module.composition import build
 from speech_to_speech.runtime import Runtime

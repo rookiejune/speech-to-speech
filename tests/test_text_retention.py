@@ -97,7 +97,7 @@ PROBES = {
 
 
 class TextRetentionTest(unittest.TestCase):
-    @patch("speech_to_speech.generation.text.generate_responses")
+    @patch("speech_to_speech.generation.eval.text.generate_responses")
     def test_text_generation_oom_carries_exact_prompt_shape(self, generate_responses):
         error = torch.OutOfMemoryError("generation allocation failed")
         generate_responses.side_effect = error
@@ -115,7 +115,7 @@ class TextRetentionTest(unittest.TestCase):
         self.assertEqual(report["inputs"]["padded_prompt_shape"], [2, 2])
         self.assertEqual(report["inputs"]["max_new_tokens"], 16)
 
-    @patch("speech_to_speech.generation.text.generate_responses")
+    @patch("speech_to_speech.generation.eval.text.generate_responses")
     def test_reference_nll_oom_carries_teacher_forcing_shape(self, generate_responses):
         generate_responses.return_value = [
             Result(response_ids=torch.tensor([5]), audio=None) for _ in PROBES
@@ -175,7 +175,7 @@ class TextRetentionTest(unittest.TestCase):
         self.assertIs(Task.T2TT.target_modality, Modality.TEXT)
         self.assertTrue(Task.T2TT.uses_source_role)
 
-    @patch("speech_to_speech.generation.text.generate_responses")
+    @patch("speech_to_speech.generation.eval.text.generate_responses")
     def test_module_evaluates_greedy_generation_and_text_only_nll(
         self, generate_responses
     ):

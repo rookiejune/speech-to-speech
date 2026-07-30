@@ -5,7 +5,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from .types import TrainInput
+from ..types import TrainInput
 
 
 @runtime_checkable

@@ -36,33 +36,33 @@ from anydataset.dataset import MapStyleABC
 from speech_to_speech.audio_route import BICODEC_GENERATE_GLOBAL, FULL_OUTPUT
 from speech_to_speech.callback import OnDeviceCodecMaterializer
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
-from speech_to_speech.datamodule._task import TaskWeights, allocate_tasks
-from speech_to_speech.datamodule.collator import Collator, TextCollator
-from speech_to_speech.datamodule.dataset import (
+from speech_to_speech.datamodule._helper.task import TaskWeights, allocate_tasks
+from speech_to_speech.datamodule.collate.collator import Collator, TextCollator
+from speech_to_speech.datamodule.dataset.speech import (
     DatasetConfig,
     DatasetName,
     SplitManifestDataset,
     ToyDataset,
     load_dataset,
 )
-from speech_to_speech.datamodule.joint import LoaderSchedule, ScheduledDataLoader
+from speech_to_speech.datamodule.collate.joint import LoaderSchedule, ScheduledDataLoader
 from speech_to_speech.datamodule.module import DataModule, LoaderSpec
 from speech_to_speech.datamodule.diagnostic import SampleSplit
-from speech_to_speech.datamodule.single import SingleCollator
-from speech_to_speech.datamodule.text import (
+from speech_to_speech.datamodule.build.single import SingleCollator
+from speech_to_speech.datamodule.dataset.text import (
     TextConfig,
     TextDatasetConfig,
     TextDatasetName,
     load_text_dataset,
 )
 from speech_to_speech.datamodule.types import DataShape
-from speech_to_speech.datamodule.parser import (
+from speech_to_speech.datamodule.parse.parser import (
     _parse_audio_item,
     parse_sample,
     parse_text_sample,
 )
-from speech_to_speech.datamodule.sample import build_sample
-from speech_to_speech.datamodule.single import build_single_sample, parse_single_sample
+from speech_to_speech.datamodule.build.sample import build_sample
+from speech_to_speech.datamodule.build.single import build_single_sample, parse_single_sample
 from speech_to_speech.datamodule.protocol import DataRuntimeSnapshot
 from speech_to_speech.datamodule.types import (
     Language,
@@ -1800,10 +1800,9 @@ class ContractTest(unittest.TestCase):
 
 
 def _sample(task: Task) -> ModelSample:
-    return ModelSample(
-        input_ids=torch.tensor([1, 2]),
-        token_labels=torch.tensor([-100, 2]),
-        acoustic_target=None,
+    return ModelSample.from_sequence(
+        torch.tensor([1, 2]),
+        torch.tensor([-100, 2]),
         task=task,
         prediction=task.prediction_modality,
     )
@@ -1815,9 +1814,9 @@ def _target_sample(
     semantic_codes: torch.Tensor | None = None,
 ) -> ModelSample:
     frames = codes.size(0)
-    return ModelSample(
-        input_ids=torch.tensor([1, 4]),
-        token_labels=torch.tensor([-100, 4]),
+    return ModelSample.from_sequence(
+        torch.tensor([1, 4]),
+        torch.tensor([-100, 4]),
         acoustic_target={
             "semantic_codes": (
                 torch.ones((frames, 1), dtype=torch.long)

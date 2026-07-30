@@ -47,7 +47,7 @@ from speech_to_speech.audio_route import (
 )
 from speech_to_speech.datamodule import DataModule
 from speech_to_speech.datamodule.module import LoaderKind
-from speech_to_speech.datamodule.dataset import DatasetName
+from speech_to_speech.datamodule.dataset.speech import DatasetName
 from speech_to_speech.datamodule.types import DataShape
 from speech_to_speech.model import (
     AdapterType,

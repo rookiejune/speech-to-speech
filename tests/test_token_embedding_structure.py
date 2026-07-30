@@ -5,7 +5,7 @@ import unittest
 import torch
 from anytrain.module.idspace import Layout
 
-from speech_to_speech.model.adapter import AdapterType
+from speech_to_speech.model import AdapterType
 from speech_to_speech.model.audio_output import (
     AudioOutputAdapterConfig,
     AudioOutputAdapterType,

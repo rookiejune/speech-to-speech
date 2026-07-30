@@ -23,14 +23,14 @@ from anydataset.types import (
 from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 
-from speech_to_speech.datamodule.dataset import (
+from speech_to_speech.datamodule.dataset.speech import (
     DatasetConfig,
     DatasetName,
     SpeakerGridCellsDataset,
     load_dataset,
 )
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
-from speech_to_speech.datamodule.single import SingleCollator
+from speech_to_speech.datamodule.build.single import SingleCollator
 from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.audio_route import BICODEC_REUSE_PROMPT_GLOBAL
 from speech_to_speech.runtime import AudioRepresentation
@@ -234,14 +234,14 @@ class BiCodecSpeakerCellTest(unittest.TestCase):
                 self.assertEqual(batch.tasks, [Task.TTS])
                 self.assertIsNone(batch.acoustic_target)
                 labels = batch.token_labels[batch.token_labels >= 0]
-                codec_marker = runtime.layout.to_global(
+                semantic_marker = runtime.layout.to_global(
                     "audio",
-                    torch.tensor(runtime.audio_tokenizer.codec_token_id),
+                    torch.tensor(runtime.audio_tokenizer.semantic_token_id),
                 )
                 if representation is AudioRepresentation.FULL_CODEC_SEQUENCE:
-                    self.assertIn(int(codec_marker), labels.tolist())
+                    self.assertIn(int(semantic_marker), labels.tolist())
                 else:
-                    self.assertNotIn(int(codec_marker), labels.tolist())
+                    self.assertNotIn(int(semantic_marker), labels.tolist())
 
 
 class _Cells(MapStyleABC):

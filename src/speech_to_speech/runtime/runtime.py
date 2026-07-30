@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
+from numbers import Integral
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union, cast
 
@@ -19,7 +20,6 @@ from .audio_tokenizer import (
     TorchCodecBPE,
 )
 from .codec import load_codec
-from .special_tokens import Qwen3SpecialToken
 from .types import (
     AudioTokenizer,
     Backbone,
@@ -205,6 +205,7 @@ class Runtime:
     @cached_property
     def text_tokenizer(self) -> TextTokenizer:
         tokenizer = AutoTokenizer.from_pretrained(self.config.backbone)
+        bind_chat_bos(tokenizer)
         return cast(TextTokenizer, cast(object, tokenizer))
 
     @cached_property
@@ -296,23 +297,17 @@ class Runtime:
             ),
         )
 
-    def _text_special_id(self, token: Qwen3SpecialToken) -> int:
-        ids = self.text_tokenizer.encode(token.value, add_special_tokens=False)
-        if len(ids) != 1:
-            raise ValueError(f"text token {token.value!r} must map to one id.")
-        return ids[0]
-
     @cached_property
     def pad_token_id(self) -> int:
-        return self._text_special_id(Qwen3SpecialToken.PAD)
+        return text_special_id(self.text_tokenizer, "pad_token_id")
 
     @cached_property
     def bos_token_id(self) -> int:
-        return self._text_special_id(Qwen3SpecialToken.BOS)
+        return text_special_id(self.text_tokenizer, "bos_token_id")
 
     @cached_property
     def eos_token_id(self) -> int:
-        return self._text_special_id(Qwen3SpecialToken.EOS)
+        return text_special_id(self.text_tokenizer, "eos_token_id")
 
     @property
     def boa_token_id(self) -> int:
@@ -403,6 +398,57 @@ def audio_tokenizer(path: str | Path) -> AudioTokenizer:
 
     tokenizer = codec_bpe(Path(path).expanduser())
     return cast(AudioTokenizer, cast(object, TorchCodecBPE.wrap(tokenizer)))
+
+
+# Qwen chat turn start; stock HF leaves bos_token unset while keeping this in vocab.
+_CHAT_BOS_TOKEN = "<|im_start|>"
+
+
+def bind_chat_bos(tokenizer: object) -> None:
+    """Expose chat turn-start as bos when the tokenizer leaves bos unset."""
+    if getattr(tokenizer, "bos_token_id", None) is not None:
+        return
+    convert = getattr(tokenizer, "convert_tokens_to_ids", None)
+    if not callable(convert):
+        return
+    token_id = convert(_CHAT_BOS_TOKEN)
+    if isinstance(token_id, bool) or not isinstance(token_id, Integral):
+        return
+    token_id = int(token_id)
+    if token_id < 0:
+        return
+    unk = getattr(tokenizer, "unk_token_id", None)
+    if unk is not None and token_id == int(unk):
+        return
+    tokenizer.bos_token = _CHAT_BOS_TOKEN
+
+
+def text_special_id(tokenizer: TextTokenizer, name: str) -> int:
+    """Resolve a required text special-token id from HF tokenizer attributes."""
+    if name not in {"pad_token_id", "bos_token_id", "eos_token_id"}:
+        raise ValueError(f"unsupported text special token attribute: {name}.")
+    token_id = getattr(tokenizer, name)
+    if token_id is not None:
+        return _token_id(token_id, name)
+    map_key = name[: -len("_id")]
+    token = tokenizer.special_tokens_map.get(map_key)
+    if token is None:
+        raise ValueError(f"text tokenizer is missing {name}.")
+    if not isinstance(token, str):
+        raise TypeError(f"text tokenizer {map_key} must be a string.")
+    ids = tokenizer.encode(token, add_special_tokens=False)
+    if len(ids) != 1:
+        raise ValueError(f"text token {token!r} must map to one id.")
+    return _token_id(ids[0], name)
+
+
+def _token_id(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError(f"text tokenizer {name} must be an integer.")
+    token_id = int(value)
+    if token_id < 0:
+        raise ValueError(f"text tokenizer {name} must be non-negative.")
+    return token_id
 
 
 def dtype(value: str) -> torch.dtype:

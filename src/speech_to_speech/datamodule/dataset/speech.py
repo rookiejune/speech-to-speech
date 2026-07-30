@@ -22,16 +22,16 @@ from anydataset.types import (
 )
 from torch.utils.data import Dataset
 
-from .._compat import StrEnum, auto
-from ..audio_route import PromptSource
-from ..runtime.types import (
+from ..._compat import StrEnum, auto
+from ...audio_route import PromptSource
+from ...runtime.types import (
     CodecBackend,
     acoustic_codec,
     frame_codebook_sizes,
     structured_codec,
 )
-from .protocol import DatasetRuntime
-from .types import AudioContextSample
+from ..protocol import DatasetRuntime
+from ..types import AudioContextSample
 
 
 class DatasetName(StrEnum):

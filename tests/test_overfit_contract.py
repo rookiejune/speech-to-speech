@@ -15,7 +15,7 @@ from scripts.overfit import (
     training_callbacks,
 )
 from speech_to_speech.datamodule.config import SpeechConfig
-from speech_to_speech.datamodule.dataset import DatasetName
+from speech_to_speech.datamodule.dataset.speech import DatasetName
 from speech_to_speech.datamodule.types import DataShape
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.task import Task

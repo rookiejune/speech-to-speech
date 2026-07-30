@@ -16,7 +16,7 @@ from torch import Tensor
 from ...generation import Request, Result
 from ...generation.batch import requests_from_batch
 from ...generation.decode import decode_reference_codes
-from ...generation.evaluation import reference_audio
+from ...generation.eval.acoustic import reference_audio
 from ...datamodule.diagnostic import (
     SampleRef,
     SampleSplit,

@@ -4,13 +4,13 @@ from collections.abc import Mapping
 
 from anydataset.types import Sample as RawSample
 
-from ..prediction import PredictionModality
-from ..task import Task
-from ._task import TaskWeights
-from .parser import parse_task_sample, parse_text_sample
-from .protocol import DataRuntime, TextRuntime
-from .sample import build_task_sample, build_text_sample
-from .types import ModelBatch, ModelSample, RawSpeechBatch, SpeechTaskSample
+from ...prediction import PredictionModality
+from ...task import Task
+from .._helper.task import TaskWeights
+from ..parse.parser import parse_task_sample, parse_text_sample
+from ..protocol import DataRuntime, TextRuntime
+from ..build.sample import build_task_sample, build_text_sample
+from ..types import ModelBatch, ModelSample, RawSpeechBatch, SpeechTaskSample
 
 
 class Collator:
@@ -114,7 +114,7 @@ def _validate_text_tasks(
     *,
     prediction: PredictionModality | None = None,
 ) -> None:
-    from ..task_spec import resolve_prediction
+    from ...task_spec import resolve_prediction
 
     for task in tasks:
         if (

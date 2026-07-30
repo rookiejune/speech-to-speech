@@ -141,8 +141,8 @@ teacher features。acoustic-only codec screening 与 oracle artifact 导出由
 - token 行损失是有效 token 的加权平均；`details` 中的 `text_loss` / `audio_loss` 仅供观测，不改变
   训练标量。validation 暴露聚合 `token/loss`（经 `val/` 前缀写入 logger），暂不拆
   `token/text_loss` / `token/audio_loss`。
-- generation 仍按 `Request.task.prediction_modality`（task 默认）分组；loader 的 prediction
-  override 目前是训练专用，不通过 generation Request 传播。
+- generation 按有效 `Request.prediction`（缺省则 `task.prediction_modality`）分组；训练 bridge
+  会把 `ModelBatch.predictions` 写入 Request。
 - `audio_route` 不改变 Flow/RVQ acoustic objective 的 frame-aligned contract；它只约束 structured
   token route 的 prompt/output/decode ownership。BiCodec reuse/predict 路线都不会把 target acoustic
   stream 静默泄漏到 prompt，prompt/reference codes 也不作为 token labels。

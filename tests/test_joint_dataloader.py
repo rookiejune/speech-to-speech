@@ -8,12 +8,12 @@ from unittest.mock import Mock, patch
 import torch
 from anydataset import IterableAnyDataset
 
-from speech_to_speech.datamodule.dataset import DatasetConfig
-from speech_to_speech.datamodule.joint import LoaderSchedule, ScheduledDataLoader
+from speech_to_speech.datamodule.dataset.speech import DatasetConfig
+from speech_to_speech.datamodule.collate.joint import LoaderSchedule, ScheduledDataLoader
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.module import DataModule, LoaderSpec
 from speech_to_speech.datamodule.diagnostic import SampleSplit
-from speech_to_speech.datamodule.text import TextConfig
+from speech_to_speech.datamodule.dataset.text import TextConfig
 from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.task import Task
 
@@ -179,7 +179,7 @@ class ScheduledDataLoaderTest(unittest.TestCase):
         dataset = _IterableSamples(samples)
 
         with patch(
-            "speech_to_speech.datamodule._text.load_text_dataset",
+            "speech_to_speech.datamodule._helper.text.load_text_dataset",
             return_value=dataset,
         ):
             datamodule = DataModule(Mock(), {"mt": spec})

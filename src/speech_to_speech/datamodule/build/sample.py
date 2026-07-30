@@ -7,16 +7,16 @@ from anydataset.types import Modality
 from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
-from ..audio_route import AudioStream, Config as AudioRouteConfig, PromptSource
-from ..prediction import PredictionModality
-from ..runtime import AudioRepresentation
-from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
-from ..task import Task
-from ..task_spec import resolve_prediction
-from ._tokenization import token_ids
+from ...audio_route import AudioStream, Config as AudioRouteConfig, PromptSource
+from ...prediction import PredictionModality
+from ...runtime import AudioRepresentation
+from ...runtime.audio_tokenizer import BiCodecAudioTokenizer
+from ...task import Task
+from ...task_spec import resolve_prediction
+from .._helper.tokenization import token_ids
 from .ar import build_ar_sample, is_ar_task
-from .protocol import DataRuntime, TextRuntime
-from .types import (
+from ..protocol import DataRuntime, TextRuntime
+from ..types import (
     AcousticTarget,
     Language,
     ModelSample,
@@ -273,8 +273,12 @@ def _build_modal_sample(
             token_positions=target_audio_token_positions,
         )
     )
-    return ModelSample(
-        input_ids=full_ids,
+    prompt_length = (
+        len(input_ids) + 1 if target_modality is Modality.AUDIO else len(input_ids)
+    )
+    return ModelSample.pack(
+        prompt_ids=full_ids[:prompt_length],
+        response_ids=full_ids[prompt_length:],
         token_labels=token_labels,
         token_groups=token_groups,
         acoustic_target=acoustic_target,
@@ -286,11 +290,6 @@ def _build_modal_sample(
             task,
             prediction,
             audio_context=audio_context if audio_prompt is not None else None,
-        ),
-        generation_prompt_length=(
-            len(input_ids) + 1
-            if target_modality is Modality.AUDIO
-            else len(input_ids)
         ),
         audio_input_positions=audio_input_positions,
         audio_context=audio_prompt,
@@ -344,8 +343,9 @@ def _parallel_response(
             codes=target.acoustic_codes,
             token_positions=torch.repeat_interleave(positions, target.audio_token_spans),
         )
-    return ModelSample(
-        input_ids=full_ids,
+    return ModelSample.pack(
+        prompt_ids=input_ids,
+        response_ids=response,
         token_labels=labels,
         token_groups=None,
         acoustic_target=acoustic,
@@ -358,7 +358,6 @@ def _parallel_response(
             prediction,
             audio_context=audio_context,
         ),
-        generation_prompt_length=input_ids.numel(),
         audio_input_positions=audio_input_positions,
         audio_context=None,
     )
@@ -391,14 +390,14 @@ def build_text_sample(
     full_ids = torch.cat([input_ids, response_ids])
     token_labels = torch.full_like(full_ids, -100)
     token_labels[len(input_ids) :] = response_ids
-    return ModelSample(
-        input_ids=full_ids,
+    return ModelSample.pack(
+        prompt_ids=input_ids,
+        response_ids=response_ids,
         token_labels=token_labels,
         token_groups=None,
         acoustic_target=None,
         task=task,
         prediction=PredictionModality.TEXT,
-        generation_prompt_length=len(input_ids),
     )
 
 

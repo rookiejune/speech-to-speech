@@ -9,7 +9,7 @@ from torch import Tensor
 from anydataset.types import Lang, Modality, Role, TextItem, TextMeta, TextView
 from anytrain.module.idspace import Layout
 
-from speech_to_speech.generation.evaluation import evaluate
+from speech_to_speech.generation.eval.acoustic import evaluate
 from speech_to_speech.callback.logging.task_sample import TaskSampleLogger
 from speech_to_speech.datamodule.types import ModelBatch
 from semantic_acoustic_codec.model import AcousticRVQDecoder
@@ -139,7 +139,7 @@ class RNGCallbackTest(unittest.TestCase):
         before = torch.random.get_rng_state().clone()
 
         with patch(
-            "speech_to_speech.generation.evaluation.device_batch",
+            "speech_to_speech.generation.eval.acoustic.device_batch",
             return_value=batch,
         ):
             evaluate(model, batch, _Codec(), seeds=(5, 7))

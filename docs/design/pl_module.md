@@ -79,7 +79,7 @@ model 构造器不接收路径或执行文件 I/O。
   每次 validation 结束后收集 `val/*` 标量，区分 fit 前 sanity run 和 optimizer-step interval run，
   并把可恢复的 report 写入 `metrics.json`。本项目不重复实现 history state 或 scalar 校验。
 - `AcousticEvaluation`：对 fixed-sample acoustic model 使用本地 generator seeds 采样，记录 feature、
-  waveform 与 STFT 距离；纯评估函数位于 `generation.evaluation`，不留在脚本私有模块。
+  waveform 与 STFT 距离；纯评估函数位于 `generation.eval.acoustic`，不留在脚本私有模块。
 - `TaskSampleLogger`：只在 global zero 读取 datamodule 的公开 fixed-sample/diagnostic API，正式训练
   panel 显式绑定 `train|validation + loader + task + indices`（split/loader 是取数坐标），
   因此 mixed-task loader 不依赖训练 collator 的 task allocation。TensorBoard tag 只保留

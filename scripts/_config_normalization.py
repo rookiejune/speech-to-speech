@@ -11,8 +11,8 @@ from speech_to_speech.audio_route import (
     PromptSource,
     StreamSource,
 )
-from speech_to_speech.datamodule.dataset import DatasetName
-from speech_to_speech.datamodule.text import TextDatasetName
+from speech_to_speech.datamodule.dataset.speech import DatasetName
+from speech_to_speech.datamodule.dataset.text import TextDatasetName
 from speech_to_speech.datamodule.types import DataShape
 from speech_to_speech.model import (
     AdapterType,

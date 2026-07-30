@@ -8,8 +8,8 @@ import torch
 from torch import Tensor, nn
 
 from .._compat import StrEnum, auto
-from .adapter import MLPAdapter
-from ._tower import (
+from ._helper import (
+    MLPAdapter,
     safe_transformer_mask,
     tower_fields,
     valid_mask,

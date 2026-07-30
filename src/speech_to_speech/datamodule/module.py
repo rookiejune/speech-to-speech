@@ -12,23 +12,23 @@ from torch.utils.data import DataLoader, Subset
 from .._compat import StrEnum, auto
 from ..prediction import PredictionModality
 from ..task import Task
-from ._text import TextLoader
-from .collator import Collator
+from ._helper.text import TextLoader
+from .collate.collator import Collator
 from .config import DataLoaderConfig, SpeechConfig
-from .dataset import load_dataset
+from .dataset.speech import load_dataset
 from .diagnostic import SampleSplit
-from .joint import LoaderSchedule, ScheduledDataLoader
+from .collate.joint import LoaderSchedule, ScheduledDataLoader
 from .protocol import (
     DataRuntime,
     DataRuntimeSnapshot,
     DatasetRuntime,
     TextRuntime,
 )
-from .single import SingleCollator
+from .build.single import SingleCollator
 from .types import DataShape, TrainInput
 
 if TYPE_CHECKING:
-    from .text import TextConfig
+    from .dataset.text import TextConfig
 
 
 class LoaderKind(StrEnum):

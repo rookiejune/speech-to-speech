@@ -14,21 +14,21 @@
   CUDA module。
 - `DatasetRuntime`：在 `DataRuntime` 上增加正式 codec object，仅供 dataset factory 根据
   codebook metadata 构造 toy prepared-code samples。
-- `parser.parse_sample()`：把 `anydataset.types.Sample` 解析为 `SpeechPair`。它解释当前
+- `parse.parser.parse_sample()`：把 `anydataset.types.Sample` 解析为 `SpeechPair`。它解释当前
   `AudioView` 与 runtime `audio_representation`，将 decoupled FrameCodec 的 LongCat codebooks 分成
   semantic/acoustic codes，或在 `full_codec_sequence` 下把完整 codec codes 作为 token
   supervision，并生成 text/audio token IDs 与 audio token spans。prompt/output stream ownership
   由 sample builder 根据 `audio_route` 处理，不由 parser 从 representation 推断。
-- `parser.parse_task_sample()`：按 `Task` 只解析实际消费的 source/target modality。pair/single
+- `parse.parser.parse_task_sample()`：按 `Task` 只解析实际消费的 source/target modality。pair/single
   只决定 role 映射；codec view 缺失时是否使用 waveform fallback 与数据 shape 无关。
-- `single.SingleCollator` / `single.parse_single_sample()`：处理 single utterance 数据形态，
+- `build.single.SingleCollator` / `build.single.parse_single_sample()`：处理 single utterance 数据形态，
   即同一条 utterance 同时提供 text 与 audio/codes。TTS、ASR、TEXT_AR、AUDIO_AR、
-  PARALLEL_AR、INTERLEAVED_AR 共用该 path；AR 序列由 `datamodule.ar` 组装。pair
+  PARALLEL_AR、INTERLEAVED_AR 共用该 path；AR 序列由 `datamodule.build.ar` 组装。pair
   translation path 不再承载 single-only 数据契约。
-- `sample.build_sample()`：根据 `Task` 把 `SpeechPair` 组装成 `ModelSample`，负责 chat
+- `build.sample.build_sample()`：根据 `Task` 把 `SpeechPair` 组装成 `ModelSample`，负责 chat
   template、BOA/EOA/EOS、global ID 映射、source token prompt、token labels 和 target frame
   positions。
-- `single.build_single_sample()`：复用同一 `ModelSample` / `ModelBatch` 输出契约，把 single
+- `build.single.build_single_sample()`：复用同一 `ModelSample` / `ModelBatch` 输出契约，把 single
   utterance 组装成 text->audio 或 audio->text 序列；`pl_module` 不区分 batch 来源。
 - `types.Speech` / `types.SpeechPair`：prepared sample 的 codec、token 和语言逻辑视图；
   `AudioContextSample` 为 raw sample 绑定独立 audio reference；`RawSpeech` / `SpeechTaskSample` /
@@ -84,10 +84,10 @@ checkpoint 的收敛和生成音质仍需单独验收。
   直接复用 `Config` 与 `TextConfig`，入口不声明同构 schema 或转换 dict。prepared speech 的 map-style dataset 通过
   `MapStyleABC.dataloader()` 使用 anydataset 的 cost planner；普通或 iterable dataset 使用
   PyTorch `DataLoader`。`shape=pair` 是默认路径；`shape=single` 显式选择 single utterance path。
-- `_task.py` 私有承载 loader task weights 校验与 batch task 分配；`_text.py` 私有承载 text dataset
-  的 DataLoader 构造。相邻模块复用其中公开命名的 `TaskWeights`、`allocate_tasks` 与 `TextLoader`，
-  不跨模块导入函数级私有名，也不把这些实现细节提升为包级 API。
-- `_duration.py` 统一校验显式音频时长，并在 metadata 缺失时按 codec frames 或 waveform samples
+- `_helper.task` 私有承载 loader task weights 校验与 batch task 分配；`_helper.text` 私有承载 text
+  dataset 的 DataLoader 构造。相邻模块复用其中公开命名的 `TaskWeights`、`allocate_tasks` 与
+  `TextLoader`，不跨模块导入函数级私有名，也不把这些实现细节提升为包级 API。
+- `_helper.duration` 统一校验显式音频时长，并在 metadata 缺失时按 codec frames 或 waveform samples
   推导秒数；pair、single 与 raw waveform parser 不各自维护同一数值约束。
 - `DataModule(runtime, loaders, schedule=None, validation=None)`：唯一 Lightning 数据入口。`loaders` 是
   `name -> LoaderSpec` 映射；speech loader 使用 `LoaderSpec.speech(config, task_weights,
@@ -110,8 +110,8 @@ checkpoint 的收敛和生成音质仍需单独验收。
 
 ```text
 raw Sample
-    -> parser.parse_sample(runtime) -> SpeechPair
-    -> sample.build_sample(task, runtime) -> ModelSample
+    -> parse.parser.parse_sample(runtime) -> SpeechPair
+    -> build.sample.build_sample(task, runtime) -> ModelSample
     -> ModelBatch.from_samples(pad_token_id=runtime.pad_token_id) -> ModelBatch
 ```
 
@@ -120,8 +120,8 @@ materialize 出当前 runtime `AudioView` 的 codec codes：
 
 ```text
 raw Sample(Role.DEFAULT)
-    -> single.parse_single_sample(runtime) -> Speech
-    -> single.build_single_sample(task, runtime) -> ModelSample
+    -> build.single.parse_single_sample(runtime) -> Speech
+    -> build.single.build_single_sample(task, runtime) -> ModelSample
     -> ModelBatch.from_samples(pad_token_id=runtime.pad_token_id) -> ModelBatch
 ```
 
@@ -136,17 +136,34 @@ structured `tokenize()`；LongCat、Stable Codec 与 UniCodec frame view 走完�
 LongCat 同时暴露 structured capability 就改变数据表示。同一 batch 可以混合 prepared-code item
 和 raw waveform item。
 
-`ModelSample` 和 `ModelBatch` 使用同一组核心字段：
+`ModelSample` 拆成与 generation 共用的输入侧 `Request`，以及仅训练使用的 `Labels`；collate
+再导出 teacher-forcing 视图供 loss / backbone 消费：
 
 ```python
-input_ids: Tensor
-token_labels: Tensor
+@dataclass
+class ModelSample:
+    request: Request   # generation.types.Request
+    labels: Labels
+
+# Request（与推理共用）
+prompt_ids: Tensor
+task: Task
+prediction: PredictionModality | None   # 训练必填；推理可空=用 task 默认
+audio_input_positions: Tensor | None
+audio_context: SemanticAcousticCodes | None
+
+# Labels（仅训练）
+response_ids: Tensor
+token_labels: Tensor          # 与 cat(prompt_ids, response_ids) 等长；prompt 段为 -100
 token_groups: Tensor | None
 acoustic_target: AcousticTarget | None
-audio_input_positions: Tensor | None
-generation_prompt_length: int
-audio_context: SemanticAcousticCodes | None
+audio_seconds: float
 ```
+
+`ModelBatch.from_samples` 分别 pad request / labels，再令
+`input_ids = cat(prompt_ids, response_ids)`，并令 `generation_prompt_lengths = len(prompt_ids)`。
+batch 仍暴露对齐的 `input_ids` / `token_labels` / `token_groups` / `acoustic_target` /
+`audio_input_positions` / `audio_contexts` / `predictions`，供现有 loss 与 bridge 使用。
 
 `AcousticTarget` 包含 `semantic_codes`、`codes`、`token_positions`。分组使必须共同存在的 tensor
 不能形成半完整状态。
@@ -159,13 +176,14 @@ route 本身只接受 `global`。reference 的 semantic/global codes
 `token_groups` 只标记实际预测的 semantic、semantic-or-end 或各 acoustic codebook payload；forced
 codec/stream marker 与外层 EOA 不进入监督。
 
-`ModelBatch` 额外保存 `tasks: list[Task]` 和 `pad_token_id`，并公开
-`attention_mask` 与 `acoustic_target_mask`。speech batch 还保存
+`ModelBatch` 额外保存 `tasks: list[Task]`、`predictions: list[PredictionModality]` 和
+`pad_token_id`，并公开 `attention_mask` 与 `acoustic_target_mask`。speech batch 还保存
 `audio_seconds: Tensor[B]`，表示每条训练样本按当前 task 实际消费的 source/target 音频秒数之和；
-纯文本样本为 0。batch padding 同时把单条 `generation_prompt_length` 和 `audio_context` 聚合为
-`generation_prompt_lengths` 与逐行 `audio_contexts`；teacher-forcing generation bridge 直接使用
-显式 prompt boundary，不从第一个非 `-100` label 反推。audio-target boundary 包含 response BOA，
-因此即使后续 grammar marker 不受监督，真实生成仍从相同状态开始。
+纯文本样本为 0。batch padding 同时把单条 prompt 边界和 `audio_context` 聚合为
+`generation_prompt_lengths` 与逐行 `audio_contexts`；teacher-forcing generation bridge
+（`requests_from_batch`）切出 `prompt_ids` 并带上同批 `prediction`，不从第一个非 `-100`
+label 反推。audio-target 路径把结构 BOA 写入 `prompt_ids`，因此即使后续 grammar marker
+不受监督，真实生成仍从相同状态开始。
 
 `audio_input_positions` 是每条序列中 source audio payload token 的位置，按 `[frames]` 保存，batch
 padding 后为 `[batch, frames]`，右侧填充 `-1`。sample builder 只为
@@ -194,7 +212,7 @@ response、generated token 以及 BiCodec route 的 reference `audio_context` �
   codec。在线编码是 FP32 预处理边界，不属于 backbone/acoustic decoder 的 autocast graph。
 - toy dataset 只读取正式 runtime 的 codec identity 与 codebook metadata；它不提供 tokenizer、
   codec、layout 或 special token，因此不存在 toy runtime 分支。
-- `parser.py` 只解释 raw dataset representation；`sample.py` 只实现任务序列规则；
+- `parse.parser` 只解释 raw dataset representation；`build.sample` 只实现任务序列规则；
   `types.py` 保存结构并处理局部校验、padding 和 mask。三层不反向读取彼此的私有逻辑。
 - LongCat 的第 0 个 codebook 和后续 codebooks 只在 parser 边界解释为 semantic/acoustic。
   FrameCodec `full_codec_sequence` 不拆 semantic/acoustic side channel，而是把完整 codec codes 放入

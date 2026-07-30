@@ -4,7 +4,9 @@ from typing import TypedDict
 
 from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
+from typing_extensions import NotRequired
 
+from ..prediction import PredictionModality
 from ..task import Task
 
 
@@ -13,6 +15,7 @@ class Request(TypedDict):
     task: Task
     audio_input_positions: Tensor | None
     audio_context: SemanticAcousticCodes | None
+    prediction: NotRequired[PredictionModality | None]
 
 
 class AudioOutput(TypedDict):

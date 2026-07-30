@@ -11,7 +11,7 @@ from torch import Tensor, nn
 
 from ...generation.types import AcousticGeneration
 from ...runtime.types import AcousticCodec, acoustic_codec
-from .._buffer import register
+from .._helper import register
 from ..base import Config, Model
 from ..protocol import FlowModelRuntime, FlowSamplingRuntime
 from ._config import DecoderConfig, FlowRepaConfig, decoder_options

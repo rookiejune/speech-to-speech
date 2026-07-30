@@ -7,8 +7,8 @@ from omegaconf import MISSING, DictConfig
 
 from speech_to_speech.audio_route import Config as AudioRouteConfig
 from speech_to_speech.datamodule.config import SpeechConfig
-from speech_to_speech.datamodule.joint import LoaderSchedule
-from speech_to_speech.datamodule.text import TextConfig as TextDataConfig
+from speech_to_speech.datamodule.collate.joint import LoaderSchedule
+from speech_to_speech.datamodule.dataset.text import TextConfig as TextDataConfig
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.pl_module import Config as ModuleConfig

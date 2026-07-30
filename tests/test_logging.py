@@ -210,17 +210,15 @@ class LoggingTest(unittest.TestCase):
         # Homogeneous batch helper only has one row; build two-row batch.
         batch = ModelBatch.from_samples(
             [
-                ModelSample(
-                    input_ids=torch.tensor([1, 2]),
-                    token_labels=torch.tensor([-100, 2]),
-                    acoustic_target=None,
+                ModelSample.from_sequence(
+                    torch.tensor([1, 2]),
+                    torch.tensor([-100, 2]),
                     task=Task.TTS,
                     prediction=Task.TTS.prediction_modality,
                 ),
-                ModelSample(
-                    input_ids=torch.tensor([1, 2, 3]),
-                    token_labels=torch.tensor([-100, 2, 3]),
-                    acoustic_target=None,
+                ModelSample.from_sequence(
+                    torch.tensor([1, 2, 3]),
+                    torch.tensor([-100, 2, 3]),
                     task=Task.TTS,
                     prediction=Task.TTS.prediction_modality,
                 ),
@@ -289,10 +287,9 @@ if __name__ == "__main__":
 def _batch(task: Task, audio_seconds: float = 0.0) -> ModelBatch:
     return ModelBatch.from_samples(
         [
-            ModelSample(
-                input_ids=torch.tensor([1, 2]),
-                token_labels=torch.tensor([-100, 2]),
-                acoustic_target=None,
+            ModelSample.from_sequence(
+                torch.tensor([1, 2]),
+                torch.tensor([-100, 2]),
                 task=task,
                 prediction=task.prediction_modality,
                 audio_seconds=audio_seconds,
@@ -305,9 +302,9 @@ def _batch(task: Task, audio_seconds: float = 0.0) -> ModelBatch:
 def _acoustic_batch(task: Task) -> ModelBatch:
     return ModelBatch.from_samples(
         [
-            ModelSample(
-                input_ids=torch.tensor([1, 2]),
-                token_labels=torch.tensor([-100, 2]),
+            ModelSample.from_sequence(
+                torch.tensor([1, 2]),
+                torch.tensor([-100, 2]),
                 acoustic_target={
                     "semantic_codes": torch.tensor([[1]]),
                     "codes": torch.tensor([[2]]),

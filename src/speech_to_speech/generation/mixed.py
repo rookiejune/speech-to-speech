@@ -9,6 +9,7 @@ from torch import Tensor
 
 from ..prediction import PredictionModality
 from ..task import Task
+from ._request import prediction_of
 from .audio import decode_token_audio_rows
 from .protocol import TokenGenerator
 from .types import Request, Result
@@ -37,10 +38,10 @@ def generate_mixed_responses(
 ) -> list[Result]:
     if not requests:
         return []
-    prediction = requests[0]["task"].prediction_modality
+    prediction = prediction_of(requests[0])
     if not prediction.is_mixed:
         raise ValueError("mixed generation requires PARALLEL or INTERLEAVED prediction.")
-    if any(request["task"].prediction_modality is not prediction for request in requests):
+    if any(prediction_of(request) is not prediction for request in requests):
         raise ValueError("mixed generation batch must share prediction modality.")
 
     runtime = model.runtime

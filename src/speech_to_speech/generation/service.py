@@ -7,7 +7,7 @@ import torch
 from torch import Tensor
 
 from ..prediction import PredictionModality
-from ._request import validate
+from ._request import prediction_of, validate
 from .audio import generate_audio_responses
 from .mixed import generate_mixed_responses
 from .protocol import TokenGenerator
@@ -31,8 +31,7 @@ def generate_responses(
     groups: dict[PredictionModality, list[tuple[int, Request]]] = {}
     for index, request in enumerate(requests):
         validate(request, model)
-        prediction = request["task"].prediction_modality
-        groups.setdefault(prediction, []).append((index, request))
+        groups.setdefault(prediction_of(request), []).append((index, request))
 
     for prediction, group in groups.items():
         prompt, prompt_mask, audio_input_positions = _inputs(

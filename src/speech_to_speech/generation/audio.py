@@ -90,7 +90,10 @@ def generate_audio_responses(
 
 def validate_audio_request(request: Request, model: TokenGenerator) -> None:
     """Validate audio context against the runtime-owned route contract."""
-    if request["task"].prediction_modality is not PredictionModality.AUDIO:
+    prediction = request.get("prediction")
+    if prediction is None:
+        prediction = request["task"].prediction_modality
+    if prediction is not PredictionModality.AUDIO:
         raise ValueError(
             "audio generation validation requires an audio prediction task."
         )

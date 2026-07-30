@@ -175,7 +175,7 @@ global input_ids
 
 `idspace.Embedding` 只做 block 路由与输入侧 adapter；跨 block 输出 head 由 S2S 读取对应
 `embeddings[block].weight` 做 tied linear，不再使用 backbone LM head。text block 在词表对齐时用
-`EmbeddingView`（`model/_embedding.py`）引用 backbone input embedding，避免把同一
+`EmbeddingView`（`model/_helper.py`）引用 backbone input embedding，避免把同一
 `nn.Embedding` 挂到两条 ownership path；audio adapter 经 `CastOutput` 在边界把 FP32 输出
 cast 到 backbone embedding dtype。`token_embedding.*` 为唯一参数路径；旧
 `semantic_audio_embedding.*` / `semantic_audio_adapter.*` checkpoint key 与现 schema 不兼容，
@@ -240,8 +240,8 @@ TEXT/AUDIO 交替与 force-BOA 规则在 `generation.mixed`，不进入该通用
 `generate_full_codec_sequence()` 按 audio tokenizer 分派：frame-aligned
 `FlattenedAudioTokenizer` 使用 codebook-block 状态机，首码本决定 frame count 并约束后续等长
 payload；fixed-length `BiCodecAudioTokenizer` 使用 `audio_route.output.streams` 选择 grammar：
-reuse route 生成 `codec, semantic_marker, semantic..., end`，generate route 生成
-`codec, global_marker, global..., semantic_marker, semantic..., end`。service 不复制 marker、
+reuse route 生成 `semantic_marker, semantic..., end`，generate route 生成
+`global_marker, global..., semantic_marker, semantic..., end`。service 不复制 marker、
 range 或 block-length 规则。
 
 route 的 prompt 属于调用前已序列化的 token context，model 只生成固定的 output streams；model 不

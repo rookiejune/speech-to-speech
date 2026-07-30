@@ -8,11 +8,11 @@ import torch.nn.functional as F
 from anydataset.types import Modality
 from torch import Tensor
 
-from .._oom import annotate, tensor_report
-from ..task import Task
-from .protocol import GenerationRuntime, TextEvaluationModel
-from .service import generate_responses
-from .types import Request
+from ..._oom import annotate, tensor_report
+from ...task import Task
+from ..protocol import GenerationRuntime, TextEvaluationModel
+from ..service import generate_responses
+from ..types import Request
 
 
 class TextProbe(TypedDict):

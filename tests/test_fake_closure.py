@@ -26,8 +26,8 @@ from semantic_acoustic_codec.runtime import (
 )
 from torch import Tensor, nn
 
-from speech_to_speech.datamodule.collator import Collator
-from speech_to_speech.datamodule.dataset import ToyDataset
+from speech_to_speech.datamodule.collate.collator import Collator
+from speech_to_speech.datamodule.dataset.speech import ToyDataset
 from speech_to_speech.loss import FlowObjective
 from speech_to_speech.model import ToyConfig
 from semantic_acoustic_codec.model.dit import DiTDecoder

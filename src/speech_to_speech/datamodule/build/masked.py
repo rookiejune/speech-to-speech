@@ -4,13 +4,13 @@ import torch
 from anydataset.types import Modality
 from torch import Generator, Tensor
 
-from ..prediction import PredictionModality
-from ..task import Task
-from ..task_spec import resolve_prediction
-from ._tokenization import token_ids
+from ...prediction import PredictionModality
+from ...task import Task
+from ...task_spec import resolve_prediction
+from .._helper.tokenization import token_ids
 from .ar import pack_interleaved, pack_parallel
-from .protocol import DataRuntime
-from .types import ModelSample, Speech
+from ..protocol import DataRuntime
+from ..types import ModelSample, Speech
 
 
 def build_masked_sample(
@@ -45,33 +45,20 @@ def build_masked_sample(
     )
     prefix = torch.cat([marker, masked_source])
     if prediction is PredictionModality.PARALLEL:
-        sample = pack_parallel(
+        return pack_parallel(
             prefix,
             speech,
             task,
             runtime,
             prediction=prediction,
         )
-    else:
-        sample = pack_interleaved(
-            prefix,
-            speech,
-            task,
-            runtime,
-            prediction=prediction,
-            interleave_audio_frames=interleave_audio_frames,
-        )
-    return ModelSample(
-        input_ids=sample.input_ids,
-        token_labels=sample.token_labels,
-        token_groups=sample.token_groups,
-        acoustic_target=sample.acoustic_target,
-        task=sample.task,
-        prediction=sample.prediction,
-        audio_seconds=sample.audio_seconds,
-        generation_prompt_length=prefix.numel(),
-        audio_input_positions=None,
-        audio_context=None,
+    return pack_interleaved(
+        prefix,
+        speech,
+        task,
+        runtime,
+        prediction=prediction,
+        interleave_audio_frames=interleave_audio_frames,
     )
 
 

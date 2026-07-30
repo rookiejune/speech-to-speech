@@ -6,7 +6,8 @@
 - [model](design/model.md)：token backbone、embedding 注入和 acoustic decoder。
 - [loss](design/loss.md)：objective 组合与监督。
 - [runtime](design/runtime.md)：已加载资源及窄协议。
-- [generation](design/generation.md)：独立 `Request -> Result` 推理、batching、评估与 decode。
+- [generation](design/generation.md)：OpenAI 风格 messages → HF/codec → 私有 `Request`/`Result`
+  推理、batching、评估与 decode。
 - [pl_module 与 callback](design/pl_module.md)：Lightning 训练集成与日志。
 - [reporting](design/reporting.md)：实验入口复用 `anytrain.lightning.window_summary` 的窗口摘要边界。
 
@@ -88,23 +89,33 @@ audio layout block 包含 semantic-audio tokens、BOA、EOA；以下集合不能
 
 text generation 使用 text head，屏蔽 PAD/BOS 并保留 EOS。集合与 range 由 Runtime 暴露，消费方不重复推导。
 
-### 2.3 ModelBatch
+### 2.3 ModelSample / ModelBatch
+
+训练样本拆成共享输入侧与监督侧：
 
 ```python
 @dataclass
+class ModelSample:
+    request: Request   # generation.types.Request（含 prompt_ids / task / prediction）
+    labels: Labels     # response_ids + 全长 token_labels 等
+
+@dataclass
 class ModelBatch:
-    input_ids: Tensor
+    input_ids: Tensor          # cat(prompt, response) 的 teacher-forcing 视图
     token_labels: Tensor
     acoustic_target: AcousticTarget | None
     audio_input_positions: Tensor | None
     tasks: list[Task]
+    predictions: list[PredictionModality]
     pad_token_id: int
+    generation_prompt_lengths: Tensor  # = 每行 len(prompt_ids)
 ```
 
 字段职责：
 
+- `request` / `Labels`：推理只要 Request；训练另带 Labels。label 不回塞进 Request。
 - `acoustic_target`：`semantic_codes`、`codes` 与 `token_positions` 共同表示 decoder target、
-  codec/REPA 输入和逐帧全局 audio token 位置。
+  codec/REPA 输入和逐帧全局 audio token 位置（相对完整 `input_ids`）。
 - `audio_input_positions`：`[batch, frames]` 的 source audio payload 位置；右侧 `-1` 是 batch
   padding，不包含 BOA/EOA、target/generated audio 或 route reference context。
 
@@ -117,7 +128,7 @@ padding 与 mask：
 
 `ModelBatch.from_samples(samples, pad_token_id=...)` 是跨字段校验边界：
 
-- input 与 token label 必须是对齐的一维序列。
+- prompt / response 拼接后与 token label 必须对齐。
 - acoustic target 以完整结构出现；未 padding 的 codes 必须是非空二维非负整数 tensor，
   内部 tensor 共用 frame 轴。
 - position 必须指向序列内非 padding token。
@@ -125,7 +136,7 @@ padding 与 mask：
   audio 时该字段为 `None`。
 - 同一 batch 的样本必须具有相同 `(source_layout, prediction)` 执行签名（有效 prediction，含 loader override）。
 
-真实推理不使用缺 target 的半成品 `ModelBatch`，而使用独立的 `generation.Request`。
+真实推理使用 `generation.Request`；训练 bridge 从 batch 还原 Request，不使用缺 target 的半成品 batch。
 
 ### 2.4 Position 语义
 
@@ -170,7 +181,8 @@ prompt 中的位置，只供 `AudioInputTower` 做输入 embedding overlay；不
 同构 microbatch 比较 `execution_signature = (source_layout, prediction)`；loader 可为白名单
 任务覆写 `prediction`（例如 `T2ST`/`S2ST` 的 `audio|parallel`）。
 `Task.prediction_modality` 只表示未覆写时的默认值；训练侧有效 prediction 写在
-`ModelSample.prediction` / `ModelBatch.predictions`，由 `task_spec.resolve_prediction` 解析。
+`ModelSample.request["prediction"]` / `ModelBatch.predictions`，由 `task_spec.resolve_prediction`
+解析，并经 `requests_from_batch` 进入 generation `Request`。
 `Task.execution_signature` 属性始终反映默认值；带 override 的签名用
 `task_spec.execution_signature(task, prediction=...)`。
 `target_modality` 只对单模态 prediction 返回 TEXT/AUDIO；mixed 时为 `None`。
@@ -289,6 +301,7 @@ token CE 的 softmax 只覆盖 `prediction_modality` 监督的模态，不让 te
 
 - `ModelBatch -> token_hidden_states -> sparse modality token_logits -> objective`
 - `Request -> generation service -> text | audio strategy | mixed AR -> decode -> Result`
+  （公开路径先经 `ChatRequest` / `create()` 降到私有 `Request`）
 
 语义 seq2seq 是基础且完整的模型能力：`model/acoustic=none` 只预测 text token 或 audio token。
 音频重建按 backend capability 分成两条路径：FrameCodec 使用

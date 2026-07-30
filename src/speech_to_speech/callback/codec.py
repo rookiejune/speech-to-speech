@@ -6,8 +6,8 @@ from anydataset.types import AudioView
 from torch import Tensor
 
 from ..datamodule.protocol import DatasetRuntime
-from ..datamodule.parser import speech_from_codes
-from ..datamodule.sample import build_task_sample
+from ..datamodule.parse.parser import speech_from_codes
+from ..datamodule.build.sample import build_task_sample
 from ..datamodule.types import (
     ModelBatch,
     RawSpeech,

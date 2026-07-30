@@ -13,10 +13,11 @@ from torch.nn.utils.rnn import pad_sequence
 
 from .._compat import StrEnum, auto
 from .._tensor import is_signed_integer_dtype
+from ..generation.types import Request
 from ..prediction import PredictionModality
 from ..source import SourceLayout
 from ..task import Task
-from ._duration import seconds
+from ._helper.duration import seconds
 
 ACOUSTIC_PAD_ID = -1
 
@@ -342,28 +343,163 @@ class AcousticTarget(TypedDict):
     token_positions: Tensor
 
 
+@dataclass(frozen=True)
+class Labels:
+    """Training-only supervision for the response side of a sample."""
+
+    response_ids: Tensor
+    token_labels: Tensor
+    token_groups: Tensor | None = None
+    acoustic_target: AcousticTarget | None = None
+    audio_seconds: float = 0.0
+
+
 @dataclass
 class ModelSample:
-    input_ids: Tensor
-    token_labels: Tensor
-    acoustic_target: AcousticTarget | None
-    task: Task
-    prediction: PredictionModality
-    token_groups: Tensor | None = None
-    audio_seconds: float = 0.0
-    generation_prompt_length: int | None = None
-    audio_input_positions: Tensor | None = None
-    audio_context: SemanticAcousticCodes | None = None
+    """Training sample: shared generation Request plus Labels."""
+
+    request: Request
+    labels: Labels
 
     def __post_init__(self) -> None:
-        if not isinstance(self.task, Task):
+        if not isinstance(self.request["task"], Task):
             raise TypeError("ModelSample task must be a Task.")
-        if not isinstance(self.prediction, PredictionModality):
+        prediction = self.request.get("prediction")
+        if not isinstance(prediction, PredictionModality):
             raise TypeError("ModelSample prediction must be a PredictionModality.")
-        if self.prediction not in self.task.allowed_predictions:
+        if prediction not in self.request["task"].allowed_predictions:
             raise ValueError(
-                f"{self.task.value} does not allow prediction={self.prediction.value}."
+                f"{self.request['task'].value} does not allow prediction={prediction.value}."
             )
+        full = torch.cat([self.request["prompt_ids"], self.labels.response_ids])
+        if self.labels.token_labels.shape != full.shape:
+            raise ValueError(
+                "token_labels must align with cat(prompt_ids, response_ids)."
+            )
+        if self.labels.token_groups is not None and (
+            self.labels.token_groups.shape != full.shape
+        ):
+            raise ValueError(
+                "token_groups must align with cat(prompt_ids, response_ids)."
+            )
+
+    @classmethod
+    def pack(
+        cls,
+        *,
+        prompt_ids: Tensor,
+        response_ids: Tensor,
+        token_labels: Tensor,
+        task: Task,
+        prediction: PredictionModality,
+        token_groups: Tensor | None = None,
+        acoustic_target: AcousticTarget | None = None,
+        audio_seconds: float = 0.0,
+        audio_input_positions: Tensor | None = None,
+        audio_context: SemanticAcousticCodes | None = None,
+    ) -> ModelSample:
+        return cls(
+            request=Request(
+                prompt_ids=prompt_ids,
+                task=task,
+                prediction=prediction,
+                audio_input_positions=audio_input_positions,
+                audio_context=audio_context,
+            ),
+            labels=Labels(
+                response_ids=response_ids,
+                token_labels=token_labels,
+                token_groups=token_groups,
+                acoustic_target=acoustic_target,
+                audio_seconds=audio_seconds,
+            ),
+        )
+
+    @classmethod
+    def from_sequence(
+        cls,
+        input_ids: Tensor,
+        token_labels: Tensor,
+        *,
+        task: Task,
+        prediction: PredictionModality,
+        generation_prompt_length: int | None = None,
+        token_groups: Tensor | None = None,
+        acoustic_target: AcousticTarget | None = None,
+        audio_seconds: float = 0.0,
+        audio_input_positions: Tensor | None = None,
+        audio_context: SemanticAcousticCodes | None = None,
+    ) -> ModelSample:
+        """Split a teacher-forcing sequence into Request prompt and Labels response."""
+        if generation_prompt_length is None:
+            positions = token_labels.ne(-100).nonzero(as_tuple=False)
+            if positions.numel() == 0:
+                raise ValueError("model sample must contain at least one target token.")
+            generation_prompt_length = int(positions[0].item())
+        if (
+            isinstance(generation_prompt_length, bool)
+            or not isinstance(generation_prompt_length, int)
+        ):
+            raise TypeError("generation_prompt_length must be an integer or None.")
+        if generation_prompt_length < 1 or generation_prompt_length >= input_ids.numel():
+            raise ValueError(
+                "generation_prompt_length must leave a non-empty generated response."
+            )
+        return cls.pack(
+            prompt_ids=input_ids[:generation_prompt_length],
+            response_ids=input_ids[generation_prompt_length:],
+            token_labels=token_labels,
+            task=task,
+            prediction=prediction,
+            token_groups=token_groups,
+            acoustic_target=acoustic_target,
+            audio_seconds=audio_seconds,
+            audio_input_positions=audio_input_positions,
+            audio_context=audio_context,
+        )
+
+    @property
+    def input_ids(self) -> Tensor:
+        return torch.cat([self.request["prompt_ids"], self.labels.response_ids])
+
+    @property
+    def token_labels(self) -> Tensor:
+        return self.labels.token_labels
+
+    @property
+    def token_groups(self) -> Tensor | None:
+        return self.labels.token_groups
+
+    @property
+    def acoustic_target(self) -> AcousticTarget | None:
+        return self.labels.acoustic_target
+
+    @property
+    def task(self) -> Task:
+        return self.request["task"]
+
+    @property
+    def prediction(self) -> PredictionModality:
+        prediction = self.request.get("prediction")
+        if not isinstance(prediction, PredictionModality):
+            raise TypeError("ModelSample prediction must be a PredictionModality.")
+        return prediction
+
+    @property
+    def audio_seconds(self) -> float:
+        return self.labels.audio_seconds
+
+    @property
+    def generation_prompt_length(self) -> int:
+        return int(self.request["prompt_ids"].numel())
+
+    @property
+    def audio_input_positions(self) -> Tensor | None:
+        return self.request["audio_input_positions"]
+
+    @property
+    def audio_context(self) -> SemanticAcousticCodes | None:
+        return self.request["audio_context"]
 
 
 @dataclass
@@ -483,24 +619,35 @@ class ModelBatch:
             raise ValueError("ModelBatch requires at least one sample.")
         for sample in samples:
             _validate_sample(sample, pad_token_id)
+        input_ids = [
+            torch.cat([sample.request["prompt_ids"], sample.labels.response_ids])
+            for sample in samples
+        ]
         return cls(
-            input_ids=_pad([sample.input_ids for sample in samples], pad_token_id),
-            token_labels=_pad([sample.token_labels for sample in samples], -100),
+            input_ids=_pad(input_ids, pad_token_id),
+            token_labels=_pad(
+                [sample.labels.token_labels for sample in samples],
+                -100,
+            ),
             token_groups=_optional_tensor(
-                [sample.token_groups for sample in samples],
+                [sample.labels.token_groups for sample in samples],
                 padding_value=-1,
             ),
-            acoustic_target=_target([sample.acoustic_target for sample in samples]),
-            tasks=[sample.task for sample in samples],
+            acoustic_target=_target(
+                [sample.labels.acoustic_target for sample in samples]
+            ),
+            tasks=[sample.request["task"] for sample in samples],
             predictions=[sample.prediction for sample in samples],
             pad_token_id=pad_token_id,
             audio_seconds=_audio_seconds(samples),
             generation_prompt_lengths=_sample_prompt_lengths(samples),
             audio_input_positions=_optional_tensor(
-                [sample.audio_input_positions for sample in samples],
+                [sample.request["audio_input_positions"] for sample in samples],
                 padding_value=-1,
             ),
-            audio_contexts=tuple(sample.audio_context for sample in samples),
+            audio_contexts=tuple(
+                sample.request["audio_context"] for sample in samples
+            ),
         )
 
     @cached_property
@@ -683,23 +830,17 @@ def _target_row(value: AcousticTarget | None, index: int) -> AcousticTarget | No
 
 
 def _audio_seconds(samples: list[ModelSample]) -> Tensor:
-    return samples[0].input_ids.new_tensor(
-        [sample.audio_seconds for sample in samples],
+    return samples[0].request["prompt_ids"].new_tensor(
+        [sample.labels.audio_seconds for sample in samples],
         dtype=torch.float32,
     )
 
 
 def _sample_prompt_lengths(samples: list[ModelSample]) -> Tensor:
-    values = []
-    for sample in samples:
-        value = sample.generation_prompt_length
-        if value is None:
-            positions = sample.token_labels.ne(-100).nonzero(as_tuple=False)
-            if positions.numel() == 0:
-                raise ValueError("model sample must contain at least one target token.")
-            value = int(positions[0].item())
-        values.append(value)
-    return samples[0].input_ids.new_tensor(values, dtype=torch.long)
+    return samples[0].request["prompt_ids"].new_tensor(
+        [sample.request["prompt_ids"].numel() for sample in samples],
+        dtype=torch.long,
+    )
 
 
 def _generation_prompt_lengths(token_labels: Tensor) -> Tensor:
@@ -815,49 +956,49 @@ def _present(values: list[T | None]) -> list[T] | None:
 
 
 def _validate_sample(sample: ModelSample, pad_token_id: int) -> None:
-    if (
-        sample.input_ids.dim() != 1
-        or sample.token_labels.shape != sample.input_ids.shape
-    ):
+    prompt_ids = sample.request["prompt_ids"]
+    response_ids = sample.labels.response_ids
+    input_ids = torch.cat([prompt_ids, response_ids])
+    token_labels = sample.labels.token_labels
+    if prompt_ids.dim() != 1 or response_ids.dim() != 1:
+        raise ValueError("sample prompt_ids and response_ids must be 1D tensors.")
+    if prompt_ids.numel() < 1 or response_ids.numel() < 1:
+        raise ValueError(
+            "generation prompt lengths must leave a non-empty generated response."
+        )
+    if token_labels.shape != input_ids.shape:
         raise ValueError(
             "sample input ids and token labels must be aligned 1D tensors."
         )
-    if sample.token_groups is not None:
-        if sample.token_groups.shape != sample.input_ids.shape:
+    token_groups = sample.labels.token_groups
+    if token_groups is not None:
+        if token_groups.shape != input_ids.shape:
             raise ValueError("sample token groups must align with input ids.")
-        if not is_signed_integer_dtype(sample.token_groups.dtype):
+        if not is_signed_integer_dtype(token_groups.dtype):
             raise TypeError("sample token groups must use a signed integer dtype.")
-        if bool((sample.token_labels.eq(-100) & sample.token_groups.ne(-1)).any()):
+        if bool((token_labels.eq(-100) & token_groups.ne(-1)).any()):
             raise ValueError("ignored sample labels must use the forced token group.")
-        if bool((sample.token_labels.ne(-100) & sample.token_groups.lt(0)).any()):
+        if bool((token_labels.ne(-100) & token_groups.lt(0)).any()):
             raise ValueError("supervised sample labels require prediction groups.")
 
-    prompt_length = sample.generation_prompt_length
-    if prompt_length is not None:
-        if isinstance(prompt_length, bool) or not isinstance(prompt_length, int):
-            raise TypeError("generation_prompt_length must be an integer or None.")
-        if prompt_length < 1 or prompt_length >= sample.input_ids.numel():
-            raise ValueError(
-                "generation_prompt_length must leave a non-empty generated response."
-            )
-    positions = sample.audio_input_positions
+    positions = sample.request["audio_input_positions"]
     if positions is not None:
         if positions.dim() != 1:
             raise ValueError("sample audio_input_positions must have shape [frames].")
         if not is_signed_integer_dtype(positions.dtype):
             raise TypeError("sample audio_input_positions must use a signed integer dtype.")
         if bool((positions < 0).any()) or bool(
-            (positions >= sample.input_ids.numel()).any()
+            (positions >= input_ids.numel()).any()
         ):
             raise ValueError("sample audio_input_positions must be valid sequence positions.")
         if positions.numel() != torch.unique(positions).numel():
             raise ValueError("sample audio_input_positions must not repeat positions.")
-    _validate_audio_context(sample.audio_context)
+    _validate_audio_context(sample.request["audio_context"])
 
-    target = sample.acoustic_target
+    target = sample.labels.acoustic_target
     if target is not None:
         _validate_acoustic_pair(
-            sample.input_ids,
+            input_ids,
             target["codes"],
             target["token_positions"],
             name="acoustic target",
@@ -880,10 +1021,10 @@ def _validate_sample(sample: ModelSample, pad_token_id: int) -> None:
         )
     if target is not None:
         positions = target["token_positions"].to(
-            device=sample.token_labels.device,
+            device=token_labels.device,
             dtype=torch.long,
         )
-        labels = sample.token_labels[positions]
+        labels = token_labels[positions]
         if bool(labels.eq(-100).any()):
             raise ValueError("acoustic target positions must point to semantic labels.")
 

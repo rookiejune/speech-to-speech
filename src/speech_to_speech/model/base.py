@@ -13,7 +13,6 @@ from torch import nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.cache_utils import Cache
 
-from ._buffer import register
 from ..audio_route import AudioStream
 from .._tensor import is_signed_integer_dtype
 from ._generation import (
@@ -24,7 +23,7 @@ from ._generation import (
 )
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer, FlattenedAudioTokenizer
 from ._head import VocabularyHeadMixin
-from .adapter import AdapterType, create_adapter
+from ._helper import AdapterType, CastOutput, EmbeddingView, create_adapter, register
 from .audio_input import (
     AudioInputAdapterConfig,
     AudioInputAdapterType,
@@ -38,7 +37,6 @@ from .audio_output import (
     create_audio_output_adapter,
 )
 from .embedding.audio import create_semantic_audio_embedding
-from ._embedding import CastOutput, EmbeddingView
 from .protocol import TokenModelRuntime
 from .toy import ToyConfig, create_toy_backbone
 from ..runtime.types import Backbone, BackboneOutput
@@ -424,7 +422,6 @@ class Model(VocabularyHeadMixin, nn.Module):
                 self,
                 prompt_ids,
                 codebook_ranges=tokenizer.codebook_ranges,
-                codec_token_id=tokenizer.codec_token_id,
                 codebook_token_ids=tokenizer.codebook_token_ids,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,

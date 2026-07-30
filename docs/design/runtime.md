@@ -82,8 +82,8 @@ full sequence，而不决定 route：
   解码使用 output semantic 与 prompt global。
 - `bicodec_generate_global` 没有 audio prompt，output 同时生成 global、semantic，解码使用 output
   的两条 stream。
-- 输出 grammar 按 route 固定为 `codec, semantic_marker, semantic..., end`（reuse）或
-  `codec, global_marker, global..., semantic_marker, semantic..., end`（generate）；prompt
+- 输出 grammar 按 route 固定为 `semantic_marker, semantic..., end`（reuse）或
+  `global_marker, global..., semantic_marker, semantic..., end`（generate）；prompt
   序列则按 `prompt.streams` 序列化。global payload 使用 slot-major 固定长度布局，semantic
   token 仍是逐单元序列。markers 与 end marker 属于 grammar，强制位置不作为可训练 payload。
 
@@ -101,13 +101,13 @@ frame-aligned Flow/RVQ side channel。
 `FlattenedAudioTokenizer` 展开完整 frame codebooks。因此同时实现 frame 与 structured capability
 的 LongCat 不会误入固定长度状态机。
 
-`audio_tokenizer.py` 提供：
+`audio_tokenizer/` 提供：
 
 - `NativeAudioTokenizer`：单 semantic codebook identity tokenizer。
-- `FlattenedAudioTokenizer`：完整 codec codebook token 序列，先写 codec marker，再按 codebook
-  block 写 marker 和 offset 后的 code IDs；公开 `codebook_ranges` 作为 generation grammar
-  metadata。marker 的 frame span 为 0，首个 codebook token 的 frame span 为 1，用于 generation
-  统计输出帧数。
+- `FlattenedAudioTokenizer`：完整 codec codebook token 序列，按 codebook block 写 marker 和
+  offset 后的 code IDs；公开 `codebook_ranges` 作为 generation grammar metadata。不再写外层
+  codec marker（Runtime 已固定单一 codec）。marker 的 frame span 为 0，首个 codebook token 的
+  frame span 为 1，用于 generation 统计输出帧数。
 - `TorchCodecBPE`：为 CodecBPE 增加 tensor API。
 - `BiCodecAudioTokenizer`：支持 semantic-only token，以及按 `audio_route` 选择 stream 的
   fixed-length structured sequence；full sequence 的 acoustic payload 使用 slot-major 顺序，
@@ -135,8 +135,16 @@ generator-owned decode，普通 FrameCodec 只接受 `full_output`，BiCodec 只
 route。
 
 文件职责保持分离：`runtime/runtime.py` 实现配置与资源聚合，`runtime/codec.py` 隔离 codec
-adapter 和加载。DataModule/Collator 接收显式 `DataRuntime`；parser、sample builder、batch
-padding、objective 与 generation service 不读取全局 runtime 状态。
+adapter 和加载，`runtime/audio_tokenizer/` 按实现拆分 Native / Flattened / BiCodec / CodecBPE。
+DataModule/Collator 接收显式 `DataRuntime`；parser、sample builder、batch padding、objective
+与 generation service 不读取全局 runtime 状态。
+
+HF `apply_chat_template` 只负责对话字符串排版；`pad_token_id` / `eos_token_id` /
+`bos_token_id` 是训练与生成用的数值 ID，由 Runtime 从 text tokenizer 的同名属性解析（缺失时再
+尝试 `special_tokens_map` 中对应字符串并要求映射为单 token），缺属性时显式报错，不再硬编码
+整表 Qwen special tokens。Qwen3 stock tokenizer 已提供 `pad=<|endoftext|>`、
+`eos=<|im_end|>`，但 `bos` 为 `None`；加载时若 vocab 含 `<|im_start|>` 则绑定为 `bos_token`，
+与旧 chat 边界一致。`boa` / `eoa` / `mask` 属于 audio layout，不在 text special tokens 里。
 
 ## 资源边界
 
@@ -150,5 +158,6 @@ padding、objective 与 generation service 不读取全局 runtime 状态。
 - LongCat 直接使用 anytrain 的 semantic-acoustic backend；`UnifiedCodec` 只保留给没有独立
   semantic/acoustic capability 的 UniCodec。消费者只依赖所需的最窄 codec capability。
   UniCodec loader 只在边界转换为窄 `UnifiedCodecSource`，adapter 内不使用 `Any`。
-- text special tokens 与 chat template 当前属于 Qwen3 contract；替换 backbone 前需提供对应
-  tokenizer/chat adapter。
+- text tokenizer 必须提供与 chat template 一致的 `pad_token_id` / `eos_token_id` /
+  `bos_token_id`（或等价 `special_tokens_map` 字符串）；替换 backbone 前需保证这些 ID 与
+  chat adapter 对齐。

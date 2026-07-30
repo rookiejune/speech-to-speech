@@ -178,7 +178,7 @@ model/objective/module 组装、基于 `acoustic.type` 的统一分发，以及 
 约束；`scripts/_entry.py` 只放 overfit/train 共享的 runtime device、Trainer 与 performance callback
 组装。
 `runtime.Config`、`model.Config`、`pl_module.Config`、`model.DecoderConfig`、
-`datamodule.config.SpeechConfig`、`DataLoaderConfig` 和 `datamodule.text.TextConfig` 直接进入 root
+`datamodule.config.SpeechConfig`、`DataLoaderConfig` 和 `datamodule.dataset.text.TextConfig` 直接进入 root
 schema，不重复声明字段；`scripts/overfit.py` 与 `scripts/train.py` 都直接把解析后的 data config 交给 `LoaderSpec`，不做
 同构对象转换。`StageLoaderConfig` 负责把字符串 task weights 暴露为 `Task` 映射，并根据非零任务
 维护 text-only 与 speech loader 不可混合的不变量；配置解析校验 validation/panel 选择，训练组装不

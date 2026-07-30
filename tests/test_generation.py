@@ -46,7 +46,7 @@ from speech_to_speech.generation import (
     generate_responses,
 )
 from speech_to_speech.generation.batch import requests_from_batch
-from speech_to_speech.generation.evaluation import evaluate_autoregressive
+from speech_to_speech.generation.eval.acoustic import evaluate_autoregressive
 from speech_to_speech.runtime.audio_tokenizer import (
     FlattenedAudioTokenizer,
     NativeAudioTokenizer,
@@ -319,7 +319,7 @@ class _UnifiedGenerationModel(Model):
         encoded = self.runtime.audio_tokenizer.encode(torch.tensor([[0], [1]]))
         self._tokens = [
             start + token_id
-            for token_id in encoded[2:].tolist()
+            for token_id in encoded[1:].tolist()
         ]
         self._tokens.append(self.runtime.eoa_token_id)
         self._step = 0
@@ -462,7 +462,7 @@ class _FullSequenceGenerationModel(Model):
         start, _ = self.runtime.codec_audio_range
         encoded = self.runtime.audio_tokenizer.encode(codes)
         if len(self.runtime.audio_tokenizer.codebook_sizes) == 1:
-            encoded = encoded[2:]
+            encoded = encoded[1:]
         self._tokens = [
             start + token_id
             for token_id in encoded.tolist()
@@ -614,11 +614,11 @@ class GenerationTest(unittest.TestCase):
         requests = [Mock()]
         with (
             patch(
-                "speech_to_speech.generation.evaluation.requests_from_batch",
+                "speech_to_speech.generation.eval.acoustic.requests_from_batch",
                 return_value=requests,
             ),
             patch(
-                "speech_to_speech.generation.evaluation.time.perf_counter",
+                "speech_to_speech.generation.eval.acoustic.time.perf_counter",
                 side_effect=(1.0, 1.5),
             ),
         ):
@@ -735,7 +735,7 @@ class GenerationTest(unittest.TestCase):
         self.assertEqual(model.audio_token_frame_spans.device.type, "meta")
         self.assertNotIn("audio_token_frame_spans", model.state_dict())
 
-    @patch("speech_to_speech.model._buffer.nn.Buffer", new=None)
+    @patch("speech_to_speech.model._helper.nn.Buffer", new=None)
     def test_frame_span_buffer_supports_torch_without_nn_buffer(self):
         model = Model(
             _model_config(),
@@ -1147,7 +1147,6 @@ class GenerationTest(unittest.TestCase):
                         for ids in model.allowed_token_ids
                     ],
                     [
-                        [start + tokenizer.codec_token_id],
                         [start + tokenizer.codebook_token_ids[0]],
                         list(range(start, start + 4)),
                         [*range(start, start + 4), start + tokenizer.codebook_token_ids[1]],
@@ -1194,9 +1193,9 @@ class GenerationTest(unittest.TestCase):
                 self.assertTrue(
                     torch.equal(result["response_ids"], expected_local + start)
                 )
-                prefix = expected_local[:2] + start
+                prefix = expected_local[:1] + start
                 self.assertTrue(
-                    torch.equal(model.generation_inputs[0][0, -2:], prefix)
+                    torch.equal(model.generation_inputs[0][0, -1:], prefix)
                 )
                 allowed_token_ids = model.allowed_token_ids[0]
                 self.assertIsNotNone(allowed_token_ids)
@@ -1225,7 +1224,7 @@ class GenerationTest(unittest.TestCase):
             codebook_sizes=(4,),
         )
 
-        with self.assertRaisesRegex(ValueError, "markers.*EOA.*4 minimum"):
+        with self.assertRaisesRegex(ValueError, "markers.*EOA.*3 minimum"):
             generate_responses(
                 [Request(prompt_ids=torch.tensor([1]), task=Task.TTS)],
                 model,
@@ -1238,11 +1237,11 @@ class GenerationTest(unittest.TestCase):
             torch.tensor([[1, 5]]),
             codebook_sizes=(4, 10),
         )
-        with self.assertRaisesRegex(ValueError, "markers.*EOA.*6 minimum"):
+        with self.assertRaisesRegex(ValueError, "markers.*EOA.*5 minimum"):
             generate_responses(
                 [Request(prompt_ids=torch.tensor([1]), task=Task.TTS)],
                 multi_codebook,
-                max_new_tokens=5,
+                max_new_tokens=4,
                 do_sample=False,
                 use_cache=False,
             )
@@ -1252,7 +1251,6 @@ class GenerationTest(unittest.TestCase):
         start, _ = model.runtime.codec_audio_range
         tokenizer = model.runtime.audio_tokenizer
         model._tokens = [
-            start + tokenizer.codec_token_id,
             start + tokenizer.codebook_token_ids[0],
             *([start + 1] * 8),
         ]
@@ -1290,7 +1288,7 @@ class GenerationTest(unittest.TestCase):
         self.assertTrue(
             torch.equal(
                 model.runtime.codec.decoded_codes,
-                torch.tensor([[[1], [1]]]),
+                torch.tensor([[[1], [1], [1]]]),
             )
         )
 

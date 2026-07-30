@@ -48,7 +48,6 @@ class BiCodecTokenizerTest(unittest.TestCase):
         tokens = self.tokenizer.encode_full(codes)
         expected = torch.tensor(
             [
-                self.tokenizer.codec_token_id,
                 self.tokenizer.acoustic_token_id,
                 16,
                 22,

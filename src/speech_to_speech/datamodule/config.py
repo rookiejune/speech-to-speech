@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .dataset import DatasetConfig, DatasetName
+from .dataset.speech import DatasetConfig, DatasetName
 from .types import DataShape
 
 

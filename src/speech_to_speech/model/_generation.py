@@ -13,7 +13,7 @@ from transformers.cache_utils import Cache
 
 from ..audio_route import AudioStream
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
-from ._sampling import top_p_filter
+from ._helper import top_p_filter
 from .protocol import TokenModelRuntime
 
 
@@ -373,7 +373,6 @@ def generate_flattened_sequence(
     prompt_ids: Tensor,
     *,
     codebook_ranges: Sequence[tuple[int, int]],
-    codec_token_id: int,
     codebook_token_ids: Sequence[int],
     max_new_tokens: int,
     temperature: float,
@@ -392,10 +391,10 @@ def generate_flattened_sequence(
         raise ValueError("flattened generation requires one marker per codebook range.")
     if any(start < 0 or end <= start for start, end in codebook_ranges):
         raise ValueError("flattened generation codebook ranges must be non-empty.")
-    minimum_tokens = 2 * len(codebook_ranges) + 2
+    minimum_tokens = 2 * len(codebook_ranges) + 1
     if max_new_tokens < minimum_tokens:
         raise ValueError(
-            "flattened full sequence max_new_tokens must include codec/codebook "
+            "flattened full sequence max_new_tokens must include codebook "
             f"markers, one payload per codebook, and EOA ({minimum_tokens} minimum)."
         )
     if prompt_attention_mask is None:
@@ -407,12 +406,7 @@ def generate_flattened_sequence(
 
     audio_start, _ = model.runtime.codec_audio_range
     if len(codebook_ranges) == 1:
-        prefix = prompt_ids.new_tensor(
-            [
-                audio_start + codec_token_id,
-                audio_start + codebook_token_ids[0],
-            ]
-        )
+        prefix = prompt_ids.new_tensor([audio_start + codebook_token_ids[0]])
         batch_prefix = prefix.unsqueeze(0).expand(prompt_ids.size(0), -1)
         prefixed = torch.cat((prompt_ids, batch_prefix), dim=1)
         prefix_mask = torch.ones_like(batch_prefix, dtype=torch.bool)
@@ -464,7 +458,6 @@ def generate_flattened_sequence(
                 else audio_input_positions[row : row + 1]
             ),
             codebook_ranges=codebook_ranges,
-            codec_token_id=codec_token_id,
             codebook_token_ids=codebook_token_ids,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
@@ -488,7 +481,6 @@ def _generate_flattened_row(
     prompt_attention_mask: Tensor,
     audio_input_positions: Tensor | None,
     codebook_ranges: Sequence[tuple[int, int]],
-    codec_token_id: int,
     codebook_token_ids: Sequence[int],
     max_new_tokens: int,
     temperature: float,
@@ -523,7 +515,6 @@ def _generate_flattened_row(
             dtype=torch.long,
         )
 
-    row.step(local(codec_token_id))
     row.step(local(codebook_token_ids[0]))
     first_ids = range_ids(codebook_ranges[0])
     row.step(first_ids)
@@ -635,7 +626,6 @@ def _generate_bicodec_row(
             dtype=torch.long,
         )
 
-    row.step(local(tokenizer.codec_token_id))
     if AudioStream.GLOBAL in streams:
         row.step(local(tokenizer.global_token_id))
         for _ in range(tokenizer.global_unit_length):

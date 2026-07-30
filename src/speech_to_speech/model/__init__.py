@@ -1,4 +1,4 @@
-from .adapter import AdapterType
+from ._helper import AdapterType
 from .audio_input import (
     AudioInputAdapterConfig,
     AudioInputAdapterType,

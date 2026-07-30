@@ -379,6 +379,9 @@ class AudioTokenizer(Protocol):
 
 class TextTokenizer(Protocol):
     special_tokens_map: Mapping[str, str | Sequence[str]]
+    pad_token_id: int | None
+    eos_token_id: int | None
+    bos_token_id: int | None
 
     def __len__(self) -> int: ...
 

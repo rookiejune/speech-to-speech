@@ -3,18 +3,18 @@ from __future__ import annotations
 from collections.abc import Mapping
 from anydataset import types
 
-from ..prediction import PredictionModality
-from ..source import SourceLayout
-from ..task import Task
-from ..task_spec import resolve_prediction
-from ._duration import from_frames
-from ._task import TaskWeights
-from ._tokenization import token_ids
+from ...prediction import PredictionModality
+from ...source import SourceLayout
+from ...task import Task
+from ...task_spec import resolve_prediction
+from .._helper.duration import from_frames
+from .._helper.task import TaskWeights
+from .._helper.tokenization import token_ids
 from .ar import build_ar_sample, is_ar_task
-from .parser import parse_audio_codes, raw_speech, speech_from_codes
-from .protocol import DataRuntime
+from ..parse.parser import parse_audio_codes, raw_speech, speech_from_codes
+from ..protocol import DataRuntime
 from .sample import build_speech_sample, build_task_sample, chat_prompt
-from .types import (
+from ..types import (
     ModelBatch,
     ModelSample,
     RawSpeech,
@@ -304,7 +304,7 @@ def _codec_codes(audio_item: types.AudioItem, runtime: DataRuntime) -> object:
 
 
 def _language(text_item: types.TextItem):
-    from .types import Language
+    from ..types import Language
 
     return Language(text_item.meta[types.TextMeta.LANG])
 

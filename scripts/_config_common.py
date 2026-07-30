@@ -10,7 +10,7 @@ from omegaconf import MISSING
 
 from speech_to_speech.audio_route import Config as AudioRouteConfig
 from speech_to_speech.datamodule.config import SpeechConfig
-from speech_to_speech.datamodule.dataset import DatasetName
+from speech_to_speech.datamodule.dataset.speech import DatasetName
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model.acoustic import AcousticType, DecoderConfig
 from speech_to_speech.pl_module import Config as ModuleConfig

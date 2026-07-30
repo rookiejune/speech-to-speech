@@ -6,7 +6,7 @@ import unittest
 import torch
 import torch.nn.functional as F
 
-from speech_to_speech.model.adapter import AdapterType
+from speech_to_speech.model import AdapterType
 from speech_to_speech.model.base import (
     _aligned_audio_adapter,
     _aligned_audio_output_adapter,

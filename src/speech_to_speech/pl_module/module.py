@@ -15,7 +15,7 @@ from torch import nn
 from ..datamodule.types import ModelBatch, RawSpeechBatch, TrainInput
 from ..audio_route import Config as AudioRouteConfig
 from ..generation.service import generate_responses
-from ..generation.text import TextProbe, TextProbeResult, evaluate_text
+from ..generation.eval.text import TextProbe, TextProbeResult, evaluate_text
 from ..generation.types import Request, Result
 from ..loss import validation_metrics
 from ..loss.objective import Objective

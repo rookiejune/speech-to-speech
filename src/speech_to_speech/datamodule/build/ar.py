@@ -4,12 +4,12 @@ import torch
 from anydataset.types import Modality
 from torch import Tensor
 
-from ..prediction import PredictionModality
-from ..runtime import AudioRepresentation
-from ..task import Task
-from ._tokenization import token_ids
-from .protocol import DataRuntime
-from .types import AcousticTarget, ModelSample, Speech, Text
+from ...prediction import PredictionModality
+from ...runtime import AudioRepresentation
+from ...task import Task
+from .._helper.tokenization import token_ids
+from ..protocol import DataRuntime
+from ..types import AcousticTarget, ModelSample, Speech, Text
 
 
 _AR_TASKS = frozenset(
@@ -39,7 +39,7 @@ def build_ar_sample(
         raise ValueError(f"{task.value} is not an autoregressive task.")
     if task.source_modality is not None:
         raise ValueError(f"{task.value} must not use a source modality.")
-    from ..task_spec import resolve_prediction
+    from ...task_spec import resolve_prediction
 
     prediction = resolve_prediction(task, prediction)
     marker = token_ids(prompt, runtime.text_tokenizer)
@@ -131,15 +131,15 @@ def pack_parallel(
         runtime,
         audio_token_start=marker.numel() + text.numel() + 1,
     )
-    return ModelSample(
-        input_ids=torch.cat([marker, response]),
+    return ModelSample.pack(
+        prompt_ids=marker,
+        response_ids=response,
         token_labels=labels,
         token_groups=None,
         acoustic_target=acoustic,
         task=task,
         prediction=prediction,
         audio_seconds=_duration(speech),
-        generation_prompt_length=marker.numel(),
         audio_input_positions=None,
         audio_context=None,
     )
@@ -219,15 +219,15 @@ def pack_interleaved(
     positions = torch.cat(audio_token_positions)
     expanded = torch.repeat_interleave(positions, spans)
     acoustic = _acoustic_from_positions(speech, runtime, expanded)
-    return ModelSample(
-        input_ids=torch.cat([marker, response]),
+    return ModelSample.pack(
+        prompt_ids=marker,
+        response_ids=response,
         token_labels=labels,
         token_groups=None,
         acoustic_target=acoustic,
         task=task,
         prediction=prediction,
         audio_seconds=_duration(speech),
-        generation_prompt_length=marker.numel(),
         audio_input_positions=None,
         audio_context=None,
     )
@@ -260,15 +260,15 @@ def _pack(
     full = torch.cat([marker, response])
     labels = torch.full_like(full, -100)
     labels[marker.numel() + supervise_from :] = response[supervise_from:]
-    return ModelSample(
-        input_ids=full,
+    return ModelSample.pack(
+        prompt_ids=marker,
+        response_ids=response,
         token_labels=labels,
         token_groups=None,
         acoustic_target=acoustic_target,
         task=task,
         prediction=prediction,
         audio_seconds=audio_seconds,
-        generation_prompt_length=marker.numel(),
         audio_input_positions=None,
         audio_context=None,
     )
