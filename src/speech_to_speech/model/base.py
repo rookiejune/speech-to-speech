@@ -34,9 +34,11 @@ from .audio_input import (
 from .audio_output import (
     AudioOutputAdapter,
     AudioOutputAdapterConfig,
+    AudioOutputAdapterType,
     create_audio_output_adapter,
 )
 from .embedding.audio import create_semantic_audio_embedding
+from .embedding.fsq import FsqAffineEmbedding
 from ._embedding import CastOutput, EmbeddingView
 from .protocol import TokenModelRuntime
 from .toy import ToyConfig, create_toy_backbone
@@ -121,25 +123,31 @@ class Model(VocabularyHeadMixin, nn.Module):
         else:
             # View keeps ownership under the backbone; idspace only routes through it.
             text_embedding = EmbeddingView(text_source)
+        hidden_size = self.backbone.config.hidden_size
         audio_embedding = create_semantic_audio_embedding(
             self.runtime,
             reference=text_source.weight,
+            embedding_dim=hidden_size,
         ).to(device=text_source.weight.device, dtype=torch.float32)
+        audio_feature_dim = int(audio_embedding.weight.size(-1))
+        fsq_audio = isinstance(audio_embedding, FsqAffineEmbedding)
+        audio_adapter_type = (
+            None if fsq_audio else self.config.semantic_audio_adapter
+        )
         audio_adapter = CastOutput(
             create_adapter(
-                self.config.semantic_audio_adapter,
-                audio_embedding.weight.size(-1),
-                self.backbone.config.hidden_size,
+                audio_adapter_type,
+                audio_feature_dim,
+                hidden_size,
             ).to(device=text_source.weight.device, dtype=torch.float32),
             dtype=text_source.weight.dtype,
         )
         self.token_embedding = Embedding(
             self.layout,
             text=text_embedding,  # pyright: ignore[reportArgumentType]
-            audio=audio_embedding,
+            audio=audio_embedding,  # pyright: ignore[reportArgumentType]
             adapters={"audio": audio_adapter},
         )
-        hidden_size = self.backbone.config.hidden_size
         backbone_weight = text_source.weight
         register(
             self,
@@ -157,8 +165,17 @@ class Model(VocabularyHeadMixin, nn.Module):
                 hidden_size,
             ).to(device=backbone_weight.device)
         )
+        output_config = self.config.audio_output_adapter
+        if fsq_audio and output_config.type is AudioOutputAdapterType.LINEAR:
+            output_config = AudioOutputAdapterConfig(
+                type=AudioOutputAdapterType.NONE,
+                layers=output_config.layers,
+                heads=output_config.heads,
+                ffn_ratio=output_config.ffn_ratio,
+                dropout=output_config.dropout,
+            )
         self.audio_output_adapter = create_audio_output_adapter(
-            self.config.audio_output_adapter,
+            output_config,
             hidden_size,
             semantic_audio_weight.size(1),
         ).to(

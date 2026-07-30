@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import cached_property
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 import torch
 from torch import Tensor, nn
@@ -10,8 +10,10 @@ from ...runtime.types import (
     AudioTokenizer,
     CodebookCodec,
     codebook_codec,
+    fsq_levels,
     semantic_feature_dim,
 )
+from .fsq import FsqAffineEmbedding
 
 _ROPE_THETA = 10000.0
 _EMBEDDING_CHUNK_SIZE = 2_048
@@ -25,11 +27,36 @@ class _Runtime(Protocol):
     def codec(self) -> object: ...
 
 
+@runtime_checkable
+class _CodebookTokenizer(Protocol):
+    @property
+    def vocab_size(self) -> int: ...
+
+    @property
+    def codebook_sizes(self) -> tuple[int, ...]: ...
+
+
 def create_semantic_audio_embedding(
     runtime: _Runtime,
     *,
     reference: Tensor,
-) -> nn.Embedding:
+    embedding_dim: int | None = None,
+) -> nn.Module:
+    levels = fsq_levels(runtime.codec)
+    if levels is not None:
+        if embedding_dim is None:
+            raise ValueError("FSQ affine audio embedding requires embedding_dim.")
+        tokenizer = runtime.audio_tokenizer
+        if not isinstance(tokenizer, _CodebookTokenizer):
+            raise TypeError(
+                "FSQ affine embedding requires a flattened codebook tokenizer."
+            )
+        return FsqAffineEmbedding(
+            codebook_sizes=tuple(int(size) for size in tokenizer.codebook_sizes),
+            fsq_levels=levels,
+            num_embeddings=tokenizer.vocab_size + 3,
+            embedding_dim=embedding_dim,
+        )
     return embedding(
         runtime.codec,
         runtime.audio_tokenizer,

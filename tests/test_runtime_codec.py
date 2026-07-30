@@ -59,6 +59,8 @@ class RuntimeCodecTest(unittest.TestCase):
         self.assertEqual(codec.sample_rate, 16_000)
         self.assertEqual(codec.frame_rate, 25.0)
         self.assertEqual(codec.codebook_sizes, (46_656,))
+        self.assertEqual(codec.semantic_feature_dim, 1)
+        self.assertEqual(codec.fsq_levels, ((6, 6, 6, 6, 6, 6),))
         codes = codec.encode(torch.zeros(1, 1, 8), 16_000)
         torch.testing.assert_close(codes, backend.codes)
         waveform = codec.decode(codes)

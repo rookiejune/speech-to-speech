@@ -234,7 +234,7 @@ def _token_path(model: Model, core: Qwen3Model, batch: ModelBatch) -> int:
         raise ValueError("each training FLOPs input row must contain a valid token.")
 
     embedding = model.token_embedding.embeddings["audio"]
-    if type(embedding) is not nn.Embedding:
+    if not hasattr(embedding, "num_embeddings") or not hasattr(embedding, "embedding_dim"):
         raise TypeError("training FLOPs require a semantic audio embedding.")
     hidden = core.config.hidden_size
     audio_start, audio_end = model.layout.blocks[Modality.AUDIO.value]

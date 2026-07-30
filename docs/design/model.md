@@ -178,16 +178,23 @@ cast 到 backbone embedding dtype。`token_embedding.*` 为唯一参数路径；
 strict resume 显式失败。
 
 Native/BPE semantic tokenizers 使用 codec codebook 初始化；完整 codec sequence tokenizer
-使用随机初始化，因为它的 vocab 同时包含多 codebook offset tokens、BiCodec semantic/global
+通常使用随机初始化，因为它的 vocab 同时包含多 codebook offset tokens、BiCodec semantic/global
 ranges 与 codec/stream/end markers。BiCodec 的 semantic payload、各 fixed-length global slot
 和 marker 共用这一稳定 global vocabulary，候选范围由 route grammar 在每个位置收窄。
 随机初始化只读取 codec 声明的 semantic feature dimension，并使用 backbone embedding 作为
-device reference，不要求 backend 暴露虚构的 codebook tensor。新建的 semantic embedding、
-input/output adapter 和 acoustic decoder 一律使用 FP32 参数存储；frozen backbone 可以保持
-BF16，forward 计算精度由 trainer autocast 控制。semantic head 与 acoustic decoder 的输入在
-模块边界显式转成对应参数 dtype，使训练外的 callback/generation 也遵守同一契约。
-codec features 在 acoustic decoder 路径转换到 decoder device/dtype。frame mask 在进入 codec
-前把 `-1` code padding 替换为安全值，adapter 后再清除无效位置。
+device reference，不要求 backend 暴露虚构的 codebook tensor。
+
+当 codec `semantic_feature_dim == 1` 且暴露 `fsq_levels`（Stable Codec）时，audio embedding
+改走 rank-1 affine：tokenizer 仍使用 packed product id，embedding 侧按 codec levels unpack，
+`e = Σ_j (b_j + q̃_j w_j)` 直接产出 `d_model`，marker / BOA/EOA/MASK 保留自由行；此时输入
+adapter 与默认 linear output adapter 退化为 identity，tied logits 仍读 materialize 后的
+`.weight`。不把 FSQ 展开进 tokenizer 序列。
+
+新建的 semantic embedding、input/output adapter 和 acoustic decoder 一律使用 FP32 参数存储；
+frozen backbone 可以保持 BF16，forward 计算精度由 trainer autocast 控制。semantic head 与
+acoustic decoder 的输入在模块边界显式转成对应参数 dtype，使训练外的 callback/generation 也遵守
+同一契约。codec features 在 acoustic decoder 路径转换到 decoder device/dtype。frame mask 在进入
+codec 前把 `-1` code padding 替换为安全值，adapter 后再清除无效位置。
 
 ## Acoustic decoder
 

@@ -208,6 +208,45 @@ def semantic_feature_dim(codec: object) -> int:
     return value
 
 
+@runtime_checkable
+class _FsqLevelsCapability(Protocol):
+    @property
+    def fsq_levels(self) -> tuple[tuple[int, ...], ...]: ...
+
+
+def fsq_levels(codec: object) -> tuple[tuple[int, ...], ...] | None:
+    """Return FSQ levels when the codec is a dim-1 FSQ source; otherwise None."""
+    if not isinstance(codec, _SemanticFeatureCapability):
+        return None
+    if semantic_feature_dim(codec) != 1:
+        return None
+    if not isinstance(codec, _FsqLevelsCapability):
+        return None
+    levels = tuple(
+        tuple(int(level) for level in stage) for stage in codec.fsq_levels
+    )
+    if not levels:
+        raise ValueError("fsq_levels must be a non-empty tuple of stages.")
+    for stage in levels:
+        if not stage:
+            raise ValueError("each FSQ stage must declare at least one level.")
+        if any(level < 2 for level in stage):
+            raise ValueError("FSQ levels must be at least 2.")
+    if isinstance(codec, _FrameCodebookCapability):
+        sizes = _codebook_sizes(codec.codebook_sizes, "FSQ codec")
+        if len(sizes) != len(levels):
+            raise ValueError("fsq_levels must align with codebook_sizes.")
+        for size, stage in zip(sizes, levels):
+            product = 1
+            for level in stage:
+                product *= level
+            if product != size:
+                raise ValueError(
+                    f"FSQ levels {stage} must multiply to codebook size {size}."
+                )
+    return levels
+
+
 def frame_codec(codec: object) -> Codec:
     if not isinstance(codec, _FrameCapability):
         raise TypeError("full frame-code encoding and decoding require a frame codec capability.")

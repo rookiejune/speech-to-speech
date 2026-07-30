@@ -82,7 +82,7 @@ class AudioEmbeddingTest(unittest.TestCase):
             reference=reference,
         )
 
-        self.assertEqual(audio.weight.shape, (9, 4))
+        self.assertEqual(audio.weight.shape, (10, 4))
         self.assertEqual(audio.weight.dtype, reference.dtype)
         self.assertEqual(audio.weight.device, reference.device)
         self.assertEqual(tokenizer.decode_batch_sizes, [])

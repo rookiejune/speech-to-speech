@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from math import prod
 from typing import Protocol, cast
 
 import torch
@@ -7,6 +8,19 @@ from anytrain.codec import load_frame, load_semantic_acoustic
 from torch import Tensor
 
 from .types import CodecBackend, StructuredCodec
+
+# Stable posthoc / native FSQ layouts keyed by product codebook sizes.
+_FSQ_LEVELS_BY_SIZES: dict[tuple[int, ...], tuple[tuple[int, ...], ...]] = {
+    (46_656,): ((6, 6, 6, 6, 6, 6),),
+    (15_625, 15_625): ((5, 5, 5, 5, 5, 5), (5, 5, 5, 5, 5, 5)),
+    (729, 729, 729, 729): (
+        (3, 3, 3, 3, 3, 3),
+        (3, 3, 3, 3, 3, 3),
+        (3, 3, 3, 3, 3, 3),
+        (3, 3, 3, 3, 3, 3),
+    ),
+    (17**6,): ((17, 17, 17, 17, 17, 17),),
+}
 
 
 class UnifiedCodecModel(Protocol):
@@ -46,6 +60,40 @@ class StableCodecSource(Protocol):
     def encode(self, audio: Tensor, sample_rate: int) -> Tensor: ...
 
     def decode(self, codes: Tensor) -> Tensor: ...
+
+
+def _fsq_levels(sizes: tuple[int, ...], source: object) -> tuple[tuple[int, ...], ...]:
+    backend_levels = getattr(source, "fsq_levels", None)
+    if backend_levels is not None:
+        levels = tuple(
+            tuple(int(level) for level in stage) for stage in backend_levels
+        )
+        _validate_fsq_levels(sizes, levels)
+        return levels
+    levels = _FSQ_LEVELS_BY_SIZES.get(sizes)
+    if levels is None:
+        raise ValueError(
+            "stable codec codebook sizes do not match a known FSQ level layout: "
+            f"{sizes}."
+        )
+    return levels
+
+
+def _validate_fsq_levels(
+    sizes: tuple[int, ...],
+    levels: tuple[tuple[int, ...], ...],
+) -> None:
+    if len(levels) != len(sizes):
+        raise ValueError("fsq_levels must align with codebook_sizes.")
+    for size, stage in zip(sizes, levels):
+        if not stage:
+            raise ValueError("each FSQ stage must declare at least one level.")
+        if any(level < 2 for level in stage):
+            raise ValueError("FSQ levels must be at least 2.")
+        if prod(stage) != size:
+            raise ValueError(
+                f"FSQ levels {stage} must multiply to codebook size {size}."
+            )
 
 
 class UnifiedCodec:
@@ -89,6 +137,9 @@ class StableCodec:
 
     def __init__(self, codec: StableCodecSource) -> None:
         self.codec = codec
+        sizes = tuple(int(size) for size in codec.codebook_sizes)
+        self._codebook_sizes = sizes
+        self._fsq_levels = _fsq_levels(sizes, codec)
 
     @property
     def name(self) -> str:
@@ -104,11 +155,15 @@ class StableCodec:
 
     @property
     def codebook_sizes(self) -> tuple[int, ...]:
-        return tuple(int(size) for size in self.codec.codebook_sizes)
+        return self._codebook_sizes
 
     @property
     def semantic_feature_dim(self) -> int:
         return 1
+
+    @property
+    def fsq_levels(self) -> tuple[tuple[int, ...], ...]:
+        return self._fsq_levels
 
     def encode(self, audio: Tensor, sample_rate: int) -> Tensor:
         return self.codec.encode(audio, sample_rate)
