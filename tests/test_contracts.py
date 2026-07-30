@@ -135,12 +135,18 @@ class _StageAcousticDecoder(nn.Module):
         self.head = nn.Linear(1, 1)
 
 
+class _TokenEmbedding(nn.Module):
+    def __init__(self, *, rows: int = 1, dim: int = 1) -> None:
+        super().__init__()
+        self.embeddings = nn.ModuleDict({"audio": nn.Embedding(rows, dim)})
+        self.adapters = nn.ModuleDict({"audio": nn.Linear(dim, dim)})
+
+
 class _StageModel(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.backbone = _StageBackbone()
-        self.semantic_audio_embedding = nn.Embedding(1, 1)
-        self.semantic_audio_adapter = nn.Linear(1, 1)
+        self.token_embedding = _TokenEmbedding()
         self.audio_output_adapter = nn.Linear(1, 1)
         self.acoustic_decoder = _StageAcousticDecoder()
 
@@ -239,6 +245,7 @@ class ContractTest(unittest.TestCase):
             eos_token_id=1,
             boa_token_id=18,
             eoa_token_id=19,
+            mask_token_id=20,
             codec=object(),
             backbone=object(),
         )
@@ -409,16 +416,22 @@ class ContractTest(unittest.TestCase):
         self.assertIsNone(Task.AUDIO_AR.source_modality)
         self.assertIs(Task.ASR.target_modality, Modality.TEXT)
         self.assertFalse(Task.TTS.uses_source_role)
+        self.assertIsNone(Task.PARALLEL_AR.target_modality)
+        self.assertIsNone(Task.INTERLEAVED_AR.target_modality)
+        self.assertTrue(Task.PARALLEL_AR.prediction_modality.supervises_text)
+        self.assertTrue(Task.PARALLEL_AR.prediction_modality.supervises_audio)
 
     def test_runtime_separates_audio_id_capabilities(self):
         rt = Runtime(Config())
         rt.__dict__["text_tokenizer"] = _Tokenizer(10)
         rt.__dict__["audio_tokenizer"] = SimpleNamespace(vocab_size=3)
 
-        self.assertEqual(rt.audio_head_range, (10, 15))
+        self.assertEqual(rt.audio_head_range, (10, 16))
         self.assertEqual(rt.codec_audio_range, (10, 13))
         self.assertEqual(rt.audio_generation_allowed_ids, (10, 11, 12, 14))
+        self.assertEqual(rt.mask_token_id, 15)
         self.assertNotIn(rt.boa_token_id, rt.audio_generation_allowed_ids)
+        self.assertNotIn(rt.mask_token_id, rt.audio_generation_allowed_ids)
         self.assertTrue(rt.is_codec_audio_id(12))
         self.assertFalse(rt.is_codec_audio_id(rt.eoa_token_id))
 
@@ -842,12 +855,13 @@ class ContractTest(unittest.TestCase):
             audio_tokenizer=tokenizer,
             layout=Layout(
                 text=(0, audio_start),
-                audio=(audio_start, audio_start + tokenizer.vocab_size + 2),
+                audio=(audio_start, audio_start + tokenizer.vocab_size + 3),
             ),
             pad_token_id=0,
             eos_token_id=1,
             boa_token_id=audio_start + tokenizer.vocab_size,
             eoa_token_id=audio_start + tokenizer.vocab_size + 1,
+            mask_token_id=audio_start + tokenizer.vocab_size + 2,
         )
         raw = _raw_sample()
 
@@ -1569,16 +1583,25 @@ class ContractTest(unittest.TestCase):
             _sample(Task.ASR),
             _sample(Task.TEXT_AR),
         ]
-        with self.assertRaisesRegex(ValueError, "same source and target modalities"):
+        with self.assertRaisesRegex(ValueError, "same execution signature"):
             ModelBatch.from_samples(samples, pad_token_id=99)
 
     def test_model_batch_direct_constructor_maintains_batch_task_invariants(self):
         def batch(tasks: list[Task]) -> ModelBatch:
+            predictions = [
+                (
+                    task.prediction_modality
+                    if isinstance(task, Task)
+                    else cast(object, task)
+                )
+                for task in tasks
+            ]
             return ModelBatch(
                 input_ids=torch.ones(2, 2, dtype=torch.long),
                 token_labels=torch.ones(2, 2, dtype=torch.long),
                 acoustic_target=None,
                 tasks=tasks,
+                predictions=predictions,  # type: ignore[arg-type]
                 pad_token_id=99,
                 generation_prompt_lengths=torch.ones(2, dtype=torch.long),
             )
@@ -1589,7 +1612,7 @@ class ContractTest(unittest.TestCase):
             (
                 [Task.ASR, Task.TEXT_AR],
                 ValueError,
-                "same source and target modalities",
+                "same execution signature",
             ),
         )
 
@@ -1606,6 +1629,7 @@ class ContractTest(unittest.TestCase):
                 token_labels=torch.empty(0, 2, dtype=torch.long),
                 acoustic_target=None,
                 tasks=[],
+                predictions=[],
                 pad_token_id=99,
             )
 
@@ -1615,6 +1639,7 @@ class ContractTest(unittest.TestCase):
                 token_labels=torch.ones(1, 2, dtype=torch.long),
                 acoustic_target=None,
                 tasks=[Task.ASR],
+                predictions=[Task.ASR.prediction_modality],
                 pad_token_id=99,
             )
 
@@ -1659,6 +1684,7 @@ class ContractTest(unittest.TestCase):
                     "token_positions": torch.tensor([[position]]),
                 },
                 tasks=[Task.TTS],
+                predictions=[Task.TTS.prediction_modality],
                 pad_token_id=99,
             )
 
@@ -1749,7 +1775,9 @@ class ContractTest(unittest.TestCase):
 
         self.assertGreater(counts[ParameterGroup.BACKBONE], 0)
         self.assertFalse(model.backbone.model.layers[0].weight.requires_grad)
-        self.assertTrue(model.semantic_audio_embedding.weight.requires_grad)
+        self.assertTrue(
+            model.token_embedding.embeddings["audio"].weight.requires_grad
+        )
         self.assertTrue(model.acoustic_decoder.head.weight.requires_grad)
         self.assertFalse(model.acoustic_decoder.decoder.embed_tokens.weight.requires_grad)
         self.assertFalse(model.acoustic_decoder.codebook_embeddings[-1].weight.requires_grad)
@@ -1777,6 +1805,7 @@ def _sample(task: Task) -> ModelSample:
         token_labels=torch.tensor([-100, 2]),
         acoustic_target=None,
         task=task,
+        prediction=task.prediction_modality,
     )
 
 
@@ -1799,6 +1828,7 @@ def _target_sample(
             "token_positions": torch.ones(frames, dtype=torch.long),
         },
         task=Task.TTS,
+        prediction=Task.TTS.prediction_modality,
     )
 
 
@@ -1838,6 +1868,7 @@ def _data_runtime():
         eos_token_id=1,
         boa_token_id=18,
         eoa_token_id=19,
+        mask_token_id=20,
         codec=_longcat_codec(),
     )
 
@@ -1861,11 +1892,12 @@ def _bicodec_data_runtime():
         acoustic_unit_length=2,
         text_tokenizer=_ChatTokenizer(10),
         audio_tokenizer=tokenizer,
-        layout=Layout(text=(0, 10), audio=(audio_start, boa_token_id + 2)),
+        layout=Layout(text=(0, 10), audio=(audio_start, boa_token_id + 3)),
         pad_token_id=0,
         eos_token_id=1,
         boa_token_id=boa_token_id,
         eoa_token_id=boa_token_id + 1,
+        mask_token_id=boa_token_id + 2,
         codec=_StructuredEncodingCodec(),
     )
 

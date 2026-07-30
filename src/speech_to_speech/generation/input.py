@@ -12,6 +12,7 @@ from ..audio_route import (
     BICODEC_GENERATE_GLOBAL,
     BICODEC_REUSE_PROMPT_GLOBAL,
 )
+from ..prediction import PredictionModality
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..runtime.protocol import GenerationRuntime
 from ..task import Task
@@ -118,7 +119,7 @@ def _validate_tts_arguments(text: str, language: str, task: Task) -> None:
         raise TypeError("BiCodec TTS task must be a Task.")
     if (
         task.source_modality is not Modality.TEXT
-        or task.target_modality is not Modality.AUDIO
+        or task.prediction_modality is not PredictionModality.AUDIO
     ):
         raise ValueError("BiCodec requests require a text-to-audio task.")
 
@@ -156,7 +157,7 @@ def _text_prompt_ids(
     task: Task,
     runtime: GenerationRuntime,
 ) -> Tensor:
-    instruction = task.template.format(language=language, source=_PLACEHOLDER)
+    instruction = task.templates[0].format(language=language, source=_PLACEHOLDER)
     rendered = runtime.text_tokenizer.apply_chat_template(
         [{"role": "user", "content": instruction}],
         tokenize=False,

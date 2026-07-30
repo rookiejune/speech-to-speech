@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Set
 
 import torch
 from anydataset.types import Modality
@@ -8,6 +8,7 @@ from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 
 from .._tensor import is_signed_integer_dtype
+from ..prediction import PredictionModality
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..runtime.types import AudioTokenizer
 from .types import LossItem
@@ -27,11 +28,13 @@ class TokenLoss(nn.Module):
         self,
         hidden_states: Tensor,
         token_labels: Tensor,
-        modality: Modality,
-        token_logits: Callable[[Tensor, Modality], Tensor],
+        prediction: PredictionModality | Modality,
+        token_logits: Callable[..., Tensor],
         *,
         token_groups: Tensor | None = None,
-        selected_logits: Callable[[Tensor, Tensor], Tensor] | None = None,
+        selected_logits: Callable[..., Tensor] | None = None,
+        audio_hidden_states: Tensor | None = None,
+        attention_mask: Tensor | None = None,
     ) -> LossItem:
         if hidden_states.dim() != 3 or token_labels.dim() != 2:
             raise ValueError(
@@ -41,12 +44,15 @@ class TokenLoss(nn.Module):
             raise ValueError("token hidden states and labels must align on sequence.")
         if not is_signed_integer_dtype(token_labels.dtype):
             raise TypeError("token labels must use a signed integer dtype.")
+        modalities = _modalities(prediction)
         target = token_labels[:, 1:]
-        prediction = hidden_states[:, :-1]
+        prediction_states = hidden_states[:, :-1]
 
         valid = target.ne(-100)
-        start, end = self.layout.blocks[modality.value]
-        modality_mask = target.ge(start) & target.lt(end)
+        modality_mask = torch.zeros_like(valid)
+        for modality in modalities:
+            start, end = self.layout.blocks[modality.value]
+            modality_mask |= target.ge(start) & target.lt(end)
         invalid = torch.stack(
             (
                 (valid & ~modality_mask).any(),
@@ -55,37 +61,48 @@ class TokenLoss(nn.Module):
         )
         if bool(invalid.any()):
             if bool(invalid[0]):
+                names = ", ".join(sorted(modality.value for modality in modalities))
                 raise ValueError(
-                    f"labels contain an id outside the {modality.value} layout block."
+                    f"labels contain an id outside the supervised layout blocks: {names}."
                 )
             raise ValueError(
                 "each token label row must contain at least one target token."
             )
         if token_groups is None:
-            selected_target = (target[valid] - start).to(dtype=torch.long)
-            logits = token_logits(prediction[valid], modality)
-            if logits.shape != (selected_target.numel(), end - start):
-                raise ValueError(
-                    "token logits do not match selected targets and modality vocabulary."
-                )
-            selected_loss = nn.functional.cross_entropy(
-                logits,
-                selected_target,
-                reduction="none",
+            selected_loss = self._ungrouped_loss(
+                prediction_states,
+                target,
+                valid,
+                modalities,
+                token_logits,
+                audio_hidden_states=(
+                    None
+                    if audio_hidden_states is None
+                    else audio_hidden_states[:, :-1]
+                ),
+                attention_mask=(
+                    None if attention_mask is None else attention_mask[:, :-1]
+                ),
             )
         else:
+            if modalities != frozenset({Modality.AUDIO}):
+                raise ValueError(
+                    "token prediction groups are supported only for audio-only targets."
+                )
             selected_loss = self._grouped_loss(
-                prediction,
+                prediction_states if audio_hidden_states is None else audio_hidden_states[:, :-1],
                 target,
                 valid,
                 token_groups[:, 1:],
-                modality,
+                Modality.AUDIO,
                 selected_logits,
             )
         token_loss = selected_loss.new_zeros(target.shape)
         token_loss[valid] = selected_loss
-        text_mask = valid if modality is Modality.TEXT else valid & False
-        audio_mask = valid if modality is Modality.AUDIO else valid & False
+        text_start, text_end = self.layout.blocks[Modality.TEXT.value]
+        audio_start, audio_end = self.layout.blocks[Modality.AUDIO.value]
+        text_mask = valid & target.ge(text_start) & target.lt(text_end)
+        audio_mask = valid & target.ge(audio_start) & target.lt(audio_end)
         text_count = text_mask.sum(dim=1)
         audio_count = audio_mask.sum(dim=1)
         text_loss = (token_loss * text_mask).sum(dim=1) / text_count.clamp_min(1)
@@ -103,6 +120,50 @@ class TokenLoss(nn.Module):
             },
         )
 
+    def _ungrouped_loss(
+        self,
+        prediction_states: Tensor,
+        target: Tensor,
+        valid: Tensor,
+        modalities: Set[Modality],
+        token_logits: Callable[..., Tensor],
+        *,
+        audio_hidden_states: Tensor | None,
+        attention_mask: Tensor | None,
+    ) -> Tensor:
+        losses = prediction_states.new_empty(int(valid.sum().item()))
+        flat_offsets = valid.flatten().nonzero(as_tuple=False).flatten()
+        loss_offsets = torch.empty_like(valid, dtype=torch.long)
+        loss_offsets.flatten()[flat_offsets] = torch.arange(
+            flat_offsets.numel(),
+            device=target.device,
+        )
+        for modality in sorted(modalities, key=lambda value: value.value):
+            start, end = self.layout.blocks[modality.value]
+            mask = valid & target.ge(start) & target.lt(end)
+            if not bool(mask.any()):
+                continue
+            selected_target = (target[mask] - start).to(dtype=torch.long)
+            if modality is Modality.AUDIO and audio_hidden_states is not None:
+                logits = token_logits(
+                    prediction_states[mask],
+                    modality,
+                    audio_hidden_state=audio_hidden_states[mask],
+                )
+            else:
+                logits = token_logits(prediction_states[mask], modality)
+            if logits.shape != (selected_target.numel(), end - start):
+                raise ValueError(
+                    "token logits do not match selected targets and modality vocabulary."
+                )
+            group_loss = nn.functional.cross_entropy(
+                logits,
+                selected_target,
+                reduction="none",
+            )
+            losses[loss_offsets[mask]] = group_loss.to(dtype=losses.dtype)
+        return losses
+
     def _grouped_loss(
         self,
         prediction: Tensor,
@@ -110,7 +171,7 @@ class TokenLoss(nn.Module):
         valid: Tensor,
         groups: Tensor,
         modality: Modality,
-        selected_logits: Callable[[Tensor, Tensor], Tensor] | None,
+        selected_logits: Callable[..., Tensor] | None,
     ) -> Tensor:
         if modality is not Modality.AUDIO:
             raise ValueError("token prediction groups are supported only for audio targets.")
@@ -139,7 +200,8 @@ class TokenLoss(nn.Module):
             mask = valid & groups.eq(group)
             local_allowed = tokenizer.prediction_ids(group, device=target.device)
             allowed = local_allowed + audio_start
-            logits = selected_logits(prediction[mask], allowed)
+            selected = selected_logits(prediction[mask], allowed)
+            logits = selected[0] if isinstance(selected, tuple) else selected
             if logits.shape != (int(mask.sum().item()), allowed.numel()):
                 raise ValueError(
                     "selected token logits do not match the BiCodec prediction group."
@@ -157,3 +219,14 @@ class TokenLoss(nn.Module):
             )
             losses[loss_offsets[mask]] = group_loss.to(dtype=losses.dtype)
         return losses
+
+
+def _modalities(prediction: PredictionModality | Modality) -> frozenset[Modality]:
+    if isinstance(prediction, PredictionModality):
+        modalities = prediction.supervised_modalities()
+        if not modalities:
+            raise ValueError(f"prediction modality {prediction.value} has no heads.")
+        return modalities
+    if prediction not in {Modality.TEXT, Modality.AUDIO}:
+        raise ValueError(f"unsupported token modality: {prediction.value}")
+    return frozenset({prediction})

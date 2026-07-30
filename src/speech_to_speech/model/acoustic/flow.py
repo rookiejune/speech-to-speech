@@ -3,23 +3,24 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 import torch
+from semantic_acoustic_codec.config import DecoderConfig as SacDecoderConfig
 from semantic_acoustic_codec.model import FMFeatureGenerator
+from semantic_acoustic_codec.model.dit import DiTDecoder
 from semantic_acoustic_codec.runtime import AcousticGeneratorArtifact
 from torch import Tensor, nn
 
 from ...generation.types import AcousticGeneration
 from ...runtime.types import AcousticCodec, acoustic_codec
 from .._buffer import register
-from ..base import Config, TokenModel
+from ..base import Config, Model
 from ..protocol import FlowModelRuntime, FlowSamplingRuntime
 from ._config import DecoderConfig, FlowRepaConfig, decoder_options
 from ._codec import code_features
 from .condition import HiddenConditionAdapter
-from .dit import AcousticDiT
 
 
 class AcousticFlow(nn.Module):
-    """Acoustic flow decoder and sampling shared by training compositions."""
+    """S2S sampling wrapper around SAC ``FMFeatureGenerator``."""
 
     feature_mean: Tensor
     feature_std: Tensor
@@ -40,15 +41,18 @@ class AcousticFlow(nn.Module):
         feature_std: tuple[float, ...] | None = None,
     ) -> None:
         super().__init__()
-        self.decoder = AcousticDiT(
+        self.generator = FMFeatureGenerator(
             condition_dim,
             latent_dim,
-            hidden_dim=hidden_dim,
-            layers=layers,
-            heads=heads,
-            ffn_ratio=ffn_ratio,
-            repa_feature_dim=repa_feature_dim,
-            repa_student_layer=repa_student_layer,
+            SacDecoderConfig(
+                hidden_dim=hidden_dim,
+                layers=layers,
+                heads=heads,
+                ffn_ratio=ffn_ratio,
+                repa_feature_dim=repa_feature_dim,
+                repa_student_layer=repa_student_layer,
+                repa_loss_weight=0.0,
+            ),
         )
         self.runtime = runtime
         register(
@@ -61,6 +65,10 @@ class AcousticFlow(nn.Module):
             "feature_std",
             _feature_stat(latent_dim, feature_std, fill=1.0),
         )
+
+    @property
+    def decoder(self) -> DiTDecoder:
+        return self.generator.core
 
     @torch.no_grad()
     def sample(
@@ -78,7 +86,7 @@ class AcousticFlow(nn.Module):
         parameter = next(self.decoder.parameters())
         condition = condition.to(dtype=parameter.dtype)
         latent = torch.randn(
-            (*condition.shape[:2], self.decoder.latent_dim),
+            (*condition.shape[:2], self.decoder.decoder.latent_dim),
             device=condition.device,
             dtype=condition.dtype,
             generator=generator,
@@ -95,7 +103,7 @@ class AcousticFlow(nn.Module):
         return output
 
 
-class FlowModel(TokenModel):
+class FlowModel(Model):
     """Token model composition with a flow-matching acoustic decoder."""
 
     def __init__(
@@ -144,14 +152,14 @@ class FlowModel(TokenModel):
             generator = initialization.generator
             if not isinstance(generator, FMFeatureGenerator):
                 raise AssertionError("Flow initialization type changed after validation.")
-            self.acoustic_decoder.load_state_dict(generator.core.decoder.state_dict())
+            self.acoustic_decoder.load_state_dict(generator.core.state_dict())
 
     @property
     def acoustic_codec(self) -> AcousticCodec:
         return acoustic_codec(self.runtime.codec)
 
     @property
-    def acoustic_decoder(self) -> AcousticDiT:
+    def acoustic_decoder(self) -> DiTDecoder:
         return self.acoustic_flow.decoder
 
     def acoustic_target_latent(self, target_acoustic_codes: Tensor) -> Tensor:

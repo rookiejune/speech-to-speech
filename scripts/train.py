@@ -146,8 +146,13 @@ def _loader_spec(
         return LoaderSpec.text(
             config.text_data,
             loader.tasks,
+            prediction=loader.prediction_modality,
         )
-    return LoaderSpec.speech(config.data, loader.tasks)
+    return LoaderSpec.speech(
+        config.data,
+        loader.tasks,
+        prediction=loader.prediction_modality,
+    )
 
 
 def _validation_spec(config: StagedTrainConfig) -> LoaderSpec:
@@ -159,6 +164,7 @@ def _validation_spec(config: StagedTrainConfig) -> LoaderSpec:
     return LoaderSpec.speech(
         replace(config.data, dataset=dataset),
         loader.tasks,
+        prediction=loader.prediction_modality,
     )
 
 

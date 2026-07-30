@@ -8,10 +8,13 @@ from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
 from ..audio_route import AudioStream, Config as AudioRouteConfig, PromptSource
+from ..prediction import PredictionModality
 from ..runtime import AudioRepresentation
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..task import Task
+from ..task_spec import resolve_prediction
 from ._tokenization import token_ids
+from .ar import build_ar_sample, is_ar_task
 from .protocol import DataRuntime, TextRuntime
 from .types import (
     AcousticTarget,
@@ -32,13 +35,29 @@ def build_sample(
     speech_pair: SpeechPair,
     task: Task,
     runtime: DataRuntime,
+    *,
+    prediction: PredictionModality | None = None,
 ) -> ModelSample:
     prompt = _prompt(speech_pair, task, runtime)
     source, target = _source_target(speech_pair, task)
-    return build_speech_sample(source, target, task, runtime, prompt=prompt)
+    return build_speech_sample(
+        source,
+        target,
+        task,
+        runtime,
+        prompt=prompt,
+        prediction=prediction,
+    )
 
 
-def build_task_sample(sample: SpeechTaskSample, runtime: DataRuntime) -> ModelSample:
+def build_task_sample(
+    sample: SpeechTaskSample,
+    runtime: DataRuntime,
+    *,
+    interleave_audio_frames: int = 25,
+    mask_text_ratio: float = 0.5,
+    mask_audio_ratio: float = 0.5,
+) -> ModelSample:
     if sample.needs_codec:
         raise ValueError("raw speech task samples must be materialized before building.")
     source = sample.source
@@ -50,6 +69,30 @@ def build_task_sample(sample: SpeechTaskSample, runtime: DataRuntime) -> ModelSa
         or isinstance(audio_context, RawSpeech)
     ):
         raise AssertionError("materialized task samples must not contain RawSpeech.")
+    if sample.task is Task.MASKED_AR:
+        from .masked import build_masked_sample
+
+        if not isinstance(target, Speech):
+            raise TypeError("MASKED_AR target must be Speech.")
+        return build_masked_sample(
+            target,
+            sample.task,
+            runtime,
+            prediction=sample.prediction,
+            prompt=chat_prompt(target.language, sample.task, runtime),
+            interleave_audio_frames=interleave_audio_frames,
+            mask_text_ratio=mask_text_ratio,
+            mask_audio_ratio=mask_audio_ratio,
+        )
+    if is_ar_task(sample.task):
+        return build_ar_sample(
+            target,
+            sample.task,
+            runtime,
+            prompt=chat_prompt(target.language, sample.task, runtime),
+            prediction=sample.prediction,
+            interleave_audio_frames=interleave_audio_frames,
+        )
     return _build_modal_sample(
         source,
         target,
@@ -57,6 +100,7 @@ def build_task_sample(sample: SpeechTaskSample, runtime: DataRuntime) -> ModelSa
         runtime,
         prompt=chat_prompt(target.language, sample.task, runtime),
         audio_context=audio_context,
+        prediction=sample.prediction,
     )
 
 
@@ -67,6 +111,7 @@ def build_speech_sample(
     runtime: DataRuntime,
     *,
     prompt: str,
+    prediction: PredictionModality | None = None,
 ) -> ModelSample:
     return _build_modal_sample(
         source,
@@ -75,6 +120,7 @@ def build_speech_sample(
         runtime,
         prompt=prompt,
         audio_context=None,
+        prediction=prediction,
     )
 
 
@@ -86,9 +132,10 @@ def _build_modal_sample(
     *,
     prompt: str,
     audio_context: Speech | None,
+    prediction: PredictionModality | None = None,
 ) -> ModelSample:
+    prediction = resolve_prediction(task, prediction)
     source_modality = task.source_modality
-    target_modality = task.target_modality
     audio_input_positions: Tensor | None = None
     if source_modality is not None:
         if source is None:
@@ -113,6 +160,23 @@ def _build_modal_sample(
     else:
         input_ids = token_ids(prompt, runtime.text_tokenizer)
 
+    if prediction is PredictionModality.PARALLEL:
+        return _parallel_response(
+            input_ids,
+            target,
+            task,
+            runtime,
+            prediction=prediction,
+            audio_input_positions=audio_input_positions,
+            audio_context=audio_context,
+            source=source,
+        )
+
+    target_modality = (
+        Modality.TEXT
+        if prediction is PredictionModality.TEXT
+        else Modality.AUDIO
+    )
     bicodec = _bicodec_route(target, target_modality, runtime)
     audio_prompt = None
     if bicodec is not None:
@@ -215,6 +279,7 @@ def _build_modal_sample(
         token_groups=token_groups,
         acoustic_target=acoustic_target,
         task=task,
+        prediction=prediction,
         audio_seconds=_audio_seconds(
             source,
             target,
@@ -231,6 +296,72 @@ def _build_modal_sample(
     )
 
 
+def _parallel_response(
+    input_ids: Tensor,
+    target: Speech | Text,
+    task: Task,
+    runtime: DataRuntime,
+    *,
+    prediction: PredictionModality,
+    audio_input_positions: Tensor | None,
+    audio_context: Speech | None,
+    source: Speech | Text | None,
+) -> ModelSample:
+    if not isinstance(target, Speech):
+        raise TypeError("PARALLEL prediction requires a Speech target.")
+    if runtime.audio_route is not None and isinstance(
+        runtime.audio_tokenizer,
+        BiCodecAudioTokenizer,
+    ):
+        raise ValueError(
+            "PARALLEL prediction is not supported with BiCodec audio routes."
+        )
+    text = _append_eos(
+        runtime.layout.to_global(Modality.TEXT.value, target.text_token_ids),
+        runtime,
+    )
+    audio = _boa_eoa(
+        runtime.layout.to_global(Modality.AUDIO.value, target.audio_token_ids),
+        runtime,
+    )
+    response = torch.cat([text, audio])
+    full_ids = torch.cat([input_ids, response])
+    labels = torch.full_like(full_ids, -100)
+    labels[input_ids.numel() : input_ids.numel() + text.numel()] = text
+    labels[input_ids.numel() + text.numel() + 1 :] = audio[1:]
+    acoustic = None
+    if target.acoustic_codes is not None and runtime.semantic_codec_artifact is None and (
+        runtime.audio_representation is not AudioRepresentation.FULL_CODEC_SEQUENCE
+    ):
+        positions = torch.arange(
+            input_ids.numel() + text.numel() + 1,
+            input_ids.numel() + text.numel() + 1 + target.audio_token_ids.numel(),
+            dtype=torch.long,
+        )
+        acoustic = AcousticTarget(
+            semantic_codes=target.semantic_codes,
+            codes=target.acoustic_codes,
+            token_positions=torch.repeat_interleave(positions, target.audio_token_spans),
+        )
+    return ModelSample(
+        input_ids=full_ids,
+        token_labels=labels,
+        token_groups=None,
+        acoustic_target=acoustic,
+        task=task,
+        prediction=prediction,
+        audio_seconds=_audio_seconds(
+            source,
+            target,
+            task,
+            audio_context=audio_context,
+        ),
+        generation_prompt_length=input_ids.numel(),
+        audio_input_positions=audio_input_positions,
+        audio_context=None,
+    )
+
+
 def build_text_sample(
     text_pair: TextPair,
     task: Task,
@@ -238,7 +369,7 @@ def build_text_sample(
 ) -> ModelSample:
     if (
         task.source_modality is Modality.AUDIO
-        or task.target_modality is not Modality.TEXT
+        or task.prediction_modality is not PredictionModality.TEXT
     ):
         raise ValueError(f"{task.value} is not supported by the text-only data path.")
 
@@ -264,6 +395,7 @@ def build_text_sample(
         token_groups=None,
         acoustic_target=None,
         task=task,
+        prediction=PredictionModality.TEXT,
         generation_prompt_length=len(input_ids),
     )
 
@@ -281,7 +413,7 @@ def chat_prompt(
     task: Task,
     runtime: TextRuntime,
 ) -> str:
-    instruction = task.template.format(
+    instruction = task.sample_template().format(
         language=str(language),
         source=_PLACEHOLDER,
     )
@@ -302,7 +434,7 @@ def _text_prompt(
     task: Task,
     runtime: TextRuntime,
 ) -> str:
-    instruction = task.template.format(
+    instruction = task.sample_template().format(
         language=str(language),
         source=_PLACEHOLDER,
     )
@@ -332,10 +464,13 @@ def _audio_seconds(
     audio_context: Speech | None = None,
 ) -> float:
     seconds = 0.0
-    if task.source_modality is Modality.AUDIO:
+    if task.source_layout.includes_audio:
         seconds += _duration(_speech(source, role="source"), role="source")
-    if task.target_modality is Modality.AUDIO:
-        seconds += _duration(_speech(target, role="target"), role="target")
+    if task.prediction_modality.supervises_audio:
+        if source is not target:
+            seconds += _duration(_speech(target, role="target"), role="target")
+        elif not task.source_layout.includes_audio:
+            seconds += _duration(_speech(target, role="target"), role="target")
     if audio_context is not None and audio_context is not source:
         seconds += _duration(audio_context, role="audio context")
     return seconds
@@ -386,7 +521,7 @@ def _global_ids(
 
 def _bicodec_route(
     target: Speech | Text,
-    target_modality: Modality,
+    target_modality: Modality | None,
     runtime: DataRuntime,
 ) -> tuple[AudioRouteConfig, BiCodecAudioTokenizer] | None:
     if target_modality is not Modality.AUDIO:

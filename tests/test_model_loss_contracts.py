@@ -38,7 +38,7 @@ from speech_to_speech.loss import (
 from speech_to_speech.loss.flow_matching import AcousticFlowLoss
 from speech_to_speech.loss.token import TokenLoss
 from speech_to_speech.loss.types import combine_outputs
-from speech_to_speech.model.base import Config, TokenModel
+from speech_to_speech.model.base import Config, Model
 from speech_to_speech.model.audio_output import (
     AudioOutputAdapterConfig,
     AudioOutputAdapterType,
@@ -52,7 +52,7 @@ from speech_to_speech.runtime.audio_tokenizer import (
 from speech_to_speech.task import Task
 
 
-class _ConditionModel(TokenModel):
+class _ConditionModel(Model):
     def __init__(self) -> None:
         nn.Module.__init__(self)
 
@@ -178,13 +178,26 @@ class _FlowModel:
         self,
         hidden_states: Tensor,
         modality: Modality | None = None,
+        **kwargs: object,
     ) -> Tensor:
+        del kwargs
         if modality is None:
             raise ValueError("objective must select a token modality")
         self.logit_rows += hidden_states.size(0)
         self.logit_modalities.append(modality)
         start, end = self.layout.blocks[modality.value]
         return torch.zeros(hidden_states.size(0), end - start)
+
+    def project_audio_hidden(
+        self,
+        hidden_state: Tensor,
+        *,
+        attention_mask: Tensor | None = None,
+        past_key_values: object | None = None,
+        use_cache: bool = False,
+    ) -> tuple[Tensor, object | None]:
+        del attention_mask, past_key_values, use_cache
+        return hidden_state, None
 
     def target_frame_condition(
         self, hidden_states: Tensor, target_positions: Tensor
@@ -221,13 +234,26 @@ class _TokenForwardModel:
         self,
         hidden_states: Tensor,
         modality: Modality | None = None,
+        **kwargs: object,
     ) -> Tensor:
+        del kwargs
         if modality is None:
             raise ValueError("objective must select a token modality")
         self.logit_rows += hidden_states.size(0)
         self.logit_modalities.append(modality)
         start, end = self.layout.blocks[modality.value]
         return torch.zeros(hidden_states.size(0), end - start)
+
+    def project_audio_hidden(
+        self,
+        hidden_state: Tensor,
+        *,
+        attention_mask: Tensor | None = None,
+        past_key_values: object | None = None,
+        use_cache: bool = False,
+    ) -> tuple[Tensor, object | None]:
+        del attention_mask, past_key_values, use_cache
+        return hidden_state, None
 
 
 class _RVQModel(_FlowModel):
@@ -425,6 +451,7 @@ class ModelLossContractTest(unittest.TestCase):
             token_labels=torch.tensor([[-100, 1]]),
             acoustic_target=None,
             tasks=[Task.TTS],
+            predictions=[Task.TTS.prediction_modality],
             pad_token_id=99,
             audio_contexts=(context,),
         )
@@ -463,6 +490,7 @@ class ModelLossContractTest(unittest.TestCase):
                         language=Language.ZH,
                     ),
                     task=Task.TTS,
+                    prediction=Task.TTS.prediction_modality,
                 ),
             ),
             pad_token_id=99,
@@ -731,12 +759,12 @@ class ModelLossContractTest(unittest.TestCase):
     def test_backbone_text_embedding_has_one_registered_path(self):
         backbone = _Backbone()
         rt = SimpleNamespace(
-            layout=Layout(text=(0, 4), audio=(4, 9)),
+            layout=Layout(text=(0, 4), audio=(4, 10)),
             backbone=backbone,
             codec=_Codec(),
             audio_tokenizer=NativeAudioTokenizer(vocab_size=3),
         )
-        model = TokenModel(
+        model = Model(
             Config(
                 semantic_audio_adapter=None,
                 audio_output_adapter=AudioOutputAdapterConfig(
@@ -757,13 +785,13 @@ class ModelLossContractTest(unittest.TestCase):
     def test_token_model_injects_the_configured_peft_adapter(self):
         backbone = _Backbone()
         rt = SimpleNamespace(
-            layout=Layout(text=(0, 4), audio=(4, 9)),
+            layout=Layout(text=(0, 4), audio=(4, 10)),
             backbone=backbone,
             codec=_Codec(),
             audio_tokenizer=NativeAudioTokenizer(vocab_size=3),
         )
 
-        model = TokenModel(
+        model = Model(
             Config(
                 semantic_audio_adapter=None,
                 audio_output_adapter=AudioOutputAdapterConfig(
@@ -782,12 +810,12 @@ class ModelLossContractTest(unittest.TestCase):
     def test_text_logits_only_cover_the_layout_vocabulary(self):
         backbone = _Backbone(text_vocab_size=4, embedding_rows=4)
         rt = SimpleNamespace(
-            layout=Layout(text=(2, 6), audio=(6, 11)),
+            layout=Layout(text=(2, 6), audio=(6, 12)),
             backbone=backbone,
             codec=_Codec(),
             audio_tokenizer=NativeAudioTokenizer(vocab_size=3),
         )
-        model = TokenModel(
+        model = Model(
             Config(
                 semantic_audio_adapter=None,
                 audio_output_adapter=AudioOutputAdapterConfig(
@@ -797,7 +825,7 @@ class ModelLossContractTest(unittest.TestCase):
             runtime=rt,
         )
         with torch.no_grad():
-            backbone.output_embeddings.weight.copy_(
+            backbone.input_embeddings.weight.copy_(
                 torch.arange(8, dtype=torch.float32).reshape(4, 2)
             )
 
@@ -809,14 +837,14 @@ class ModelLossContractTest(unittest.TestCase):
     def test_backbone_embeddings_must_cover_the_text_layout(self):
         backbone = _Backbone(text_vocab_size=4, embedding_rows=3)
         rt = SimpleNamespace(
-            layout=Layout(text=(0, 4), audio=(4, 9)),
+            layout=Layout(text=(0, 4), audio=(4, 10)),
             backbone=backbone,
             codec=_Codec(),
             audio_tokenizer=NativeAudioTokenizer(vocab_size=3),
         )
 
         with self.assertRaisesRegex(ValueError, "input embedding"):
-            TokenModel(
+            Model(
                 Config(
                     semantic_audio_adapter=None,
                     audio_output_adapter=AudioOutputAdapterConfig(
@@ -1073,6 +1101,7 @@ def _batch(
             }
         ),
         tasks=[task] * token_labels.size(0),
+        predictions=[task.prediction_modality] * token_labels.size(0),
         pad_token_id=99,
     )
     return batch

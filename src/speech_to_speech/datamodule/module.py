@@ -10,6 +10,7 @@ from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader, Subset
 
 from .._compat import StrEnum, auto
+from ..prediction import PredictionModality
 from ..task import Task
 from ._text import TextLoader
 from .collator import Collator
@@ -42,12 +43,18 @@ class LoaderSpec:
     speech_config: SpeechConfig | None = None
     text_config: TextConfig | None = None
     sample_index: int | None = None
+    prediction: PredictionModality | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, LoaderKind):
             raise TypeError("loader kind must be a LoaderKind.")
         if not isinstance(self.task_weights, Mapping):
             raise TypeError("loader task_weights must be a mapping.")
+        if self.prediction is not None and not isinstance(
+            self.prediction,
+            PredictionModality,
+        ):
+            raise TypeError("loader prediction must be a PredictionModality or None.")
         if self.kind is LoaderKind.SPEECH:
             if self.speech_config is None or self.text_config is not None:
                 raise ValueError(
@@ -69,12 +76,14 @@ class LoaderSpec:
         task_weights: Mapping[Task, float],
         *,
         sample_index: int | None = None,
+        prediction: PredictionModality | None = None,
     ) -> LoaderSpec:
         return cls(
             kind=LoaderKind.SPEECH,
             task_weights=task_weights,
             speech_config=config,
             sample_index=sample_index,
+            prediction=prediction,
         )
 
     @classmethod
@@ -82,11 +91,14 @@ class LoaderSpec:
         cls,
         config: TextConfig,
         task_weights: Mapping[Task, float],
+        *,
+        prediction: PredictionModality | None = None,
     ) -> LoaderSpec:
         return cls(
             kind=LoaderKind.TEXT,
             task_weights=task_weights,
             text_config=config,
+            prediction=prediction,
         )
 
 
@@ -118,6 +130,8 @@ class _SpeechLoader:
         runtime: DatasetRuntime,
         task_weights: Mapping[Task, float],
         sample_index: int | None = None,
+        *,
+        prediction: PredictionModality | None = None,
     ) -> None:
         self.config = config
         self.runtime = runtime
@@ -126,6 +140,10 @@ class _SpeechLoader:
             runtime,
             task_weights,
             encode_missing_codes=config.encode_missing_codes,
+            interleave_audio_frames=config.interleave_audio_frames,
+            mask_text_ratio=config.mask_text_ratio,
+            mask_audio_ratio=config.mask_audio_ratio,
+            prediction=prediction,
         )
         self.sample_index = sample_index
         self._dataset = None
@@ -166,6 +184,10 @@ class _SpeechLoader:
             self.runtime,
             {task: 1.0},
             encode_missing_codes=self.config.encode_missing_codes,
+            interleave_audio_frames=self.config.interleave_audio_frames,
+            mask_text_ratio=self.config.mask_text_ratio,
+            mask_audio_ratio=self.config.mask_audio_ratio,
+            prediction=self.collator.prediction,
         )
 
     def train_dataloader(self) -> Iterable[TrainInput]:
@@ -331,12 +353,14 @@ def _build_loader(
             cast(DatasetRuntime, runtime),
             spec.task_weights,
             sample_index=spec.sample_index,
+            prediction=spec.prediction,
         )
     assert spec.text_config is not None
     return TextLoader(
         spec.text_config,
         cast(TextRuntime, runtime),
         spec.task_weights,
+        prediction=spec.prediction,
     )
 
 
@@ -352,6 +376,7 @@ def _build_validation_loader(
         cast(DatasetRuntime, runtime),
         spec.task_weights,
         sample_index=spec.sample_index,
+        prediction=spec.prediction,
     )
 
 
@@ -411,17 +436,29 @@ def _collator(
     task_weights: Mapping[Task, float],
     *,
     encode_missing_codes: bool = False,
+    interleave_audio_frames: int = 25,
+    mask_text_ratio: float = 0.5,
+    mask_audio_ratio: float = 0.5,
+    prediction: PredictionModality | None = None,
 ):
     if shape is DataShape.PAIR:
         return Collator(
             runtime,
             task_weights,
             encode_missing_codes=encode_missing_codes,
+            interleave_audio_frames=interleave_audio_frames,
+            mask_text_ratio=mask_text_ratio,
+            mask_audio_ratio=mask_audio_ratio,
+            prediction=prediction,
         )
     if shape is DataShape.SINGLE:
         return SingleCollator(
             runtime,
             task_weights,
             encode_missing_codes=encode_missing_codes,
+            interleave_audio_frames=interleave_audio_frames,
+            mask_text_ratio=mask_text_ratio,
+            mask_audio_ratio=mask_audio_ratio,
+            prediction=prediction,
         )
     raise AssertionError(f"unsupported data shape: {shape}")

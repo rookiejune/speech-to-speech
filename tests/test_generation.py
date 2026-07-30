@@ -35,7 +35,8 @@ from speech_to_speech.model import (
 )
 from speech_to_speech.model.acoustic import FlowModel
 from speech_to_speech.model.base import Config as ModelConfig
-from speech_to_speech.model.base import TokenModel
+from speech_to_speech.model.base import Model
+from speech_to_speech.model._generation import GenerationStepResult
 from speech_to_speech.generation import (
     Request,
     Result,
@@ -102,7 +103,7 @@ class _Runtime:
     def __init__(self) -> None:
         self.audio_route = None
         self.audio_representation = AudioRepresentation.DECOUPLED
-        self.layout = Layout(text=(0, 4), audio=(4, 8))
+        self.layout = Layout(text=(0, 4), audio=(4, 9))
         self.audio_tokenizer = NativeAudioTokenizer(vocab_size=2)
         self.codec = _Codec()
         self.eos_token_id = 3
@@ -110,6 +111,7 @@ class _Runtime:
         self.bos_token_id = 1
         self.boa_token_id = 6
         self.eoa_token_id = 7
+        self.mask_token_id = 8
         self.structured_full_sequence = False
 
     @property
@@ -165,12 +167,13 @@ class _TinyCodec:
 class _TinyRuntime(_Runtime):
     def __init__(self) -> None:
         super().__init__()
-        self.layout = Layout(text=(0, 8), audio=(8, 12))
+        self.layout = Layout(text=(0, 8), audio=(8, 13))
         self.audio_tokenizer = NativeAudioTokenizer(vocab_size=2)
         self.codec = _TinyCodec()
         self.eos_token_id = 3
         self.boa_token_id = 10
         self.eoa_token_id = 11
+        self.mask_token_id = 12
 
     @property
     def codec_audio_range(self) -> tuple[int, int]:
@@ -192,10 +195,11 @@ class _UnifiedRuntime(_Runtime):
         )
         self.layout = Layout(
             text=(0, 4),
-            audio=(4, 4 + self.audio_tokenizer.vocab_size + 2),
+            audio=(4, 4 + self.audio_tokenizer.vocab_size + 3),
         )
         self.boa_token_id = self.codec_audio_range[1]
         self.eoa_token_id = self.boa_token_id + 1
+        self.mask_token_id = self.boa_token_id + 2
 
     @property
     def semantic_codec(self):
@@ -240,7 +244,7 @@ class _GenerationModel(FlowModel):
         token_ids: Tensor | None = None,
         modality: Modality | None = None,
         **kwargs,
-    ) -> CausalLMOutputWithPast:
+    ) -> GenerationStepResult:
         del kwargs
         cached_length = 0 if past_key_values is None else past_key_values.length
         source = 0 if past_key_values is None else past_key_values.source
@@ -260,11 +264,16 @@ class _GenerationModel(FlowModel):
         hidden = torch.zeros(*input_ids.shape, 2)
         hidden[:, -1] = torch.tensor([source, length])
         cache = SimpleNamespace(length=length, source=source) if use_cache else None
-        return CausalLMOutputWithPast(
+        return GenerationStepResult(
             logits=logits,
             past_key_values=cache,
+            audio_output_past=None,
             hidden_states=(hidden,) if output_hidden_states else None,
         )
+
+    def audio_output_adapter_batch_select(self, past_key_values, indices):
+        del indices
+        return past_key_values
 
     def sample_acoustic_features(
         self,
@@ -279,7 +288,7 @@ class _GenerationModel(FlowModel):
         return torch.zeros_like(condition)
 
 
-class _TokenGenerationModel(TokenModel):
+class _TokenGenerationModel(Model):
     def __init__(self) -> None:
         nn.Module.__init__(self)
         self.runtime = _Runtime()
@@ -293,7 +302,7 @@ class _TokenGenerationModel(TokenModel):
     generation_step = _GenerationModel.generation_step
 
 
-class _UnifiedGenerationModel(TokenModel):
+class _UnifiedGenerationModel(Model):
     def __init__(self) -> None:
         nn.Module.__init__(self)
         self.runtime = _UnifiedRuntime()
@@ -327,7 +336,7 @@ class _UnifiedGenerationModel(TokenModel):
         token_ids: Tensor | None = None,
         modality: Modality | None = None,
         **kwargs,
-    ) -> CausalLMOutputWithPast:
+    ) -> GenerationStepResult:
         del kwargs, output_hidden_states, past_key_values
         self.calls.append((input_ids.size(1), input_ids.size(0)))
         next_id = self._tokens[min(self._step, len(self._tokens) - 1)]
@@ -360,7 +369,7 @@ class _UnifiedGenerationModel(TokenModel):
             if use_cache
             else None
         )
-        return CausalLMOutputWithPast(logits=logits, past_key_values=cache)
+        return GenerationStepResult(logits=logits, past_key_values=cache, audio_output_past=None)
 
 
 class _FullSequenceCodec:
@@ -391,12 +400,13 @@ class _FullSequenceRuntime:
             codec_name="frame-codec",
         )
         self.codec = _FullSequenceCodec(codebook_sizes)
-        self.layout = Layout(text=(0, 4), audio=(4, 4 + self.audio_tokenizer.vocab_size + 2))
+        self.layout = Layout(text=(0, 4), audio=(4, 4 + self.audio_tokenizer.vocab_size + 3))
         self.pad_token_id = 0
         self.eos_token_id = 3
         self.bos_token_id = 1
         self.boa_token_id = self.codec_audio_range[1]
         self.eoa_token_id = self.boa_token_id + 1
+        self.mask_token_id = self.boa_token_id + 2
         self.structured_full_sequence = False
 
     @property
@@ -427,7 +437,7 @@ class _FullSequenceRuntime:
         return start <= token_id < end
 
 
-class _FullSequenceGenerationModel(TokenModel):
+class _FullSequenceGenerationModel(Model):
     def __init__(
         self,
         codes: Tensor | None = None,
@@ -473,7 +483,7 @@ class _FullSequenceGenerationModel(TokenModel):
         token_ids: Tensor | None = None,
         modality: Modality | None = None,
         **kwargs,
-    ) -> CausalLMOutputWithPast:
+    ) -> GenerationStepResult:
         del kwargs, output_hidden_states, past_key_values
         self.generation_inputs.append(input_ids.clone())
         self.allowed_token_ids.append(None if token_ids is None else token_ids.clone())
@@ -503,7 +513,7 @@ class _FullSequenceGenerationModel(TokenModel):
             if use_cache
             else None
         )
-        return CausalLMOutputWithPast(logits=logits, past_key_values=cache)
+        return GenerationStepResult(logits=logits, past_key_values=cache, audio_output_past=None)
 
     def generate_audio_features(self, **kwargs) -> None:
         del kwargs
@@ -533,7 +543,7 @@ class _VariableStopModel(_UnifiedGenerationModel):
         self.batch_sizes: list[int] = []
         self.cache_selections: list[list[int]] = []
 
-    def generation_step(self, input_ids: Tensor, **kwargs) -> CausalLMOutputWithPast:
+    def generation_step(self, input_ids: Tensor, **kwargs) -> GenerationStepResult:
         self.batch_sizes.append(input_ids.size(0))
         generation_token_ids = kwargs.get("token_ids")
         generation_modality = kwargs.get("modality")
@@ -577,7 +587,11 @@ class _VariableStopModel(_UnifiedGenerationModel):
             if use_cache
             else None
         )
-        return CausalLMOutputWithPast(logits=logits, past_key_values=cache)
+        return GenerationStepResult(logits=logits, past_key_values=cache, audio_output_past=None)
+
+    def audio_output_adapter_batch_select(self, past_key_values, indices):
+        del indices
+        return past_key_values
 
 
 class GenerationTest(unittest.TestCase):
@@ -619,7 +633,7 @@ class GenerationTest(unittest.TestCase):
         self.assertTrue(report["finite"])
 
     def test_explicit_audio_output_adapter_is_shared_by_logits_paths(self):
-        model = TokenModel(
+        model = Model(
             ModelConfig(
                 semantic_audio_adapter=None,
                 audio_output_adapter=AudioOutputAdapterConfig(
@@ -644,7 +658,7 @@ class GenerationTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(logits).all())
 
     def test_audio_input_adapter_overlays_only_source_positions(self):
-        model = TokenModel(
+        model = Model(
             ModelConfig(
                 semantic_audio_adapter=None,
                 audio_output_adapter=AudioOutputAdapterConfig(
@@ -678,7 +692,7 @@ class GenerationTest(unittest.TestCase):
             model._input_embedding(input_ids, torch.tensor([[3]]))
 
     def test_cached_generation_runs_audio_input_adapter_once(self):
-        model = TokenModel(
+        model = Model(
             ModelConfig(
                 semantic_audio_adapter=None,
                 audio_output_adapter=AudioOutputAdapterConfig(
@@ -713,7 +727,7 @@ class GenerationTest(unittest.TestCase):
 
     def test_frame_span_buffer_follows_the_backbone_device(self):
         runtime = _TinyRuntime()
-        model = TokenModel(
+        model = Model(
             _model_config(),
             runtime=runtime,
         ).to(device="meta")
@@ -723,7 +737,7 @@ class GenerationTest(unittest.TestCase):
 
     @patch("speech_to_speech.model._buffer.nn.Buffer", new=None)
     def test_frame_span_buffer_supports_torch_without_nn_buffer(self):
-        model = TokenModel(
+        model = Model(
             _model_config(),
             runtime=_TinyRuntime(),
         )
@@ -745,7 +759,7 @@ class GenerationTest(unittest.TestCase):
         self.assertEqual(allowed, (2, 3))
 
     def test_modality_generation_masks_special_tokens(self):
-        model = TokenModel(
+        model = Model(
             _model_config(),
             runtime=_TinyRuntime(),
         ).eval()
@@ -760,7 +774,7 @@ class GenerationTest(unittest.TestCase):
 
         def audio_logits(hidden_state: Tensor, local_ids=None) -> Tensor:
             self.assertIsNone(local_ids)
-            logits = hidden_state.new_zeros(*hidden_state.shape[:-1], 4)
+            logits = hidden_state.new_zeros(*hidden_state.shape[:-1], 5)
             logits[..., 2] = 100
             logits[..., 0] = 90
             return logits
@@ -786,7 +800,7 @@ class GenerationTest(unittest.TestCase):
         self.assertEqual(int(audio[0, -1]), 8)
 
     def test_forward_skips_the_backbone_lm_head(self):
-        model = TokenModel(
+        model = Model(
             _model_config(),
             runtime=_TinyRuntime(),
         ).eval()
@@ -798,10 +812,10 @@ class GenerationTest(unittest.TestCase):
         ):
             output = model(torch.tensor([[1, 2]]))
 
-        self.assertEqual(tuple(output.logits.shape), (1, 2, 12))
+        self.assertEqual(tuple(output.logits.shape), (1, 2, 13))
 
     def test_generation_only_computes_the_allowed_output_head(self):
-        model = TokenModel(
+        model = Model(
             _model_config(),
             runtime=_TinyRuntime(),
         ).eval()
@@ -830,7 +844,7 @@ class GenerationTest(unittest.TestCase):
         self.assertEqual(semantic_audio_logits.call_args.args[0].size(1), 1)
 
     def test_generation_rejects_invalid_constraints(self):
-        model = TokenModel(
+        model = Model(
             _model_config(),
             runtime=_TinyRuntime(),
         ).eval()
@@ -952,7 +966,7 @@ class GenerationTest(unittest.TestCase):
             (torch.tensor([[4, 6]]), "1 dimensions"),
             (torch.tensor([4.5, 6.0]), "integer ids"),
             (torch.tensor([4, 6], dtype=torch.uint64), "signed dtype"),
-            (torch.tensor([4, 8]), "runtime layout"),
+            (torch.tensor([4, 9]), "runtime layout"),
         )
         for prompt_ids, message in invalid:
             request = _request()
@@ -964,7 +978,7 @@ class GenerationTest(unittest.TestCase):
     def test_acoustic_codec_without_audio_model_decodes_semantic_tokens(self):
         runtime = _TinyRuntime()
         runtime._semantic_codec = _UnifiedCodec()
-        model = TokenModel(
+        model = Model(
             _model_config(),
             runtime=runtime,
         ).eval()
@@ -1001,7 +1015,7 @@ class GenerationTest(unittest.TestCase):
     def test_tiny_qwen_cache_matches_full_recompute(self):
         torch.manual_seed(0)
         rt = _TinyRuntime()
-        model = TokenModel(
+        model = Model(
             _model_config(),
             runtime=rt,
         ).eval()
@@ -1018,14 +1032,14 @@ class GenerationTest(unittest.TestCase):
 
     def test_tiny_qwen_cache_compacts_finished_rows(self):
         def generate(use_cache: bool) -> tuple[Tensor, list[int]]:
-            model = TokenModel(
+            model = Model(
                 _model_config(),
                 runtime=_TinyRuntime(),
             ).eval()
             generation_step = model.generation_step
             batch_sizes: list[int] = []
 
-            def variable_step(input_ids: Tensor, **kwargs) -> CausalLMOutputWithPast:
+            def variable_step(input_ids: Tensor, **kwargs) -> GenerationStepResult:
                 batch_sizes.append(input_ids.size(0))
                 output = generation_step(input_ids, **kwargs)
                 next_ids = torch.where(
@@ -1378,6 +1392,7 @@ class GenerationTest(unittest.TestCase):
             token_labels=torch.tensor([[-100, -100, 4, 7], [-100, -100, 5, 7]]),
             acoustic_target=None,
             tasks=[Task.S2ST, Task.S2ST],
+            predictions=[Task.S2ST.prediction_modality, Task.S2ST.prediction_modality],
             pad_token_id=0,
         )
 
@@ -1392,6 +1407,7 @@ class GenerationTest(unittest.TestCase):
             token_labels=torch.tensor([[-100, -100, 4, 7]]),
             acoustic_target=None,
             tasks=[Task.TTS],
+            predictions=[Task.TTS.prediction_modality],
             pad_token_id=0,
         )
         result = Result(
@@ -1513,6 +1529,7 @@ class GenerationTest(unittest.TestCase):
             token_labels=torch.tensor([[-100, 2]]),
             acoustic_target=None,
             tasks=[Task.T2TT],
+            predictions=[Task.T2TT.prediction_modality],
             pad_token_id=0,
         )
         module = SimpleNamespace(
@@ -1550,6 +1567,7 @@ class GenerationTest(unittest.TestCase):
             token_labels=torch.tensor([[-100, 2]]),
             acoustic_target=None,
             tasks=[Task.T2TT],
+            predictions=[Task.T2TT.prediction_modality],
             pad_token_id=0,
         )
         module = SimpleNamespace(
@@ -1593,6 +1611,169 @@ class GenerationTest(unittest.TestCase):
         logger.on_train_batch_start(trainer, module, None, 0)
 
         module.generate.assert_not_called()
+
+    def test_parallel_mixed_generation_decodes_audio_span(self):
+        # TEXT token, EOS, then forced BOA, codec token, EOA.
+        model = _MixedScriptModel([2, 3, 4, 7])
+        result = generate_responses(
+            [_mixed_request(Task.PARALLEL_AR)],
+            model,
+            max_new_tokens=8,
+            do_sample=False,
+        )[0]
+        self.assertTrue(torch.equal(result["response_ids"], torch.tensor([2, 3, 6, 4, 7])))
+        self.assertIsNotNone(result["audio"])
+        audio = cast(dict, result["audio"])
+        self.assertEqual(audio["sample_rate"], 16_000)
+        self.assertEqual(model.runtime._semantic_codec.decode_calls, 1)
+
+    def test_interleaved_mixed_generation_decodes_audio_span(self):
+        # TEXT, BOA, codec, EOA, EOS.
+        model = _MixedScriptModel([2, 6, 4, 7, 3])
+        result = generate_responses(
+            [_mixed_request(Task.INTERLEAVED_AR)],
+            model,
+            max_new_tokens=8,
+            do_sample=False,
+        )[0]
+        self.assertTrue(
+            torch.equal(result["response_ids"], torch.tensor([2, 6, 4, 7, 3]))
+        )
+        self.assertIsNotNone(result["audio"])
+        self.assertEqual(model.runtime._semantic_codec.decode_calls, 1)
+
+    def test_mixed_generation_rejects_acoustic_feature_side_channel(self):
+        model = _MixedAcousticModel([2, 3, 4, 7])
+        with self.assertRaisesRegex(ValueError, "acoustic feature side channel"):
+            generate_responses(
+                [_mixed_request(Task.PARALLEL_AR)],
+                model,
+                max_new_tokens=8,
+                do_sample=False,
+            )
+
+
+class _MixedScriptModel(Model):
+    def __init__(self, script: list[int]) -> None:
+        nn.Module.__init__(self)
+        self.runtime = _Runtime()
+        self.runtime._semantic_codec = _UnifiedCodec()
+        self.layout = self.runtime.layout
+        self.audio_token_frame_spans = torch.tensor([1, 1])
+        self.backbone = SimpleNamespace(
+            get_input_embeddings=lambda: SimpleNamespace(weight=torch.empty(0))
+        )
+        self._script = list(script)
+        self._step = 0
+
+    def generation_step(
+        self,
+        input_ids: Tensor,
+        *,
+        attention_mask: Tensor,
+        output_hidden_states: bool,
+        token_ids: Tensor | None,
+        modality: Modality | None,
+        past_key_values=None,
+        use_cache: bool = False,
+        audio_input_positions: Tensor | None = None,
+        audio_output_past: object | None = None,
+    ) -> GenerationStepResult:
+        del attention_mask, modality, audio_input_positions, audio_output_past
+        if self._step >= len(self._script):
+            raise RuntimeError("mixed script exhausted.")
+        next_id = self._script[self._step]
+        self._step += 1
+        logits = torch.full(
+            (*input_ids.shape, self.runtime.layout.vocab_size),
+            float("-inf"),
+        )
+        logits[:, -1, next_id] = 0.0
+        if token_ids is not None:
+            logits = logits.index_select(-1, token_ids)
+        cache = SimpleNamespace(length=input_ids.size(1)) if use_cache else None
+        return GenerationStepResult(
+            logits=logits,
+            past_key_values=cache,
+            audio_output_past=None,
+            hidden_states=(torch.zeros(*input_ids.shape, 2),)
+            if output_hidden_states
+            else None,
+        )
+
+    def audio_output_adapter_batch_select(self, past_key_values, indices):
+        del indices
+        return past_key_values
+
+
+class _MixedAcousticModel(FlowModel):
+    def __init__(self, script: list[int]) -> None:
+        nn.Module.__init__(self)
+        self.runtime = _Runtime()
+        self.layout = self.runtime.layout
+        self.audio_token_frame_spans = torch.tensor([1, 1])
+        self.backbone = SimpleNamespace(
+            get_input_embeddings=lambda: SimpleNamespace(weight=torch.empty(0))
+        )
+        self.acoustic_condition = nn.Identity()
+        self._script = list(script)
+        self._step = 0
+
+    def generation_step(
+        self,
+        input_ids: Tensor,
+        *,
+        attention_mask: Tensor,
+        output_hidden_states: bool,
+        token_ids: Tensor | None,
+        modality: Modality | None,
+        past_key_values=None,
+        use_cache: bool = False,
+        audio_input_positions: Tensor | None = None,
+        audio_output_past: object | None = None,
+    ) -> GenerationStepResult:
+        del (
+            attention_mask,
+            modality,
+            audio_input_positions,
+            past_key_values,
+            audio_output_past,
+        )
+        next_id = self._script[self._step]
+        self._step += 1
+        logits = torch.full(
+            (*input_ids.shape, self.runtime.layout.vocab_size),
+            float("-inf"),
+        )
+        logits[:, -1, next_id] = 0.0
+        if token_ids is not None:
+            logits = logits.index_select(-1, token_ids)
+        cache = (
+            SimpleNamespace(batch_select_indices=lambda indices: None)
+            if use_cache
+            else None
+        )
+        return GenerationStepResult(
+            logits=logits,
+            past_key_values=cache,
+            audio_output_past=None,
+            hidden_states=(torch.zeros(*input_ids.shape, 2),)
+            if output_hidden_states
+            else None,
+        )
+
+    def audio_output_adapter_batch_select(self, past_key_values, indices):
+        del indices
+        return past_key_values
+
+
+def _mixed_request(task: Task) -> Request:
+    return Request(
+        prompt_ids=torch.tensor([1, 2]),
+        task=task,
+        audio_input_positions=None,
+        audio_context=None,
+    )
 
 
 def _model_config() -> ModelConfig:

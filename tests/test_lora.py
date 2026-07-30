@@ -14,6 +14,13 @@ from speech_to_speech.stage import (
 )
 
 
+class _TokenEmbedding(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.embeddings = nn.ModuleDict({"audio": nn.Embedding(2, 2)})
+        self.adapters = nn.ModuleDict({"audio": nn.Linear(2, 2)})
+
+
 class _LoraStageModel(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -27,8 +34,7 @@ class _LoraStageModel(nn.Module):
             self.backbone,
             adapter_name="speech",
         )
-        self.semantic_audio_embedding = nn.Embedding(2, 2)
-        self.semantic_audio_adapter = nn.Linear(2, 2)
+        self.token_embedding = _TokenEmbedding()
         self.audio_output_adapter = nn.Linear(2, 2)
         self.acoustic_decoder = nn.Linear(2, 2)
 
@@ -52,7 +58,7 @@ class LoraTest(unittest.TestCase):
         self.assertFalse(parameters[base].requires_grad)
         self.assertTrue(parameters[adapter_a].requires_grad)
         self.assertTrue(parameters[adapter_b].requires_grad)
-        self.assertTrue(model.semantic_audio_embedding.weight.requires_grad)
+        self.assertTrue(model.token_embedding.embeddings["audio"].weight.requires_grad)
         self.assertTrue(model.acoustic_decoder.weight.requires_grad)
         self.assertEqual(counts[ParameterGroup.BACKBONE_ADAPTER], 4)
 

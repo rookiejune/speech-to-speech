@@ -4,7 +4,9 @@ from collections.abc import Sequence
 from typing import cast
 
 import torch
-from anytrain.module.dit import SequenceAttention
+from anytrain.module.dit import DiTBlock, SequenceAttention, TimeEmbedding
+from semantic_acoustic_codec.model.dit import DiTDecoder
+from semantic_acoustic_codec.model.rvq import AcousticRVQDecoder
 from torch import Tensor, nn
 from torch.nn.modules.linear import NonDynamicallyQuantizableLinear
 from transformers import Qwen3Model
@@ -14,11 +16,9 @@ from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3MLP,
 )
 
-from .model.acoustic.dit import AcousticDiT, DiTBlock, TimeEmbedding
-from .model.acoustic.rvq import AcousticRVQDecoder
 from .model.adapter import MLPAdapter
 from .model.audio_input import AudioInputAdapterType, AudioInputTower
-from .model.audio_output import AudioOutputAdapter
+from .model.audio_output import AudioOutputAdapter, AudioOutputAdapterType
 
 
 def adapter(
@@ -47,6 +47,8 @@ def adapter(
             for projection in (module.gate_proj, module.up_proj, module.down_proj)
         )
     if type(module) is AudioOutputAdapter:
+        if module.config.type is AudioOutputAdapterType.TRANSFORMER:
+            return audio_output_transformer(module, rows=rows)
         return adapter(
             module.adapter,
             rows=rows,
@@ -55,6 +57,36 @@ def adapter(
             name=name,
         )
     raise TypeError(f"{name} uses an unsupported module: {type(module).__name__}.")
+
+
+def audio_output_transformer(module: AudioOutputAdapter, *, rows: int) -> int:
+    """Count a pointwise-row estimate for causal audio output transformer layers.
+
+    Teacher-forcing FLOPs use the selected valid label rows as the sequence
+    budget proxy, matching the sparse CE path that still pays for a full-sequence
+    adapter forward in practice via denser ops; this keeps the estimate finite
+    and deterministic without requiring padded sequence geometry here.
+    """
+    if module.layers is None:
+        raise TypeError("audio output transformer FLOPs require transformer layers.")
+    if type(module.input_projection) is not nn.Linear:
+        raise TypeError("audio output transformer must use a linear input projection.")
+    hidden = module.out_features
+    require_linear(module.input_projection, module.in_features, hidden, "audio output projection")
+    total = linear(module.input_projection, rows)
+    for layer in module.layers:
+        # Q, K, V, out projections + 2-layer FFN, ignoring attention score matmuls'
+        # sequence-length term for the sparse-row proxy.
+        total += 4 * 2 * rows * hidden * hidden
+        ffn = layer.ffn
+        if not isinstance(ffn, nn.Sequential) or len(ffn) < 4:
+            raise TypeError("audio output transformer FFN shape is unsupported.")
+        up = ffn[0]
+        down = ffn[3]
+        if type(up) is not nn.Linear or type(down) is not nn.Linear:
+            raise TypeError("audio output transformer FFN must use linear layers.")
+        total += linear(up, rows) + linear(down, rows)
+    return total
 
 
 def audio_input_tower(
@@ -185,31 +217,32 @@ def _linear_module(module: nn.Module, rows: int) -> int:
     return _linear(cast(nn.Linear, module), rows)
 
 
-def flow_decoder(decoder: AcousticDiT, *, batch: int, frames: int) -> int:
-    """Count a standard dense AcousticDiT forward pass."""
-    if type(decoder) is not AcousticDiT:
-        raise TypeError("Flow FLOPs require the standard AcousticDiT decoder.")
+def flow_decoder(decoder: DiTDecoder, *, batch: int, frames: int) -> int:
+    """Count a standard dense SAC ``DiTDecoder`` forward pass."""
+    if type(decoder) is not DiTDecoder:
+        raise TypeError("Flow FLOPs require the standard SAC DiTDecoder.")
     if batch < 1 or frames < 1:
         raise ValueError("Flow FLOPs batch and frame dimensions must be positive.")
-    if decoder.feature_projection is not None or decoder.feature_layer is not None:
+    core = decoder.decoder
+    if core.feature_projection is not None or core.feature_layer is not None:
         raise ValueError("Flow FLOPs do not support a REPA decoder.")
 
     rows = batch * frames
-    hidden = decoder.input.out_features
-    latent = decoder.latent_dim
-    condition_projection = decoder.condition
-    condition = decoder.condition_dim
+    hidden = core.input.out_features
+    latent = core.latent_dim
+    condition_projection = core.condition
+    condition = core.condition_dim
     if condition_projection is None or condition is None:
         raise RuntimeError("Flow condition projection is not configured.")
-    require_linear(decoder.input, latent, hidden, "Flow input")
-    require_linear(decoder.output, hidden, latent, "Flow output")
+    require_linear(core.input, latent, hidden, "Flow input")
+    require_linear(core.output, hidden, latent, "Flow output")
     require_linear(condition_projection, condition, hidden, "Flow condition")
 
-    forward = linear(decoder.input, rows)
+    forward = linear(core.input, rows)
     forward += linear(condition_projection, rows)
-    forward += linear(decoder.output, rows)
-    forward += _time(decoder.time, batch, hidden)
-    for block in decoder.blocks:
+    forward += linear(core.output, rows)
+    forward += _time(core.time, batch, hidden)
+    for block in core.blocks:
         if type(block) is not DiTBlock:
             raise TypeError("Flow FLOPs require standard DiTBlock layers.")
         forward += _dit_block(block, batch, frames, hidden)

@@ -60,7 +60,7 @@ def _runtime(*, route=BICODEC_REUSE_PROMPT_GLOBAL) -> GenerationRuntime:
             text_tokenizer=_TextTokenizer(),
             layout=Layout(
                 text=(0, 8),
-                audio=(8, 8 + tokenizer.vocab_size + 2),
+                audio=(8, 8 + tokenizer.vocab_size + 3),
             ),
             boa_token_id=8 + tokenizer.vocab_size,
             eoa_token_id=8 + tokenizer.vocab_size + 1,
@@ -305,6 +305,10 @@ class _RouteModel:
             runtime.audio_tokenizer.vocab_size,
             dtype=torch.long,
         )
+
+    def generation_step(self, *args, **kwargs):
+        del args, kwargs
+        raise AssertionError("structured route must use constrained generation")
 
     def generate_full_codec_sequence(
         self,

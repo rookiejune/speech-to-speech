@@ -22,9 +22,9 @@
 - `parser.parse_task_sample()`：按 `Task` 只解析实际消费的 source/target modality。pair/single
   只决定 role 映射；codec view 缺失时是否使用 waveform fallback 与数据 shape 无关。
 - `single.SingleCollator` / `single.parse_single_sample()`：处理 single utterance 数据形态，
-  即同一条 utterance 同时提供 text 与 audio/codes。TTS、ASR、TEXT_AR、AUDIO_AR 共用该
-  path，由 task 决定同一 utterance 的哪个 modality 作为 source/target；pair translation path
-  不再承载 single-only 数据契约。
+  即同一条 utterance 同时提供 text 与 audio/codes。TTS、ASR、TEXT_AR、AUDIO_AR、
+  PARALLEL_AR、INTERLEAVED_AR 共用该 path；AR 序列由 `datamodule.ar` 组装。pair
+  translation path 不再承载 single-only 数据契约。
 - `sample.build_sample()`：根据 `Task` 把 `SpeechPair` 组装成 `ModelSample`，负责 chat
   template、BOA/EOA/EOS、global ID 映射、source token prompt、token labels 和 target frame
   positions。
@@ -36,10 +36,15 @@
 - `types.ModelSample` / `types.ModelBatch`：单条和 batch 级模型输入；
   `ModelBatch.from_samples(..., pad_token_id=...)` 完成校验与 padding，mask 由 padding 字段
   派生并缓存。
-- `task.Task` / `types.Language`：任务与语言枚举。`Task` 是 source/target modality、
-  `uses_source_role` 和 instruction template 的唯一事实来源。
-- `Collator(runtime, task_weights)`：按任务权重为 raw samples 选择任务，依次调用 parser、
-  sample builder 和 batch padding；task weights 在构造时固定。
+- `task.Task` / `prediction.PredictionModality` / `source.SourceLayout`：`Task` 拥有
+  `source_layout`、默认 `prediction_modality`、`allowed_predictions`、`uses_source_role` 和
+  instruction template。loader 可对白名单任务覆写 `prediction`（如 T2ST/S2ST 的
+  `audio|parallel`）。同构 batch 比较 `(source_layout, prediction)`。`MASKED_AR` 使用
+  `TEXT_AUDIO` source（mask 后）与 mixed prediction。每任务 30 条 template 存在
+  `speech_to_speech.templates`，训练构建时 `sample_template()` 随机采样。
+- `Collator(runtime, task_weights, prediction=...)`：按任务权重为 raw samples 选择任务，依次调用
+  parser、sample builder 和 batch padding；可选 loader 级 prediction override 写入
+  `SpeechTaskSample.prediction`。
 - `LoaderSpec.text(...)` / `TextCollator`：纯文本 MT loader，只读取 source/target text，当前可
   配置为 anydataset `WMT19` preset 或 deterministic toy text samples，不消费 codec/audio
   tokenizer。
@@ -225,7 +230,7 @@ response、generated token 以及 BiCodec route 的 reference `audio_context` �
   该元数据；缺失时用当前 codec view 的 frame count 除以 `runtime.codec_frame_rate` 推导
   `Speech.duration_seconds`。task sample builder 按 source/target modality 决定哪些角色计入
   `ModelBatch.audio_seconds`；不能把真实音频静默计为 0。
-- 同一 `task_weights` 中的任务必须具有相同 source/target modality，保证 DDP 各 rank 走相同
+- 同一 `task_weights` 中的任务必须具有相同 `(source_modality, prediction_modality)` 执行签名，保证 DDP 各 rank 走相同
   模型路径。0 权重任务不会参与 batch 分配；每项权重必须有限且非负，总和必须有限且为正；
   task allocator 把 weighted round-robin credit 跨 collate 调用保存在进程共享状态中。小 batch
   可以暂时不含某个低权重 task，但不会丢弃尾批样本，并会在后续 batch 归还配额。DataModule
@@ -265,5 +270,5 @@ response、generated token 以及 BiCodec route 的 reference `audio_context` �
   teacher-forcing batch，不由 callback 手工切 tensor。
 - parser 生成 `Speech.audio_token_spans`，`Speech` 校验 spans 与 semantic frame 完整对齐；
   不满足时直接报错，不做静默修复。
-- raw language 在 parser 边界转换为 `Language`，未知语言直接报错；task template 不消费
+- raw language 在 parser 边界转换为 `Language`，未知语言直接报错；task prompt 不消费
   dataset 各自的语言别名。

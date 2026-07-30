@@ -18,6 +18,7 @@ class AudioInputContractTest(unittest.TestCase):
                     token_labels=torch.tensor([-100, -100, -100, -100, 2]),
                     acoustic_target=None,
                     task=Task.S2ST,
+                    prediction=Task.S2ST.prediction_modality,
                     audio_input_positions=torch.tensor([1, 2]),
                 ),
                 ModelSample(
@@ -25,6 +26,7 @@ class AudioInputContractTest(unittest.TestCase):
                     token_labels=torch.tensor([-100, -100, -100, 2]),
                     acoustic_target=None,
                     task=Task.S2ST,
+                    prediction=Task.S2ST.prediction_modality,
                     audio_input_positions=torch.tensor([1]),
                 ),
             ],
@@ -53,6 +55,7 @@ class AudioInputContractTest(unittest.TestCase):
             token_labels=torch.tensor([-100, 2]),
             acoustic_target=None,
             task=Task.S2ST,
+            prediction=Task.S2ST.prediction_modality,
             audio_input_positions=torch.tensor([1, 1]),
         )
         with self.assertRaisesRegex(ValueError, "must not repeat"):

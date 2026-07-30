@@ -3,10 +3,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from anydataset import types
 
+from ..prediction import PredictionModality
+from ..source import SourceLayout
 from ..task import Task
+from ..task_spec import resolve_prediction
 from ._duration import from_frames
 from ._task import TaskWeights
 from ._tokenization import token_ids
+from .ar import build_ar_sample, is_ar_task
 from .parser import parse_audio_codes, raw_speech, speech_from_codes
 from .protocol import DataRuntime
 from .sample import build_speech_sample, build_task_sample, chat_prompt
@@ -21,7 +25,17 @@ from .types import (
     Text,
 )
 
-_SINGLE_TASKS = frozenset({Task.ASR, Task.AUDIO_AR, Task.TEXT_AR, Task.TTS})
+_SINGLE_TASKS = frozenset(
+    {
+        Task.ASR,
+        Task.AUDIO_AR,
+        Task.INTERLEAVED_AR,
+        Task.MASKED_AR,
+        Task.PARALLEL_AR,
+        Task.TEXT_AR,
+        Task.TTS,
+    }
+)
 
 
 class SingleCollator:
@@ -31,15 +45,26 @@ class SingleCollator:
         task_weights: Mapping[Task, float],
         *,
         encode_missing_codes: bool = False,
+        interleave_audio_frames: int = 25,
+        mask_text_ratio: float = 0.5,
+        mask_audio_ratio: float = 0.5,
+        prediction: PredictionModality | None = None,
     ) -> None:
         self.runtime = runtime
         self.encode_missing_codes = encode_missing_codes
+        self.interleave_audio_frames = interleave_audio_frames
+        self.mask_text_ratio = mask_text_ratio
+        self.mask_audio_ratio = mask_audio_ratio
         _validate_single_tasks(_positive_tasks(task_weights))
-        self._task_weights = TaskWeights(task_weights)
+        self._task_weights = TaskWeights(task_weights, prediction=prediction)
 
     @property
     def tasks(self) -> list[Task]:
         return self._task_weights.tasks
+
+    @property
+    def prediction(self) -> PredictionModality | None:
+        return self._task_weights.prediction
 
     def _items(self, samples: list[types.Sample]) -> list[SpeechTaskSample]:
         tasks = self._task_weights.allocate(len(samples))
@@ -49,6 +74,7 @@ class SingleCollator:
                 task,
                 self.runtime,
                 encode_missing_codes=self.encode_missing_codes,
+                prediction=self.prediction,
             )
             for sample, task in zip(samples, tasks)
         ]
@@ -61,7 +87,16 @@ class SingleCollator:
                 pad_token_id=self.runtime.pad_token_id,
             )
         return ModelBatch.from_samples(
-            [build_task_sample(item, self.runtime) for item in items],
+            [
+                build_task_sample(
+                    item,
+                    self.runtime,
+                    interleave_audio_frames=self.interleave_audio_frames,
+                    mask_text_ratio=self.mask_text_ratio,
+                    mask_audio_ratio=self.mask_audio_ratio,
+                )
+                for item in items
+            ],
             pad_token_id=self.runtime.pad_token_id,
         )
 
@@ -88,10 +123,53 @@ def build_single_sample(
     utterance: Speech,
     task: Task,
     runtime: DataRuntime,
+    *,
+    interleave_audio_frames: int = 25,
+    mask_text_ratio: float = 0.5,
+    mask_audio_ratio: float = 0.5,
+    prediction: PredictionModality | None = None,
 ) -> ModelSample:
     _validate_single_tasks([task])
+    prediction = resolve_prediction(task, prediction)
+    if task is Task.MASKED_AR:
+        from .masked import build_masked_sample
+
+        return build_masked_sample(
+            utterance,
+            task,
+            runtime,
+            prompt=chat_prompt(utterance.language, task, runtime),
+            prediction=prediction,
+            interleave_audio_frames=interleave_audio_frames,
+            mask_text_ratio=mask_text_ratio,
+            mask_audio_ratio=mask_audio_ratio,
+        )
+    if is_ar_task(task):
+        target: Speech | Text
+        if prediction.supervises_audio:
+            target = utterance
+        else:
+            target = Text(
+                text_token_ids=utterance.text_token_ids,
+                language=utterance.language,
+            )
+        return build_ar_sample(
+            target,
+            task,
+            runtime,
+            prompt=chat_prompt(utterance.language, task, runtime),
+            prediction=prediction,
+            interleave_audio_frames=interleave_audio_frames,
+        )
     prompt = chat_prompt(utterance.language, task, runtime)
-    return build_speech_sample(utterance, utterance, task, runtime, prompt=prompt)
+    return build_speech_sample(
+        utterance,
+        utterance,
+        task,
+        runtime,
+        prompt=prompt,
+        prediction=prediction,
+    )
 
 
 def _build_item(
@@ -100,8 +178,10 @@ def _build_item(
     runtime: DataRuntime,
     *,
     encode_missing_codes: bool,
+    prediction: PredictionModality | None,
 ) -> SpeechTaskSample:
     _validate_single_tasks([task])
+    prediction = resolve_prediction(task, prediction)
     audio_item, text_item = _single_items(sample)
     text = Text(
         text_token_ids=token_ids(
@@ -111,10 +191,15 @@ def _build_item(
         language=_language(text_item),
     )
     if (
-        task.source_modality is not types.Modality.AUDIO
-        and task.target_modality is not types.Modality.AUDIO
+        task.source_layout is SourceLayout.NONE
+        and not prediction.supervises_audio
     ):
-        return SpeechTaskSample(source=None, target=text, task=task)
+        return SpeechTaskSample(
+            source=None,
+            target=text,
+            task=task,
+            prediction=prediction,
+        )
     utterance = _utterance(
         sample,
         audio_item,
@@ -130,7 +215,13 @@ def _build_item(
             runtime,
             encode_missing_codes=encode_missing_codes,
         )
-    return _task_sample(utterance, text, task, audio_context=audio_context)
+    return _task_sample(
+        utterance,
+        text,
+        task,
+        prediction=prediction,
+        audio_context=audio_context,
+    )
 
 
 def _utterance(
@@ -164,18 +255,25 @@ def _task_sample(
     text: Text,
     task: Task,
     *,
+    prediction: PredictionModality,
     audio_context: Speech | RawSpeech | None = None,
 ) -> SpeechTaskSample:
     source = None
-    if task.source_modality is types.Modality.AUDIO:
+    if task.source_layout is SourceLayout.TEXT_AUDIO:
+        source = utterance
+    elif task.source_modality is types.Modality.AUDIO:
         source = utterance
     elif task.source_modality is types.Modality.TEXT:
         source = text
-    target = utterance if task.target_modality is types.Modality.AUDIO else text
+    if prediction.supervises_audio:
+        target: Speech | RawSpeech | Text = utterance
+    else:
+        target = text
     return SpeechTaskSample(
         source=source,
         target=target,
         task=task,
+        prediction=prediction,
         audio_context=audio_context,
     )
 

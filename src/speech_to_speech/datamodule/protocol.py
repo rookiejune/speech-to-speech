@@ -75,6 +75,7 @@ class DataRuntimeSnapshot:
     eos_token_id: int
     boa_token_id: int
     eoa_token_id: int
+    mask_token_id: int
 
     @classmethod
     def from_runtime(cls, runtime: DataRuntime) -> DataRuntimeSnapshot:
@@ -94,6 +95,7 @@ class DataRuntimeSnapshot:
             eos_token_id=runtime.eos_token_id,
             boa_token_id=runtime.boa_token_id,
             eoa_token_id=runtime.eoa_token_id,
+            mask_token_id=runtime.mask_token_id,
         )
 
     @cached_property

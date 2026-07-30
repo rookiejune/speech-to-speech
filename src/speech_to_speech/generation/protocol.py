@@ -6,7 +6,9 @@ from typing import Protocol, runtime_checkable
 from anydataset.types import Modality
 from anytrain.module.idspace import Layout
 from torch import Tensor
+from transformers.cache_utils import Cache
 
+from ..model._generation import GenerationStepResult
 from ..runtime.protocol import GenerationRuntime
 from ..runtime.types import Backbone
 from .types import AcousticGeneration
@@ -21,6 +23,26 @@ class TokenGenerator(Protocol):
 
     @property
     def audio_token_frame_spans(self) -> Tensor: ...
+
+    def generation_step(
+        self,
+        input_ids: Tensor,
+        *,
+        attention_mask: Tensor,
+        output_hidden_states: bool,
+        token_ids: Tensor | None,
+        modality: Modality | None,
+        past_key_values: Cache | None,
+        use_cache: bool,
+        audio_input_positions: Tensor | None = None,
+        audio_output_past: object | None = None,
+    ) -> GenerationStepResult: ...
+
+    def audio_output_adapter_batch_select(
+        self,
+        past_key_values: object | None,
+        indices: Tensor,
+    ) -> object | None: ...
 
     def generate_tokens(
         self,

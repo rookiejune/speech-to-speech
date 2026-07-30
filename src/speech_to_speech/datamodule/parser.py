@@ -23,7 +23,10 @@ from .types import (
 )
 from ..runtime import AudioRepresentation
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
+from ..source import SourceLayout
 from ..task import Task
+from ..task_spec import resolve_prediction
+from ..prediction import PredictionModality
 
 
 def parse_sample(sample: types.Sample, runtime: DataRuntime) -> SpeechPair:
@@ -39,9 +42,19 @@ def parse_task_sample(
     runtime: DataRuntime,
     *,
     encode_missing_codes: bool = False,
+    prediction: PredictionModality | None = None,
 ) -> SpeechTaskSample:
+    prediction = resolve_prediction(task, prediction)
     source = None
-    if task.source_modality is not None:
+    if task.source_layout is SourceLayout.TEXT_AUDIO:
+        source = _parse_task_item(
+            sample,
+            types.Role.TARGET,
+            types.Modality.AUDIO,
+            runtime,
+            encode_missing_codes=encode_missing_codes,
+        )
+    elif task.source_modality is not None:
         source_role = types.Role.SOURCE if task.uses_source_role else types.Role.TARGET
         source = _parse_task_item(
             sample,
@@ -50,13 +63,25 @@ def parse_task_sample(
             runtime,
             encode_missing_codes=encode_missing_codes,
         )
-    target = _parse_task_item(
-        sample,
-        types.Role.TARGET,
-        task.target_modality,
-        runtime,
-        encode_missing_codes=encode_missing_codes,
-    )
+    target_modality = task.target_modality
+    if target_modality is None:
+        if not prediction.supervises_audio:
+            raise ValueError(
+                f"{task.value} mixed prediction without audio cannot use pair parser."
+            )
+        target_modality = types.Modality.AUDIO
+    if task.source_layout is SourceLayout.TEXT_AUDIO:
+        if not isinstance(source, (Speech, RawSpeech)):
+            raise TypeError("MASKED_AR source must be Speech or RawSpeech.")
+        target: Speech | Text | RawSpeech = source
+    else:
+        target = _parse_task_item(
+            sample,
+            types.Role.TARGET,
+            target_modality,
+            runtime,
+            encode_missing_codes=encode_missing_codes,
+        )
     audio_context = None
     if isinstance(sample, AudioContextSample):
         context = _parse_task_item(
@@ -73,6 +98,7 @@ def parse_task_sample(
         source=source,
         target=target,
         task=task,
+        prediction=prediction,
         audio_context=audio_context,
     )
 

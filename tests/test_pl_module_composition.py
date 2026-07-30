@@ -69,7 +69,7 @@ class PlModuleCompositionTest(unittest.TestCase):
 
     @patch("speech_to_speech.pl_module.composition.SpeechToSpeechModule")
     @patch("speech_to_speech.pl_module.composition.TokenObjective")
-    @patch("speech_to_speech.pl_module.composition.TokenModel")
+    @patch("speech_to_speech.pl_module.composition.Model")
     def test_token_closes_model_and_objective(self, model, objective, module):
         runtime = SimpleNamespace(layout=Mock(), audio_tokenizer=None)
         model_config = ModelConfig()

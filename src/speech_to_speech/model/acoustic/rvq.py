@@ -9,14 +9,14 @@ from torch import Tensor
 
 from ...generation.types import AcousticGeneration
 from ...runtime.types import AcousticCodec, acoustic_codec
-from ..base import Config, TokenModel
+from ..base import Config, Model
 from ..protocol import TokenModelRuntime
 from ._config import DecoderConfig, decoder_options
 from ._codec import code_features
 from .condition import HiddenConditionAdapter
 
 
-class RVQModel(TokenModel):
+class RVQModel(Model):
     """Token model composition with a discrete RVQ acoustic decoder."""
 
     def __init__(

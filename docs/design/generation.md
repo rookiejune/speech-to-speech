@@ -11,16 +11,19 @@
   `prompt_ids` 是一维 layout global token IDs；当固定 `audio_route` 的 decode 需要 prompt stream
   时，`audio_context` 提供同一 reference 的 structured semantic/acoustic codes。可选的
   `audio_input_positions` 只标记 source audio payload 在 prompt 中的位置，供 input tower 使用。
-- `Result(response_ids, audio)`：按原请求顺序返回的单条结果。`response_ids` 是不含 EOS/EOA
-  的 layout global token IDs；text task 的 `audio=None`。
+- `Result(response_ids, audio)`：按原请求顺序返回的单条结果。TEXT / AUDIO 路径的
+  `response_ids` 是裁掉 stop token 后的 layout global token IDs；mixed 路径当前保留状态机产生的
+  EOS/BOA/EOA，供 audio span 抽取。纯 text prediction 的 `audio=None`；AUDIO 与 token-only mixed
+  在成功 decode 后填充 `AudioOutput`。
 - `AudioOutput(features, codes, waveform, sample_rate)`：audio task 的 decode 结果。`codes` 保存
   route resolve 后的 structured semantic/acoustic codes；unified-token codec 没有独立 acoustic
   representation，因此 `features=None`。
 - `AcousticGeneration(sequence, features, frame_counts)`：acoustic model 与 audio strategy 之间的批量
   返回契约；`features` 是带右侧 padding 的 `[batch, frames, dim]`，`frame_counts` 给出每行
   有效 frame 数。
-- `generate_responses()`：校验通用请求外形、按 target modality 分组、padding，并恢复原请求顺序；
-  audio generation 与 waveform decode 委托给 `generation.audio` 的 capability strategy。
+- `generate_responses()`：校验通用请求外形、按 `prediction_modality` 分组、padding，并恢复原请求顺序；
+  TEXT / AUDIO 走既有 token 或 audio strategy，PARALLEL / INTERLEAVED 走 `generation.mixed`；
+  audio waveform decode 委托给 `generation.audio` 的 capability strategy。
 - `prepare_bicodec_tts_request()`：为 `bicodec_reuse_prompt_global` 构造 reference-conditioned TTS
   request，只接收预编码的 `SemanticAcousticCodes`。
 - `prepare_bicodec_global_tts_request()`：为 `bicodec_generate_global` 构造无 audio context 的 TTS
@@ -32,7 +35,8 @@
 
 `generation.protocol` 定义 service 与 audio strategy 所依赖的窄模型协议：
 
-- `TokenGenerator`：公开 runtime、backbone 和 `generate_tokens()`。
+- `TokenGenerator`：公开 runtime、backbone、`generate_tokens()`，以及供 mixed AR 使用的
+  `generation_step()`（按 modality 或候选 `token_ids` 选择输出 head）。
 - `FullCodecSequenceGenerator`：在基础 token generation 上增加受 tokenizer grammar 约束的
   `generate_full_codec_sequence()`；frame-aligned flattened codec 与 fixed-length BiCodec
   共用这一 service 能力边界。
@@ -100,9 +104,14 @@ service 在 padding 前校验每条 request 的通用外形，audio strategy 继
   structured prompt streams 必须使用 `BiCodecAudioTokenizer`。
 ## 执行流程
 
-`generate_responses()` 按 target modality 分组。每组 prompt 左 padding，输出仍按原始请求顺序排列。
-text 组直接调用 `generate_tokens()`；audio 组只调用统一的 `generate_audio_responses()`，后者按
-runtime/model capability 一次选择以下策略：
+`generate_responses()` 按 `prediction_modality` 分组。每组 prompt 左 padding，输出仍按原始请求顺序排列。
+
+- `TEXT`：调用 `generate_tokens(generation_modality=TEXT, stop=EOS)`。
+- `AUDIO`：调用统一的 `generate_audio_responses()`，按 runtime/model capability 选择策略。
+- `PARALLEL` / `INTERLEAVED`：调用 `generate_mixed_responses()`；mixed grammar 属于 generation，
+  不进入 `model.generate_tokens(generation_modality=...)`。
+
+AUDIO 策略：
 
 - semantic-only：semantic token generation + `SemanticCodec.decode()`。
 - acoustic side channel：semantic token/condition generation + `AcousticCodec.decode_features()`。
@@ -113,20 +122,39 @@ strategy factory 只检查 representation、structured layout 和 model capabili
 各策略拥有本路径的 generation/decode 配对；共享层只负责 frame count 校验、同 shape 行合批和
 `AudioOutput` 构造。
 
+### Mixed AR
+
+`generation.mixed` 用逐步 `generation_step(..., token_ids=union)` 驱动模型，再按行状态收窄
+allowed IDs。状态机：
+
+- `PARALLEL`：`TEXT -> EOS -> force BOA -> AUDIO -> EOA`。
+- `INTERLEAVED`：`TEXT <-> AUDIO`，TEXT 可发 BOA 进入 AUDIO，AUDIO 遇 EOA 回到 TEXT；TEXT 遇
+  EOS 结束。
+
+model 只提供单步 head 选择与 cache；mixed 不收集 acoustic frame condition，因此启用
+`acoustic_side_channel` 且模型实现 `AcousticFeatureGeneration` 时显式失败。token-only 路径在
+生成结束后从 `response_ids` 抽出 codec-decodable audio span，复用与 AUDIO 相同的 semantic /
+frame / structured decode 配对写入 `Result.audio`；没有 codec audio token 时 `audio=None`。
+
 ```text
-text target
+text prediction
     -> generate_tokens(stop=EOS)
     -> trim EOS
     -> Result(audio=None)
 
-audio target + token-only model
+audio prediction + token-only model
     -> generate_tokens(stop=EOA), or constrained full-codec state machine
     -> FrameCodec full-code decode, route-aware BiCodec detokenize, or SAC SemanticCodecRuntime decode
 
-audio target + runtime acoustic side channel + acoustic feature generator
+audio prediction + runtime acoustic side channel + acoustic feature generator
     -> generate_audio_features()
     -> trim EOA and padded features by frame_counts
     -> codec.decode_features(semantic_codes, features)
+
+mixed prediction (PARALLEL | INTERLEAVED)
+    -> generation_step loop with per-row TEXT/AUDIO/FORCE_BOA state
+    -> extract codec-decodable audio tokens from response_ids
+    -> token-only decode into Result.audio (no acoustic feature side channel)
 ```
 
 audio 路径至少要生成一个 codec-decodable token。audio strategy 共享层按

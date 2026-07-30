@@ -13,11 +13,12 @@ position 语义见 [总览 §2.4](../model-design.md)。
   acoustic flow matching 和可选 REPA；`RVQObjective`：组合 token CE 与 acoustic RVQ CE。
   三者的 `forward(batch, model)` 都返回含标量总损失的 `Outputs`，直接满足 Lightning
   训练契约。
-- `TokenLoss`：按 batch task 的 target modality 在对应局部词表上计算 CE，每行必须至少包含一个
-  非 `-100` target；causal shift 在此完成，只把有效 predictor hidden states 交给
-  `model.token_logits(hidden, modality)`，text/audio head 不做跨模态 softmax 竞争。BiCodec route
-  额外消费逐位置 `token_groups` 与 `model.selected_logits()`，只在当前 semantic、semantic-or-end
-  或 acoustic codebook candidate group 上计算 restricted CE。
+- `TokenLoss`：按 batch task 的 `prediction_modality` 展开监督 head（TEXT / AUDIO / 两者），在对应
+  局部词表上计算 CE，每行必须至少包含一个非 `-100` target；causal shift 在此完成，只把有效
+  predictor hidden states 交给 `model.token_logits(hidden, modality)`，text/audio head 不做跨模态
+  softmax 竞争。`target_modality` 只是单模态 prediction 的便捷属性，mixed 时为 `None`，不作为
+  loss 入口。BiCodec route 额外消费逐位置 `token_groups` 与 `model.selected_logits()`，只在当前
+  semantic、semantic-or-end 或 acoustic codebook candidate group 上计算 restricted CE。
 - `AcousticFlowLoss`：直接复用 `semantic-acoustic-codec.loss.FlowLoss`；S2S 只保留 joint
   token/acoustic objective 的组合。
 - `CausalAcousticLoss`：直接复用 `anytrain.loss.MaskedCodebookCrossEntropyLoss`；训练 forward
@@ -51,7 +52,7 @@ hidden_states = model.token_hidden_states(
 token = self.token(
     hidden_states,
     batch.token_labels,
-    batch.tasks[0].target_modality,
+    batch.tasks[0].prediction_modality,
     model.token_logits,
 )
 result = {

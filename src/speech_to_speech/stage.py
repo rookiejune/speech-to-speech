@@ -10,6 +10,7 @@ from anydataset.types import Modality
 from torch import nn
 
 from ._compat import StrEnum, auto
+from .prediction import PredictionModality
 from .task import Task
 
 
@@ -108,6 +109,7 @@ class ParameterPolicyConfig:
 class StageLoaderConfig:
     weight: float
     task_weights: dict[str, float]
+    prediction: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -118,6 +120,10 @@ class StageLoaderConfig:
         ):
             raise ValueError("stage loader weight must be finite and positive.")
         _validate_weights(self.task_weights, name="stage loader task weights")
+        if self.prediction is not None:
+            if not isinstance(self.prediction, str):
+                raise TypeError("stage loader prediction must be a string or None.")
+            PredictionModality(self.prediction)
         self.is_text
 
     @property
@@ -125,11 +131,20 @@ class StageLoaderConfig:
         return {Task(name): weight for name, weight in self.task_weights.items()}
 
     @property
+    def prediction_modality(self) -> PredictionModality | None:
+        if self.prediction is None:
+            return None
+        return PredictionModality(self.prediction)
+
+    @property
     def is_text(self) -> bool:
+        from .task_spec import resolve_prediction
+
         active = [task for task, weight in self.tasks.items() if weight > 0]
         text = [
             task.source_modality is not Modality.AUDIO
-            and task.target_modality is Modality.TEXT
+            and resolve_prediction(task, self.prediction_modality)
+            is PredictionModality.TEXT
             for task in active
         ]
         if any(text) and not all(text):
@@ -281,9 +296,11 @@ def parameter_group(name: str) -> ParameterGroup:
         if ".lora_A." in name or ".lora_B." in name:
             return ParameterGroup.BACKBONE_ADAPTER
         return ParameterGroup.BACKBONE
-    if name.startswith("semantic_audio_embedding."):
+    if name.startswith("token_embedding.embeddings.text"):
+        return ParameterGroup.BACKBONE
+    if name.startswith("token_embedding.embeddings.audio"):
         return ParameterGroup.SEMANTIC_AUDIO_EMBEDDING
-    if name.startswith("semantic_audio_adapter."):
+    if name.startswith("token_embedding.adapters.audio"):
         return ParameterGroup.SEMANTIC_AUDIO_ADAPTER
     if name.startswith("audio_input_adapter."):
         return ParameterGroup.AUDIO_INPUT_ADAPTER

@@ -23,13 +23,30 @@ class TokenObjectiveModel(Protocol):
         self,
         hidden_state: Tensor,
         modality: Modality | None = None,
+        *,
+        attention_mask: Tensor | None = None,
+        audio_hidden_state: Tensor | None = None,
     ) -> Tensor: ...
+
+    def project_audio_hidden(
+        self,
+        hidden_state: Tensor,
+        *,
+        attention_mask: Tensor | None = None,
+        past_key_values: object | None = None,
+        use_cache: bool = False,
+    ) -> tuple[Tensor, object | None]: ...
 
     def selected_logits(
         self,
         hidden_state: Tensor,
         token_ids: Tensor,
-    ) -> Tensor: ...
+        *,
+        attention_mask: Tensor | None = None,
+        audio_hidden_state: Tensor | None = None,
+        past_key_values: object | None = None,
+        use_cache: bool = False,
+    ) -> tuple[Tensor, object | None] | Tensor: ...
 
 
 class AcousticDecoder(Protocol):

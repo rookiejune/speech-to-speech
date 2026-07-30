@@ -22,8 +22,9 @@ class AudioOutputAdapterTest(unittest.TestCase):
         )
         hidden = torch.randn(2, 3, 4, dtype=torch.bfloat16)
 
-        output = adapter(hidden)
+        output, past = adapter(hidden)
 
+        self.assertIsNone(past)
         self.assertEqual(output.shape, (2, 3, 6))
         self.assertEqual(output.dtype, torch.float32)
         self.assertTrue(
@@ -39,7 +40,9 @@ class AudioOutputAdapterTest(unittest.TestCase):
         )
         hidden = torch.randn(2, 3, 4, dtype=torch.bfloat16)
 
-        torch.testing.assert_close(adapter(hidden), hidden.to(dtype=torch.float32))
+        output, past = adapter(hidden)
+        self.assertIsNone(past)
+        torch.testing.assert_close(output, hidden.to(dtype=torch.float32))
 
         with self.assertRaisesRegex(ValueError, "matching feature dimensions"):
             AudioOutputAdapter(
@@ -70,6 +73,55 @@ class AudioOutputAdapterTest(unittest.TestCase):
             adapter(torch.randn(4))
         with self.assertRaisesRegex(ValueError, "does not match"):
             adapter(torch.randn(2, 3, 5))
+
+    def test_transformer_cache_matches_full_recompute(self) -> None:
+        adapter = create_audio_output_adapter(
+            AudioOutputAdapterConfig(
+                type=AudioOutputAdapterType.TRANSFORMER,
+                layers=2,
+                heads=2,
+                ffn_ratio=2.0,
+            ),
+            in_features=8,
+            out_features=8,
+        )
+        adapter.eval()
+        hidden = torch.randn(2, 4, 8)
+        mask = torch.tensor(
+            [[True, True, True, False], [True, True, False, False]],
+            dtype=torch.bool,
+        )
+        full, _ = adapter(hidden, attention_mask=mask, use_cache=False)
+
+        past = None
+        steps = []
+        for index in range(hidden.size(1)):
+            step, past = adapter(
+                hidden[:, index : index + 1],
+                attention_mask=mask[:, index : index + 1],
+                past_key_values=past,
+                use_cache=True,
+            )
+            steps.append(step)
+        cached = torch.cat(steps, dim=1)
+        torch.testing.assert_close(cached, full, atol=1e-5, rtol=1e-5)
+
+    def test_transformer_batch_select_past(self) -> None:
+        adapter = create_audio_output_adapter(
+            AudioOutputAdapterConfig(
+                type=AudioOutputAdapterType.TRANSFORMER,
+                layers=1,
+                heads=2,
+                ffn_ratio=2.0,
+            ),
+            in_features=8,
+            out_features=8,
+        )
+        hidden = torch.randn(3, 2, 8)
+        _, past = adapter(hidden, use_cache=True)
+        selected = adapter.batch_select_past(past, torch.tensor([0, 2]))
+        assert selected is not None
+        self.assertEqual(selected[0][0].shape[0], 2)
 
 
 if __name__ == "__main__":

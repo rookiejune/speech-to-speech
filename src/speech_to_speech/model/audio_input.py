@@ -9,6 +9,12 @@ from torch import Tensor, nn
 
 from .._compat import StrEnum, auto
 from .adapter import MLPAdapter
+from ._tower import (
+    safe_transformer_mask,
+    tower_fields,
+    valid_mask,
+    validate_tower_fields,
+)
 
 
 class AudioInputAdapterType(StrEnum):
@@ -37,14 +43,13 @@ class AudioInputAdapterConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.type, AudioInputAdapterType):
             raise TypeError("audio input adapter type must be AudioInputAdapterType.")
-        if isinstance(self.layers, bool) or self.layers <= 0:
-            raise ValueError("audio input adapter layers must be positive.")
-        if isinstance(self.heads, bool) or self.heads <= 0:
-            raise ValueError("audio input adapter heads must be positive.")
-        if isinstance(self.ffn_ratio, bool) or self.ffn_ratio <= 0:
-            raise ValueError("audio input adapter ffn_ratio must be positive.")
-        if isinstance(self.dropout, bool) or not 0 <= self.dropout < 1:
-            raise ValueError("audio input adapter dropout must be in [0, 1).")
+        validate_tower_fields(
+            "audio input adapter",
+            layers=self.layers,
+            heads=self.heads,
+            ffn_ratio=self.ffn_ratio,
+            dropout=self.dropout,
+        )
 
 
 def audio_input_options(
@@ -61,10 +66,7 @@ def audio_input_options(
     adapter_type = config.get("type", AudioInputAdapterType.NONE)
     return AudioInputAdapterConfig(
         type=AudioInputAdapterType(cast(str, adapter_type)),
-        layers=cast(int, config.get("layers", 2)),
-        heads=cast(int, config.get("heads", 8)),
-        ffn_ratio=cast(float, config.get("ffn_ratio", 4.0)),
-        dropout=cast(float, config.get("dropout", 0.0)),
+        **tower_fields(config),
     )
 
 
@@ -132,13 +134,13 @@ class AudioInputTower(nn.Module):
         if features.size(1) <= 0:
             raise ValueError("audio input must contain at least one frame.")
 
-        valid = _valid_mask(features, mask)
+        valid = valid_mask(features, mask, name="audio input")
         values = features.to(dtype=torch.float32)
         values = values.masked_fill(~valid[..., None], 0)
 
         if self.config.type is AudioInputAdapterType.TRANSFORMER:
             values = self.input_projection(values)
-            key_padding_mask = ~_safe_transformer_mask(valid)
+            key_padding_mask = ~safe_transformer_mask(valid)
             values = self.adapter(values, src_key_padding_mask=key_padding_mask)
         else:
             values = self.adapter(values)
@@ -164,28 +166,6 @@ def create_audio_input_adapter(
     else:
         options = audio_input_options(config)
     return AudioInputTower(options, in_features, out_features)
-
-
-def _valid_mask(features: Tensor, mask: Tensor | None) -> Tensor:
-    if mask is None:
-        return torch.ones(
-            features.shape[:2],
-            device=features.device,
-            dtype=torch.bool,
-        )
-    if mask.dim() != 2 or mask.shape != features.shape[:2]:
-        raise ValueError("audio input mask must have shape [batch, frames].")
-    return mask.to(device=features.device, dtype=torch.bool)
-
-
-def _safe_transformer_mask(valid: Tensor) -> Tensor:
-    """Keep all-padding rows finite while their final outputs remain zero."""
-    if bool(valid.any(dim=1).all()):
-        return valid
-    safe = valid.clone()
-    empty = ~valid.any(dim=1)
-    safe[empty, 0] = True
-    return safe
 
 
 __all__ = [

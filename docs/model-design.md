@@ -123,7 +123,7 @@ padding 与 mask：
 - position 必须指向序列内非 padding token。
 - `audio_input_positions` 中的有效位置必须唯一，并指向 runtime codec audio range；source 不是
   audio 时该字段为 `None`。
-- 同一 batch 的 task 必须具有相同 source/target modality 执行签名。
+- 同一 batch 的 task 必须具有相同 `(source_modality, prediction_modality)` 执行签名。
 
 真实推理不使用缺 target 的半成品 `ModelBatch`，而使用独立的 `generation.Request`。
 
@@ -146,19 +146,38 @@ prompt 中的位置，只供 `AudioInputTower` 做输入 embedding overlay；不
 
 ## 3. 任务定义
 
-| Task | source | token target | acoustic target |
+| Task | source | prediction | acoustic target |
 | --- | --- | --- | --- |
 | ASR | audio | text | no |
 | MT | text | text | no |
 | S2TT | audio | text | no |
-| S2ST | audio | semantic audio | codec-dependent |
-| TTS | text | semantic audio | codec-dependent |
-| T2ST | text | semantic audio | codec-dependent |
+| S2ST | audio | audio (optional parallel) | codec-dependent |
+| TTS | text | audio | codec-dependent |
+| T2ST | text | audio (optional parallel) | codec-dependent |
 | T2TT | text | text | no |
 | TEXT_AR | none | text | no |
-| AUDIO_AR | none | semantic audio | codec-dependent |
+| AUDIO_AR | none | audio | codec-dependent |
+| PARALLEL_AR | none | parallel | codec-dependent |
+| INTERLEAVED_AR | none | interleaved | codec-dependent |
+| MASKED_AR | text+audio (masked) | parallel (optional interleaved) | codec-dependent |
 
-`Task` 是 source modality、target modality、`uses_source_role` 和 instruction template 的唯一事实来源。task builder、collator、generation 与 objective 不维护重复的任务集合。
+`PredictionModality`（`speech_to_speech.prediction`）是 token 监督与 generation 路径的事实来源：
+
+- `TEXT` / `AUDIO`：单模态 next-token。
+- `PARALLEL`：同一序列内独立 text/audio span，两套 head 都监督（块级，非时间交错）。
+- `INTERLEAVED`：按 `interleave_audio_frames` 切 audio，文本比例分配后交错。
+
+同构 microbatch 比较 `execution_signature = (source_layout, prediction)`；loader 可为白名单
+任务覆写 `prediction`（例如 `T2ST`/`S2ST` 的 `audio|parallel`）。
+`target_modality` 只对单模态 prediction 返回 TEXT/AUDIO；mixed 时为 `None`。
+
+`Task` 仍拥有 `uses_source_role` 与 instruction template。
+每个 task 在 `speech_to_speech.templates` 中维护 30 条自然语言 instruction；训练样本构建通过
+`Task.sample_template()` 均匀随机采样其中一条，generation 入口使用 `Task.templates[0]` 保持可复现。
+task builder、collator、generation 与 objective 不维护重复的任务集合。
+
+`MASKED_AR` 在 chat prompt 后追加按 `mask_text_ratio` / `mask_audio_ratio` 随机替换的 text/audio
+source（`mask_token_id`），再以 PARALLEL/INTERLEAVED 布局还原完整目标。
 
 ## 4. Runtime 与所有权
 
@@ -172,9 +191,11 @@ Runtime 聚合互相兼容的 backbone、text/audio tokenizer、codec、layout�
 
 ## 5. Model 与 Objective
 
-`model.Config` 配置 token backbone 周边的 semantic-audio input/output adapter，以及可选的 source-audio
-input tower。semantic-audio output adapter 是逐 token 的 hidden-to-audio projection，必须保持
-pointwise 以兼容 cached generation；acoustic composition 使用独立结构：
+`model.Config` 配置 token backbone 周边的 idspace embedding、semantic-audio input/output
+adapter，以及可选的 source-audio input tower。输入侧用 `anytrain.module.idspace.Embedding`
+统一 text/audio lookup 与 audio→hidden adapter；text/audio logits 严格 tied 到对应 block
+embedding weight。semantic-audio output adapter 是因果族：`none` / `linear` / `mlp` 为无序列
+混合特例，`transformer` 带独立 KV cache；acoustic composition 使用独立结构：
 
 ```python
 @dataclass(frozen=True)
@@ -222,31 +243,33 @@ support 做 waveform reconstruction，不初始化联合训练 decoder，并继�
 backend metadata。新增 adapter 改变了 Flow/RVQ checkpoint schema；旧 S2S checkpoint 缺少
 `acoustic_condition.*`，strict resume 会显式失败，不做隐式补参。
 
-source-audio input tower 的数据流是：
+token embedding 与 source-audio input tower 的数据流是：
 
 ```text
-source audio semantic token IDs
-    -> semantic_audio_embedding
-    -> AudioInputTower (none | mlp | transformer)
-    -> overlay inputs_embeds at audio_input_positions
+global input_ids
+    -> idspace.Embedding (text + audio + adapters["audio"])
+    -> AudioInputTower overlay at audio_input_positions (none | mlp | non-causal transformer)
     -> Qwen backbone
+    -> AudioOutputAdapter (none | linear | mlp | causal transformer)
+    -> tied text/audio logits
 ```
 
-`mlp` 是逐帧 gated projection；`transformer` 是保持帧数的非 causal encoder。tower 只服务输入
-表示，不能读取或修改生成中的新 token，也不参与 `audio_output_adapter`、Flow/RVQ decoder
-或 audio response grammar。显式位置由 datamodule/sample builder 和 generation request 传递；
-没有 source audio 时为 `None`。
+`mlp` input tower 是逐帧 gated projection；`transformer` input tower 是保持帧数的非 causal
+encoder。tower 只服务输入表示，不能读取或修改生成中的新 token，也不参与 output adapter、
+Flow/RVQ decoder 或 audio response grammar。显式位置由 datamodule/sample builder 和 generation
+request 传递；没有 source audio 时为 `None`。旧 `semantic_audio_*` checkpoint key 与
+`token_embedding.*` 不兼容，strict resume 显式失败。
 
 model 的训练能力是：
 
 - `token_hidden_states()`：返回完整 backbone 表示，不构造 vocabulary logits。
-- `token_logits(hidden, modality)`：在有效 predictor rows 上只构造 target modality 的局部
+- `token_logits(hidden, modality)`：在有效 predictor rows 上只构造对应 `Modality` 的局部
   vocabulary logits；省略 modality 时为通用 forward 构造 global text+audio logits。
 - `target_frame_condition()`：把 target token position 对齐到 acoustic frame。
 - flow/RVQ 各自提供 acoustic target 与 decoder 能力。
 
 `TokenObjective`、`FlowObjective`、`RVQObjective` 只依赖结构化 Protocol。所有 batch 计算 token CE；存在 acoustic target 时，组合对应的 flow 或 RVQ objective。REPA 只属于 flow，通过显式 teacher 与正数 weight 加入。
-token CE 的 softmax 只覆盖 task 的 target modality，不让 text/audio head 跨模态竞争；flow、RVQ
+token CE 的 softmax 只覆盖 `prediction_modality` 监督的模态，不让 text/audio head 跨模态竞争；flow、RVQ
 与 REPA 只对 boolean mask 选中的有效 frame 计算非线性 loss，padding NaN/Inf 不参与梯度。
 
 ## 6. Generation
@@ -256,7 +279,7 @@ token CE 的 softmax 只覆盖 task 的 target modality，不让 text/audio head
 训练与推理是两条独立路径：
 
 - `ModelBatch -> token_hidden_states -> sparse modality token_logits -> objective`
-- `Request -> generation service -> text generation | audio strategy -> decode -> Result`
+- `Request -> generation service -> text | audio strategy | mixed AR -> decode -> Result`
 
 语义 seq2seq 是基础且完整的模型能力：`model/acoustic=none` 只预测 text token 或 audio token。
 音频重建按 backend capability 分成两条路径：FrameCodec 使用
@@ -286,13 +309,19 @@ model 对外提供：
 当前 generation 只接收已经映射到 layout global ID 空间的 semantic-token prompt；audio-source
 内容和 text-source 内容都编码在 `Request.prompt_ids` 中。audio-source request 可额外携带
 `audio_input_positions`，让可配置 `AudioInputTower` 只覆盖 source payload 的 embedding，不改变
-序列长度或 generation grammar。service 只按 target modality 分组，左 padding 变长 prompt，逐行
-追踪 EOS/EOA，并恢复原请求顺序；KV cache 首步之后不再重复运行 source tower。
+序列长度或 generation grammar。service 只按 `prediction_modality` 分组，左 padding 变长 prompt，逐行
+追踪 EOS/EOA（mixed 另有 force-BOA 与 TEXT/AUDIO 切换），并恢复原请求顺序；KV cache 首步之后不再重复运行 source tower。
 
 状态机：
 
 - text：`prompt -> text tokens -> EOS`。
 - audio：`prepared prompt ending in BOA -> semantic-audio tokens -> EOA`；service 不追加 BOA。
+- parallel：`text tokens -> EOS -> BOA -> semantic-audio tokens -> EOA`。
+- interleaved：`text <-> audio` 交替，TEXT 可发 BOA，AUDIO 遇 EOA 回到 TEXT，TEXT 遇 EOS 结束。
+
+PARALLEL / INTERLEAVED 的 grammar 在 `generation.mixed`；model 只提供 `generation_step`。mixed
+token-only 路径会从 `response_ids` 抽出 codec-decodable audio span 并复用 AUDIO decode；不收集
+acoustic frame condition。
 
 service 把 model sequence 裁剪为不含 stop token 的 `Result.response_ids`。有独立 acoustic
 representation 时直接复用 model 返回的 frame count 裁剪 features；`(token count, frame count)`
@@ -305,7 +334,7 @@ DataModule 显式持有 runtime 与 Collator。一个正式 job 只运行一个 
 DataModule 构造时确定，训练过程中保持不变。task weights 位于进程共享数组，持久 worker 在
 collate 时读取；worker 侧 runtime 是不含 backbone/codec 的数据快照。
 
-同一组 task weights 只能包含相同 source/target modality 的任务，权重必须有限、非负且总和为
+同一组 task weights 只能包含相同 `(source_modality, prediction_modality)` 执行签名的任务，权重必须有限、非负且总和为
 正，以保证每个子 batch 的执行签名稳定。task 与 loader 权重只控制进入训练 step 的数据频率，
 不额外乘到 loss 上；每个 microbatch 独立按有效 token/frame 归约 token、flow、RVQ 与 REPA loss，
 再由 Lightning 在 accumulation window 内累积梯度。

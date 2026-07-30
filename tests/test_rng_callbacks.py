@@ -12,7 +12,7 @@ from anytrain.module.idspace import Layout
 from speech_to_speech.generation.evaluation import evaluate
 from speech_to_speech.callback.logging.task_sample import TaskSampleLogger
 from speech_to_speech.datamodule.types import ModelBatch
-from speech_to_speech.model.acoustic import AcousticRVQDecoder
+from semantic_acoustic_codec.model import AcousticRVQDecoder
 from speech_to_speech.generation import Result
 from speech_to_speech.task import Task
 

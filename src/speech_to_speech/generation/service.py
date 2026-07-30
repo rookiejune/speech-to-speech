@@ -4,11 +4,12 @@ from collections.abc import Sequence
 from typing import cast
 
 import torch
-from anydataset.types import Modality
 from torch import Tensor
 
+from ..prediction import PredictionModality
 from ._request import validate
 from .audio import generate_audio_responses
+from .mixed import generate_mixed_responses
 from .protocol import TokenGenerator
 from .types import Request, Result
 
@@ -24,22 +25,38 @@ def generate_responses(
     do_sample: bool = True,
     use_cache: bool = True,
 ) -> list[Result]:
-    """Generate batched responses grouped by target modality."""
+    """Generate batched responses grouped by prediction modality."""
     results: list[Result | None] = [None] * len(requests)
     device = model.backbone.get_input_embeddings().weight.device
-    groups: dict[Modality, list[tuple[int, Request]]] = {}
+    groups: dict[PredictionModality, list[tuple[int, Request]]] = {}
     for index, request in enumerate(requests):
         validate(request, model)
-        task = request["task"]
-        groups.setdefault(task.target_modality, []).append((index, request))
+        prediction = request["task"].prediction_modality
+        groups.setdefault(prediction, []).append((index, request))
 
-    for modality, group in groups.items():
+    for prediction, group in groups.items():
         prompt, prompt_mask, audio_input_positions = _inputs(
             [request for _, request in group],
             model,
             device,
         )
-        if modality is Modality.AUDIO:
+        if prediction.is_mixed:
+            mixed_results = generate_mixed_responses(
+                [request for _, request in group],
+                model,
+                prompt,
+                prompt_mask,
+                audio_input_positions,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=do_sample,
+                use_cache=use_cache,
+            )
+            for result, (result_index, _) in zip(mixed_results, group):
+                results[result_index] = result
+            continue
+        if prediction is PredictionModality.AUDIO:
             audio_results = generate_audio_responses(
                 [request for _, request in group],
                 model,
@@ -57,6 +74,10 @@ def generate_responses(
             for result, (result_index, _) in zip(audio_results, group):
                 results[result_index] = result
             continue
+        if prediction is not PredictionModality.TEXT:
+            raise ValueError(f"unsupported prediction modality: {prediction.value}")
+
+        from anydataset.types import Modality
 
         sequence = model.generate_tokens(
             prompt,

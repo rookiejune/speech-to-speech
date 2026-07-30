@@ -9,7 +9,7 @@ from anytrain.loss import MaskedCosineAlignmentLoss
 from torch import Tensor, nn
 
 from speech_to_speech.loss import WavLMTeacher
-from speech_to_speech.model.acoustic import AcousticDiT, AcousticFlow
+from speech_to_speech.model.acoustic import AcousticFlow
 
 
 class AcousticFlowTest(unittest.TestCase):
@@ -34,105 +34,17 @@ class AcousticFlowTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "boolean"):
             flow.sample(condition, mask=torch.ones(1, 2))
 
+    def test_wraps_sac_feature_generator(self):
+        from semantic_acoustic_codec.model import FMFeatureGenerator
+        from semantic_acoustic_codec.model.dit import DiTDecoder
 
-class AcousticDiTTest(unittest.TestCase):
-    def test_repa_projection_is_only_registered_when_configured(self):
-        model = AcousticDiT(6, 4, hidden_dim=8, layers=2, heads=2)
+        flow = AcousticFlow(2, 2, _FlowRuntime(), hidden_dim=2, layers=1, heads=1)
+        self.assertIsInstance(flow.generator, FMFeatureGenerator)
+        self.assertIsInstance(flow.decoder, DiTDecoder)
+        self.assertIs(flow.decoder, flow.generator.core)
 
-        self.assertIsNone(model.feature_projection)
-        with self.assertRaisesRegex(RuntimeError, "not configured"):
-            model.forward_with_features(
-                torch.randn(1, 2, 4),
-                torch.rand(1),
-                condition=torch.randn(1, 2, 6),
-            )
 
-    def test_position_embedding_is_reused_and_grows_on_demand(self):
-        model = AcousticDiT(6, 4, hidden_dim=8, layers=2, heads=2)
-        condition = torch.randn(1, 3, 6)
-        model(torch.randn(1, 3, 4), torch.rand(1), condition=condition)
-        cached = model.position_embedding
-
-        model(torch.randn(1, 3, 4), torch.rand(1), condition=condition)
-        self.assertIs(model.position_embedding, cached)
-
-        model(
-            torch.randn(1, 5, 4),
-            torch.rand(1),
-            condition=torch.randn(1, 5, 6),
-        )
-        self.assertEqual(model.position_embedding.size(0), 5)
-
-    def setUp(self) -> None:
-        torch.manual_seed(0)
-        self.model = AcousticDiT(
-            condition_dim=6,
-            latent_dim=4,
-            hidden_dim=8,
-            layers=2,
-            heads=2,
-            ffn_ratio=2,
-            repa_feature_dim=6,
-        )
-
-    def test_shapes_and_backward(self):
-        x_t = torch.randn(2, 5, 4, requires_grad=True)
-        condition = torch.randn(2, 5, 6, requires_grad=True)
-        mask = torch.tensor(
-            [[True, True, True, True, True], [True, True, True, False, False]]
-        )
-
-        velocity, representation = self.model.forward_with_features(
-            x_t,
-            torch.tensor([0.2, 0.8]),
-            condition=condition,
-            mask=mask,
-        )
-        (velocity.square().mean() + representation.square().mean()).backward()
-
-        self.assertEqual(velocity.shape, x_t.shape)
-        self.assertEqual(representation.shape, condition.shape)
-        self.assertTrue(torch.equal(velocity[1, 3:], torch.zeros(2, 4)))
-        self.assertIsNotNone(x_t.grad)
-        self.assertIsNotNone(condition.grad)
-
-    def test_padding_does_not_change_valid_frames(self):
-        x_t = torch.randn(1, 4, 4)
-        condition = torch.randn(1, 4, 6)
-        mask = torch.tensor([[True, True, False, False]])
-        changed_x = x_t.clone()
-        changed_condition = condition.clone()
-        changed_x[:, 2:] = 1000
-        changed_condition[:, 2:] = -1000
-
-        output = self.model(x_t, torch.tensor([0.5]), condition=condition, mask=mask)
-        changed = self.model(
-            changed_x,
-            torch.tensor([0.5]),
-            condition=changed_condition,
-            mask=mask,
-        )
-
-        torch.testing.assert_close(output[:, :2], changed[:, :2])
-
-    def test_film_condition_and_self_attention_affect_output(self):
-        for block in self.model.blocks:
-            torch.nn.init.normal_(block.film.weight, std=0.1)
-        x_t = torch.randn(1, 3, 4)
-        condition = torch.randn(1, 3, 6)
-        time = torch.tensor([0.5])
-        baseline = self.model(x_t, time, condition=condition)
-
-        changed_condition = condition.clone()
-        changed_condition[:, 1] += 1
-        film_changed = self.model(x_t, time, condition=changed_condition)
-        changed_x = x_t.clone()
-        changed_x[:, 1] += 1
-        attention_changed = self.model(changed_x, time, condition=condition)
-
-        self.assertFalse(torch.equal(baseline[:, 1], film_changed[:, 1]))
-        self.assertFalse(torch.equal(baseline[:, 0], attention_changed[:, 0]))
-
+class AcousticRepaLossTest(unittest.TestCase):
     def test_repa_detaches_teacher(self):
         representation = torch.randn(2, 3, 5, requires_grad=True)
         condition = torch.randn(2, 3, 5, requires_grad=True)
@@ -168,35 +80,6 @@ class AcousticDiTTest(unittest.TestCase):
             self.fail("REPA representation gradient is unavailable")
         self.assertTrue(torch.isfinite(gradient).all())
         self.assertTrue(torch.equal(gradient[:, 1], torch.zeros_like(gradient[:, 1])))
-
-    def test_eight_layer_dit_exposes_block_four_for_repa(self):
-        model = AcousticDiT(
-            condition_dim=6,
-            latent_dim=4,
-            hidden_dim=8,
-            layers=8,
-            heads=2,
-            ffn_ratio=2,
-            repa_feature_dim=5,
-            repa_student_layer=4,
-        )
-        captured: list[Tensor] = []
-        handle = model.blocks[3].register_forward_hook(
-            lambda module, inputs, output: captured.append(output)
-        )
-        try:
-            _, representation = model.forward_with_features(
-                torch.randn(1, 3, 4),
-                torch.tensor([0.5]),
-                condition=torch.randn(1, 3, 6),
-            )
-        finally:
-            handle.remove()
-
-        torch.testing.assert_close(
-            representation,
-            model.feature_projection(captured[0]),
-        )
 
     def test_wavlm_teacher_uses_layer_nine_and_preserves_mask_positions(self):
         wavlm = _WavLM()

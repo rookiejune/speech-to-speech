@@ -9,7 +9,7 @@ from .audio_output import (
     AudioOutputAdapterConfig,
     AudioOutputAdapterType,
 )
-from .base import Config, TokenModel
+from .base import Config, Model
 from .toy import ToyConfig, create_toy_backbone
 
 __all__ = [
@@ -21,7 +21,7 @@ __all__ = [
     "AudioOutputAdapterConfig",
     "AudioOutputAdapterType",
     "Config",
-    "TokenModel",
+    "Model",
     "ToyConfig",
     "create_toy_backbone",
 ]

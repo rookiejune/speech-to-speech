@@ -82,8 +82,8 @@ class ModelDtypeTest(unittest.TestCase):
         hidden = torch.randn(1, 2, 4, dtype=torch.bfloat16)
 
         dense = model.token_logits(hidden)
-        selected = model.selected_logits(hidden, torch.tensor([0, 4, 8]))
-        audio = model.selected_logits(hidden, torch.tensor([4, 8]))
+        selected, _ = model.selected_logits(hidden, torch.tensor([0, 4, 8]))
+        audio, _ = model.selected_logits(hidden, torch.tensor([4, 8]))
 
         self.assertEqual(dense.dtype, torch.float32)
         self.assertEqual(selected.dtype, torch.float32)
@@ -178,7 +178,7 @@ def _runtime() -> SimpleNamespace:
         backbone=_Backbone(),
         codec=_Codec(),
         audio_tokenizer=NativeAudioTokenizer(vocab_size=3),
-        layout=Layout(text=(0, 4), audio=(4, 9)),
+        layout=Layout(text=(0, 4), audio=(4, 10)),
         flow_matching=_FlowRuntime(),
     )
 

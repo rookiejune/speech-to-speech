@@ -8,6 +8,7 @@ import torch
 from anydataset.types import AudioView, Modality
 from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
+from speech_to_speech.prediction import PredictionModality
 from semantic_acoustic_codec.config import (
     DecoderConfig as SharedDecoderConfig,
     Route,
@@ -29,8 +30,8 @@ from speech_to_speech.datamodule.collator import Collator
 from speech_to_speech.datamodule.dataset import ToyDataset
 from speech_to_speech.loss import FlowObjective
 from speech_to_speech.model import ToyConfig
+from semantic_acoustic_codec.model.dit import DiTDecoder
 from speech_to_speech.model.acoustic import (
-    AcousticDiT,
     FlowModel,
     RVQModel,
 )
@@ -161,12 +162,13 @@ class _Runtime:
         self.text_tokenizer = _TextTokenizer()
         self.audio_tokenizer = NativeAudioTokenizer(vocab_size=8)
         self.codec = _Codec()
-        self.layout = Layout(text=(0, 32), audio=(32, 42))
+        self.layout = Layout(text=(0, 32), audio=(32, 43))
         self.flow_matching = _FlowRuntime()
         self.pad_token_id = 0
         self.eos_token_id = 10
         self.boa_token_id = 40
         self.eoa_token_id = 41
+        self.mask_token_id = 42
 
     @property
     def codec_audio_range(self) -> tuple[int, int]:
@@ -211,8 +213,9 @@ class FakeClosureTest(unittest.TestCase):
 
         self.assertEqual(model.acoustic_condition.hidden_dim, 4)
         self.assertEqual(model.acoustic_condition.condition_dim, 6)
-        self.assertEqual(model.acoustic_decoder.condition_dim, 6)
-        _assert_state_equal(self, model.acoustic_decoder, generator.core.decoder)
+        self.assertEqual(model.acoustic_decoder.decoder.condition_dim, 6)
+        self.assertIsInstance(model.acoustic_decoder, DiTDecoder)
+        _assert_state_equal(self, model.acoustic_decoder, generator.core)
 
     def test_rvq_model_loads_codebook_ar_generator(self):
         rt = _Runtime()
@@ -306,9 +309,9 @@ class FakeClosureTest(unittest.TestCase):
 
         self.assertIn("repa", outputs)
         self.assertTrue(torch.isfinite(outputs["loss"]))
-        self.assertEqual(model.acoustic_decoder.feature_layer, 1)
-        self.assertIsNotNone(model.acoustic_decoder.feature_projection)
-        self.assertIsInstance(model.acoustic_decoder, AcousticDiT)
+        self.assertEqual(model.acoustic_decoder.decoder.feature_layer, 1)
+        self.assertIsNotNone(model.acoustic_decoder.decoder.feature_projection)
+        self.assertIsInstance(model.acoustic_decoder, DiTDecoder)
 
     def test_rvq_model_generates_acoustic_features(self):
         torch.manual_seed(0)
@@ -327,8 +330,9 @@ class FakeClosureTest(unittest.TestCase):
 
         def audio_logits(hidden_states: Tensor, local_ids=None) -> Tensor:
             self.assertIsNone(local_ids)
+            start, end = rt.layout.blocks["audio"]
             logits = hidden_states.new_full(
-                (*hidden_states.shape[:-1], 10),
+                (*hidden_states.shape[:-1], end - start),
                 float("-inf"),
             )
             logits[..., 0] = 0
@@ -363,9 +367,9 @@ class FakeClosureTest(unittest.TestCase):
                 self.assertEqual(batch.input_ids.shape, batch.token_labels.shape)
                 self.assertEqual(
                     batch.acoustic_target is not None,
-                    task.target_modality is Modality.AUDIO,
+                    task.prediction_modality.supervises_audio,
                 )
-                if task.target_modality is Modality.AUDIO:
+                if task.prediction_modality is PredictionModality.AUDIO:
                     supervised = batch.token_labels[0].ne(-100).nonzero().flatten()
                     first = int(supervised[0])
                     last = int(supervised[-1])
@@ -399,7 +403,7 @@ class FakeClosureTest(unittest.TestCase):
                 self.assertTrue(torch.isfinite(outputs["loss"]))
                 self.assertEqual(
                     "flow_matching" in outputs,
-                    task.target_modality is Modality.AUDIO,
+                    task.prediction_modality.supervises_audio,
                 )
                 self.assertTrue(
                     any(

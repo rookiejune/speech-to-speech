@@ -23,7 +23,7 @@ from ._flops import (
 )
 from .datamodule.types import ModelBatch
 from .loss import FlowObjective, LossItem, RVQObjective, TokenObjective
-from .model import TokenModel
+from .model import Model
 from .model.acoustic import FlowModel, HiddenConditionAdapter, RVQModel
 from .pl_module import SpeechToSpeechModule
 
@@ -66,8 +66,8 @@ class TrainingFlops:
         objective = cast(nn.Module, cast(object, pl_module.objective))
         expected = {"loss", "token"}
         if type(objective) is TokenObjective:
-            if type(model) is not TokenModel:
-                raise TypeError("TokenObjective FLOPs require the standard TokenModel.")
+            if type(model) is not Model:
+                raise TypeError("TokenObjective FLOPs require the standard Model.")
         elif type(objective) is FlowObjective:
             if type(model) is not FlowModel:
                 raise TypeError(
@@ -89,7 +89,7 @@ class TrainingFlops:
             )
 
         _outputs(outputs, expected)
-        token_model = cast(TokenModel, model)
+        token_model = cast(Model, model)
         core = _backbone(token_model)
         _trainable(model)
         forward = _token_path(token_model, core, batch)
@@ -100,7 +100,7 @@ class TrainingFlops:
                 _, mask = target
                 decoder = model.acoustic_decoder
                 feature_dim = model.acoustic_codec.acoustic_feature_dim
-                if decoder.latent_dim != feature_dim:
+                if decoder.decoder.latent_dim != feature_dim:
                     raise ValueError(
                         "Flow decoder latent size does not match the codec feature size."
                     )
@@ -146,7 +146,7 @@ def _acoustic_condition(adapter: HiddenConditionAdapter, mask: Tensor) -> int:
 def _flow_objective(objective: FlowObjective, model: nn.Module) -> None:
     if objective.repa_weight is not None or objective.repa_teacher is not None:
         raise ValueError("training FLOPs do not support REPA.")
-    decoder = cast(FlowModel, model).acoustic_decoder
+    decoder = cast(FlowModel, model).acoustic_decoder.decoder
     if decoder.feature_projection is not None or decoder.feature_layer is not None:
         raise ValueError("training FLOPs do not support REPA.")
 
@@ -167,7 +167,7 @@ def _outputs(outputs: Any, expected: set[str]) -> None:
             raise TypeError(f"training FLOPs output {name!r} must be a LossItem.")
 
 
-def _backbone(model: TokenModel) -> Qwen3Model:
+def _backbone(model: Model) -> Qwen3Model:
     backbone = cast(object, model.backbone)
     if type(backbone) is not Qwen3ForCausalLM:
         raise TypeError("training FLOPs require a standard Qwen3ForCausalLM backbone.")
@@ -223,7 +223,7 @@ def _trainable(model: nn.Module) -> None:
         )
 
 
-def _token_path(model: TokenModel, core: Qwen3Model, batch: ModelBatch) -> int:
+def _token_path(model: Model, core: Qwen3Model, batch: ModelBatch) -> int:
     input_ids = batch.input_ids
     if input_ids.dim() != 2 or input_ids.size(0) < 1 or input_ids.size(1) < 1:
         raise ValueError("training FLOPs input ids must have shape [B, S].")
@@ -233,7 +233,7 @@ def _token_path(model: TokenModel, core: Qwen3Model, batch: ModelBatch) -> int:
     if not bool(lengths.gt(0).all()):
         raise ValueError("each training FLOPs input row must contain a valid token.")
 
-    embedding = model.semantic_audio_embedding
+    embedding = model.token_embedding.embeddings["audio"]
     if type(embedding) is not nn.Embedding:
         raise TypeError("training FLOPs require a semantic audio embedding.")
     hidden = core.config.hidden_size
@@ -243,8 +243,9 @@ def _token_path(model: TokenModel, core: Qwen3Model, batch: ModelBatch) -> int:
             "semantic audio embedding rows do not match the audio layout block."
         )
     audio_rows = int((input_ids.ge(audio_start) & input_ids.lt(audio_end)).sum().item())
+    audio_adapter = model.token_embedding.adapters["audio"]
     forward = adapter(
-        model.semantic_audio_adapter,
+        getattr(audio_adapter, "module", audio_adapter),
         rows=audio_rows,
         in_features=embedding.embedding_dim,
         out_features=hidden,
@@ -273,42 +274,55 @@ def _token_path(model: TokenModel, core: Qwen3Model, batch: ModelBatch) -> int:
     return forward
 
 
-def _token_head(model: TokenModel, batch: ModelBatch) -> int:
+def _token_head(model: Model, batch: ModelBatch) -> int:
     labels = batch.token_labels[:, 1:]
     valid = labels.ne(-100)
     if not bool(valid.any(dim=1).all()):
         raise ValueError(
             "each training FLOPs token-label row must contain a valid target."
         )
-    rows = int(valid.sum().item())
-    modality = batch.tasks[0].target_modality
-    start, end = model.layout.blocks[modality.value]
-    if bool((valid & (labels.lt(start) | labels.ge(end))).any()):
+    modalities = batch.tasks[0].prediction_modality.supervised_modalities()
+    allowed = torch.zeros_like(valid)
+    for modality in modalities:
+        start, end = model.layout.blocks[modality.value]
+        allowed |= labels.ge(start) & labels.lt(end)
+    if bool((valid & ~allowed).any()):
+        names = ", ".join(sorted(modality.value for modality in modalities))
         raise ValueError(
-            f"training FLOPs labels contain an id outside the {modality.value} block."
+            f"training FLOPs labels contain an id outside supervised blocks: {names}."
         )
 
     hidden = model.backbone.config.hidden_size
-    if modality is Modality.TEXT:
-        output = model.backbone.get_output_embeddings()
-        if type(output) is not nn.Linear or output.in_features != hidden:
-            raise ValueError(f"text token head must be Linear({hidden}, vocab_size).")
-        if output.out_features < end - start:
-            raise ValueError("text token head does not cover the text layout block.")
-        # VocabularyHeadMixin selects only the text-layout rows from this head.
-        return 2 * rows * hidden * (end - start)
-    if modality is Modality.AUDIO:
-        embedding = model.semantic_audio_embedding
-        forward = adapter(
-            model.audio_output_adapter,
-            rows=rows,
-            in_features=hidden,
-            out_features=embedding.embedding_dim,
-            name="semantic audio output adapter",
-        )
-        return forward + 2 * rows * embedding.embedding_dim * embedding.num_embeddings
-    raise ValueError(f"training FLOPs do not support modality {modality.value!r}.")
-
+    total = 0
+    for modality in sorted(modalities, key=lambda value: value.value):
+        start, end = model.layout.blocks[modality.value]
+        mask = valid & labels.ge(start) & labels.lt(end)
+        if not bool(mask.any()):
+            continue
+        rows = int(mask.sum().item())
+        if modality is Modality.TEXT:
+            weight = model.token_embedding.embeddings["text"].weight
+            if weight.size(0) < end - start or weight.size(1) != hidden:
+                raise ValueError(
+                    "text token embedding does not cover the text layout block."
+                )
+            total += 2 * rows * hidden * (end - start)
+            continue
+        if modality is Modality.AUDIO:
+            embedding = model.token_embedding.embeddings["audio"]
+            forward = adapter(
+                model.audio_output_adapter,
+                rows=rows,
+                in_features=hidden,
+                out_features=embedding.embedding_dim,
+                name="semantic audio output adapter",
+            )
+            total += (
+                forward + 2 * rows * embedding.embedding_dim * embedding.num_embeddings
+            )
+            continue
+        raise ValueError(f"training FLOPs do not support modality {modality.value!r}.")
+    return total
 
 def _target(
     batch: ModelBatch,

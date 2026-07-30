@@ -7,7 +7,7 @@ from semantic_acoustic_codec.runtime import AcousticGeneratorArtifact
 
 from speech_to_speech.loss import FlowObjective, RVQObjective, TokenObjective, WavLMTeacher
 from speech_to_speech.model import Config as ModelConfig
-from speech_to_speech.model import TokenModel
+from speech_to_speech.model import Model
 from speech_to_speech.model.acoustic import (
     AcousticType,
     DecoderConfig,
@@ -62,11 +62,11 @@ class RVQConfig(AcousticConfig, Protocol):
 
 
 CompositionModule = Union[
-    SpeechToSpeechModule[TokenModel],
+    SpeechToSpeechModule[Model],
     SpeechToSpeechModule[FlowCompositionModel],
     SpeechToSpeechModule[RVQCompositionModel],
 ]
-CompositionModel = Union[TokenModel, FlowModel, RVQModel]
+CompositionModel = Model
 
 
 def build(
@@ -105,8 +105,8 @@ def token(
     runtime: Runtime,
     config: Config,
     model_config: ModelConfig,
-) -> tuple[SpeechToSpeechModule[TokenModel], TokenModel]:
-    model = TokenModel(model_config, runtime=runtime)
+) -> tuple[SpeechToSpeechModule[Model], Model]:
+    model = Model(model_config, runtime=runtime)
     module = SpeechToSpeechModule(
         config,
         model=model,

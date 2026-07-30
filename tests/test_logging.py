@@ -277,6 +277,7 @@ def _batch(task: Task, audio_seconds: float = 0.0) -> ModelBatch:
                 token_labels=torch.tensor([-100, 2]),
                 acoustic_target=None,
                 task=task,
+                prediction=task.prediction_modality,
                 audio_seconds=audio_seconds,
             )
         ],
@@ -296,6 +297,7 @@ def _acoustic_batch(task: Task) -> ModelBatch:
                     "token_positions": torch.tensor([1]),
                 },
                 task=task,
+                prediction=task.prediction_modality,
             )
         ],
         pad_token_id=0,

@@ -6,6 +6,7 @@ from typing import Optional, cast
 
 import torch
 from anydataset.types import Modality
+from anytrain.module.idspace import Embedding
 from peft import LoraConfig, inject_adapter_in_model
 from peft.utils.other import cast_mixed_precision_params
 from torch import nn
@@ -16,13 +17,14 @@ from ._buffer import register
 from ..audio_route import AudioStream
 from .._tensor import is_signed_integer_dtype
 from ._generation import (
+    GenerationStepResult,
     generate_bicodec_sequence,
     generate_flattened_sequence,
     generate_sequence,
 )
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer, FlattenedAudioTokenizer
 from ._head import VocabularyHeadMixin
-from .adapter import AdapterType
+from .adapter import AdapterType, create_adapter
 from .audio_input import (
     AudioInputAdapterConfig,
     AudioInputAdapterType,
@@ -30,10 +32,12 @@ from .audio_input import (
     create_audio_input_adapter,
 )
 from .audio_output import (
+    AudioOutputAdapter,
     AudioOutputAdapterConfig,
     create_audio_output_adapter,
 )
-from .embedding import create_semantic_audio_modules
+from .embedding.audio import create_semantic_audio_embedding
+from ._embedding import CastOutput, EmbeddingView
 from .protocol import TokenModelRuntime
 from .toy import ToyConfig, create_toy_backbone
 from ..runtime.types import Backbone, BackboneOutput
@@ -52,11 +56,13 @@ class Config:
     lora: Optional[LoraConfig] = None
 
 
-class TokenModel(VocabularyHeadMixin, nn.Module):
-    """Shared text and semantic-audio token modeling."""
+class Model(VocabularyHeadMixin, nn.Module):
+    """Text and semantic-audio model; Flow/RVQ compositions subclass this entry."""
 
     audio_token_frame_spans: torch.Tensor
     audio_input_adapter: AudioInputTower | None
+    token_embedding: Embedding
+    audio_output_adapter: AudioOutputAdapter
 
     @property
     def lora_config(self) -> Optional[LoraConfig]:
@@ -97,34 +103,51 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             }:
                 cast_mixed_precision_params(backbone, reference.dtype)
         self.backbone = cast(Backbone, cast(object, backbone))
-        (
-            self.semantic_audio_embedding,
-            self.semantic_audio_adapter,
-        ) = create_semantic_audio_modules(
-            self.config.semantic_audio_adapter,
-            self.runtime,
-            self.backbone,
-        )
-        hidden_size = self.backbone.config.hidden_size
-        input_embedding = self.backbone.get_input_embeddings()
-        output_embedding = self.backbone.get_output_embeddings()
+        text_source = self.backbone.get_input_embeddings()
         text_vocab_size = text_end - text_start
-        if input_embedding.weight.size(0) < text_vocab_size:
+        if text_source.weight.size(0) < text_vocab_size:
             raise ValueError(
                 "backbone input embedding does not cover the text layout vocabulary."
             )
-        if output_embedding.weight.size(0) < text_vocab_size:
-            raise ValueError(
-                "backbone output embedding does not cover the text layout vocabulary."
+        if text_source.num_embeddings != text_vocab_size:
+            # Layout text block may be a prefix of a larger backbone table.
+            text_embedding: nn.Module = nn.Embedding.from_pretrained(
+                text_source.weight[:text_vocab_size].detach().clone(),
+                freeze=False,
             )
-        backbone_weight = input_embedding.weight
+            setter = getattr(self.backbone, "set_input_embeddings", None)
+            if setter is not None:
+                setter(EmbeddingView(text_embedding))
+        else:
+            # View keeps ownership under the backbone; idspace only routes through it.
+            text_embedding = EmbeddingView(text_source)
+        audio_embedding = create_semantic_audio_embedding(
+            self.runtime,
+            reference=text_source.weight,
+        ).to(device=text_source.weight.device, dtype=torch.float32)
+        audio_adapter = CastOutput(
+            create_adapter(
+                self.config.semantic_audio_adapter,
+                audio_embedding.weight.size(-1),
+                self.backbone.config.hidden_size,
+            ).to(device=text_source.weight.device, dtype=torch.float32),
+            dtype=text_source.weight.dtype,
+        )
+        self.token_embedding = Embedding(
+            self.layout,
+            text=text_embedding,  # pyright: ignore[reportArgumentType]
+            audio=audio_embedding,
+            adapters={"audio": audio_adapter},
+        )
+        hidden_size = self.backbone.config.hidden_size
+        backbone_weight = text_source.weight
         register(
             self,
             "audio_token_frame_spans",
             _frame_span_lookup(self.runtime).to(device=backbone_weight.device),
             persistent=False,
         )
-        semantic_audio_weight = self.semantic_audio_embedding.weight
+        semantic_audio_weight = self.token_embedding.embeddings["audio"].weight
         self.audio_input_adapter = (
             None
             if self.config.audio_input_adapter.type is AudioInputAdapterType.NONE
@@ -142,6 +165,13 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             device=backbone_weight.device,
             dtype=torch.float32,
         )
+
+    def audio_output_adapter_batch_select(
+        self,
+        past_key_values: object | None,
+        indices: torch.Tensor,
+    ) -> object | None:
+        return self.audio_output_adapter.batch_select_past(past_key_values, indices)
 
     def forward(
         self,
@@ -165,7 +195,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
             cache_position=cache_position,
         )
         hidden_states = backbone_output.last_hidden_state
-        logits = self.token_logits(hidden_states)
+        logits = self.token_logits(hidden_states, attention_mask=attention_mask)
         return self._output(
             backbone_output, hidden_states, logits, output_hidden_states
         )
@@ -181,7 +211,8 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         past_key_values: Cache | None,
         use_cache: bool,
         audio_input_positions: torch.Tensor | None = None,
-    ) -> CausalLMOutputWithPast:
+        audio_output_past: object | None = None,
+    ) -> GenerationStepResult:
         """Run one autoregressive step with an explicit output-head selection."""
         if token_ids is not None and modality is not None:
             raise ValueError(
@@ -196,14 +227,40 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         )
         hidden_states = backbone_output.last_hidden_state
         last_hidden_state = hidden_states[:, -1:]
+        step_mask = attention_mask[:, -1:] if attention_mask is not None else None
+        audio_past = None
         if modality is not None:
-            logits = self.modality_logits(last_hidden_state, modality)
+            logits, audio_past = self.modality_logits(
+                last_hidden_state,
+                modality,
+                attention_mask=step_mask,
+                past_key_values=audio_output_past,
+                use_cache=use_cache,
+            )
         elif token_ids is not None:
-            logits = self.selected_logits(last_hidden_state, token_ids)
+            logits, audio_past = self.selected_logits(
+                last_hidden_state,
+                token_ids,
+                attention_mask=step_mask,
+                past_key_values=audio_output_past,
+                use_cache=use_cache,
+            )
         else:
-            logits = self.token_logits(last_hidden_state)
-        return self._output(
-            backbone_output, hidden_states, logits, output_hidden_states
+            adapted, audio_past = self.project_audio_hidden(
+                last_hidden_state,
+                attention_mask=step_mask,
+                past_key_values=audio_output_past,
+                use_cache=use_cache,
+            )
+            logits = self.token_logits(
+                last_hidden_state,
+                audio_hidden_state=adapted,
+            )
+        return GenerationStepResult(
+            logits=logits,
+            past_key_values=backbone_output.past_key_values,
+            audio_output_past=audio_past,
+            hidden_states=(hidden_states,) if output_hidden_states else None,
         )
 
     @staticmethod
@@ -439,22 +496,7 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         input_ids: torch.Tensor,
         audio_input_positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        text_start, text_end = self.layout.blocks["text"]
-        audio_start, audio_end = self.layout.blocks["audio"]
-        text_mask = input_ids.ge(text_start) & input_ids.lt(text_end)
-        audio_mask = input_ids.ge(audio_start) & input_ids.lt(audio_end)
-        if not bool((text_mask | audio_mask).all()):
-            raise ValueError(
-                "input token ids contain an id outside the runtime layout."
-            )
-        output = self.backbone.get_input_embeddings()(
-            input_ids.clamp(text_start, text_end - 1) - text_start
-        )
-        audio_token_ids = input_ids[audio_mask] - audio_start
-        audio = self.semantic_audio_adapter(
-            self.semantic_audio_embedding(audio_token_ids)
-        )
-        output[audio_mask] = audio.to(dtype=output.dtype)
+        output = self.token_embedding(input_ids)
         if self.audio_input_adapter is not None and audio_input_positions is not None:
             output = self._overlay_audio_input(
                 output,
@@ -491,9 +533,9 @@ class TokenModel(VocabularyHeadMixin, nn.Module):
         audio_start, _ = self.layout.blocks["audio"]
         local_ids = (selected_ids - audio_start).clamp(
             0,
-            self.semantic_audio_embedding.num_embeddings - 1,
+            self.token_embedding.embeddings["audio"].num_embeddings - 1,
         )
-        features = self.semantic_audio_embedding(local_ids)
+        features = self.token_embedding.embeddings["audio"](local_ids)
         adapter = self.audio_input_adapter
         if adapter is None:
             raise RuntimeError("audio input adapter is unavailable.")

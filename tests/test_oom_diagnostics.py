@@ -77,6 +77,7 @@ class OOMDiagnosticsTest(unittest.TestCase):
                         language=Language.EN,
                     ),
                     task=Task.TTS,
+                    prediction=Task.TTS.prediction_modality,
                 ),
             ),
             pad_token_id=0,

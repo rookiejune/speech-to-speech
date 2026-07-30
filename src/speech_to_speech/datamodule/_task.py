@@ -4,15 +4,27 @@ import math
 import multiprocessing
 from collections.abc import Mapping
 
+from ..prediction import PredictionModality
 from ..task import Task
+from ..task_spec import execution_signature, resolve_prediction
 
 
 class TaskWeights:
-    def __init__(self, values: Mapping[Task, float]) -> None:
+    def __init__(
+        self,
+        values: Mapping[Task, float],
+        *,
+        prediction: PredictionModality | None = None,
+    ) -> None:
         weights = dict(values)
-        _validate_tasks(list(weights))
+        positive = [task for task, weight in weights.items() if weight > 0]
+        if prediction is not None:
+            for task in positive:
+                resolve_prediction(task, prediction)
+        _validate_tasks(positive, prediction=prediction)
         _validate_weights(list(weights.values()))
-        self._tasks = tuple(task for task, weight in weights.items() if weight > 0)
+        self._prediction = prediction
+        self._tasks = tuple(positive)
         self._weights = tuple(
             float(weight) for weight in weights.values() if weight > 0
         )
@@ -25,6 +37,10 @@ class TaskWeights:
     @property
     def tasks(self) -> list[Task]:
         return list(self._tasks)
+
+    @property
+    def prediction(self) -> PredictionModality | None:
+        return self._prediction
 
     def allocate(self, batch_size: int) -> list[Task]:
         _validate_batch_size(batch_size)
@@ -44,11 +60,14 @@ def allocate_tasks(
     tasks: list[Task],
     weights: list[float],
     batch_size: int,
+    *,
+    prediction: PredictionModality | None = None,
 ) -> list[Task]:
     _validate_batch_size(batch_size)
     if len(tasks) != len(weights):
         raise ValueError("tasks and weights must have the same length.")
     _validate_weights(weights)
+    _validate_tasks(tasks, prediction=prediction)
     return _allocate_tasks(tasks, weights, batch_size, [0.0] * len(tasks))
 
 
@@ -79,15 +98,19 @@ def _validate_batch_size(batch_size: int) -> None:
         raise ValueError("task allocation requires a non-empty batch.")
 
 
-def _validate_tasks(tasks: list[Task]) -> None:
+def _validate_tasks(
+    tasks: list[Task],
+    *,
+    prediction: PredictionModality | None = None,
+) -> None:
     if not tasks:
         raise ValueError("task weights must contain at least one task.")
-    source = tasks[0].source_modality
-    target = tasks[0].target_modality
+    signature = execution_signature(tasks[0], prediction=prediction)
     for task in tasks:
-        if task.source_modality is not source or task.target_modality is not target:
+        if execution_signature(task, prediction=prediction) != signature:
             raise ValueError(
-                "all weighted tasks must use the same source and target modalities."
+                "all weighted tasks must use the same execution signature "
+                "(source layout and prediction modality)."
             )
 
 

@@ -56,10 +56,10 @@ audio payload。这个配置与 `semantic_audio_adapter`、`audio_output_adapter
 处理 target/generated audio，也不替换 Flow/RVQ acoustic decoder。启用 transformer 时要求
 backbone hidden size 能被 `heads` 整除。
 
-`model.audio_output_adapter` 使用 `none`、`linear` 或 `mlp` 时，模型通过显式的 pointwise
-`AudioOutputAdapter` 将 backbone hidden 投影到 semantic-audio feature space；该
-模块同时服务 teacher forcing、候选 logits 和 autoregressive generation，不引入跨 token 的
-sequence mixer。
+`model.audio_output_adapter` 默认 `type=linear`。`none` / `linear` / `mlp` 是无序列混合的
+pointwise 特例；`transformer` 启用因果 self-attention，并携带独立 KV cache（与 backbone cache
+同步 compact）。可配置 `layers`、`heads`、`ffn_ratio`、`dropout`（仅 transformer 使用）。该模块
+同时服务 teacher forcing、候选 logits 和 autoregressive generation。
 
 ## 生产默认与完整链路测试
 

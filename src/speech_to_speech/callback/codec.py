@@ -79,6 +79,7 @@ class OnDeviceCodecMaterializer:
             source=source,
             target=target,
             task=sample.task,
+            prediction=sample.prediction,
             audio_context=audio_context,
         )
 

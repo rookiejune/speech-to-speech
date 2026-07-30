@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
 import torch
@@ -8,13 +9,22 @@ from anydataset.types import Modality
 from anytrain.module.idspace import Layout
 from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
-from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.cache_utils import Cache
 
 from ..audio_route import AudioStream
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ._sampling import top_p_filter
 from .protocol import TokenModelRuntime
+
+
+@dataclass
+class GenerationStepResult:
+    """One autoregressive step: logits plus backbone and audio-output caches."""
+
+    logits: Tensor
+    past_key_values: Cache | None
+    audio_output_past: object | None
+    hidden_states: tuple[Tensor, ...] | None = None
 
 
 class GenerationStepModel(Protocol):
@@ -33,7 +43,14 @@ class GenerationStepModel(Protocol):
         past_key_values: Cache | None,
         use_cache: bool,
         audio_input_positions: Tensor | None = None,
-    ) -> CausalLMOutputWithPast: ...
+        audio_output_past: object | None = None,
+    ) -> GenerationStepResult: ...
+
+    def audio_output_adapter_batch_select(
+        self,
+        past_key_values: object | None,
+        indices: Tensor,
+    ) -> object | None: ...
 
 
 class _RowGenerator:
@@ -62,6 +79,7 @@ class _RowGenerator:
         self._use_cache = use_cache
         self._grammar = grammar
         self._past_key_values: Cache | None = None
+        self._audio_output_past: object | None = None
         self._audio_input_positions = audio_input_positions
         self._emitted = 0
 
@@ -81,6 +99,7 @@ class _RowGenerator:
                 if not self._use_cache or self._past_key_values is None
                 else None
             ),
+            audio_output_past=self._audio_output_past,
         )
         if output.logits is None:
             raise RuntimeError("model did not return generation logits.")
@@ -109,6 +128,7 @@ class _RowGenerator:
             self._past_key_values = output.past_key_values
             if self._past_key_values is None:
                 raise RuntimeError("backbone did not return a generation cache.")
+            self._audio_output_past = output.audio_output_past
             self._current = self.sequence[:, -1:]
         else:
             self._current = self.sequence
@@ -179,6 +199,7 @@ def generate_sequence(
     length = prompt_width
     input_ids = generated[:, :length]
     past_key_values: Cache | None = None
+    audio_output_past: object | None = None
     condition_steps: list[Tensor] = []
     span_steps: list[Tensor] = []
     batch_size = prompt_ids.size(0)
@@ -198,6 +219,7 @@ def generate_sequence(
             past_key_values=past_key_values,
             use_cache=use_cache,
             audio_input_positions=audio_input_positions,
+            audio_output_past=audio_output_past,
         )
         if output.logits is None:
             raise RuntimeError("model did not return generation logits.")
@@ -272,17 +294,23 @@ def generate_sequence(
             past_key_values = output.past_key_values
             if past_key_values is None:
                 raise RuntimeError("backbone did not return a generation cache.")
+            audio_output_past = output.audio_output_past
             if (
                 continuing_rows is not None
                 and continuing_rows.numel() != next_ids.numel()
             ):
                 past_key_values.batch_select_indices(continuing_rows)
+                audio_output_past = model.audio_output_adapter_batch_select(
+                    audio_output_past,
+                    continuing_rows,
+                )
             input_ids = (
                 next_ids
                 if continuing_rows is None
                 else next_ids.index_select(0, continuing_rows)
             ).unsqueeze(-1)
         else:
+            audio_output_past = None
             if audio_input_positions is not None and continuing_rows is not None:
                 audio_input_positions = audio_input_positions.index_select(
                     0, continuing_rows

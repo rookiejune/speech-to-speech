@@ -405,12 +405,17 @@ def _request_metadata(
     request: Request,
 ) -> dict[str, Any]:
     task = request["task"]
+    reference_modality = (
+        task.target_modality
+        if task.target_modality is not None
+        else types.Modality.AUDIO
+    )
     return {
         "dataset_index": dataset_index,
         "task": task.value,
         "prompt_tokens": int(request["prompt_ids"].numel()),
         "source": _modality_metadata(source_item(sample, task), task.source_modality),
-        "reference": _modality_metadata(target_item(sample, task), task.target_modality),
+        "reference": _modality_metadata(target_item(sample, task), reference_modality),
     }
 
 
@@ -424,7 +429,7 @@ def _log_target_reference_audio(
     tag: str,
     step: int,
 ) -> tuple[Tensor, int] | None:
-    if task.target_modality is not types.Modality.AUDIO:
+    if not task.prediction_modality.supervises_audio:
         return None
     if batch.acoustic_target is None:
         target, sample_rate = _sample_audio(datamodule, sample, task, source=False)
@@ -474,7 +479,7 @@ def _log_target_audio(
     tag: str,
     step: int,
 ) -> None:
-    if task.target_modality is not types.Modality.AUDIO:
+    if not task.prediction_modality.supervises_audio:
         return
     waveform, sample_rate = _sample_audio(datamodule, sample, task, source=False)
     audio_writer.add_audio(
@@ -527,12 +532,30 @@ def _generated_text(datamodule: _DataModule, response_ids: Tensor) -> str | None
 
 
 def _target_text(sample: types.Sample, task: Task) -> str | None:
-    if task.target_modality is not types.Modality.TEXT:
+    if not task.prediction_modality.supervises_text:
         return None
+    if task.prediction_modality.is_mixed:
+        # Mixed targets are Speech items; read aligned text from the DEFAULT/TARGET
+        # text view when present.
+        role = _text_role(sample, task)
+        try:
+            item = sample[(role, types.Modality.TEXT)]
+        except KeyError:
+            return None
+        if not isinstance(item, types.TextItem):
+            raise TypeError("mixed-task text view must contain a TextItem.")
+        return item.views[types.TextView.TEXT]
     _, item = target_item(sample, task)
     if not isinstance(item, types.TextItem):
         raise TypeError("text-target task sample must contain a TextItem.")
     return item.views[types.TextView.TEXT]
+
+
+def _text_role(sample: types.Sample, task: Task) -> types.Role:
+    roles = {role for role, _ in sample}
+    if types.Role.DEFAULT in roles:
+        return types.Role.DEFAULT
+    return types.Role.TARGET if not task.uses_source_role else types.Role.TARGET
 
 
 def _modality_metadata(

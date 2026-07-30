@@ -64,6 +64,9 @@ class DataRuntime(Protocol):
     @property
     def eoa_token_id(self) -> int: ...
 
+    @property
+    def mask_token_id(self) -> int: ...
+
 
 class GenerationRuntime(DataRuntime, Protocol):
     @cached_property

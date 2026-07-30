@@ -277,7 +277,7 @@ class Runtime:
     @cached_property
     def layout(self) -> Layout:
         text_vocab_size = len(self.text_tokenizer)
-        audio_vocab_size = self.audio_tokenizer.vocab_size + 2
+        audio_vocab_size = self.audio_tokenizer.vocab_size + 3
         return Layout(
             text=(0, text_vocab_size),
             audio=(text_vocab_size, text_vocab_size + audio_vocab_size),
@@ -321,6 +321,10 @@ class Runtime:
     @property
     def eoa_token_id(self) -> int:
         return self.boa_token_id + 1
+
+    @property
+    def mask_token_id(self) -> int:
+        return self.boa_token_id + 2
 
     @property
     def audio_head_range(self) -> tuple[int, int]:

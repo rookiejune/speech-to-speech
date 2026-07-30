@@ -13,6 +13,8 @@ from torch.nn.utils.rnn import pad_sequence
 
 from .._compat import StrEnum, auto
 from .._tensor import is_signed_integer_dtype
+from ..prediction import PredictionModality
+from ..source import SourceLayout
 from ..task import Task
 from ._duration import seconds
 
@@ -162,13 +164,25 @@ class SpeechTaskSample:
     source: Union[Speech, Text, RawSpeech, None]
     target: Union[Speech, Text, RawSpeech]
     task: Task
+    prediction: PredictionModality
     audio_context: Union[Speech, RawSpeech, None] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.task, Task):
             raise TypeError("speech task sample task must be a Task.")
-        _validate_task_item(self.source, self.task.source_modality, name="source")
-        _validate_task_item(self.target, self.task.target_modality, name="target")
+        if not isinstance(self.prediction, PredictionModality):
+            raise TypeError("speech task sample prediction must be a PredictionModality.")
+        if self.prediction not in self.task.allowed_predictions:
+            raise ValueError(
+                f"{self.task.value} does not allow prediction={self.prediction.value}."
+            )
+        _validate_source_item(self.source, self.task.source_layout, name="source")
+        _validate_target_item(
+            self.target,
+            self.task,
+            prediction=self.prediction,
+            name="target",
+        )
         if self.audio_context is not None and not isinstance(
             self.audio_context,
             (Speech, RawSpeech),
@@ -191,6 +205,7 @@ class SpeechTaskSample:
             source=_pin_task_item(self.source),
             target=target,
             task=self.task,
+            prediction=self.prediction,
             audio_context=_audio_context(_pin_task_item(self.audio_context)),
         )
 
@@ -208,12 +223,11 @@ class RawSpeechBatch:
         if not any(sample.needs_codec for sample in self.samples):
             raise ValueError("RawSpeechBatch requires at least one waveform to encode.")
         signatures = {
-            (sample.task.source_modality, sample.task.target_modality)
-            for sample in self.samples
+            (sample.task.source_layout, sample.prediction) for sample in self.samples
         }
         if len(signatures) != 1:
             raise ValueError(
-                "all raw speech samples in a batch must use the same source and target modalities."
+                "all raw speech samples in a batch must use the same execution signature."
             )
 
     @property
@@ -225,6 +239,29 @@ class RawSpeechBatch:
             samples=tuple(sample.pin_memory() for sample in self.samples),
             pad_token_id=self.pad_token_id,
         )
+
+
+def _validate_source_item(
+    item: Speech | Text | RawSpeech | None,
+    layout: SourceLayout,
+    *,
+    name: str,
+) -> None:
+    if layout is SourceLayout.NONE:
+        if item is not None:
+            raise ValueError(f"modality-free task {name} must be None.")
+        return
+    if layout is SourceLayout.TEXT_AUDIO:
+        if not isinstance(item, (Speech, RawSpeech)):
+            raise TypeError(f"{name} TEXT_AUDIO must be Speech or RawSpeech.")
+        return
+    modality = layout.as_modality()
+    if modality is None:
+        raise AssertionError(f"unexpected source layout: {layout.value}")
+    expected = (Speech, RawSpeech) if modality is Modality.AUDIO else (Text,)
+    if not isinstance(item, expected):
+        expected_names = " or ".join(value.__name__ for value in expected)
+        raise TypeError(f"{name} {modality.value} must be {expected_names}.")
 
 
 def _validate_task_item(
@@ -241,6 +278,27 @@ def _validate_task_item(
     if not isinstance(item, expected):
         expected_names = " or ".join(value.__name__ for value in expected)
         raise TypeError(f"{name} {modality.value} must be {expected_names}.")
+
+
+def _validate_target_item(
+    item: Speech | Text | RawSpeech | None,
+    task: Task,
+    *,
+    prediction: PredictionModality,
+    name: str,
+) -> None:
+    del task
+    if prediction.supervises_audio:
+        if not isinstance(item, (Speech, RawSpeech)):
+            raise TypeError(
+                f"{name} for {prediction.value} must be Speech or RawSpeech."
+            )
+        return
+    if prediction.supervises_text:
+        if not isinstance(item, Text):
+            raise TypeError(f"{name} for {prediction.value} must be Text.")
+        return
+    raise ValueError(f"unsupported prediction modality: {prediction.value}")
 
 
 def _pin_task_item(
@@ -290,11 +348,22 @@ class ModelSample:
     token_labels: Tensor
     acoustic_target: AcousticTarget | None
     task: Task
+    prediction: PredictionModality
     token_groups: Tensor | None = None
     audio_seconds: float = 0.0
     generation_prompt_length: int | None = None
     audio_input_positions: Tensor | None = None
     audio_context: SemanticAcousticCodes | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task, Task):
+            raise TypeError("ModelSample task must be a Task.")
+        if not isinstance(self.prediction, PredictionModality):
+            raise TypeError("ModelSample prediction must be a PredictionModality.")
+        if self.prediction not in self.task.allowed_predictions:
+            raise ValueError(
+                f"{self.task.value} does not allow prediction={self.prediction.value}."
+            )
 
 
 @dataclass
@@ -303,6 +372,7 @@ class ModelBatch:
     token_labels: Tensor
     acoustic_target: AcousticTarget | None
     tasks: list[Task]
+    predictions: list[PredictionModality]
     pad_token_id: int
     token_groups: Tensor | None = None
     audio_seconds: Tensor | None = None
@@ -337,6 +407,22 @@ class ModelBatch:
             raise ValueError("ModelBatch requires at least one row.")
         if len(self.tasks) != batch_size:
             raise ValueError("ModelBatch tasks must provide one Task per row.")
+        if len(self.predictions) != batch_size:
+            raise ValueError("ModelBatch predictions must provide one value per row.")
+        if any(not isinstance(task, Task) for task in self.tasks):
+            raise TypeError("ModelBatch tasks must contain Task values.")
+        if any(
+            not isinstance(prediction, PredictionModality)
+            for prediction in self.predictions
+        ):
+            raise TypeError(
+                "ModelBatch predictions must contain PredictionModality values."
+            )
+        for task, prediction in zip(self.tasks, self.predictions):
+            if prediction not in task.allowed_predictions:
+                raise ValueError(
+                    f"{task.value} does not allow prediction={prediction.value}."
+                )
         if self.audio_seconds is None:
             self.audio_seconds = self.input_ids.new_zeros(
                 batch_size,
@@ -361,19 +447,18 @@ class ModelBatch:
             raise ValueError("ModelBatch audio_contexts must provide one value per row.")
         for context in self.audio_contexts:
             _validate_audio_context(context)
-        if any(not isinstance(task, Task) for task in self.tasks):
-            raise TypeError("ModelBatch tasks must contain Task values.")
         signatures = {
-            (task.source_modality, task.target_modality) for task in self.tasks
+            (task.source_layout, prediction)
+            for task, prediction in zip(self.tasks, self.predictions)
         }
         if len(signatures) != 1:
             raise ValueError(
-                "all samples in a batch must use the same source and target modalities."
+                "all samples in a batch must use the same execution signature."
             )
-        _, target_modality = next(iter(signatures))
-        if target_modality is Modality.TEXT and self.acoustic_target is not None:
+        _, prediction = next(iter(signatures))
+        if not prediction.supervises_audio and self.acoustic_target is not None:
             raise ValueError(
-                "text-target tasks must not provide acoustic target fields."
+                "text-only prediction tasks must not provide acoustic target fields."
             )
         _validate_batch_acoustic(
             self.input_ids,
@@ -382,6 +467,10 @@ class ModelBatch:
             minimum_position=1,
         )
         _validate_batch_target_labels(self.token_labels, self.acoustic_target)
+
+    @property
+    def prediction_modality(self) -> PredictionModality:
+        return self.predictions[0]
 
     @classmethod
     def from_samples(
@@ -403,6 +492,7 @@ class ModelBatch:
             ),
             acoustic_target=_target([sample.acoustic_target for sample in samples]),
             tasks=[sample.task for sample in samples],
+            predictions=[sample.prediction for sample in samples],
             pad_token_id=pad_token_id,
             audio_seconds=_audio_seconds(samples),
             generation_prompt_lengths=_sample_prompt_lengths(samples),
@@ -441,6 +531,7 @@ class ModelBatch:
             ),
             acoustic_target=_pin_target(self.acoustic_target),
             tasks=list(self.tasks),
+            predictions=list(self.predictions),
             pad_token_id=self.pad_token_id,
             audio_seconds=audio_seconds.pin_memory(),
             generation_prompt_lengths=prompt_lengths.pin_memory(),
@@ -471,6 +562,7 @@ class ModelBatch:
             ),
             acoustic_target=_to_target(self.acoustic_target, device),
             tasks=list(self.tasks),
+            predictions=list(self.predictions),
             pad_token_id=self.pad_token_id,
             audio_seconds=audio_seconds.to(device=device),
             generation_prompt_lengths=prompt_lengths.to(device=device),
@@ -507,6 +599,7 @@ class ModelBatch:
             ),
             acoustic_target=_target_row(self.acoustic_target, index),
             tasks=[self.tasks[index]],
+            predictions=[self.predictions[index]],
             pad_token_id=self.pad_token_id,
             audio_seconds=audio_seconds[index : index + 1],
             generation_prompt_lengths=prompt_lengths[index : index + 1],
@@ -781,8 +874,11 @@ def _validate_sample(sample: ModelSample, pad_token_id: int) -> None:
             raise ValueError(
                 "target semantic and acoustic codes must share the frame axis."
             )
-    if sample.task.target_modality is Modality.TEXT and target is not None:
-        raise ValueError("text-target tasks must not provide acoustic target fields.")
+    if (
+        not sample.task.prediction_modality.supervises_audio
+        and target is not None
+    ):
+        raise ValueError("text-only prediction tasks must not provide acoustic target fields.")
     if target is not None:
         positions = target["token_positions"].to(
             device=sample.token_labels.device,

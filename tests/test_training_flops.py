@@ -27,7 +27,7 @@ from speech_to_speech.model import (
     AudioOutputAdapterConfig,
     AudioOutputAdapterType,
     Config as ModelConfig,
-    TokenModel,
+    Model,
     ToyConfig,
 )
 from speech_to_speech.model.acoustic import DecoderConfig, FlowModel, RVQModel
@@ -51,7 +51,7 @@ class TrainingFlopsTest(unittest.TestCase):
             labels=torch.tensor([[-100, 7, 8, -100], [-100, 9, -100, -100]]),
             tasks=[Task.TTS, Task.TTS],
         )
-        expected = _token_expected(cast(TokenModel, module.model), batch)
+        expected = _token_expected(cast(Model, module.model), batch)
         self.assertEqual(_flops(module, batch), expected)
 
         # Changing a padded token changes the dense attention work, while the
@@ -213,7 +213,9 @@ class TrainingFlopsTest(unittest.TestCase):
             _flops(module, batch)
 
         model.backbone.config._attn_implementation = "flash_attention_2"
-        next(iter(model.semantic_audio_adapter.parameters())).requires_grad_(False)
+        next(iter(model.token_embedding.adapters["audio"].parameters())).requires_grad_(
+            False
+        )
         with self.assertRaisesRegex(ValueError, "full model to be trainable"):
             _flops(module, batch)
 
@@ -230,7 +232,7 @@ class TrainingFlopsTest(unittest.TestCase):
             )
 
         flow_model = _flow_model()
-        flow_model.acoustic_decoder.feature_layer = 1
+        flow_model.acoustic_decoder.decoder.feature_layer = 1
         flow_module = _module(flow_model, FlowObjective(_layout(), _flow_runtime()))
         flow_batch = _batch(
             input_ids=batch.input_ids,
@@ -243,7 +245,7 @@ class TrainingFlopsTest(unittest.TestCase):
 
 
 def _layout() -> Layout:
-    return Layout(text=(0, 7), audio=(7, 12))
+    return Layout(text=(0, 7), audio=(7, 13))
 
 
 class _Tokenizer:
@@ -287,6 +289,7 @@ class _Runtime:
     eos_token_id = 2
     boa_token_id = 10
     eoa_token_id = 11
+    mask_token_id = 12
     flow_matching = _flow_runtime()
 
 
@@ -310,8 +313,8 @@ def _model_config(
     )
 
 
-def _token_model(config: ModelConfig | None = None) -> TokenModel:
-    model = TokenModel(config or _model_config(), runtime=cast(Any, _Runtime()))
+def _token_model(config: ModelConfig | None = None) -> Model:
+    model = Model(config or _model_config(), runtime=cast(Any, _Runtime()))
     model.backbone.config._attn_implementation = "flash_attention_2"
     return model
 
@@ -357,6 +360,7 @@ def _batch(
         token_labels=labels,
         acoustic_target=acoustic_target,
         tasks=tasks,
+        predictions=[task.prediction_modality for task in tasks],
         pad_token_id=0,
         audio_input_positions=audio_input_positions,
     )
@@ -375,15 +379,16 @@ def _target(mask: Tensor) -> AcousticTarget:
     }
 
 
-def _token_expected(model: TokenModel, batch: ModelBatch) -> int:
+def _token_expected(model: Model, batch: ModelBatch) -> int:
     core = model.backbone.base_model
     input_ids = batch.input_ids
     hidden = core.config.hidden_size
-    embedding = model.semantic_audio_embedding
+    embedding = model.token_embedding.embeddings["audio"]
     audio_start, audio_end = model.layout.blocks["audio"]
     rows = int((input_ids.ge(audio_start) & input_ids.lt(audio_end)).sum())
+    audio_adapter = model.token_embedding.adapters["audio"]
     forward = adapter(
-        model.semantic_audio_adapter,
+        getattr(audio_adapter, "module", audio_adapter),
         rows=rows,
         in_features=embedding.embedding_dim,
         out_features=hidden,

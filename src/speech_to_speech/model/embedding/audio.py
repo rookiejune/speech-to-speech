@@ -8,12 +8,10 @@ from torch import Tensor, nn
 
 from ...runtime.types import (
     AudioTokenizer,
-    Backbone,
     CodebookCodec,
     codebook_codec,
     semantic_feature_dim,
 )
-from ..adapter import AdapterType, create_adapter
 
 _ROPE_THETA = 10000.0
 _EMBEDDING_CHUNK_SIZE = 2_048
@@ -27,26 +25,16 @@ class _Runtime(Protocol):
     def codec(self) -> object: ...
 
 
-def create_semantic_audio_modules(
-    adapter_type: AdapterType | None,
+def create_semantic_audio_embedding(
     runtime: _Runtime,
-    backbone: Backbone,
-) -> tuple[nn.Embedding, nn.Module]:
-    backbone_weight = backbone.get_input_embeddings().weight
-    audio = embedding(
+    *,
+    reference: Tensor,
+) -> nn.Embedding:
+    return embedding(
         runtime.codec,
         runtime.audio_tokenizer,
-        reference=backbone_weight,
-    ).to(
-        device=backbone_weight.device,
-        dtype=torch.float32,
+        reference=reference,
     )
-    adapter = create_adapter(
-        adapter_type,
-        audio.weight.size(-1),
-        backbone.config.hidden_size,
-    ).to(device=backbone_weight.device, dtype=torch.float32)
-    return audio, adapter
 
 
 def _merge(embeddings: Tensor) -> Tensor:
@@ -248,7 +236,7 @@ def embedding(
 ) -> nn.Embedding:
     """Build a lookup initialized from the codec codebook.
 
-    The final two rows are reserved for BOA and EOA.
+    The final three rows are reserved for BOA, EOA, and MASK.
     """
     initialization = tokenizer.embedding_initialization
     if initialization == "codec":
@@ -262,7 +250,7 @@ def embedding(
     else:
         raise ValueError(f"unsupported audio embedding initialization: {initialization}")
     special = torch.empty(
-        (2, base.size(1)),
+        (3, base.size(1)),
         device=base.device,
         dtype=base.dtype,
     )

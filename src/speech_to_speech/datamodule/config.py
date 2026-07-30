@@ -33,6 +33,9 @@ class SpeechConfig:
     dataloader: DataLoaderConfig
     shape: DataShape = DataShape.PAIR
     encode_missing_codes: bool = False
+    interleave_audio_frames: int = 25
+    mask_text_ratio: float = 0.5
+    mask_audio_ratio: float = 0.5
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
 
     def __post_init__(self) -> None:
@@ -42,6 +45,18 @@ class SpeechConfig:
             raise TypeError("data shape must be a DataShape.")
         if not isinstance(self.encode_missing_codes, bool):
             raise TypeError("encode_missing_codes must be a boolean.")
+        if (
+            isinstance(self.interleave_audio_frames, bool)
+            or not isinstance(self.interleave_audio_frames, int)
+            or self.interleave_audio_frames < 1
+        ):
+            raise ValueError("interleave_audio_frames must be a positive integer.")
+        for name in ("mask_text_ratio", "mask_audio_ratio"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (float, int)):
+                raise TypeError(f"{name} must be a float.")
+            if not 0.0 <= float(value) <= 1.0:
+                raise ValueError(f"{name} must be in [0, 1].")
         if (
             self.dataset.name is DatasetName.QWEN_TTS_SPEAKER
             and self.shape is not DataShape.SINGLE

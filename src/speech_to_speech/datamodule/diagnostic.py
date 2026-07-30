@@ -25,7 +25,10 @@ def source_item(sample: types.Sample, task: Task) -> SampleRef | None:
 
 
 def target_item(sample: types.Sample, task: Task) -> SampleRef:
-    return _item(sample, _role(sample, types.Role.TARGET), task.target_modality)
+    modality = task.target_modality
+    if modality is None:
+        modality = types.Modality.AUDIO
+    return _item(sample, _role(sample, types.Role.TARGET), modality)
 
 
 def _role(sample: types.Sample, pair_role: types.Role) -> types.Role:

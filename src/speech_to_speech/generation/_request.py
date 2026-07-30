@@ -5,6 +5,7 @@ from anydataset.types import Modality
 from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
+from ..prediction import PredictionModality
 from ..task import Task
 from .audio import validate_audio_request
 from .protocol import TokenGenerator
@@ -48,9 +49,13 @@ def validate(request: Request, model: TokenGenerator) -> None:
             raise ValueError(
                 "audio input positions must point to visible codec audio payload tokens."
             )
-    if task.target_modality is Modality.TEXT:
+    if task.prediction_modality is PredictionModality.TEXT:
         if request.get("audio_context") is not None:
             raise ValueError("text generation requests cannot include audio context.")
+        return
+    if task.prediction_modality.is_mixed:
+        if request.get("audio_context") is not None:
+            raise ValueError("mixed AR generation requests cannot include audio context.")
         return
     validate_audio_request(request, model)
 

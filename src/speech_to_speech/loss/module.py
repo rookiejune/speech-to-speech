@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import TypedDict
 
-from anydataset.types import Modality
 from anytrain.loss import MaskedCosineAlignmentLoss, loss_item_mean
 from anytrain.module.idspace import Layout
 from torch import Tensor
@@ -31,6 +30,48 @@ class RepaConfig(TypedDict):
     teacher: Teacher
 
 
+def _selected_logits(model: TokenObjectiveModel):
+    def selected(hidden_state: Tensor, token_ids: Tensor) -> Tensor:
+        result = model.selected_logits(
+            hidden_state,
+            token_ids,
+            audio_hidden_state=hidden_state,
+        )
+        return result[0] if isinstance(result, tuple) else result
+
+    return selected
+
+
+def _token_forward(
+    batch: ModelBatch,
+    model: TokenObjectiveModel,
+    token: TokenLoss,
+) -> LossItem:
+    hidden_states = model.token_hidden_states(
+        batch.input_ids,
+        attention_mask=batch.attention_mask,
+        audio_input_positions=batch.audio_input_positions,
+    )
+    audio_hidden = None
+    if batch.prediction_modality.supervises_audio:
+        audio_hidden, _ = model.project_audio_hidden(
+            hidden_states,
+            attention_mask=batch.attention_mask,
+        )
+    return token(
+        hidden_states,
+        batch.token_labels,
+        batch.prediction_modality,
+        model.token_logits,
+        token_groups=batch.token_groups,
+        selected_logits=(
+            _selected_logits(model) if batch.token_groups is not None else None
+        ),
+        audio_hidden_states=audio_hidden,
+        attention_mask=batch.attention_mask,
+    )
+
+
 class TokenObjective(Objective[TokenObjectiveModel]):
     def __init__(
         self,
@@ -44,21 +85,7 @@ class TokenObjective(Objective[TokenObjectiveModel]):
     def forward(self, batch: ModelBatch, model: TokenObjectiveModel) -> Outputs:
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
-        hidden_states = model.token_hidden_states(
-            batch.input_ids,
-            attention_mask=batch.attention_mask,
-            audio_input_positions=batch.audio_input_positions,
-        )
-        token = self.token(
-            hidden_states,
-            batch.token_labels,
-            batch.tasks[0].target_modality,
-            model.token_logits,
-            token_groups=batch.token_groups,
-            selected_logits=(
-                model.selected_logits if batch.token_groups is not None else None
-            ),
-        )
+        token = _token_forward(batch, model, self.token)
         return {"loss": _weighted_mean(token, "tokens"), "token": token}
 
 
@@ -86,24 +113,35 @@ class FlowObjective(Objective[FlowObjectiveModel]):
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
         target_data = batch.acoustic_target
-        if target_data is None and batch.tasks[0].target_modality is Modality.AUDIO:
+        if (
+            target_data is None
+            and batch.prediction_modality.supervises_audio
+        ):
             raise ValueError(
-                "FlowObjective requires acoustic target data for audio-target batches."
+                "FlowObjective requires acoustic target data for audio-supervised batches."
             )
         hidden_states = model.token_hidden_states(
             batch.input_ids,
             attention_mask=batch.attention_mask,
             audio_input_positions=batch.audio_input_positions,
         )
+        audio_hidden = None
+        if batch.prediction_modality.supervises_audio:
+            audio_hidden, _ = model.project_audio_hidden(
+                hidden_states,
+                attention_mask=batch.attention_mask,
+            )
         token = self.token(
             hidden_states,
             batch.token_labels,
-            batch.tasks[0].target_modality,
+            batch.prediction_modality,
             model.token_logits,
             token_groups=batch.token_groups,
             selected_logits=(
-                model.selected_logits if batch.token_groups is not None else None
+                _selected_logits(model) if batch.token_groups is not None else None
             ),
+            audio_hidden_states=audio_hidden,
+            attention_mask=batch.attention_mask,
         )
         result: Outputs = {"loss": _weighted_mean(token, "tokens"), "token": token}
 
@@ -183,24 +221,35 @@ class RVQObjective(Objective[RVQObjectiveModel]):
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
         target_data = batch.acoustic_target
-        if target_data is None and batch.tasks[0].target_modality is Modality.AUDIO:
+        if (
+            target_data is None
+            and batch.prediction_modality.supervises_audio
+        ):
             raise ValueError(
-                "RVQObjective requires acoustic target data for audio-target batches."
+                "RVQObjective requires acoustic target data for audio-supervised batches."
             )
         hidden_states = model.token_hidden_states(
             batch.input_ids,
             attention_mask=batch.attention_mask,
             audio_input_positions=batch.audio_input_positions,
         )
+        audio_hidden = None
+        if batch.prediction_modality.supervises_audio:
+            audio_hidden, _ = model.project_audio_hidden(
+                hidden_states,
+                attention_mask=batch.attention_mask,
+            )
         token = self.token(
             hidden_states,
             batch.token_labels,
-            batch.tasks[0].target_modality,
+            batch.prediction_modality,
             model.token_logits,
             token_groups=batch.token_groups,
             selected_logits=(
-                model.selected_logits if batch.token_groups is not None else None
+                _selected_logits(model) if batch.token_groups is not None else None
             ),
+            audio_hidden_states=audio_hidden,
+            attention_mask=batch.attention_mask,
         )
         result: Outputs = {"loss": _weighted_mean(token, "tokens"), "token": token}
 

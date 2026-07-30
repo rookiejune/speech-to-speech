@@ -8,6 +8,7 @@ from anydataset import IterableAnyDataset
 from anydataset.types import Sample as RawSample
 from torch.utils.data import DataLoader, Dataset
 
+from ..prediction import PredictionModality
 from ..task import Task
 from .collator import TextCollator
 from .protocol import TextRuntime, TextRuntimeSnapshot
@@ -21,10 +22,12 @@ class TextLoader:
         config: TextConfig,
         runtime: TextRuntime,
         task_weights: Mapping[Task, float],
+        *,
+        prediction: PredictionModality | None = None,
     ) -> None:
         self.config = config
         self.runtime = runtime
-        self.collator = TextCollator(runtime, task_weights)
+        self.collator = TextCollator(runtime, task_weights, prediction=prediction)
         self._train_dataset: Dataset[RawSample] | IterableAnyDataset | None = None
 
     def setup(self, stage: str | None = None) -> None:
@@ -39,7 +42,11 @@ class TextLoader:
         return _samples(self._train_dataset, indices)
 
     def diagnostic_collator(self, task: Task) -> TextCollator:
-        return TextCollator(self.runtime, {task: 1.0})
+        return TextCollator(
+            self.runtime,
+            {task: 1.0},
+            prediction=self.collator.prediction,
+        )
 
     def train_dataloader(self) -> Iterable[ModelBatch]:
         if self._train_dataset is None:

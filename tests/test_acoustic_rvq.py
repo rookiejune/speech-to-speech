@@ -5,7 +5,7 @@ import unittest
 import torch
 
 from speech_to_speech.loss import CausalAcousticLoss
-from speech_to_speech.model.acoustic import AcousticRVQDecoder
+from semantic_acoustic_codec.model import AcousticRVQDecoder
 
 
 class AcousticRVQTest(unittest.TestCase):

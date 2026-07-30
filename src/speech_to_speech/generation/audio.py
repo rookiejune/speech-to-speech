@@ -11,6 +11,7 @@ from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
 from ..audio_route import PromptSource, StreamSource
+from ..prediction import PredictionModality
 from ..runtime import AudioRepresentation
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..runtime.types import (
@@ -89,8 +90,10 @@ def generate_audio_responses(
 
 def validate_audio_request(request: Request, model: TokenGenerator) -> None:
     """Validate audio context against the runtime-owned route contract."""
-    if request["task"].target_modality is not Modality.AUDIO:
-        raise ValueError("audio generation validation requires an audio-target task.")
+    if request["task"].prediction_modality is not PredictionModality.AUDIO:
+        raise ValueError(
+            "audio generation validation requires an audio prediction task."
+        )
     route = model.runtime.audio_route
     context = request.get("audio_context")
     if context is not None and not isinstance(context, SemanticAcousticCodes):
@@ -471,4 +474,58 @@ def _integer_tensor(value: object, name: str, *, dimensions: int) -> Tensor:
     return value
 
 
-__all__ = ["generate_audio_responses", "validate_audio_request"]
+def decode_token_audio_rows(
+    token_rows: Sequence[Tensor],
+    model: TokenGenerator,
+) -> list[AudioOutput | None]:
+    """Decode codec-decodable spans already present in generated token rows.
+
+    Used by mixed AR after token generation. Does not collect or consume acoustic
+    frame conditions; acoustic feature generators must fail explicitly.
+    """
+    if model.runtime.acoustic_side_channel and isinstance(
+        model, AcousticFeatureGeneration
+    ):
+        raise ValueError(
+            "token-row audio decode does not support acoustic feature side channel."
+        )
+    codec_rows = [_codec_payload(row, model) for row in token_rows]
+    if not any(row.numel() > 0 for row in codec_rows):
+        return [None] * len(token_rows)
+
+    decoder = _token_decoder(model)
+    active_index = [index for index, row in enumerate(codec_rows) if row.numel() > 0]
+    active_rows = [codec_rows[index] for index in active_index]
+    decoded = _decoded_results(
+        active_rows,
+        None,
+        _frame_counts(active_rows, model),
+        decoder,
+    )
+    outputs: list[AudioOutput | None] = [None] * len(token_rows)
+    for index, result in zip(active_index, decoded):
+        outputs[index] = result["audio"]
+    return outputs
+
+
+def _codec_payload(token_ids: Tensor, model: TokenGenerator) -> Tensor:
+    start, end = model.runtime.codec_audio_range
+    mask = token_ids.ge(start) & token_ids.lt(end)
+    return token_ids[mask]
+
+
+def _token_decoder(model: TokenGenerator) -> _Decoder:
+    if model.runtime.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE:
+        if not isinstance(model, FullCodecSequenceGenerator):
+            raise TypeError("full codec sequence requires constrained token generation.")
+        if model.runtime.structured_full_sequence:
+            return _Structured(model)
+        return _Frame(model)
+    return _Semantic(model)
+
+
+__all__ = [
+    "decode_token_audio_rows",
+    "generate_audio_responses",
+    "validate_audio_request",
+]

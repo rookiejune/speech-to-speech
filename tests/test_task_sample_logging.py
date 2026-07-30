@@ -58,6 +58,7 @@ class TaskSampleLoggingTest(unittest.TestCase):
                         language=Language.EN,
                     ),
                     task=Task.TTS,
+                    prediction=Task.TTS.prediction_modality,
                 ),
             ),
             pad_token_id=0,
@@ -86,6 +87,7 @@ class TaskSampleLoggingTest(unittest.TestCase):
             every_n_steps=1,
             loader_name="tts",
             task=Task.TTS,
+                    prediction=Task.TTS.prediction_modality,
         )
 
         callback.on_fit_start(trainer, module)
@@ -141,6 +143,7 @@ class TaskSampleLoggingTest(unittest.TestCase):
             every_n_steps=1,
             loader_name="tts",
             task=Task.TTS,
+                    prediction=Task.TTS.prediction_modality,
             max_new_tokens=32,
             do_sample=False,
         )
