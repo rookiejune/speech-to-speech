@@ -5,6 +5,7 @@ import hashlib
 import json
 from collections.abc import Sequence
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, cast
 
 
@@ -91,6 +92,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     candidate = Path(args.candidate).expanduser()
     audit = Path(args.audit).expanduser()
     output = Path(args.output).expanduser()
+    validate_artifact_paths(candidate, audit, output)
     manifest = build_manifest(
         candidate,
         audit,
@@ -98,8 +100,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         artifact_role=args.artifact_role,
         split_method=args.split_method,
     )
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    write_manifest(output, manifest, force=args.force)
     print(json.dumps({"output": str(output), "splits": manifest["splits"]}, sort_keys=True))
 
 
@@ -111,7 +112,56 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", required=True)
     parser.add_argument("--artifact-role", default="stage1_pilot")
     parser.add_argument("--split-method", default="candidate_artifact")
+    parser.add_argument("--force", action="store_true")
     return parser
+
+
+def validate_artifact_paths(candidate: Path, audit: Path, output: Path) -> None:
+    paths = {
+        "candidate": candidate,
+        "audit": audit,
+        "output": output,
+    }
+    resolved = {
+        label: path.expanduser().resolve(strict=False)
+        for label, path in paths.items()
+    }
+    labels = tuple(resolved)
+    for left_index, left in enumerate(labels):
+        for right in labels[left_index + 1 :]:
+            if resolved[left] == resolved[right]:
+                raise ValueError(
+                    f"split manifest {left} and {right} paths must be distinct: "
+                    f"{resolved[left]}"
+                )
+
+
+def write_manifest(path: Path, manifest: dict[str, Any], *, force: bool = False) -> None:
+    output = path.expanduser()
+    if output.exists() and not force:
+        raise FileExistsError(
+            f"split manifest output already exists: {output}. "
+            "Pass --force to replace it."
+        )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    tmp_path: Path | None = None
+    try:
+        with NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=output.parent,
+            prefix=f".{output.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp.write(payload)
+            tmp_path = Path(tmp.name)
+        tmp_path.replace(output)
+    except Exception:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _load_object(path: Path, label: str) -> dict[str, Any]:

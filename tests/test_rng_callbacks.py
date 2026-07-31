@@ -180,6 +180,7 @@ def task_sample_logger_fixture() -> tuple[TaskSampleLogger, object]:
         token_labels=torch.tensor([[-100, 2]]),
         acoustic_target=None,
         tasks=[Task.T2TT],
+        predictions=[Task.T2TT.prediction_modality],
         pad_token_id=0,
     )
     experiment = SimpleNamespace(add_text=Mock())

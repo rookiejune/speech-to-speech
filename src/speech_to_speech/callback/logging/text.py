@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Protocol, cast
+from typing import Any, Dict, Optional, Protocol, cast
 
 import torch
 from anytrain.lightning import experiment
@@ -70,7 +70,7 @@ class TextRetentionLogger(Callback):
         state_dict: dict[str, dict[str, int | None] | dict[str, float]],
     ) -> None:
         self.interval.load_state_dict(
-            cast(dict[str, int | None], state_dict.get("interval", {}))
+            cast(Dict[str, Optional[int]], state_dict.get("interval", {}))
         )
         self._baseline_nll = dict(
             cast(dict[str, float], state_dict.get("baseline_nll", {}))

@@ -48,8 +48,8 @@ def _batch(token_ids: list[int], *, supervised: bool = True) -> ModelBatch:
         input_ids=input_ids,
         token_labels=token_labels,
         acoustic_target=None,
-        tasks=(Task.T2TT,),
-        predictions=(PredictionModality.TEXT,),
+        tasks=[Task.T2TT],
+        predictions=[PredictionModality.TEXT],
         pad_token_id=0,
     )
 

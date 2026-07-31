@@ -54,7 +54,13 @@ class OnDeviceCodecMaterializer:
         device: torch.device | None,
     ) -> ModelBatch:
         samples = [
-            build_task_sample(self._task_sample(sample, device=device), self.runtime)
+            build_task_sample(
+                self._task_sample(sample, device=device),
+                self.runtime,
+                interleave_audio_frames=batch.interleave_audio_frames,
+                mask_text_ratio=batch.mask_text_ratio,
+                mask_audio_ratio=batch.mask_audio_ratio,
+            )
             for sample in batch.samples
         ]
         return _move_model_batch(

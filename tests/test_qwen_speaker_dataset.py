@@ -7,7 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
-from anydataset.dataset import MapStyleABC, SpeakerAudioGrid
+from anydataset.dataset import MapStyleABC
+from anydataset.dataset.speaker import SpeakerAudioGrid
 from anydataset.types import (
     AudioItem,
     AudioMeta,

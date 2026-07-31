@@ -189,6 +189,7 @@ def batch_report(batch: object) -> dict[str, object]:
         return {
             "type": type(batch).__name__,
             "tasks": [task.value for task in batch.tasks],
+            "predictions": [prediction.value for prediction in batch.predictions],
             "input_ids": tensor_report(batch.input_ids),
             "token_labels": tensor_report(batch.token_labels),
             "token_groups": tensor_report(batch.token_groups),
@@ -222,6 +223,7 @@ def batch_report(batch: object) -> dict[str, object]:
             "samples": [
                 {
                     "task": sample.task.value,
+                    "prediction": sample.prediction.value,
                     "source": item_report(sample.source),
                     "target": item_report(sample.target),
                     "audio_context": item_report(sample.audio_context),

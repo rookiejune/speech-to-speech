@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -42,7 +43,15 @@ def main(argv: Sequence[str] | None = None) -> None:
             attn_implementation=args.attn_implementation,
         )
     )
-    dataset = load_dataset(DatasetConfig(split=args.split), runtime)
+    dataset = load_dataset(
+        DatasetConfig(
+            root=args.data_root,
+            split=args.split,
+            split_manifest=args.split_manifest,
+            split_label=args.split_label,
+        ),
+        runtime,
+    )
     batch = _prepared_batch(
         Collator(runtime, {Task.S2ST: 1.0})([dataset[args.sample_index]])
     )
@@ -92,6 +101,15 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     result = {
         "task": Task.S2ST.value,
+        "dataset": {
+            "split": args.split,
+            "data_root": args.data_root,
+            "split_manifest": args.split_manifest,
+            "split_label": args.split_label,
+            "split_manifest_sha256": (
+                _sha256(args.split_manifest) if args.split_manifest else None
+            ),
+        },
         "sample_index": args.sample_index,
         "max_new_tokens": args.max_new_tokens,
         "seed": args.seed,
@@ -167,6 +185,10 @@ def _seed(seed: int, device: torch.device) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def _sha256(path: str) -> str:
+    return hashlib.sha256(Path(path).expanduser().read_bytes()).hexdigest()
+
+
 def _prepared_batch(batch: ModelBatch | object) -> ModelBatch:
     if not isinstance(batch, ModelBatch):
         raise TypeError("generation smoke requires prepared codec data.")
@@ -179,7 +201,10 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--audio-tokenizer", required=True)
     parser.add_argument("--sample-index", type=_non_negative_int, default=0)
     parser.add_argument("--batch-sizes", type=_batch_sizes, default="1,2,4")
+    parser.add_argument("--data-root", default=None)
     parser.add_argument("--split", default="train")
+    parser.add_argument("--split-manifest", default=None)
+    parser.add_argument("--split-label", default="train")
     parser.add_argument("--max-new-tokens", type=_positive_int, default=2)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--codec", default="longcat")

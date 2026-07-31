@@ -188,7 +188,7 @@ class AudioOutputAdapter(nn.Module):
         values = self.input_projection(hidden_state)
         valid = valid_mask(values, attention_mask, name="audio output")
         past_layers = cast(
-            Sequence[tuple[Tensor, Tensor]] | None,
+            Optional[Sequence[tuple[Tensor, Tensor]]],
             past_key_values,
         )
         if past_layers is not None and len(past_layers) != len(self.layers):

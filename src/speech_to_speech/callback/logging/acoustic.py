@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Dict, Optional, cast
 
 import torch
 from lightning import LightningModule, Trainer
@@ -103,7 +103,7 @@ class AcousticEvaluation(Callback):
     def load_state_dict(self, state_dict: dict[str, object]) -> None:
         interval = state_dict.get("interval", {})
         if isinstance(interval, dict):
-            self.interval.load_state_dict(cast(dict[str, int | None], interval))
+            self.interval.load_state_dict(cast(Dict[str, Optional[int]], interval))
         values = state_dict.get("values", {})
         if isinstance(values, dict):
             self.values = {

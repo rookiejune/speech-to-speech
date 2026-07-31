@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import multiprocessing
 from collections.abc import Mapping
+from typing import cast
 
 from ...prediction import PredictionModality
 from ...task import Task
@@ -54,6 +55,48 @@ class TaskWeights:
             )
             self._credits[:] = credits
         return allocated
+
+    def __getstate__(self) -> dict[str, object]:
+        with self._credits.get_lock():
+            credits = [self._credits[index] for index in range(len(self._tasks))]
+        return {
+            "prediction": self._prediction,
+            "tasks": self._tasks,
+            "weights": self._weights,
+            "credits": credits,
+        }
+
+    def __setstate__(self, state: Mapping[str, object]) -> None:
+        prediction = state["prediction"]
+        if prediction is not None and not isinstance(prediction, PredictionModality):
+            raise TypeError("pickled task weights prediction is invalid.")
+        tasks = state["tasks"]
+        weights = state["weights"]
+        credits = state["credits"]
+        if not isinstance(tasks, tuple) or any(
+            not isinstance(task, Task) for task in tasks
+        ):
+            raise TypeError("pickled task weights tasks are invalid.")
+        if not isinstance(weights, tuple) or any(
+            not isinstance(weight, float) for weight in weights
+        ):
+            raise TypeError("pickled task weights values are invalid.")
+        if not isinstance(credits, list) or any(
+            not isinstance(credit, float) for credit in credits
+        ):
+            raise TypeError("pickled task weights credits are invalid.")
+        if len(tasks) != len(weights) or len(tasks) != len(credits):
+            raise ValueError("pickled task weights state lengths must match.")
+        self._prediction = prediction
+        self._tasks = cast(tuple[Task, ...], tasks)
+        self._weights = cast(tuple[float, ...], weights)
+        _validate_tasks(list(self._tasks), prediction=self._prediction)
+        _validate_weights(list(self._weights))
+        self._credits = multiprocessing.Array(
+            "d",
+            cast(list[float], credits),
+            lock=True,
+        )
 
 
 def allocate_tasks(

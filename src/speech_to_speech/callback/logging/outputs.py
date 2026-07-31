@@ -62,17 +62,21 @@ class OutputsLogger(LossItemLoggerCallback):
         item: LossItem,
         labels: list[object],
     ) -> None:
-        for label in dict.fromkeys(labels):
+        for label in _distributed_labels(trainer, labels):
             mask = torch.tensor(
                 [value == label for value in labels],
                 device=item.loss.device,
                 dtype=torch.bool,
             )
+            loss, count = _distributed_mean(trainer, pl_module, item.loss, mask)
+            if _empty(count):
+                continue
             pl_module.log(
                 self._tag(objective=objective, key="loss", label=label),
-                item.loss[mask].mean(),
+                loss,
                 on_step=True,
                 on_epoch=False,
+                sync_dist=False,
             )
             if item.details is None:
                 continue
@@ -90,11 +94,15 @@ class OutputsLogger(LossItemLoggerCallback):
                         sync_dist=False,
                     )
                     continue
+                mean, count = _distributed_mean(trainer, pl_module, values, mask)
+                if _empty(count):
+                    continue
                 pl_module.log(
                     tag,
-                    values[mask].mean(),
+                    mean,
                     on_step=True,
                     on_epoch=False,
+                    sync_dist=False,
                 )
 
     def _tag(self, *, objective: str, key: str, label: object) -> str:
@@ -165,3 +173,51 @@ def _reduce_sum(
     if not callable(reduce):
         raise RuntimeError("distributed token counts require trainer.strategy.reduce.")
     return cast(Tensor, reduce(value.detach(), reduce_op="sum"))
+
+
+def _distributed_labels(trainer: pl.Trainer, labels: list[object]) -> list[object]:
+    del trainer
+    local = _ordered(labels)
+    if (
+        not torch.distributed.is_available()
+        or not torch.distributed.is_initialized()
+    ):
+        return local
+    gathered: list[list[object] | None] = [
+        None for _ in range(torch.distributed.get_world_size())
+    ]
+    torch.distributed.all_gather_object(gathered, local)
+    ordered: list[object] = []
+    for rank_labels in gathered:
+        if rank_labels is None:
+            continue
+        for label in rank_labels:
+            if not any(existing == label for existing in ordered):
+                ordered.append(label)
+    return ordered
+
+
+def _distributed_mean(
+    trainer: pl.Trainer,
+    pl_module: pl.LightningModule,
+    values: Tensor,
+    mask: Tensor,
+) -> tuple[Tensor, Tensor]:
+    dtype = values.dtype if values.is_floating_point() else torch.float32
+    local_sum = values[mask].sum().to(dtype=dtype)
+    local_count = mask.sum().to(device=values.device, dtype=dtype)
+    global_sum = _reduce_sum(trainer, pl_module, local_sum)
+    global_count = _reduce_sum(trainer, pl_module, local_count)
+    return global_sum / global_count.clamp_min(1), global_count
+
+
+def _empty(count: Tensor) -> bool:
+    return bool((count <= 0).detach().cpu())
+
+
+def _ordered(labels: list[object]) -> list[object]:
+    ordered: list[object] = []
+    for label in labels:
+        if not any(existing == label for existing in ordered):
+            ordered.append(label)
+    return ordered

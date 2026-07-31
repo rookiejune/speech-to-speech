@@ -144,7 +144,7 @@ selected. Install the workspace training package with its PEFT extra in every
 speech-to-speech environment:
 
 ```bash
-python -m pip install -e "third_party/anytrain[peft]"
+python -m pip install -e "../third_party/anytrain[peft]"
 ```
 
 ## Documentation
@@ -172,8 +172,11 @@ entry points and their arguments as the source of truth for execution.
 
 Python 3.9 is the minimum supported version. Run the checks below in the
 workspace's documented `py39` environment; `py312` remains the primary
-environment for full-model training and audio experiments. Run from the
-repository collection root:
+environment for full-model training and audio experiments. Dependencies are
+expected to be installed in both the documented `py39` and `py312`
+environments. The CI/local gate should include `basedpyright`, `unittest`, and
+`compileall` before a change is accepted. Run from the repository collection
+root:
 
 ```bash
 export PYTHONPATH=speech-to-speech:speech-to-speech/src:semantic-acoustic-codec/src:workspace/src:third_party/anydataset/src:third_party/anytrain/src

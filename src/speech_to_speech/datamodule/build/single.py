@@ -85,6 +85,9 @@ class SingleCollator:
             return RawSpeechBatch(
                 samples=tuple(items),
                 pad_token_id=self.runtime.pad_token_id,
+                interleave_audio_frames=self.interleave_audio_frames,
+                mask_text_ratio=self.mask_text_ratio,
+                mask_audio_ratio=self.mask_audio_ratio,
             )
         return ModelBatch.from_samples(
             [

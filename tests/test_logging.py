@@ -207,6 +207,59 @@ class LoggingTest(unittest.TestCase):
             ],
         )
 
+    def test_outputs_logger_uses_distributed_weighted_means(self):
+        module = SimpleNamespace(log=Mock())
+        strategy = Mock()
+        strategy.reduce.side_effect = [
+            torch.tensor(4.0),
+            torch.tensor(2.0),
+            torch.tensor(40.0),
+            torch.tensor(2.0),
+            torch.tensor(5.0),
+            torch.tensor(1.0),
+            torch.tensor(7.0),
+            torch.tensor(1.0),
+        ]
+        trainer = SimpleNamespace(world_size=2, strategy=strategy)
+        callback = OutputsLogger()
+        batch = _batch(Task.ASR)
+        outputs = Outputs(
+            loss=torch.tensor(2.0),
+            token=LossItem(
+                torch.tensor([1.0]),
+                details={"quality": torch.tensor([10.0])},
+            ),
+        )
+
+        def gather(output: list[object], value: object) -> None:
+            del value
+            output[:] = [[Task.ASR], [Task.MT]]
+
+        with (
+            patch("torch.distributed.is_available", return_value=True),
+            patch("torch.distributed.is_initialized", return_value=True),
+            patch("torch.distributed.get_world_size", return_value=2),
+            patch("torch.distributed.all_gather_object", side_effect=gather),
+        ):
+            callback.on_train_batch_end(trainer, module, outputs, batch, 0)
+
+        values = {
+            call.args[0]: float(call.args[1])
+            for call in module.log.call_args_list
+        }
+        self.assertEqual(
+            values,
+            {
+                "token/loss/asr": 2.0,
+                "token/quality/asr": 20.0,
+                "token/loss/mt": 5.0,
+                "token/quality/mt": 7.0,
+            },
+        )
+        self.assertTrue(
+            all(call.kwargs["sync_dist"] is False for call in module.log.call_args_list)
+        )
+
     def test_outputs_logger_accumulates_token_counts(self):
         module = SimpleNamespace(log=Mock())
         trainer = SimpleNamespace(world_size=1)

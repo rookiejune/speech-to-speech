@@ -1797,6 +1797,16 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(tiny_batches.count(Task.T2ST), 1)
         self.assertEqual(tiny_batches.count(Task.TTS), 9)
 
+    def test_task_weights_are_pickleable_for_spawn_workers(self):
+        weights = TaskWeights({Task.T2ST: 1.0, Task.TTS: 9.0})
+        weights.allocate(1)
+
+        restored = pickle.loads(pickle.dumps(weights))
+
+        self.assertEqual(restored.tasks, [Task.T2ST, Task.TTS])
+        self.assertEqual(restored.prediction, None)
+        self.assertIsInstance(restored.allocate(1)[0], Task)
+
     def test_parameter_policy_freezes_explicit_parameter_groups(self):
         model = _StageModel()
 

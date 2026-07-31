@@ -215,12 +215,23 @@ class SpeechTaskSample:
 class RawSpeechBatch:
     samples: tuple[SpeechTaskSample, ...]
     pad_token_id: int
+    interleave_audio_frames: int = 25
+    mask_text_ratio: float = 0.5
+    mask_audio_ratio: float = 0.5
 
     def __post_init__(self) -> None:
         if not self.samples:
             raise ValueError("RawSpeechBatch requires at least one sample.")
         if isinstance(self.pad_token_id, bool) or not isinstance(self.pad_token_id, int):
             raise TypeError("RawSpeechBatch pad_token_id must be an integer.")
+        if (
+            isinstance(self.interleave_audio_frames, bool)
+            or not isinstance(self.interleave_audio_frames, int)
+            or self.interleave_audio_frames < 1
+        ):
+            raise ValueError("RawSpeechBatch interleave_audio_frames must be positive.")
+        _validate_ratio(self.mask_text_ratio, name="mask_text_ratio")
+        _validate_ratio(self.mask_audio_ratio, name="mask_audio_ratio")
         if not any(sample.needs_codec for sample in self.samples):
             raise ValueError("RawSpeechBatch requires at least one waveform to encode.")
         signatures = {
@@ -239,7 +250,17 @@ class RawSpeechBatch:
         return RawSpeechBatch(
             samples=tuple(sample.pin_memory() for sample in self.samples),
             pad_token_id=self.pad_token_id,
+            interleave_audio_frames=self.interleave_audio_frames,
+            mask_text_ratio=self.mask_text_ratio,
+            mask_audio_ratio=self.mask_audio_ratio,
         )
+
+
+def _validate_ratio(value: float, *, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, (float, int)):
+        raise TypeError(f"{name} must be a float.")
+    if not 0.0 <= float(value) <= 1.0:
+        raise ValueError(f"{name} must be in [0, 1].")
 
 
 def _validate_source_item(
