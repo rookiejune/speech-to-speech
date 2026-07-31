@@ -19,8 +19,8 @@
 
 ## 016 Stable Codec stage 1
 
-- 真实单步 smoke 已验证 Stable Codec、无 BPE、ASR/TTS fixed samples 和 finite loss；下一步使用
-  `jobs/015/01_stable_codec_stage1.sh` 启动正式 1,000,000-step 长跑，保留每 10,000 steps 的
+- 真实单步 smoke 已验证 Stable Codec、无 BPE、ASR/TTS fixed samples 和 finite loss；016 是实验/result 编号，
+  正式长跑入口沿用 `jobs/015/01_stable_codec_stage1.sh`。下一步启动正式 1,000,000-step 长跑，保留每 10,000 steps 的
   TensorBoard fixed samples、周期 checkpoint 与最新恢复点。单步 smoke 不支持质量或收敛结论。
 
 ## 其他工程欠账
