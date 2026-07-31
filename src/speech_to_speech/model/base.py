@@ -16,10 +16,12 @@ from transformers.cache_utils import Cache
 from ..audio_route import AudioStream
 from .._tensor import is_signed_integer_dtype
 from ._generation import (
+    GenerationOutput,
     GenerationStepResult,
     generate_bicodec_sequence,
     generate_flattened_sequence,
     generate_sequence,
+    generate_sequence_full,
 )
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer, FlattenedAudioTokenizer
 from ._head import VocabularyHeadMixin
@@ -374,6 +376,44 @@ class Model(VocabularyHeadMixin, nn.Module):
             ),
         )
         return generated
+
+    def generate_tokens_with_logprobs(
+        self,
+        prompt_ids: torch.Tensor,
+        *,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        prompt_attention_mask: torch.Tensor | None = None,
+        audio_input_positions: torch.Tensor | None = None,
+        stop_token_id: int | None = None,
+        generation_modality: Modality | None = None,
+        allowed_token_ids: Sequence[int] | torch.Tensor | None = None,
+        do_sample: bool = True,
+        use_cache: bool = True,
+    ) -> GenerationOutput:
+        return generate_sequence_full(
+            self,
+            prompt_ids,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            prompt_attention_mask=prompt_attention_mask,
+            audio_input_positions=audio_input_positions,
+            stop_token_id=stop_token_id,
+            generation_modality=generation_modality,
+            allowed_token_ids=allowed_token_ids,
+            do_sample=do_sample,
+            use_cache=use_cache,
+            collect_audio_condition=False,
+            collect_logprobs=True,
+            min_new_tokens=(
+                1
+                if generation_modality is Modality.AUDIO
+                and stop_token_id == self.runtime.eoa_token_id
+                else 0
+            ),
+        )
 
     def generate_audio_condition(
         self,

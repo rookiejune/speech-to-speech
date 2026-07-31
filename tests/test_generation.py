@@ -370,7 +370,11 @@ class _UnifiedGenerationModel(Model):
             if use_cache
             else None
         )
-        return GenerationStepResult(logits=logits, past_key_values=cache, audio_output_past=None)
+        return GenerationStepResult(
+            logits=logits,
+            past_key_values=cache,
+            audio_output_past=None,
+        )
 
 
 class _FullSequenceCodec:
@@ -514,7 +518,11 @@ class _FullSequenceGenerationModel(Model):
             if use_cache
             else None
         )
-        return GenerationStepResult(logits=logits, past_key_values=cache, audio_output_past=None)
+        return GenerationStepResult(
+            logits=logits,
+            past_key_values=cache,
+            audio_output_past=None,
+        )
 
     def generate_audio_features(self, **kwargs) -> None:
         del kwargs
@@ -593,6 +601,25 @@ class _VariableStopModel(_UnifiedGenerationModel):
     def audio_output_adapter_batch_select(self, past_key_values, indices):
         del indices
         return past_key_values
+
+
+class _LogprobGenerationModel(_UnifiedGenerationModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.step_logits = torch.tensor([0.0, 1.0, 3.0])
+
+    def generation_step(self, input_ids: Tensor, **kwargs) -> GenerationStepResult:
+        token_ids = kwargs.get("token_ids")
+        if token_ids is None:
+            raise AssertionError("logprob test requires explicit allowed token ids")
+        logits = self.step_logits.to(device=input_ids.device).view(1, 1, -1)
+        logits = logits.expand(input_ids.size(0), 1, token_ids.numel()).clone()
+        cache = (
+            SimpleNamespace(batch_select_indices=lambda indices: None)
+            if kwargs["use_cache"]
+            else None
+        )
+        return GenerationStepResult(logits=logits, past_key_values=cache, audio_output_past=None)
 
 
 class GenerationTest(unittest.TestCase):
@@ -843,6 +870,69 @@ class GenerationTest(unittest.TestCase):
 
         self.assertIn(int(generated[0, -1]), model.runtime.audio_generation_allowed_ids)
         self.assertEqual(semantic_audio_logits.call_args.args[0].size(1), 1)
+
+    def test_generate_tokens_with_logprobs_matches_public_generation(self):
+        prompt_ids = torch.tensor([[1, 2]])
+        allowed_token_ids = torch.tensor([2, 3, 4])
+        kwargs = {
+            "max_new_tokens": 2,
+            "allowed_token_ids": allowed_token_ids,
+            "do_sample": False,
+            "use_cache": False,
+        }
+
+        output = _LogprobGenerationModel().generate_tokens_with_logprobs(
+            prompt_ids,
+            **kwargs,
+        )
+        generated = _LogprobGenerationModel().generate_tokens(prompt_ids, **kwargs)
+
+        self.assertTrue(torch.equal(output.sequences, generated))
+        self.assertTrue(torch.equal(output.sequences, torch.tensor([[1, 2, 4, 4]])))
+        self.assertEqual(tuple(output.token_logprobs.shape), (1, 2))
+        self.assertEqual(tuple(output.token_logprob_mask.shape), (1, 2))
+        expected = torch.log_softmax(
+            _LogprobGenerationModel().step_logits,
+            dim=-1,
+        )[2]
+        torch.testing.assert_close(
+            output.token_logprobs,
+            expected.expand_as(output.token_logprobs),
+        )
+        self.assertTrue(
+            torch.equal(output.token_logprob_mask, torch.ones(1, 2, dtype=torch.bool))
+        )
+        self.assertIsNone(output.audio_condition)
+        self.assertIsNone(output.frame_spans)
+
+    def test_generate_tokens_with_logprobs_masks_finished_rows(self):
+        model = _VariableStopModel()
+
+        output = model.generate_tokens_with_logprobs(
+            torch.tensor([[1, 4], [1, 5]]),
+            max_new_tokens=2,
+            stop_token_id=model.runtime.eos_token_id,
+            allowed_token_ids=(model.runtime.eos_token_id, 1),
+            do_sample=False,
+            use_cache=True,
+        )
+
+        self.assertTrue(
+            torch.equal(output.sequences, torch.tensor([[1, 4, 3, 3], [1, 5, 1, 3]]))
+        )
+        self.assertEqual(tuple(output.token_logprobs.shape), (2, 2))
+        self.assertTrue(
+            torch.equal(
+                output.token_logprob_mask,
+                torch.tensor([[True, False], [True, True]]),
+            )
+        )
+        torch.testing.assert_close(
+            output.token_logprobs,
+            torch.zeros_like(output.token_logprobs),
+        )
+        self.assertEqual(model.batch_sizes, [2, 1])
+        self.assertEqual(model.cache_selections, [[1]])
 
     def test_generation_rejects_invalid_constraints(self):
         model = Model(

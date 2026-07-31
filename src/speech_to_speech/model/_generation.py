@@ -27,6 +27,17 @@ class GenerationStepResult:
     hidden_states: tuple[Tensor, ...] | None = None
 
 
+@dataclass
+class GenerationOutput:
+    """Generated token sequences plus optional per-token generation metadata."""
+
+    sequences: Tensor
+    token_logprobs: Tensor | None = None
+    token_logprob_mask: Tensor | None = None
+    audio_condition: Tensor | None = None
+    frame_spans: Tensor | None = None
+
+
 class GenerationStepModel(Protocol):
     layout: Layout
     runtime: TokenModelRuntime
@@ -135,7 +146,7 @@ class _RowGenerator:
         return next_id
 
 
-def generate_sequence(
+def generate_sequence_full(
     model: GenerationStepModel,
     prompt_ids: Tensor,
     *,
@@ -150,8 +161,9 @@ def generate_sequence(
     do_sample: bool,
     use_cache: bool,
     collect_audio_condition: bool,
+    collect_logprobs: bool = False,
     min_new_tokens: int = 0,
-) -> tuple[Tensor, Tensor | None, Tensor | None]:
+) -> GenerationOutput:
     if (
         max_new_tokens < 0
         or min_new_tokens < 0
@@ -204,6 +216,8 @@ def generate_sequence(
     span_steps: list[Tensor] = []
     batch_size = prompt_ids.size(0)
     active_rows = torch.arange(batch_size, dtype=torch.long, device=prompt_ids.device)
+    logprob_steps: list[Tensor] = []
+    logprob_mask_steps: list[Tensor] = []
     for step in range(max_new_tokens):
         active_attention_mask = (
             attention_mask
@@ -239,6 +253,22 @@ def generate_sequence(
             if do_sample
             else logits.argmax(dim=-1)
         )
+        if collect_logprobs:
+            step_logprobs = logits.log_softmax(dim=-1)
+            active_token_logprobs = step_logprobs.gather(
+                1,
+                next_indices.unsqueeze(1),
+            ).squeeze(1)
+            token_logprobs = active_token_logprobs.new_zeros(batch_size)
+            token_logprobs.index_copy_(0, active_rows, active_token_logprobs)
+            token_logprob_mask = torch.zeros(
+                batch_size,
+                dtype=torch.bool,
+                device=prompt_ids.device,
+            )
+            token_logprob_mask.index_fill_(0, active_rows, True)
+            logprob_steps.append(token_logprobs)
+            logprob_mask_steps.append(token_logprob_mask)
         if generation_token_ids is not None:
             next_ids = generation_token_ids.index_select(0, next_indices)
         elif generation_modality is not None:
@@ -322,8 +352,31 @@ def generate_sequence(
             )
 
     generated = generated[:, :length]
+    token_logprobs: Tensor | None = None
+    token_logprob_mask: Tensor | None = None
+    if collect_logprobs:
+        if logprob_steps:
+            token_logprobs = torch.stack(logprob_steps, dim=1)
+            token_logprob_mask = torch.stack(logprob_mask_steps, dim=1)
+        else:
+            token_logprobs = torch.empty(
+                batch_size,
+                0,
+                dtype=torch.float32,
+                device=prompt_ids.device,
+            )
+            token_logprob_mask = torch.zeros(
+                batch_size,
+                0,
+                dtype=torch.bool,
+                device=prompt_ids.device,
+            )
     if not span_steps:
-        return generated, None, None
+        return GenerationOutput(
+            sequences=generated,
+            token_logprobs=token_logprobs,
+            token_logprob_mask=token_logprob_mask,
+        )
     frame_spans = torch.stack(span_steps, dim=1)
     frame_counts = frame_spans.sum(dim=1)
     if bool(frame_counts.eq(0).any()):
@@ -340,7 +393,49 @@ def generate_sequence(
         ],
         batch_first=True,
     )
-    return generated, condition, frame_spans
+    return GenerationOutput(
+        sequences=generated,
+        token_logprobs=token_logprobs,
+        token_logprob_mask=token_logprob_mask,
+        audio_condition=condition,
+        frame_spans=frame_spans,
+    )
+
+
+def generate_sequence(
+    model: GenerationStepModel,
+    prompt_ids: Tensor,
+    *,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    prompt_attention_mask: Tensor | None,
+    audio_input_positions: Tensor | None,
+    stop_token_id: int | None,
+    generation_modality: Modality | None,
+    allowed_token_ids: Sequence[int] | Tensor | None,
+    do_sample: bool,
+    use_cache: bool,
+    collect_audio_condition: bool,
+    min_new_tokens: int = 0,
+) -> tuple[Tensor, Tensor | None, Tensor | None]:
+    output = generate_sequence_full(
+        model,
+        prompt_ids,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        prompt_attention_mask=prompt_attention_mask,
+        audio_input_positions=audio_input_positions,
+        stop_token_id=stop_token_id,
+        generation_modality=generation_modality,
+        allowed_token_ids=allowed_token_ids,
+        do_sample=do_sample,
+        use_cache=use_cache,
+        collect_audio_condition=collect_audio_condition,
+        min_new_tokens=min_new_tokens,
+    )
+    return output.sequences, output.audio_condition, output.frame_spans
 
 
 def _suppress_stop(
