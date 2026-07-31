@@ -80,6 +80,9 @@ def generate_tokens(...) -> Tensor: ...
   或未监督模态构造大词表 logits。未传 modality 的通用 `forward()` 仍返回 global text+audio
   logits。model 不接受 `PredictionModality` 作为 head 参数。
 - backbone 直接调用 HF causal LM 的 `base_model`；自带 text LM head 不会先计算再丢弃。
+- backbone body 由 runtime 的 `backbone_readout` 选择实际 hidden tensor；默认使用
+  `last_hidden_state`，Kimi-Audio 等自定义输出可选择 `mimo_hidden_states[1]`。不支持
+  `cache_position` 的 remote-code backbone 通过 `backbone_supports_cache_position=false` 省略该参数。
 - text/audio output head 分别对对应 block embedding weight 做 tied linear，layout offset 只负责
   恢复 global token ID；不保留 LM head bias。
 - `selected_logits()` 只计算调用方给出的候选 global IDs；BiCodec route 的 grouped CE 用它避免为

@@ -214,6 +214,9 @@ schema，不重复声明字段；`scripts/overfit.py` 与 `scripts/train.py` 都
   BiCodec 不接受它。route 不属于 `Request`，一次运行中不能按请求切换。
 - `runtime.backbone_initialization=random` 从 `runtime.backbone` 读取 tokenizer 与完整 HF config，
   但不读取预训练权重；它不能与 `model=toy` 组合，并要求 `parameter_policy=full`。
+- `runtime.backbone_trust_remote_code`、`runtime.backbone_readout` 与
+  `runtime.backbone_supports_cache_position` 是替换 HF backbone 的显式兼容性开关；默认值保持
+  Qwen/Qwen3 contract，`configs/runtime/kimi_audio.yaml` 覆写为 Kimi-Audio 的 remote-code readout。
 - `runtime.semantic_codec_artifact` 为 `semantic-acoustic-codec` 的 semantic-only waveform
   support artifact；LongCat 的 `DECOUPLED` token-only 路径可使用它。BiCodec 的 structured
   `FULL_CODEC_SEQUENCE` 路径由 `audio_route` 选择 stream ownership，并调用 backend

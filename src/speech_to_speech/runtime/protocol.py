@@ -99,5 +99,14 @@ class GenerationRuntime(DataRuntime, Protocol):
 
 
 class TokenModelRuntime(GenerationRuntime, Protocol):
+    @property
+    def backbone_trust_remote_code(self) -> bool: ...
+
+    @property
+    def backbone_readout(self) -> str: ...
+
+    @property
+    def backbone_supports_cache_position(self) -> bool: ...
+
     @cached_property
     def backbone(self) -> Backbone: ...

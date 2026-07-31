@@ -31,6 +31,7 @@ from .types import (
     structured_codec,
     supports_acoustic,
     supports_structured,
+    validate_backbone_readout,
 )
 from .._compat import StrEnum, auto
 from ..audio_route import (
@@ -81,6 +82,9 @@ class Config:
     codec: str = "longcat"
     backbone: str = "Qwen/Qwen3-0.6B"
     backbone_initialization: BackboneInitialization = BackboneInitialization.PRETRAINED
+    backbone_trust_remote_code: bool = False
+    backbone_readout: str = "last_hidden_state"
+    backbone_supports_cache_position: bool = True
     audio_representation: AudioRepresentation = AudioRepresentation.DECOUPLED
     audio_tokenizer: Optional[Union[str, Path]] = None
     semantic_codec_artifact: Optional[str] = None
@@ -94,6 +98,11 @@ class Config:
     def __post_init__(self) -> None:
         if not isinstance(self.backbone_initialization, BackboneInitialization):
             raise TypeError("backbone_initialization must be a BackboneInitialization.")
+        if not isinstance(self.backbone_trust_remote_code, bool):
+            raise TypeError("backbone_trust_remote_code must be a bool.")
+        validate_backbone_readout(self.backbone_readout)
+        if not isinstance(self.backbone_supports_cache_position, bool):
+            raise TypeError("backbone_supports_cache_position must be a bool.")
         if not isinstance(self.audio_representation, AudioRepresentation):
             raise TypeError("audio_representation must be an AudioRepresentation.")
         if (
@@ -202,9 +211,24 @@ class Runtime:
             return structured_codec(self.codec).acoustic_unit_length
         return None
 
+    @property
+    def backbone_trust_remote_code(self) -> bool:
+        return self.config.backbone_trust_remote_code
+
+    @property
+    def backbone_readout(self) -> str:
+        return self.config.backbone_readout
+
+    @property
+    def backbone_supports_cache_position(self) -> bool:
+        return self.config.backbone_supports_cache_position
+
     @cached_property
     def text_tokenizer(self) -> TextTokenizer:
-        tokenizer = AutoTokenizer.from_pretrained(self.config.backbone)
+        tokenizer = AutoTokenizer.from_pretrained(
+            self.config.backbone,
+            trust_remote_code=self.config.backbone_trust_remote_code,
+        )
         bind_chat_bos(tokenizer)
         return cast(TextTokenizer, cast(object, tokenizer))
 
@@ -218,11 +242,18 @@ class Runtime:
         if self.config.backbone_initialization is BackboneInitialization.PRETRAINED:
             backbone = AutoModelForCausalLM.from_pretrained(
                 self.config.backbone,
+                trust_remote_code=self.config.backbone_trust_remote_code,
                 **kwargs,
             )
         else:
-            config = AutoConfig.from_pretrained(self.config.backbone)
-            backbone = AutoModelForCausalLM.from_config(config, **kwargs)
+            config = AutoConfig.from_pretrained(
+                self.config.backbone,
+                trust_remote_code=self.config.backbone_trust_remote_code,
+            )
+            backbone = AutoModelForCausalLM.from_config(
+                config,
+                **kwargs,
+            )
         if self.config.device is not None:
             backbone = cast(nn.Module, cast(object, backbone)).to(self.config.device)
         return cast(Backbone, cast(object, backbone))

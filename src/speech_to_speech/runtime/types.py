@@ -421,6 +421,57 @@ class BackboneOutput(Protocol):
     attentions: tuple[Tensor, ...] | None
 
 
+def validate_backbone_readout(path: object) -> str:
+    _backbone_readout_path(path)
+    return cast(str, path)
+
+
+def select_backbone_readout(output: BackboneOutput, path: str) -> Tensor:
+    attribute, index = _backbone_readout_path(path)
+    if not hasattr(output, attribute):
+        raise ValueError(
+            f"backbone output is missing readout attribute {attribute!r}."
+        )
+    value = getattr(output, attribute)
+    if index is not None:
+        if not isinstance(value, Sequence):
+            raise TypeError(
+                f"backbone readout index [{index}] requires a sequence value."
+            )
+        if index >= len(value):
+            raise ValueError(f"backbone readout index [{index}] is out of range.")
+        value = value[index]
+    if not isinstance(value, Tensor):
+        raise TypeError("backbone readout must resolve to a Tensor.")
+    return value
+
+
+def _backbone_readout_path(path: object) -> tuple[str, int | None]:
+    if not isinstance(path, str):
+        raise TypeError("backbone_readout must be a string.")
+    if not path:
+        raise ValueError("backbone_readout must not be empty.")
+    if "[" not in path:
+        if "]" in path:
+            raise ValueError("backbone_readout index is missing opening '['.")
+        attribute = path
+        index = None
+    else:
+        start = path.find("[")
+        if not path.endswith("]") or path.find("]", start + 1) != len(path) - 1:
+            raise ValueError("backbone_readout index must end the path.")
+        if path.find("[", start + 1) != -1:
+            raise ValueError("backbone_readout accepts at most one index.")
+        attribute = path[:start]
+        raw = path[start + 1 : -1]
+        if not raw.isdecimal():
+            raise ValueError("backbone_readout indices must be non-negative integers.")
+        index = int(raw)
+    if not attribute.isidentifier():
+        raise ValueError("backbone_readout must start with an identifier attribute.")
+    return attribute, index
+
+
 class BackboneBody(Protocol):
     def __call__(
         self,

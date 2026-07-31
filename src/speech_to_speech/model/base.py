@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from collections.abc import Sequence
 from typing import Optional, cast
 
 import torch
@@ -50,7 +50,7 @@ from .embedding.audio import (
 )
 from .protocol import TokenModelRuntime
 from .toy import ToyConfig, create_toy_backbone
-from ..runtime.types import Backbone, BackboneOutput
+from ..runtime.types import Backbone, BackboneOutput, select_backbone_readout
 
 
 @dataclass
@@ -129,6 +129,11 @@ class Model(VocabularyHeadMixin, nn.Module):
             text_embedding = text_source
         # Backbone keeps a non-Module view; idspace owns the real embedding once.
         _install_text_embedding_view(self.backbone, EmbeddingView(text_embedding))
+        self._backbone_body = BackboneBodyAdapter(
+            self.backbone.base_model,
+            readout=self.runtime.backbone_readout,
+            supports_cache_position=self.runtime.backbone_supports_cache_position,
+        )
         hidden_size = self.backbone.config.hidden_size
         audio_embedding = create_semantic_audio_embedding(
             self.runtime,
@@ -328,7 +333,7 @@ class Model(VocabularyHeadMixin, nn.Module):
             raise ValueError("input_ids must have shape [batch, sequence].")
         inputs_embeds = self._input_embedding(input_ids, audio_input_positions)
 
-        return self.backbone.base_model(
+        return self._backbone_body(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             output_hidden_states=False,
@@ -605,6 +610,59 @@ class Model(VocabularyHeadMixin, nn.Module):
             dtype=output.dtype
         )
         return output
+
+
+@dataclass(frozen=True)
+class BackboneOutputView:
+    output: BackboneOutput
+    last_hidden_state: torch.Tensor
+
+    @property
+    def past_key_values(self) -> Cache | None:
+        return self.output.past_key_values
+
+    @property
+    def hidden_states(self) -> tuple[torch.Tensor, ...] | None:
+        return self.output.hidden_states
+
+    @property
+    def attentions(self) -> tuple[torch.Tensor, ...] | None:
+        return self.output.attentions
+
+
+@dataclass(frozen=True)
+class BackboneBodyAdapter:
+    body: Callable[..., BackboneOutput]
+    readout: str
+    supports_cache_position: bool
+
+    def __call__(
+        self,
+        *,
+        inputs_embeds: torch.Tensor,
+        attention_mask: torch.Tensor | None,
+        output_hidden_states: bool,
+        past_key_values: Cache | None = None,
+        use_cache: bool = False,
+        position_ids: torch.Tensor | None = None,
+        cache_position: torch.Tensor | None = None,
+    ) -> BackboneOutput:
+        kwargs = {
+            "inputs_embeds": inputs_embeds,
+            "attention_mask": attention_mask,
+            "output_hidden_states": output_hidden_states
+            or self.readout != "last_hidden_state",
+            "past_key_values": past_key_values,
+            "use_cache": use_cache,
+            "position_ids": position_ids,
+        }
+        if self.supports_cache_position:
+            kwargs["cache_position"] = cache_position
+        output = self.body(**kwargs)
+        return BackboneOutputView(
+            output=output,
+            last_hidden_state=select_backbone_readout(output, self.readout),
+        )
 
 
 def _install_text_embedding_view(backbone: Backbone, view: EmbeddingView) -> None:

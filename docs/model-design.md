@@ -204,6 +204,9 @@ Runtime 聚合互相兼容的 backbone、text/audio tokenizer、codec、layout�
 - 组合入口显式构造并传递 `Runtime`；parser、sample builder、batch padding 不读取全局状态。
 - DataModule 在加载 prepared dataset 前比较 `config.codec` 与 `runtime.codec_name`。
 - 同一可训练 `nn.Module` 只注册在 model 的一条 ownership path 下。
+- HF 兼容性由 runtime 显式声明：remote-code backbone 使用 `backbone_trust_remote_code` 加载，
+  model 通过 `backbone_readout` 选择 hidden tensor，并按 `backbone_supports_cache_position`
+  决定是否传入 `cache_position`。
 
 ## 5. Model 与 Objective
 
