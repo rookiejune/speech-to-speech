@@ -31,7 +31,6 @@ from ._helper import (
     EmbeddingView,
     create_adapter,
     register,
-    require_embedding,
 )
 from .audio_input import (
     AudioInputAdapterConfig,

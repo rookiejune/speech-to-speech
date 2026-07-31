@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-from anydataset.types import AudioView, Modality
+from anydataset.types import AudioView
 from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 from speech_to_speech.prediction import PredictionModality

@@ -174,13 +174,36 @@ Python 3.9 is the minimum supported version. Run the checks below in the
 workspace's documented `py39` environment; `py312` remains the primary
 environment for full-model training and audio experiments. Dependencies are
 expected to be installed in both the documented `py39` and `py312`
-environments. The CI/local gate should include `basedpyright`, `unittest`, and
-`compileall` before a change is accepted. Run from the repository collection
-root:
+environments. From the repository collection root, install the sibling
+repositories and this package in editable mode:
 
 ```bash
-export PYTHONPATH=speech-to-speech:speech-to-speech/src:semantic-acoustic-codec/src:workspace/src:third_party/anydataset/src:third_party/anytrain/src
-basedpyright --project speech-to-speech/pyrightconfig.json --pythonpath "$(command -v python)"
+python -m pip install -e third_party/anydataset
+python -m pip install -e "third_party/anytrain[peft,text,flow,test]"
+python -m pip install -e "semantic-acoustic-codec[train,test]"
+python -m pip install -e workspace
+python -m pip install -e "speech-to-speech[dev]"
+```
+
+The minimal CI gate currently blocks on Ruff's `E`/`F` checks, unit tests, and
+`compileall`. Use the same sibling `PYTHONPATH` that CI sets:
+
+```bash
+export PYTHONPATH=speech-to-speech/src:semantic-acoustic-codec/src:third_party/anydataset/src:third_party/anytrain/src:workspace/src
+python -m ruff check speech-to-speech/src speech-to-speech/scripts speech-to-speech/tests
 DYNAMIC_HOME=/private/tmp/speech-to-speech-test PYTHONPYCACHEPREFIX=/private/tmp/speech-to-speech-pycache python -m unittest discover -s speech-to-speech/tests -v
 PYTHONPYCACHEPREFIX=/private/tmp/speech-to-speech-pycache python -m compileall -q speech-to-speech/src speech-to-speech/scripts speech-to-speech/tests
 ```
+
+`basedpyright` remains the stricter local static check for type-focused
+changes, but it is not a blocking GitHub CI step until the existing type
+baseline is clean:
+
+```bash
+python -m basedpyright --project speech-to-speech/pyrightconfig.json --pythonpath "$(command -v python)"
+```
+
+The GitHub workflow checks out `speech-to-speech`, `semantic-acoustic-codec`,
+`third_party/anydataset`, `third_party/anytrain`, and `workspace` as sibling
+repositories. If any sibling repository is private, configure the
+`CI_REPO_TOKEN` secret with access to those repositories.

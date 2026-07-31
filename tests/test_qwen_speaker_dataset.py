@@ -127,7 +127,7 @@ class SpeakerGridDatasetTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at least two"):
             SpeakerGridCellsDataset(one_row, with_audio_context=True)
 
-    @patch("zhuyin.datasets.qwen_tts_speech.qwen_tts_speaker_codec_grid")
+    @patch("zhuyin.datasets.wmt19.qwen_tts.speaker_grid")
     def test_loader_selects_runtime_codec_and_speaker(self, load: Mock):
         load.return_value = _grid()
         config = DatasetConfig(
@@ -150,7 +150,7 @@ class SpeakerGridDatasetTest(unittest.TestCase):
             split="train",
         )
 
-    @patch("zhuyin.datasets.qwen_tts_speech.qwen_tts_speaker_codec_grid")
+    @patch("zhuyin.datasets.wmt19.qwen_tts.speaker_grid")
     def test_loader_enables_reference_context_for_reference_route(self, load: Mock):
         load.return_value = _grid()
         dataset = load_dataset(

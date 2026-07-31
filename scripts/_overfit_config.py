@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Type, Union
+from typing import Type, Union
 
 from omegaconf import MISSING, DictConfig
 
@@ -25,7 +25,6 @@ if __package__:
         TrainerConfig,
         non_empty_string,
         non_negative_integer,
-        optional_positive_number,
         positive_integer,
         validate_training,
     )
@@ -42,7 +41,6 @@ else:
         TrainerConfig,
         non_empty_string,
         non_negative_integer,
-        optional_positive_number,
         positive_integer,
         validate_training,
     )

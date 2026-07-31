@@ -20,8 +20,6 @@ from anydataset.types import (
 )
 from anytrain.module.idspace import Layout
 from torch import Tensor, nn
-from transformers.modeling_outputs import CausalLMOutputWithPast
-
 from speech_to_speech.callback.logging.task_sample import TaskSampleLogger
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.module import DataModule, LoaderSpec

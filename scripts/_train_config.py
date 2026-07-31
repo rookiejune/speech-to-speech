@@ -33,7 +33,6 @@ if __package__:
         TrainerConfig,
         non_empty_string,
         non_negative_integer,
-        optional_positive_number,
         positive_integer,
         validate_training,
     )
@@ -52,7 +51,6 @@ else:
         TrainerConfig,
         non_empty_string,
         non_negative_integer,
-        optional_positive_number,
         positive_integer,
         validate_training,
     )

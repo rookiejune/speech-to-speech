@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout speech-to-speech
+        uses: actions/checkout@v4
+        with:
+          path: speech-to-speech
+
+      - name: Checkout semantic-acoustic-codec
+        uses: actions/checkout@v4
+        with:
+          repository: rookiejune/semantic-acoustic-codec
+          path: semantic-acoustic-codec
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+
+      - name: Checkout anydataset
+        uses: actions/checkout@v4
+        with:
+          repository: rookiejune/anydataset
+          path: third_party/anydataset
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+
+      - name: Checkout anytrain
+        uses: actions/checkout@v4
+        with:
+          repository: rookiejune/anytrain
+          path: third_party/anytrain
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+
+      - name: Checkout workspace
+        uses: actions/checkout@v4
+        with:
+          repository: rookiejune/workspace
+          path: workspace
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install dependencies
+        working-directory: speech-to-speech
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install -e ../third_party/anydataset
+          python -m pip install -e "../third_party/anytrain[peft,text,flow,test]"
+          python -m pip install -e "../semantic-acoustic-codec[train,test]"
+          python -m pip install -e ../workspace
+          python -m pip install -e ".[dev]"
+
+      - name: Ruff
+        working-directory: speech-to-speech
+        run: python -m ruff check src scripts tests
+
+      - name: Unit tests
+        working-directory: speech-to-speech
+        env:
+          DYNAMIC_HOME: /tmp/speech-to-speech-test
+          PYTHONPYCACHEPREFIX: /tmp/speech-to-speech-pycache
+          PYTHONPATH: ${{ github.workspace }}/speech-to-speech/src:${{ github.workspace }}/semantic-acoustic-codec/src:${{ github.workspace }}/third_party/anydataset/src:${{ github.workspace }}/third_party/anytrain/src:${{ github.workspace }}/workspace/src
+        run: python -m unittest discover -s tests -v
+
+      - name: Compile
+        working-directory: speech-to-speech
+        env:
+          PYTHONPYCACHEPREFIX: /tmp/speech-to-speech-pycache
+        run: python -m compileall -q src scripts tests

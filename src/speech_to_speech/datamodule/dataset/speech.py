@@ -406,7 +406,9 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
             raise ValueError(
                 "qwen_tts_speaker supports only the bicodec and longcat runtimes."
             )
-        from zhuyin.datasets.qwen_tts_speech import qwen_tts_speaker_codec_grid
+        from zhuyin.datasets.wmt19.qwen_tts import (
+            speaker_grid as qwen_tts_speaker_codec_grid,
+        )
 
         grid = qwen_tts_speaker_codec_grid(
             codec=runtime.codec_name,

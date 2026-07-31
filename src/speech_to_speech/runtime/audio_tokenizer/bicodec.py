@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from numbers import Integral
-
 import torch
 from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
