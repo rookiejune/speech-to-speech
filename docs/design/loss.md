@@ -20,9 +20,9 @@ position 语义见 [总览 §2.4](../model-design.md)。
   softmax 竞争。`target_modality` 只是单模态 prediction 的便捷属性，mixed 时为 `None`，不作为
   loss 入口。BiCodec route 额外消费逐位置 `token_groups` 与 `model.selected_logits()`，只在当前
   semantic、semantic-or-end 或 acoustic codebook candidate group 上计算 restricted CE。
-- `AcousticFlowLoss`：直接复用 `semantic-acoustic-codec.loss.FlowLoss`；S2S 只保留 joint
-  token/acoustic objective 的组合。
-- `CausalAcousticLoss`：直接复用 `anytrain.loss.MaskedCodebookCrossEntropyLoss`；训练 forward
+- `FlowLoss`：直接从 `semantic-acoustic-codec.loss` 包级导出；S2S 只保留 joint
+  token/acoustic objective 的组合，不再维护独立 loss 子模块或重命名 alias。
+- `MaskedCodebookCrossEntropyLoss`：直接从 `anytrain.loss` 包级导出；训练 forward
   的 `details` 只保留逐行 `codebook_N` 和有效 frame 数。`RVQObjective.validation()` 显式请求
   `codebook_N_top1`，训练 step 不额外执行大码本 argmax；acoustic padding ID 不进入 decoder
   embedding、loss 或 accuracy。

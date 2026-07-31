@@ -4,7 +4,7 @@ import unittest
 
 import torch
 
-from speech_to_speech.loss import CausalAcousticLoss
+from anytrain.loss import MaskedCodebookCrossEntropyLoss
 from semantic_acoustic_codec.model import AcousticRVQDecoder
 
 
@@ -186,8 +186,8 @@ class AcousticRVQTest(unittest.TestCase):
         for value in changed:
             value[:, -1] = 1000
 
-        baseline = CausalAcousticLoss()(logits, labels, mask)
-        padded_changed = CausalAcousticLoss()(changed, labels, mask)
+        baseline = MaskedCodebookCrossEntropyLoss()(logits, labels, mask)
+        padded_changed = MaskedCodebookCrossEntropyLoss()(changed, labels, mask)
 
         torch.testing.assert_close(baseline.loss, padded_changed.loss)
 
@@ -210,8 +210,8 @@ class AcousticRVQTest(unittest.TestCase):
             for value, classes in zip(predictions, (3, 4))
         )
 
-        training = CausalAcousticLoss()(logits, labels, mask)
-        baseline = CausalAcousticLoss()(
+        training = MaskedCodebookCrossEntropyLoss()(logits, labels, mask)
+        baseline = MaskedCodebookCrossEntropyLoss()(
             logits,
             labels,
             mask,
@@ -220,7 +220,7 @@ class AcousticRVQTest(unittest.TestCase):
         changed = tuple(value.clone() for value in logits)
         for value in changed:
             value[~mask] = 1000
-        padded_changed = CausalAcousticLoss()(
+        padded_changed = MaskedCodebookCrossEntropyLoss()(
             changed,
             labels,
             mask,
@@ -252,7 +252,7 @@ class AcousticRVQTest(unittest.TestCase):
         )
 
     def test_causal_loss_accepts_signed_integer_label_dtypes(self):
-        loss = CausalAcousticLoss()
+        loss = MaskedCodebookCrossEntropyLoss()
         item = loss(
             (torch.randn(1, 2, 4),),
             torch.tensor([[[1], [2]]], dtype=torch.int32),
@@ -279,7 +279,7 @@ class AcousticRVQTest(unittest.TestCase):
             requires_grad=True,
         )
 
-        item = CausalAcousticLoss()((logits,), labels, mask)
+        item = MaskedCodebookCrossEntropyLoss()((logits,), labels, mask)
         item.loss.mean().backward()
 
         self.assertTrue(torch.isfinite(item.loss).all())

@@ -8,7 +8,7 @@ import torch
 from anytrain.loss import MaskedCosineAlignmentLoss
 from torch import Tensor, nn
 
-from speech_to_speech.loss import WavLMTeacher
+from semantic_acoustic_codec.loss.repa import WavLMTeacher
 from speech_to_speech.model.acoustic import AcousticFlow
 
 
@@ -84,7 +84,7 @@ class AcousticRepaLossTest(unittest.TestCase):
     def test_wavlm_teacher_uses_layer_nine_and_preserves_mask_positions(self):
         wavlm = _WavLM()
         with patch(
-            "speech_to_speech.loss.repa.WavLMModel.from_pretrained",
+            "transformers.WavLMModel.from_pretrained",
             return_value=wavlm,
         ):
             teacher = WavLMTeacher(_Codec(), layer=9)

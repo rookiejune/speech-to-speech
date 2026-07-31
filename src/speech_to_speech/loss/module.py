@@ -1,10 +1,18 @@
 from __future__ import annotations
 
-from typing import TypedDict
+from abc import ABC, abstractmethod
+from collections.abc import Sequence
+from typing import Generic, TypeVar, TypedDict
 
-from anytrain.loss import MaskedCosineAlignmentLoss, loss_item_mean
+from anytrain.loss import (
+    MaskedCodebookCrossEntropyLoss,
+    MaskedCosineAlignmentLoss,
+    loss_item_mean,
+)
 from anytrain.module.idspace import Layout
-from torch import Tensor
+from semantic_acoustic_codec.loss.flow import FlowLoss, FlowRuntime
+from semantic_acoustic_codec.loss.repa import Teacher
+from torch import Tensor, nn
 
 from ..datamodule.types import ModelBatch
 from ..runtime.types import AudioTokenizer
@@ -13,12 +21,22 @@ from .protocol import (
     RVQObjectiveModel,
     TokenObjectiveModel,
 )
-from .causal_lm import CausalAcousticLoss
-from .flow_matching import AcousticFlowLoss, FlowRuntime
-from .objective import Objective
-from .repa import Teacher
 from .token import TokenLoss
-from .types import LossItem, Outputs
+from .types import LossItem, Outputs, combine_outputs
+
+
+ModelT_contra = TypeVar("ModelT_contra", bound=TokenObjectiveModel, contravariant=True)
+
+
+class Objective(nn.Module, Generic[ModelT_contra], ABC):
+    @abstractmethod
+    def forward(self, batch: ModelBatch, model: ModelT_contra) -> Outputs: ...
+
+    def validation(self, batch: ModelBatch, model: ModelT_contra) -> Outputs:
+        return self.forward(batch, model)
+
+    def reduce(self, outputs: Sequence[Outputs]) -> Outputs:
+        return combine_outputs(outputs)
 
 
 def _weighted_mean(item: LossItem, key: str) -> Tensor:
@@ -103,7 +121,7 @@ class FlowObjective(Objective[FlowObjectiveModel]):
             raise ValueError("REPA weight must be positive")
         self.layout = layout
         self.token = TokenLoss(layout, audio_tokenizer)
-        self.flow_matching = AcousticFlowLoss()
+        self.flow_matching = FlowLoss()
         self.repa_loss = MaskedCosineAlignmentLoss()
         self.repa_teacher = None if repa is None else repa["teacher"]
         self.flow_runtime = flow_runtime
@@ -203,7 +221,7 @@ class RVQObjective(Objective[RVQObjectiveModel]):
         super().__init__()
         self.layout = layout
         self.token = TokenLoss(layout, audio_tokenizer)
-        self.rvq = CausalAcousticLoss()
+        self.rvq = MaskedCodebookCrossEntropyLoss()
 
     def forward(self, batch: ModelBatch, model: RVQObjectiveModel) -> Outputs:
         return self._outputs(batch, model, include_top1=False)

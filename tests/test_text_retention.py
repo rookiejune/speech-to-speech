@@ -19,7 +19,7 @@ from speech_to_speech._oom import context as oom_context
 from speech_to_speech.callback import OOMDiagnostics
 from speech_to_speech.callback.logging import TextRetentionLogger
 from speech_to_speech.task import Task
-from speech_to_speech.loss import TokenObjective
+from speech_to_speech.loss.module import TokenObjective
 from speech_to_speech.generation import Result
 from speech_to_speech.pl_module import Config, SpeechToSpeechModule
 

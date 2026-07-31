@@ -5,7 +5,9 @@ from typing import Optional, Protocol, Union, cast
 from semantic_acoustic_codec.config import Route
 from semantic_acoustic_codec.runtime import AcousticGeneratorArtifact
 
-from speech_to_speech.loss import FlowObjective, RVQObjective, TokenObjective, WavLMTeacher
+from semantic_acoustic_codec.loss.repa import WavLMTeacher
+
+from speech_to_speech.loss.module import FlowObjective, RVQObjective, TokenObjective
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model import Model
 from speech_to_speech.model.acoustic import (
