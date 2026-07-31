@@ -47,6 +47,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         DatasetConfig(
             root=args.data_root,
             split=args.split,
+            filter=None if args.disable_dataset_filter else args.dataset_filter,
             split_manifest=args.split_manifest,
             split_label=args.split_label,
         ),
@@ -104,6 +105,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "dataset": {
             "split": args.split,
             "data_root": args.data_root,
+            "filter": None if args.disable_dataset_filter else args.dataset_filter,
             "split_manifest": args.split_manifest,
             "split_label": args.split_label,
             "split_manifest_sha256": (
@@ -203,6 +205,8 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-sizes", type=_batch_sizes, default="1,2,4")
     parser.add_argument("--data-root", default=None)
     parser.add_argument("--split", default="train")
+    parser.add_argument("--dataset-filter", default="speech_translation_v1")
+    parser.add_argument("--disable-dataset-filter", action="store_true")
     parser.add_argument("--split-manifest", default=None)
     parser.add_argument("--split-label", default="train")
     parser.add_argument("--max-new-tokens", type=_positive_int, default=2)
