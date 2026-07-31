@@ -65,13 +65,13 @@ class TrainingFlopsTest(unittest.TestCase):
         )
         self.assertGreater(_flops(module, longer), _flops(module, batch))
 
-        # The semantic input adapter follows actual audio IDs, not B*S.
+        # The default semantic input adapter no longer adds per-audio-row FLOPs.
         text_id = _batch(
             input_ids=torch.tensor([[1, 2, 8, 2], [1, 2, 0, 0]]),
             labels=batch.token_labels,
             tasks=[Task.TTS, Task.TTS],
         )
-        self.assertGreater(_flops(module, batch), _flops(module, text_id))
+        self.assertEqual(_flops(module, batch), _flops(module, text_id))
 
         # The token head follows valid shifted labels only.
         fewer_labels = _batch(
@@ -245,9 +245,9 @@ class TrainingFlopsTest(unittest.TestCase):
             _flops(module, batch)
 
         model.backbone.config._attn_implementation = "flash_attention_2"
-        next(iter(model.token_embedding.adapters["audio"].parameters())).requires_grad_(
-            False
-        )
+        next(
+            parameter for parameter in model.parameters() if parameter.requires_grad
+        ).requires_grad_(False)
         with self.assertRaisesRegex(ValueError, "full model to be trainable"):
             _flops(module, batch)
 

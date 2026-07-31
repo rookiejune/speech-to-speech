@@ -33,6 +33,7 @@ EnumT = TypeVar("EnumT", bound=Enum)
 def prepare(config: DictConfig) -> DictConfig:
     result = cast(DictConfig, OmegaConf.create(OmegaConf.to_container(config)))
     OmegaConf.resolve(result)
+    _gradient_probe(result)
     semantic_adapter = result.model.get("semantic_audio_adapter")
     if semantic_adapter is not None:
         result.model.semantic_audio_adapter = _enum_name(
@@ -148,6 +149,27 @@ def _audio_route(value: object) -> None:
     output.streams = [_enum_name(AudioStream, stream) for stream in output.streams]
     decode.semantic = _enum_name(StreamSource, decode.semantic)
     decode.acoustic = _enum_name(StreamSource, decode.acoustic)
+
+
+def _gradient_probe(config: DictConfig) -> None:
+    callbacks = config.get("callbacks")
+    if not isinstance(callbacks, DictConfig):
+        return
+    probe = callbacks.get("gradient_probe")
+    if not isinstance(probe, DictConfig) or "loss_pairs" not in probe:
+        return
+
+    loss_pairs = probe.pop("loss_pairs")
+    if probe.get("comparisons"):
+        return
+
+    probe.comparisons = [
+        {
+            "left": {"loss": str(left), "group": "batch"},
+            "right": {"loss": str(right), "group": "batch"},
+        }
+        for left, right in loss_pairs
+    ]
 
 
 def _enum_name(enum: Type[EnumT], value: object) -> str:
