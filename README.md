@@ -51,13 +51,15 @@ training and generation path.
 
 Use the job wrappers as the formal entry points; they load the workspace and
 project environments themselves, independent of the caller's current
-directory. Hydra-based jobs accept `key=value` overrides, while the generation
-smoke accepts normal command-line flags:
+directory. Hydra-based jobs, including the generation smoke, accept `key=value`
+overrides:
 
 ```bash
 jobs/002/01_tts.sh train.max_steps=2
 jobs/002/02_s2st.sh train.max_steps=2 model/acoustic=rvq
-jobs/004/01_s2st.sh --batch-sizes 1,2,4
+jobs/004/01_s2st.sh 'batch_sizes=[1,2,4]'
+jobs/004/01_s2st.sh experiment=generation_online_encode_smoke
+jobs/004/01_s2st.sh 'batch_sizes=[1]' data.dataset.filter=null data.encode_missing_codes=true
 jobs/005/02_unicodec.sh
 jobs/005/05_unicodec_ddp.sh
 SPEECH_TO_SPEECH_STAGE=stage_1 jobs/011/03_staged_joint_train.sh

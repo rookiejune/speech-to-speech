@@ -239,12 +239,13 @@ cadence、设备编排、日志和落盘，不维护平行评估实现。
 
 ## 诊断入口
 
-`scripts/generation_smoke.py` 通过公开的 `DatasetConfig + load_dataset()` 和
-`generate_responses()` 验证 cache/full-recompute 及 variable-batch 语义，不直接绑定 workspace 的
-具体 dataset provider。CPU 模式不调用 CUDA seed、同步或显存 API；CUDA 模式以模型实际所在 device
-同步和统计 peak memory。cached/full、batched/serial 任一 waveform 非 finite，或 greedy token 不一致，
-都会在写出 `metrics.json` 后让入口失败。sample index、batch sizes 与 generation token budget 在加载
-runtime 前完成边界校验。
+`scripts/generation_smoke.py` 通过 Hydra root `configs/generation_smoke.yaml` 组合
+`RuntimeConfig`、`DatasetConfig + load_dataset()` 和 `generate_responses()`，验证
+cache/full-recompute 及 variable-batch 语义，不直接绑定 workspace 的具体 dataset provider。CPU 模式
+不调用 CUDA seed、同步或显存 API；CUDA 模式以模型实际所在 device 同步和统计 peak memory。
+cached/full、batched/serial 任一 waveform 非 finite，或 greedy token 不一致，都会在写出
+`metrics.json` 后让入口失败。sample index、batch sizes、dataset filter 和 generation token budget
+通过普通 Hydra override 配置，并在加载 runtime 前完成边界校验。
 
 ## 边界
 

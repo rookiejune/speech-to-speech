@@ -1,87 +1,103 @@
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import hydra
 import torch
+from omegaconf import DictConfig
 
+from speech_to_speech.callback import OnDeviceCodecMaterializer
 from speech_to_speech.datamodule.collate.collator import Collator
-from speech_to_speech.datamodule.dataset.speech import DatasetConfig, load_dataset
-from speech_to_speech.datamodule.types import ModelBatch
+from speech_to_speech.datamodule.dataset.speech import load_dataset
+from speech_to_speech.datamodule.types import ModelBatch, TrainInput
 from speech_to_speech.generation.batch import requests_from_batch
 from speech_to_speech.generation.eval.reporting import compare, summary
 from speech_to_speech.model.acoustic import FlowModel
-from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import Runtime
 from speech_to_speech.task import Task
 
 if __package__:
     from ._generation_benchmark import benchmark_batch
-    from ._generation_probe import run, second_step
+    from ._generation_smoke_config import (
+        GenerationSmokeConfig,
+        generation_smoke as parse_config,
+    )
+    from ._entry import runtime_config
+    from ._generation_probe import run as probe_run, second_step
 else:
     from _generation_benchmark import benchmark_batch
-    from _generation_probe import run, second_step
+    from _generation_smoke_config import (
+        GenerationSmokeConfig,
+        generation_smoke as parse_config,
+    )
+    from _entry import runtime_config
+    from _generation_probe import run as probe_run, second_step
 
 
-def main(argv: Sequence[str] | None = None) -> None:
-    args = parser().parse_args(argv)
-    output_dir = Path(args.output_dir).expanduser()
+@hydra.main(version_base=None, config_path="../configs", config_name="generation_smoke")
+def main(config: DictConfig) -> None:
+    run(parse_config(config))
+
+
+def run(config: GenerationSmokeConfig) -> None:
+    output_dir = Path(config.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    _seed(args.seed, torch.device(args.device))
-    runtime = Runtime(
-        RuntimeConfig(
-            codec=args.codec,
-            backbone=args.backbone,
-            audio_tokenizer=args.audio_tokenizer,
-            device=args.device,
-            dtype=args.dtype,
-            attn_implementation=args.attn_implementation,
-        )
-    )
-    dataset = load_dataset(
-        DatasetConfig(
-            root=args.data_root,
-            split=args.split,
-            filter=None if args.disable_dataset_filter else args.dataset_filter,
-            split_manifest=args.split_manifest,
-            split_label=args.split_label,
-        ),
+    rt_config = runtime_config(config.runtime)
+    device = None if rt_config.device is None else torch.device(rt_config.device)
+    _seed(config.seed, device or torch.device("cpu"))
+    runtime = Runtime(rt_config)
+    task = Task(config.task)
+    dataset = load_dataset(config.data.dataset, runtime)
+    collator = Collator(
         runtime,
+        {task: 1.0},
+        encode_missing_codes=config.data.encode_missing_codes,
+        interleave_audio_frames=config.data.interleave_audio_frames,
+        mask_text_ratio=config.data.mask_text_ratio,
+        mask_audio_ratio=config.data.mask_audio_ratio,
     )
     batch = _prepared_batch(
-        Collator(runtime, {Task.S2ST: 1.0})([dataset[args.sample_index]])
+        collator([dataset[config.sample_index]]),
+        runtime,
+        config,
+        device=device,
     )
     request = requests_from_batch(batch)[0]
 
     model = FlowModel(runtime=runtime).eval()
 
     probe = second_step(model, request)
-    cached = run(
+    cached = probe_run(
         model,
         request,
-        seed=args.seed,
-        max_new_tokens=args.max_new_tokens,
+        seed=config.seed,
+        max_new_tokens=config.max_new_tokens,
         use_cache=True,
     )
-    full = run(
+    full = probe_run(
         model,
         request,
-        seed=args.seed,
-        max_new_tokens=args.max_new_tokens,
+        seed=config.seed,
+        max_new_tokens=config.max_new_tokens,
         use_cache=False,
     )
     comparison = compare(cached, full)
-    batch_sizes = args.batch_sizes
+    batch_sizes = config.batch_sizes
     batch_requests = [
         requests_from_batch(
-            _prepared_batch(Collator(runtime, {Task.S2ST: 1.0})([dataset[index]]))
+            _prepared_batch(
+                collator([dataset[index]]),
+                runtime,
+                config,
+                device=device,
+            )
         )[0]
-        for index in range(args.sample_index, args.sample_index + max(batch_sizes))
+        for index in range(config.sample_index, config.sample_index + max(batch_sizes))
     ]
     for prefix_length, batch_request in enumerate(batch_requests):
         if prefix_length == 0:
@@ -94,27 +110,29 @@ def main(argv: Sequence[str] | None = None) -> None:
         benchmark_batch(
             model,
             batch_requests[:batch_size],
-            seed=args.seed,
-            max_new_tokens=args.max_new_tokens,
+            seed=config.seed,
+            max_new_tokens=config.max_new_tokens,
         )
         for batch_size in batch_sizes
     ]
 
     result = {
-        "task": Task.S2ST.value,
+        "task": task.value,
         "dataset": {
-            "split": args.split,
-            "data_root": args.data_root,
-            "filter": None if args.disable_dataset_filter else args.dataset_filter,
-            "split_manifest": args.split_manifest,
-            "split_label": args.split_label,
+            "split": config.data.dataset.split,
+            "data_root": config.data.dataset.root,
+            "filter": config.data.dataset.filter,
+            "split_manifest": config.data.dataset.split_manifest,
+            "split_label": config.data.dataset.split_label,
             "split_manifest_sha256": (
-                _sha256(args.split_manifest) if args.split_manifest else None
+                _sha256(config.data.dataset.split_manifest)
+                if config.data.dataset.split_manifest
+                else None
             ),
         },
-        "sample_index": args.sample_index,
-        "max_new_tokens": args.max_new_tokens,
-        "seed": args.seed,
+        "sample_index": config.sample_index,
+        "max_new_tokens": config.max_new_tokens,
+        "seed": config.seed,
         "prompt_tokens": int(request["prompt_ids"].numel()),
         "second_step_probe": probe,
         "cached": summary(cached),
@@ -145,42 +163,6 @@ def _validate(
         )
 
 
-def _batch_sizes(value: object) -> list[int]:
-    if not isinstance(value, str):
-        raise TypeError("batch sizes must be a comma-separated string.")
-    items = value.split(",")
-    if not items or any(not item.strip() for item in items):
-        raise ValueError("batch sizes must be positive integers.")
-    try:
-        return [_positive_int(item) for item in items]
-    except (TypeError, ValueError) as error:
-        raise ValueError("batch sizes must be positive integers.") from error
-
-
-def _positive_int(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, (int, str)):
-        raise TypeError("value must be a positive integer.")
-    try:
-        result = int(value)
-    except ValueError as error:
-        raise ValueError("value must be a positive integer.") from error
-    if result < 1:
-        raise ValueError("value must be a positive integer.")
-    return result
-
-
-def _non_negative_int(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, (int, str)):
-        raise TypeError("value must be a non-negative integer.")
-    try:
-        result = int(value)
-    except ValueError as error:
-        raise ValueError("value must be a non-negative integer.") from error
-    if result < 0:
-        raise ValueError("value must be a non-negative integer.")
-    return result
-
-
 def _seed(seed: int, device: torch.device) -> None:
     torch.set_rng_state(torch.Generator().manual_seed(seed).get_state())
     if device.type == "cuda":
@@ -191,32 +173,21 @@ def _sha256(path: str) -> str:
     return hashlib.sha256(Path(path).expanduser().read_bytes()).hexdigest()
 
 
-def _prepared_batch(batch: ModelBatch | object) -> ModelBatch:
+def _prepared_batch(
+    batch: TrainInput | object,
+    runtime: Runtime,
+    config: GenerationSmokeConfig,
+    *,
+    device: torch.device | None,
+) -> ModelBatch:
     if not isinstance(batch, ModelBatch):
-        raise TypeError("generation smoke requires prepared codec data.")
+        if config.data.encode_missing_codes:
+            return OnDeviceCodecMaterializer(runtime)(batch, device=device)
+        raise TypeError(
+            "generation smoke requires prepared codec data; set "
+            "data.encode_missing_codes=true to online encode raw waveform samples."
+        )
     return batch
-
-
-def parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--audio-tokenizer", required=True)
-    parser.add_argument("--sample-index", type=_non_negative_int, default=0)
-    parser.add_argument("--batch-sizes", type=_batch_sizes, default="1,2,4")
-    parser.add_argument("--data-root", default=None)
-    parser.add_argument("--split", default="train")
-    parser.add_argument("--dataset-filter", default="speech_translation_v1")
-    parser.add_argument("--disable-dataset-filter", action="store_true")
-    parser.add_argument("--split-manifest", default=None)
-    parser.add_argument("--split-label", default="train")
-    parser.add_argument("--max-new-tokens", type=_positive_int, default=2)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--codec", default="longcat")
-    parser.add_argument("--backbone", default="Qwen/Qwen3-0.6B")
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--dtype", default="bfloat16")
-    parser.add_argument("--attn-implementation", default="flash_attention_2")
-    return parser
 
 
 if __name__ == "__main__":

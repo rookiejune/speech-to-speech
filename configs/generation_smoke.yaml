@@ -1,0 +1,33 @@
+defaults:
+  - runtime: longcat
+  - data@data.dataset: wmt19_tts
+  - _self_
+  - experiment: null
+
+task: s2st
+run_name: generation_smoke
+repo_output_root: ${oc.env:SPEECH_TO_SPEECH_TRAIN_ROOT,${oc.env:DYNAMIC_HOME}/train/speech-to-speech}
+output_subdir: 004-real-cached-generation
+output_dir: ${repo_output_root}/${output_subdir}
+
+data:
+  codec: ${runtime.codec}
+  dataloader:
+    batch_size: 1
+    num_workers: 0
+    pin_memory: false
+    persistent_workers: false
+  shape: pair
+  encode_missing_codes: false
+
+sample_index: 0
+batch_sizes: [1, 2, 4]
+max_new_tokens: 2
+seed: 0
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${output_dir}/hydra
+  output_subdir: config

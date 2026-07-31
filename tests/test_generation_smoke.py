@@ -1,21 +1,22 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import call, patch
 
+from hydra import compose, initialize_config_dir
+from omegaconf import DictConfig, OmegaConf
+from omegaconf.errors import ValidationError
 import torch
 
 from scripts import _generation_benchmark as benchmark
 from scripts import _generation_probe as probe
+from scripts._generation_smoke_config import generation_smoke
 from scripts.generation_smoke import (
-    _batch_sizes,
-    _non_negative_int,
-    _positive_int,
     _seed,
     _validate,
-    parser,
 )
 from speech_to_speech.generation import Request, Result
 from speech_to_speech.model.acoustic import FlowModel
@@ -23,29 +24,73 @@ from speech_to_speech.task import Task
 
 
 class GenerationSmokeTest(unittest.TestCase):
-    def test_parser_validates_entry_budgets_before_execution(self) -> None:
-        parsed = parser().parse_args(_required_args())
+    def test_hydra_config_accepts_smoke_overrides(self) -> None:
+        with initialize_config_dir(
+            config_dir=str(Path(__file__).resolve().parents[1] / "configs"),
+            version_base=None,
+        ):
+            config = compose(
+                config_name="generation_smoke",
+                overrides=[
+                    "repo_output_root=/tmp/generation-smoke-test",
+                    "runtime.audio_tokenizer=/tmp/audio-tokenizer",
+                    "runtime.device=cpu",
+                    "batch_sizes=[1]",
+                    "data.dataset.filter=null",
+                    "data.encode_missing_codes=true",
+                ],
+            )
+            experiment_config = compose(
+                config_name="generation_smoke",
+                overrides=[
+                    "repo_output_root=/tmp/generation-smoke-test",
+                    "runtime.audio_tokenizer=/tmp/audio-tokenizer",
+                    "runtime.device=cpu",
+                    "experiment=generation_online_encode_smoke",
+                ],
+            )
+
+        parsed = generation_smoke(config)
+        experiment = generation_smoke(experiment_config)
+
+        self.assertEqual(parsed.sample_index, 0)
+        self.assertEqual(parsed.batch_sizes, [1])
+        self.assertEqual(parsed.max_new_tokens, 2)
+        self.assertIsNone(parsed.data.dataset.filter)
+        self.assertTrue(parsed.data.encode_missing_codes)
+        self.assertEqual(experiment.batch_sizes, [1])
+        self.assertIsNone(experiment.data.dataset.filter)
+        self.assertTrue(experiment.data.encode_missing_codes)
+
+    def test_config_validates_entry_budgets_before_execution(self) -> None:
+        parsed = generation_smoke(_config())
 
         self.assertEqual(parsed.sample_index, 0)
         self.assertEqual(parsed.batch_sizes, [1, 2, 4])
         self.assertEqual(parsed.max_new_tokens, 2)
 
         cases = (
-            ("--sample-index", "-1"),
-            ("--batch-sizes", "1,0"),
-            ("--batch-sizes", "1,,2"),
-            ("--max-new-tokens", "0"),
+            {"sample_index": -1},
+            {"batch_sizes": [1, 0]},
+            {"batch_sizes": []},
+            {"max_new_tokens": 0},
         )
-        for option, value in cases:
-            with self.subTest(option=option, value=value):
-                with self.assertRaises(SystemExit):
-                    parser().parse_args([*_required_args(), option, value])
+        for override in cases:
+            with self.subTest(override=override):
+                with self.assertRaises((TypeError, ValueError)):
+                    generation_smoke(_config(override))
 
-    def test_integer_validators_reject_boole(self) -> None:
-        for validator in (_positive_int, _non_negative_int, _batch_sizes):
-            with self.subTest(validator=validator.__name__):
-                with self.assertRaises(TypeError):
-                    validator(True)
+    def test_integer_config_rejects_booleans(self) -> None:
+        cases = (
+            {"sample_index": True},
+            {"seed": True},
+            {"max_new_tokens": True},
+            {"batch_sizes": [True]},
+        )
+        for override in cases:
+            with self.subTest(override=override):
+                with self.assertRaises((TypeError, ValidationError)):
+                    generation_smoke(_config(override))
 
     def test_cpu_generation_does_not_call_cuda_apis(self) -> None:
         model = cast(FlowModel, cast(object, _Model(torch.device("cpu"))))
@@ -167,15 +212,44 @@ class _Model:
         del args, kwargs
 
 
-def _required_args() -> list[str]:
-    return [
-        "--output-dir",
-        "/tmp/generation-smoke-test",
-        "--audio-tokenizer",
-        "/tmp/audio-tokenizer",
-        "--device",
-        "cpu",
-    ]
+def _config(override: dict[str, object] | None = None) -> DictConfig:
+    base = OmegaConf.create(
+        {
+            "task": "s2st",
+            "run_name": "generation_smoke",
+            "repo_output_root": "/tmp/generation-smoke-test",
+            "output_subdir": "004-real-cached-generation",
+            "output_dir": "/tmp/generation-smoke-test/004-real-cached-generation",
+            "data": {
+                "codec": "longcat",
+                "dataloader": {
+                    "batch_size": 1,
+                    "num_workers": 0,
+                    "pin_memory": False,
+                    "persistent_workers": False,
+                },
+                "shape": "pair",
+                "encode_missing_codes": False,
+                "dataset": {
+                    "name": "wmt19_tts",
+                    "root": None,
+                    "split": "train",
+                    "filter": "speech_translation_v1",
+                    "split_manifest": None,
+                    "split_label": "train",
+                    "toy_samples": 8,
+                    "toy_frames": 4,
+                },
+            },
+            "sample_index": 0,
+            "batch_sizes": [1, 2, 4],
+            "max_new_tokens": 2,
+            "seed": 0,
+        }
+    )
+    if override is None:
+        return cast(DictConfig, base)
+    return cast(DictConfig, OmegaConf.merge(base, override))
 
 
 def _request() -> Request:
