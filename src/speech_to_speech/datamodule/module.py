@@ -436,7 +436,7 @@ def _source_loader(
         return None
     batch_size = loader.batch_size
     return source.dataloader(
-        costs=1,
+        costs=None,
         max_batch_memory=batch_size,
         max_batch_samples=batch_size,
         shuffle=shuffle,
