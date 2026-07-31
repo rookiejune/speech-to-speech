@@ -17,6 +17,7 @@ from .chat import (
     to_request,
 )
 from .service import generate_responses
+from .rollout import RolloutRow, generate_rollouts, write_rollouts_jsonl
 from .eval.text import TextProbe, TextProbeResult, evaluate_text
 from .types import AcousticGeneration, AudioOutput, Request, Result
 
@@ -30,6 +31,7 @@ __all__ = [
     "Message",
     "Request",
     "Result",
+    "RolloutRow",
     "TextPart",
     "TextProbe",
     "TextProbeResult",
@@ -42,5 +44,7 @@ __all__ = [
     "decode_reference_codes",
     "evaluate_text",
     "generate_responses",
+    "generate_rollouts",
     "to_request",
+    "write_rollouts_jsonl",
 ]
