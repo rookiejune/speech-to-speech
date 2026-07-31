@@ -11,6 +11,7 @@ from typing_extensions import NotRequired
 class Outputs(TypedDict):
     loss: Tensor
     dpo: NotRequired[LossItem]
+    grpo: NotRequired[LossItem]
     token: NotRequired[LossItem]
     flow_matching: NotRequired[LossItem]
     repa: NotRequired[LossItem]
@@ -20,6 +21,7 @@ class Outputs(TypedDict):
 
 _UNITS = {
     "dpo": "preferences",
+    "grpo": "preferences",
     "token": "tokens",
     "flow_matching": "frames",
     "repa": "frames",
