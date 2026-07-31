@@ -71,7 +71,8 @@ class ScheduledDataLoader:
                         tuple(
                             _next_batch(key, iterators, self.loaders, cycles)
                             for key in window
-                        )
+                        ),
+                        loader_names=window,
                     )
                     continue
                 for key in window:

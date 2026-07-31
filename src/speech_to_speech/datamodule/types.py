@@ -765,6 +765,7 @@ TrainInput = Union[ModelBatch, RawSpeechBatch]
 @dataclass(frozen=True)
 class FusedBatch:
     batches: tuple[TrainInput, ...]
+    loader_names: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if not self.batches:
@@ -776,9 +777,21 @@ class FusedBatch:
             raise TypeError(
                 "FusedBatch microbatches must be ModelBatch or RawSpeechBatch."
             )
+        if self.loader_names is not None:
+            if len(self.loader_names) != len(self.batches):
+                raise ValueError(
+                    "FusedBatch loader_names must align with microbatches."
+                )
+            if any(not isinstance(name, str) or not name for name in self.loader_names):
+                raise TypeError(
+                    "FusedBatch loader_names must be non-empty strings."
+                )
 
     def pin_memory(self) -> FusedBatch:
-        return FusedBatch(tuple(batch.pin_memory() for batch in self.batches))
+        return FusedBatch(
+            tuple(batch.pin_memory() for batch in self.batches),
+            self.loader_names,
+        )
 
 
 TrainBatch = Union[TrainInput, FusedBatch]

@@ -30,10 +30,10 @@ from ..generation.eval.text import (
     evaluate_text,
 )
 from ..generation.types import Request, Result
-from ..loss import validation_metrics
-from ..loss.objective import Objective
+from ..loss.module import Objective
 from ..loss.protocol import TokenObjectiveModel
 from ..loss.types import Outputs, combine_outputs
+from ..loss.validation import validation_metrics
 from ..generation.protocol import TextEvaluationModel
 from ..prediction import PredictionModality
 from ..task import Task
@@ -88,11 +88,13 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         self.objective = objective
         self.batch_materializer = batch_materializer
         self._current_loss_outputs: Outputs | None = None
+        self._current_gradient_loss_groups: dict[str, Outputs] | None = None
         self.mt_validation_evaluator = TextComparisonEvaluator()
         self._mt_validation_seen = False
 
     def training_step(self, batch: TrainBatch, batch_idx: int = 0):
         del batch_idx
+        self._current_gradient_loss_groups = None
         outputs = self._training_outputs(batch)
         self._current_loss_outputs = outputs
         self.log(
@@ -168,7 +170,8 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
                 tuple(
                     self.transfer_batch_to_device(child, device, dataloader_idx)
                     for child in batch.batches
-                )
+                ),
+                batch.loader_names,
             )
         return super().transfer_batch_to_device(batch, device, dataloader_idx)
 
@@ -178,7 +181,19 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
                 self._loss_outputs(self.materialize_batch(child))
                 for child in batch.batches
             ]
-            return _combine_training_outputs(outputs)
+            combined = _combine_training_outputs(outputs)
+            if batch.loader_names is not None:
+                grouped: dict[str, list[Outputs]] = {}
+                for name, output in zip(batch.loader_names, outputs):
+                    grouped.setdefault(name, []).append(output)
+                self._current_gradient_loss_groups = {
+                    "batch": combined,
+                    **{
+                        name: _combine_training_outputs(values)
+                        for name, values in grouped.items()
+                    },
+                }
+            return combined
         return self._loss_outputs(self.materialize_batch(batch))
 
     def _loss_outputs(self, batch: ModelBatch) -> Outputs:
@@ -211,8 +226,14 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
             raise RuntimeError("loss outputs are unavailable outside a training step")
         return self._current_loss_outputs
 
+    def current_gradient_loss_groups(self) -> Mapping[str, Outputs]:
+        if self._current_gradient_loss_groups is None:
+            return {"batch": self.current_loss_outputs()}
+        return self._current_gradient_loss_groups
+
     def on_after_backward(self) -> None:
         self._current_loss_outputs = None
+        self._current_gradient_loss_groups = None
 
     def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         checkpoint[_AUDIO_ROUTE_KEY] = _audio_route_payload(

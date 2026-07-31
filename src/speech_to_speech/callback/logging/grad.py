@@ -1,22 +1,29 @@
 from __future__ import annotations
 
-from anytrain.lightning import GradientLoggerCallback, GradientNormLoggerCallback
+from collections.abc import Mapping, Sequence
+
+from anytrain.lightning import (
+    GradientComparison,
+    GradientNormLoggerCallback,
+    GradientProbe,
+    GradientProbeLoggerCallback,
+)
 from lightning import LightningModule, Trainer
 
 from ..interval import TrainInterval
 
 
-class GradLogger(GradientLoggerCallback):
+class GradLogger(GradientProbeLoggerCallback):
     def __init__(
         self,
-        loss_pair: tuple[str, str],
-        parameter_name: str,
+        comparisons: Sequence[GradientComparison],
+        probes: Sequence[GradientProbe] | Mapping[str, Sequence[str]],
         every_n_steps: int = 5_000,
         eps: float = 1e-12,
     ) -> None:
         super().__init__(
-            loss_pair,
-            parameter_name,
+            comparisons,
+            probes,
             every_n_steps=every_n_steps,
             eps=eps,
         )
@@ -56,29 +63,3 @@ class GradNormLogger(GradientNormLoggerCallback):
         every_n_steps: int = 100,
     ) -> None:
         super().__init__(tag=tag, every_n_steps=every_n_steps)
-        self.interval = TrainInterval(every_n_steps=every_n_steps)
-        self._run_current_batch = False
-
-    def on_train_batch_start(
-        self,
-        trainer: Trainer,
-        pl_module: LightningModule,
-        batch: object,
-        batch_idx: int,
-    ) -> None:
-        del batch_idx, batch
-        self._run_current_batch = self.interval.should_run(int(trainer.global_step))
-
-    def should_run(
-        self,
-        trainer: Trainer,
-        pl_module: LightningModule,
-    ) -> bool:
-        del trainer, pl_module
-        return getattr(self, "_run_current_batch", False)
-
-    def state_dict(self) -> dict[str, dict[str, int | None]]:
-        return {"interval": self.interval.state_dict()}
-
-    def load_state_dict(self, state_dict: dict[str, dict[str, int | None]]) -> None:
-        self.interval.load_state_dict(state_dict.get("interval", {}))

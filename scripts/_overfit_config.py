@@ -63,11 +63,18 @@ class EvaluationCallbackConfig:
 
 
 @dataclass
-class GradientPairCallbackConfig:
+class GradientProbeConfig:
+    parameters: list[str] = field(default_factory=list)
+    match: str = "exact"
+    trainable_only: bool = True
+
+
+@dataclass
+class GradientProbeCallbackConfig:
     enabled: bool = MISSING
     every_n_steps: int = MISSING
-    full_parameter: str = MISSING
-    partial_parameter: str = MISSING
+    probes: dict[str, GradientProbeConfig] = field(default_factory=dict)
+    partial_probes: dict[str, GradientProbeConfig] = field(default_factory=dict)
 
 
 @dataclass
@@ -88,8 +95,8 @@ class OverfitCallbacksConfig:
         default_factory=TextRetentionCallbackConfig
     )
     grad_norm: GradNormCallbackConfig = field(default_factory=GradNormCallbackConfig)
-    gradient_pair: GradientPairCallbackConfig = field(
-        default_factory=GradientPairCallbackConfig
+    gradient_probe: GradientProbeCallbackConfig = field(
+        default_factory=GradientProbeCallbackConfig
     )
     flow_matching: FlowMatchingCallbackConfig = field(
         default_factory=FlowMatchingCallbackConfig
@@ -174,29 +181,51 @@ def _validate_callbacks(config: OverfitCallbacksConfig) -> None:
         "callbacks.grad_norm.every_n_steps",
     )
     positive_integer(
-        config.gradient_pair.every_n_steps,
-        "callbacks.gradient_pair.every_n_steps",
+        config.gradient_probe.every_n_steps,
+        "callbacks.gradient_probe.every_n_steps",
     )
-    non_empty_string(
-        config.gradient_pair.full_parameter,
-        "callbacks.gradient_pair.full_parameter",
+    _validate_gradient_probes(
+        config.gradient_probe.probes,
+        "callbacks.gradient_probe.probes",
     )
-    non_empty_string(
-        config.gradient_pair.partial_parameter,
-        "callbacks.gradient_pair.partial_parameter",
+    _validate_gradient_probes(
+        config.gradient_probe.partial_probes,
+        "callbacks.gradient_probe.partial_probes",
     )
-    if config.gradient_pair.full_parameter == config.gradient_pair.partial_parameter:
-        raise ValueError("gradient pair full and partial parameters must differ.")
+    if config.gradient_probe.enabled and not config.gradient_probe.probes:
+        raise ValueError("enabled gradient probe requires at least one probe.")
     positive_integer(
         config.flow_matching.every_n_steps,
         "callbacks.flow_matching.every_n_steps",
     )
 
 
+def _validate_gradient_probes(
+    probes: dict[str, GradientProbeConfig],
+    path: str,
+) -> None:
+    if not isinstance(probes, dict):
+        raise TypeError(f"{path} must be a mapping.")
+    for name, probe in probes.items():
+        non_empty_string(name, f"{path} probe name")
+        if probe.match not in {"exact", "regex"}:
+            raise ValueError(f"{path}.{name}.match must be 'exact' or 'regex'.")
+        if not isinstance(probe.trainable_only, bool):
+            raise TypeError(f"{path}.{name}.trainable_only must be a boolean.")
+        if not probe.parameters:
+            raise ValueError(f"{path}.{name}.parameters must not be empty.")
+        for index, parameter in enumerate(probe.parameters):
+            non_empty_string(
+                parameter,
+                f"{path}.{name}.parameters[{index}]",
+            )
+
+
 __all__ = [
     "EvaluationCallbackConfig",
     "FlowMatchingCallbackConfig",
-    "GradientPairCallbackConfig",
+    "GradientProbeCallbackConfig",
+    "GradientProbeConfig",
     "OverfitCallbacksConfig",
     "OverfitConfig",
     "OverfitFlowConfig",

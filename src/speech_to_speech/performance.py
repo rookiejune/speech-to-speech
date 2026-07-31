@@ -5,7 +5,7 @@ from typing import Any, Protocol, cast
 
 import torch
 from anydataset.types import Modality
-from anytrain.lightning import GradientLoggerCallback
+from anytrain.lightning import GradientProbeLoggerCallback
 from anytrain.lightning.perf import training_flops_from_forward
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
@@ -22,7 +22,8 @@ from ._flops import (
     rvq_decoder,
 )
 from .datamodule.types import ModelBatch
-from .loss import FlowObjective, LossItem, RVQObjective, TokenObjective
+from .loss.module import FlowObjective, RVQObjective, TokenObjective
+from .loss.types import LossItem
 from .model import Model
 from .model._helper import require_embedding
 from .model.acoustic import FlowModel, HiddenConditionAdapter, RVQModel
@@ -58,7 +59,7 @@ class TrainingFlops:
         if not isinstance(batch, ModelBatch):
             raise TypeError("training FLOPs require a ModelBatch.")
         callbacks = cast(_Trainer, cast(object, trainer)).callbacks
-        if any(isinstance(callback, GradientLoggerCallback) for callback in callbacks):
+        if any(isinstance(callback, GradientProbeLoggerCallback) for callback in callbacks):
             raise ValueError(
                 "training FLOPs do not support GradLogger because it adds "
                 "extra autograd work."

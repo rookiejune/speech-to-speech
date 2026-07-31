@@ -6,7 +6,12 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import torch
-from anytrain.lightning import ModelCheckpoint
+from anytrain.lightning import (
+    GradientComparison,
+    GradientProbe,
+    GradientTarget,
+    ModelCheckpoint,
+)
 from hydra import compose, initialize_config_dir
 from hydra.errors import ConfigCompositionException
 from omegaconf import DictConfig
@@ -355,45 +360,59 @@ class ConfigTest(unittest.TestCase):
                 "callbacks.performance.enabled=true",
             )
         )
-        loss_pair = ("token", "flow_matching")
+        flow_comparison = GradientComparison(
+            GradientTarget("token"),
+            GradientTarget("flow_matching"),
+        )
 
-        gradient = _gradient_logger(default, AcousticType.FLOW, loss_pair)
+        gradient = _gradient_logger(default, AcousticType.FLOW, flow_comparison)
 
         self.assertIs(gradient, grad_logger.return_value)
         grad_logger.assert_called_once_with(
-            loss_pair,
-            "model.backbone.model.layers.0.self_attn.q_proj.weight",
+            (
+                flow_comparison,
+            ),
+            _default_gradient_probes(),
             every_n_steps=1,
         )
         grad_logger.reset_mock()
 
-        rvq_pair = ("token", "rvq")
-        rvq_gradient = _gradient_logger(default, AcousticType.RVQ, rvq_pair)
+        rvq_comparison = GradientComparison(
+            GradientTarget("token"),
+            GradientTarget("rvq"),
+        )
+        rvq_gradient = _gradient_logger(default, AcousticType.RVQ, rvq_comparison)
 
         self.assertIs(rvq_gradient, grad_logger.return_value)
         grad_logger.assert_called_once_with(
-            rvq_pair,
-            "model.backbone.model.layers.0.self_attn.q_proj.weight",
+            (
+                rvq_comparison,
+            ),
+            _default_gradient_probes(),
             every_n_steps=1,
         )
         grad_logger.reset_mock()
 
-        self.assertIsNone(_gradient_logger(performance, AcousticType.FLOW, loss_pair))
+        self.assertIsNone(
+            _gradient_logger(performance, AcousticType.FLOW, flow_comparison)
+        )
         grad_logger.assert_not_called()
 
         frozen = overfit(_compose("overfit", "parameter_policy=speech_interface"))
-        self.assertIsNone(_gradient_logger(frozen, AcousticType.RVQ, rvq_pair))
+        self.assertIsNone(_gradient_logger(frozen, AcousticType.RVQ, rvq_comparison))
         grad_logger.assert_not_called()
 
         partial = overfit(
             _compose("overfit", "parameter_policy=speech_interface_top_third")
         )
-        partial_gradient = _gradient_logger(partial, AcousticType.RVQ, rvq_pair)
+        partial_gradient = _gradient_logger(partial, AcousticType.RVQ, rvq_comparison)
 
         self.assertIs(partial_gradient, grad_logger.return_value)
         grad_logger.assert_called_once_with(
-            rvq_pair,
-            "model.backbone.model.norm.weight",
+            (
+                rvq_comparison,
+            ),
+            (GradientProbe("backbone_norm", ("model.backbone.model.norm.weight",)),),
             every_n_steps=1,
         )
 
@@ -897,6 +916,71 @@ class ConfigTest(unittest.TestCase):
         )
         self.assertTrue(checkpoint.async_save)
         self.assertFalse(checkpoint._enable_version_counter)
+
+    def test_train_constructs_gradient_probe_callback(self):
+        config = parse_train(
+            _compose(
+                "train",
+                "callbacks.gradient_probe.enabled=true",
+            )
+        )
+        built = Mock()
+
+        with patch("scripts.train.GradLogger", return_value=built) as factory:
+            callbacks = train_script.training_callbacks(
+                config,
+                Path("/tmp/output"),
+                Mock(),
+            )
+
+        self.assertIn(built, callbacks)
+        factory.assert_called_once_with(
+            (
+                GradientComparison(
+                    GradientTarget("token", "asr"),
+                    GradientTarget("token", "tts"),
+                ),
+            ),
+            (
+                GradientProbe(
+                    "backbone_l0_attn_lora",
+                    (
+                        r"model\.backbone\.model\.layers\.0\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.lora_[AB]\..*\.weight$",
+                    ),
+                    match="regex",
+                ),
+                GradientProbe(
+                    "backbone_l0_ffn_lora",
+                    (
+                        r"model\.backbone\.model\.layers\.0\.mlp\.(gate_proj|up_proj|down_proj)\.lora_[AB]\..*\.weight$",
+                    ),
+                    match="regex",
+                ),
+            ),
+            every_n_steps=10_000,
+        )
+
+    def test_train_performance_omits_gradient_probe_callback(self):
+        config = parse_train(
+            _compose(
+                "train",
+                "callbacks.gradient_probe.enabled=true",
+            )
+        )
+        performance = Mock()
+
+        with (
+            patch("scripts.train.performance", return_value=performance),
+            patch("scripts.train.GradLogger") as factory,
+        ):
+            callbacks = train_script.training_callbacks(
+                config,
+                Path("/tmp/output"),
+                Mock(),
+            )
+
+        self.assertIs(callbacks[0], performance)
+        factory.assert_not_called()
 
     @patch("scripts.train.build_trainer")
     @patch("scripts.train.training_callbacks", return_value=[])
@@ -1408,6 +1492,29 @@ class ConfigTest(unittest.TestCase):
                     re.findall(r"\bexperiment=([a-z0-9_]+)", source),
                     [expected],
                 )
+
+
+def _default_gradient_probes() -> tuple[GradientProbe, ...]:
+    return (
+        GradientProbe(
+            "backbone_l0_attn",
+            (
+                "model.backbone.model.layers.0.self_attn.q_proj.weight",
+                "model.backbone.model.layers.0.self_attn.k_proj.weight",
+                "model.backbone.model.layers.0.self_attn.v_proj.weight",
+                "model.backbone.model.layers.0.self_attn.o_proj.weight",
+            ),
+        ),
+        GradientProbe(
+            "backbone_l0_ffn",
+            (
+                "model.backbone.model.layers.0.mlp.gate_proj.weight",
+                "model.backbone.model.layers.0.mlp.up_proj.weight",
+                "model.backbone.model.layers.0.mlp.down_proj.weight",
+            ),
+        ),
+    )
+
 
 def _compose(config_name: str, *overrides: str) -> DictConfig:
     root = Path(__file__).parents[1]

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
+from anytrain.lightning import GradientComparison, GradientProbe, GradientTarget
 
 from speech_to_speech.callback.logging import (
     FlowMatchingLogger,
@@ -15,7 +16,7 @@ from speech_to_speech.callback.logging import (
 )
 from speech_to_speech.callback import TrainInterval
 from speech_to_speech.datamodule.types import FusedBatch, ModelBatch, ModelSample
-from speech_to_speech.loss import LossItem, Outputs, loss_items
+from speech_to_speech.loss.types import LossItem, Outputs, loss_items
 from speech_to_speech.pl_module import Config, SpeechToSpeechModule
 from speech_to_speech.task import Task
 
@@ -65,7 +66,16 @@ class LoggingTest(unittest.TestCase):
         torch.testing.assert_close(module.log.call_args.args[1], torch.tensor(13.0))
 
     def test_grad_logger_runs_once_for_an_accumulated_global_step(self):
-        callback = GradLogger(("token", "rvq"), "weight", every_n_steps=2)
+        callback = GradLogger(
+            (
+                GradientComparison(
+                    GradientTarget("token"),
+                    GradientTarget("rvq"),
+                ),
+            ),
+            (GradientProbe("parameter", ("weight",)),),
+            every_n_steps=2,
+        )
         trainer = SimpleNamespace(global_step=2)
         module = SimpleNamespace()
 

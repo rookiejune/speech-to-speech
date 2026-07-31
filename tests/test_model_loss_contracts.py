@@ -28,17 +28,11 @@ from speech_to_speech.audio_route import (
     BICODEC_GENERATE_GLOBAL,
     BICODEC_REUSE_PROMPT_GLOBAL,
 )
-from speech_to_speech.loss import (
-    FlowObjective,
-    LossItem,
-    Objective,
-    Outputs,
-    RVQObjective,
-    TokenObjective,
-)
-from speech_to_speech.loss.flow_matching import AcousticFlowLoss
+from semantic_acoustic_codec.loss.flow import FlowLoss
+
+from speech_to_speech.loss.module import FlowObjective, Objective, RVQObjective, TokenObjective
 from speech_to_speech.loss.token import TokenLoss
-from speech_to_speech.loss.types import combine_outputs
+from speech_to_speech.loss.types import LossItem, Outputs, combine_outputs
 from speech_to_speech.loss.validation import validation_metrics
 from speech_to_speech.model.base import Config, Model
 from speech_to_speech.model.audio_output import (
@@ -830,7 +824,10 @@ class ModelLossContractTest(unittest.TestCase):
         mt = _batch(Task.MT, token_labels=torch.tensor([[-100, 1]]))
 
         with patch.object(module, "log"):
-            outputs = module.training_step(FusedBatch((asr, mt)), 0)
+            outputs = module.training_step(
+                FusedBatch((asr, mt), loader_names=("asr", "mt")),
+                0,
+            )
 
         self.assertEqual(objective.tasks, [Task.ASR, Task.MT])
         torch.testing.assert_close(outputs["loss"], torch.tensor(2.0))
@@ -841,6 +838,11 @@ class ModelLossContractTest(unittest.TestCase):
             outputs["token"].details["tokens"],
             torch.tensor([1.0, 3.0]),
         )
+        groups = module.current_gradient_loss_groups()
+        self.assertEqual(tuple(groups), ("batch", "asr", "mt"))
+        torch.testing.assert_close(groups["batch"]["loss"], torch.tensor(2.0))
+        torch.testing.assert_close(groups["asr"]["loss"], torch.tensor(1.0))
+        torch.testing.assert_close(groups["mt"]["loss"], torch.tensor(3.0))
 
     def test_validation_step_logs_effective_unit_weighted_metrics(self):
         module = SpeechToSpeechModule(
@@ -1166,7 +1168,7 @@ class ModelLossContractTest(unittest.TestCase):
         decoder = _NonfinitePaddedDecoder()
         mask = torch.tensor([[True, False]])
 
-        item = AcousticFlowLoss()(
+        item = FlowLoss()(
             decoder,
             torch.zeros(1, 2, 2),
             torch.zeros(1, 2, 1),

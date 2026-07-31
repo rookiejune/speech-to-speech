@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Union, cast
 
 import hydra
 import torch
+from anytrain.lightning import GradientComparison, GradientProbe, GradientTarget
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig
@@ -35,7 +36,7 @@ from speech_to_speech.stage import ParameterGroup, apply_parameter_policy
 from speech_to_speech.task import Task
 
 if TYPE_CHECKING:
-    from scripts._overfit_config import OverfitConfig
+    from scripts._overfit_config import GradientProbeConfig, OverfitConfig
 
 if __package__:
     from ._overfit_config import (
@@ -115,22 +116,29 @@ def run(config: OverfitConfig) -> None:
             output_dir,
             every_n_steps=max(1, config.train.max_steps // 5),
             seeds=range(4),
-        )
+    )
     summary = LossSummary()
-    loss_pair: tuple[str, str] | None = None
+    gradient_comparison: GradientComparison | None = None
     if acoustic_type is AcousticType.FLOW:
-        loss_pair = (
+        left_loss, right_loss = (
             ("flow_matching", "repa")
             if repa_weight is not None
             else ("token", "flow_matching")
         )
+        gradient_comparison = GradientComparison(
+            GradientTarget(left_loss),
+            GradientTarget(right_loss),
+        )
     elif acoustic_type is AcousticType.RVQ:
-        loss_pair = ("token", "rvq")
+        gradient_comparison = GradientComparison(
+            GradientTarget("token"),
+            GradientTarget("rvq"),
+        )
     callbacks = training_callbacks(
         config,
         rt,
         acoustic_type=acoustic_type,
-        loss_pair=loss_pair,
+        gradient_comparison=gradient_comparison,
         task=task,
         summary=summary,
         evaluation=evaluation,
@@ -203,7 +211,7 @@ def training_callbacks(
     runtime: Runtime,
     *,
     acoustic_type: AcousticType,
-    loss_pair: tuple[str, str] | None,
+    gradient_comparison: GradientComparison | None,
     task: Task,
     summary: LossSummary,
     evaluation: AcousticEvaluation | None,
@@ -222,7 +230,7 @@ def training_callbacks(
                 every_n_steps=flow.every_n_steps,
             )
         )
-    gradient = _gradient_logger(config, acoustic_type, loss_pair)
+    gradient = _gradient_logger(config, acoustic_type, gradient_comparison)
     if gradient is not None:
         callbacks.append(gradient)
     grad_norm = config.callbacks.grad_norm
@@ -300,9 +308,9 @@ def _device(config: RuntimeConfig) -> torch.device | None:
 def _gradient_logger(
     config: OverfitConfig,
     acoustic_type: AcousticType,
-    loss_pair: tuple[str, str] | None,
+    gradient_comparison: GradientComparison | None,
 ) -> GradLogger | None:
-    callback = config.callbacks.gradient_pair
+    callback = config.callbacks.gradient_probe
     if (
         not callback.enabled
         or acoustic_type is AcousticType.NONE
@@ -312,17 +320,35 @@ def _gradient_logger(
     policy = config.parameter_policy.spec()
     if ParameterGroup.BACKBONE not in policy.trainable_groups:
         return None
-    if loss_pair is None:
+    if gradient_comparison is None:
         raise RuntimeError("acoustic composition metadata is unavailable.")
-    parameter_name = (
-        callback.partial_parameter
-        if policy.backbone_top_fraction is not None and policy.backbone_top_fraction < 1
-        else callback.full_parameter
+    selected_probes = (
+        callback.partial_probes
+        if (
+            policy.backbone_top_fraction is not None
+            and policy.backbone_top_fraction < 1
+            and callback.partial_probes
+        )
+        else callback.probes
     )
     return GradLogger(
-        loss_pair,
-        parameter_name,
+        (gradient_comparison,),
+        _gradient_probes(selected_probes),
         every_n_steps=callback.every_n_steps,
+    )
+
+
+def _gradient_probes(
+    probes: dict[str, "GradientProbeConfig"],
+) -> tuple[GradientProbe, ...]:
+    return tuple(
+        GradientProbe(
+            name=name,
+            parameters=tuple(probe.parameters),
+            match=probe.match,
+            trainable_only=probe.trainable_only,
+        )
+        for name, probe in probes.items()
     )
 
 

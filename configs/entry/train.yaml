@@ -76,6 +76,27 @@ callbacks:
   grad_norm:
     enabled: false
     every_n_steps: 100
+  gradient_probe:
+    enabled: false
+    every_n_steps: 10000
+    comparisons:
+      - left:
+          loss: token
+          group: asr
+        right:
+          loss: token
+          group: tts
+    probes:
+      backbone_l0_attn_lora:
+        match: regex
+        trainable_only: true
+        parameters:
+          - model\.backbone\.model\.layers\.0\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.lora_[AB]\..*\.weight$
+      backbone_l0_ffn_lora:
+        match: regex
+        trainable_only: true
+        parameters:
+          - model\.backbone\.model\.layers\.0\.mlp\.(gate_proj|up_proj|down_proj)\.lora_[AB]\..*\.weight$
   checkpoint:
     filename: step-{step:08d}
     save_last: true

@@ -5,6 +5,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from anytrain.lightning import GradientComparison, GradientProbe, GradientTarget
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig
 
@@ -99,8 +100,8 @@ class OverfitContractTest(unittest.TestCase):
                 "callbacks.text_retention.every_n_steps=3",
                 "callbacks.text_retention.max_new_tokens=9",
                 "callbacks.grad_norm.every_n_steps=4",
-                "callbacks.gradient_pair.every_n_steps=5",
-                "callbacks.gradient_pair.full_parameter=full.weight",
+                "callbacks.gradient_probe.every_n_steps=5",
+                "callbacks.gradient_probe.probes.backbone_l0_attn.parameters=[full.weight]",
                 "callbacks.flow_matching.every_n_steps=6",
             )
         )
@@ -128,7 +129,10 @@ class OverfitContractTest(unittest.TestCase):
                 config,
                 runtime,
                 acoustic_type=AcousticType.FLOW,
-                loss_pair=("token", "flow_matching"),
+                gradient_comparison=GradientComparison(
+                    GradientTarget("token"),
+                    GradientTarget("flow_matching"),
+                ),
                 task=Task.TTS,
                 summary=summary,
                 evaluation=evaluation,
@@ -154,8 +158,23 @@ class OverfitContractTest(unittest.TestCase):
             every_n_steps=6,
         )
         factories["GradLogger"].assert_called_once_with(
-            ("token", "flow_matching"),
-            "full.weight",
+            (
+                GradientComparison(
+                    GradientTarget("token"),
+                    GradientTarget("flow_matching"),
+                ),
+            ),
+            (
+                GradientProbe("backbone_l0_attn", ("full.weight",)),
+                GradientProbe(
+                    "backbone_l0_ffn",
+                    (
+                        "model.backbone.model.layers.0.mlp.gate_proj.weight",
+                        "model.backbone.model.layers.0.mlp.up_proj.weight",
+                        "model.backbone.model.layers.0.mlp.down_proj.weight",
+                    ),
+                ),
+            ),
             every_n_steps=5,
         )
         factories["GradNormLogger"].assert_called_once_with(
@@ -187,7 +206,7 @@ class OverfitContractTest(unittest.TestCase):
                 "callbacks.evaluation.enabled=false",
                 "callbacks.text_retention.enabled=false",
                 "callbacks.grad_norm.enabled=false",
-                "callbacks.gradient_pair.enabled=false",
+                "callbacks.gradient_probe.enabled=false",
                 "callbacks.flow_matching.enabled=false",
             )
         )
@@ -205,7 +224,10 @@ class OverfitContractTest(unittest.TestCase):
                 config,
                 runtime,
                 acoustic_type=AcousticType.FLOW,
-                loss_pair=("token", "flow_matching"),
+                gradient_comparison=GradientComparison(
+                    GradientTarget("token"),
+                    GradientTarget("flow_matching"),
+                ),
                 task=Task.TTS,
                 summary=summary,
                 evaluation=None,
@@ -232,7 +254,7 @@ class OverfitContractTest(unittest.TestCase):
                 config,
                 Mock(),
                 acoustic_type=AcousticType.NONE,
-                loss_pair=None,
+                gradient_comparison=None,
                 task=Task.TTS,
                 summary=Mock(),
                 evaluation=None,
@@ -241,13 +263,13 @@ class OverfitContractTest(unittest.TestCase):
         self.assertIs(callbacks[0], performance)
         self.assertIs(callbacks[1], oom)
 
-    def test_partial_policy_uses_the_configured_partial_parameter(self) -> None:
+    def test_partial_policy_uses_the_configured_partial_probe(self) -> None:
         config = overfit(
             _compose(
                 "overfit",
                 "parameter_policy=speech_interface_top_third",
                 "model/acoustic=rvq",
-                "callbacks.gradient_pair.partial_parameter=partial.weight",
+                "callbacks.gradient_probe.partial_probes.backbone_norm.parameters=[partial.weight]",
             )
         )
 
@@ -255,13 +277,21 @@ class OverfitContractTest(unittest.TestCase):
             built = _gradient_logger(
                 config,
                 AcousticType.RVQ,
-                ("token", "rvq"),
+                GradientComparison(
+                    GradientTarget("token"),
+                    GradientTarget("rvq"),
+                ),
             )
 
         self.assertIs(built, logger.return_value)
         logger.assert_called_once_with(
-            ("token", "rvq"),
-            "partial.weight",
+            (
+                GradientComparison(
+                    GradientTarget("token"),
+                    GradientTarget("rvq"),
+                ),
+            ),
+            (GradientProbe("backbone_norm", ("partial.weight",)),),
             every_n_steps=1,
         )
 
@@ -286,14 +316,24 @@ class OverfitContractTest(unittest.TestCase):
                 "callbacks.grad_norm.every_n_steps",
             ),
             (
-                "callbacks.gradient_pair.every_n_steps=0",
+                "callbacks.gradient_probe.every_n_steps=0",
                 ValueError,
-                "callbacks.gradient_pair.every_n_steps",
+                "callbacks.gradient_probe.every_n_steps",
             ),
             (
-                "callbacks.gradient_pair.full_parameter=''",
+                "callbacks.gradient_probe.probes.backbone_l0_attn.parameters=['']",
                 TypeError,
-                "callbacks.gradient_pair.full_parameter",
+                "callbacks.gradient_probe.probes.backbone_l0_attn.parameters",
+            ),
+            (
+                "callbacks.gradient_probe.probes.backbone_l0_attn.parameters=[]",
+                ValueError,
+                "callbacks.gradient_probe.probes.backbone_l0_attn.parameters",
+            ),
+            (
+                "callbacks.gradient_probe.probes.backbone_l0_attn.match=glob",
+                ValueError,
+                "callbacks.gradient_probe.probes.backbone_l0_attn.match",
             ),
             (
                 "callbacks.flow_matching.every_n_steps=0",
@@ -308,15 +348,6 @@ class OverfitContractTest(unittest.TestCase):
                 self.assertRaisesRegex(error, message),
             ):
                 overfit(_compose("overfit", override))
-
-        with self.assertRaisesRegex(ValueError, "must differ"):
-            overfit(
-                _compose(
-                    "overfit",
-                    "callbacks.gradient_pair.partial_parameter="
-                    "model.backbone.model.layers.0.self_attn.q_proj.weight",
-                )
-            )
 
 
 def _compose(config_name: str, *overrides: str) -> DictConfig:

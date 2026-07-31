@@ -19,7 +19,8 @@ from speech_to_speech._flops import (
     rvq_decoder,
 )
 from speech_to_speech.datamodule.types import AcousticTarget, ModelBatch
-from speech_to_speech.loss import FlowObjective, LossItem, RVQObjective, TokenObjective
+from speech_to_speech.loss.module import FlowObjective, RVQObjective, TokenObjective
+from speech_to_speech.loss.types import LossItem
 from speech_to_speech.model import (
     AdapterType,
     AudioInputAdapterConfig,
@@ -465,9 +466,19 @@ def _outputs(*, acoustic: str | None = None) -> dict[str, Any]:
 
 
 def _grad_logger() -> Any:
+    from anytrain.lightning import GradientComparison, GradientProbe, GradientTarget
+
     from speech_to_speech.callback.logging import GradLogger
 
-    return GradLogger(("token", "token"), "unused")
+    return GradLogger(
+        (
+            GradientComparison(
+                GradientTarget("token"),
+                GradientTarget("token"),
+            ),
+        ),
+        (GradientProbe("parameter", ("unused",)),),
+    )
 
 
 def _flops(

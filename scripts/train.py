@@ -7,13 +7,20 @@ from typing import TYPE_CHECKING, cast
 
 import hydra
 import torch
-from anytrain.lightning import ModelCheckpoint, validation
+from anytrain.lightning import (
+    GradientComparison,
+    GradientProbe,
+    GradientTarget,
+    ModelCheckpoint,
+    validation,
+)
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig
 
 from speech_to_speech.callback import OOMDiagnostics, OnDeviceCodecMaterializer
 from speech_to_speech.callback.logging import (
+    GradLogger,
     GradNormLogger,
     LossSummary,
     OutputsLogger,
@@ -29,7 +36,11 @@ from speech_to_speech.stage import StageLoaderConfig, apply_parameter_policy
 from speech_to_speech.task import Task
 
 if TYPE_CHECKING:
-    from scripts._train_config import StagedTrainConfig
+    from scripts._train_config import (
+        GradientComparisonConfig,
+        GradientProbeConfig,
+        StagedTrainConfig,
+    )
 
 if __package__:
     from ._train_config import train as parse_config
@@ -267,6 +278,9 @@ def training_callbacks(
                 max_new_tokens=config.callbacks.text_retention.max_new_tokens,
             )
         )
+    gradient = _gradient_logger(config, performance_callback)
+    if gradient is not None:
+        callbacks.append(gradient)
     if config.callbacks.grad_norm.enabled and performance_callback is None:
         callbacks.append(
             GradNormLogger(
@@ -286,6 +300,46 @@ def training_callbacks(
             )
         )
     return callbacks
+
+
+def _gradient_logger(
+    config: StagedTrainConfig,
+    performance_callback: Callback | None,
+) -> GradLogger | None:
+    callback = config.callbacks.gradient_probe
+    if not callback.enabled or performance_callback is not None:
+        return None
+    return GradLogger(
+        _gradient_comparisons(callback.comparisons),
+        _gradient_probes(callback.probes),
+        every_n_steps=callback.every_n_steps,
+    )
+
+
+def _gradient_probes(
+    probes: dict[str, "GradientProbeConfig"],
+) -> tuple[GradientProbe, ...]:
+    return tuple(
+        GradientProbe(
+            name=name,
+            parameters=tuple(probe.parameters),
+            match=probe.match,
+            trainable_only=probe.trainable_only,
+        )
+        for name, probe in probes.items()
+    )
+
+
+def _gradient_comparisons(
+    comparisons: list["GradientComparisonConfig"],
+) -> tuple[GradientComparison, ...]:
+    return tuple(
+        GradientComparison(
+            GradientTarget(comparison.left.loss, comparison.left.group),
+            GradientTarget(comparison.right.loss, comparison.right.group),
+        )
+        for comparison in comparisons
+    )
 
 
 if __name__ == "__main__":

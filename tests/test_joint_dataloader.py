@@ -318,6 +318,21 @@ class ScheduledDataLoaderTest(unittest.TestCase):
             self.fail("scheduled loader did not return a fused batch")
         self.assertEqual(len(fused.batches), 10)
         self.assertEqual(
+            fused.loader_names,
+            (
+                "asr",
+                "tts",
+                "asr",
+                "tts",
+                "asr",
+                "mt",
+                "tts",
+                "asr",
+                "tts",
+                "asr",
+            ),
+        )
+        self.assertEqual(
             [batch.tasks[0] for batch in fused.batches],
             [
                 Task.ASR,
