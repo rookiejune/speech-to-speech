@@ -1,6 +1,7 @@
 from .runtime import (
     AudioRepresentation,
     BackboneInitialization,
+    BackboneType,
     Config,
     Runtime,
     validate_audio_route,
@@ -9,6 +10,7 @@ from .runtime import (
 __all__ = [
     "AudioRepresentation",
     "BackboneInitialization",
+    "BackboneType",
     "Config",
     "Runtime",
     "validate_audio_route",

@@ -9,6 +9,7 @@ from anytrain.module.idspace import Layout
 
 from ..audio_route import Config as AudioRouteConfig
 from .runtime import AudioRepresentation
+from .backbone import BackboneAdapter
 from .types import (
     AudioTokenizer,
     Backbone,
@@ -99,6 +100,9 @@ class GenerationRuntime(DataRuntime, Protocol):
 
 
 class TokenModelRuntime(GenerationRuntime, Protocol):
+    @cached_property
+    def backbone_adapter(self) -> BackboneAdapter: ...
+
     @property
     def backbone_trust_remote_code(self) -> bool: ...
 

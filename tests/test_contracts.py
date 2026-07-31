@@ -464,7 +464,7 @@ class ContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported codec audio view"):
             _parse_audio_item(item, AudioView.WAVEFORM)
 
-    @patch("speech_to_speech.runtime.runtime.AutoModelForCausalLM.from_pretrained")
+    @patch("speech_to_speech.runtime.backbone.hf.AutoModelForCausalLM.from_pretrained")
     def test_backbone_loading_forwards_runtime_configuration(self, from_pretrained):
         backbone = Mock()
         moved = Mock()
@@ -483,6 +483,7 @@ class ContractTest(unittest.TestCase):
 
         from_pretrained.assert_called_once_with(
             "fake/backbone",
+            trust_remote_code=False,
             dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
         )

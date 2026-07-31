@@ -63,7 +63,11 @@ from speech_to_speech.model import (
 )
 from speech_to_speech.model.acoustic import AcousticType, DecoderConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
-from speech_to_speech.runtime import BackboneInitialization, Config as RuntimeConfig
+from speech_to_speech.runtime import (
+    BackboneInitialization,
+    BackboneType,
+    Config as RuntimeConfig,
+)
 from speech_to_speech.stage import (
     ParameterGroup,
     ParameterPolicyName,
@@ -158,6 +162,13 @@ class ConfigTest(unittest.TestCase):
         )
         self.assertIsInstance(selected.model.toy, ToyConfig)
         self.assertIs(selected.data.dataset.name, DatasetName.TOY)
+
+    def test_qwen2_5_omni_text_runtime_uses_thinker_adapter(self):
+        config = overfit(_compose("overfit", "runtime=qwen2_5_omni_text"))
+
+        self.assertIs(config.runtime.backbone_type, BackboneType.QWEN2_5_OMNI_THINKER)
+        self.assertEqual(config.runtime.backbone, "Qwen/Qwen2.5-Omni-7B")
+        self.assertEqual(config.runtime.backbone_body, "model")
 
     def test_random_backbone_requires_unambiguous_full_training(self):
         random = overfit(

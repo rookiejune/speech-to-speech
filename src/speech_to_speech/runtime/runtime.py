@@ -6,18 +6,24 @@ from numbers import Integral
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union, cast
 
-import torch
 from anytrain.codec import AcousticLayout
 from anydataset.types import AudioView, Modality
 from anytrain.module.idspace import Layout
-from torch import nn
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from .audio_tokenizer import (
     BiCodecAudioTokenizer,
     FlattenedAudioTokenizer,
     NativeAudioTokenizer,
     TorchCodecBPE,
+)
+from .backbone import (
+    AdapterConfig as BackboneAdapterConfig,
+    BackboneAdapter,
+    BackboneInitialization,
+    BackboneType,
+    bind_chat_bos as bind_chat_bos,
+    create as create_backbone_adapter,
+    dtype as dtype,
 )
 from .codec import load_codec
 from .types import (
@@ -72,19 +78,17 @@ class AudioRepresentation(StrEnum):
     FULL_CODEC_SEQUENCE = auto()
 
 
-class BackboneInitialization(StrEnum):
-    PRETRAINED = auto()
-    RANDOM = auto()
-
-
 @dataclass(frozen=True)
 class Config:
     codec: str = "longcat"
+    backbone_type: BackboneType = BackboneType.HF_CAUSAL_LM
     backbone: str = "Qwen/Qwen3-0.6B"
     backbone_initialization: BackboneInitialization = BackboneInitialization.PRETRAINED
     backbone_trust_remote_code: bool = False
     backbone_readout: str = "last_hidden_state"
     backbone_supports_cache_position: bool = True
+    backbone_module: str = ""
+    backbone_body: str = "base_model"
     audio_representation: AudioRepresentation = AudioRepresentation.DECOUPLED
     audio_tokenizer: Optional[Union[str, Path]] = None
     semantic_codec_artifact: Optional[str] = None
@@ -96,6 +100,8 @@ class Config:
     flow_num_steps: int = 10
 
     def __post_init__(self) -> None:
+        if not isinstance(self.backbone_type, BackboneType):
+            raise TypeError("backbone_type must be a BackboneType.")
         if not isinstance(self.backbone_initialization, BackboneInitialization):
             raise TypeError("backbone_initialization must be a BackboneInitialization.")
         if not isinstance(self.backbone_trust_remote_code, bool):
@@ -103,6 +109,8 @@ class Config:
         validate_backbone_readout(self.backbone_readout)
         if not isinstance(self.backbone_supports_cache_position, bool):
             raise TypeError("backbone_supports_cache_position must be a bool.")
+        _validate_path(self.backbone_module, "backbone_module")
+        _validate_path(self.backbone_body, "backbone_body", allow_empty=False)
         if not isinstance(self.audio_representation, AudioRepresentation):
             raise TypeError("audio_representation must be an AudioRepresentation.")
         if (
@@ -223,40 +231,41 @@ class Runtime:
     def backbone_supports_cache_position(self) -> bool:
         return self.config.backbone_supports_cache_position
 
+    @property
+    def backbone_module(self) -> str:
+        return self.config.backbone_module
+
+    @property
+    def backbone_body(self) -> str:
+        return self.config.backbone_body
+
+    @property
+    def backbone_adapter_config(self) -> BackboneAdapterConfig:
+        return BackboneAdapterConfig(
+            type=self.config.backbone_type,
+            path=self.config.backbone,
+            initialization=self.config.backbone_initialization,
+            trust_remote_code=self.config.backbone_trust_remote_code,
+            readout=self.config.backbone_readout,
+            supports_cache_position=self.config.backbone_supports_cache_position,
+            module=self.config.backbone_module,
+            body=self.config.backbone_body,
+            device=self.config.device,
+            dtype=self.config.dtype,
+            attn_implementation=self.config.attn_implementation,
+        )
+
+    @cached_property
+    def backbone_adapter(self) -> BackboneAdapter:
+        return create_backbone_adapter(self.backbone_adapter_config)
+
     @cached_property
     def text_tokenizer(self) -> TextTokenizer:
-        tokenizer = AutoTokenizer.from_pretrained(
-            self.config.backbone,
-            trust_remote_code=self.config.backbone_trust_remote_code,
-        )
-        bind_chat_bos(tokenizer)
-        return cast(TextTokenizer, cast(object, tokenizer))
+        return self.backbone_adapter.text_tokenizer
 
     @cached_property
     def backbone(self) -> Backbone:
-        kwargs = {}
-        if self.config.dtype is not None:
-            kwargs["dtype"] = dtype(self.config.dtype)
-        if self.config.attn_implementation is not None:
-            kwargs["attn_implementation"] = self.config.attn_implementation
-        if self.config.backbone_initialization is BackboneInitialization.PRETRAINED:
-            backbone = AutoModelForCausalLM.from_pretrained(
-                self.config.backbone,
-                trust_remote_code=self.config.backbone_trust_remote_code,
-                **kwargs,
-            )
-        else:
-            config = AutoConfig.from_pretrained(
-                self.config.backbone,
-                trust_remote_code=self.config.backbone_trust_remote_code,
-            )
-            backbone = AutoModelForCausalLM.from_config(
-                config,
-                **kwargs,
-            )
-        if self.config.device is not None:
-            backbone = cast(nn.Module, cast(object, backbone)).to(self.config.device)
-        return cast(Backbone, cast(object, backbone))
+        return self.backbone_adapter.model
 
     @cached_property
     def codec(self) -> CodecBackend:
@@ -431,29 +440,6 @@ def audio_tokenizer(path: str | Path) -> AudioTokenizer:
     return cast(AudioTokenizer, cast(object, TorchCodecBPE.wrap(tokenizer)))
 
 
-# Qwen chat turn start; stock HF leaves bos_token unset while keeping this in vocab.
-_CHAT_BOS_TOKEN = "<|im_start|>"
-
-
-def bind_chat_bos(tokenizer: object) -> None:
-    """Expose chat turn-start as bos when the tokenizer leaves bos unset."""
-    if getattr(tokenizer, "bos_token_id", None) is not None:
-        return
-    convert = getattr(tokenizer, "convert_tokens_to_ids", None)
-    if not callable(convert):
-        return
-    token_id = convert(_CHAT_BOS_TOKEN)
-    if isinstance(token_id, bool) or not isinstance(token_id, Integral):
-        return
-    token_id = int(token_id)
-    if token_id < 0:
-        return
-    unk = getattr(tokenizer, "unk_token_id", None)
-    if unk is not None and token_id == int(unk):
-        return
-    setattr(tokenizer, "bos_token", _CHAT_BOS_TOKEN)
-
-
 def text_special_id(tokenizer: TextTokenizer, name: str) -> int:
     """Resolve a required text special-token id from HF tokenizer attributes."""
     if name not in {"pad_token_id", "bos_token_id", "eos_token_id"}:
@@ -482,11 +468,15 @@ def _token_id(value: object, name: str) -> int:
     return token_id
 
 
-def dtype(value: str) -> torch.dtype:
-    try:
-        result = getattr(torch, value)
-    except AttributeError as error:
-        raise ValueError(f"unknown torch dtype: {value}") from error
-    if not isinstance(result, torch.dtype):
-        raise ValueError(f"unknown torch dtype: {value}")
-    return result
+def _validate_path(value: object, name: str, *, allow_empty: bool = True) -> None:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string.")
+    if not value:
+        if allow_empty:
+            return
+        raise ValueError(f"{name} must not be empty.")
+    if value.startswith(".") or value.endswith(".") or ".." in value:
+        raise ValueError(f"{name} must be a dotted attribute path.")
+    for part in value.split("."):
+        if not part.isidentifier():
+            raise ValueError(f"{name} must contain identifier path components.")

@@ -19,7 +19,11 @@ from speech_to_speech.model import (
     AudioInputAdapterType,
     AudioOutputAdapterType,
 )
-from speech_to_speech.runtime import AudioRepresentation, BackboneInitialization
+from speech_to_speech.runtime import (
+    AudioRepresentation,
+    BackboneInitialization,
+    BackboneType,
+)
 from speech_to_speech.stage import (
     ParameterGroup,
     ParameterPolicyName,
@@ -58,6 +62,12 @@ def prepare(config: DictConfig) -> DictConfig:
     _audio_route(result.get("audio_route"))
     runtime = result.get("runtime")
     if runtime is not None:
+        backbone_type = runtime.get("backbone_type")
+        if backbone_type is not None:
+            runtime.backbone_type = _enum_name(
+                BackboneType,
+                backbone_type,
+            )
         initialization = runtime.get("backbone_initialization")
         if initialization is not None:
             runtime.backbone_initialization = _enum_name(

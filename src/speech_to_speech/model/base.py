@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Optional, cast
 
@@ -24,6 +24,7 @@ from ._generation import (
     generate_sequence_full,
 )
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer, FlattenedAudioTokenizer
+from ..runtime.backbone import BackboneBodyAdapter, BackboneEncoder, BackboneOutputView
 from ._head import VocabularyHeadMixin
 from ._helper import (
     AdapterType,
@@ -50,7 +51,7 @@ from .embedding.audio import (
 )
 from .protocol import TokenModelRuntime
 from .toy import ToyConfig, create_toy_backbone
-from ..runtime.types import Backbone, BackboneOutput, select_backbone_readout
+from ..runtime.types import Backbone
 
 
 @dataclass
@@ -129,12 +130,16 @@ class Model(VocabularyHeadMixin, nn.Module):
             text_embedding = text_source
         # Backbone keeps a non-Module view; idspace owns the real embedding once.
         _install_text_embedding_view(self.backbone, EmbeddingView(text_embedding))
-        self._backbone_body = BackboneBodyAdapter(
-            self.backbone.base_model,
-            readout=self.runtime.backbone_readout,
-            supports_cache_position=self.runtime.backbone_supports_cache_position,
+        self._backbone_body = _backbone_adapter(
+            self.runtime,
+            self.backbone,
+            prefer_runtime=self.config.toy is None,
         )
-        hidden_size = self.backbone.config.hidden_size
+        hidden_size = _backbone_hidden_size(
+            self.runtime,
+            self.backbone,
+            prefer_runtime=self.config.toy is None,
+        )
         audio_embedding = create_semantic_audio_embedding(
             self.runtime,
             reference=text_embedding.weight,
@@ -288,7 +293,7 @@ class Model(VocabularyHeadMixin, nn.Module):
 
     @staticmethod
     def _output(
-        backbone_output: BackboneOutput,
+        backbone_output: BackboneOutputView,
         hidden_states: torch.Tensor,
         logits: torch.Tensor,
         output_hidden_states: bool,
@@ -328,12 +333,12 @@ class Model(VocabularyHeadMixin, nn.Module):
         use_cache: bool = False,
         position_ids: torch.Tensor | None = None,
         cache_position: torch.Tensor | None = None,
-    ) -> BackboneOutput:
+    ) -> BackboneOutputView:
         if input_ids.dim() != 2:
             raise ValueError("input_ids must have shape [batch, sequence].")
         inputs_embeds = self._input_embedding(input_ids, audio_input_positions)
 
-        return self._backbone_body(
+        return self._backbone_body.encode(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             output_hidden_states=False,
@@ -612,59 +617,6 @@ class Model(VocabularyHeadMixin, nn.Module):
         return output
 
 
-@dataclass(frozen=True)
-class BackboneOutputView:
-    output: BackboneOutput
-    last_hidden_state: torch.Tensor
-
-    @property
-    def past_key_values(self) -> Cache | None:
-        return self.output.past_key_values
-
-    @property
-    def hidden_states(self) -> tuple[torch.Tensor, ...] | None:
-        return self.output.hidden_states
-
-    @property
-    def attentions(self) -> tuple[torch.Tensor, ...] | None:
-        return self.output.attentions
-
-
-@dataclass(frozen=True)
-class BackboneBodyAdapter:
-    body: Callable[..., BackboneOutput]
-    readout: str
-    supports_cache_position: bool
-
-    def __call__(
-        self,
-        *,
-        inputs_embeds: torch.Tensor,
-        attention_mask: torch.Tensor | None,
-        output_hidden_states: bool,
-        past_key_values: Cache | None = None,
-        use_cache: bool = False,
-        position_ids: torch.Tensor | None = None,
-        cache_position: torch.Tensor | None = None,
-    ) -> BackboneOutput:
-        kwargs = {
-            "inputs_embeds": inputs_embeds,
-            "attention_mask": attention_mask,
-            "output_hidden_states": output_hidden_states
-            or self.readout != "last_hidden_state",
-            "past_key_values": past_key_values,
-            "use_cache": use_cache,
-            "position_ids": position_ids,
-        }
-        if self.supports_cache_position:
-            kwargs["cache_position"] = cache_position
-        output = self.body(**kwargs)
-        return BackboneOutputView(
-            output=output,
-            last_hidden_state=select_backbone_readout(output, self.readout),
-        )
-
-
 def _install_text_embedding_view(backbone: Backbone, view: EmbeddingView) -> None:
     """Point backbone text lookup at a non-owning view of the idspace table.
 
@@ -687,6 +639,52 @@ def _install_text_embedding_view(backbone: Backbone, view: EmbeddingView) -> Non
         "backbone must expose a replaceable input embedding attribute so the "
         "shared text table is referenced without dual Module ownership."
     )
+
+
+def _backbone_adapter(
+    runtime: object,
+    backbone: Backbone,
+    *,
+    prefer_runtime: bool,
+) -> BackboneEncoder:
+    adapter = getattr(runtime, "backbone_adapter", None) if prefer_runtime else None
+    if adapter is not None:
+        return cast(BackboneEncoder, adapter)
+    body = getattr(backbone, "base_model", backbone)
+    if not callable(body):
+        raise TypeError("backbone fallback body must be callable.")
+    return cast(
+        BackboneEncoder,
+        BackboneBodyAdapter(
+            body,
+            readout=str(getattr(runtime, "backbone_readout", "last_hidden_state")),
+            supports_cache_position=bool(
+                getattr(runtime, "backbone_supports_cache_position", True)
+            ),
+        ),
+    )
+
+
+def _backbone_hidden_size(
+    runtime: object,
+    backbone: Backbone,
+    *,
+    prefer_runtime: bool,
+) -> int:
+    adapter = getattr(runtime, "backbone_adapter", None) if prefer_runtime else None
+    value = getattr(adapter, "hidden_size", None) if adapter is not None else None
+    if isinstance(value, bool):
+        raise TypeError("backbone hidden size must be an integer.")
+    if isinstance(value, int):
+        if value <= 0:
+            raise ValueError("backbone hidden size must be positive.")
+        return value
+    config_value = getattr(backbone.config, "hidden_size", None)
+    if isinstance(config_value, bool) or not isinstance(config_value, int):
+        raise AttributeError("backbone config does not expose hidden_size.")
+    if config_value <= 0:
+        raise ValueError("backbone hidden size must be positive.")
+    return config_value
 
 
 def _replace_registered_embedding(
