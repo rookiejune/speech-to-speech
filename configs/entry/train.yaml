@@ -101,3 +101,9 @@ callbacks:
     every_n_train_steps: 10000
   performance:
     enabled: false
+  data_throughput:
+    enabled: false
+    log_every_n_steps: 100
+    warmup_steps: 20
+    measure_window_steps: 100
+    sync_cuda: true
