@@ -1,6 +1,7 @@
 name: wmt19_tts
 root:
 split: train
+filter: speech_translation_v1
 split_manifest:
 split_label: train
 toy_samples: 8

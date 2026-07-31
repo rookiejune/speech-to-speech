@@ -1367,6 +1367,54 @@ class ContractTest(unittest.TestCase):
                     2,
                 )
 
+    def test_wmt19_loader_uses_default_filter(self):
+        dataset = [Mock()]
+        module = ModuleType("zhuyin.datasets.wmt19_tts")
+        module.wmt19_tts_codec = Mock(return_value=dataset)
+        runtime = _data_runtime()
+
+        with patch.dict(
+            sys.modules,
+            {
+                "zhuyin": ModuleType("zhuyin"),
+                "zhuyin.datasets": ModuleType("zhuyin.datasets"),
+                "zhuyin.datasets.wmt19_tts": module,
+            },
+        ):
+            loaded = load_dataset(DatasetConfig(), runtime)
+
+        self.assertIs(loaded, dataset)
+        module.wmt19_tts_codec.assert_called_once_with(
+            codec="longcat",
+            root=None,
+            split="train",
+            filter="speech_translation_v1",
+        )
+
+    def test_wmt19_loader_can_disable_filter(self):
+        dataset = [Mock()]
+        module = ModuleType("zhuyin.datasets.wmt19_tts")
+        module.wmt19_tts_codec = Mock(return_value=dataset)
+        runtime = _data_runtime()
+
+        with patch.dict(
+            sys.modules,
+            {
+                "zhuyin": ModuleType("zhuyin"),
+                "zhuyin.datasets": ModuleType("zhuyin.datasets"),
+                "zhuyin.datasets.wmt19_tts": module,
+            },
+        ):
+            loaded = load_dataset(DatasetConfig(filter=None), runtime)
+
+        self.assertIs(loaded, dataset)
+        module.wmt19_tts_codec.assert_called_once_with(
+            codec="longcat",
+            root=None,
+            split="train",
+            filter=None,
+        )
+
     def test_toy_settings_reject_invalid_dimensions(self):
         with self.assertRaisesRegex(ValueError, "divisible"):
             ToyConfig(hidden_size=7, heads=2)

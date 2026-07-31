@@ -46,6 +46,7 @@ class DatasetConfig:
     name: DatasetName = DatasetName.WMT19_TTS
     root: Optional[str] = None
     split: str = "train"
+    filter: Optional[str] = "speech_translation_v1"
     split_manifest: Optional[str] = None
     split_label: str = "train"
     speaker: Optional[str] = None
@@ -61,6 +62,10 @@ class DatasetConfig:
             raise TypeError("dataset split must be a string.")
         if not self.split:
             raise ValueError("dataset split must not be empty.")
+        if self.filter is not None and not isinstance(self.filter, str):
+            raise TypeError("dataset filter must be a string or None.")
+        if self.filter == "":
+            raise ValueError("dataset filter must not be empty.")
         if self.split_manifest is not None and not isinstance(
             self.split_manifest,
             str,
@@ -396,6 +401,7 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
                             else Path(config.root).expanduser()
                         ),
                         split=config.split,
+                        filter=config.filter,
                     ),
                 ),
             ),
