@@ -33,22 +33,24 @@ EnumT = TypeVar("EnumT", bound=Enum)
 def prepare(config: DictConfig) -> DictConfig:
     result = cast(DictConfig, OmegaConf.create(OmegaConf.to_container(config)))
     OmegaConf.resolve(result)
-    semantic_adapter = result.model.get("semantic_audio_adapter")
-    if semantic_adapter is not None:
-        result.model.semantic_audio_adapter = _enum_name(
-            AdapterType,
-            semantic_adapter,
-        )
-    audio_input = result.model.get("audio_input_adapter")
-    if isinstance(audio_input, DictConfig):
-        value = audio_input.get("type")
-        if value is not None:
-            audio_input.type = _enum_name(AudioInputAdapterType, value)
-    audio_output = result.model.get("audio_output_adapter")
-    if isinstance(audio_output, DictConfig):
-        value = audio_output.get("type")
-        if value is not None:
-            audio_output.type = _enum_name(AudioOutputAdapterType, value)
+    model = result.get("model")
+    if isinstance(model, DictConfig):
+        semantic_adapter = model.get("semantic_audio_adapter")
+        if semantic_adapter is not None:
+            model.semantic_audio_adapter = _enum_name(
+                AdapterType,
+                semantic_adapter,
+            )
+        audio_input = model.get("audio_input_adapter")
+        if isinstance(audio_input, DictConfig):
+            value = audio_input.get("type")
+            if value is not None:
+                audio_input.type = _enum_name(AudioInputAdapterType, value)
+        audio_output = model.get("audio_output_adapter")
+        if isinstance(audio_output, DictConfig):
+            value = audio_output.get("type")
+            if value is not None:
+                audio_output.type = _enum_name(AudioOutputAdapterType, value)
     _dataset(result.get("data"))
     _dataset(result.get("data", {}).get("dataset"))
     _data_shape(result.get("data"))
