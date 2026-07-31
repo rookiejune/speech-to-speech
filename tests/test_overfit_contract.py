@@ -99,7 +99,6 @@ class OverfitContractTest(unittest.TestCase):
                 "callbacks.task_sample.every_n_steps=2",
                 "callbacks.text_retention.every_n_steps=3",
                 "callbacks.text_retention.max_new_tokens=9",
-                "callbacks.grad_norm.every_n_steps=4",
                 "callbacks.gradient_probe.every_n_steps=5",
                 "callbacks.gradient_probe.probes.backbone_l0_attn.parameters=[full.weight]",
                 "callbacks.flow_matching.every_n_steps=6",
@@ -117,7 +116,6 @@ class OverfitContractTest(unittest.TestCase):
                     "OutputsLogger",
                     "FlowMatchingLogger",
                     "GradLogger",
-                    "GradNormLogger",
                     "TaskSampleLogger",
                     "TextRetentionLogger",
                 )
@@ -145,7 +143,6 @@ class OverfitContractTest(unittest.TestCase):
                 factories["OutputsLogger"].return_value,
                 factories["FlowMatchingLogger"].return_value,
                 factories["GradLogger"].return_value,
-                factories["GradNormLogger"].return_value,
                 factories["TaskSampleLogger"].return_value,
                 factories["TextRetentionLogger"].return_value,
                 summary,
@@ -177,9 +174,6 @@ class OverfitContractTest(unittest.TestCase):
             ),
             every_n_steps=5,
         )
-        factories["GradNormLogger"].assert_called_once_with(
-            every_n_steps=4,
-        )
         factories["TaskSampleLogger"].assert_called_once_with(
             [config.sample_index],
             every_n_steps=2,
@@ -205,7 +199,6 @@ class OverfitContractTest(unittest.TestCase):
                 "callbacks.task_sample.enabled=false",
                 "callbacks.evaluation.enabled=false",
                 "callbacks.text_retention.enabled=false",
-                "callbacks.grad_norm.enabled=false",
                 "callbacks.gradient_probe.enabled=false",
                 "callbacks.flow_matching.enabled=false",
             )
@@ -309,11 +302,6 @@ class OverfitContractTest(unittest.TestCase):
                 "callbacks.text_retention.max_new_tokens=0",
                 ValueError,
                 "max_new_tokens",
-            ),
-            (
-                "callbacks.grad_norm.every_n_steps=0",
-                ValueError,
-                "callbacks.grad_norm.every_n_steps",
             ),
             (
                 "callbacks.gradient_probe.every_n_steps=0",

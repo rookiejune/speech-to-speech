@@ -16,7 +16,6 @@ from speech_to_speech.callback.logging import (
     AcousticEvaluation,
     FlowMatchingLogger,
     GradLogger,
-    GradNormLogger,
     LossSummary,
     OutputsLogger,
     TaskSampleLogger,
@@ -233,13 +232,6 @@ def training_callbacks(
     gradient = _gradient_logger(config, acoustic_type, gradient_comparison)
     if gradient is not None:
         callbacks.append(gradient)
-    grad_norm = config.callbacks.grad_norm
-    if grad_norm.enabled and performance_callback is None:
-        callbacks.append(
-            GradNormLogger(
-                every_n_steps=grad_norm.every_n_steps,
-            )
-        )
     task_sample = config.callbacks.task_sample
     if task_sample.enabled:
         callbacks.append(

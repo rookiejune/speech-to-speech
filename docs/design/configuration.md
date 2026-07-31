@@ -46,8 +46,8 @@ speech-to-speech 自有日志 callback 按 `every_n_steps`（optimizer step）�
 默认启用 `callbacks.text_retention`，用固定 T2TT
 probe 在 fit 开始建立 reference-NLL baseline，并持续记录 greedy generation 与 NLL delta；启用时
 至少配置一条非空 instruction/reference，cadence 和 generation budget 在入口解析时校验。
-overfit 的可选 `text_retention`、`grad_norm`、`gradient_pair` 与 `flow_matching` 诊断同样由
-`configs/overfit.yaml` 显式持有开关、cadence 和模型参数路径；`OOMDiagnostics`、`OutputsLogger` 与
+overfit 的可选 `text_retention`、`gradient_probe` 与 `flow_matching` 诊断同样由
+`configs/overfit.yaml` 显式持有开关、cadence 和模型参数 probe；`OOMDiagnostics`、`OutputsLogger` 与
 `LossSummary` 是两个训练入口固定拥有的结构 callback，不伪装成可关闭的实验选项。
 
 `model.audio_input_adapter` 默认 `type=none`。可显式选择 `mlp` 或 `transformer`，并配置
@@ -75,7 +75,7 @@ fixed-sample 验收默认承担性能测试。显式启用时必须同时关闭 
 满足该前提后，入口使用 `speech_to_speech.performance.TrainingFlops` 组装
 `anytrain.PerformanceCallback`，并沿用同一套硬件峰值 override、cadence、warmup、窗口和 CUDA 同步
 配置。performance callback 位于 callback 列表首位，使其 step timer 在后续 batch-end 诊断前结束；
-该模式不组装 `GradLogger` 或重复计算全局 norm 的 `GradNormLogger`，因为这些额外计算会进入实测
+该模式不组装 `GradLogger`，因为 comparison probes 的额外 `autograd.grad` 会进入实测
 step time，却不属于 provider 统计的训练 FLOPs。DDP 默认在下一 batch timer 启动前执行 barrier，
 避免仅 rank zero 执行的 batch-end 诊断使各 rank 起点错位。
 

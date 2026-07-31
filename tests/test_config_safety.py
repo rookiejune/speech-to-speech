@@ -53,9 +53,6 @@ class ConfigSafetyTest(unittest.TestCase):
             "callbacks.task_sample.max_new_tokens=0": (
                 "callbacks.task_sample.max_new_tokens"
             ),
-            "callbacks.grad_norm.every_n_steps=0": (
-                "callbacks.grad_norm.every_n_steps"
-            ),
             "callbacks.checkpoint.every_n_train_steps=0": (
                 "callbacks.checkpoint.every_n_train_steps"
             ),

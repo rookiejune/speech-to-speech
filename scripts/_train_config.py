@@ -23,7 +23,6 @@ if __package__:
     from ._config_common import (
         AcousticNoneConfig,
         FlowConfig,
-        GradNormCallbackConfig,
         LoggingConfig,
         PerformanceConfig,
         RVQConfig,
@@ -42,7 +41,6 @@ else:
     from _config_common import (
         AcousticNoneConfig,
         FlowConfig,
-        GradNormCallbackConfig,
         LoggingConfig,
         PerformanceConfig,
         RVQConfig,
@@ -139,7 +137,6 @@ class StagedCallbacksConfig:
     text_retention: TextRetentionCallbackConfig = field(
         default_factory=TextRetentionCallbackConfig
     )
-    grad_norm: GradNormCallbackConfig = field(default_factory=GradNormCallbackConfig)
     gradient_probe: GradientProbeCallbackConfig = field(
         default_factory=GradientProbeCallbackConfig
     )
@@ -293,10 +290,6 @@ def _validate_task_samples(config: StagedTrainConfig) -> None:
 
 
 def _validate_callback_cadences(config: StagedCallbacksConfig) -> None:
-    positive_integer(
-        config.grad_norm.every_n_steps,
-        "callbacks.grad_norm.every_n_steps",
-    )
     positive_integer(
         config.gradient_probe.every_n_steps,
         "callbacks.gradient_probe.every_n_steps",

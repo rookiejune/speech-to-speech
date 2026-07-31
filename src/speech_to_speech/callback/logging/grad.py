@@ -4,7 +4,6 @@ from collections.abc import Mapping, Sequence
 
 from anytrain.lightning import (
     GradientComparison,
-    GradientNormLoggerCallback,
     GradientProbe,
     GradientProbeLoggerCallback,
 )
@@ -54,12 +53,3 @@ class GradLogger(GradientProbeLoggerCallback):
 
     def load_state_dict(self, state_dict: dict[str, dict[str, int | None]]) -> None:
         self.interval.load_state_dict(state_dict.get("interval", {}))
-
-
-class GradNormLogger(GradientNormLoggerCallback):
-    def __init__(
-        self,
-        tag: str = "grad_norm",
-        every_n_steps: int = 100,
-    ) -> None:
-        super().__init__(tag=tag, every_n_steps=every_n_steps)

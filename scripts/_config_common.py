@@ -147,12 +147,6 @@ class TextRetentionCallbackConfig:
             )
 
 
-@dataclass
-class GradNormCallbackConfig:
-    enabled: bool = MISSING
-    every_n_steps: int = MISSING
-
-
 class _TrainValues(Protocol):
     @property
     def seed(self) -> int: ...
@@ -371,7 +365,6 @@ def _validate_lora(config: _EntryConfig) -> None:
 __all__ = [
     "AcousticNoneConfig",
     "FlowConfig",
-    "GradNormCallbackConfig",
     "LoggingConfig",
     "PerformanceConfig",
     "RVQConfig",

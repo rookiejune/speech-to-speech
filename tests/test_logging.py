@@ -10,7 +10,6 @@ from anytrain.lightning import GradientComparison, GradientProbe, GradientTarget
 from speech_to_speech.callback.logging import (
     FlowMatchingLogger,
     GradLogger,
-    GradNormLogger,
     LossSummary,
     OutputsLogger,
 )
@@ -41,29 +40,6 @@ class LoggingTest(unittest.TestCase):
             on_step=True,
             sync_dist=True,
         )
-
-    def test_grad_norm_logger_respects_its_interval(self):
-        weight = torch.nn.Parameter(torch.zeros(2))
-        bias = torch.nn.Parameter(torch.zeros(1))
-        weight.grad = torch.tensor([3.0, 4.0])
-        bias.grad = torch.tensor([12.0])
-        module = SimpleNamespace(
-            parameters=lambda: iter((weight, bias)),
-            log=Mock(),
-        )
-        trainer = SimpleNamespace(global_step=1)
-        callback = GradNormLogger(every_n_steps=2)
-
-        callback.on_train_batch_start(trainer, module, None, 0)
-        callback.on_before_optimizer_step(trainer, module, Mock())
-        module.log.assert_not_called()
-
-        trainer.global_step = 2
-        callback.on_train_batch_start(trainer, module, None, 0)
-        callback.on_before_optimizer_step(trainer, module, Mock())
-
-        self.assertEqual(module.log.call_args.args[0], "grad_norm")
-        torch.testing.assert_close(module.log.call_args.args[1], torch.tensor(13.0))
 
     def test_grad_logger_runs_once_for_an_accumulated_global_step(self):
         callback = GradLogger(

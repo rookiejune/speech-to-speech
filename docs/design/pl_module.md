@@ -63,8 +63,8 @@ model 构造器不接收路径或执行文件 I/O。
   tag；loss 与观测 detail 按 task 做 microbatch mean，`tokens` / `text_tokens` / `audio_tokens` /
   `frames` 则跨 step 做 DDP-sum 后累计（可 checkpoint resume）。通用遍历顺序来自
   `anytrain.lightning.LossItemLoggerCallback` 的契约，计数累计由本项目实现。
-- `GradLogger` / `GradNormLogger`：只接入 S2S `TrainInterval`；指定分项或全局梯度范数的通用日志逻辑来自
-  `anytrain.lightning`。`GradNormLogger` 默认 tag 为 `grad_norm`。
+- `GradLogger`：只接入 S2S `TrainInterval`；对称 comparison、probe 参数解析、per-target norm、
+  log-ratio 与 cosine 逻辑来自 `anytrain.lightning`。
 - `OnDeviceCodecMaterializer`：训练时 wav->codes 的显式 fallback。正式数据仍应提前 materialize
   codec codes；该 fallback 只把 pair/single 共用的 `RawSpeechBatch` 规范化为 `ModelBatch`，不改变
   objective 或 task loss contract。它把 waveform 转成 FP32，在关闭当前 device autocast 的上下文
@@ -129,8 +129,8 @@ performance 与 task sample logging 同时启用。`TaskSampleLogger` 在 `on_tr
 满足该前提后，`scripts/overfit.py` 使用 `speech_to_speech.performance.TrainingFlops` 组装
 `anytrain.PerformanceCallback`。provider 按实际 module、batch 和 objective 输出分析 token、Flow 或
 RVQ 路径的动态训练 FLOPs；入口把 performance callback 放在 callback 列表首位，并省略
-`GradLogger` 与 `GradNormLogger`。前者的额外 `autograd.grad`、后者重复的全局梯度 norm 如果与
-MFU 同时运行，会增加实测 step time，但没有对应的模型训练 FLOPs，因而会扭曲指标口径。DDP 默认
+`GradLogger`。comparison probes 的额外 `autograd.grad` 如果与 MFU 同时运行，会增加实测 step time，
+但没有对应的模型训练 FLOPs，因而会扭曲指标口径。DDP 默认
 在每个 batch timer 前 barrier，使上一 batch 仅 rank zero 执行的日志与评估不会泄漏到下一步计时；
 可通过 `callbacks.performance.sync_distributed` 显式关闭。
 
@@ -155,14 +155,14 @@ FlashAttention 或其他 custom op 也可能不在通用算子计数覆盖范围
   request/result；通用 validation/batching 由 generation service 负责，audio decode 由其选择的
   capability strategy 负责。
 - callback 只依赖 `Outputs`/`LossItem`、datamodule 与 pl_module 公共能力；`GradLogger` 额外要求
-  LightningModule 实现 `current_loss_outputs()` 生命周期契约。
+  LightningModule 实现 `current_loss_outputs()` fallback 或 `current_gradient_loss_groups()` 生命周期契约。
 - `OutputsLogger` 按当前 `ModelBatch` 中 objective 的 `LossItem` 行粒度记录 task 指标。token loss
   覆盖当前 batch 的有效 token；RVQ、Flow 和 REPA 只覆盖带 acoustic target 的样本。若 loss 行数与
   该 objective 对应 task 行数不一致，callback 直接报错，不把不匹配的 task mask 静默套到 loss 上。
 - `TrainingFlops` 负责解释 speech-to-speech 的模型、batch 与 objective；`PerformanceCallback` 只负责
   optimizer-step 聚合、计时、硬件峰值推断和 MFU 记录，不内置任务 batch schema。
-- overfit performance composition 不包含 `TaskSampleLogger`、`GradLogger` 或 `GradNormLogger`；前者由
-  配置显式关闭，后两者由入口自动省略。
+- overfit performance composition 不包含 `TaskSampleLogger` 或 `GradLogger`；前者由
+  配置显式关闭，后者由入口自动省略。
 - total loss 只由 LightningModule 以 `sync_dist=True` 记录一次（tag `loss`），分项 logger 不重复记录。
 - `OutputsLogger` 的 TensorBoard tag 按通道归组：`token/{key}/{task}` 与
   `acoustic/{rvq|flow_matching|repa}/{key}/{task}`；`repa` 与 `rvq` / `flow_matching` 平级，

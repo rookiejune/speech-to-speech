@@ -21,7 +21,6 @@ from omegaconf import DictConfig
 from speech_to_speech.callback import OOMDiagnostics, OnDeviceCodecMaterializer
 from speech_to_speech.callback.logging import (
     GradLogger,
-    GradNormLogger,
     LossSummary,
     OutputsLogger,
     TaskSampleLogger,
@@ -281,12 +280,6 @@ def training_callbacks(
     gradient = _gradient_logger(config, performance_callback)
     if gradient is not None:
         callbacks.append(gradient)
-    if config.callbacks.grad_norm.enabled and performance_callback is None:
-        callbacks.append(
-            GradNormLogger(
-                every_n_steps=config.callbacks.grad_norm.every_n_steps,
-            )
-        )
     if config.trainer.enable_checkpointing:
         callbacks.append(
             ModelCheckpoint(

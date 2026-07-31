@@ -17,7 +17,6 @@ if __package__:
     from ._config_common import (
         AcousticNoneConfig,
         FlowConfig,
-        GradNormCallbackConfig,
         LoggingConfig,
         PerformanceConfig,
         RVQConfig,
@@ -35,7 +34,6 @@ else:
     from _config_common import (
         AcousticNoneConfig,
         FlowConfig,
-        GradNormCallbackConfig,
         LoggingConfig,
         PerformanceConfig,
         RVQConfig,
@@ -94,7 +92,6 @@ class OverfitCallbacksConfig:
     text_retention: TextRetentionCallbackConfig = field(
         default_factory=TextRetentionCallbackConfig
     )
-    grad_norm: GradNormCallbackConfig = field(default_factory=GradNormCallbackConfig)
     gradient_probe: GradientProbeCallbackConfig = field(
         default_factory=GradientProbeCallbackConfig
     )
@@ -176,10 +173,6 @@ def _validate_callbacks(config: OverfitCallbacksConfig) -> None:
         "callbacks.task_sample.every_n_steps",
     )
     config.text_retention.validate()
-    positive_integer(
-        config.grad_norm.every_n_steps,
-        "callbacks.grad_norm.every_n_steps",
-    )
     positive_integer(
         config.gradient_probe.every_n_steps,
         "callbacks.gradient_probe.every_n_steps",
