@@ -26,8 +26,13 @@ class RolloutRow(TypedDict):
     finish_reason: str
 
 
+class _RolloutRuntime(Protocol):
+    pad_token_id: int
+    eos_token_id: int
+
+
 class RolloutGenerator(Protocol):
-    runtime: object
+    runtime: _RolloutRuntime
 
     def generate_tokens_with_logprobs(
         self,

@@ -94,8 +94,8 @@ def _samples(
 
     selected: dict[int, RawSample] = {}
     requested = set(indices)
-    iterator: Iterator[RawSample] = dataset.iter_shard(1, 0)
-    for index, sample in enumerate(islice(iterator, max(requested) + 1)):
+    iterator: Iterator[tuple[int, RawSample]] = dataset.iter_shard(1, 0)
+    for index, sample in islice(iterator, max(requested) + 1):
         if index in requested:
             selected[index] = sample
     missing = requested - set(selected)
@@ -126,7 +126,7 @@ class _LimitedAnyDataset(IterableDataset[RawSample]):
         self.max_samples = max_samples
 
     def __iter__(self) -> Iterator[RawSample]:
-        for index, sample in self.dataset.iter_indexed_runtime_shard():
+        for index, sample in self.dataset.iter_shard(1, 0):
             if index >= self.max_samples:
                 break
             yield sample

@@ -382,29 +382,19 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
         )
     if config.name is DatasetName.WMT19_TTS:
         _reject_speaker(config)
-        from zhuyin.datasets.wmt19_tts import wmt19_tts_codec
+        from zhuyin.datasets.wmt19 import moss_tts
 
         codec_name = (
             "stable" if runtime.codec_name == "stable_codec" else runtime.codec_name
         )
+        view = moss_tts.codec(
+            codec_name,
+            root=None if config.root is None else Path(config.root).expanduser(),
+            split=config.split,
+        ).filter(config.filter)
 
         return _apply_split_manifest(
-            cast(
-                Dataset[Sample],
-                cast(
-                    object,
-                    wmt19_tts_codec(
-                        codec=codec_name,
-                        root=(
-                            None
-                            if config.root is None
-                            else Path(config.root).expanduser()
-                        ),
-                        split=config.split,
-                        filter=config.filter,
-                    ),
-                ),
-            ),
+            cast(Dataset[Sample], cast(object, view.load())),
             config,
         )
     if config.name is DatasetName.QWEN_TTS_SPEAKER:
@@ -420,7 +410,7 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
             codec=runtime.codec_name,
             root=None if config.root is None else Path(config.root).expanduser(),
             split=config.split,
-        )
+        ).load()
         return _apply_split_manifest(
             SpeakerGridCellsDataset(
                 grid,

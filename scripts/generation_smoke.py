@@ -4,7 +4,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import hydra
 import torch
@@ -182,7 +182,10 @@ def _prepared_batch(
 ) -> ModelBatch:
     if not isinstance(batch, ModelBatch):
         if config.data.encode_missing_codes:
-            return OnDeviceCodecMaterializer(runtime)(batch, device=device)
+            return OnDeviceCodecMaterializer(runtime)(
+                cast(TrainInput, batch),
+                device=device,
+            )
         raise TypeError(
             "generation smoke requires prepared codec data; set "
             "data.encode_missing_codes=true to online encode raw waveform samples."

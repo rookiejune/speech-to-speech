@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Optional, cast
 
@@ -51,7 +51,7 @@ from .embedding.audio import (
 )
 from .protocol import TokenModelRuntime
 from .toy import ToyConfig, create_toy_backbone
-from ..runtime.types import Backbone
+from ..runtime.types import Backbone, BackboneOutput
 
 
 @dataclass
@@ -656,7 +656,7 @@ def _backbone_adapter(
     return cast(
         BackboneEncoder,
         BackboneBodyAdapter(
-            body,
+            cast(Callable[..., BackboneOutput], body),
             readout=str(getattr(runtime, "backbone_readout", "last_hidden_state")),
             supports_cache_position=bool(
                 getattr(runtime, "backbone_supports_cache_position", True)
