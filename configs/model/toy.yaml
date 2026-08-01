@@ -1,6 +1,6 @@
 semantic_audio_adapter: linear
 audio_output_adapter:
-  type: linear
+  type: none
   layers: 2
   heads: 8
   ffn_ratio: 4.0

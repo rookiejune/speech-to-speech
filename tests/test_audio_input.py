@@ -58,6 +58,29 @@ class AudioInputTowerTest(unittest.TestCase):
         self.assertTrue(torch.allclose(padded_output[:, :2], valid_output, atol=1e-6))
         self.assertTrue(torch.equal(padded_output[:, 2:], torch.zeros(1, 2, 8)))
 
+    def test_transformer_is_causal(self) -> None:
+        torch.manual_seed(0)
+        tower = create_audio_input_adapter(
+            AudioInputAdapterConfig(
+                type=AudioInputAdapterType.TRANSFORMER,
+                layers=2,
+                heads=2,
+                ffn_ratio=2,
+            ),
+            in_features=3,
+            out_features=8,
+        )
+        tower.eval()
+        prefix = torch.randn(1, 2, 3)
+        future = torch.randn(1, 2, 3)
+        changed_future = torch.randn(1, 2, 3) + 100
+
+        original = tower(torch.cat((prefix, future), dim=1))
+        changed = tower(torch.cat((prefix, changed_future), dim=1))
+
+        torch.testing.assert_close(original[:, :2], changed[:, :2], atol=1e-6, rtol=1e-6)
+        self.assertFalse(torch.allclose(original[:, 2:], changed[:, 2:]))
+
     def test_transformer_all_padding_is_finite_and_zero(self) -> None:
         tower = create_audio_input_adapter(
             {

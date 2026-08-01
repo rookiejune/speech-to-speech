@@ -6,8 +6,8 @@ from anydataset.types import Modality
 from anytrain.module.idspace import Embedding
 from torch import Tensor
 
-from .audio_output import AudioOutputAdapter
-from ._helper import require_embedding
+from .audio_output import AudioOutputAdapter, AudioOutputAdapterType
+from ._helper import CastOutput, require_embedding
 from .embedding.audio import require_semantic_audio_embedding
 from .protocol import TokenModelRuntime
 
@@ -35,14 +35,25 @@ class VocabularyHeadMixin:
         hidden_state: Tensor,
         local_ids: Tensor | None = None,
     ) -> Tensor:
-        """Compute audio logits from already-adapted hidden states."""
-        weight = require_semantic_audio_embedding(
+        """Compute audio logits from the embedding table tied to audio inputs."""
+        weight = self._audio_logit_weight(local_ids)
+        return F.linear(hidden_state.to(dtype=weight.dtype), weight)
+
+    def _audio_logit_weight(self, local_ids: Tensor | None = None) -> Tensor:
+        embedding = require_semantic_audio_embedding(
             self.token_embedding.embeddings["audio"],
             "semantic audio embedding",
-        ).weight
+        )
+        weight = embedding.weight
         if local_ids is not None:
             weight = weight.index_select(0, local_ids)
-        return F.linear(hidden_state.to(dtype=weight.dtype), weight)
+        if self.audio_output_adapter.config.type is not AudioOutputAdapterType.NONE:
+            return weight
+        if "audio" not in self.token_embedding.adapters:
+            return weight
+        adapter = self.token_embedding.adapters["audio"]
+        module = adapter.module if isinstance(adapter, CastOutput) else adapter
+        return module(weight.to(dtype=torch.float32))
 
     def project_audio_hidden(
         self,

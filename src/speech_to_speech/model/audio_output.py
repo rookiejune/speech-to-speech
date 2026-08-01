@@ -18,10 +18,12 @@ from ._helper import (
 
 
 class AudioOutputAdapterType(StrEnum):
-    """Causal audio output adapter family.
+    """Legacy audio pre-head adapter family.
 
     ``none`` / ``linear`` / ``mlp`` are pointwise special cases with no sequence
     mixing. ``transformer`` is a causal self-attention stack with its own KV cache.
+    The default tied-head path uses ``none`` and computes logits against the
+    effective audio input embedding table instead of adding an output-side tower.
     """
 
     NONE = auto()
@@ -32,9 +34,9 @@ class AudioOutputAdapterType(StrEnum):
 
 @dataclass(frozen=True)
 class AudioOutputAdapterConfig:
-    """Configuration for the causal semantic-audio output adapter."""
+    """Configuration for the legacy semantic-audio pre-head adapter."""
 
-    type: AudioOutputAdapterType = AudioOutputAdapterType.LINEAR
+    type: AudioOutputAdapterType = AudioOutputAdapterType.NONE
     layers: int = 2
     heads: int = 8
     ffn_ratio: float = 4.0
@@ -62,7 +64,7 @@ def audio_output_options(
         return config
     if not isinstance(config, Mapping):
         raise TypeError("audio output adapter config must be a config or mapping.")
-    adapter_type = config.get("type", AudioOutputAdapterType.LINEAR)
+    adapter_type = config.get("type", AudioOutputAdapterType.NONE)
     return AudioOutputAdapterConfig(
         type=AudioOutputAdapterType(cast(str, adapter_type)),
         **tower_fields(config),
@@ -70,7 +72,7 @@ def audio_output_options(
 
 
 class AudioOutputAdapter(nn.Module):
-    """Project backbone states into the semantic-audio feature space.
+    """Optional legacy projection before the semantic-audio tied head.
 
     Pointwise variants ignore cache arguments. The transformer variant is causal
     and returns an independent past for autoregressive generation.
@@ -251,11 +253,12 @@ class _CausalTransformerLayer(nn.Module):
             key = query
             value = query
             key_padding_mask = ~safe_transformer_mask(attention_mask)
-            attn_mask = nn.Transformer.generate_square_subsequent_mask(
+            attn_mask = torch.ones(
+                query.size(1),
                 query.size(1),
                 device=query.device,
-                dtype=query.dtype,
-            )
+                dtype=torch.bool,
+            ).triu(1)
         else:
             past_key, past_value = past_key_value
             key = torch.cat((past_key, query), dim=1)

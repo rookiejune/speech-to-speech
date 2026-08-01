@@ -30,8 +30,8 @@ class AudioInputAdapterConfig:
     """Configuration for a same-length source-audio input adapter.
 
     ``mask`` passed to :class:`AudioInputTower` uses ``True`` for active
-    frames. The transformer variant is intentionally non-causal because this
-    tower only encodes source audio before the language-model forward pass.
+    frames. The transformer variant is causal so a prompt embedding at a given
+    frame cannot depend on future codec frames.
     """
 
     type: AudioInputAdapterType = AudioInputAdapterType.NONE
@@ -141,7 +141,17 @@ class AudioInputTower(nn.Module):
         if self.config.type is AudioInputAdapterType.TRANSFORMER:
             values = self.input_projection(values)
             key_padding_mask = ~safe_transformer_mask(valid)
-            values = self.adapter(values, src_key_padding_mask=key_padding_mask)
+            causal_mask = torch.ones(
+                values.size(1),
+                values.size(1),
+                device=values.device,
+                dtype=torch.bool,
+            ).triu(1)
+            values = self.adapter(
+                values,
+                mask=causal_mask,
+                src_key_padding_mask=key_padding_mask,
+            )
         else:
             values = self.adapter(values)
 

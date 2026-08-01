@@ -181,14 +181,20 @@ class Model(VocabularyHeadMixin, nn.Module):
                 hidden_size,
             ).to(device=backbone_weight.device)
         )
-        self.audio_output_adapter = create_audio_output_adapter(
-            _aligned_audio_output_adapter(
-                self.config.audio_output_adapter,
-                hidden_size,
-                semantic_audio_weight.size(1),
-            ),
+        audio_output_adapter = _aligned_audio_output_adapter(
+            self.config.audio_output_adapter,
             hidden_size,
             semantic_audio_weight.size(1),
+        )
+        audio_output_dim = (
+            hidden_size
+            if audio_output_adapter.type is AudioOutputAdapterType.NONE
+            else semantic_audio_weight.size(1)
+        )
+        self.audio_output_adapter = create_audio_output_adapter(
+            audio_output_adapter,
+            hidden_size,
+            audio_output_dim,
         ).to(
             device=backbone_weight.device,
             dtype=torch.float32,

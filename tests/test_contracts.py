@@ -301,11 +301,17 @@ class ContractTest(unittest.TestCase):
         logger,
         trainer,
     ):
-        config = parse_overfit(_compose("experiment=unicodec_ddp_smoke"))
         callbacks = [Callback()]
-        output_dir = Path(self.id())
+        with TemporaryDirectory() as output_root:
+            config = parse_overfit(
+                _compose(
+                    "experiment=unicodec_ddp_smoke",
+                    f"repo_output_root={output_root}",
+                )
+            )
+            output_dir = Path(self.id())
 
-        built = build_trainer(config, output_dir, callbacks)
+            built = build_trainer(config, output_dir, callbacks)
 
         self.assertIs(built, trainer.return_value)
         kwargs = trainer.call_args.kwargs
@@ -327,7 +333,7 @@ class ContractTest(unittest.TestCase):
         self.assertIsNone(runtime_config.audio_tokenizer)
         self.assertIsNone(runtime_config.device)
         self.assertEqual(model_config.semantic_audio_adapter, "linear")
-        self.assertEqual(model_config.audio_output_adapter.type, "linear")
+        self.assertEqual(model_config.audio_output_adapter.type, "none")
 
     def test_acoustic_presets_expose_only_supported_options(self):
         flow = _compose()
@@ -496,14 +502,16 @@ class ContractTest(unittest.TestCase):
             dtype("not_a_dtype")
 
     def test_overfit_runtime_config_preserves_native_audio_tokenizer(self):
-        config = parse_overfit(
-            _compose(
-                "runtime=unicodec",
-                "model/acoustic=none",
-                "audio_route=full_output",
-                "runtime.backbone=fake/backbone",
+        with TemporaryDirectory() as output_root:
+            config = parse_overfit(
+                _compose(
+                    "runtime=unicodec",
+                    "model/acoustic=none",
+                    "audio_route=full_output",
+                    "runtime.backbone=fake/backbone",
+                    f"repo_output_root={output_root}",
+                )
             )
-        )
 
         with patch.dict("os.environ", {"LOCAL_RANK": "1"}):
             result = runtime_config(config.runtime)
@@ -1248,7 +1256,7 @@ class ContractTest(unittest.TestCase):
         rank_batches = []
         for rank in range(2):
             with patch(
-                "anydataset.dataset.batching._rank",
+                "anydataset.dataset.batching.rank",
                 return_value=(2, rank),
             ):
                 rank_batches.append(list(sampler))
@@ -1370,8 +1378,13 @@ class ContractTest(unittest.TestCase):
 
     def test_wmt19_loader_uses_default_filter(self):
         dataset = [Mock()]
-        module = ModuleType("zhuyin.datasets.wmt19_tts")
-        module.wmt19_tts_codec = Mock(return_value=dataset)
+        view = Mock()
+        filtered = Mock()
+        filtered.load.return_value = dataset
+        view.filter.return_value = filtered
+        moss_tts = SimpleNamespace(codec=Mock(return_value=view))
+        wmt19 = ModuleType("zhuyin.datasets.wmt19")
+        wmt19.moss_tts = moss_tts
         runtime = _data_runtime()
 
         with patch.dict(
@@ -1379,23 +1392,29 @@ class ContractTest(unittest.TestCase):
             {
                 "zhuyin": ModuleType("zhuyin"),
                 "zhuyin.datasets": ModuleType("zhuyin.datasets"),
-                "zhuyin.datasets.wmt19_tts": module,
+                "zhuyin.datasets.wmt19": wmt19,
             },
         ):
             loaded = load_dataset(DatasetConfig(), runtime)
 
         self.assertIs(loaded, dataset)
-        module.wmt19_tts_codec.assert_called_once_with(
-            codec="longcat",
+        moss_tts.codec.assert_called_once_with(
+            "longcat",
             root=None,
             split="train",
-            filter="speech_translation_v1",
         )
+        view.filter.assert_called_once_with("speech_translation_v1")
+        filtered.load.assert_called_once_with()
 
     def test_wmt19_loader_can_disable_filter(self):
         dataset = [Mock()]
-        module = ModuleType("zhuyin.datasets.wmt19_tts")
-        module.wmt19_tts_codec = Mock(return_value=dataset)
+        view = Mock()
+        filtered = Mock()
+        filtered.load.return_value = dataset
+        view.filter.return_value = filtered
+        moss_tts = SimpleNamespace(codec=Mock(return_value=view))
+        wmt19 = ModuleType("zhuyin.datasets.wmt19")
+        wmt19.moss_tts = moss_tts
         runtime = _data_runtime()
 
         with patch.dict(
@@ -1403,18 +1422,19 @@ class ContractTest(unittest.TestCase):
             {
                 "zhuyin": ModuleType("zhuyin"),
                 "zhuyin.datasets": ModuleType("zhuyin.datasets"),
-                "zhuyin.datasets.wmt19_tts": module,
+                "zhuyin.datasets.wmt19": wmt19,
             },
         ):
             loaded = load_dataset(DatasetConfig(filter=None), runtime)
 
         self.assertIs(loaded, dataset)
-        module.wmt19_tts_codec.assert_called_once_with(
-            codec="longcat",
+        moss_tts.codec.assert_called_once_with(
+            "longcat",
             root=None,
             split="train",
-            filter=None,
         )
+        view.filter.assert_called_once_with(None)
+        filtered.load.assert_called_once_with()
 
     def test_toy_settings_reject_invalid_dimensions(self):
         with self.assertRaisesRegex(ValueError, "divisible"):

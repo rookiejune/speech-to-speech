@@ -1096,11 +1096,11 @@ class ConfigTest(unittest.TestCase):
             AudioInputAdapterType.TRANSFORMER,
         )
 
-    def test_audio_output_adapter_is_structured_and_linear_by_default(self):
+    def test_audio_output_adapter_is_structured_and_tied_by_default(self):
         default = overfit(_compose("overfit"))
         self.assertIs(
             default.model.audio_output_adapter.type,
-            AudioOutputAdapterType.LINEAR,
+            AudioOutputAdapterType.NONE,
         )
         configured = overfit(
             _compose("overfit", "model.audio_output_adapter.type=mlp")

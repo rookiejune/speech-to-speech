@@ -26,6 +26,7 @@ from .loss.module import FlowObjective, RVQObjective, TokenObjective
 from .loss.types import LossItem
 from .model import Model
 from .model._helper import require_embedding
+from .model.audio_output import AudioOutputAdapterType
 from .model.acoustic import FlowModel, HiddenConditionAdapter, RVQModel
 from .model.embedding.audio import require_semantic_audio_embedding
 from .pl_module import SpeechToSpeechModule
@@ -357,16 +358,28 @@ def _token_head(model: Model, batch: ModelBatch) -> int:
                 model.token_embedding.embeddings["audio"],
                 "semantic audio embedding",
             )
-            forward = adapter(
-                model.audio_output_adapter,
-                rows=rows,
-                in_features=hidden,
-                out_features=embedding.embedding_dim,
-                name="semantic audio output adapter",
-            )
-            total += (
-                forward + 2 * rows * embedding.embedding_dim * embedding.num_embeddings
-            )
+            if model.audio_output_adapter.config.type is AudioOutputAdapterType.NONE:
+                audio_adapter = model.token_embedding.adapters["audio"]
+                forward = adapter(
+                    getattr(audio_adapter, "module", audio_adapter),
+                    rows=embedding.num_embeddings,
+                    in_features=embedding.embedding_dim,
+                    out_features=hidden,
+                    name="semantic audio input adapter",
+                )
+                total += forward + 2 * rows * hidden * embedding.num_embeddings
+            else:
+                forward = adapter(
+                    model.audio_output_adapter,
+                    rows=rows,
+                    in_features=hidden,
+                    out_features=embedding.embedding_dim,
+                    name="semantic audio output adapter",
+                )
+                total += (
+                    forward
+                    + 2 * rows * embedding.embedding_dim * embedding.num_embeddings
+                )
             continue
         raise ValueError(f"training FLOPs do not support modality {modality.value!r}.")
     return total

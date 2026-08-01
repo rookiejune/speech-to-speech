@@ -442,14 +442,24 @@ def _token_expected(model: Model, batch: ModelBatch) -> int:
     modality = batch.tasks[0].target_modality
     start, end = model.layout.blocks[modality.value]
     if modality.value == "audio":
-        forward += adapter(
-            model.audio_output_adapter,
-            rows=count,
-            in_features=hidden,
-            out_features=embedding.embedding_dim,
-            name="test output",
-        )
-        forward += 2 * count * embedding.embedding_dim * embedding.num_embeddings
+        if model.audio_output_adapter.config.type is AudioOutputAdapterType.NONE:
+            forward += adapter(
+                getattr(audio_adapter, "module", audio_adapter),
+                rows=embedding.num_embeddings,
+                in_features=embedding.embedding_dim,
+                out_features=hidden,
+                name="test tied audio head",
+            )
+            forward += 2 * count * hidden * embedding.num_embeddings
+        else:
+            forward += adapter(
+                model.audio_output_adapter,
+                rows=count,
+                in_features=hidden,
+                out_features=embedding.embedding_dim,
+                name="test output",
+            )
+            forward += 2 * count * embedding.embedding_dim * embedding.num_embeddings
     else:
         forward += 2 * count * hidden * (end - start)
     return 3 * forward

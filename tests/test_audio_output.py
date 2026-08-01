@@ -56,10 +56,10 @@ class AudioOutputAdapterTest(unittest.TestCase):
 
         self.assertEqual(config.type, AudioOutputAdapterType.MLP)
 
-    def test_default_config_selects_linear(self) -> None:
+    def test_default_config_selects_tied_head(self) -> None:
         self.assertIs(
             AudioOutputAdapterConfig().type,
-            AudioOutputAdapterType.LINEAR,
+            AudioOutputAdapterType.NONE,
         )
 
     def test_invalid_hidden_shape_is_rejected(self) -> None:

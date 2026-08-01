@@ -76,7 +76,7 @@ class TokenEmbeddingStructureTest(unittest.TestCase):
             Config(
                 semantic_audio_adapter=AdapterType.LINEAR,
                 audio_output_adapter=AudioOutputAdapterConfig(
-                    type=AudioOutputAdapterType.LINEAR,
+                    type=AudioOutputAdapterType.NONE,
                 ),
                 toy=ToyConfig(
                     hidden_size=8,
@@ -93,8 +93,8 @@ class TokenEmbeddingStructureTest(unittest.TestCase):
         self.assertEqual(tuple(embeds.shape), (1, 4, 8))
         hidden = torch.randn(1, 4, 8)
         text = model.text_logits(hidden)
-        adapted, _ = model.project_audio_hidden(hidden)
-        audio = model.semantic_audio_logits(adapted)
+        projected, audio_past = model.project_audio_hidden(hidden)
+        audio = model.semantic_audio_logits(projected)
         self.assertIsInstance(
             model.token_embedding.embeddings["text"],
             torch.nn.Embedding,
@@ -116,14 +116,17 @@ class TokenEmbeddingStructureTest(unittest.TestCase):
             model.token_embedding.embeddings["text"].num_embeddings,
         )
         self.assertEqual(audio.shape[-1], audio_table.num_embeddings)
+        self.assertIsNone(audio_past)
+        torch.testing.assert_close(projected, hidden.to(dtype=torch.float32))
         with torch.no_grad():
             tied_text = torch.nn.functional.linear(
                 hidden,
                 model.token_embedding.embeddings["text"].weight,
             )
+            tied_audio_weight = audio_adapter(audio_table.weight.to(dtype=torch.float32))
             tied_audio = torch.nn.functional.linear(
-                adapted,
-                audio_table.weight,
+                hidden.to(dtype=tied_audio_weight.dtype),
+                tied_audio_weight,
             )
         torch.testing.assert_close(text, tied_text)
         torch.testing.assert_close(audio, tied_audio)
@@ -137,7 +140,7 @@ class TokenEmbeddingStructureTest(unittest.TestCase):
             Config(
                 semantic_audio_adapter=AdapterType.LINEAR,
                 audio_output_adapter=AudioOutputAdapterConfig(
-                    type=AudioOutputAdapterType.LINEAR,
+                    type=AudioOutputAdapterType.NONE,
                 ),
                 toy=ToyConfig(
                     hidden_size=8,
@@ -159,13 +162,18 @@ class TokenEmbeddingStructureTest(unittest.TestCase):
         self.assertEqual(audio_table.num_embeddings, tokenizer.vocab_size + 3)
 
         hidden = torch.randn(1, 3, 8)
-        adapted, _ = model.project_audio_hidden(hidden)
-        logits = model.semantic_audio_logits(adapted)
+        logits = model.semantic_audio_logits(hidden)
+        audio_adapter = getattr(
+            model.token_embedding.adapters["audio"],
+            "module",
+            model.token_embedding.adapters["audio"],
+        )
 
         self.assertEqual(logits.shape[-1], audio_table.num_embeddings)
+        tied_audio_weight = audio_adapter(audio_table.weight.to(dtype=torch.float32))
         torch.testing.assert_close(
             logits,
-            torch.nn.functional.linear(adapted, audio_table.weight),
+            torch.nn.functional.linear(hidden.to(dtype=tied_audio_weight.dtype), tied_audio_weight),
         )
 
 
