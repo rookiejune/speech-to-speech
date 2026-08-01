@@ -2,7 +2,7 @@ codec: longcat
 backbone: moonshotai/Kimi-Audio-7B-Instruct
 backbone_initialization: pretrained
 backbone_trust_remote_code: true
-backbone_readout: mimo_hidden_states[1]
+backbone_readout: last_hidden_state[1]
 backbone_supports_cache_position: false
 audio_tokenizer: ${oc.env:SPEECH_TO_SPEECH_AUDIO_TOKENIZER}
 semantic_codec_artifact:

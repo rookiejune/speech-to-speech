@@ -170,6 +170,14 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.runtime.backbone, "Qwen/Qwen2.5-Omni-7B")
         self.assertEqual(config.runtime.backbone_body, "model")
 
+    def test_kimi_audio_runtime_uses_tuple_readout(self):
+        config = overfit(_compose("overfit", "runtime=kimi_audio"))
+
+        self.assertEqual(config.runtime.backbone, "moonshotai/Kimi-Audio-7B-Instruct")
+        self.assertTrue(config.runtime.backbone_trust_remote_code)
+        self.assertEqual(config.runtime.backbone_readout, "last_hidden_state[1]")
+        self.assertFalse(config.runtime.backbone_supports_cache_position)
+
     def test_random_backbone_requires_unambiguous_full_training(self):
         random = overfit(
             _compose("overfit", "runtime.backbone_initialization=random")

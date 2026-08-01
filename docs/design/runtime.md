@@ -42,7 +42,7 @@ HF config，但通过 `AutoModelForCausalLM.from_config()` 随机构造同架构
 
 非标准 HF backbone 通过三个 runtime 字段显式声明边界：`backbone_trust_remote_code` 同时传给
 tokenizer、pretrained backbone 与 random-init config 加载；`backbone_readout` 选择 model 消费的
-hidden tensor，支持 `last_hidden_state` 或单层序列索引形如 `mimo_hidden_states[1]`；`backbone_supports_cache_position`
+hidden tensor，支持 `last_hidden_state` 或单层序列索引形如 `last_hidden_state[1]`；`backbone_supports_cache_position`
 决定 token model 调用 backbone body 时是否传入 HF `cache_position` 参数。
 
 ## 协议

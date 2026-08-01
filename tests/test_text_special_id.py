@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from speech_to_speech.runtime.runtime import bind_chat_bos, text_special_id
+from speech_to_speech.runtime.runtime import (
+    bind_chat_bos,
+    text_special_id,
+    text_tokenizer_vocab_size,
+)
 
 
 class _SpecialTokenizer:
@@ -41,6 +45,21 @@ class _BindableTokenizer:
 
     def convert_tokens_to_ids(self, token: str) -> int:
         return self._token_ids[token]
+
+
+class _TikTokenLikeTokenizer:
+    vocab_size = 152064
+
+    @property
+    def total_vocab_size(self) -> int:
+        raise AttributeError("missing total_vocab_size")
+
+    def __len__(self) -> int:
+        return self.total_vocab_size
+
+    def convert_tokens_to_ids(self, token: str) -> int:
+        del token
+        raise AttributeError("missing _added_tokens_encoder")
 
 
 class TextSpecialIdTest(unittest.TestCase):
@@ -113,6 +132,23 @@ class BindChatBosTest(unittest.TestCase):
         bind_chat_bos(tokenizer)
 
         self.assertIsNone(tokenizer.bos_token)
+
+    def test_skips_tokenizers_that_cannot_convert_im_start(self):
+        bind_chat_bos(_TikTokenLikeTokenizer())
+
+
+class TextTokenizerVocabSizeTest(unittest.TestCase):
+    def test_prefers_len_when_available(self):
+        class _Tokenizer:
+            vocab_size = 20
+
+            def __len__(self) -> int:
+                return 10
+
+        self.assertEqual(text_tokenizer_vocab_size(_Tokenizer()), 10)
+
+    def test_falls_back_to_vocab_size_when_len_is_broken(self):
+        self.assertEqual(text_tokenizer_vocab_size(_TikTokenLikeTokenizer()), 152064)
 
 
 if __name__ == "__main__":

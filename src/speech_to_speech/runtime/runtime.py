@@ -317,7 +317,7 @@ class Runtime:
 
     @cached_property
     def layout(self) -> Layout:
-        text_vocab_size = len(self.text_tokenizer)
+        text_vocab_size = text_tokenizer_vocab_size(self.text_tokenizer)
         audio_vocab_size = self.audio_tokenizer.vocab_size + 3
         return Layout(
             text=(0, text_vocab_size),
@@ -351,7 +351,7 @@ class Runtime:
 
     @property
     def boa_token_id(self) -> int:
-        return len(self.text_tokenizer) + self.audio_tokenizer.vocab_size
+        return text_tokenizer_vocab_size(self.text_tokenizer) + self.audio_tokenizer.vocab_size
 
     @property
     def eoa_token_id(self) -> int:
@@ -438,6 +438,31 @@ def audio_tokenizer(path: str | Path) -> AudioTokenizer:
 
     tokenizer = codec_bpe(Path(path).expanduser())
     return cast(AudioTokenizer, cast(object, TorchCodecBPE.wrap(tokenizer)))
+
+
+def text_tokenizer_vocab_size(tokenizer: object) -> int:
+    try:
+        return _positive_integral(len(cast(TextTokenizer, tokenizer)), "text tokenizer length")
+    except (AttributeError, NotImplementedError, TypeError):
+        pass
+    for attribute in ("vocab_size", "total_vocab_size"):
+        try:
+            value = getattr(tokenizer, attribute)
+        except AttributeError:
+            continue
+        if value is None:
+            continue
+        return _positive_integral(value, f"text tokenizer {attribute}")
+    raise AttributeError("text tokenizer does not expose a positive vocabulary size.")
+
+
+def _positive_integral(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be a positive integer.")
+    result = int(value)
+    if result <= 0:
+        raise ValueError(f"{name} must be positive.")
+    return result
 
 
 def text_special_id(tokenizer: TextTokenizer, name: str) -> int:

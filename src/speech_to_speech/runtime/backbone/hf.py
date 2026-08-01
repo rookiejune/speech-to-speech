@@ -183,7 +183,10 @@ def bind_chat_bos(tokenizer: object) -> None:
     convert = getattr(tokenizer, "convert_tokens_to_ids", None)
     if not callable(convert):
         return
-    token_id = convert(_CHAT_BOS_TOKEN)
+    try:
+        token_id = convert(_CHAT_BOS_TOKEN)
+    except (AttributeError, NotImplementedError):
+        return
     if isinstance(token_id, bool) or not isinstance(token_id, Integral):
         return
     token_id = int(token_id)

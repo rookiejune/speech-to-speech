@@ -81,7 +81,7 @@ def generate_tokens(...) -> Tensor: ...
   logits。model 不接受 `PredictionModality` 作为 head 参数。
 - backbone 直接调用 HF causal LM 的 `base_model`；自带 text LM head 不会先计算再丢弃。
 - backbone body 由 runtime 的 `backbone_readout` 选择实际 hidden tensor；默认使用
-  `last_hidden_state`，Kimi-Audio 等自定义输出可选择 `mimo_hidden_states[1]`。不支持
+  `last_hidden_state`，Kimi-Audio 等自定义输出可选择 `last_hidden_state[1]`。不支持
   `cache_position` 的 remote-code backbone 通过 `backbone_supports_cache_position=false` 省略该参数。
 - text/audio output head 分别对对应 block embedding weight 做 tied linear，layout offset 只负责
   恢复 global token ID；不保留 LM head bias。
