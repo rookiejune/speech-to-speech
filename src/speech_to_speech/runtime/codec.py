@@ -23,10 +23,6 @@ _FSQ_LEVELS_BY_SIZES: dict[tuple[int, ...], tuple[tuple[int, ...], ...]] = {
 }
 
 
-class UnifiedCodecModel(Protocol):
-    frame_rate: float
-
-
 class UnifiedCodecSource(Protocol):
     @property
     def codebook_sizes(self) -> tuple[int, ...]: ...
@@ -35,7 +31,7 @@ class UnifiedCodecSource(Protocol):
     def device(self) -> torch.device: ...
 
     @property
-    def model(self) -> UnifiedCodecModel: ...
+    def frame_rate(self) -> float: ...
 
     @property
     def sample_rate(self) -> int: ...
@@ -115,7 +111,7 @@ class UnifiedCodec:
 
     @property
     def frame_rate(self) -> float:
-        return float(self.codec.model.frame_rate)
+        return float(self.codec.frame_rate)
 
     @property
     def semantic_feature_dim(self) -> int:

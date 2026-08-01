@@ -265,11 +265,12 @@ class _StableSource:
 
 class _UnifiedSource:
     sample_rate = 24_000
+    frame_rate = 75.0
     codebook_sizes = (4,)
 
     def __init__(self) -> None:
         self.device = torch.device("cpu")
-        self.model = SimpleNamespace(frame_rate=75.0)
+        self.model = SimpleNamespace()
         self.codes = torch.tensor([[[1], [2]]], dtype=torch.long)
         self.waveform = torch.zeros(1, 1, 8)
         self.features = torch.arange(12, dtype=torch.float32).view(4, 3)
