@@ -34,7 +34,7 @@ class AudioInputAdapterConfig:
     frame cannot depend on future codec frames.
     """
 
-    type: AudioInputAdapterType = AudioInputAdapterType.NONE
+    type: AudioInputAdapterType = AudioInputAdapterType.MLP
     layers: int = 2
     heads: int = 8
     ffn_ratio: float = 4.0
@@ -63,7 +63,7 @@ def audio_input_options(
     if not isinstance(config, Mapping):
         raise TypeError("audio input adapter config must be a config or mapping.")
 
-    adapter_type = config.get("type", AudioInputAdapterType.NONE)
+    adapter_type = config.get("type", AudioInputAdapterType.MLP)
     return AudioInputAdapterConfig(
         type=AudioInputAdapterType(cast(str, adapter_type)),
         **tower_fields(config),

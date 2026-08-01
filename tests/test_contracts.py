@@ -333,6 +333,7 @@ class ContractTest(unittest.TestCase):
         self.assertIsNone(runtime_config.audio_tokenizer)
         self.assertIsNone(runtime_config.device)
         self.assertEqual(model_config.semantic_audio_adapter, "linear")
+        self.assertEqual(model_config.audio_input_adapter.type, "mlp")
         self.assertEqual(model_config.audio_output_adapter.type, "none")
 
     def test_acoustic_presets_expose_only_supported_options(self):

@@ -6,7 +6,7 @@ audio_output_adapter:
   ffn_ratio: 4.0
   dropout: 0.0
 audio_input_adapter:
-  type: none
+  type: mlp
   layers: 2
   heads: 8
   ffn_ratio: 4.0

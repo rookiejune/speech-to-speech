@@ -1082,11 +1082,11 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             overfit(_compose("overfit", "model.semantic_audio_adapter=invalid"))
 
-    def test_audio_input_adapter_is_structured_and_disabled_by_default(self):
+    def test_audio_input_adapter_is_structured_and_mlp_by_default(self):
         default = overfit(_compose("overfit"))
         self.assertIs(
             default.model.audio_input_adapter.type,
-            AudioInputAdapterType.NONE,
+            AudioInputAdapterType.MLP,
         )
         configured = overfit(
             _compose("overfit", "model.audio_input_adapter.type=transformer")

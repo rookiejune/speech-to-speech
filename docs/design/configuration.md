@@ -50,13 +50,14 @@ overfit 的可选 `text_retention`、`gradient_probe` 与 `flow_matching` 诊断
 `configs/overfit.yaml` 显式持有开关、cadence 和模型参数 probe；`OOMDiagnostics`、`OutputsLogger` 与
 `LossSummary` 是两个训练入口固定拥有的结构 callback，不伪装成可关闭的实验选项。
 
-`model.audio_input_adapter` 默认 `type=none`。可显式选择 `mlp` 或 `transformer`，并配置
-`layers`、`heads`、`ffn_ratio` 与 `dropout`；两者都只作用于 `audio_input_positions` 标记的 source
-audio payload。这个配置与 `semantic_audio_adapter`、`audio_output_adapter` 独立：它不
-处理 target/generated audio，也不替换 Flow/RVQ acoustic decoder。启用 transformer 时要求
-backbone hidden size 能被 `heads` 整除。
+`model.audio_input_adapter` 默认 `type=mlp`，让 source audio payload 先经过可学习的
+pointwise 对齐层再 overlay 到 backbone embedding space。可显式选择 `none` 作为 ablation/smoke
+baseline，或选择 `transformer` 并配置 `layers`、`heads`、`ffn_ratio` 与 `dropout`。启用的
+input adapter 只作用于 `audio_input_positions` 标记的 source audio payload；它与
+`semantic_audio_adapter`、`audio_output_adapter` 独立，不处理 target/generated audio，也不替换
+Flow/RVQ acoustic decoder。启用 transformer 时要求 backbone hidden size 能被 `heads` 整除。
 
-`model.audio_output_adapter` 默认 `type=linear`。`none` / `linear` / `mlp` 是无序列混合的
+`model.audio_output_adapter` 默认 `type=none`。`none` / `linear` / `mlp` 是无序列混合的
 pointwise 特例；`transformer` 启用因果 self-attention，并携带独立 KV cache（与 backbone cache
 同步 compact）。可配置 `layers`、`heads`、`ffn_ratio`、`dropout`（仅 transformer 使用）。该模块
 同时服务 teacher forcing、候选 logits 和 autoregressive generation。

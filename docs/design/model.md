@@ -118,9 +118,10 @@ backbone hidden 一次前向；generation 增量喂入新 token hidden 并与 ba
 pointwise 特例忽略 cache。训练 CE 在 adapter 之后对 audio 行做 tied linear；frame condition 仍取
 adapter 前的 backbone hidden。
 
-`audio_input_adapter` 默认 `type=none`。启用 `mlp` 时，source audio payload 的 semantic embedding
-逐帧经过 gated MLP 投影到 backbone hidden dimension；启用 `transformer` 时，先做输入投影，再用
-同长度、非 causal 的 Transformer encoder 跨 source frames 建立上下文。两种 tower 都保持 frame
+`audio_input_adapter` 默认 `type=mlp`，让 source audio payload 的 semantic embedding
+逐帧经过 gated MLP 投影到 backbone hidden dimension，避免无变换地覆盖 LLM embedding space。
+显式选择 `transformer` 时，先做输入投影，再用
+同长度、causal 的 Transformer encoder 跨 source frames 建立上下文。两种 tower 都保持 frame
 数量不变，并在 overlay 到 `inputs_embeds` 前清零 padding。训练和完整 prompt 的首步会传入显式
 `audio_input_positions`；启用 KV cache 后后续 token 只走 backbone，不重复运行 source tower。
 该配置不会改变生成 grammar，也不会替换 Flow/RVQ
