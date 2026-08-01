@@ -67,6 +67,26 @@ class RuntimeCodecTest(unittest.TestCase):
         torch.testing.assert_close(waveform, backend.waveform)
         load_codec_backend.assert_called_once_with("stable_codec", device="cuda")
 
+    def test_load_codec_unicodec_exposes_frame_capability(self) -> None:
+        backend = _UnifiedSource()
+
+        with patch(
+            "speech_to_speech.runtime.codec.load_frame",
+            return_value=backend,
+        ) as load_codec_backend:
+            codec = load_codec("unicodec", device="cuda")
+
+        self.assertEqual(codec.name, "unicodec")
+        self.assertEqual(codec.sample_rate, 24_000)
+        self.assertEqual(codec.frame_rate, 75.0)
+        self.assertEqual(codec.codebook_sizes, (4,))
+        self.assertIs(frame_codec(codec), codec)
+        codes = codec.encode(torch.zeros(1, 1, 8), 24_000)
+        torch.testing.assert_close(codes, backend.codes)
+        waveform = codec.decode(codes)
+        torch.testing.assert_close(waveform, backend.waveform)
+        load_codec_backend.assert_called_once_with("unicodec", device="cuda")
+
     def test_stable_runtime_uses_stable_audio_view(self) -> None:
         config = Config(
             codec="stable_codec",
@@ -233,6 +253,29 @@ class _StableSource:
     def __init__(self) -> None:
         self.codes = torch.tensor([[[1], [2]]], dtype=torch.long)
         self.waveform = torch.zeros(1, 1, 8)
+
+    def encode(self, audio: torch.Tensor, sample_rate: int) -> torch.Tensor:
+        del audio, sample_rate
+        return self.codes
+
+    def decode(self, codes: torch.Tensor) -> torch.Tensor:
+        del codes
+        return self.waveform
+
+
+class _UnifiedSource:
+    sample_rate = 24_000
+    codebook_sizes = (4,)
+
+    def __init__(self) -> None:
+        self.device = torch.device("cpu")
+        self.model = SimpleNamespace(frame_rate=75.0)
+        self.codes = torch.tensor([[[1], [2]]], dtype=torch.long)
+        self.waveform = torch.zeros(1, 1, 8)
+        self.features = torch.arange(12, dtype=torch.float32).view(4, 3)
+
+    def codes_to_features(self, codes: torch.Tensor) -> torch.Tensor:
+        return self.features[codes.squeeze(-1)]
 
     def encode(self, audio: torch.Tensor, sample_rate: int) -> torch.Tensor:
         del audio, sample_rate

@@ -106,6 +106,10 @@ class UnifiedCodec:
         self._semantic_codebook = codec.codes_to_features(ids)[0].detach()
 
     @property
+    def name(self) -> str:
+        return "unicodec"
+
+    @property
     def sample_rate(self) -> int:
         return int(self.codec.sample_rate)
 
