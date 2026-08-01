@@ -4,6 +4,7 @@ from .decode import (
     decode_generated_bicodec_route,
     decode_generated_codes,
     decode_generated_frame_codes,
+    decode_generated_semantic,
     decode_reference_codes,
 )
 from .chat import (
@@ -41,6 +42,7 @@ __all__ = [
     "decode_generated_bicodec_route",
     "decode_generated_codes",
     "decode_generated_frame_codes",
+    "decode_generated_semantic",
     "decode_reference_codes",
     "evaluate_text",
     "generate_responses",

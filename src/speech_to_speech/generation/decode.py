@@ -4,7 +4,7 @@ from collections.abc import Mapping
 
 import torch
 from anytrain.codec import SemanticAcousticCodes
-from torch import Tensor
+from torch import Generator, Tensor
 
 from .._tensor import is_signed_integer_dtype
 from ..audio_route import AudioStream, Config as AudioRouteConfig, StreamSource
@@ -69,13 +69,21 @@ def decode_generated_semantic(
     codec: SemanticCodec,
     audio_tokenizer: AudioTokenizer,
     audio_token_range: tuple[int, int],
+    semantic_reference_features: Tensor | None = None,
+    semantic_reference_mask: Tensor | None = None,
+    semantic_decode_generator: Generator | None = None,
 ) -> Tensor:
     """Decode semantic-only codec tokens directly into waveforms."""
     local_ids = _local_ids(audio_token_ids, audio_token_range)
     semantic_codes = torch.stack(
         [semantic_codes_from_audio_tokens(audio_tokenizer, row) for row in local_ids]
     )
-    return codec.decode(semantic_codes)
+    return codec.decode(
+        semantic_codes,
+        reference_features=semantic_reference_features,
+        reference_mask=semantic_reference_mask,
+        generator=semantic_decode_generator,
+    )
 
 
 def decode_generated_frame_codes(

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TypedDict
 
 from anytrain.codec import SemanticAcousticCodes
-from torch import Tensor
+from torch import Generator, Tensor
 from typing_extensions import NotRequired
 
 from ..prediction import PredictionModality
@@ -16,6 +16,9 @@ class Request(TypedDict):
     audio_input_positions: Tensor | None
     audio_context: SemanticAcousticCodes | None
     prediction: NotRequired[PredictionModality | None]
+    semantic_reference_features: NotRequired[Tensor | None]
+    semantic_reference_mask: NotRequired[Tensor | None]
+    semantic_decode_generator: NotRequired[Generator | None]
 
 
 class AudioOutput(TypedDict):

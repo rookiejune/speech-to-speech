@@ -7,7 +7,7 @@ from torch import Tensor
 from .._tensor import is_signed_integer_dtype
 from ..prediction import PredictionModality
 from ..task import Task
-from .audio import validate_audio_request
+from .audio import has_semantic_decode_options, validate_audio_request
 from .protocol import TokenGenerator
 from .types import Request
 
@@ -66,10 +66,18 @@ def validate(request: Request, model: TokenGenerator) -> None:
     if prediction is PredictionModality.TEXT:
         if request.get("audio_context") is not None:
             raise ValueError("text generation requests cannot include audio context.")
+        if has_semantic_decode_options(request):
+            raise ValueError(
+                "text generation requests cannot include semantic decode options."
+            )
         return
     if prediction.is_mixed:
         if request.get("audio_context") is not None:
             raise ValueError("mixed AR generation requests cannot include audio context.")
+        if has_semantic_decode_options(request):
+            raise ValueError(
+                "mixed AR generation requests cannot include semantic decode options."
+            )
         return
     validate_audio_request(request, model)
 

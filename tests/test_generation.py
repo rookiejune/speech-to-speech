@@ -42,6 +42,7 @@ from speech_to_speech.generation import (
     decode_generated_audio,
     decode_generated_codes,
     decode_generated_frame_codes,
+    decode_generated_semantic,
     generate_responses,
 )
 from speech_to_speech.generation.batch import requests_from_batch
@@ -88,9 +89,35 @@ class _UnifiedCodec:
 
     def __init__(self) -> None:
         self.decode_calls = 0
+        self.decode_call_args: list[
+            tuple[
+                Tensor,
+                Tensor | None,
+                Tensor | None,
+                Tensor | None,
+                torch.Generator | None,
+            ]
+        ] = []
 
-    def decode(self, codes: Tensor) -> Tensor:
+    def decode(
+        self,
+        codes: Tensor,
+        *,
+        mask: Tensor | None = None,
+        reference_features: Tensor | None = None,
+        reference_mask: Tensor | None = None,
+        generator: torch.Generator | None = None,
+    ) -> Tensor:
         self.decode_calls += 1
+        self.decode_call_args.append(
+            (
+                codes.clone(),
+                None if mask is None else mask.clone(),
+                None if reference_features is None else reference_features.clone(),
+                None if reference_mask is None else reference_mask.clone(),
+                generator,
+            )
+        )
         return codes[..., 0].float()
 
     def encode(self, audio: Tensor, sample_rate: int) -> Tensor:
@@ -985,6 +1012,79 @@ class GenerationTest(unittest.TestCase):
         self.assertEqual(semantic_codec.decode_calls, 1)
         self.assertEqual(model.runtime.codec.decode_calls, 0)
         self.assertEqual(result["audio"]["sample_rate"], semantic_codec.sample_rate)
+
+    def test_decode_generated_semantic_passes_reference_and_generator(self):
+        codec = _UnifiedCodec()
+        tokenizer = NativeAudioTokenizer(vocab_size=2)
+        reference_features = torch.randn(1, 2, 3)
+        reference_mask = torch.tensor([[True, False]])
+        generator = torch.Generator().manual_seed(1)
+
+        decoded = decode_generated_semantic(
+            torch.tensor([[4, 5]]),
+            codec=codec,
+            audio_tokenizer=tokenizer,
+            audio_token_range=(4, 6),
+            semantic_reference_features=reference_features,
+            semantic_reference_mask=reference_mask,
+            semantic_decode_generator=generator,
+        )
+
+        self.assertEqual(codec.decode_calls, 1)
+        (
+            _codes,
+            _mask,
+            actual_features,
+            actual_reference_mask,
+            actual_generator,
+        ) = codec.decode_call_args[0]
+        self.assertIsNotNone(actual_features)
+        self.assertIsNotNone(actual_reference_mask)
+        if actual_features is None or actual_reference_mask is None:
+            self.fail("semantic decode reference arguments were not recorded")
+        torch.testing.assert_close(actual_features, reference_features)
+        torch.testing.assert_close(actual_reference_mask, reference_mask)
+        self.assertIs(actual_generator, generator)
+        torch.testing.assert_close(decoded, torch.tensor([[0.0, 1.0]]))
+
+    def test_generate_responses_batches_semantic_reference_options(self):
+        model = _TokenGenerationModel()
+        semantic_codec = _UnifiedCodec()
+        model.runtime._semantic_codec = semantic_codec
+        reference_features = torch.randn(2, 3)
+        reference_mask = torch.tensor([True, False])
+        generator = torch.Generator().manual_seed(2)
+        request = _request()
+        request["semantic_reference_features"] = reference_features
+        request["semantic_reference_mask"] = reference_mask
+        request["semantic_decode_generator"] = generator
+
+        result = generate_responses(
+            [request],
+            model,
+            max_new_tokens=3,
+            do_sample=False,
+        )[0]
+
+        self.assertIsNotNone(result["audio"])
+        self.assertEqual(semantic_codec.decode_calls, 1)
+        (
+            _codes,
+            _mask,
+            actual_features,
+            actual_reference_mask,
+            actual_generator,
+        ) = semantic_codec.decode_call_args[0]
+        self.assertIsNotNone(actual_features)
+        self.assertIsNotNone(actual_reference_mask)
+        if actual_features is None or actual_reference_mask is None:
+            self.fail("semantic decode reference arguments were not recorded")
+        torch.testing.assert_close(actual_features, reference_features.unsqueeze(0))
+        torch.testing.assert_close(
+            actual_reference_mask,
+            reference_mask.unsqueeze(0),
+        )
+        self.assertIs(actual_generator, generator)
 
     def test_full_codec_sequence_decodes_all_codebooks(self):
         tokenizer = FlattenedAudioTokenizer(

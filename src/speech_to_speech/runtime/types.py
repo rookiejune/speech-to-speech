@@ -5,7 +5,7 @@ import math
 from typing import Protocol, Union, cast, runtime_checkable
 
 from anytrain.codec import AcousticLayout
-from torch import Tensor, nn
+from torch import Generator, Tensor, nn
 from transformers.cache_utils import Cache
 
 
@@ -16,7 +16,15 @@ class SemanticCodec(Protocol):
     @property
     def frame_rate(self) -> float: ...
 
-    def decode(self, semantic_codes: Tensor) -> Tensor: ...
+    def decode(
+        self,
+        semantic_codes: Tensor,
+        *,
+        mask: Tensor | None = None,
+        reference_features: Tensor | None = None,
+        reference_mask: Tensor | None = None,
+        generator: Generator | None = None,
+    ) -> Tensor: ...
 
 
 class SemanticCodebookCodec(Protocol):

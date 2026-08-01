@@ -59,6 +59,13 @@ class _Decoder(Protocol):
     def decode(self, token_ids: Tensor, features: Tensor | None) -> Tensor: ...
 
 
+@dataclass(frozen=True)
+class _SemanticDecodeOptions:
+    reference_features: Tensor | None
+    reference_mask: Tensor | None
+    generator: torch.Generator | None
+
+
 def generate_audio_responses(
     requests: Sequence[Request],
     model: TokenGenerator,
@@ -101,6 +108,7 @@ def validate_audio_request(request: Request, model: TokenGenerator) -> None:
     context = request.get("audio_context")
     if context is not None and not isinstance(context, SemanticAcousticCodes):
         raise TypeError("generation audio context must be SemanticAcousticCodes.")
+    _validate_semantic_decode_options(request, model)
     if route is None:
         if context is not None:
             raise ValueError(
@@ -175,11 +183,40 @@ class _Semantic:
 
     def generate(self, batch: _Batch) -> list[Result]:
         responses = _token_responses(batch)
+        frame_counts = _frame_counts(responses, self.model)
+        if any(has_semantic_decode_options(request) for request in batch.requests):
+            return [
+                self._decode_result(token_ids, request)
+                for token_ids, request in zip(responses, batch.requests)
+            ]
         return _decoded_results(
             responses,
             None,
-            _frame_counts(responses, self.model),
+            frame_counts,
             self,
+        )
+
+    def _decode_result(self, token_ids: Tensor, request: Request) -> Result:
+        options = _semantic_decode_options(request)
+        decoded = decode_generated_semantic(
+            token_ids.unsqueeze(0),
+            codec=self.codec,
+            audio_tokenizer=self.model.runtime.audio_tokenizer,
+            audio_token_range=self.model.runtime.codec_audio_range,
+            semantic_reference_features=_batched(options.reference_features),
+            semantic_reference_mask=_batched(options.reference_mask),
+            semantic_decode_generator=options.generator,
+        )
+        if decoded.dim() < 1 or decoded.size(0) != 1:
+            raise ValueError("codec decode must preserve the generation batch axis.")
+        return Result(
+            response_ids=token_ids,
+            audio=AudioOutput(
+                features=None,
+                codes=None,
+                waveform=decoded[0],
+                sample_rate=self.sample_rate,
+            ),
         )
 
     def decode(self, token_ids: Tensor, features: Tensor | None) -> Tensor:
@@ -542,8 +579,78 @@ def _token_decoder(model: TokenGenerator) -> _Decoder:
     return _Semantic(model)
 
 
+def has_semantic_decode_options(request: Request) -> bool:
+    return (
+        request.get("semantic_reference_features") is not None
+        or request.get("semantic_reference_mask") is not None
+        or request.get("semantic_decode_generator") is not None
+    )
+
+
+def _validate_semantic_decode_options(
+    request: Request,
+    model: TokenGenerator,
+) -> None:
+    if not has_semantic_decode_options(request):
+        return
+    if model.runtime.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE:
+        raise ValueError(
+            "semantic decode options require semantic-only audio generation."
+        )
+    if model.runtime.acoustic_side_channel and isinstance(
+        model,
+        AcousticFeatureGeneration,
+    ):
+        raise ValueError(
+            "semantic decode options are not supported with acoustic side-channel generation."
+        )
+
+    features = request.get("semantic_reference_features")
+    if features is not None:
+        if not isinstance(features, Tensor):
+            raise TypeError("semantic reference features must be a Tensor.")
+        if features.dim() != 2:
+            raise ValueError(
+                "semantic reference features must have shape [frames, dim]."
+            )
+    mask = request.get("semantic_reference_mask")
+    if mask is not None:
+        if not isinstance(mask, Tensor):
+            raise TypeError("semantic reference mask must be a Tensor.")
+        if mask.dtype != torch.bool:
+            raise TypeError("semantic reference mask must be a bool Tensor.")
+        if mask.dim() != 1:
+            raise ValueError("semantic reference mask must have shape [frames].")
+        if features is None:
+            raise ValueError(
+                "semantic reference mask requires semantic reference features."
+            )
+        if mask.size(0) != features.size(0):
+            raise ValueError(
+                "semantic reference mask must align with reference feature frames."
+            )
+    generator = request.get("semantic_decode_generator")
+    if generator is not None and not isinstance(generator, torch.Generator):
+        raise TypeError("semantic decode generator must be a torch.Generator.")
+
+
+def _semantic_decode_options(request: Request) -> _SemanticDecodeOptions:
+    return _SemanticDecodeOptions(
+        reference_features=request.get("semantic_reference_features"),
+        reference_mask=request.get("semantic_reference_mask"),
+        generator=request.get("semantic_decode_generator"),
+    )
+
+
+def _batched(value: Tensor | None) -> Tensor | None:
+    if value is None:
+        return None
+    return value.unsqueeze(0)
+
+
 __all__ = [
     "decode_token_audio_rows",
     "generate_audio_responses",
+    "has_semantic_decode_options",
     "validate_audio_request",
 ]
