@@ -35,7 +35,11 @@ from anydataset.dataset import MapStyleABC
 
 from speech_to_speech.audio_route import BICODEC_GENERATE_GLOBAL, FULL_OUTPUT
 from speech_to_speech.callback import OnDeviceCodecMaterializer
-from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
+from speech_to_speech.datamodule.config import (
+    DataLoaderConfig,
+    DataLoaderCostsConfig,
+    SpeechConfig,
+)
 from speech_to_speech.datamodule._helper.task import TaskWeights, allocate_tasks
 from speech_to_speech.datamodule.collate.collator import Collator, TextCollator
 from speech_to_speech.datamodule.dataset.speech import (
@@ -166,6 +170,44 @@ class ContractTest(unittest.TestCase):
         for kwargs, error, message in invalid:
             with self.subTest(kwargs=kwargs), self.assertRaisesRegex(error, message):
                 DataLoaderConfig(**kwargs)
+        costs_invalid = (
+            ({"enabled": True}, ValueError, "max_batch_frames"),
+            (
+                {"enabled": True, "max_batch_frames": 1, "planning_window": 0},
+                ValueError,
+                "planning_window",
+            ),
+            ({"enabled": 1}, TypeError, "boolean"),
+        )
+        for kwargs, error, message in costs_invalid:
+            with self.subTest(costs=kwargs), self.assertRaisesRegex(error, message):
+                DataLoaderCostsConfig(**kwargs)
+        with self.assertRaisesRegex(TypeError, "DataLoaderCostsConfig"):
+            DataLoaderConfig(
+                batch_size=1,
+                num_workers=0,
+                costs=cast(DataLoaderCostsConfig, {}),
+            )
+        structured = OmegaConf.structured(DataLoaderConfig)
+        merged = OmegaConf.merge(
+            structured,
+            {"batch_size": 8, "num_workers": 4, "pin_memory": True},
+        )
+        loader = OmegaConf.to_object(merged)
+        self.assertIsInstance(loader, DataLoaderConfig)
+        self.assertIsInstance(loader.costs, DataLoaderCostsConfig)
+        self.assertFalse(loader.costs.enabled)
+        with self.assertRaisesRegex(ValueError, "text loaders"):
+            TextConfig(
+                dataloader=DataLoaderConfig(
+                    batch_size=1,
+                    num_workers=0,
+                    costs=DataLoaderCostsConfig(
+                        enabled=True,
+                        max_batch_frames=8,
+                    ),
+                )
+            )
 
     def test_datamodule_configs_reject_mapping_loader_config(self):
         loader = cast(DataLoaderConfig, {"batch_size": 1, "num_workers": 0})
@@ -1157,6 +1199,64 @@ class ContractTest(unittest.TestCase):
         self.assertIs(loader.dataset, load_dataset.return_value)
         self.assertEqual(loader.batch_size, 2)
 
+    @patch("speech_to_speech.datamodule.module.load_dataset")
+    def test_datamodule_rejects_enabled_costs_for_non_mapstyle_dataset(
+        self,
+        load_dataset,
+    ):
+        load_dataset.return_value = [_raw_sample(), _raw_sample()]
+        runtime = _data_runtime()
+        config = SpeechConfig(
+            codec="longcat",
+            dataloader=DataLoaderConfig(
+                batch_size=2,
+                num_workers=0,
+                costs=DataLoaderCostsConfig(
+                    enabled=True,
+                    max_batch_frames=8,
+                ),
+            ),
+        )
+        datamodule = DataModule(
+            runtime,
+            {"train": LoaderSpec.speech(config, {Task.TTS: 1.0})},
+        )
+        datamodule.setup()
+        with self.assertRaisesRegex(ValueError, "non-MapStyle"):
+            datamodule.train_dataloader()
+
+    @patch("speech_to_speech.datamodule.module.load_dataset")
+    def test_datamodule_rejects_enabled_costs_for_fixed_sample_loader(
+        self,
+        load_dataset,
+    ):
+        load_dataset.return_value = [_raw_sample(), _raw_sample()]
+        runtime = _data_runtime()
+        config = SpeechConfig(
+            codec="longcat",
+            dataloader=DataLoaderConfig(
+                batch_size=1,
+                num_workers=0,
+                costs=DataLoaderCostsConfig(
+                    enabled=True,
+                    max_batch_frames=8,
+                ),
+            ),
+        )
+        datamodule = DataModule(
+            runtime,
+            {
+                "train": LoaderSpec.speech(
+                    config,
+                    {Task.TTS: 1.0},
+                    sample_index=0,
+                )
+            },
+        )
+        datamodule.setup()
+        with self.assertRaisesRegex(ValueError, "fixed-sample"):
+            datamodule.train_dataloader()
+
     def test_toy_dataset_uses_codec_shapes_and_value_ranges(self):
         cases = (
             (
@@ -1320,6 +1420,53 @@ class ContractTest(unittest.TestCase):
                     2,
                 )
 
+    def test_datamodule_smoke_uses_audio_frame_costs_for_store_backed_data(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with patch.dict("os.environ", {"ANYDATASET_HOME": str(root / "cache")}):
+                output = root / "dataset"
+                DatasetWriter(
+                    output,
+                    dataset_id="toy-speech",
+                    split="train",
+                    max_shard_samples=2,
+                ).write([_raw_sample(index) for index in range(4)])
+                dataset = AnyDataset(
+                    Spec(source=Source.STORE, path=str(output), split="train")
+                )
+                runtime = _data_runtime()
+                config = SpeechConfig(
+                    codec="longcat",
+                    dataloader=DataLoaderConfig(
+                        batch_size=2,
+                        num_workers=0,
+                        costs=DataLoaderCostsConfig(
+                            enabled=True,
+                            max_batch_frames=8,
+                            planning_window=4,
+                        ),
+                    ),
+                )
+                datamodule = DataModule(
+                    runtime,
+                    {"train": LoaderSpec.speech(config, {Task.TTS: 1.0})},
+                )
+
+                with patch(
+                    "speech_to_speech.datamodule.module.load_dataset",
+                    return_value=dataset,
+                ):
+                    datamodule.setup()
+                    loader = cast(Any, datamodule.train_dataloader())
+
+                sampler = loader.batch_sampler
+                self.assertIsNotNone(sampler.costs)
+                self.assertEqual(sampler.costs[0], 4)
+                self.assertEqual(sampler.max_batch_memory, 8)
+                self.assertEqual(sampler.max_batch_samples, 2)
+                self.assertEqual(sampler.planning_window, 4)
+                _assert_store_local_batches(self, sampler)
+
     def test_datamodule_uses_store_backed_data_without_duration(self):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1376,6 +1523,47 @@ class ContractTest(unittest.TestCase):
                     ),
                     2,
                 )
+
+    def test_datamodule_enabled_costs_require_audio_duration_metadata(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with patch.dict("os.environ", {"ANYDATASET_HOME": str(root / "cache")}):
+                output = root / "dataset"
+                DatasetWriter(
+                    output,
+                    dataset_id="toy-speech",
+                    split="train",
+                    max_shard_samples=2,
+                ).write([_raw_sample_without_duration(index) for index in range(2)])
+                dataset = AnyDataset(
+                    Spec(source=Source.STORE, path=str(output), split="train")
+                )
+                runtime = _data_runtime()
+                config = SpeechConfig(
+                    codec="longcat",
+                    dataloader=DataLoaderConfig(
+                        batch_size=2,
+                        num_workers=0,
+                        costs=DataLoaderCostsConfig(
+                            enabled=True,
+                            max_batch_frames=8,
+                        ),
+                    ),
+                )
+                datamodule = DataModule(
+                    runtime,
+                    {"train": LoaderSpec.speech(config, {Task.TTS: 1.0})},
+                )
+
+                with patch(
+                    "speech_to_speech.datamodule.module.load_dataset",
+                    return_value=dataset,
+                ):
+                    datamodule.setup()
+                    loader = cast(Any, datamodule.train_dataloader())
+
+                with self.assertRaisesRegex(ValueError, "duration metadata"):
+                    _ = loader.batch_sampler.costs[0]
 
     def test_wmt19_loader_uses_default_filter(self):
         dataset = [Mock()]

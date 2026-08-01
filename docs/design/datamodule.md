@@ -78,10 +78,16 @@ checkpoint 的收敛和生成音质仍需单独验收。
   校验。
 - `ToyDataset`：提供完整 source/target audio+text raw sample，不读取文件、不修改全局 RNG；它实现
   `MapStyleABC`，因此 DDP smoke 与正式 prepared data 使用同一 rank-local batch planner。
-- `config.DataLoaderConfig(batch_size, num_workers, pin_memory, persistent_workers)` /
+- `config.DataLoaderConfig(batch_size, num_workers, pin_memory, persistent_workers, costs)` /
+  `DataLoaderCostsConfig(enabled, max_batch_frames, planning_window)` /
   `SpeechConfig(codec, dataloader, shape, encode_missing_codes, dataset)`：公开的 DataLoader、
   dataset 与 DataModule dataclass 配置结构，字段和值域校验只在这里维护；Hydra staged train
-  直接复用 `Config` 与 `TextConfig`，入口不声明同构 schema 或转换 dict。prepared speech 的 map-style dataset 通过
+  直接复用 `Config` 与 `TextConfig`，入口不声明同构 schema 或转换 dict。`costs` 默认关闭；
+  开启后只适用于 speech `MapStyleABC` 路径，样本 cost 为全部 audio item 的
+  `ceil(duration_seconds * codec_frame_rate)` 之和，并以 `max_batch_frames` 作为
+  `max_batch_memory`。开启 costs 要求 cost_row / manifest 提供 `AudioMeta.DURATION`，不会像
+  parser 那样从 codec frames 回退；text loader、fixed-sample subset 与非 MapStyle dataset
+  开启 costs 直接报错。prepared speech 的 map-style dataset 通过
   `MapStyleABC.dataloader()` 使用 anydataset 的 cost planner；普通或 iterable dataset 使用
   PyTorch `DataLoader`。`shape=pair` 是默认路径；`shape=single` 显式选择 single utterance path。
 - `_helper.task` 私有承载 loader task weights 校验与 batch task 分配；`_helper.text` 私有承载 text
@@ -267,11 +273,12 @@ response、generated token 以及 BiCodec route 的 reference `audio_context` �
   仍持有正式 runtime 供 dataset setup 使用。`persistent_workers` 只在 `num_workers > 0` 时启用，
   `pin_memory` 由入口显式配置。
 - 对 anydataset `MapStyleABC`，`DataModule` 使用其 `dataloader()` 公开入口负责 deterministic
-  shuffle、runtime shard 和固定的 sample-cost batch 规划；store-backed dataset 会额外保留
-  payload locality。DataLoader 仍索引原始外层 dataset，因此 `AnyDataset` transform 不会被绕过。
-  普通或 iterable dataset 使用 PyTorch `DataLoader`。多 loader train 的外层
-  `ScheduledDataLoader` 不接受 Lightning 注入 sampler；正式 distributed sample partition
-  由各 loader 的公开 dataloader 契约负责。
+  shuffle、runtime shard 和 sample-cost batch 规划；默认 costs 关闭时以 unit cost 与
+  `batch_size` 对齐，开启后按 audio-frame cost 与 `max_batch_frames` 规划。store-backed
+  dataset 会额外保留 payload locality。DataLoader 仍索引原始外层 dataset，因此
+  `AnyDataset` transform 不会被绕过。普通或 iterable dataset 使用 PyTorch `DataLoader`，
+  不能开启 costs。多 loader train 的外层 `ScheduledDataLoader` 不接受 Lightning 注入
+  sampler；正式 distributed sample partition 由各 loader 的公开 dataloader 契约负责。
 - validation speech loader 使用同一公开 batch planner 和 distributed partition，但显式关闭
   shuffle。正式 train 入口从一个现有 stage speech loader 复制 task weights 与 speech config，
   只把复制后的 `DatasetConfig.split_label` 改为 dev；训练 spec 与 dataset config 保持不变。

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterable, Mapping, Sequence, Sized
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from anydataset.dataset import MapStyleABC
-from anydataset.types import Sample as RawSample
+from anydataset.types import AudioMeta, Modality, Sample as RawSample
 from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader, Subset
 
@@ -208,6 +210,10 @@ class _SpeechLoader:
                 "speech loader setup() must run before building a loader."
             )
         if self._subset is not None:
+            _reject_enabled_costs(
+                self.config.dataloader,
+                "fixed-sample speech loaders",
+            )
             return DataLoader(
                 self._subset,
                 batch_size=1,
@@ -224,6 +230,7 @@ class _SpeechLoader:
             loader=loader,
             collate_fn=self.collator,
             shuffle=shuffle,
+            frame_rate=self.runtime.codec_frame_rate,
         )
         if source_loader is not None:
             if source_loader.dataset is self._dataset:
@@ -238,6 +245,7 @@ class _SpeechLoader:
                 ),
                 collate_fn=self.collator,
             )
+        _reject_enabled_costs(loader, "non-MapStyle speech datasets")
         return DataLoader(
             self._dataset,
             batch_size=loader.batch_size,
@@ -430,15 +438,33 @@ def _source_loader(
     loader: DataLoaderConfig,
     collate_fn: Any,
     shuffle: bool,
+    frame_rate: float,
 ) -> DataLoader[Any] | None:
     source = _source_dataset(dataset)
     if source is None:
         return None
     batch_size = loader.batch_size
+    if not loader.costs.enabled:
+        return source.dataloader(
+            costs=None,
+            max_batch_memory=batch_size,
+            max_batch_samples=batch_size,
+            planning_window=256,
+            shuffle=shuffle,
+            num_workers=loader.num_workers,
+            pin_memory=loader.pin_memory,
+            persistent_workers=(
+                loader.persistent_workers and loader.num_workers > 0
+            ),
+            collate_fn=collate_fn,
+        )
+    if loader.costs.max_batch_frames is None:
+        raise RuntimeError("enabled dataloader costs require max_batch_frames.")
     return source.dataloader(
-        costs=None,
-        max_batch_memory=batch_size,
+        costs=partial(_sample_audio_frame_cost, frame_rate=frame_rate),
+        max_batch_memory=loader.costs.max_batch_frames,
         max_batch_samples=batch_size,
+        planning_window=loader.costs.planning_window,
         shuffle=shuffle,
         num_workers=loader.num_workers,
         pin_memory=loader.pin_memory,
@@ -451,6 +477,56 @@ def _source_loader(
 
 def _source_dataset(dataset: object) -> MapStyleABC | None:
     return dataset if isinstance(dataset, MapStyleABC) else None
+
+
+def _reject_enabled_costs(loader: DataLoaderConfig, path: str) -> None:
+    if loader.costs.enabled:
+        raise ValueError(f"dataloader costs are unsupported for {path}.")
+
+
+def _sample_audio_frame_cost(row: object, *, frame_rate: float) -> int:
+    if isinstance(frame_rate, bool) or not isinstance(frame_rate, (float, int)):
+        raise TypeError("codec frame_rate must be numeric for dataloader costs.")
+    if not math.isfinite(float(frame_rate)) or frame_rate <= 0:
+        raise ValueError("codec frame_rate must be positive for dataloader costs.")
+    durations = tuple(_audio_durations(row))
+    if not durations:
+        raise ValueError("dataloader costs require audio duration metadata.")
+    return sum(
+        max(1, math.ceil(duration * float(frame_rate)))
+        for duration in durations
+    )
+
+
+def _audio_durations(row: object) -> Iterable[float]:
+    if isinstance(row, Mapping):
+        for ref, item in row.items():
+            if _is_audio_ref(ref):
+                yield _audio_duration(getattr(item, "meta", {}))
+        return
+    items = getattr(row, "items", None)
+    if isinstance(items, tuple):
+        for ref, meta in items:
+            if _is_audio_ref(ref):
+                yield _audio_duration(meta)
+
+
+def _is_audio_ref(ref: object) -> bool:
+    return isinstance(ref, tuple) and len(ref) == 2 and ref[1] is Modality.AUDIO
+
+
+def _audio_duration(meta: object) -> float:
+    if not isinstance(meta, Mapping):
+        raise TypeError("audio metadata must be a mapping for dataloader costs.")
+    value = meta.get(AudioMeta.DURATION)
+    if value is None:
+        value = meta.get(AudioMeta.DURATION.value)
+    if isinstance(value, bool) or not isinstance(value, (float, int)):
+        raise ValueError("dataloader costs require audio duration metadata.")
+    duration = float(value)
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError("audio duration must be finite and positive.")
+    return duration
 
 
 def _collator(

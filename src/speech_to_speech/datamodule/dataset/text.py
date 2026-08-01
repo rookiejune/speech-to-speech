@@ -99,6 +99,8 @@ class TextConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.dataloader, DataLoaderConfig):
             raise TypeError("text dataloader must be a DataLoaderConfig.")
+        if self.dataloader.costs.enabled:
+            raise ValueError("dataloader costs are unsupported for text loaders.")
 
 
 __all__ = [

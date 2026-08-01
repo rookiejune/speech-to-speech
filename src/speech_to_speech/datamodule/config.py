@@ -1,9 +1,40 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 from .dataset.speech import DatasetConfig, DatasetName
 from .types import DataShape
+
+
+@dataclass
+class DataLoaderCostsConfig:
+    enabled: bool = False
+    max_batch_frames: Optional[int] = None
+    planning_window: int = 256
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise TypeError("dataloader costs enabled must be a boolean.")
+        if self.max_batch_frames is not None:
+            if (
+                isinstance(self.max_batch_frames, bool)
+                or not isinstance(self.max_batch_frames, int)
+            ):
+                raise TypeError("dataloader costs max_batch_frames must be an integer or None.")
+            if self.max_batch_frames <= 0:
+                raise ValueError("dataloader costs max_batch_frames must be positive.")
+        if isinstance(self.planning_window, bool) or not isinstance(
+            self.planning_window,
+            int,
+        ):
+            raise TypeError("dataloader costs planning_window must be an integer.")
+        if self.planning_window <= 0:
+            raise ValueError("dataloader costs planning_window must be positive.")
+        if self.enabled and self.max_batch_frames is None:
+            raise ValueError(
+                "enabled dataloader costs require max_batch_frames.",
+            )
 
 
 @dataclass
@@ -12,6 +43,7 @@ class DataLoaderConfig:
     num_workers: int
     pin_memory: bool = False
     persistent_workers: bool = False
+    costs: DataLoaderCostsConfig = field(default_factory=DataLoaderCostsConfig)
 
     def __post_init__(self) -> None:
         if isinstance(self.batch_size, bool) or not isinstance(self.batch_size, int):
@@ -25,6 +57,8 @@ class DataLoaderConfig:
         for name in ("pin_memory", "persistent_workers"):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"dataloader {name} must be a boolean.")
+        if not isinstance(self.costs, DataLoaderCostsConfig):
+            raise TypeError("dataloader costs must be a DataLoaderCostsConfig.")
 
 
 @dataclass
@@ -64,4 +98,4 @@ class SpeechConfig:
             raise ValueError("qwen_tts_speaker requires data shape single.")
 
 
-__all__ = ["DataLoaderConfig", "SpeechConfig"]
+__all__ = ["DataLoaderConfig", "DataLoaderCostsConfig", "SpeechConfig"]
