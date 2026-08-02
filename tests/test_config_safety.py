@@ -65,6 +65,11 @@ class ConfigSafetyTest(unittest.TestCase):
             "callbacks.performance.measure_window_steps=0": (
                 "callbacks.performance.measure_window_steps"
             ),
+            "callbacks.schedule.unit=bad-unit": "callbacks.schedule.unit",
+            "callbacks.schedule.measure_window_batches=0": (
+                "callbacks.schedule.measure_window_batches"
+            ),
+            "callbacks.schedule.enabled=true": "enabled callbacks.schedule requires phases",
         }
 
         for override, message in cases.items():

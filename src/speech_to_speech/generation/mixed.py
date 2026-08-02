@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from enum import Enum, auto
 
 import torch
 from anydataset.types import Modality
 from torch import Tensor
+from transformers.cache_utils import Cache
 
 from ..prediction import PredictionModality
 from ..task import Task
@@ -22,6 +24,45 @@ class _State(Enum):
     DONE = auto()
 
 
+@dataclass(frozen=True)
+class _TokenSets:
+    text: Tensor
+    audio: Tensor
+    union: Tensor
+    boa_id: int
+    eoa_id: int
+    eos_id: int
+    pad_id: int
+
+
+@dataclass
+class _MixedLoopState:
+    generated: Tensor
+    attention: Tensor
+    input_ids: Tensor
+    positions: Tensor | None
+    length: int
+    states: list[_State]
+    finished: list[bool]
+    past: Cache | None = None
+    audio_past: object | None = None
+    cache_rows: list[int] | None = None
+
+    @property
+    def batch_size(self) -> int:
+        return len(self.states)
+
+    def active_rows(self, device: torch.device) -> Tensor:
+        return torch.tensor(
+            [index for index, done in enumerate(self.finished) if not done],
+            dtype=torch.long,
+            device=device,
+        )
+
+    def done(self) -> bool:
+        return all(self.finished)
+
+
 @torch.no_grad()
 def generate_mixed_responses(
     requests: Sequence[Request],
@@ -36,191 +77,330 @@ def generate_mixed_responses(
     do_sample: bool,
     use_cache: bool,
 ) -> list[Result]:
-    if not requests:
+    prediction = _validate_mixed_batch(requests)
+    if prediction is None:
         return []
+    device = prompt.device
+    tokens = _token_sets(model, device)
+    state = _initial_state(
+        prompt,
+        prompt_mask,
+        audio_input_positions,
+        max_new_tokens,
+        pad_token_id=tokens.pad_id,
+    )
+
+    for _ in range(max_new_tokens):
+        if state.done():
+            break
+        active = state.active_rows(device)
+        active_list = active.tolist()
+        _align_cache(state, model, active_list, device=device, use_cache=use_cache)
+        forced, sampled_rows = _split_forced_rows(
+            state.states,
+            active_list,
+            boa_id=tokens.boa_id,
+        )
+        next_ids = state.generated.new_full((state.batch_size,), tokens.pad_id)
+        if sampled_rows:
+            logits = _sampled_logits(
+                state,
+                model,
+                active,
+                active_list,
+                tokens,
+                temperature=temperature,
+                use_cache=use_cache,
+            )
+            _sample_rows(
+                state,
+                next_ids,
+                sampled_rows,
+                logits,
+                tokens,
+                prediction,
+                top_p=top_p,
+                do_sample=do_sample,
+            )
+        _force_rows(state, next_ids, forced)
+        _advance_loop(state, next_ids, pad_token_id=tokens.pad_id, use_cache=use_cache)
+    return _mixed_results(state, prompt.size(1), model)
+
+
+def _validate_mixed_batch(
+    requests: Sequence[Request],
+) -> PredictionModality | None:
+    if not requests:
+        return None
     prediction = prediction_of(requests[0])
     if not prediction.is_mixed:
         raise ValueError("mixed generation requires PARALLEL or INTERLEAVED prediction.")
     if any(prediction_of(request) is not prediction for request in requests):
         raise ValueError("mixed generation batch must share prediction modality.")
+    return prediction
 
+
+def _token_sets(model: TokenGenerator, device: torch.device) -> _TokenSets:
     runtime = model.runtime
-    device = prompt.device
-    batch = prompt.size(0)
-    capacity = prompt.size(1) + max_new_tokens
-    generated = prompt.new_full((batch, capacity), runtime.pad_token_id)
-    generated[:, : prompt.size(1)] = prompt
-    attention = torch.zeros_like(generated, dtype=torch.bool)
-    attention[:, : prompt.size(1)] = prompt_mask
-    length = prompt.size(1)
-    states = [_State.TEXT for _ in range(batch)]
-    finished = [False] * batch
-    past = None
-    audio_past = None
-    cache_rows: list[int] | None = None
-    input_ids = generated[:, :length]
-    positions = audio_input_positions
-
-    text_allowed = torch.tensor(
+    text = torch.tensor(
         runtime.generation_allowed_ids(Modality.TEXT),
         dtype=torch.long,
         device=device,
     )
-    audio_allowed = torch.tensor(
+    audio = torch.tensor(
         runtime.audio_generation_allowed_ids,
         dtype=torch.long,
         device=device,
     )
-    boa_id = runtime.boa_token_id
-    eoa_id = runtime.eoa_token_id
-    eos_id = runtime.eos_token_id
+    return _TokenSets(
+        text=text,
+        audio=audio,
+        union=torch.unique(
+            torch.cat([text, audio, text.new_tensor([runtime.boa_token_id, runtime.eos_token_id])])
+        ),
+        boa_id=runtime.boa_token_id,
+        eoa_id=runtime.eoa_token_id,
+        eos_id=runtime.eos_token_id,
+        pad_id=runtime.pad_token_id,
+    )
 
-    for _ in range(max_new_tokens):
-        if all(finished):
-            break
-        active = torch.tensor(
-            [index for index, done in enumerate(finished) if not done],
-            dtype=torch.long,
-            device=device,
-        )
-        active_list = active.tolist()
-        if (
-            use_cache
-            and past is not None
-            and cache_rows is not None
-            and cache_rows != active_list
-        ):
-            indices = torch.tensor(
-                [cache_rows.index(row) for row in active_list],
-                dtype=torch.long,
-                device=device,
-            )
-            past.batch_select_indices(indices)
-            audio_past = model.audio_output_adapter_batch_select(audio_past, indices)
-            cache_rows = active_list
 
-        active_input = input_ids.index_select(0, active)
-        active_mask = attention.index_select(0, active)[:, :length]
-        active_positions = (
-            None if positions is None else positions.index_select(0, active)
-        )
-        # Force-BOA rows emit a constant; they still join the model step when any
-        # other active row needs logits so backbone/audio caches stay aligned.
-        forced = []
-        sampled_rows = []
-        for local, row in enumerate(active_list):
-            if states[row] is _State.FORCE_BOA:
-                forced.append((row, boa_id))
-            else:
-                sampled_rows.append((local, row))
+def _initial_state(
+    prompt: Tensor,
+    prompt_mask: Tensor,
+    audio_input_positions: Tensor | None,
+    max_new_tokens: int,
+    *,
+    pad_token_id: int,
+) -> _MixedLoopState:
+    capacity = prompt.size(1) + max_new_tokens
+    generated = prompt.new_full((prompt.size(0), capacity), pad_token_id)
+    generated[:, : prompt.size(1)] = prompt
+    attention = torch.zeros_like(generated, dtype=torch.bool)
+    attention[:, : prompt.size(1)] = prompt_mask
+    return _MixedLoopState(
+        generated=generated,
+        attention=attention,
+        input_ids=generated[:, : prompt.size(1)],
+        positions=audio_input_positions,
+        length=prompt.size(1),
+        states=[_State.TEXT for _ in range(prompt.size(0))],
+        finished=[False] * prompt.size(0),
+    )
 
-        next_ids = generated.new_full((batch,), runtime.pad_token_id)
-        if sampled_rows:
-            union_parts = [
-                text_allowed,
-                audio_allowed,
-                text_allowed.new_tensor([boa_id, eos_id]),
-            ]
-            union = torch.unique(torch.cat(union_parts))
-            output = model.generation_step(
-                active_input,
-                attention_mask=active_mask,
-                output_hidden_states=False,
-                token_ids=union,
-                modality=None,
-                past_key_values=past,
-                use_cache=use_cache,
-                audio_input_positions=active_positions,
-                audio_output_past=audio_past,
-            )
-            if output.logits is None:
-                raise RuntimeError("model did not return generation logits.")
-            logits = output.logits[:, -1] / temperature
-            past = output.past_key_values
-            audio_past = output.audio_output_past
-            if use_cache:
-                if past is None:
-                    raise RuntimeError("backbone did not return a generation cache.")
-                cache_rows = active_list
-            for local, row in sampled_rows:
-                state = states[row]
-                if state is _State.TEXT:
-                    if prediction is PredictionModality.PARALLEL:
-                        allowed = torch.unique(
-                            torch.cat([text_allowed, text_allowed.new_tensor([eos_id])])
-                        )
-                    else:
-                        allowed = torch.unique(
-                            torch.cat(
-                                [
-                                    text_allowed,
-                                    text_allowed.new_tensor([boa_id, eos_id]),
-                                ]
-                            )
-                        )
-                elif state is _State.AUDIO:
-                    allowed = audio_allowed
-                else:
-                    raise AssertionError(f"unexpected mixed generation state: {state}")
-                row_logits = _restrict(logits[local], union, allowed)
-                if top_p < 1.0:
-                    row_logits = _top_p(row_logits, top_p)
-                choice = (
-                    torch.distributions.Categorical(logits=row_logits).sample()
-                    if do_sample
-                    else row_logits.argmax()
-                )
-                token = int(allowed[choice].item())
-                next_ids[row] = token
-                if state is _State.TEXT:
-                    if token == eos_id:
-                        if prediction is PredictionModality.PARALLEL:
-                            states[row] = _State.FORCE_BOA
-                        else:
-                            states[row] = _State.DONE
-                            finished[row] = True
-                    elif token == boa_id:
-                        states[row] = _State.AUDIO
-                elif state is _State.AUDIO and token == eoa_id:
-                    if prediction is PredictionModality.PARALLEL:
-                        states[row] = _State.DONE
-                        finished[row] = True
-                    else:
-                        states[row] = _State.TEXT
 
-        for row, token in forced:
-            next_ids[row] = token
-            states[row] = _State.AUDIO
+def _align_cache(
+    state: _MixedLoopState,
+    model: TokenGenerator,
+    active_rows: list[int],
+    *,
+    device: torch.device,
+    use_cache: bool,
+) -> None:
+    if (
+        not use_cache
+        or state.past is None
+        or state.cache_rows is None
+        or state.cache_rows == active_rows
+    ):
+        return
+    indices = torch.tensor(
+        [state.cache_rows.index(row) for row in active_rows],
+        dtype=torch.long,
+        device=device,
+    )
+    state.past.batch_select_indices(indices)
+    state.audio_past = model.audio_output_adapter_batch_select(state.audio_past, indices)
+    state.cache_rows = active_rows
 
-        generated[:, length] = next_ids
-        for row in range(batch):
-            if finished[row] and next_ids[row].item() == runtime.pad_token_id:
-                attention[row, length] = False
-            elif not finished[row] or next_ids[row].item() != runtime.pad_token_id:
-                attention[row, length] = True
-            if states[row] is _State.DONE:
-                finished[row] = True
-        length += 1
-        if use_cache:
-            input_ids = next_ids.unsqueeze(1)
-            positions = None
+
+def _split_forced_rows(
+    states: Sequence[_State],
+    active_rows: Sequence[int],
+    *,
+    boa_id: int,
+) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    forced = []
+    sampled = []
+    for local, row in enumerate(active_rows):
+        if states[row] is _State.FORCE_BOA:
+            forced.append((row, boa_id))
         else:
-            past = None
-            audio_past = None
-            cache_rows = None
-            input_ids = generated[:, :length]
-            # Keep original source positions for full recomputes.
+            sampled.append((local, row))
+    return forced, sampled
 
-    results: list[Result] = []
-    response_rows: list[Tensor] = []
-    for row in range(batch):
-        response = generated[row, prompt.size(1) : length]
-        response = response[attention[row, prompt.size(1) : length]]
+
+def _sampled_logits(
+    state: _MixedLoopState,
+    model: TokenGenerator,
+    active: Tensor,
+    active_rows: list[int],
+    tokens: _TokenSets,
+    *,
+    temperature: float,
+    use_cache: bool,
+) -> Tensor:
+    active_input = state.input_ids.index_select(0, active)
+    active_mask = state.attention.index_select(0, active)[:, : state.length]
+    active_positions = None if state.positions is None else state.positions.index_select(0, active)
+    output = model.generation_step(
+        active_input,
+        attention_mask=active_mask,
+        output_hidden_states=False,
+        token_ids=tokens.union,
+        modality=None,
+        past_key_values=state.past,
+        use_cache=use_cache,
+        audio_input_positions=active_positions,
+        audio_output_past=state.audio_past,
+    )
+    if output.logits is None:
+        raise RuntimeError("model did not return generation logits.")
+    state.past = output.past_key_values
+    state.audio_past = output.audio_output_past
+    if use_cache:
+        if state.past is None:
+            raise RuntimeError("backbone did not return a generation cache.")
+        state.cache_rows = active_rows
+    return output.logits[:, -1] / temperature
+
+
+def _sample_rows(
+    state: _MixedLoopState,
+    next_ids: Tensor,
+    sampled_rows: Sequence[tuple[int, int]],
+    logits: Tensor,
+    tokens: _TokenSets,
+    prediction: PredictionModality,
+    *,
+    top_p: float,
+    do_sample: bool,
+) -> None:
+    for local, row in sampled_rows:
+        allowed = _allowed_for_state(state.states[row], prediction, tokens)
+        token = _sample_mixed_token(
+            logits[local],
+            tokens.union,
+            allowed,
+            top_p=top_p,
+            do_sample=do_sample,
+        )
+        next_ids[row] = token
+        _advance_row_state(state, row, token, prediction, tokens)
+
+
+def _allowed_for_state(
+    state: _State,
+    prediction: PredictionModality,
+    tokens: _TokenSets,
+) -> Tensor:
+    if state is _State.TEXT:
+        if prediction is PredictionModality.PARALLEL:
+            return torch.unique(torch.cat([tokens.text, tokens.text.new_tensor([tokens.eos_id])]))
+        return torch.unique(
+            torch.cat([tokens.text, tokens.text.new_tensor([tokens.boa_id, tokens.eos_id])])
+        )
+    if state is _State.AUDIO:
+        return tokens.audio
+    raise AssertionError(f"unexpected mixed generation state: {state}")
+
+
+def _sample_mixed_token(
+    logits: Tensor,
+    union: Tensor,
+    allowed: Tensor,
+    *,
+    top_p: float,
+    do_sample: bool,
+) -> int:
+    row_logits = _restrict(logits, union, allowed)
+    if top_p < 1.0:
+        row_logits = _top_p(row_logits, top_p)
+    choice = (
+        torch.distributions.Categorical(logits=row_logits).sample()
+        if do_sample
+        else row_logits.argmax()
+    )
+    return int(allowed[choice].item())
+
+
+def _advance_row_state(
+    state: _MixedLoopState,
+    row: int,
+    token: int,
+    prediction: PredictionModality,
+    tokens: _TokenSets,
+) -> None:
+    row_state = state.states[row]
+    if row_state is _State.TEXT:
+        if token == tokens.eos_id:
+            if prediction is PredictionModality.PARALLEL:
+                state.states[row] = _State.FORCE_BOA
+            else:
+                state.states[row] = _State.DONE
+                state.finished[row] = True
+        elif token == tokens.boa_id:
+            state.states[row] = _State.AUDIO
+    elif row_state is _State.AUDIO and token == tokens.eoa_id:
+        if prediction is PredictionModality.PARALLEL:
+            state.states[row] = _State.DONE
+            state.finished[row] = True
+        else:
+            state.states[row] = _State.TEXT
+
+
+def _force_rows(
+    state: _MixedLoopState,
+    next_ids: Tensor,
+    forced: Sequence[tuple[int, int]],
+) -> None:
+    for row, token in forced:
+        next_ids[row] = token
+        state.states[row] = _State.AUDIO
+
+
+def _advance_loop(
+    state: _MixedLoopState,
+    next_ids: Tensor,
+    *,
+    pad_token_id: int,
+    use_cache: bool,
+) -> None:
+    state.generated[:, state.length] = next_ids
+    for row in range(state.batch_size):
+        emitted = int(next_ids[row].item())
+        if state.finished[row] and emitted == pad_token_id:
+            state.attention[row, state.length] = False
+        elif not state.finished[row] or emitted != pad_token_id:
+            state.attention[row, state.length] = True
+        if state.states[row] is _State.DONE:
+            state.finished[row] = True
+    state.length += 1
+    if use_cache:
+        state.input_ids = next_ids.unsqueeze(1)
+        state.positions = None
+        return
+    state.past = None
+    state.audio_past = None
+    state.cache_rows = None
+    state.input_ids = state.generated[:, : state.length]
+
+
+def _mixed_results(
+    state: _MixedLoopState,
+    prompt_width: int,
+    model: TokenGenerator,
+) -> list[Result]:
+    response_rows = []
+    for row in range(state.batch_size):
+        response = state.generated[row, prompt_width : state.length]
+        response = response[state.attention[row, prompt_width : state.length]]
         response_rows.append(response)
     audios = decode_token_audio_rows(response_rows, model)
-    for response, audio in zip(response_rows, audios):
-        results.append(Result(response_ids=response, audio=audio))
-    return results
+    return [
+        Result(response_ids=response, audio=audio)
+        for response, audio in zip(response_rows, audios)
+    ]
 
 
 def _restrict(logits: Tensor, union: Tensor, allowed: Tensor) -> Tensor:

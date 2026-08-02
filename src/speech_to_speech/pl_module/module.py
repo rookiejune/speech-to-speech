@@ -8,6 +8,7 @@ from typing import Any, Generic, Protocol, TypeVar, cast
 import torch
 from anytrain.evaluator.text import TextComparisonEvaluator
 from anytrain.lightning import validation
+from anytrain.lightning.schedule import ScheduleRuntime
 from anytrain.optim.llm import create_optimizer
 from lightning.pytorch import LightningModule
 from peft import LoraConfig
@@ -79,6 +80,7 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         model: ModelT,
         objective: Objective[ModelT],
         batch_materializer: BatchMaterializer | None = None,
+        schedule_runtime: ScheduleRuntime | None = None,
     ) -> None:
         super().__init__()
 
@@ -87,6 +89,7 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         self.model = model
         self.objective = objective
         self.batch_materializer = batch_materializer
+        self.schedule_runtime = schedule_runtime
         self._current_loss_outputs: Outputs | None = None
         self._current_gradient_loss_groups: dict[str, Outputs] | None = None
         self.mt_validation_evaluator = TextComparisonEvaluator()
@@ -296,13 +299,16 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
             self.train(was_training)
 
     def configure_optimizers(self):
-        return create_optimizer(
+        optimizer = create_optimizer(
             cast(nn.Module, cast(object, self.model)),
             preset="sft",
             optimizer=self.config.optimizer,
             lr=self.config.learning_rate,
             weight_decay=self.config.weight_decay,
         )
+        if self.schedule_runtime is None:
+            return optimizer
+        return self.schedule_runtime.configure_optimizers(optimizer)
 
 
 def _combine_training_outputs(outputs: Sequence[Outputs]) -> Outputs:

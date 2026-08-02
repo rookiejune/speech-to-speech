@@ -249,7 +249,8 @@ class Runtime:
                 "semantic-only waveform decoding requires runtime.semantic_codec_artifact; "
                 "use audio_sequence_layout=flattened for token-only generation."
             )
-        from semantic_acoustic_codec.runtime import SemanticCodecRuntime, load_artifact
+        from semantic_acoustic_codec.runtime import SemanticCodecRuntime
+        from semantic_acoustic_codec.runtime.artifact import load_artifact
 
         support = load_artifact(
             Path(artifact).expanduser(),

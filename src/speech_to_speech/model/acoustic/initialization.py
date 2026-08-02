@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 from anytrain.codec import AcousticLayout
 from semantic_acoustic_codec.config import Route
-from semantic_acoustic_codec.runtime import (
+from semantic_acoustic_codec.runtime.artifact import (
     AcousticGeneratorBackend,
     AcousticGeneratorArtifact,
     load_generator_artifact,

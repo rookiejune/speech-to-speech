@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Optional, Type, Union
 
 from omegaconf import MISSING, DictConfig
 
+from speech_to_speech.callback.schedule import SUPPORTED_UNIT_NAMES
 from speech_to_speech.datamodule.config import SpeechConfig
 from speech_to_speech.datamodule.collate.joint import LoaderSchedule
 from speech_to_speech.datamodule.dataset.text import (
@@ -128,6 +130,35 @@ class GradientProbeCallbackConfig:
 
 
 @dataclass
+class UnitScheduleCurveConfig:
+    type: str = "constant"
+    value: Optional[float] = None
+    start: Optional[float] = None
+    end: Optional[float] = None
+
+
+@dataclass
+class UnitSchedulePhaseConfig:
+    name: str = MISSING
+    duration: float = MISSING
+    lr: UnitScheduleCurveConfig = field(default_factory=UnitScheduleCurveConfig)
+
+
+@dataclass
+class UnitScheduleCallbackConfig:
+    enabled: bool = False
+    unit: str = "tokens"
+    log_every_n_units: Optional[float] = None
+    measure_window_batches: int = 100
+    sync_cuda: bool = True
+    sync_distributed: bool = True
+    allow_external_lr_changes: bool = False
+    stop_at: Optional[float] = None
+    stop_at_end: bool = False
+    phases: list[UnitSchedulePhaseConfig] = field(default_factory=list)
+
+
+@dataclass
 class StagedCallbacksConfig:
     parameter_policy: ParameterPolicyConfig = field(
         default_factory=ParameterPolicyConfig
@@ -145,6 +176,9 @@ class StagedCallbacksConfig:
         default_factory=CheckpointCallbackConfig
     )
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
+    schedule: UnitScheduleCallbackConfig = field(
+        default_factory=UnitScheduleCallbackConfig
+    )
 
 
 @dataclass
@@ -215,6 +249,7 @@ def train(config: DictConfig) -> StagedTrainConfig:
     _validate_validation(result)
     _validate_task_samples(result)
     _validate_callback_cadences(result.callbacks)
+    _validate_unit_schedule(result.callbacks.schedule)
     _validate_gradient_probe(result)
     return result
 
@@ -298,6 +333,61 @@ def _validate_callback_cadences(config: StagedCallbacksConfig) -> None:
     )
 
 
+def _validate_unit_schedule(config: UnitScheduleCallbackConfig) -> None:
+    if not isinstance(config.enabled, bool):
+        raise TypeError("callbacks.schedule.enabled must be a boolean.")
+    if config.unit not in SUPPORTED_UNIT_NAMES:
+        raise ValueError(
+            "callbacks.schedule.unit must be one of "
+            + ", ".join(sorted(SUPPORTED_UNIT_NAMES))
+        )
+    if config.log_every_n_units is not None:
+        _positive_number(
+            config.log_every_n_units,
+            "callbacks.schedule.log_every_n_units",
+        )
+    positive_integer(
+        config.measure_window_batches,
+        "callbacks.schedule.measure_window_batches",
+    )
+    if not isinstance(config.sync_cuda, bool):
+        raise TypeError("callbacks.schedule.sync_cuda must be a boolean.")
+    if not isinstance(config.sync_distributed, bool):
+        raise TypeError("callbacks.schedule.sync_distributed must be a boolean.")
+    if not isinstance(config.allow_external_lr_changes, bool):
+        raise TypeError(
+            "callbacks.schedule.allow_external_lr_changes must be a boolean."
+        )
+    if config.stop_at is not None:
+        _positive_number(config.stop_at, "callbacks.schedule.stop_at")
+    if not isinstance(config.stop_at_end, bool):
+        raise TypeError("callbacks.schedule.stop_at_end must be a boolean.")
+    if not config.enabled:
+        return
+    if not config.phases:
+        raise ValueError("enabled callbacks.schedule requires phases.")
+    seen: set[str] = set()
+    for index, phase in enumerate(config.phases):
+        path = f"callbacks.schedule.phases[{index}]"
+        non_empty_string(phase.name, f"{path}.name")
+        if phase.name in seen:
+            raise ValueError(f"duplicate callbacks.schedule phase {phase.name!r}.")
+        seen.add(phase.name)
+        _positive_number(phase.duration, f"{path}.duration")
+        _validate_schedule_curve(phase.lr, f"{path}.lr")
+
+
+def _validate_schedule_curve(config: UnitScheduleCurveConfig, path: str) -> None:
+    if config.type not in {"constant", "linear", "cosine"}:
+        raise ValueError(f"{path}.type must be constant, linear, or cosine.")
+    if config.value is not None:
+        _non_negative_number(config.value, f"{path}.value")
+    if config.start is not None:
+        _non_negative_number(config.start, f"{path}.start")
+    if config.end is not None:
+        _non_negative_number(config.end, f"{path}.end")
+
+
 def _validate_gradient_probe(config: StagedTrainConfig) -> None:
     callback = config.callbacks.gradient_probe
     _validate_gradient_probes(
@@ -363,6 +453,27 @@ def _validate_gradient_comparisons(
 def _validate_gradient_target(target: GradientTargetConfig, path: str) -> None:
     non_empty_string(target.loss, f"{path}.loss")
     non_empty_string(target.group, f"{path}.group")
+
+
+def _positive_number(value: object, name: str) -> None:
+    number = _number(value, name)
+    if number <= 0:
+        raise ValueError(f"{name} must be positive.")
+
+
+def _non_negative_number(value: object, name: str) -> None:
+    number = _number(value, name)
+    if number < 0:
+        raise ValueError(f"{name} must be non-negative.")
+
+
+def _number(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (float, int)):
+        raise TypeError(f"{name} must be a number.")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{name} must be finite.")
+    return number
 
 
 def _validate_loader_schedule(config: StagedTrainConfig) -> None:
@@ -461,6 +572,9 @@ __all__ = [
     "StagedTrainTokenConfig",
     "TaskSamplePanelConfig",
     "TextProbeConfig",
+    "UnitScheduleCallbackConfig",
+    "UnitScheduleCurveConfig",
+    "UnitSchedulePhaseConfig",
     "ValidationConfig",
     "train",
 ]

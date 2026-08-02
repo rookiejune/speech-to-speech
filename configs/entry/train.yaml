@@ -1,6 +1,7 @@
 # @package _global_
 defaults:
   - /callback/performance@callbacks.performance
+  - /callback/schedule@callbacks.schedule
   - _self_
 
 run_name: ${oc.select:model.acoustic.name,token}

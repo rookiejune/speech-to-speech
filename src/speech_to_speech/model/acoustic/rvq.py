@@ -4,7 +4,7 @@ from collections.abc import Mapping, Sequence
 
 import torch
 from semantic_acoustic_codec.model import AcousticRVQDecoder, RVQCodeGenerator
-from semantic_acoustic_codec.runtime import AcousticGeneratorArtifact
+from semantic_acoustic_codec.runtime.artifact import AcousticGeneratorArtifact
 from torch import Tensor
 
 from ...generation.types import AcousticGeneration

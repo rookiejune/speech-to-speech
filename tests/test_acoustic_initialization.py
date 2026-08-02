@@ -11,8 +11,8 @@ from semantic_acoustic_codec.config import DecoderConfig, Route
 from semantic_acoustic_codec.runtime import (
     SemanticSupportConfig,
     build_support,
-    save_artifact,
 )
+from semantic_acoustic_codec.runtime.artifact import save_artifact
 
 from speech_to_speech.model.acoustic.initialization import load_acoustic_initialization
 

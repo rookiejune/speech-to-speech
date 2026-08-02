@@ -20,9 +20,11 @@ from semantic_acoustic_codec.model import (
     RVQCodeGenerator,
 )
 from semantic_acoustic_codec.runtime import (
+    SamplingConfig,
+)
+from semantic_acoustic_codec.runtime.artifact import (
     AcousticGeneratorArtifact,
     AcousticGeneratorSpec,
-    SamplingConfig,
 )
 from torch import Tensor, nn
 

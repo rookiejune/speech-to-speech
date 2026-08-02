@@ -13,6 +13,7 @@ from anytrain.lightning import (
     ModelCheckpoint,
     ParameterPolicyCallback,
 )
+from anytrain.lightning.schedule import UnitScheduleCallback
 from hydra import compose, initialize_config_dir
 from hydra.errors import ConfigCompositionException
 from omegaconf import DictConfig
@@ -50,7 +51,8 @@ from scripts.train import (
 from speech_to_speech.datamodule import DataModule
 from speech_to_speech.datamodule.module import LoaderKind
 from speech_to_speech.datamodule.dataset.speech import DatasetName
-from speech_to_speech.datamodule.types import DataShape
+from speech_to_speech.datamodule.types import DataShape, FusedBatch, ModelBatch
+from speech_to_speech.callback import BatchUnits
 from speech_to_speech.model import (
     AdapterType,
     AudioInputAdapterType,
@@ -60,6 +62,7 @@ from speech_to_speech.model import (
 )
 from speech_to_speech.model.acoustic import AcousticType, DecoderConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
+from speech_to_speech.pl_module import SpeechToSpeechModule
 from speech_to_speech.runtime import (
     AudioSequenceLayout,
     BackboneInitialization,
@@ -71,6 +74,7 @@ from speech_to_speech.parameter_policy import (
     ParameterGroup,
     ParameterPolicyName,
 )
+from speech_to_speech.prediction import PredictionModality
 from speech_to_speech.task import Task
 
 
@@ -83,6 +87,16 @@ class _DeviceRestoreModule(torch.nn.Module):
     def to(self, device: torch.device):  # type: ignore[override]
         self.moves.append(device)
         return self
+
+
+class _OptimizerModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear = torch.nn.Linear(1, 1)
+
+    @property
+    def lora_config(self) -> None:
+        return None
 
 
 @patch.dict(
@@ -951,6 +965,83 @@ class ConfigTest(unittest.TestCase):
         )
         self.assertTrue(checkpoint.async_save)
         self.assertFalse(checkpoint._enable_version_counter)
+
+    def test_train_constructs_unit_schedule_callback(self):
+        config = parse_train(
+            _compose(
+                "train",
+                "callbacks.schedule.enabled=true",
+                "callbacks.schedule.log_every_n_units=25",
+                "callbacks.schedule.measure_window_batches=3",
+                "callbacks.schedule.sync_cuda=false",
+                "callbacks.schedule.stop_at_end=true",
+                (
+                    "callbacks.schedule.phases=["
+                    "{name:warmup,duration:100,lr:{type:linear,start:0.0,end:1.0}},"
+                    "{name:main,duration:900,lr:{type:constant,value:1.0}}"
+                    "]"
+                ),
+            )
+        )
+
+        callbacks = train_script.training_callbacks(
+            config,
+            Path("/tmp/output"),
+            Mock(),
+        )
+
+        callback = next(
+            callback
+            for callback in callbacks
+            if isinstance(callback, UnitScheduleCallback)
+        )
+        self.assertEqual(callback.clock.unit, "tokens")
+        self.assertEqual(callback.clock.log_every_n_units, 25.0)
+        self.assertEqual(callback.clock.measure_window_batches, 3)
+        self.assertFalse(callback.clock.sync_cuda)
+        self.assertEqual(
+            callback.schedule.milestones(),
+            (("warmup", 100.0), ("main", 1000.0)),
+        )
+        self.assertEqual(callback.schedule.stop_unit(), 1000.0)
+
+    def test_batch_units_count_fused_tokens(self):
+        batch = ModelBatch(
+            input_ids=torch.tensor([[1, 2, 0], [3, 4, 5]]),
+            token_labels=torch.tensor([[-100, 2, -100], [-100, -100, 5]]),
+            acoustic_target=None,
+            tasks=[Task.MT, Task.MT],
+            predictions=[PredictionModality.TEXT, PredictionModality.TEXT],
+            pad_token_id=0,
+        )
+
+        units = BatchUnits("tokens")(
+            trainer=object(),
+            pl_module=object(),
+            outputs=None,
+            batch=FusedBatch((batch, batch), ("left", "right")),
+            batch_idx=0,
+        )
+
+        self.assertEqual(units.unit, "tokens")
+        self.assertEqual(units.valid, 10.0)
+        self.assertEqual(units.padded, 12.0)
+
+    def test_module_configure_optimizers_uses_schedule_runtime(self):
+        runtime = Mock()
+        runtime.configure_optimizers.return_value = "configured"
+        module = SpeechToSpeechModule(
+            ModuleConfig(),
+            model=_OptimizerModel(),
+            objective=Mock(),
+            schedule_runtime=runtime,
+        )
+
+        configured = module.configure_optimizers()
+
+        self.assertEqual(configured, "configured")
+        optimizer = runtime.configure_optimizers.call_args.args[0]
+        self.assertEqual(optimizer.param_groups[0]["lr"], ModuleConfig().learning_rate)
 
     def test_train_constructs_gradient_probe_callback(self):
         config = parse_train(

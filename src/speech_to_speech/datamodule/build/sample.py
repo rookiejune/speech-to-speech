@@ -154,31 +154,12 @@ def _build_modal_sample(
     prediction: PredictionModality | None = None,
 ) -> ModelSample:
     prediction = resolve_prediction(task, prediction)
-    source_modality = task.source_modality
-    audio_input_positions: Tensor | None = None
-    if source_modality is not None:
-        if source is None:
-            raise ValueError("tasks with a source modality require a source item.")
-        prefix_text, suffix_text = _split(prompt, _PLACEHOLDER)
-        tokenizer = runtime.text_tokenizer
-        prefix = token_ids(prefix_text, tokenizer)
-        suffix = token_ids(suffix_text, tokenizer)
-        source_ids = _global_ids(source, source_modality, runtime)
-
-        if source_modality is Modality.AUDIO:
-            source_length = source_ids.numel()
-            audio_input_positions = torch.arange(
-                len(prefix) + 1,
-                len(prefix) + 1 + source_length,
-                dtype=torch.long,
-                device=source_ids.device,
-            )
-            source_ids = _boa_eoa(source_ids, runtime)
-
-        input_ids = torch.cat([prefix, source_ids, suffix])
-    else:
-        input_ids = token_ids(prompt, runtime.text_tokenizer)
-
+    input_ids, audio_input_positions = _modal_input_ids(
+        source,
+        task.source_modality,
+        prompt,
+        runtime,
+    )
     if prediction is PredictionModality.PARALLEL:
         return _parallel_response(
             input_ids,
@@ -191,118 +172,39 @@ def _build_modal_sample(
             source=source,
         )
 
-    target_modality = (
-        Modality.TEXT
-        if prediction is PredictionModality.TEXT
-        else Modality.AUDIO
-    )
-    bicodec_tokenizer = _bicodec_tokenizer(
+    target_modality = _target_modality(prediction)
+    (
+        input_ids,
+        response_ids,
+        response_groups,
+        reference_audio_codes,
+        uses_bicodec,
+    ) = _target_response(
+        input_ids,
         target,
         target_modality,
         runtime,
+        audio_context=audio_context,
     )
-    reference_audio_codes = None
-    if bicodec_tokenizer is not None:
-        tokenizer = bicodec_tokenizer
-        if runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
-            response_streams = (AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
-        elif runtime.audio_sequence_layout is AudioSequenceLayout.SEMANTIC:
-            if audio_context is None:
-                raise ValueError(
-                    "BiCodec semantic layout requires reference audio context."
-                )
-            prompt_ids = _global_bicodec_ids(
-                audio_context,
-                (AudioStream.ACOUSTIC,),
-                tokenizer,
-                runtime,
-            )
-            input_ids = torch.cat((input_ids, _boa_eoa(prompt_ids, runtime)))
-            reference_audio_codes = _structured_codes(audio_context)
-            response_streams = (AudioStream.SEMANTIC,)
-        else:
-            raise AssertionError(
-                f"unsupported audio_sequence_layout: {runtime.audio_sequence_layout}"
-            )
-
-        response_local, response_groups = tokenizer.encode_streams_with_groups(
-            _structured_codes(_speech(target, role="target")),
-            response_streams,
-        )
-        response_ids = _boa_eoa(
-            runtime.layout.to_global(Modality.AUDIO.value, response_local),
-            runtime,
-        )
-        response_groups = torch.cat(
-            (
-                response_groups.new_tensor([tokenizer.forced_group]),
-                response_groups,
-                response_groups.new_tensor([tokenizer.forced_group]),
-            )
-        )
-    else:
-        response_ids = _global_ids(target, target_modality, runtime)
-        response_groups = None
-    target_acoustic_codes = None
-    target_semantic_codes = None
-    target_audio_token_positions = None
-    audio_target: Speech | None = None
-
-    if target_modality is Modality.AUDIO:
-        if not isinstance(target, Speech):
-            raise TypeError("audio target must be Speech.")
-        audio_target = target
-        if bicodec_tokenizer is None:
-            response_ids = _boa_eoa(response_ids, runtime)
-        if target.acoustic_codes is not None and runtime.semantic_codec_artifact is None and (
-            bicodec_tokenizer is None
-        ) and (
-            runtime.audio_sequence_layout is not AudioSequenceLayout.FLATTENED
-        ):
-            target_semantic_codes = target.semantic_codes
-            target_acoustic_codes = target.acoustic_codes
-    else:
-        response_ids = _append_eos(response_ids, runtime)
 
     full_ids = torch.cat([input_ids, response_ids])
-    token_labels = torch.full_like(full_ids, -100)
-    token_groups = None
-    if target_modality is Modality.AUDIO:
-        if response_groups is None:
-            # BOA is a structural response prefix; supervise codec tokens and EOA.
-            token_labels[len(input_ids) + 1 :] = response_ids[1:]
-        else:
-            token_groups = torch.full_like(full_ids, -1)
-            group_slice = token_groups[len(input_ids) :]
-            group_slice.copy_(response_groups)
-            predicted = response_groups.ge(0)
-            label_slice = token_labels[len(input_ids) :]
-            label_slice[predicted] = response_ids[predicted]
-    else:
-        token_labels[len(input_ids) :] = response_ids
-
-    if target_acoustic_codes is not None:
-        if audio_target is None:
-            raise AssertionError("acoustic target requires an audio target.")
-        target_audio_token_positions = torch.repeat_interleave(
-            torch.arange(
-                len(input_ids) + 1,
-                len(input_ids) + 1 + audio_target.audio_token_ids.numel(),
-                dtype=torch.long,
-            ),
-            audio_target.audio_token_spans,
-        )
-        if target_audio_token_positions.numel() != target_acoustic_codes.size(0):
-            raise ValueError("target acoustic frames and audio tokens must align.")
-
-    acoustic_target = (
-        None
-        if target_acoustic_codes is None or target_audio_token_positions is None
-        else AcousticTarget(
-            semantic_codes=cast(Tensor, target_semantic_codes),
-            codes=target_acoustic_codes,
-            token_positions=target_audio_token_positions,
-        )
+    token_labels, token_groups = _token_supervision(
+        input_ids,
+        response_ids,
+        target_modality,
+        response_groups,
+    )
+    audio_target, target_semantic_codes, target_acoustic_codes = _acoustic_codes(
+        target,
+        target_modality,
+        runtime,
+        uses_bicodec=uses_bicodec,
+    )
+    acoustic_target = _acoustic_target(
+        input_ids,
+        audio_target,
+        target_semantic_codes,
+        target_acoustic_codes,
     )
     prompt_length = (
         len(input_ids) + 1 if target_modality is Modality.AUDIO else len(input_ids)
@@ -324,6 +226,180 @@ def _build_modal_sample(
         ),
         audio_input_positions=audio_input_positions,
         audio_context=reference_audio_codes,
+    )
+
+
+def _modal_input_ids(
+    source: Speech | Text | None,
+    source_modality: Modality | None,
+    prompt: str,
+    runtime: DataRuntime,
+) -> tuple[Tensor, Tensor | None]:
+    if source_modality is None:
+        return token_ids(prompt, runtime.text_tokenizer), None
+    if source is None:
+        raise ValueError("tasks with a source modality require a source item.")
+    prefix_text, suffix_text = _split(prompt, _PLACEHOLDER)
+    prefix = token_ids(prefix_text, runtime.text_tokenizer)
+    suffix = token_ids(suffix_text, runtime.text_tokenizer)
+    source_ids = _global_ids(source, source_modality, runtime)
+    audio_input_positions = None
+    if source_modality is Modality.AUDIO:
+        audio_input_positions = torch.arange(
+            len(prefix) + 1,
+            len(prefix) + 1 + source_ids.numel(),
+            dtype=torch.long,
+            device=source_ids.device,
+        )
+        source_ids = _boa_eoa(source_ids, runtime)
+    return torch.cat([prefix, source_ids, suffix]), audio_input_positions
+
+
+def _target_modality(prediction: PredictionModality) -> Modality:
+    return Modality.TEXT if prediction is PredictionModality.TEXT else Modality.AUDIO
+
+
+def _target_response(
+    input_ids: Tensor,
+    target: Speech | Text,
+    target_modality: Modality,
+    runtime: DataRuntime,
+    *,
+    audio_context: Speech | None,
+) -> tuple[Tensor, Tensor, Tensor | None, SemanticAcousticCodes | None, bool]:
+    tokenizer = _bicodec_tokenizer(target, target_modality, runtime)
+    if tokenizer is not None:
+        input_ids, response_ids, response_groups, reference = _bicodec_response(
+            input_ids,
+            target,
+            runtime,
+            tokenizer,
+            audio_context=audio_context,
+        )
+        return input_ids, response_ids, response_groups, reference, True
+    response_ids = _global_ids(target, target_modality, runtime)
+    if target_modality is Modality.AUDIO:
+        response_ids = _boa_eoa(response_ids, runtime)
+    else:
+        response_ids = _append_eos(response_ids, runtime)
+    return input_ids, response_ids, None, None, False
+
+
+def _bicodec_response(
+    input_ids: Tensor,
+    target: Speech | Text,
+    runtime: DataRuntime,
+    tokenizer: BiCodecAudioTokenizer,
+    *,
+    audio_context: Speech | None,
+) -> tuple[Tensor, Tensor, Tensor, SemanticAcousticCodes | None]:
+    reference_audio_codes = None
+    if runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
+        response_streams = (AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
+    elif runtime.audio_sequence_layout is AudioSequenceLayout.SEMANTIC:
+        if audio_context is None:
+            raise ValueError("BiCodec semantic layout requires reference audio context.")
+        prompt_ids = _global_bicodec_ids(
+            audio_context,
+            (AudioStream.ACOUSTIC,),
+            tokenizer,
+            runtime,
+        )
+        input_ids = torch.cat((input_ids, _boa_eoa(prompt_ids, runtime)))
+        reference_audio_codes = _structured_codes(audio_context)
+        response_streams = (AudioStream.SEMANTIC,)
+    else:
+        raise AssertionError(
+            f"unsupported audio_sequence_layout: {runtime.audio_sequence_layout}"
+        )
+    response_local, response_groups = tokenizer.encode_streams_with_groups(
+        _structured_codes(_speech(target, role="target")),
+        response_streams,
+    )
+    response_ids = _boa_eoa(
+        runtime.layout.to_global(Modality.AUDIO.value, response_local),
+        runtime,
+    )
+    groups = torch.cat(
+        (
+            response_groups.new_tensor([tokenizer.forced_group]),
+            response_groups,
+            response_groups.new_tensor([tokenizer.forced_group]),
+        )
+    )
+    return input_ids, response_ids, groups, reference_audio_codes
+
+
+def _token_supervision(
+    input_ids: Tensor,
+    response_ids: Tensor,
+    target_modality: Modality,
+    response_groups: Tensor | None,
+) -> tuple[Tensor, Tensor | None]:
+    full_ids = torch.cat([input_ids, response_ids])
+    labels = torch.full_like(full_ids, -100)
+    groups = None
+    if target_modality is Modality.AUDIO:
+        if response_groups is None:
+            # BOA is a structural response prefix; supervise codec tokens and EOA.
+            labels[len(input_ids) + 1 :] = response_ids[1:]
+            return labels, groups
+        groups = torch.full_like(full_ids, -1)
+        group_slice = groups[len(input_ids) :]
+        group_slice.copy_(response_groups)
+        predicted = response_groups.ge(0)
+        label_slice = labels[len(input_ids) :]
+        label_slice[predicted] = response_ids[predicted]
+        return labels, groups
+    labels[len(input_ids) :] = response_ids
+    return labels, groups
+
+
+def _acoustic_codes(
+    target: Speech | Text,
+    target_modality: Modality,
+    runtime: DataRuntime,
+    *,
+    uses_bicodec: bool,
+) -> tuple[Speech | None, Tensor | None, Tensor | None]:
+    if target_modality is not Modality.AUDIO:
+        return None, None, None
+    if not isinstance(target, Speech):
+        raise TypeError("audio target must be Speech.")
+    if (
+        target.acoustic_codes is not None
+        and runtime.semantic_codec_artifact is None
+        and not uses_bicodec
+        and runtime.audio_sequence_layout is not AudioSequenceLayout.FLATTENED
+    ):
+        return target, target.semantic_codes, target.acoustic_codes
+    return target, None, None
+
+
+def _acoustic_target(
+    input_ids: Tensor,
+    audio_target: Speech | None,
+    target_semantic_codes: Tensor | None,
+    target_acoustic_codes: Tensor | None,
+) -> AcousticTarget | None:
+    if target_acoustic_codes is None:
+        return None
+    if audio_target is None:
+        raise AssertionError("acoustic target requires an audio target.")
+    positions = torch.repeat_interleave(
+        torch.arange(
+            len(input_ids) + 1,
+            len(input_ids) + 1 + audio_target.audio_token_ids.numel(),
+            dtype=torch.long,
+        ),
+        audio_target.audio_token_spans,
+    )
+    if positions.numel() != target_acoustic_codes.size(0):
+        raise ValueError("target acoustic frames and audio tokens must align.")
+    return AcousticTarget(
+        semantic_codes=cast(Tensor, target_semantic_codes),
+        codes=target_acoustic_codes,
+        token_positions=positions,
     )
 
 

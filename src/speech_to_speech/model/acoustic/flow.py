@@ -6,7 +6,7 @@ import torch
 from semantic_acoustic_codec.config import DecoderConfig as SacDecoderConfig
 from semantic_acoustic_codec.model import FMFeatureGenerator
 from semantic_acoustic_codec.model.dit import DiTDecoder
-from semantic_acoustic_codec.runtime import AcousticGeneratorArtifact
+from semantic_acoustic_codec.runtime.artifact import AcousticGeneratorArtifact
 from torch import Tensor, nn
 
 from ...generation.types import AcousticGeneration

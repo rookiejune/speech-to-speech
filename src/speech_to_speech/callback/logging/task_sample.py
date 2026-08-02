@@ -189,18 +189,73 @@ class TaskSampleLogger(Callback):
     def on_train_batch_start(
         self, trainer: Trainer, pl_module: LightningModule, batch: Any, batch_idx: int
     ) -> None:
-        del batch_idx
-        if not self.interval.should_run(int(trainer.global_step)):
+        del batch, batch_idx
+        if not self._should_log(trainer):
             return
-        if not trainer.is_global_zero:
-            return
-        audio_writer = experiment.audio(trainer)
-        scalar_writer = experiment.scalar(trainer)
-        text_writer = experiment.text(trainer)
+        audio_writer, scalar_writer, text_writer = self._writers(trainer)
         if audio_writer is None and scalar_writer is None and text_writer is None:
             return
         module = cast(_Module, cast(object, pl_module))
         datamodule = cast(_DataModule, _attached_datamodule(trainer))
+        sample_batch = self._materialize_samples(trainer, pl_module, module, datamodule)
+        requests = requests_from_batch(sample_batch)
+        generation = self._generation_kwargs()
+        generation_metadata = {**generation, "seed": self.seed}
+        results = self._generate_samples(
+            trainer,
+            pl_module,
+            module,
+            datamodule,
+            sample_batch,
+            requests,
+            generation,
+            generation_metadata,
+            text_writer,
+        )
+        if len(results) != len(requests):
+            error = RuntimeError("task sample generation returned the wrong row count.")
+            self._log_failed_rows(
+                text_writer,
+                datamodule,
+                sample_batch,
+                requests,
+                generation_metadata,
+                error,
+                step=trainer.global_step,
+            )
+            raise error
+        for row, (dataset_index, sample, request, result) in enumerate(
+            zip(self.indices, self.samples, requests, results)
+        ):
+            self._log_result_row(
+                audio_writer,
+                scalar_writer,
+                text_writer,
+                datamodule,
+                module,
+                sample_batch,
+                row,
+                dataset_index,
+                sample,
+                request,
+                result,
+                generation_metadata,
+                step=trainer.global_step,
+            )
+
+    def _should_log(self, trainer: Trainer) -> bool:
+        return self.interval.should_run(int(trainer.global_step)) and trainer.is_global_zero
+
+    def _writers(self, trainer: Trainer) -> tuple[Any | None, Any | None, Any | None]:
+        return experiment.audio(trainer), experiment.scalar(trainer), experiment.text(trainer)
+
+    def _materialize_samples(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        module: _Module,
+        datamodule: _DataModule,
+    ) -> ModelBatch:
         collator = datamodule.diagnostic_collator(
             self.task,
             split=self.split,
@@ -220,17 +275,27 @@ class TaskSampleLogger(Callback):
             raise
         if not isinstance(materialized, ModelBatch):
             raise TypeError("task sample logging requires one materialized ModelBatch.")
-        sample_batch = materialized
-        requests = requests_from_batch(sample_batch)
+        return materialized
+
+    def _generate_samples(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        module: _Module,
+        datamodule: _DataModule,
+        sample_batch: ModelBatch,
+        requests: Sequence[Request],
+        generation: _GenerationKwargs,
+        generation_metadata: Mapping[str, Any],
+        text_writer: Any | None,
+    ) -> list[Result]:
         cuda_devices = [torch.cuda.current_device()] if torch.cuda.is_available() else []
-        generation = self._generation_kwargs()
-        generation_metadata = {**generation, "seed": self.seed}
         try:
             with torch.random.fork_rng(devices=cuda_devices):
                 torch.random.set_rng_state(torch.Generator().manual_seed(self.seed).get_state())
                 if cuda_devices:
                     torch.cuda.manual_seed(self.seed)
-                results = module.generate(requests, **generation)
+                return module.generate(requests, **generation)
         except Exception as error:
             if report_oom(
                 trainer,
@@ -245,135 +310,211 @@ class TaskSampleLogger(Callback):
                 ),
             ):
                 raise
-            if text_writer is not None:
-                for row, (dataset_index, sample, request) in enumerate(
-                    zip(self.indices, self.samples, requests)
-                ):
-                    text_writer.add_text(
-                        f"{self._tag(dataset_index)}/metadata",
-                        _metadata_json(
-                            _sample_log_record(
-                                datamodule,
-                                sample_batch.row(row),
-                                dataset_index,
-                                sample,
-                                request,
-                                status="failed",
-                                generation_settings=generation_metadata,
-                                error={
-                                    "type": type(error).__name__,
-                                    "message": str(error),
-                                },
-                            )
-                        ),
-                        trainer.global_step,
-                    )
+            self._log_failed_rows(
+                text_writer,
+                datamodule,
+                sample_batch,
+                requests,
+                generation_metadata,
+                error,
+                step=trainer.global_step,
+            )
             raise
-        if len(results) != len(requests):
-            error = RuntimeError("task sample generation returned the wrong row count.")
-            if text_writer is not None:
-                for row, (dataset_index, sample, request) in enumerate(
-                    zip(self.indices, self.samples, requests)
-                ):
-                    text_writer.add_text(
-                        f"{self._tag(dataset_index)}/metadata",
-                        _metadata_json(
-                            _sample_log_record(
-                                datamodule,
-                                sample_batch.row(row),
-                                dataset_index,
-                                sample,
-                                request,
-                                status="failed",
-                                generation_settings=generation_metadata,
-                                error={
-                                    "type": type(error).__name__,
-                                    "message": str(error),
-                                },
-                            )
-                        ),
-                        trainer.global_step,
-                    )
-            raise error
-        for row, (dataset_index, sample, request, result) in enumerate(
-            zip(self.indices, self.samples, requests, results)
+
+    def _log_failed_rows(
+        self,
+        text_writer: Any | None,
+        datamodule: _DataModule,
+        sample_batch: ModelBatch,
+        requests: Sequence[Request],
+        generation_metadata: Mapping[str, Any],
+        error: Exception,
+        *,
+        step: int,
+    ) -> None:
+        if text_writer is None:
+            return
+        failure = {"type": type(error).__name__, "message": str(error)}
+        for row, (dataset_index, sample, request) in enumerate(
+            zip(self.indices, self.samples, requests)
         ):
-            tag = self._tag(dataset_index)
-            row_batch = sample_batch.row(row)
-            metrics: dict[str, float] = {}
-            prediction = (
-                request.get("prediction") or request["task"].prediction_modality
-            )
-            decode_error = result.get("decode_error")
-            status = "partial" if decode_error is not None else "ok"
-            result_metadata = _result_metadata(
-                result,
-                max_new_tokens=self.max_new_tokens,
-                prediction=prediction,
-                runtime=datamodule.runtime,
-            )
-            metrics.update(
-                {
-                    "generation/response_tokens": float(
-                        result_metadata["response_tokens"]
-                    ),
-                    "generation/reached_max_new_tokens": float(
-                        result_metadata["reached_max_new_tokens"]
-                    ),
-                }
-            )
-            if audio_writer is not None:
-                _log_source_audio(
-                    audio_writer,
-                    datamodule,
-                    sample,
-                    request["task"],
-                    tag,
-                    trainer.global_step,
-                )
-            audio = result["audio"]
-            generated_text = None
-            if audio is None:
-                if prediction.supervises_audio:
-                    metrics["generation/stopped_without_eoa"] = float(
-                        result_metadata["stopped_without_eoa"]
-                    )
-                    metrics["generation/audio_available"] = 0.0
-                    if decode_error is not None:
-                        metrics["generation/audio_decode_failed"] = 1.0
-                    if audio_writer is not None:
-                        _log_target_reference_audio(
-                            audio_writer,
-                            datamodule,
-                            module,
-                            row_batch,
-                            sample,
-                            request["task"],
-                            tag,
-                            trainer.global_step,
-                        )
-                    if prediction.supervises_text:
-                        generated_text = _decode_chat_template(
-                            datamodule, result["response_ids"]
-                        )
-                elif prediction.supervises_text:
-                    generated_text = _generated_text(
+            text_writer.add_text(
+                f"{self._tag(dataset_index)}/metadata",
+                _metadata_json(
+                    _sample_log_record(
                         datamodule,
-                        result["response_ids"],
+                        sample_batch.row(row),
+                        dataset_index,
+                        sample,
+                        request,
+                        status="failed",
+                        generation_settings=generation_metadata,
+                        error=failure,
                     )
-                    target_text = _target_text(sample, request["task"])
-                    if generated_text is not None and target_text is not None:
-                        metrics.update(text_metrics(target_text, generated_text))
-                    metrics["generation/stopped_without_eos"] = float(
-                        result_metadata["stopped_without_eos"]
-                    )
-            else:
-                metrics["generation/stopped_without_eoa"] = float(
-                    result_metadata["stopped_without_eoa"]
-                )
-                metrics["generation/audio_available"] = 1.0
-                metrics["generation/audio_decode_failed"] = 0.0
-                target_audio = _log_target_reference_audio(
+                ),
+                step,
+            )
+
+    def _log_result_row(
+        self,
+        audio_writer: Any | None,
+        scalar_writer: Any | None,
+        text_writer: Any | None,
+        datamodule: _DataModule,
+        module: _Module,
+        sample_batch: ModelBatch,
+        row: int,
+        dataset_index: int,
+        sample: types.Sample,
+        request: Request,
+        result: Result,
+        generation_metadata: Mapping[str, Any],
+        *,
+        step: int,
+    ) -> None:
+        tag = self._tag(dataset_index)
+        row_batch = sample_batch.row(row)
+        metrics: dict[str, float] = {}
+        prediction = _prediction_modality(request)
+        decode_error = result.get("decode_error")
+        status = "partial" if decode_error is not None else "ok"
+        result_metadata = _result_metadata(
+            result,
+            max_new_tokens=self.max_new_tokens,
+            prediction=prediction,
+            runtime=datamodule.runtime,
+        )
+        metrics.update(
+            {
+                "generation/response_tokens": float(result_metadata["response_tokens"]),
+                "generation/reached_max_new_tokens": float(
+                    result_metadata["reached_max_new_tokens"]
+                ),
+            }
+        )
+        if audio_writer is not None:
+            _log_source_audio(audio_writer, datamodule, sample, request["task"], tag, step)
+        generated_text = self._log_generation_payload(
+            audio_writer,
+            datamodule,
+            module,
+            row_batch,
+            sample,
+            request,
+            result,
+            result_metadata,
+            prediction,
+            metrics,
+            tag=tag,
+            step=step,
+        )
+        self._write_row_outputs(
+            audio_writer,
+            scalar_writer,
+            text_writer,
+            datamodule,
+            row_batch,
+            dataset_index,
+            sample,
+            request,
+            result,
+            generation_metadata,
+            result_metadata,
+            metrics,
+            status=status,
+            generated_text=generated_text,
+            tag=tag,
+            step=step,
+        )
+
+    def _log_generation_payload(
+        self,
+        audio_writer: Any | None,
+        datamodule: _DataModule,
+        module: _Module,
+        row_batch: ModelBatch,
+        sample: types.Sample,
+        request: Request,
+        result: Result,
+        result_metadata: Mapping[str, Any],
+        prediction: PredictionModality,
+        metrics: dict[str, float],
+        *,
+        tag: str,
+        step: int,
+    ) -> str | None:
+        audio = result["audio"]
+        decode_error = result.get("decode_error")
+        if audio is None:
+            return self._log_text_or_partial_audio(
+                audio_writer,
+                datamodule,
+                module,
+                row_batch,
+                sample,
+                request,
+                result,
+                result_metadata,
+                prediction,
+                metrics,
+                decode_error,
+                tag=tag,
+                step=step,
+            )
+        metrics["generation/stopped_without_eoa"] = float(
+            result_metadata["stopped_without_eoa"]
+        )
+        metrics["generation/audio_available"] = 1.0
+        metrics["generation/audio_decode_failed"] = 0.0
+        target_audio = _log_target_reference_audio(
+            audio_writer,
+            datamodule,
+            module,
+            row_batch,
+            sample,
+            request["task"],
+            tag,
+            step,
+        )
+        metrics.update(
+            audio_metrics(
+                audio["waveform"],
+                audio["sample_rate"],
+                target_duration=(
+                    None
+                    if target_audio is None
+                    else target_audio[0].size(-1) / target_audio[1]
+                ),
+            )
+        )
+        return None
+
+    def _log_text_or_partial_audio(
+        self,
+        audio_writer: Any | None,
+        datamodule: _DataModule,
+        module: _Module,
+        row_batch: ModelBatch,
+        sample: types.Sample,
+        request: Request,
+        result: Result,
+        result_metadata: Mapping[str, Any],
+        prediction: PredictionModality,
+        metrics: dict[str, float],
+        decode_error: Mapping[str, str] | None,
+        *,
+        tag: str,
+        step: int,
+    ) -> str | None:
+        if prediction.supervises_audio:
+            metrics["generation/stopped_without_eoa"] = float(
+                result_metadata["stopped_without_eoa"]
+            )
+            metrics["generation/audio_available"] = 0.0
+            if decode_error is not None:
+                metrics["generation/audio_decode_failed"] = 1.0
+            if audio_writer is not None:
+                _log_target_reference_audio(
                     audio_writer,
                     datamodule,
                     module,
@@ -381,71 +522,106 @@ class TaskSampleLogger(Callback):
                     sample,
                     request["task"],
                     tag,
-                    trainer.global_step,
+                    step,
                 )
-                metrics.update(
-                    audio_metrics(
-                        audio["waveform"],
-                        audio["sample_rate"],
-                        target_duration=(
-                            None
-                            if target_audio is None
-                            else target_audio[0].size(-1) / target_audio[1]
-                        ),
+            if prediction.supervises_text:
+                return _decode_chat_template(datamodule, result["response_ids"])
+            return None
+        if not prediction.supervises_text:
+            return None
+        generated_text = _generated_text(datamodule, result["response_ids"])
+        target_text = _target_text(sample, request["task"])
+        if generated_text is not None and target_text is not None:
+            metrics.update(text_metrics(target_text, generated_text))
+        metrics["generation/stopped_without_eos"] = float(
+            result_metadata["stopped_without_eos"]
+        )
+        return generated_text
+
+    def _write_row_outputs(
+        self,
+        audio_writer: Any | None,
+        scalar_writer: Any | None,
+        text_writer: Any | None,
+        datamodule: _DataModule,
+        row_batch: ModelBatch,
+        dataset_index: int,
+        sample: types.Sample,
+        request: Request,
+        result: Result,
+        generation_metadata: Mapping[str, Any],
+        result_metadata: Mapping[str, Any],
+        metrics: Mapping[str, float],
+        *,
+        status: str,
+        generated_text: str | None,
+        tag: str,
+        step: int,
+    ) -> None:
+        if scalar_writer is not None:
+            for name, value in metrics.items():
+                scalar_writer.add_scalar(f"{tag}/{name}", value, step)
+        if text_writer is not None:
+            text_writer.add_text(
+                f"{tag}/metadata",
+                _metadata_json(
+                    _sample_log_record(
+                        datamodule,
+                        row_batch,
+                        dataset_index,
+                        sample,
+                        request,
+                        status=status,
+                        generation_settings=generation_metadata,
+                        result_metadata=result_metadata,
+                        response_ids=result["response_ids"],
+                        generated_text=generated_text,
+                        metrics=metrics,
                     )
-                )
-            if scalar_writer is not None:
-                for name, value in metrics.items():
-                    scalar_writer.add_scalar(
-                        f"{tag}/{name}", value, trainer.global_step
-                    )
-            if text_writer is not None:
-                text_writer.add_text(
-                    f"{tag}/metadata",
-                    _metadata_json(
-                        _sample_log_record(
-                            datamodule,
-                            row_batch,
-                            dataset_index,
-                            sample,
-                            request,
-                            status=status,
-                            generation_settings=generation_metadata,
-                            result_metadata=result_metadata,
-                            response_ids=result["response_ids"],
-                            generated_text=generated_text,
-                            metrics=metrics,
-                        )
-                    ),
-                    trainer.global_step,
-                )
-            if audio is not None and audio_writer is not None:
-                audio_writer.add_audio(
-                    f"{tag}/generated",
-                    audio["waveform"].detach().cpu(),
-                    trainer.global_step,
-                    sample_rate=audio["sample_rate"],
-                )
-            elif text_writer is not None:
-                if prediction.supervises_text:
-                    target_text = _target_text(sample, request["task"])
-                    if target_text is not None:
-                        text_writer.add_text(
-                            f"{tag}/target",
-                            target_text,
-                            trainer.global_step,
-                        )
-                text_writer.add_text(
-                    f"{tag}/generated_ids",
-                    " ".join(str(value) for value in result["response_ids"].tolist()),
-                    trainer.global_step,
-                )
-                if generated_text is not None:
-                    text_writer.add_text(
-                        f"{tag}/generated",
-                        generated_text,
-                        trainer.global_step,
-                    )
+                ),
+                step,
+            )
+        audio = result["audio"]
+        if audio is not None and audio_writer is not None:
+            audio_writer.add_audio(
+                f"{tag}/generated",
+                audio["waveform"].detach().cpu(),
+                step,
+                sample_rate=audio["sample_rate"],
+            )
+        elif text_writer is not None:
+            self._write_text_fallback(
+                text_writer,
+                sample,
+                request,
+                result,
+                generated_text,
+                tag=tag,
+                step=step,
+            )
+
+    def _write_text_fallback(
+        self,
+        text_writer: Any,
+        sample: types.Sample,
+        request: Request,
+        result: Result,
+        generated_text: str | None,
+        *,
+        tag: str,
+        step: int,
+    ) -> None:
+        if _prediction_modality(request).supervises_text:
+            target_text = _target_text(sample, request["task"])
+            if target_text is not None:
+                text_writer.add_text(f"{tag}/target", target_text, step)
+        text_writer.add_text(
+            f"{tag}/generated_ids",
+            " ".join(str(value) for value in result["response_ids"].tolist()),
+            step,
+        )
+        if generated_text is not None:
+            text_writer.add_text(f"{tag}/generated", generated_text, step)
 
     def _tag(self, dataset_index: int) -> str:
         return f"sample/{self.task.value}/{dataset_index}"

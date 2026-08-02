@@ -165,7 +165,7 @@ def _strategy(model: TokenGenerator) -> _Strategy:
         model, AcousticFeatureGeneration
     ):
         return _Acoustic(model)
-    if getattr(model.runtime, "structured_full_sequence", False):
+    if model.runtime.structured_full_sequence:
         if not isinstance(model, FullCodecSequenceGenerator):
             raise TypeError("structured full sequence requires constrained token generation.")
         return _Structured(model)
@@ -572,7 +572,7 @@ def _codec_payload(token_ids: Tensor, model: TokenGenerator) -> Tensor:
 
 
 def _token_decoder(model: TokenGenerator) -> _Decoder:
-    if getattr(model.runtime, "structured_full_sequence", False):
+    if model.runtime.structured_full_sequence:
         if not isinstance(model, FullCodecSequenceGenerator):
             raise TypeError("structured full sequence requires constrained token generation.")
         return _Structured(model)
@@ -599,7 +599,7 @@ def _validate_semantic_decode_options(
         return
     if (
         model.runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED
-        or getattr(model.runtime, "structured_full_sequence", False)
+        or model.runtime.structured_full_sequence
     ):
         raise ValueError(
             "semantic decode options require semantic-only audio generation."

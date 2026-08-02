@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional, Protocol, Union, cast
 
 from semantic_acoustic_codec.config import Route
-from semantic_acoustic_codec.runtime import AcousticGeneratorArtifact
+from semantic_acoustic_codec.runtime.artifact import AcousticGeneratorArtifact
 
 from semantic_acoustic_codec.loss.repa import WavLMTeacher
 

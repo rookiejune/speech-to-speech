@@ -74,7 +74,7 @@ from speech_to_speech.datamodule.types import (
     RawSpeech,
     RawSpeechBatch,
 )
-from speech_to_speech.model import Config as ModelConfig, ToyConfig
+from speech_to_speech.model import ToyConfig
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.runtime import (
     AudioSequenceLayout,
@@ -239,7 +239,7 @@ class ContractTest(unittest.TestCase):
                 return_value=backend,
             ),
             patch(
-                "semantic_acoustic_codec.runtime.load_artifact",
+                "semantic_acoustic_codec.runtime.artifact.load_artifact",
                 return_value=support,
             ) as load,
             patch(
@@ -2081,7 +2081,7 @@ class ContractTest(unittest.TestCase):
         self.assertFalse(model.acoustic_decoder.codebook_embeddings[-1].weight.requires_grad)
         self.assertFalse(model.acoustic_decoder.embedding_projections[-1].weight.requires_grad)
 
-    def test_parameter_policy_callback_applies_on_fit_setup(self):
+    def test_parameter_policy_callback_applies_on_fit_start(self):
         model = _StageModel()
         callback = build_parameter_policy(
             default_parameter_policy_config(ParameterPolicyName.SPEECH_INTERFACE)
@@ -2091,7 +2091,7 @@ class ContractTest(unittest.TestCase):
         self.assertIsNone(callback.summary)
         self.assertTrue(model.backbone.model.layers[0].weight.requires_grad)
 
-        callback.setup(Mock(), cast(Any, SimpleNamespace(model=model)), "fit")
+        callback.on_fit_start(Mock(), cast(Any, SimpleNamespace(model=model)))
 
         self.assertIsNotNone(callback.summary)
         self.assertFalse(model.backbone.model.layers[0].weight.requires_grad)

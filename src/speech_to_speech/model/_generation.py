@@ -38,6 +38,18 @@ class GenerationOutput:
     frame_spans: Tensor | None = None
 
 
+@dataclass
+class _GenerationLoopState:
+    generated: Tensor
+    attention_mask: Tensor
+    input_ids: Tensor
+    active_rows: Tensor
+    audio_input_positions: Tensor | None
+    length: int
+    past_key_values: Cache | None = None
+    audio_output_past: object | None = None
+
+
 class GenerationStepModel(Protocol):
     layout: Layout
     runtime: TokenModelRuntime
@@ -164,6 +176,117 @@ def generate_sequence_full(
     collect_logprobs: bool = False,
     min_new_tokens: int = 0,
 ) -> GenerationOutput:
+    prompt_attention_mask = _validate_generation_inputs(
+        prompt_ids,
+        max_new_tokens=max_new_tokens,
+        min_new_tokens=min_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        prompt_attention_mask=prompt_attention_mask,
+        audio_input_positions=audio_input_positions,
+        generation_modality=generation_modality,
+        allowed_token_ids=allowed_token_ids,
+    )
+    generation_token_ids = _generation_token_ids(
+        allowed_token_ids,
+        prompt_ids,
+        model.layout,
+    )
+    state = _initial_loop_state(
+        prompt_ids,
+        prompt_attention_mask,
+        max_new_tokens,
+        audio_input_positions,
+    )
+    batch_size = prompt_ids.size(0)
+    condition_steps: list[Tensor] = []
+    span_steps: list[Tensor] = []
+    logprob_steps: list[Tensor] = []
+    logprob_mask_steps: list[Tensor] = []
+
+    for step in range(max_new_tokens):
+        output = _generation_loop_step(
+            model,
+            state,
+            batch_size=batch_size,
+            collect_audio_condition=collect_audio_condition,
+            generation_token_ids=generation_token_ids,
+            generation_modality=generation_modality,
+            use_cache=use_cache,
+        )
+        logits = _sampling_logits(
+            output.logits,
+            temperature,
+            top_p=top_p,
+            step=step,
+            min_new_tokens=min_new_tokens,
+            stop_token_id=stop_token_id,
+            generation_token_ids=generation_token_ids,
+            generation_modality=generation_modality,
+            layout=model.layout,
+        )
+        next_indices = _sample_next_indices(logits, do_sample)
+        if collect_logprobs:
+            _append_logprobs(
+                logprob_steps,
+                logprob_mask_steps,
+                logits,
+                next_indices,
+                state.active_rows,
+                batch_size=batch_size,
+                device=prompt_ids.device,
+            )
+        next_ids = _selected_token_ids(
+            next_indices,
+            generation_token_ids,
+            generation_modality,
+            model.layout,
+        )
+        if collect_audio_condition:
+            _append_audio_condition(
+                condition_steps,
+                span_steps,
+                model,
+                output,
+                next_ids,
+                state.active_rows,
+                batch_size=batch_size,
+            )
+        if not _advance_generation_state(
+            state,
+            model,
+            output,
+            next_ids,
+            stop_token_id=stop_token_id,
+            use_cache=use_cache,
+            batch_size=batch_size,
+        ):
+            break
+
+    return _build_generation_output(
+        state.generated[:, : state.length],
+        prompt_ids,
+        batch_size=batch_size,
+        logprob_steps=logprob_steps,
+        logprob_mask_steps=logprob_mask_steps,
+        condition_steps=condition_steps,
+        span_steps=span_steps,
+        collect_logprobs=collect_logprobs,
+    )
+
+
+def _validate_generation_inputs(
+    prompt_ids: Tensor,
+    *,
+    max_new_tokens: int,
+    min_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    prompt_attention_mask: Tensor | None,
+    audio_input_positions: Tensor | None,
+    generation_modality: Modality | None,
+    allowed_token_ids: Sequence[int] | Tensor | None,
+) -> Tensor:
     if (
         max_new_tokens < 0
         or min_new_tokens < 0
@@ -196,162 +319,270 @@ def generate_sequence_full(
         raise ValueError("audio_input_positions must have shape [batch, frames].")
     if not bool(prompt_attention_mask.any(dim=1).all()):
         raise ValueError("each generation prompt must contain at least one token.")
+    return prompt_attention_mask
 
-    generation_token_ids = _generation_token_ids(
-        allowed_token_ids,
-        prompt_ids,
-        model.layout,
-    )
+
+def _initial_loop_state(
+    prompt_ids: Tensor,
+    prompt_attention_mask: Tensor,
+    max_new_tokens: int,
+    audio_input_positions: Tensor | None,
+) -> _GenerationLoopState:
     prompt_width = prompt_ids.size(1)
     capacity = prompt_width + max_new_tokens
     generated = prompt_ids.new_empty(prompt_ids.size(0), capacity)
     generated[:, :prompt_width] = prompt_ids
     attention_mask = torch.zeros_like(generated, dtype=torch.bool)
     attention_mask[:, :prompt_width] = prompt_attention_mask
-    length = prompt_width
-    input_ids = generated[:, :length]
-    past_key_values: Cache | None = None
-    audio_output_past: object | None = None
-    condition_steps: list[Tensor] = []
-    span_steps: list[Tensor] = []
     batch_size = prompt_ids.size(0)
-    active_rows = torch.arange(batch_size, dtype=torch.long, device=prompt_ids.device)
-    logprob_steps: list[Tensor] = []
-    logprob_mask_steps: list[Tensor] = []
-    for step in range(max_new_tokens):
-        active_attention_mask = (
-            attention_mask
-            if active_rows.numel() == batch_size
-            else attention_mask.index_select(0, active_rows)
+    return _GenerationLoopState(
+        generated=generated,
+        attention_mask=attention_mask,
+        input_ids=generated[:, :prompt_width],
+        active_rows=torch.arange(batch_size, dtype=torch.long, device=prompt_ids.device),
+        audio_input_positions=audio_input_positions,
+        length=prompt_width,
+    )
+
+
+def _generation_loop_step(
+    model: GenerationStepModel,
+    state: _GenerationLoopState,
+    *,
+    batch_size: int,
+    collect_audio_condition: bool,
+    generation_token_ids: Tensor | None,
+    generation_modality: Modality | None,
+    use_cache: bool,
+) -> GenerationStepResult:
+    active_attention_mask = (
+        state.attention_mask
+        if state.active_rows.numel() == batch_size
+        else state.attention_mask.index_select(0, state.active_rows)
+    )
+    output = model.generation_step(
+        state.input_ids,
+        attention_mask=active_attention_mask[:, : state.length],
+        output_hidden_states=collect_audio_condition,
+        token_ids=generation_token_ids,
+        modality=generation_modality,
+        past_key_values=state.past_key_values,
+        use_cache=use_cache,
+        audio_input_positions=state.audio_input_positions,
+        audio_output_past=state.audio_output_past,
+    )
+    if output.logits is None:
+        raise RuntimeError("model did not return generation logits.")
+    return output
+
+
+def _sampling_logits(
+    logits: Tensor,
+    temperature: float,
+    *,
+    top_p: float,
+    step: int,
+    min_new_tokens: int,
+    stop_token_id: int | None,
+    generation_token_ids: Tensor | None,
+    generation_modality: Modality | None,
+    layout: Layout,
+) -> Tensor:
+    logits = logits[:, -1] / temperature
+    if stop_token_id is not None and step < min_new_tokens:
+        _suppress_stop(
+            logits,
+            stop_token_id,
+            generation_token_ids,
+            generation_modality,
+            layout,
         )
-        output = model.generation_step(
-            input_ids,
-            attention_mask=active_attention_mask[:, :length],
-            output_hidden_states=collect_audio_condition,
-            token_ids=generation_token_ids,
-            modality=generation_modality,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            audio_input_positions=audio_input_positions,
-            audio_output_past=audio_output_past,
+    if top_p < 1.0:
+        logits = top_p_filter(logits, top_p)
+    return logits
+
+
+def _sample_next_indices(logits: Tensor, do_sample: bool) -> Tensor:
+    return (
+        torch.distributions.Categorical(logits=logits).sample()
+        if do_sample
+        else logits.argmax(dim=-1)
+    )
+
+
+def _append_logprobs(
+    logprob_steps: list[Tensor],
+    logprob_mask_steps: list[Tensor],
+    logits: Tensor,
+    next_indices: Tensor,
+    active_rows: Tensor,
+    *,
+    batch_size: int,
+    device: torch.device,
+) -> None:
+    step_logprobs = logits.log_softmax(dim=-1)
+    active_token_logprobs = step_logprobs.gather(
+        1,
+        next_indices.unsqueeze(1),
+    ).squeeze(1)
+    token_logprobs = active_token_logprobs.new_zeros(batch_size)
+    token_logprobs.index_copy_(0, active_rows, active_token_logprobs)
+    token_logprob_mask = torch.zeros(
+        batch_size,
+        dtype=torch.bool,
+        device=device,
+    )
+    token_logprob_mask.index_fill_(0, active_rows, True)
+    logprob_steps.append(token_logprobs)
+    logprob_mask_steps.append(token_logprob_mask)
+
+
+def _selected_token_ids(
+    next_indices: Tensor,
+    generation_token_ids: Tensor | None,
+    generation_modality: Modality | None,
+    layout: Layout,
+) -> Tensor:
+    if generation_token_ids is not None:
+        return generation_token_ids.index_select(0, next_indices)
+    if generation_modality is not None:
+        start, _ = layout.blocks[generation_modality.value]
+        return next_indices + start
+    return next_indices
+
+
+def _append_audio_condition(
+    condition_steps: list[Tensor],
+    span_steps: list[Tensor],
+    model: GenerationStepModel,
+    output: GenerationStepResult,
+    next_ids: Tensor,
+    active_rows: Tensor,
+    *,
+    batch_size: int,
+) -> None:
+    if output.hidden_states is None:
+        raise RuntimeError("model did not return generation hidden states.")
+    codec_start, codec_end = model.runtime.codec_audio_range
+    codec_tokens = next_ids.ge(codec_start) & next_ids.lt(codec_end)
+    local_ids = (next_ids - codec_start).clamp(
+        0, model.audio_token_frame_spans.numel() - 1
+    )
+    spans = model.audio_token_frame_spans.index_select(0, local_ids)
+    step_spans = spans.new_zeros(batch_size)
+    step_spans.index_copy_(
+        0,
+        active_rows,
+        spans.masked_fill(~codec_tokens, 0),
+    )
+    span_steps.append(step_spans)
+    active_condition = output.hidden_states[-1][:, -1]
+    step_condition = active_condition.new_zeros(
+        batch_size, active_condition.size(-1)
+    )
+    step_condition.index_copy_(0, active_rows, active_condition)
+    condition_steps.append(step_condition)
+
+
+def _advance_generation_state(
+    state: _GenerationLoopState,
+    model: GenerationStepModel,
+    output: GenerationStepResult,
+    next_ids: Tensor,
+    *,
+    stop_token_id: int | None,
+    use_cache: bool,
+    batch_size: int,
+) -> bool:
+    _write_generated_tokens(state, next_ids, stop_token_id, batch_size=batch_size)
+    continuing_rows = _continuing_rows(next_ids, stop_token_id)
+    if continuing_rows is not None and continuing_rows.numel() == 0:
+        return False
+    if continuing_rows is not None:
+        state.active_rows = state.active_rows.index_select(0, continuing_rows)
+    if use_cache:
+        _advance_cached_state(state, model, output, next_ids, continuing_rows)
+    else:
+        _advance_full_recompute_state(state, continuing_rows)
+    return True
+
+
+def _write_generated_tokens(
+    state: _GenerationLoopState,
+    next_ids: Tensor,
+    stop_token_id: int | None,
+    *,
+    batch_size: int,
+) -> None:
+    if state.active_rows.numel() == batch_size:
+        state.generated[:, state.length] = next_ids
+    else:
+        if stop_token_id is None:
+            raise RuntimeError("generation rows became inactive without a stop token.")
+        state.generated[:, state.length] = stop_token_id
+        state.generated[state.active_rows, state.length] = next_ids
+    state.length += 1
+    state.attention_mask[state.active_rows, state.length - 1] = True
+
+
+def _continuing_rows(next_ids: Tensor, stop_token_id: int | None) -> Tensor | None:
+    if stop_token_id is None:
+        return None
+    return next_ids.ne(stop_token_id).nonzero(as_tuple=False).flatten()
+
+
+def _advance_cached_state(
+    state: _GenerationLoopState,
+    model: GenerationStepModel,
+    output: GenerationStepResult,
+    next_ids: Tensor,
+    continuing_rows: Tensor | None,
+) -> None:
+    state.audio_input_positions = None
+    state.past_key_values = output.past_key_values
+    if state.past_key_values is None:
+        raise RuntimeError("backbone did not return a generation cache.")
+    state.audio_output_past = output.audio_output_past
+    if continuing_rows is not None and continuing_rows.numel() != next_ids.numel():
+        state.past_key_values.batch_select_indices(continuing_rows)
+        state.audio_output_past = model.audio_output_adapter_batch_select(
+            state.audio_output_past,
+            continuing_rows,
         )
-        if output.logits is None:
-            raise RuntimeError("model did not return generation logits.")
-        logits = output.logits[:, -1] / temperature
-        if stop_token_id is not None and step < min_new_tokens:
-            _suppress_stop(
-                logits,
-                stop_token_id,
-                generation_token_ids,
-                generation_modality,
-                model.layout,
-            )
-        if top_p < 1.0:
-            logits = top_p_filter(logits, top_p)
-        next_indices = (
-            torch.distributions.Categorical(logits=logits).sample()
-            if do_sample
-            else logits.argmax(dim=-1)
+    state.input_ids = (
+        next_ids
+        if continuing_rows is None
+        else next_ids.index_select(0, continuing_rows)
+    ).unsqueeze(-1)
+
+
+def _advance_full_recompute_state(
+    state: _GenerationLoopState,
+    continuing_rows: Tensor | None,
+) -> None:
+    state.audio_output_past = None
+    if state.audio_input_positions is not None and continuing_rows is not None:
+        state.audio_input_positions = state.audio_input_positions.index_select(
+            0, continuing_rows
         )
-        if collect_logprobs:
-            step_logprobs = logits.log_softmax(dim=-1)
-            active_token_logprobs = step_logprobs.gather(
-                1,
-                next_indices.unsqueeze(1),
-            ).squeeze(1)
-            token_logprobs = active_token_logprobs.new_zeros(batch_size)
-            token_logprobs.index_copy_(0, active_rows, active_token_logprobs)
-            token_logprob_mask = torch.zeros(
-                batch_size,
-                dtype=torch.bool,
-                device=prompt_ids.device,
-            )
-            token_logprob_mask.index_fill_(0, active_rows, True)
-            logprob_steps.append(token_logprobs)
-            logprob_mask_steps.append(token_logprob_mask)
-        if generation_token_ids is not None:
-            next_ids = generation_token_ids.index_select(0, next_indices)
-        elif generation_modality is not None:
-            start, _ = model.layout.blocks[generation_modality.value]
-            next_ids = next_indices + start
-        else:
-            next_ids = next_indices
+    state.input_ids = (
+        state.generated[:, : state.length]
+        if continuing_rows is None
+        else state.generated.index_select(0, state.active_rows)[:, : state.length]
+    )
 
-        if collect_audio_condition:
-            if output.hidden_states is None:
-                raise RuntimeError("model did not return generation hidden states.")
-            codec_start, codec_end = model.runtime.codec_audio_range
-            codec_tokens = next_ids.ge(codec_start) & next_ids.lt(codec_end)
-            local_ids = (next_ids - codec_start).clamp(
-                0, model.audio_token_frame_spans.numel() - 1
-            )
-            spans = model.audio_token_frame_spans.index_select(0, local_ids)
-            step_spans = spans.new_zeros(batch_size)
-            step_spans.index_copy_(
-                0,
-                active_rows,
-                spans.masked_fill(~codec_tokens, 0),
-            )
-            span_steps.append(step_spans)
-            active_condition = output.hidden_states[-1][:, -1]
-            step_condition = active_condition.new_zeros(
-                batch_size, active_condition.size(-1)
-            )
-            step_condition.index_copy_(0, active_rows, active_condition)
-            condition_steps.append(step_condition)
 
-        if active_rows.numel() == batch_size:
-            generated[:, length] = next_ids
-        else:
-            if stop_token_id is None:
-                raise RuntimeError(
-                    "generation rows became inactive without a stop token."
-                )
-            generated[:, length] = stop_token_id
-            generated[active_rows, length] = next_ids
-        length += 1
-        attention_mask[active_rows, length - 1] = True
-
-        continuing_rows: Tensor | None = None
-        if stop_token_id is not None:
-            continuing = next_ids.ne(stop_token_id)
-            if not bool(continuing.any()):
-                break
-            continuing_rows = continuing.nonzero(as_tuple=False).flatten()
-            active_rows = active_rows.index_select(0, continuing_rows)
-        if use_cache:
-            audio_input_positions = None
-            past_key_values = output.past_key_values
-            if past_key_values is None:
-                raise RuntimeError("backbone did not return a generation cache.")
-            audio_output_past = output.audio_output_past
-            if (
-                continuing_rows is not None
-                and continuing_rows.numel() != next_ids.numel()
-            ):
-                past_key_values.batch_select_indices(continuing_rows)
-                audio_output_past = model.audio_output_adapter_batch_select(
-                    audio_output_past,
-                    continuing_rows,
-                )
-            input_ids = (
-                next_ids
-                if continuing_rows is None
-                else next_ids.index_select(0, continuing_rows)
-            ).unsqueeze(-1)
-        else:
-            audio_output_past = None
-            if audio_input_positions is not None and continuing_rows is not None:
-                audio_input_positions = audio_input_positions.index_select(
-                    0, continuing_rows
-                )
-            input_ids = (
-                generated[:, :length]
-                if continuing_rows is None
-                else generated.index_select(0, active_rows)[:, :length]
-            )
-
-    generated = generated[:, :length]
+def _build_generation_output(
+    generated: Tensor,
+    prompt_ids: Tensor,
+    *,
+    batch_size: int,
+    logprob_steps: list[Tensor],
+    logprob_mask_steps: list[Tensor],
+    condition_steps: list[Tensor],
+    span_steps: list[Tensor],
+    collect_logprobs: bool,
+) -> GenerationOutput:
     token_logprobs: Tensor | None = None
     token_logprob_mask: Tensor | None = None
     if collect_logprobs:

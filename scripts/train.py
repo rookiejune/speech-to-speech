@@ -14,6 +14,7 @@ from anytrain.lightning import (
     ModelCheckpoint,
     validation,
 )
+from anytrain.lightning.schedule import ScheduleRuntime
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig
@@ -22,6 +23,7 @@ from speech_to_speech.callback import (
     OOMDiagnostics,
     OnDeviceCodecMaterializer,
     build_parameter_policy,
+    build_unit_schedule,
 )
 from speech_to_speech.callback.logging import (
     GradLogger,
@@ -39,6 +41,7 @@ from speech_to_speech.runtime import runtime_for_sequence_layout
 from speech_to_speech.task import Task
 
 if TYPE_CHECKING:
+    from speech_to_speech.runtime import Runtime
     from scripts._train_config import (
         GradientComparisonConfig,
         GradientProbeConfig,
@@ -83,6 +86,8 @@ def run(config: StagedTrainConfig) -> None:
         config.model,
         config.model.acoustic,
     )
+    schedule_runtime = build_unit_schedule(config.callbacks.schedule)
+    module.schedule_runtime = schedule_runtime
     if config.datamodule.encode_missing_codes is True:
         module.batch_materializer = OnDeviceCodecMaterializer(rt)
 
@@ -94,6 +99,7 @@ def run(config: StagedTrainConfig) -> None:
         output_dir,
         summary,
         validation_history,
+        schedule_runtime,
     )
 
     trainer = build_trainer(config, output_dir, callbacks)
@@ -235,6 +241,7 @@ def training_callbacks(
     output_dir: Path,
     summary: Callback,
     validation_history: Callback | None = None,
+    schedule_runtime: ScheduleRuntime | None = None,
 ) -> list[Callback]:
     callbacks: list[Callback] = [
         build_parameter_policy(config.callbacks.parameter_policy)
@@ -242,66 +249,90 @@ def training_callbacks(
     performance_callback = performance(config.callbacks.performance)
     if performance_callback is not None:
         callbacks.append(performance_callback)
+    if schedule_runtime is None:
+        schedule_runtime = build_unit_schedule(config.callbacks.schedule)
+    if schedule_runtime is not None:
+        callbacks.extend(schedule_runtime.callbacks())
     callbacks.append(OOMDiagnostics())
-    callbacks.extend(
-        cast(
-            list[Callback],
-            [
-                OutputsLogger(),
-                summary,
-            ],
-        )
-    )
-    if validation_history is not None:
-        callbacks.append(validation_history)
-    if config.callbacks.task_sample.enabled:
-        for panel in config.callbacks.task_sample.panels:
-            loader_name = panel.loader
-            callbacks.append(
-                TaskSampleLogger(
-                    panel.indices,
-                    config.callbacks.task_sample.every_n_steps,
-                    loader_name=loader_name,
-                    split=SampleSplit(panel.split),
-                    task=Task(panel.task),
-                    seed=config.callbacks.task_sample.seed,
-                    max_new_tokens=config.callbacks.task_sample.max_new_tokens,
-                    temperature=config.callbacks.task_sample.temperature,
-                    top_p=config.callbacks.task_sample.top_p,
-                    do_sample=config.callbacks.task_sample.do_sample,
-                    use_cache=config.callbacks.task_sample.use_cache,
-                )
-            )
-    if config.callbacks.text_retention.enabled:
-        callbacks.append(
-            TextRetentionLogger(
-                {
-                    name: {
-                        "instruction": probe.instruction,
-                        "reference": probe.reference,
-                    }
-                    for name, probe in config.callbacks.text_retention.probes.items()
-                },
-                every_n_steps=config.callbacks.text_retention.every_n_steps,
-                max_new_tokens=config.callbacks.text_retention.max_new_tokens,
-            )
-        )
+    callbacks.extend(_logging_callbacks(summary, validation_history))
+    callbacks.extend(_task_sample_loggers(config))
+    text_retention = _text_retention_logger(config)
+    if text_retention is not None:
+        callbacks.append(text_retention)
     gradient = _gradient_logger(config, performance_callback)
     if gradient is not None:
         callbacks.append(gradient)
-    if config.trainer.enable_checkpointing:
-        callbacks.append(
-            ModelCheckpoint(
-                dirpath=output_dir / "checkpoints",
-                filename=config.callbacks.checkpoint.filename,
-                save_last=config.callbacks.checkpoint.save_last,
-                save_top_k=config.callbacks.checkpoint.save_top_k,
-                every_n_train_steps=config.callbacks.checkpoint.every_n_train_steps,
-                auto_insert_metric_name=False,
-                enable_version_counter=False,
-            )
-        )
+    checkpoint = _checkpoint_callback(config, output_dir)
+    if checkpoint is not None:
+        callbacks.append(checkpoint)
     return callbacks
+
+
+def _logging_callbacks(
+    summary: Callback,
+    validation_history: Callback | None,
+) -> list[Callback]:
+    callbacks = cast(list[Callback], [OutputsLogger(), summary])
+    if validation_history is not None:
+        callbacks.append(validation_history)
+    return callbacks
+
+
+def _task_sample_loggers(config: StagedTrainConfig) -> list[Callback]:
+    task_sample = config.callbacks.task_sample
+    if not task_sample.enabled:
+        return []
+    return [
+        TaskSampleLogger(
+            panel.indices,
+            task_sample.every_n_steps,
+            loader_name=panel.loader,
+            split=SampleSplit(panel.split),
+            task=Task(panel.task),
+            seed=task_sample.seed,
+            max_new_tokens=task_sample.max_new_tokens,
+            temperature=task_sample.temperature,
+            top_p=task_sample.top_p,
+            do_sample=task_sample.do_sample,
+            use_cache=task_sample.use_cache,
+        )
+        for panel in task_sample.panels
+    ]
+
+
+def _text_retention_logger(config: StagedTrainConfig) -> Callback | None:
+    text_retention = config.callbacks.text_retention
+    if not text_retention.enabled:
+        return None
+    return TextRetentionLogger(
+        {
+            name: {
+                "instruction": probe.instruction,
+                "reference": probe.reference,
+            }
+            for name, probe in text_retention.probes.items()
+        },
+        every_n_steps=text_retention.every_n_steps,
+        max_new_tokens=text_retention.max_new_tokens,
+    )
+
+
+def _checkpoint_callback(
+    config: StagedTrainConfig,
+    output_dir: Path,
+) -> Callback | None:
+    if not config.trainer.enable_checkpointing:
+        return None
+    checkpoint = config.callbacks.checkpoint
+    return ModelCheckpoint(
+        dirpath=output_dir / "checkpoints",
+        filename=checkpoint.filename,
+        save_last=checkpoint.save_last,
+        save_top_k=checkpoint.save_top_k,
+        every_n_train_steps=checkpoint.every_n_train_steps,
+        auto_insert_metric_name=False,
+        enable_version_counter=False,
+    )
 
 
 def _gradient_logger(
