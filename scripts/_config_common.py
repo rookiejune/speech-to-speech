@@ -23,7 +23,7 @@ from speech_to_speech.runtime import (
     BackboneInitialization,
 )
 from speech_to_speech.runtime import Config as RuntimeConfig
-from speech_to_speech.stage import (
+from speech_to_speech.parameter_policy import (
     ParameterGroup,
     ParameterPolicyConfig,
     ParameterPolicyName,

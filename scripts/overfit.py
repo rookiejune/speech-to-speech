@@ -35,7 +35,7 @@ from speech_to_speech.pl_module.composition import build
 from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import runtime_for_sequence_layout
 from speech_to_speech.runtime.types import codec_sample_rate
-from speech_to_speech.stage import ParameterGroup
+from speech_to_speech.parameter_policy import ParameterGroup
 from speech_to_speech.task import Task
 
 if TYPE_CHECKING:

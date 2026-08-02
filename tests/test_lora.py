@@ -5,7 +5,7 @@ import unittest
 from peft import LoraConfig, inject_adapter_in_model
 from torch import nn
 
-from speech_to_speech.stage import (
+from speech_to_speech.parameter_policy import (
     PARAMETER_POLICY_SPECS,
     ParameterGroup,
     ParameterPolicyName,

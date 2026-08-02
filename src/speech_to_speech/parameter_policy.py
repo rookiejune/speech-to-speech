@@ -30,7 +30,7 @@ class ParameterPolicyName(StrEnum):
     SPEECH_INTERFACE_TOP_THIRD = auto()
 
 
-class StagedModel(Protocol):
+class ParameterPolicyModel(Protocol):
     def named_parameters(
         self, prefix: str = "", recurse: bool = True
     ) -> Iterable[tuple[str, nn.Parameter]]: ...
@@ -177,7 +177,7 @@ _LAYER_PATTERN = re.compile(r"^backbone\.model\.layers\.(\d+)\.")
 
 
 def apply_parameter_policy(
-    model: StagedModel,
+    model: ParameterPolicyModel,
     spec: ParameterPolicySpec,
 ) -> dict[ParameterGroup, int]:
     counts = {group: 0 for group in ParameterGroup}
@@ -264,11 +264,11 @@ def parameter_group(name: str) -> ParameterGroup:
         or name.startswith("acoustic_flow.")
     ):
         return ParameterGroup.ACOUSTIC_DECODER
-    raise ValueError(f"parameter {name!r} does not belong to a stage group.")
+    raise ValueError(f"parameter {name!r} does not belong to a parameter group.")
 
 
 def _backbone_trainable(
-    name: str, model: StagedModel, top_fraction: float | None
+    name: str, model: ParameterPolicyModel, top_fraction: float | None
 ) -> bool:
     if top_fraction is None or top_fraction >= 1:
         return True
@@ -289,7 +289,7 @@ def _is_final_norm(name: str) -> bool:
     )
 
 
-def _num_layers(model: StagedModel, minimum: int) -> int:
+def _num_layers(model: ParameterPolicyModel, minimum: int) -> int:
     backbone = getattr(model, "backbone", None)
     config = None if backbone is None else getattr(backbone, "config", None)
     value = None if config is None else getattr(config, "num_hidden_layers", None)
@@ -298,7 +298,7 @@ def _num_layers(model: StagedModel, minimum: int) -> int:
     return value
 
 
-def _structurally_frozen(name: str, model: StagedModel) -> bool:
+def _structurally_frozen(name: str, model: ParameterPolicyModel) -> bool:
     if name.startswith("acoustic_decoder.decoder.embed_tokens."):
         return True
     decoder = getattr(model, "acoustic_decoder", None)

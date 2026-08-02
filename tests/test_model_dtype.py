@@ -11,7 +11,7 @@ from torch import Tensor, nn
 from speech_to_speech.model import Config
 from speech_to_speech.model.acoustic import DecoderConfig, FlowModel, RVQModel
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
-from speech_to_speech.stage import (
+from speech_to_speech.parameter_policy import (
     PARAMETER_POLICY_SPECS,
     ParameterGroup,
     ParameterPolicyName,

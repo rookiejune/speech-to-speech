@@ -88,7 +88,7 @@ from speech_to_speech.runtime.audio_tokenizer import (
     NativeAudioTokenizer,
     TorchCodecBPE,
 )
-from speech_to_speech.stage import (
+from speech_to_speech.parameter_policy import (
     PARAMETER_POLICY_SPECS,
     ParameterGroup,
     ParameterPolicyName,

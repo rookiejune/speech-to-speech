@@ -16,7 +16,7 @@ from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.runtime import AudioSequenceLayout, Config as RuntimeConfig
 from speech_to_speech.loader_plan import LoaderPlanConfig
-from speech_to_speech.stage import ParameterPolicyConfig
+from speech_to_speech.parameter_policy import ParameterPolicyConfig
 from speech_to_speech.task import Task
 
 if __package__:
