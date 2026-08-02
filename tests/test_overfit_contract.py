@@ -5,7 +5,12 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from anytrain.lightning import GradientComparison, GradientProbe, GradientTarget
+from anytrain.lightning import (
+    GradientComparison,
+    GradientProbe,
+    GradientTarget,
+    ParameterPolicyCallback,
+)
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig
 
@@ -31,44 +36,44 @@ from speech_to_speech.task import Task
 )
 class OverfitContractTest(unittest.TestCase):
     def test_overfit_uses_the_shared_speech_data_contract(self) -> None:
-        config = overfit(_compose("overfit", "experiment=toy_smoke"))
+        config = overfit(_compose("overfit", "experiment=overfit/toy_smoke"))
 
-        self.assertIsInstance(config.data, SpeechConfig)
-        self.assertEqual(config.data.codec, config.runtime.codec)
-        self.assertEqual(config.data.dataloader.batch_size, 1)
-        self.assertEqual(config.data.dataloader.num_workers, 0)
-        self.assertFalse(config.data.dataloader.pin_memory)
-        self.assertFalse(config.data.dataloader.persistent_workers)
-        self.assertIs(config.data.shape, DataShape.PAIR)
-        self.assertFalse(config.data.encode_missing_codes)
-        self.assertIs(config.data.dataset.name, DatasetName.TOY)
+        self.assertIsInstance(config.datamodule, SpeechConfig)
+        self.assertEqual(config.datamodule.codec, config.runtime.codec)
+        self.assertEqual(config.datamodule.dataloader.batch_size, 1)
+        self.assertEqual(config.datamodule.dataloader.num_workers, 0)
+        self.assertFalse(config.datamodule.dataloader.pin_memory)
+        self.assertFalse(config.datamodule.dataloader.persistent_workers)
+        self.assertIs(config.datamodule.shape, DataShape.PAIR)
+        self.assertFalse(config.datamodule.encode_missing_codes)
+        self.assertIs(config.datamodule.dataset.name, DatasetName.TOY)
         self.assertEqual(config.sample_index, 0)
         with self.assertRaises(AttributeError):
-            getattr(config.data, "sample_index")
+            getattr(config.datamodule, "sample_index")
 
     def test_flat_overfit_experiments_package_dataset_and_sample_separately(
         self,
     ) -> None:
         root = Path(__file__).parents[1]
-        experiments = sorted((root / "configs" / "experiment").glob("*.yaml"))
+        experiments = sorted((root / "configs" / "experiment" / "overfit").glob("*.yaml"))
 
         self.assertEqual(
             {path.stem for path in experiments},
             {
                 "bicodec_full_sequence_smoke",
                 "bicodec_semantic_only_smoke",
-                "longcat_decoupled_semantic_only_smoke",
+                "longcat_semantic_only_smoke",
                 "longcat_full_sequence_smoke",
-                "overfit",
+                "default",
                 "toy_smoke",
                 "unicodec_ddp_smoke",
-                "unicodec_overfit",
+                "unicodec",
             },
         )
         for path in experiments:
             with self.subTest(experiment=path.name):
                 source = path.read_text()
-                self.assertIn("- /data@data.dataset:", source)
+                self.assertIn("- /datamodule/dataset@datamodule.dataset:", source)
                 self.assertRegex(source, r"(?m)^sample_index: 0$")
                 self.assertNotRegex(source, r"(?m)^  sample_index:")
 
@@ -86,7 +91,7 @@ class OverfitContractTest(unittest.TestCase):
 
         self.assertIs(built, datamodule)
         speech.assert_called_once_with(
-            config.data,
+            config.datamodule,
             {Task.TTS: 1.0},
             sample_index=config.sample_index,
         )
@@ -226,7 +231,8 @@ class OverfitContractTest(unittest.TestCase):
                 evaluation=None,
             )
 
-        self.assertEqual(callbacks, [oom, outputs, summary])
+        self.assertIsInstance(callbacks[0], ParameterPolicyCallback)
+        self.assertEqual(callbacks[1:], [oom, outputs, summary])
 
     def test_oom_follows_performance_before_other_callbacks(self) -> None:
         config = overfit(
@@ -253,14 +259,15 @@ class OverfitContractTest(unittest.TestCase):
                 evaluation=None,
             )
 
-        self.assertIs(callbacks[0], performance)
-        self.assertIs(callbacks[1], oom)
+        self.assertIsInstance(callbacks[0], ParameterPolicyCallback)
+        self.assertIs(callbacks[1], performance)
+        self.assertIs(callbacks[2], oom)
 
     def test_partial_policy_uses_the_configured_partial_probe(self) -> None:
         config = overfit(
             _compose(
                 "overfit",
-                "parameter_policy=speech_interface_top_third",
+                "callback/parameter_policy=speech_interface_top_third",
                 "model/acoustic=rvq",
                 "callbacks.gradient_probe.partial_probes.backbone_norm.parameters=[partial.weight]",
             )
@@ -291,8 +298,8 @@ class OverfitContractTest(unittest.TestCase):
     def test_exposed_overfit_values_are_validated_during_parse(self) -> None:
         cases = (
             ("sample_index=-1", ValueError, "sample_index"),
-            ("data.dataloader.batch_size=0", ValueError, "batch_size"),
-            ("data.dataloader.num_workers=-1", ValueError, "num_workers"),
+            ("datamodule.dataloader.batch_size=0", ValueError, "batch_size"),
+            ("datamodule.dataloader.num_workers=-1", ValueError, "num_workers"),
             (
                 "callbacks.text_retention.every_n_steps=0",
                 ValueError,

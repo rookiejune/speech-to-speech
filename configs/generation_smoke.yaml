@@ -1,8 +1,6 @@
 defaults:
-  - runtime: longcat
-  - data@data.dataset: wmt19_tts
   - _self_
-  - experiment: null
+  - experiment: generation/online_encode_smoke
 
 task: s2st
 run_name: generation_smoke
@@ -10,7 +8,7 @@ repo_output_root: ${oc.env:SPEECH_TO_SPEECH_TRAIN_ROOT,${oc.env:DYNAMIC_HOME}/tr
 output_subdir: 004-real-cached-generation
 output_dir: ${repo_output_root}/${output_subdir}
 
-data:
+datamodule:
   codec: ${runtime.codec}
   dataloader:
     batch_size: 1

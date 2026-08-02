@@ -54,7 +54,7 @@ class JobsTest(unittest.TestCase):
     def test_identity_guard_rejects_hydra_override_forms(self) -> None:
         command = (
             'source "$1"; shift; '
-            'job_reject_overrides experiment task stage -- "$@"'
+            'job_reject_overrides experiment task stage stage_id -- "$@"'
         )
         valid = subprocess.run(
             ["bash", "-c", command, "jobs-test", str(JOBS / "env.sh"), "train.max_steps=1"],
@@ -70,7 +70,7 @@ class JobsTest(unittest.TestCase):
             "experiment=other",
             "+task=s2st",
             "++stage=stage_4",
-            "stage.name=stage_4",
+            "stage_id=stage_4",
             "~task",
             "experiment@_global_=other",
         ):

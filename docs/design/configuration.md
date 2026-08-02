@@ -6,22 +6,31 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
 
 ## 源码模块
 
-- `runtime`：完整映射 `runtime.Config`，统一拥有 codec、FrameCodec audio representation、backbone、backbone
-  initialization、audio tokenizer、device、dtype、attention backend 与 flow sampling。顶层 `audio_route`
-  由运行入口一起注入 `Runtime`，固定本次 experiment 的 prompt/output/decode stream ownership。
-  `longcat`、`longcat_native`、
-  `longcat_full_sequence`、`unicodec` 表示相互兼容的资源 snapshot；不再拆分 `codec` 和
-  `sampler` 组。
+- `runtime`：完整映射 `runtime.Config`，统一拥有 codec、`audio_sequence_layout`、backbone、
+  backbone initialization、audio tokenizer、device、dtype、attention backend 与 flow sampling。
+  `audio_sequence_layout=flattened|semantic` 是公开的音频序列轴：`flattened` 把完整 codec
+  codes 作为 acoustic-first / semantic-last 的 token 序列训练；`semantic` 的逻辑输入输出仍是
+  full codes，但 token sequence 只处理 semantic，acoustic 由 Flow/RVQ side module 或
+  `semantic-acoustic-codec` artifact 补齐。`longcat`、`longcat_native`、`longcat_full_sequence`、
+  `unicodec` 表示相互兼容的资源 snapshot；不再拆分 `codec` 和 `sampler` 组。
 - `model`：完整映射 `model.Config` 的 semantic adapter、可选 source-audio input adapter、
   `ToyConfig`、`AudioOutputAdapterConfig` 与 `peft.LoraConfig | None`。
-  `model=toy` 只替换 backbone；`model/lora=qwen` 直接组合 Hugging Face PEFT 的官方字段并向现有
+  `model=toy` 只替换 backbone；`+model/lora@model.lora=qwen` 直接组合 Hugging Face PEFT 的官方字段并向现有
   backbone 注入 adapter，不维护项目内 LoRA config 或 layer；`model/acoustic` 选择 flow/RVQ composition，preset
-  package 仍是顶层 `acoustic`，避免把 subtype 字段混入基础 `model.Config`。
-- `data`：speech 数据源 preset，通过 `data@data.dataset=<name>` 组合到统一的
-  `SpeechConfig.dataset`；`data@data.dataset=toy` 选择内存 codec samples，
+  package 写入 `model.acoustic`，避免把 subtype 字段混入基础 `model.Config`。
+- `datamodule`：speech 数据源 preset，通过
+  `datamodule/dataset=<name>` 组合到统一的
+  `SpeechConfig.dataset`；`datamodule/dataset=toy` 选择内存 codec samples，
   production/fixed-sample experiment 默认仍使用 WMT19 TTS prepared data。需要固定正式
   train/dev/test 子集时，通过 `DatasetConfig.split_manifest` 和 `split_label` 显式选择
-  manifest 中的索引集合。
+  manifest 中的索引集合。task template 也在 `datamodule` 上：
+  `datamodule.tasks.<task>.template`（`int` 固定下标，`null` 随机；默认 `0`）。
+- `stage`：正式训练 stage 与参数策略 preset，通过
+  `stage=<name>` 写入
+  `StageConfig.loaders/accumulate_grad_batches/fuse_loaders_per_step`，通过
+  `callback/parameter_policy=<name>`
+  写入 `ParameterPolicyConfig`。stage preset 位于 `configs/stage/stage_*.yaml`
+  （`# @package stage`）；parameter policy 位于 `configs/callback/parameter_policy/`。
 - `scripts/create_split_manifest.py`：把 distribution candidate 与 formal-root audit 转成
   可追溯的 split manifest。它要求候选索引覆盖 audited `samples.parquet` 的全部行，绑定
   audit 文件 fingerprint，并把 split method 作为显式参数；它不是训练入口，也不会修改原始
@@ -36,7 +45,7 @@ job wrapper 或 config schema；历史实验记录仍保存在 `docs/experiments
 
 `entry`、`trainer`、`logging`、`callback` 与 `experiment` 属于 Lightning/Hydra 运行编排，可以没有同名
 `src` 包。overfit 的 sample index 和 train budget 位于 experiment；`sample_index` 是入口字段，
-不再混入 `SpeechConfig`，数据源则通过 `data.dataset: DatasetConfig` 选择。overfit 的
+不再混入 `SpeechConfig`，数据源则通过 `datamodule.dataset: DatasetConfig` 选择。overfit 的
 `callbacks.evaluation.enabled` 控制声学生成评估；真实
 fixed-sample experiment 默认启用，随机输出不构成质量结论的 `toy_smoke` 显式关闭。共享
 `callback/performance` preset 只暴露开关、
@@ -117,22 +126,23 @@ forward，按原 Lightning accumulation 语义平均各 microbatch scalar loss�
 
 `configs/experiment/train/` 只放 `scripts/train.py` 消费的 staged experiments；仍位于
 `configs/experiment/` 顶层的文件由 `scripts/overfit.py` 消费。这样两个入口不会共享一组含义不明的
-flat experiment 名称。`configs/train.yaml` 组合 `entry=train`、默认 `model/lora=qwen`（须排在
+flat experiment 名称。`configs/train.yaml` 组合 `entry=train`、默认 LoRA preset（须排在
 experiment 之前，以便非 LoRA experiment 用 `model.lora: null` 覆盖）和可选 experiment；可复用的
 百万步预算、数据加载和 callback cadence 位于 `configs/entry/train.yaml`。
 
-- `unicodec_overfit`：UniCodec fixed-sample 100-step overfit。
+- `overfit/unicodec`：UniCodec fixed-sample 100-step overfit。
 - `unicodec_ddp_smoke`：UniCodec 显式 DDP 两步验收。
 - `overfit`：TTS/S2ST fixed-sample 完整链路实验。
-- `train/staged_joint_stage_1..4`：正式 staged joint experiments。每个文件显式绑定 stage 与
-  parameter policy；入口消费 `configs/stage/stage_*.yaml` 中的 loader/task 契约并构造唯一
-  `DataModule`。每个 speech loader 使用
-  `LoaderSpec.speech(...)`，纯文本 MT loader 使用 `LoaderSpec.text(...)`，多 loader 调度由
-  `LoaderSchedule` 持有。四个正式 stage 都启用每 10,000 optimizer steps 的 train fixed panels；
-  Stage 2-4 的 panels 包含 MT；正式 entry 还默认启用独立的 text-retention baseline。MT panel 只允许
-  train split，validation panel 仍要求 speech loader 与独立 validation dataset。
-- `train/parameter_policy_smoke`：参数冻结专用两步实验。它固定 toy model/data 与 CPU trainer，
-  只通过 `parameter_policy=<name>` 切换冻结策略，不借用正式长跑配置充当策略测试夹具。
+- `train/staged_joint/stage_1..4`：正式 staged joint experiments。每个文件显式绑定
+  `stage` 与 `callback/parameter_policy`，并通过 `stage_id` 记录运行身份；
+  `stage.loaders` / `stage.accumulate_grad_batches` 等持有 loader/task 契约，再构造唯一 `DataModule`。每个 speech
+  loader 使用 `LoaderSpec.speech(...)`，纯文本 MT loader 使用 `LoaderSpec.text(...)`（读
+  `datamodule.tasks`），多 loader 调度由 `LoaderSchedule` 持有。四个正式 stage 都启用每 10,000
+  optimizer steps 的 train fixed panels；Stage 2-4 的 panels 包含 MT；正式 entry 还默认启用独立的
+  text-retention baseline。MT panel 只允许 train split，validation panel 仍要求 speech loader 与
+  独立 validation dataset。
+- `train/smoke/parameter_policy`：参数冻结专用两步实验。它固定 toy model/data 与 CPU trainer，
+  只通过 `callback/parameter_policy=<name>` 切换冻结策略，不借用正式长跑配置充当策略测试夹具。
 - `toy_smoke`：正式 LongCat runtime 加 tiny model/in-memory dataset 的 CPU 两步训练契约测试；
   不读取真实 backbone 权重或 WMT19 prepared dataset，也不替代真实资源验收。
 
@@ -143,10 +153,10 @@ experiment 之前，以便非 LoRA experiment 用 `model.lora: null` 覆盖）�
 
 `jobs/011/03_staged_joint_train.sh` 是正式 staged joint training wrapper，调用
 `scripts/train.py`，固定 `trainer=staged_static_ddp`，并根据
-`SPEECH_TO_SPEECH_STAGE=stage_1..stage_4` 选择对应的 `train/staged_joint_stage_*` experiment，
-由 experiment 同时绑定 stage 和 parameter policy；未设置时默认 `stage_1`。该 wrapper 在
-启动 Python 前拒绝通过末尾 `"$@"` 覆写 `experiment`、`task` 或 `stage`，需要切换 identity 时必须
-使用对应环境选择器并单独提交一次 wrapper。正式 train 入口通过
+`SPEECH_TO_SPEECH_STAGE=stage_1..stage_4` 选择对应的 `train/staged_joint/stage_*` experiment，
+由 experiment 同时覆盖 `stage` schedule 与 `callbacks.parameter_policy`；未设置时默认 `stage_1`。该
+wrapper 在启动 Python 前拒绝通过末尾 `"$@"` 覆写 `experiment`、`task` 或 `stage`，需要切换
+identity 时必须使用对应环境选择器并单独提交一次 wrapper。正式 train 入口通过
 `train.ckpt_path=<checkpoint>` 显式恢复 Lightning checkpoint；默认值为空，普通训练不走 resume。
 该字段只属于 staged train，overfit 配置不接受它。
 
@@ -165,7 +175,7 @@ experiment 之前，以便非 LoRA experiment 用 `model.lora: null` 覆盖）�
 `stable-codec` 依赖使用独立兼容环境，不能默认复用普通训练 Python。
 
 正式 train 的 `validation` 默认关闭。启用时，`loader` 必须选择当前 stage 的一个 speech loader，
-且 `data.dataset.split_manifest` 必须存在、`split_label` 必须与训练 split 不同。入口复制该 loader
+且 `datamodule.dataset.split_manifest` 必须存在、`split_label` 必须与训练 split 不同。入口复制该 loader
 的 task weights 与 speech data config，仅替换 dev `split_label`；配置的 `every_n_steps` 使用
 optimizer-step 语义；fused loader 下入口传给 Lightning 的 batch 级 `val_check_interval` 等于该
 step 数，非 fused accumulation 下才乘以 `stage.accumulate_grad_batches`。`sanity_steps=-1` 表示 fit 前遍历完整 dev split，非负值表示对应 sanity batch
@@ -178,19 +188,20 @@ step 数，非 fused accumulation 下才乘以 `stage.accumulate_grad_batches`�
 组合校验；`scripts/_overfit_config.py` 和 `scripts/_train_config.py` 分别拥有入口 schema 与其业务规则。
 `scripts/_config_normalization.py` 隔离 OmegaConf 可写化、枚举规范化与 structured dataclass 合并，
 不包含训练业务规则。`speech_to_speech.pl_module.composition` 负责 token/flow/RVQ 的
-model/objective/module 组装、基于 `acoustic.type` 的统一分发，以及 runtime acoustic side-channel
+model/objective/module 组装、基于 `model.acoustic.type` 的统一分发，以及 runtime acoustic side-channel
 约束；`scripts/_entry.py` 只放 overfit/train 共享的 runtime device、Trainer 与 performance callback
 组装。
 `runtime.Config`、`model.Config`、`pl_module.Config`、`model.DecoderConfig`、
 `datamodule.config.SpeechConfig`、`DataLoaderConfig` 和 `datamodule.dataset.text.TextConfig` 直接进入 root
-schema，不重复声明字段；`scripts/overfit.py` 与 `scripts/train.py` 都直接把解析后的 data config 交给 `LoaderSpec`，不做
-同构对象转换。`StageLoaderConfig` 负责把字符串 task weights 暴露为 `Task` 映射，并根据非零任务
+schema，不重复声明字段；`scripts/overfit.py` 与 `scripts/train.py` 都直接把解析后的 datamodule config 交给 `LoaderSpec`，不做
+同构对象转换。`stage.loaders` 使用 `StageLoaderConfig`：把字符串 task weights 暴露为 `Task` 映射，并根据非零任务
 维护 text-only 与 speech loader 不可混合的不变量；配置解析校验 validation/panel 选择，训练组装不
 重复这些条件。OmegaConf 对字符串枚举只接受成员
 名，入口在合并前把公开的小写 value 转成 enum member name；除此之外不做兼容重写。
-`audio_route` 是 root schema 的独立公开结构，不属于 `runtime.Config`；入口解析后把同一份 route
-传给 `Runtime`、DataModule、model 和 generation service。Hydra 的 list/enum 表示在入口归一化，
-再由公开 route dataclass 校验并把 streams 归一化为 tuple。
+`audio_sequence_layout` 是 root/runtime schema 的公开结构，入口解析后由同一 `Runtime` 派生内部
+route，再传给 DataModule、model 和 generation。Hydra 的字符串表示在入口归一化，再由公开
+dataclass 校验。reference 不是独立 config 轴；需要 prompt-owned acoustic 的路径从输入 full
+codes/context 中取得 reference acoustic。
 
 两个入口分别解析为：
 
@@ -204,56 +215,63 @@ schema，不重复声明字段；`scripts/overfit.py` 与 `scripts/train.py` 都
 
 - `model/acoustic=none|flow|rvq` 显式选择下游 acoustic path；`none` 只训练
   audio token，flow/RVQ 才启用 acoustic objective，RVQ schema 不接受 REPA。
-- `runtime.audio_representation=full_codec_sequence` 只切换 FrameCodec 的完整 codebook 序列化格式，
-  只允许 `model/acoustic=none`，因为完整 codec codes 已作为 token objective 训练，不能再同时构造
-  frame-aligned acoustic side channel。它不决定 prompt 使用哪些 stream，也不决定 output 的 decode
-  所有权。
-- `audio_route` 是 experiment/checkpoint 级的固定音频流契约。`prompt.source` 选择 source 或独立
-  reference，`prompt.streams` 声明进入 prompt 的 global/acoustic/semantic stream，`output.streams` 声明
-  自回归实际预测的 stream，`decode` 分别声明 semantic/acoustic 由 prompt、output 或 generator
-  提供。BiCodec 的 `global` 是固定长度 speaker/style stream；`acoustic` 只用于 FrameCodec route，
-  BiCodec 不接受它。route 不属于 `Request`，一次运行中不能按请求切换。
+- `runtime.audio_sequence_layout=flattened` 切换到完整 codebook 序列化格式，只允许
+  `model/acoustic=none`，因为完整 codec codes 已作为 token objective 训练，不能再同时构造
+  frame-aligned acoustic side channel。flattened layout 的 token 顺序固定为 acoustic-first /
+  semantic-last。
+- `runtime.audio_sequence_layout=semantic` 保持逻辑输入输出为 full codes，但模型 token sequence
+  只预测 semantic。需要 waveform 时，acoustic 由 Flow/RVQ side module 或
+  `runtime.semantic_codec_artifact` 提供。
+- reference 不是公开 config 轴。BiCodec 的 semantic layout 从输入 full codes/context 取得
+  reference acoustic；没有 reference 的路径只能依赖输出 full codes 或后置 acoustic provider。
+- 非 semantic 单元的存储始终是 `SemanticAcousticCodes.acoustic`；frame-aligned 还是 fixed-length
+  由 codec 的 `AcousticLayout` 决定，不由 grammar/prompt 再造第三种 stream。
 - `runtime.backbone_initialization=random` 从 `runtime.backbone` 读取 tokenizer 与完整 HF config，
-  但不读取预训练权重；它不能与 `model=toy` 组合，并要求 `parameter_policy=full`。
+  但不读取预训练权重；它不能与 `model=toy` 组合，并要求
+  `callback/parameter_policy=full`。
 - `runtime.backbone_trust_remote_code`、`runtime.backbone_readout` 与
   `runtime.backbone_supports_cache_position` 是替换 HF backbone 的显式兼容性开关；默认值保持
   Qwen/Qwen3 contract，`configs/runtime/kimi_audio.yaml` 覆写为 Kimi-Audio 的 remote-code readout。
 - `runtime.semantic_codec_artifact` 为 `semantic-acoustic-codec` 的 semantic-only waveform
-  support artifact；LongCat 的 `DECOUPLED` token-only 路径可使用它。BiCodec 的 structured
-  `FULL_CODEC_SEQUENCE` 路径由 `audio_route` 选择 stream ownership，并调用 backend
-  `detokenize()`；它不接入 Flow/RVQ composition。默认 smoke 使用
-  `bicodec_reuse_prompt_global`（reference global -> output semantic）和
-  `bicodec_generate_global`（无 audio prompt -> output global+semantic）。
-  两份 BiCodec smoke 都选择 `data@data.dataset=qwen_tts_speaker` 和 `data.shape=single`，直接消费 workspace
-  prepared grid 的 flat cells；可用 `data.dataset.speaker=<id>` 限制到一个 speaker。FrameCodec 的
-  token-only 路径仍使用 `audio_representation=full_codec_sequence`。
-- `acoustic.init_artifact` 是 Flow/RVQ 联合训练的 generator 初始化路径，与
-  `runtime.semantic_codec_artifact` 不同。composition 加载 artifact 后校验 route、frame-aligned layout、
+  support artifact；LongCat 的 `semantic` token-only 路径可使用它。BiCodec 的 `semantic`
+  layout 从 full-code input/context 复用 reference acoustic，并调用 backend `detokenize()`；它不接入
+  Flow/RVQ composition。两份 BiCodec smoke 都选择
+  `datamodule/dataset=qwen_tts_speaker` 和 `datamodule.shape=single`；可用
+  `datamodule.dataset.speaker=<id>` 限制到一个 speaker。FrameCodec 的 token-only full-code
+  baseline 使用 `audio_sequence_layout=flattened`。
+- `model.acoustic.init_artifact` 是 Flow/RVQ 联合训练的 generator 初始化路径，与
+  `runtime.semantic_codec_artifact` 不同。composition 加载 artifact 后校验 frame-aligned layout、
   decoder/REPA 配置和 acoustic backend metadata，再把已加载对象交给 model；semantic conditioner 不进入
   S2S。Flow 迁移 decoder 与 feature normalization，RVQ 当前只接受 `codebook_ar` artifact。
 - UniCodec 也是 `FrameCodec`，`runtime=unicodec model/acoustic=none` 使用
-  `full_codec_sequence`，只是完整 frame 里只有一个 codebook。有独立 acoustic codebook 的 codec
+  `audio_sequence_layout=flattened`，只是完整 frame 里只有一个 codebook。有独立 acoustic codebook 的 codec
   只有在提供 semantic-only artifact 或选择 full-code sequence 时才可以作为 token-only baseline。
 - flow method、NFE 和 step 数直接覆盖 `runtime.flow_*`；RVQ/token 中保留这些字段是
   `runtime.Config` 的稳定 shape，不需要再为未使用字段创建 variant schema。
 - flow/RVQ 必须有独立 acoustic codebook；`none` 不要求 codec 缺少 acoustic codebook，入口不自动改写 composition。
 
-route 不是服务请求参数，而是实验与 checkpoint 的不变量。`SpeechToSpeechModule` 保存规范化后的
-route metadata；恢复 checkpoint 时要求 metadata 存在且与当前 `Runtime.audio_route` 严格相等，缺失
-或不一致都直接失败，避免用错误的 prompt/output/decode 语义继续训练或生成。
+sequence layout 不是服务请求参数，而是实验与 checkpoint 的不变量。`SpeechToSpeechModule` 保存规范化后的
+layout/route metadata；恢复 checkpoint 时要求 metadata 存在且与当前 `Runtime` 派生的 route 严格相等，
+缺失或不一致都直接失败。reference/context 数据只属于样本或请求本身，不作为可在恢复时切换的配置轴。
 
-## Stage 与参数策略
+## Schedule 与参数策略
 
-`configs/stage/stage_*.yaml` 只描述 loader/task schedule 与 `accumulate_grad_batches`。参数冻结和
-backbone top-fraction 抽象为顶层 `parameter_policy` 组，入口解析为
-`ParameterPolicyConfig`，并在 Trainer/optimizer 创建前一次性应用。一个正式 job 只选择一个
-experiment，运行中不切换数据计划或参数冻结。`train/staged_joint_stage_*` 显式保留约定组合：
-stage 0/4 使用 `full`，stage 1/2 使用 `speech_interface`，stage 3 使用
-`speech_interface_top_third`；这不是 `StageName` 的隐式映射。这些非 LoRA 对照 experiment 会在配置体中显式写 `model.lora: null`，以覆盖正式 train 的默认 LoRA。需要只训练 semantic token
-interface 时在专用 experiment 中显式选择 `parameter_policy=semantic_only`。
+loader mix 属于 `stage`（`StageConfig`），由
+`stage: stage_*` preset 写入；`train/staged_joint/stage_*` experiment
+通过 `/stage@stage: stage_*` 替换整段 stage（避免 dict merge 残留旧 loader）。
+参数冻结和 backbone top-fraction 位于
+`callbacks.parameter_policy`，由 `callback/parameter_policy` 组写入，并在 Trainer/optimizer
+创建前一次性应用。一个正式 job 只选择一个 experiment，运行中不切换数据计划或参数冻结。
+约定组合：stage 0/4 使用 `full`，stage 1/2 使用 `speech_interface`，stage 3 使用
+`speech_interface_top_third`；这不是 `schedule_name` 的隐式映射。这些非 LoRA 对照
+experiment 会在配置体中显式写 `model.lora: null`，以覆盖正式 train 的默认 LoRA。需要只训练
+semantic token interface 时在专用 experiment 中显式选择
+`callback/parameter_policy=semantic_only`。
 
-正式 train 入口默认选择 `model/lora=qwen` 与 `parameter_policy=lora`（PiSSA 初始化）。
-PEFT LoRA 必须同时选择 `model/lora=qwen` 与 `parameter_policy=lora`，避免注入 adapter 后又选择
+正式 train 入口默认选择 LoRA preset 与
+`callback/parameter_policy=lora`（PiSSA 初始化）。
+PEFT LoRA 必须同时选择 `+model/lora@model.lora=qwen` 与
+`callback/parameter_policy=lora`，避免注入 adapter 后又选择
 其它训练策略，或选择 policy 却没有 adapter。OmegaConf 2.3 不能把 PEFT 的复杂 union 字段直接作为
 nested structured config 展开，因此 normalization 边界先用官方字段构造 `peft.LoraConfig`，再把
 该对象写回公开 `model.Config`；它不复制字段或二次校验。PEFT 负责 backbone 内参数的冻结语义，
@@ -261,8 +279,8 @@ nested structured config 展开，因此 normalization 边界先用官方字段�
 拒绝同时启用 performance callback。`pl_module.optimizer=muon` 与 LoRA 组合时，要求
 `init_lora_weights` 为 PiSSA 系满秩初始化，否则入口早失败。
 
-overfit 入口继续默认 `parameter_policy=full` 且不启用 LoRA，专门验收全参闭环。
+overfit 入口继续默认 `callbacks.parameter_policy.name=full` 且不启用 LoRA，专门验收全参闭环。
 
-Stage 0-4 是 S2S 内部的数据/任务/参数策略日程，不等同于“先在 SAC 预训练 generator、再在 S2S
-用 hidden state 联合训练”的两个 phase。artifact 初始化只在 model composition 时发生一次，stage 不拥有
-artifact 导出或切换逻辑。
+Stage 0-4 是 S2S 内部的数据/任务/参数策略阶段（`stage_id` + stage preset），
+不等同于“先在 SAC 预训练 generator、再在 S2S 用 hidden state 联合训练”的两个 phase。artifact
+初始化只在 model composition 时发生一次，schedule 不拥有 artifact 导出或切换逻辑。

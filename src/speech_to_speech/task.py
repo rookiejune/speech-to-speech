@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import random
+from typing import Optional
 
 from anydataset.types import Modality
 
@@ -92,18 +92,14 @@ class Task(StrEnum):
 
     @property
     def templates(self) -> tuple[str, ...]:
-        from .templates import TEMPLATES, TEMPLATES_PER_TASK
+        from .templates import TEMPLATES
 
-        values = TEMPLATES[self]
-        if len(values) != TEMPLATES_PER_TASK:
-            raise AssertionError(
-                f"{self.value} must provide exactly {TEMPLATES_PER_TASK} templates, "
-                f"got {len(values)}."
-            )
-        return values
+        return TEMPLATES[self]
 
-    def sample_template(self) -> str:
-        return random.choice(self.templates)
+    def sample_template(self, index: Optional[int] = 0) -> str:
+        from .templates import select_template
+
+        return select_template(self, index)
 
 
 __all__ = ["Task"]

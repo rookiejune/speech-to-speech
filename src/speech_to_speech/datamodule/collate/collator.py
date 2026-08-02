@@ -7,6 +7,7 @@ from anydataset.types import Sample as RawSample
 from ...prediction import PredictionModality
 from ...task import Task
 from .._helper.task import TaskWeights
+from ..config import TaskConfig
 from ..parse.parser import parse_task_sample, parse_text_sample
 from ..protocol import DataRuntime, TextRuntime
 from ..build.sample import build_task_sample, build_text_sample
@@ -24,12 +25,14 @@ class Collator:
         mask_text_ratio: float = 0.5,
         mask_audio_ratio: float = 0.5,
         prediction: PredictionModality | None = None,
+        tasks: Mapping[Task, TaskConfig] | None = None,
     ) -> None:
         self.runtime = runtime
         self.encode_missing_codes = encode_missing_codes
         self.interleave_audio_frames = interleave_audio_frames
         self.mask_text_ratio = mask_text_ratio
         self.mask_audio_ratio = mask_audio_ratio
+        self.task_configs = tasks
         self._task_weights = TaskWeights(task_weights, prediction=prediction)
 
     @property
@@ -71,6 +74,7 @@ class Collator:
                     interleave_audio_frames=self.interleave_audio_frames,
                     mask_text_ratio=self.mask_text_ratio,
                     mask_audio_ratio=self.mask_audio_ratio,
+                    tasks=self.task_configs,
                 )
                 for sample in task_samples
             ],
@@ -85,8 +89,10 @@ class TextCollator:
         task_weights: Mapping[Task, float],
         *,
         prediction: PredictionModality | None = None,
+        tasks: Mapping[Task, TaskConfig] | None = None,
     ) -> None:
         self.runtime = runtime
+        self.task_configs = tasks
         _validate_text_tasks(_positive_tasks(task_weights), prediction=prediction)
         self._task_weights = TaskWeights(task_weights, prediction=prediction)
 
@@ -101,7 +107,12 @@ class TextCollator:
     def _model_samples(self, samples: list[RawSample]) -> list[ModelSample]:
         tasks = self._task_weights.allocate(len(samples))
         return [
-            build_text_sample(parse_text_sample(sample, self.runtime), task, self.runtime)
+            build_text_sample(
+                parse_text_sample(sample, self.runtime),
+                task,
+                self.runtime,
+                tasks=self.task_configs,
+            )
             for sample, task in zip(samples, tasks)
         ]
 

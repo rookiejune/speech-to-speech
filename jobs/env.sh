@@ -49,7 +49,7 @@ job_reject_overrides() {
 }
 
 fdu_stage_data_args() {
-  local key="${1:-data.dataset.root}"
+  local key="${1:-datamodule.dataset.root}"
   FDU_DATA_ARGS=()
   if [[ -n "${SPEECH_TO_SPEECH_STAGE_DATA_ROOT:-}" ]]; then
     FDU_DATA_ARGS=("${key}=${SPEECH_TO_SPEECH_STAGE_DATA_ROOT}")

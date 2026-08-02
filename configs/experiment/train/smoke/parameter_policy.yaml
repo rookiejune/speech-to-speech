@@ -1,16 +1,20 @@
 # @package _global_
 defaults:
-  - override /stage: stage_1
-  - override /parameter_policy: speech_interface
-  - override /model: toy
-  - override /model/acoustic: rvq
-  - override /runtime: longcat_native
-  - override /data@data.dataset: toy
-  - override /trainer: staged_ddp
-  - override /logging: csv
+  - /runtime: longcat_native
+  - /model: toy
+  - /model/acoustic@model.acoustic: rvq
+  - /audio_sequence_layout: semantic
+  - /datamodule/dataset@datamodule.dataset: toy
+  - /stage@stage: stage_1
+  - /callback/parameter_policy@callbacks.parameter_policy: speech_interface
+  - /pl_module: sft
+  - /trainer: staged_ddp
+  - /logging: csv
   - _self_
 
-run_name: parameter-policy-${parameter_policy.name}
+stage_id: stage_1
+
+run_name: parameter-policy-${callbacks.parameter_policy.name}
 output_subdir: parameter-policy-smoke/${run_name}
 
 runtime:
@@ -18,7 +22,7 @@ runtime:
   dtype: float32
   attn_implementation:
 
-data:
+datamodule:
   dataloader:
     batch_size: 1
     num_workers: 0

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Dict, Optional, cast
 
+from ..task import Task
 from .dataset.speech import DatasetConfig, DatasetName
 from .types import DataShape
 
@@ -62,6 +65,21 @@ class DataLoaderConfig:
 
 
 @dataclass
+class TaskConfig:
+    """Per-task instruction index: ``null`` random, ``int`` fixed."""
+
+    template: Optional[int] = 0
+
+    def __post_init__(self) -> None:
+        if self.template is None:
+            return
+        if isinstance(self.template, bool) or not isinstance(self.template, int):
+            raise TypeError("task template must be an integer or null.")
+        if self.template < 0:
+            raise ValueError("task template must be non-negative.")
+
+
+@dataclass
 class SpeechConfig:
     codec: str
     dataloader: DataLoaderConfig
@@ -70,6 +88,8 @@ class SpeechConfig:
     interleave_audio_frames: int = 25
     mask_text_ratio: float = 0.5
     mask_audio_ratio: float = 0.5
+    # Dict[str, ...] for OmegaConf.structured; runtime keys are Task after __post_init__.
+    tasks: Dict[str, TaskConfig] = field(default_factory=dict)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
 
     def __post_init__(self) -> None:
@@ -91,11 +111,61 @@ class SpeechConfig:
                 raise TypeError(f"{name} must be a float.")
             if not 0.0 <= float(value) <= 1.0:
                 raise ValueError(f"{name} must be in [0, 1].")
+        self.tasks = _tasks(self.tasks)  # type: ignore[assignment]
         if (
             self.dataset.name is DatasetName.QWEN_TTS_SPEAKER
             and self.shape is not DataShape.SINGLE
         ):
-            raise ValueError("qwen_tts_speaker requires data shape single.")
+            raise ValueError("qwen_tts_speaker requires datamodule shape single.")
+
+    def template_index(self, task: Task) -> Optional[int]:
+        return task_template_index(self.tasks, task)
 
 
-__all__ = ["DataLoaderConfig", "DataLoaderCostsConfig", "SpeechConfig"]
+def task_template_index(
+    tasks: Mapping[Task, TaskConfig] | None,
+    task: Task,
+) -> Optional[int]:
+    if not isinstance(task, Task):
+        raise TypeError("task must be a Task.")
+    if tasks is None:
+        return 0
+    configs = cast(Mapping[Task, TaskConfig], tasks)
+    if task not in configs:
+        raise KeyError(f"datamodule.tasks missing entry for {task.value}.")
+    return configs[task].template
+
+
+def _tasks(value: object) -> dict[Task, TaskConfig]:
+    if not isinstance(value, Mapping):
+        raise TypeError("tasks must be a mapping.")
+    normalized: dict[Task, TaskConfig] = {}
+    for key, config in value.items():
+        task = key if isinstance(key, Task) else _task(key)
+        if isinstance(config, TaskConfig):
+            resolved = config
+        elif isinstance(config, Mapping):
+            resolved = TaskConfig(**dict(config))
+        else:
+            raise TypeError("tasks values must be TaskConfig mappings.")
+        normalized[task] = resolved
+    return normalized
+
+
+def _task(value: object) -> Task:
+    if isinstance(value, Task):
+        return value
+    if isinstance(value, str):
+        if value in Task.__members__:
+            return Task[value]
+        return Task(value)
+    raise TypeError(f"task key must be a Task or string, got {type(value)}.")
+
+
+__all__ = [
+    "DataLoaderConfig",
+    "DataLoaderCostsConfig",
+    "SpeechConfig",
+    "TaskConfig",
+    "task_template_index",
+]

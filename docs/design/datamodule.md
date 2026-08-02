@@ -6,19 +6,20 @@
 ## 对外能力
 
 - `protocol.DataRuntime`：datamodule 所需资源的最小只读协议，公开 codec identity/view、
-  FrameCodec representation、audio route、semantic artifact、acoustic layout/unit length、
-  text/audio tokenizer、layout 和 special token ID。正式 `Runtime` 与测试 fake 都必须显式满足
-  完整协议，不为缺失字段推断默认语义。
+  `audio_sequence_layout`（`flattened | semantic`）、semantic artifact、acoustic
+  layout/unit length、text/audio tokenizer、layout 和 special token ID。正式 `Runtime` 与测试
+  fake 都必须显式满足完整协议，不为缺失字段推断默认语义。
 - `DataRuntimeSnapshot`：DataLoader worker 使用的可 pickle 数据视图，只保存 tokenizer、layout
-  blocks、codec 数据解释字段和 special token ID；不携带 runtime 已缓存的 backbone、codec 或
-  CUDA module。
+  blocks、codec 数据解释字段、`audio_sequence_layout`、semantic/acoustic metadata 和 special token ID；不携带
+  runtime 已缓存的 backbone、codec 或 CUDA module。
 - `DatasetRuntime`：在 `DataRuntime` 上增加正式 codec object，仅供 dataset factory 根据
   codebook metadata 构造 toy prepared-code samples。
 - `parse.parser.parse_sample()`：把 `anydataset.types.Sample` 解析为 `SpeechPair`。它解释当前
-  `AudioView` 与 runtime `audio_representation`，将 decoupled FrameCodec 的 LongCat codebooks 分成
-  semantic/acoustic codes，或在 `full_codec_sequence` 下把完整 codec codes 作为 token
-  supervision，并生成 text/audio token IDs 与 audio token spans。prompt/output stream ownership
-  由 sample builder 根据 `audio_route` 处理，不由 parser 从 representation 推断。
+  `AudioView` 与 runtime `audio_sequence_layout`：逻辑 audio 输入/输出始终保留完整
+  semantic/acoustic codes；`flattened` 把完整 codes 投影为 audio token sequence（acoustic-first、
+  semantic-last），`semantic` 只把 semantic 放进 sequence，并保留 acoustic codes 给 side module、
+  SAC 或 BiCodec reference context。prompt/output/decode ownership 由 sample builder 根据 task 和
+  内部固定 route 处理，不由 parser 从 sequence layout 推断。
 - `parse.parser.parse_task_sample()`：按 `Task` 只解析实际消费的 source/target modality。pair/single
   只决定 role 映射；codec view 缺失时是否使用 waveform fallback 与数据 shape 无关。
 - `build.single.SingleCollator` / `build.single.parse_single_sample()`：处理 single utterance 数据形态，
@@ -40,8 +41,13 @@
   `source_layout`、默认 `prediction_modality`、`allowed_predictions`、`uses_source_role` 和
   instruction template。loader 可对白名单任务覆写 `prediction`（如 T2ST/S2ST 的
   `audio|parallel`）。同构 batch 比较 `(source_layout, prediction)`。`MASKED_AR` 使用
-  `TEXT_AUDIO` source（mask 后）与 mixed prediction。每任务 30 条 template 存在
-  `speech_to_speech.templates`，训练构建时 `sample_template()` 随机采样。
+  `TEXT_AUDIO` source（mask 后）与 mixed prediction。instruction 文案在
+  `speech_to_speech.templates` 的每任务 paraphrase 池中；`SpeechConfig.tasks.<task>.template`
+  为每 task 的 `int|null`（`null`=该 task 池内随机，整数=固定下标；默认 `0`）。loader
+  schedule（`loaders` / `accumulate_grad_batches` / `fuse_loaders_per_step`）同属
+  `SpeechConfig`。训练构建调用 `sample_template(index)`；generation 要求固定下标，可用
+  `evaluation_template_index()`（把 `null` 钉成 `0`）。正权重 loader task 必须在
+  `datamodule.tasks` 中声明。
 - `Collator(runtime, task_weights, prediction=...)`：按任务权重为 raw samples 选择任务，依次调用
   parser、sample builder 和 batch padding；可选 loader 级 prediction override 写入
   `SpeechTaskSample.prediction`。
@@ -56,8 +62,8 @@
   或确定性的内存 `toy` data。`qwen_tts_speaker` 通过 workspace 加载
   `SpeakerAudioGrid`，再由 `SpeakerGridCellsDataset` 暴露 `Role.DEFAULT` flat cells；默认覆盖
   所有 speaker，也可用 `speaker` 显式选择一列。BiCodec prepared cell 使用
-  `AudioView.BICODEC` 的 structured mapping，semantic 和 fixed-length global unit 分别保留
-  独立轴；可选的 `split_manifest` + `split_label` 把已加载的 map-style dataset 限制到
+  `AudioView.BICODEC` 的 structured mapping，semantic 和 fixed-length acoustic
+  （speaker）unit 分别保留独立轴；可选的 `split_manifest` + `split_label` 把已加载的 map-style dataset 限制到
   manifest 声明的非重复、非负索引；manifest 不替换底层 anydataset split，也不绕过其公开
   dataloader/batch-planning 契约。底层是 `MapStyleABC` 时，split view 委托其 `_shuffle()` 并
   映射回子集位置，以保留 store-backed payload locality。toy codes 根据正式 codec 的
@@ -68,10 +74,16 @@ grouped rows，因此不会把 speaker 轴或 semantic padding 带入模型 batc
 把底层 flat store 的局部分组映射回 text-row 索引，再在过滤后执行 rank 分片，避免 speaker-minor
 排列把某一列集中到单个 distributed rank。该接入只确认 prepared-data 与模型输入契约；真实
 checkpoint 的收敛和生成音质仍需单独验收。
-当 `audio_route.prompt.source=reference` 且 prompt streams 非空时，adapter 为每个 target cell 绑定
-同 speaker 的下一 text row 作为 `AudioContextSample.audio_context`，最后一行循环到第一行；reference
-与 target 必须是不同 row。它仍通过 flat-cell 索引读取，不把 grouped `rows` 或另一 speaker 混入
-训练样本。
+当内部固定 route 要求 reference-owned prompt streams 时：
+
+- speaker-grid（`qwen_tts_speaker` / `shape=single`）：adapter 为每个 target cell 绑定同
+  speaker 的下一 text row 作为 `AudioContextSample.audio_context`，最后一行循环到第一行；
+  reference 与 target 必须是不同 row。它仍通过 flat-cell 索引读取，不把 grouped `rows` 或
+  另一 speaker 混入训练样本。
+- pair（例如 WMT19 TTS）：parser 在样本不是 `AudioContextSample` 时，把同样本
+  `Role.SOURCE` audio 解析为 `audio_context`（合成同说话人 enrollment）。已有
+  `AudioContextSample` 优先，不覆盖 grid 行为。缺 SOURCE audio 时显式失败。ASR 等非
+  audio-target 任务即使带上 context，build 也不会把它写进 model batch。
 - split manifest 的生成属于审计/部署入口，不属于 dataset loader：
   `scripts/create_split_manifest.py` 只消费 candidate、root audit 和 data-root 路径，输出带
   source artifact 与 root fingerprint 的 JSON；训练前必须先在 stable root 上完成该产物的独立
@@ -80,7 +92,7 @@ checkpoint 的收敛和生成音质仍需单独验收。
   `MapStyleABC`，因此 DDP smoke 与正式 prepared data 使用同一 rank-local batch planner。
 - `config.DataLoaderConfig(batch_size, num_workers, pin_memory, persistent_workers, costs)` /
   `DataLoaderCostsConfig(enabled, max_batch_frames, planning_window)` /
-  `SpeechConfig(codec, dataloader, shape, encode_missing_codes, dataset)`：公开的 DataLoader、
+  `SpeechConfig(codec, dataloader, shape, encode_missing_codes, tasks, loaders, dataset, …)`：公开的 DataLoader、
   dataset 与 DataModule dataclass 配置结构，字段和值域校验只在这里维护；Hydra staged train
   直接复用 `Config` 与 `TextConfig`，入口不声明同构 schema 或转换 dict。`costs` 默认关闭；
   开启后只适用于 speech `MapStyleABC` 路径，样本 cost 为全部 audio item 的
@@ -175,12 +187,12 @@ batch 仍暴露对齐的 `input_ids` / `token_labels` / `token_groups` / `acoust
 不能形成半完整状态。
 
 BiCodec route 的 sample builder 先按 `prompt.source` 选择 source/reference，再只序列化
-`prompt.streams`；target 只按 `output.streams` 产生 response。`global` 表示 fixed-length
-speaker/style codes，仍按共享 codec 契约存放在 structured codes 的 `acoustic` 字段；BiCodec
-route 本身只接受 `global`。reference 的 semantic/global codes
-作为 `audio_context` 独立保存供 route-aware decode 使用，target semantic 不会被放进 prompt。
-`token_groups` 只标记实际预测的 semantic、semantic-or-end 或各 acoustic codebook payload；forced
-codec/stream marker 与外层 EOA 不进入监督。
+`prompt.streams`；target 只按 `output.streams` 产生 response。route 的 `acoustic` stream 对应
+structured codes 的 `acoustic` 字段；在 BiCodec（`FIXED_LENGTH`）上它是 fixed-length
+speaker/style slots，在 frame-aligned codec 上它与 semantic 时间对齐。reference 的
+semantic/acoustic codes 作为 `audio_context` 独立保存供 route-aware decode 使用，target
+semantic 不会被放进 prompt。`token_groups` 只标记实际预测的 semantic、semantic-or-end 或各
+acoustic codebook payload；forced codec/stream marker 与外层 EOA 不进入监督。
 
 `ModelBatch` 额外保存 `tasks: list[Task]`、`predictions: list[PredictionModality]` 和
 `pad_token_id`，并公开 `attention_mask` 与 `acoustic_target_mask`。speech batch 还保存
@@ -188,7 +200,7 @@ codec/stream marker 与外层 EOA 不进入监督。
 纯文本样本为 0。batch padding 同时把单条 prompt 边界和 `audio_context` 聚合为
 `generation_prompt_lengths` 与逐行 `audio_contexts`；teacher-forcing generation bridge
 （`requests_from_batch`）切出 `prompt_ids` 并带上同批 `prediction`，不从第一个非 `-100`
-label 反推。audio-target 路径把结构 BOA 写入 `prompt_ids`，因此即使后续 grammar marker
+label 反推。audio-target 路径把结构 BOA 写入 `prompt_ids`，因此即使后续 codec marker
 不受监督，真实生成仍从相同状态开始。
 
 `audio_input_positions` 是每条序列中 source audio payload token 的位置，按 `[frames]` 保存，batch
@@ -221,10 +233,10 @@ response、generated token 以及 BiCodec route 的 reference `audio_context` �
 - `parse.parser` 只解释 raw dataset representation；`build.sample` 只实现任务序列规则；
   `types.py` 保存结构并处理局部校验、padding 和 mask。三层不反向读取彼此的私有逻辑。
 - LongCat 的第 0 个 codebook 和后续 codebooks 只在 parser 边界解释为 semantic/acoustic。
-  FrameCodec `full_codec_sequence` 不拆 semantic/acoustic side channel，而是把完整 codec codes 放入
+  `flattened` sequence layout 不拆 semantic/acoustic side channel，而是把完整 codec codes 放入
   `semantic_codes` 并设置 `acoustic_codes=None`；Stable Codec 与 UniCodec 的完整 frame codes
   也使用相同表示。fixed-length structured codec 不属于这条 frame-code parser 路径，其 prompt、
-  output 和 decode 所有权由正交的 `audio_route` 负责。
+  output 和 decode 所有权由内部固定 route 按 task 处理，不作为 datamodule 公共配置轴。
 - audio tokenizer 的输出统一称为 `audio_token_ids`；codec codebook index 统一称为
   `semantic_codes` / `acoustic_codes`。只有 layout global IDs 使用 `input_ids` 和
   `token_labels`。

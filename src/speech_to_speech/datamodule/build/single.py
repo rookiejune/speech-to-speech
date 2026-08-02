@@ -7,6 +7,7 @@ from ...prediction import PredictionModality
 from ...source import SourceLayout
 from ...task import Task
 from ...task_spec import resolve_prediction
+from ..config import TaskConfig
 from .._helper.duration import from_frames
 from .._helper.task import TaskWeights
 from .._helper.tokenization import token_ids
@@ -49,12 +50,14 @@ class SingleCollator:
         mask_text_ratio: float = 0.5,
         mask_audio_ratio: float = 0.5,
         prediction: PredictionModality | None = None,
+        tasks: Mapping[Task, TaskConfig] | None = None,
     ) -> None:
         self.runtime = runtime
         self.encode_missing_codes = encode_missing_codes
         self.interleave_audio_frames = interleave_audio_frames
         self.mask_text_ratio = mask_text_ratio
         self.mask_audio_ratio = mask_audio_ratio
+        self.task_configs = tasks
         _validate_single_tasks(_positive_tasks(task_weights))
         self._task_weights = TaskWeights(task_weights, prediction=prediction)
 
@@ -97,6 +100,7 @@ class SingleCollator:
                     interleave_audio_frames=self.interleave_audio_frames,
                     mask_text_ratio=self.mask_text_ratio,
                     mask_audio_ratio=self.mask_audio_ratio,
+                    tasks=self.task_configs,
                 )
                 for item in items
             ],
@@ -131,6 +135,7 @@ def build_single_sample(
     mask_text_ratio: float = 0.5,
     mask_audio_ratio: float = 0.5,
     prediction: PredictionModality | None = None,
+    tasks: Mapping[Task, TaskConfig] | None = None,
 ) -> ModelSample:
     _validate_single_tasks([task])
     prediction = resolve_prediction(task, prediction)
@@ -141,7 +146,12 @@ def build_single_sample(
             utterance,
             task,
             runtime,
-            prompt=chat_prompt(utterance.language, task, runtime),
+            prompt=chat_prompt(
+                utterance.language,
+                task,
+                runtime,
+                tasks=tasks,
+            ),
             prediction=prediction,
             interleave_audio_frames=interleave_audio_frames,
             mask_text_ratio=mask_text_ratio,
@@ -160,11 +170,21 @@ def build_single_sample(
             target,
             task,
             runtime,
-            prompt=chat_prompt(utterance.language, task, runtime),
+            prompt=chat_prompt(
+                utterance.language,
+                task,
+                runtime,
+                tasks=tasks,
+            ),
             prediction=prediction,
             interleave_audio_frames=interleave_audio_frames,
         )
-    prompt = chat_prompt(utterance.language, task, runtime)
+    prompt = chat_prompt(
+        utterance.language,
+        task,
+        runtime,
+        tasks=tasks,
+    )
     return build_speech_sample(
         utterance,
         utterance,

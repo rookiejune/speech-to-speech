@@ -1,13 +1,18 @@
 # @package _global_
 defaults:
-  - override /stage: stage_1
-  - override /parameter_policy: speech_interface
-  - override /runtime: stable_codec
-  - override /audio_route: full_output
-  - override /model/acoustic: none
-  - override /trainer: staged_static_ddp
-  - override /logging: tensorboard
+  - /runtime: stable_codec
+  - /model: default
+  - /model/acoustic@model.acoustic: none
+  - /audio_sequence_layout: flattened
+  - /datamodule/dataset@datamodule.dataset: wmt19_tts
+  - /stage@stage: stage_1
+  - /callback/parameter_policy@callbacks.parameter_policy: speech_interface
+  - /pl_module: sft
+  - /trainer: staged_static_ddp
+  - /logging: tensorboard
   - _self_
+
+stage_id: stage_1
 
 output_subdir: stable-codec-stage1/${run_name}
 

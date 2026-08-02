@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader, Dataset, IterableDataset, Subset
 from ...prediction import PredictionModality
 from ...task import Task
 from ..collate.collator import TextCollator
+from ..config import TaskConfig
 from ..protocol import TextRuntime, TextRuntimeSnapshot
 from ..dataset.text import TextConfig, load_text_dataset
 from ..types import ModelBatch
@@ -25,10 +26,17 @@ class TextLoader:
         *,
         prediction: PredictionModality | None = None,
         max_samples: int | None = None,
+        tasks: Mapping[Task, TaskConfig] | None = None,
     ) -> None:
         self.config = config
         self.runtime = runtime
-        self.collator = TextCollator(runtime, task_weights, prediction=prediction)
+        self.task_configs = tasks
+        self.collator = TextCollator(
+            runtime,
+            task_weights,
+            prediction=prediction,
+            tasks=tasks,
+        )
         self.max_samples = max_samples
         self._train_dataset: Dataset[RawSample] | IterableAnyDataset | None = None
 
@@ -48,6 +56,7 @@ class TextLoader:
             self.runtime,
             {task: 1.0},
             prediction=self.collator.prediction,
+            tasks=self.task_configs,
         )
 
     def train_dataloader(self) -> Iterable[ModelBatch]:

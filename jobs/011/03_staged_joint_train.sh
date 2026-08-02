@@ -15,11 +15,11 @@ case "$stage" in
     exit 2
     ;;
 esac
-experiment="train/staged_joint_${stage}"
+experiment="train/staged_joint/${stage}"
 visible_devices="${CUDA_VISIBLE_DEVICES:-${SPEECH_TO_SPEECH_STAGE_GPUS:-0,1}}"
-job_reject_overrides experiment task stage -- "$@"
+job_reject_overrides experiment task stage stage_id -- "$@"
 
-fdu_stage_data_args data.dataset.root
+fdu_stage_data_args datamodule.dataset.root
 
 cd "${SPEECH_TO_SPEECH_ROOT}"
 echo "{\"event\":\"job.launch\",\"entry\":\"scripts/train.py\",\"experiment\":\"${experiment}\",\"stage\":\"${stage}\",\"devices\":\"${visible_devices}\"}"

@@ -1,0 +1,13 @@
+# @package _global_
+defaults:
+  - /runtime: longcat
+  - /audio_sequence_layout: semantic
+  - /datamodule/dataset@datamodule.dataset: wmt19_tts
+  - _self_
+
+datamodule:
+  encode_missing_codes: true
+  dataset:
+    filter: null
+
+batch_sizes: [1]

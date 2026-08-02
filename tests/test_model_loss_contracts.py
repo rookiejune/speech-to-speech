@@ -6,7 +6,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import torch
-from anydataset.types import Modality
+from anydataset.types import AudioView, Modality
 from anytrain.codec import SemanticAcousticCodes
 from anytrain.module.idspace import Layout
 from lightning.pytorch import LightningModule
@@ -23,11 +23,7 @@ from speech_to_speech.datamodule.types import (
     SpeechTaskSample,
     Text,
 )
-from speech_to_speech.audio_route import (
-    AudioStream,
-    BICODEC_GENERATE_GLOBAL,
-    BICODEC_REUSE_PROMPT_GLOBAL,
-)
+from speech_to_speech.audio_stream import AudioStream
 from semantic_acoustic_codec.loss.flow import FlowLoss
 
 from speech_to_speech.loss.module import FlowObjective, Objective, RVQObjective, TokenObjective
@@ -42,6 +38,7 @@ from speech_to_speech.model.audio_output import (
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.pl_module import SpeechToSpeechModule
 from speech_to_speech.prediction import PredictionModality
+from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.runtime.audio_tokenizer import (
     BiCodecAudioTokenizer,
     NativeAudioTokenizer,
@@ -315,7 +312,7 @@ class ModelLossContractTest(unittest.TestCase):
         )
         local_ids, local_groups = tokenizer.encode_streams_with_groups(
             codes,
-            (AudioStream.GLOBAL, AudioStream.SEMANTIC),
+            (AudioStream.ACOUSTIC, AudioStream.SEMANTIC),
         )
         global_ids = layout.to_global(Modality.AUDIO.value, local_ids)
         input_ids = torch.cat((torch.tensor([1]), global_ids)).unsqueeze(0)
@@ -410,7 +407,7 @@ class ModelLossContractTest(unittest.TestCase):
         )
         local_ids, local_groups = tokenizer.encode_streams_with_groups(
             codes,
-            (AudioStream.GLOBAL, AudioStream.SEMANTIC),
+            (AudioStream.ACOUSTIC, AudioStream.SEMANTIC),
         )
         global_ids = layout.to_global(Modality.AUDIO.value, local_ids)
         input_ids = torch.cat((torch.tensor([1]), global_ids)).unsqueeze(0)
@@ -481,9 +478,12 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertEqual(float(metrics["token/loss"].weights.sum()), 2.0)
         self.assertEqual(float(metrics["acoustic/rvq/codebook_0_top1"].values.sum()), 1.0)
 
-    def test_checkpoint_audio_route_is_immutable(self):
+    def test_checkpoint_audio_sequence_layout_is_immutable(self):
         model = SimpleNamespace(
-            runtime=SimpleNamespace(audio_route=BICODEC_REUSE_PROMPT_GLOBAL),
+            runtime=SimpleNamespace(
+                audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
+                audio_view=AudioView.BICODEC,
+            ),
             lora_config=None,
         )
         module = SpeechToSpeechModule(
@@ -496,7 +496,7 @@ class ModelLossContractTest(unittest.TestCase):
         module.on_save_checkpoint(checkpoint)
         module.on_load_checkpoint(checkpoint)
 
-        model.runtime.audio_route = BICODEC_GENERATE_GLOBAL
+        model.runtime.audio_sequence_layout = AudioSequenceLayout.FLATTENED
         with self.assertRaisesRegex(ValueError, "does not match"):
             module.on_load_checkpoint(checkpoint)
 
@@ -565,7 +565,7 @@ class ModelLossContractTest(unittest.TestCase):
             module.on_load_checkpoint(checkpoint)
 
     def test_checkpoint_requires_lora_contract_only_when_enabled(self):
-        legacy_checkpoint = {"speech_to_speech_audio_route": None}
+        legacy_checkpoint = {"speech_to_speech_audio_grammar": None}
 
         _checkpoint_module(None).on_load_checkpoint(legacy_checkpoint)
         with self.assertRaisesRegex(ValueError, "missing the PEFT LoRA contract"):
@@ -1300,7 +1300,10 @@ class ModelLossContractTest(unittest.TestCase):
 
 def _checkpoint_module(config: LoraConfig | None) -> SpeechToSpeechModule[Any]:
     model = SimpleNamespace(
-        runtime=SimpleNamespace(audio_route=None),
+        runtime=SimpleNamespace(
+            audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
+            audio_view=AudioView.BICODEC,
+        ),
         lora_config=config,
     )
     return SpeechToSpeechModule(

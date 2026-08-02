@@ -1,17 +1,19 @@
 from .runtime import (
     AudioRepresentation,
+    AudioSequenceLayout,
     BackboneInitialization,
     BackboneType,
     Config,
     Runtime,
-    validate_audio_route,
+    runtime_for_sequence_layout,
 )
 
 __all__ = [
     "AudioRepresentation",
+    "AudioSequenceLayout",
     "BackboneInitialization",
     "BackboneType",
     "Config",
     "Runtime",
-    "validate_audio_route",
+    "runtime_for_sequence_layout",
 ]

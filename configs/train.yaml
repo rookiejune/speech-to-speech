@@ -1,8 +1,7 @@
 defaults:
   - entry: train
-  - optional model/lora@model.lora: qwen
+  - experiment: train/staged_joint/stage_1
   - _self_
-  - experiment: null
 
 hydra:
   job:

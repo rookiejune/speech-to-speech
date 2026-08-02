@@ -1,26 +1,30 @@
 # @package _global_
 defaults:
+  - /stage@stage: stage_0
+  - /callback/parameter_policy@callbacks.parameter_policy: full
   - /model: toy
-  - /model/acoustic: none
-  - /runtime: longcat_full_sequence
-  - /data@data.dataset: toy
+  - /model/acoustic@model.acoustic: none
+  - /runtime: bicodec_full_sequence
+  - /audio_sequence_layout: flattened
+  - /datamodule/dataset@datamodule.dataset: qwen_tts_speaker
   - /pl_module: sft
   - /trainer: default
   - /logging: csv
-  - override /parameter_policy: full
-  - override /audio_route: full_output
   - _self_
 
 task: tts
-run_name: longcat-full-sequence-token
-output_subdir: longcat-full-sequence-smoke/${task}/${run_name}
-
-sample_index: 0
+run_name: bicodec-generate-acoustic
+output_subdir: bicodec-generate-acoustic-smoke/${task}/${run_name}
 
 runtime:
   device: cpu
   dtype: float32
   attn_implementation:
+
+sample_index: 0
+
+datamodule:
+  shape: single
 
 callbacks:
   task_sample:

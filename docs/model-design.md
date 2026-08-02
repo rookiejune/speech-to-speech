@@ -188,9 +188,11 @@ prompt 中的位置，只供 `AudioInputTower` 做输入 embedding overlay；不
 `target_modality` 只对单模态 prediction 返回 TEXT/AUDIO；mixed 时为 `None`。
 
 `Task` 仍拥有 `uses_source_role` 与 instruction template。
-每个 task 在 `speech_to_speech.templates` 中维护 30 条自然语言 instruction；训练样本构建通过
-`Task.sample_template()` 均匀随机采样其中一条，generation 入口使用 `Task.templates[0]` 保持可复现。
-task builder、collator、generation 与 objective 不维护重复的任务集合。
+每个 task 在 `speech_to_speech.templates` 维护 30 条 paraphrase。
+`SpeechConfig.tasks.<task>.template` 为 per-task 下标（`int` 固定，`null` 随机；默认 `0`）。
+训练经 `Task.sample_template(index)` / `select_template(task, index)` 取模板；generation
+要求固定下标，可用 `evaluation_template_index()`（`null` -> `0`）。task builder、collator、
+generation 与 objective 不维护重复的任务集合。
 
 `MASKED_AR` 在 chat prompt 后追加按 `mask_text_ratio` / `mask_audio_ratio` 随机替换的 text/audio
 source（`mask_token_id`），再以 PARALLEL/INTERLEAVED 布局还原完整目标。
@@ -246,7 +248,7 @@ Phase A: semantic codes -> SAC conditioner -> acoustic generator pretraining
 Phase B: aligned backbone hidden state -> HiddenConditionAdapter -> initialized generator joint training
 ```
 
-Phase A 由 `semantic-acoustic-codec` 拥有。Phase B 通过 `acoustic.init_artifact` 加载 SAC 的
+Phase A 由 `semantic-acoustic-codec` 拥有。Phase B 通过 `model.acoustic.init_artifact` 加载 SAC 的
 `AcousticGeneratorArtifact`，只迁移 generator 权重和其 condition/acoustic contract；SAC semantic/reference
 conditioner 不进入 S2S model。artifact I/O、route/backend/config 校验由 `pl_module.composition` 持有，
 `FlowModel`/`RVQModel` 构造器只接收已加载对象，不读取路径。
@@ -371,23 +373,23 @@ fused loss 保持原 Lightning accumulation 语义：各 microbatch scalar loss 
 权重、loader 内 task 权重和 `accumulate_grad_batches`。多 loader schedule 在每个 accumulation
 window 内按权重交错单个 homogeneous microbatch；正式 stage 默认 `fuse_loaders_per_step=true`，
 因此 DataLoader 返回一个 fused window batch。独立的
-`parameter_policy` 显式声明可训练参数组、
+`callbacks.parameter_policy` 显式声明可训练参数组、
 冻结参数组和 `backbone_top_fraction`，入口在 Trainer 创建前应用一次。正式
-`experiment=train/staged_joint_stage_1..4` 当前约定
-Stage 1-2 使用 speech-interface policy，Stage 3 解冻 Qwen 顶部 1/3 block 与 final norm，
+`experiment=train/staged_joint/stage_1..4` 当前约定
+Stage 1 使用 LoRA policy，Stage 2 使用 speech-interface policy，Stage 3 解冻 Qwen 顶部 1/3 block 与 final norm，
 Stage 4 使用 full policy；stage 本身不隐式选择 policy。RVQ decoder 的结构性冻结参数始终保持
 frozen。正式 joint entry 使用 `ddp_find_unused_parameters_false`，依赖 fused window 在每次
 backward 覆盖多 loader 动态分支；未 fuse 的 staged fallback 继续使用
 `ddp_find_unused_parameters_true`。
 
 需要参数高效适配时，`model.lora` 直接持有 Hugging Face `peft.LoraConfig`，通过
-`model/lora=qwen parameter_policy=lora` 成对选择；项目不维护本地 LoRA config、layer 或注入
+`+model/lora@model.lora=qwen callback/parameter_policy=lora` 成对选择；项目不维护本地 LoRA config、layer 或注入
 facade。PEFT 决定 backbone 内 trainable 参数，speech/acoustic interface 由 policy 一起训练。
 LoRA 的正式文本保真度先由固定
 `TextRetentionLogger` baseline 验证。
 
 这里的 Stage 0-4 只表示 S2S 数据、任务和参数策略日程，不是上文 Phase A/B。SAC generator pretraining
-在进入任一使用 `acoustic.init_artifact` 的 S2S experiment 之前独立完成；S2S stage 不在运行中创建或
+在进入任一使用 `model.acoustic.init_artifact` 的 S2S experiment 之前独立完成；S2S stage 不在运行中创建或
 替换 SAC artifact。
 
 正式 train 只在配置了独立 speech validation spec 时让 `val_dataloader()` 返回真实 loader；

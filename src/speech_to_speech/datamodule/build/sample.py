@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import cast
 
 import torch
@@ -7,12 +8,13 @@ from anydataset.types import Modality
 from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
-from ...audio_route import AudioStream, Config as AudioRouteConfig, PromptSource
+from ...audio_stream import AudioStream
 from ...prediction import PredictionModality
-from ...runtime import AudioRepresentation
+from ...runtime import AudioSequenceLayout
 from ...runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ...task import Task
 from ...task_spec import resolve_prediction
+from ..config import TaskConfig, task_template_index
 from .._helper.tokenization import token_ids
 from .ar import build_ar_sample, is_ar_task
 from ..protocol import DataRuntime, TextRuntime
@@ -37,8 +39,9 @@ def build_sample(
     runtime: DataRuntime,
     *,
     prediction: PredictionModality | None = None,
+    tasks: Mapping[Task, TaskConfig] | None = None,
 ) -> ModelSample:
-    prompt = _prompt(speech_pair, task, runtime)
+    prompt = _prompt(speech_pair, task, runtime, tasks=tasks)
     source, target = _source_target(speech_pair, task)
     return build_speech_sample(
         source,
@@ -57,6 +60,7 @@ def build_task_sample(
     interleave_audio_frames: int = 25,
     mask_text_ratio: float = 0.5,
     mask_audio_ratio: float = 0.5,
+    tasks: Mapping[Task, TaskConfig] | None = None,
 ) -> ModelSample:
     if sample.needs_codec:
         raise ValueError("raw speech task samples must be materialized before building.")
@@ -79,7 +83,12 @@ def build_task_sample(
             sample.task,
             runtime,
             prediction=sample.prediction,
-            prompt=chat_prompt(target.language, sample.task, runtime),
+            prompt=chat_prompt(
+                target.language,
+                sample.task,
+                runtime,
+                tasks=tasks,
+            ),
             interleave_audio_frames=interleave_audio_frames,
             mask_text_ratio=mask_text_ratio,
             mask_audio_ratio=mask_audio_ratio,
@@ -89,7 +98,12 @@ def build_task_sample(
             target,
             sample.task,
             runtime,
-            prompt=chat_prompt(target.language, sample.task, runtime),
+            prompt=chat_prompt(
+                target.language,
+                sample.task,
+                runtime,
+                tasks=tasks,
+            ),
             prediction=sample.prediction,
             interleave_audio_frames=interleave_audio_frames,
         )
@@ -98,7 +112,12 @@ def build_task_sample(
         target,
         sample.task,
         runtime,
-        prompt=chat_prompt(target.language, sample.task, runtime),
+        prompt=chat_prompt(
+            target.language,
+            sample.task,
+            runtime,
+            tasks=tasks,
+        ),
         audio_context=audio_context,
         prediction=sample.prediction,
     )
@@ -177,28 +196,38 @@ def _build_modal_sample(
         if prediction is PredictionModality.TEXT
         else Modality.AUDIO
     )
-    bicodec = _bicodec_route(target, target_modality, runtime)
-    audio_prompt = None
-    if bicodec is not None:
-        route, tokenizer = bicodec
-        prompt_speech = _route_prompt(source, audio_context, route.prompt.source)
-        if route.prompt.streams:
-            if prompt_speech is None:
+    bicodec_tokenizer = _bicodec_tokenizer(
+        target,
+        target_modality,
+        runtime,
+    )
+    reference_audio_codes = None
+    if bicodec_tokenizer is not None:
+        tokenizer = bicodec_tokenizer
+        if runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
+            response_streams = (AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
+        elif runtime.audio_sequence_layout is AudioSequenceLayout.SEMANTIC:
+            if audio_context is None:
                 raise ValueError(
-                    f"audio route prompt source {route.prompt.source.value} is unavailable."
+                    "BiCodec semantic layout requires reference audio context."
                 )
             prompt_ids = _global_bicodec_ids(
-                prompt_speech,
-                route.prompt.canonical_streams,
+                audio_context,
+                (AudioStream.ACOUSTIC,),
                 tokenizer,
                 runtime,
             )
             input_ids = torch.cat((input_ids, _boa_eoa(prompt_ids, runtime)))
-            audio_prompt = _structured_codes(prompt_speech)
+            reference_audio_codes = _structured_codes(audio_context)
+            response_streams = (AudioStream.SEMANTIC,)
+        else:
+            raise AssertionError(
+                f"unsupported audio_sequence_layout: {runtime.audio_sequence_layout}"
+            )
 
         response_local, response_groups = tokenizer.encode_streams_with_groups(
             _structured_codes(_speech(target, role="target")),
-            route.output.canonical_streams,
+            response_streams,
         )
         response_ids = _boa_eoa(
             runtime.layout.to_global(Modality.AUDIO.value, response_local),
@@ -223,10 +252,12 @@ def _build_modal_sample(
         if not isinstance(target, Speech):
             raise TypeError("audio target must be Speech.")
         audio_target = target
-        if bicodec is None:
+        if bicodec_tokenizer is None:
             response_ids = _boa_eoa(response_ids, runtime)
         if target.acoustic_codes is not None and runtime.semantic_codec_artifact is None and (
-            runtime.audio_representation is not AudioRepresentation.FULL_CODEC_SEQUENCE
+            bicodec_tokenizer is None
+        ) and (
+            runtime.audio_sequence_layout is not AudioSequenceLayout.FLATTENED
         ):
             target_semantic_codes = target.semantic_codes
             target_acoustic_codes = target.acoustic_codes
@@ -289,10 +320,10 @@ def _build_modal_sample(
             target,
             task,
             prediction,
-            audio_context=audio_context if audio_prompt is not None else None,
+            audio_context=audio_context if reference_audio_codes is not None else None,
         ),
         audio_input_positions=audio_input_positions,
-        audio_context=audio_prompt,
+        audio_context=reference_audio_codes,
     )
 
 
@@ -309,12 +340,9 @@ def _parallel_response(
 ) -> ModelSample:
     if not isinstance(target, Speech):
         raise TypeError("PARALLEL prediction requires a Speech target.")
-    if runtime.audio_route is not None and isinstance(
-        runtime.audio_tokenizer,
-        BiCodecAudioTokenizer,
-    ):
+    if isinstance(runtime.audio_tokenizer, BiCodecAudioTokenizer):
         raise ValueError(
-            "PARALLEL prediction is not supported with BiCodec audio routes."
+            "PARALLEL prediction is not supported with BiCodec sequence layouts."
         )
     text = _append_eos(
         runtime.layout.to_global(Modality.TEXT.value, target.text_token_ids),
@@ -331,7 +359,7 @@ def _parallel_response(
     labels[input_ids.numel() + text.numel() + 1 :] = audio[1:]
     acoustic = None
     if target.acoustic_codes is not None and runtime.semantic_codec_artifact is None and (
-        runtime.audio_representation is not AudioRepresentation.FULL_CODEC_SEQUENCE
+        runtime.audio_sequence_layout is not AudioSequenceLayout.FLATTENED
     ):
         positions = torch.arange(
             input_ids.numel() + text.numel() + 1,
@@ -367,6 +395,8 @@ def build_text_sample(
     text_pair: TextPair,
     task: Task,
     runtime: TextRuntime,
+    *,
+    tasks: Mapping[Task, TaskConfig] | None = None,
 ) -> ModelSample:
     if (
         task.source_modality is Modality.AUDIO
@@ -374,7 +404,12 @@ def build_text_sample(
     ):
         raise ValueError(f"{task.value} is not supported by the text-only data path.")
 
-    prompt = _text_prompt(text_pair.target.language, task, runtime)
+    prompt = _text_prompt(
+        text_pair.target.language,
+        task,
+        runtime,
+        tasks=tasks,
+    )
     source, target = _text_source_target(text_pair, task)
     if task.source_modality is Modality.TEXT:
         prefix_text, suffix_text = _split(prompt, _PLACEHOLDER)
@@ -405,16 +440,25 @@ def _prompt(
     speech_pair: SpeechPair,
     task: Task,
     runtime: DataRuntime,
+    *,
+    tasks: Mapping[Task, TaskConfig] | None = None,
 ) -> str:
-    return chat_prompt(speech_pair.target.language, task, runtime)
+    return chat_prompt(
+        speech_pair.target.language,
+        task,
+        runtime,
+        tasks=tasks,
+    )
 
 
 def chat_prompt(
     language: Language,
     task: Task,
     runtime: TextRuntime,
+    *,
+    tasks: Mapping[Task, TaskConfig] | None = None,
 ) -> str:
-    instruction = task.sample_template().format(
+    instruction = task.sample_template(task_template_index(tasks, task)).format(
         language=str(language),
         source=_PLACEHOLDER,
     )
@@ -434,8 +478,10 @@ def _text_prompt(
     language: Language,
     task: Task,
     runtime: TextRuntime,
+    *,
+    tasks: Mapping[Task, TaskConfig] | None = None,
 ) -> str:
-    instruction = task.sample_template().format(
+    instruction = task.sample_template(task_template_index(tasks, task)).format(
         language=str(language),
         source=_PLACEHOLDER,
     )
@@ -521,32 +567,19 @@ def _global_ids(
     return runtime.layout.to_global(modality.value, local_ids)
 
 
-def _bicodec_route(
+def _bicodec_tokenizer(
     target: Speech | Text,
     target_modality: Modality | None,
     runtime: DataRuntime,
-) -> tuple[AudioRouteConfig, BiCodecAudioTokenizer] | None:
+) -> BiCodecAudioTokenizer | None:
     if target_modality is not Modality.AUDIO:
         return None
     if not isinstance(target, Speech):
         raise TypeError("audio target must be Speech.")
-    route = runtime.audio_route
     tokenizer = runtime.audio_tokenizer
-    if route is None or not isinstance(tokenizer, BiCodecAudioTokenizer):
+    if not isinstance(tokenizer, BiCodecAudioTokenizer):
         return None
-    return route, tokenizer
-
-
-def _route_prompt(
-    source: Speech | Text | None,
-    audio_context: Speech | None,
-    prompt_source: PromptSource,
-) -> Speech | None:
-    if prompt_source is PromptSource.REFERENCE:
-        return audio_context
-    if prompt_source is PromptSource.SOURCE:
-        return source if isinstance(source, Speech) else None
-    raise TypeError("audio route prompt source must be a PromptSource.")
+    return tokenizer
 
 
 def _global_bicodec_ids(
@@ -561,7 +594,7 @@ def _global_bicodec_ids(
 
 def _structured_codes(speech: Speech) -> SemanticAcousticCodes:
     if speech.acoustic_codes is None:
-        raise ValueError("BiCodec audio routes require semantic and acoustic codes.")
+        raise ValueError("BiCodec sequence layouts require semantic and acoustic codes.")
     return SemanticAcousticCodes(
         semantic=speech.semantic_codes,
         acoustic=speech.acoustic_codes,

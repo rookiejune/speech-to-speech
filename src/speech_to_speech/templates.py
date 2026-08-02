@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import random
+from typing import Optional
+
 from .task import Task
 
 TEMPLATES_PER_TASK = 30
+CANONICAL_TEMPLATES_PER_TASK = 1
 
 TEMPLATES: dict[Task, tuple[str, ...]] = {
     Task.AUDIO_AR: (
@@ -390,3 +394,94 @@ TEMPLATES: dict[Task, tuple[str, ...]] = {
         'Speak the following text aloud: {source}',
     ),
 }
+
+
+CANONICAL_TEMPLATES: dict[Task, tuple[str, ...]] = {
+    Task.AUDIO_AR: ("Continue the {language} speech.",),
+    Task.ASR: ("Transcribe the {language} speech: {source}",),
+    Task.INTERLEAVED_AR: ("Continue the interleaved {language} text and speech.",),
+    Task.MASKED_AR: ("Reconstruct masked {language} text and speech.",),
+    Task.MT: ("Translate the following text into {language}: {source}",),
+    Task.PARALLEL_AR: ("Continue the parallel {language} text and speech tracks.",),
+    Task.S2ST: (
+        "Translate the following speech into {language} speech: {source}",
+    ),
+    Task.S2TT: (
+        "Translate the following speech into {language} text: {source}",
+    ),
+    Task.TEXT_AR: ("Continue the following text.",),
+    Task.T2ST: (
+        "Translate the following text into {language} speech: {source}",
+    ),
+    Task.T2TT: ("Translate the following text into {language}: {source}",),
+    Task.TTS: ("Synthesize speech from the following text: {source}",),
+}
+
+
+def select_template(task: Task, index: Optional[int] = 0) -> str:
+    values = TEMPLATES[task]
+    if len(values) != TEMPLATES_PER_TASK:
+        raise AssertionError(
+            f"{task.value} template pool must provide exactly "
+            f"{TEMPLATES_PER_TASK} templates, got {len(values)}."
+        )
+    resolved = _index(index, name=f"{task.value} template")
+    if resolved is None:
+        return random.choice(values)
+    if resolved >= len(values):
+        raise IndexError(
+            f"template index {resolved} is outside the {task.value} pool "
+            f"of size {len(values)}."
+        )
+    return values[resolved]
+
+
+def evaluation_template_index(index: Optional[int]) -> int:
+    """Fixed index for reproducible eval/generation (``null`` -> ``0``)."""
+    return 0 if index is None else _index(index, name="evaluation template")
+
+
+def format_instruction(
+    task: Task,
+    *,
+    source: str,
+    language: str | None = None,
+    index: Optional[int] = 0,
+) -> str:
+    resolved = _index(index, name=f"{task.value} template")
+    if resolved is None:
+        raise ValueError(
+            f"format_instruction requires a fixed template index for {task.value}."
+        )
+    text = select_template(task, resolved)
+    kwargs: dict[str, str] = {}
+    if "{source}" in text:
+        kwargs["source"] = source
+    if "{language}" in text:
+        if language is None:
+            raise ValueError(
+                f"{task.value} template requires a language placeholder value."
+            )
+        kwargs["language"] = language
+    return text.format(**kwargs)
+
+
+def _index(value: object, *, name: str) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an integer or null.")
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative.")
+    return value
+
+
+__all__ = [
+    "CANONICAL_TEMPLATES",
+    "CANONICAL_TEMPLATES_PER_TASK",
+    "TEMPLATES",
+    "TEMPLATES_PER_TASK",
+    "evaluation_template_index",
+    "format_instruction",
+    "select_template",
+]

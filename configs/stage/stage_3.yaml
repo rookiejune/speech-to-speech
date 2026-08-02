@@ -1,4 +1,4 @@
-name: stage_3
+# @package stage
 loaders:
   asr_s2tt:
     weight: 0.45

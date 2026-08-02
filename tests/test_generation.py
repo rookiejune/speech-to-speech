@@ -51,7 +51,11 @@ from speech_to_speech.runtime.audio_tokenizer import (
     FlattenedAudioTokenizer,
     NativeAudioTokenizer,
 )
-from speech_to_speech.runtime import AudioRepresentation, Config as RuntimeConfig
+from speech_to_speech.runtime import (
+    AudioRepresentation,
+    AudioSequenceLayout,
+    Config as RuntimeConfig,
+)
 from speech_to_speech.runtime import Runtime
 from speech_to_speech.runtime.types import supports_acoustic
 from speech_to_speech.task import Task
@@ -127,8 +131,8 @@ class _UnifiedCodec:
 
 class _Runtime:
     def __init__(self) -> None:
-        self.audio_route = None
         self.audio_representation = AudioRepresentation.DECOUPLED
+        self.audio_sequence_layout = AudioSequenceLayout.SEMANTIC
         self.layout = Layout(text=(0, 4), audio=(4, 9))
         self.audio_tokenizer = NativeAudioTokenizer(vocab_size=2)
         self.codec = _Codec()
@@ -215,6 +219,7 @@ class _UnifiedRuntime(_Runtime):
         super().__init__()
         self.codec = _UnifiedCodec()
         self.audio_representation = AudioRepresentation.FULL_CODEC_SEQUENCE
+        self.audio_sequence_layout = AudioSequenceLayout.FLATTENED
         self.audio_tokenizer = FlattenedAudioTokenizer(
             codebook_sizes=(2,),
             codec_name="unicodec",
@@ -423,8 +428,8 @@ class _FullSequenceCodec:
 
 class _FullSequenceRuntime:
     def __init__(self, codebook_sizes: tuple[int, ...] = (4, 10)) -> None:
-        self.audio_route = None
         self.audio_representation = AudioRepresentation.FULL_CODEC_SEQUENCE
+        self.audio_sequence_layout = AudioSequenceLayout.FLATTENED
         self.audio_tokenizer = FlattenedAudioTokenizer(
             codebook_sizes=codebook_sizes,
             codec_name="frame-codec",

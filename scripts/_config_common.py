@@ -8,65 +8,45 @@ from typing import Optional, Protocol, Union
 from anydataset.types import AudioView
 from omegaconf import MISSING
 
-from speech_to_speech.audio_route import Config as AudioRouteConfig
 from speech_to_speech.datamodule.config import SpeechConfig
-from speech_to_speech.datamodule.dataset.speech import DatasetName
 from speech_to_speech.model import Config as ModelConfig
-from speech_to_speech.model.acoustic import AcousticType, DecoderConfig
+from speech_to_speech.model.acoustic import (
+    AcousticNoneConfig,
+    AcousticType,
+    FlowConfig,
+    RepaConfig,
+    RVQConfig,
+)
 from speech_to_speech.pl_module import Config as ModuleConfig
-from speech_to_speech.runtime import AudioRepresentation, BackboneInitialization
+from speech_to_speech.runtime import (
+    AudioSequenceLayout,
+    BackboneInitialization,
+)
 from speech_to_speech.runtime import Config as RuntimeConfig
-from speech_to_speech.runtime import validate_audio_route
 from speech_to_speech.stage import (
     ParameterGroup,
     ParameterPolicyConfig,
     ParameterPolicyName,
+    StageConfig,
 )
 
 
 @dataclass
-class RepaConfig:
-    weight: Optional[float] = None
-    teacher_checkpoint: str = "microsoft/wavlm-base"
-    teacher_layer: int = 9
-    student_layer: Optional[int] = None
+class TokenModelConfig(ModelConfig):
+    acoustic: AcousticNoneConfig = field(default_factory=AcousticNoneConfig)
 
 
 @dataclass
-class FlowConfig:
-    type: str = AcousticType.FLOW.value
-    name: str = MISSING
-    init_artifact: Optional[str] = None
-    decoder: DecoderConfig = field(default_factory=DecoderConfig)
-    repa: RepaConfig = field(default_factory=RepaConfig)
-
-    def __post_init__(self) -> None:
-        _validate_init_artifact(self.init_artifact)
+class FlowModelConfig(ModelConfig):
+    acoustic: FlowConfig = field(default_factory=FlowConfig)
 
 
 @dataclass
-class RVQConfig:
-    type: str = AcousticType.RVQ.value
-    name: str = MISSING
-    init_artifact: Optional[str] = None
-    decoder: DecoderConfig = field(default_factory=DecoderConfig)
-
-    def __post_init__(self) -> None:
-        _validate_init_artifact(self.init_artifact)
+class RVQModelConfig(ModelConfig):
+    acoustic: RVQConfig = field(default_factory=RVQConfig)
 
 
-@dataclass
-class AcousticNoneConfig:
-    type: str = AcousticType.NONE.value
-    name: str = "token"
-
-
-AcousticConfig = Union[AcousticNoneConfig, FlowConfig, RVQConfig]
-
-
-def _validate_init_artifact(value: Optional[str]) -> None:
-    if value is not None and not value:
-        raise ValueError("acoustic init_artifact must not be empty.")
+EntryModelConfig = Union[TokenModelConfig, FlowModelConfig, RVQModelConfig]
 
 
 @dataclass
@@ -168,6 +148,9 @@ class _Callbacks(Protocol):
     @property
     def performance(self) -> PerformanceConfig: ...
 
+    @property
+    def parameter_policy(self) -> ParameterPolicyConfig: ...
+
 
 class _EntryConfig(Protocol):
     @property
@@ -186,19 +169,16 @@ class _EntryConfig(Protocol):
     def runtime(self) -> RuntimeConfig: ...
 
     @property
-    def audio_route(self) -> AudioRouteConfig: ...
+    def audio_sequence_layout(self) -> AudioSequenceLayout: ...
 
     @property
-    def data(self) -> SpeechConfig: ...
+    def datamodule(self) -> SpeechConfig: ...
 
     @property
-    def parameter_policy(self) -> ParameterPolicyConfig: ...
+    def stage(self) -> StageConfig: ...
 
     @property
     def pl_module(self) -> ModuleConfig: ...
-
-    @property
-    def acoustic(self) -> AcousticConfig: ...
 
     @property
     def train(self) -> _TrainValues: ...
@@ -219,8 +199,7 @@ def validate_training(config: _EntryConfig) -> None:
     )
     _validate_performance(config.callbacks.performance)
     _validate_output(config)
-    _validate_audio_representation(config)
-    _validate_audio_route(config)
+    _validate_audio_sequence_layout(config)
     _validate_backbone_initialization(config)
     _validate_lora(config)
 
@@ -279,16 +258,15 @@ def _validate_output(config: _EntryConfig) -> None:
         raise ValueError("output_dir must equal repo_output_root/output_subdir.")
 
 
-def _validate_audio_representation(config: _EntryConfig) -> None:
-    acoustic = AcousticType(config.acoustic.type)
+def _validate_audio_sequence_layout(config: _EntryConfig) -> None:
+    acoustic = AcousticType(config.model.acoustic.type)
     if (
-        config.runtime.audio_representation
-        is AudioRepresentation.FULL_CODEC_SEQUENCE
+        config.audio_sequence_layout is AudioSequenceLayout.FLATTENED
         and acoustic is not AcousticType.NONE
     ):
         raise ValueError(
-            "runtime.audio_representation=full_codec_sequence requires "
-            "model/acoustic=none because codec codes are trained as tokens."
+            "audio_sequence_layout=flattened requires model/acoustic=none "
+            "because full codec codes are trained as sequence tokens."
         )
     if (
         config.runtime.semantic_codec_artifact is not None
@@ -304,27 +282,15 @@ def _validate_audio_representation(config: _EntryConfig) -> None:
         )
     if (
         acoustic is AcousticType.NONE
-        and config.runtime.audio_view in {AudioView.LONGCAT, AudioView.BICODEC}
-        and config.runtime.audio_representation is AudioRepresentation.DECOUPLED
+        and config.runtime.audio_view is AudioView.LONGCAT
+        and config.audio_sequence_layout is AudioSequenceLayout.SEMANTIC
         and config.runtime.semantic_codec_artifact is None
     ):
         raise ValueError(
-            "decoupled model/acoustic=none requires runtime.semantic_codec_artifact; "
-            "use a full_codec_sequence runtime for token-only training."
+            "audio_sequence_layout=semantic with model/acoustic=none requires "
+            "runtime.semantic_codec_artifact; use audio_sequence_layout=flattened "
+            "for token-only training."
         )
-
-
-def _validate_audio_route(config: _EntryConfig) -> None:
-    validate_audio_route(config.runtime, config.audio_route)
-    if config.runtime.audio_view is not AudioView.BICODEC:
-        return
-    if config.runtime.semantic_codec_artifact is not None:
-        raise ValueError(
-            "BiCodec audio routes decode structured codes and must not configure "
-            "a semantic codec artifact."
-        )
-    if config.data.dataset.name is not DatasetName.QWEN_TTS_SPEAKER:
-        raise ValueError("BiCodec audio routes currently require qwen_tts_speaker data.")
 
 
 def _validate_backbone_initialization(config: _EntryConfig) -> None:
@@ -334,7 +300,7 @@ def _validate_backbone_initialization(config: _EntryConfig) -> None:
         raise ValueError(
             "runtime.backbone_initialization=random cannot be combined with model.toy."
         )
-    policy = config.parameter_policy.spec()
+    policy = config.callbacks.parameter_policy.spec()
     if (
         ParameterGroup.BACKBONE not in policy.trainable_groups
         or (
@@ -344,16 +310,17 @@ def _validate_backbone_initialization(config: _EntryConfig) -> None:
     ):
         raise ValueError(
             "random backbone initialization requires a fully trainable backbone; "
-            "select parameter_policy=full."
+            "select callbacks.parameter_policy=full."
         )
 
 
 def _validate_lora(config: _EntryConfig) -> None:
     enabled = config.model.lora is not None
-    selected = config.parameter_policy.name is ParameterPolicyName.LORA
+    selected = config.callbacks.parameter_policy.name is ParameterPolicyName.LORA
     if enabled != selected:
         raise ValueError(
-            "model/lora and parameter_policy=lora must be selected together."
+            "model/lora and callbacks.parameter_policy=lora must be selected "
+            "together."
         )
     if enabled and config.model.lora is not None and config.model.lora.inference_mode:
         raise ValueError("training requires model.lora.inference_mode=false.")
@@ -375,12 +342,15 @@ __all__ = [
     "AcousticNoneConfig",
     "DataThroughputConfig",
     "FlowConfig",
+    "FlowModelConfig",
     "LoggingConfig",
     "PerformanceConfig",
     "RVQConfig",
+    "RVQModelConfig",
     "RepaConfig",
     "TextProbeConfig",
     "TextRetentionCallbackConfig",
+    "TokenModelConfig",
     "TrainConfig",
     "TrainerConfig",
     "non_empty_string",

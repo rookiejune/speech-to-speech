@@ -7,8 +7,7 @@ from anydataset.types import AudioView, Modality
 from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 
-from ..audio_route import Config as AudioRouteConfig
-from .runtime import AudioRepresentation
+from .runtime import AudioRepresentation, AudioSequenceLayout
 from .backbone import BackboneAdapter
 from .types import (
     AudioTokenizer,
@@ -21,9 +20,6 @@ from .types import (
 
 class DataRuntime(Protocol):
     @property
-    def audio_route(self) -> AudioRouteConfig | None: ...
-
-    @property
     def codec_name(self) -> str: ...
 
     @property
@@ -34,6 +30,9 @@ class DataRuntime(Protocol):
 
     @property
     def audio_representation(self) -> AudioRepresentation: ...
+
+    @property
+    def audio_sequence_layout(self) -> AudioSequenceLayout: ...
 
     @property
     def semantic_codec_artifact(self) -> str | None: ...

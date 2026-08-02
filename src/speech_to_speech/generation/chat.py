@@ -12,18 +12,15 @@ from torch import Tensor
 from typing_extensions import NotRequired
 
 from .._tensor import is_signed_integer_dtype
-from ..audio_route import (
-    BICODEC_GENERATE_GLOBAL,
-    BICODEC_REUSE_PROMPT_GLOBAL,
-    PromptSource,
-)
 from ..prediction import PredictionModality
+from ..runtime import AudioSequenceLayout
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..runtime.protocol import GenerationRuntime
 from ..runtime.types import frame_codec, structured_codec, supports_structured
 from ..task import Task
+from ..templates import format_instruction, select_template
 from .bicodec import (
-    prepare_bicodec_global_tts_request,
+    prepare_bicodec_acoustic_tts_request,
     prepare_bicodec_tts_request,
 )
 from .protocol import TokenGenerator
@@ -170,9 +167,8 @@ def _build_request(
         )
 
     tokenizer = runtime.audio_tokenizer
-    route = runtime.audio_route
     if isinstance(tokenizer, BiCodecAudioTokenizer):
-        if route == BICODEC_REUSE_PROMPT_GLOBAL:
+        if runtime.audio_sequence_layout is AudioSequenceLayout.SEMANTIC:
             if codes is None:
                 raise ValueError(
                     "reference BiCodec chat requests require audio or codec_codes."
@@ -189,38 +185,25 @@ def _build_request(
                 messages=prompt_messages,
                 task=task,
             )
-        if route == BICODEC_GENERATE_GLOBAL:
+        if runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
             if codes is not None:
                 raise ValueError(
-                    "global BiCodec chat requests do not accept prompt audio or codes."
+                    "unconditioned BiCodec chat requests do not accept prompt "
+                    "audio or codes."
                 )
-            return prepare_bicodec_global_tts_request(
+            return prepare_bicodec_acoustic_tts_request(
                 source_text,
                 runtime,
                 language=language,
                 messages=prompt_messages,
                 task=task,
             )
-
-    if codes is not None and _prompt_needs_context(route):
-        if not isinstance(codes, SemanticAcousticCodes):
-            raise TypeError(
-                "prompt audio context requires SemanticAcousticCodes for this route."
-            )
-        prompt_ids = _prompt_ids(prompt_messages, runtime)
-        prompt_ids = torch.cat(
-            (prompt_ids, prompt_ids.new_tensor([runtime.boa_token_id]))
-        )
-        return Request(
-            prompt_ids=prompt_ids,
-            task=task,
-            audio_input_positions=None,
-            audio_context=codes,
-        )
+        raise ValueError("unsupported BiCodec audio_sequence_layout.")
 
     if codes is not None:
         raise ValueError(
-            "chat audio/codec_codes are not supported for the current audio route."
+            "chat audio/codec_codes are not supported for the current "
+            "audio_sequence_layout."
         )
     prompt_ids = _prompt_ids(prompt_messages, runtime)
     if task.prediction_modality is PredictionModality.AUDIO:
@@ -233,17 +216,6 @@ def _build_request(
         audio_input_positions=None,
         audio_context=None,
     )
-
-
-def _prompt_needs_context(route: object) -> bool:
-    if route is None:
-        return False
-    prompt = getattr(route, "prompt", None)
-    if prompt is None:
-        return False
-    source = getattr(prompt, "source", None)
-    streams = getattr(prompt, "streams", ())
-    return source is PromptSource.REFERENCE and bool(streams)
 
 
 def _prompt_ids(
@@ -297,16 +269,24 @@ def _prompt_messages(
     return prompt_messages, source_text
 
 
-def _task_instruction(text: str, task: Task, language: str) -> str:
-    template = task.templates[0]
-    if "{source}" not in template:
+def _task_instruction(
+    text: str,
+    task: Task,
+    language: str,
+    *,
+    template_index: int = 0,
+) -> str:
+    instruction = select_template(task, template_index)
+    if "{source}" not in instruction:
         raise ValueError(
             f"{task.value} chat template must include a {{source}} placeholder."
         )
-    kwargs: dict[str, str] = {"source": text}
-    if "{language}" in template:
-        kwargs["language"] = language
-    return template.format(**kwargs)
+    return format_instruction(
+        task,
+        source=text,
+        language=language,
+        index=template_index,
+    )
 
 
 def _token_ids(text: str, runtime: GenerationRuntime) -> Tensor:

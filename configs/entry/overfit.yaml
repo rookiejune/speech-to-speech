@@ -1,0 +1,68 @@
+# @package _global_
+defaults:
+  - /callback/performance@callbacks.performance
+  - _self_
+
+repo_output_root: ${oc.env:SPEECH_TO_SPEECH_TRAIN_ROOT,${oc.env:DYNAMIC_HOME}/train/speech-to-speech}
+output_dir: ${repo_output_root}/${output_subdir}
+stage_id: stage_0
+
+stage:
+  loaders: {}
+  accumulate_grad_batches: 1
+  fuse_loaders_per_step: false
+
+datamodule:
+  codec: ${runtime.codec}
+  dataloader:
+    batch_size: 1
+    num_workers: 0
+    pin_memory: false
+    persistent_workers: false
+  shape: pair
+  encode_missing_codes: false
+
+callbacks:
+  task_sample:
+    enabled: true
+    every_n_steps: 1
+  evaluation:
+    enabled: true
+  text_retention:
+    enabled: true
+    every_n_steps: 1
+    max_new_tokens: 8
+    probes:
+      zh_en:
+        instruction: "Translate into English: \u6628\u665a\u7684\u66b4\u96e8\u5bfc\u81f4\u4e09\u8d9f\u5217\u8f66\u665a\u70b9\u3002"
+        reference: "Last night's heavy rain delayed three trains."
+  gradient_probe:
+    enabled: true
+    every_n_steps: 1
+    probes:
+      backbone_l0_attn:
+        match: exact
+        trainable_only: true
+        parameters:
+          - model.backbone.model.layers.0.self_attn.q_proj.weight
+          - model.backbone.model.layers.0.self_attn.k_proj.weight
+          - model.backbone.model.layers.0.self_attn.v_proj.weight
+          - model.backbone.model.layers.0.self_attn.o_proj.weight
+      backbone_l0_ffn:
+        match: exact
+        trainable_only: true
+        parameters:
+          - model.backbone.model.layers.0.mlp.gate_proj.weight
+          - model.backbone.model.layers.0.mlp.up_proj.weight
+          - model.backbone.model.layers.0.mlp.down_proj.weight
+    partial_probes:
+      backbone_norm:
+        match: exact
+        trainable_only: true
+        parameters:
+          - model.backbone.model.norm.weight
+  flow_matching:
+    enabled: true
+    every_n_steps: 1
+  performance:
+    enabled: false

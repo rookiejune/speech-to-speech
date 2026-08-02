@@ -13,7 +13,7 @@ from torch import nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.cache_utils import Cache
 
-from ..audio_route import AudioStream
+from ..audio_stream import AudioStream
 from .._tensor import is_signed_integer_dtype
 from ._generation import (
     GenerationOutput,
@@ -45,6 +45,7 @@ from .audio_output import (
     AudioOutputAdapterType,
     create_audio_output_adapter,
 )
+from .acoustic._config import AcousticConfig, AcousticNoneConfig
 from .embedding.audio import (
     create_semantic_audio_embedding,
     require_semantic_audio_embedding,
@@ -65,6 +66,7 @@ class Config:
     )
     toy: Optional[ToyConfig] = None
     lora: Optional[LoraConfig] = None
+    acoustic: AcousticConfig = field(default_factory=AcousticNoneConfig)
 
 
 class Model(VocabularyHeadMixin, nn.Module):
@@ -502,12 +504,7 @@ class Model(VocabularyHeadMixin, nn.Module):
             raise TypeError(
                 "full codec sequence generation requires a structured audio tokenizer."
             )
-        route = self.runtime.audio_route
-        streams = (
-            (AudioStream.GLOBAL, AudioStream.SEMANTIC)
-            if route is None
-            else route.output.canonical_streams
-        )
+        streams = (AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
         return generate_bicodec_sequence(
             self,
             prompt_ids,

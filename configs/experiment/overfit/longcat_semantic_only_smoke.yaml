@@ -1,19 +1,20 @@
 # @package _global_
 defaults:
+  - /stage@stage: stage_0
+  - /callback/parameter_policy@callbacks.parameter_policy: semantic_only
   - /model: toy
-  - /model/acoustic: none
+  - /model/acoustic@model.acoustic: none
   - /runtime: longcat_native
-  - /data@data.dataset: toy
+  - /audio_sequence_layout: semantic
+  - /datamodule/dataset@datamodule.dataset: toy
   - /pl_module: sft
   - /trainer: default
   - /logging: csv
-  - override /stage: stage_1
-  - override /parameter_policy: semantic_only
   - _self_
 
 task: tts
-run_name: longcat-decoupled-semantic-only
-output_subdir: longcat-decoupled-semantic-only-smoke/${task}/${run_name}
+run_name: longcat-semantic-only
+output_subdir: longcat-semantic-only-smoke/${task}/${run_name}
 
 runtime:
   semantic_codec_artifact: ${oc.env:SPEECH_TO_SPEECH_SEMANTIC_CODEC_ARTIFACT}

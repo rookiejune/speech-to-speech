@@ -11,7 +11,11 @@ from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig
 
-from speech_to_speech.callback import OOMDiagnostics, OnDeviceCodecMaterializer
+from speech_to_speech.callback import (
+    OOMDiagnostics,
+    OnDeviceCodecMaterializer,
+    build_parameter_policy,
+)
 from speech_to_speech.callback.logging import (
     AcousticEvaluation,
     FlowMatchingLogger,
@@ -29,9 +33,9 @@ from speech_to_speech.model.acoustic import AcousticType, FlowModel, RVQModel
 from speech_to_speech.pl_module import SpeechToSpeechModule
 from speech_to_speech.pl_module.composition import build
 from speech_to_speech.runtime import Config as RuntimeConfig
-from speech_to_speech.runtime import Runtime
+from speech_to_speech.runtime import runtime_for_sequence_layout
 from speech_to_speech.runtime.types import codec_sample_rate
-from speech_to_speech.stage import ParameterGroup, apply_parameter_policy
+from speech_to_speech.stage import ParameterGroup
 from speech_to_speech.task import Task
 
 if TYPE_CHECKING:
@@ -72,7 +76,7 @@ def run(config: OverfitConfig) -> None:
 
     pl.seed_everything(config.train.seed, workers=True)
     rt_config = runtime_config(config.runtime)
-    rt = Runtime(rt_config, audio_route=config.audio_route)
+    rt = runtime_for_sequence_layout(rt_config, config.audio_sequence_layout)
     codec = rt.codec
     task = Task(config.task)
     datamodule = build_datamodule(config, rt, task)
@@ -82,17 +86,16 @@ def run(config: OverfitConfig) -> None:
         rt,
         config.pl_module,
         config.model,
-        config.acoustic,
+        config.model.acoustic,
     )
     uses_acoustic_decoder = acoustic_type is not AcousticType.NONE
     evaluation: AcousticEvaluation | None = None
     repa_weight = (
-        config.acoustic.repa.weight
+        config.model.acoustic.repa.weight
         if isinstance(config, OverfitFlowConfig)
         else None
     )
-    apply_parameter_policy(model, config.parameter_policy.spec())
-    if config.data.encode_missing_codes is True:
+    if config.datamodule.encode_missing_codes is True:
         module.batch_materializer = OnDeviceCodecMaterializer(rt)
     if uses_acoustic_decoder and config.callbacks.evaluation.enabled:
         datamodule.setup("fit")
@@ -100,7 +103,7 @@ def run(config: OverfitConfig) -> None:
         if isinstance(batch, FusedBatch):
             raise TypeError("acoustic evaluation requires a single overfit batch.")
         train_batch = cast(TrainInput, batch)
-        if config.data.encode_missing_codes is True:
+        if config.datamodule.encode_missing_codes is True:
             train_batch = module.materialize_batch(train_batch)
             if not isinstance(train_batch, ModelBatch):
                 raise TypeError(
@@ -168,8 +171,8 @@ def run(config: OverfitConfig) -> None:
     )
     result = {
         "task": task.value,
-        "parameter_policy": config.parameter_policy.name.value,
-        "stage": config.stage.name.value,
+        "parameter_policy": config.callbacks.parameter_policy.name.value,
+        "stage": config.stage_id,
         "sample_index": config.sample_index,
         "max_steps": config.train.max_steps,
         "parameters": {
@@ -197,7 +200,7 @@ def build_datamodule(
         runtime,
         {
             "train": LoaderSpec.speech(
-                config.data,
+                config.datamodule,
                 {task: 1.0},
                 sample_index=config.sample_index,
             )
@@ -216,7 +219,9 @@ def training_callbacks(
     evaluation: AcousticEvaluation | None,
 ) -> list[Callback]:
     performance_callback = performance(config.callbacks.performance)
-    callbacks: list[Callback] = []
+    callbacks: list[Callback] = [
+        build_parameter_policy(config.callbacks.parameter_policy)
+    ]
     if performance_callback is not None:
         callbacks.append(performance_callback)
     callbacks.extend([OOMDiagnostics(), OutputsLogger()])
@@ -309,7 +314,7 @@ def _gradient_logger(
         or config.callbacks.performance.enabled
     ):
         return None
-    policy = config.parameter_policy.spec()
+    policy = config.callbacks.parameter_policy.spec()
     if ParameterGroup.BACKBONE not in policy.trainable_groups:
         return None
     if gradient_comparison is None:

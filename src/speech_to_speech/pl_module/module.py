@@ -6,6 +6,7 @@ from enum import Enum
 from typing import Any, Generic, Protocol, TypeVar, cast
 
 import torch
+from anydataset.types import AudioView
 from anytrain.evaluator.text import TextComparisonEvaluator
 from anytrain.lightning import validation
 from anytrain.optim.llm import create_optimizer
@@ -20,7 +21,6 @@ from ..datamodule.types import (
     TrainBatch,
     TrainInput,
 )
-from ..audio_route import Config as AudioRouteConfig
 from ..generation.batch import requests_from_batch
 from ..generation.service import generate_responses
 from ..generation.eval.text import (
@@ -36,6 +36,7 @@ from ..loss.types import Outputs, combine_outputs
 from ..loss.validation import validation_metrics
 from ..generation.protocol import TextEvaluationModel
 from ..prediction import PredictionModality
+from ..runtime import AudioSequenceLayout
 from ..task import Task
 
 
@@ -58,7 +59,8 @@ class ModuleModel(TextEvaluationModel, TokenObjectiveModel, Protocol):
 
 
 ModelT = TypeVar("ModelT", bound=ModuleModel)
-_AUDIO_ROUTE_KEY = "speech_to_speech_audio_route"
+_AUDIO_GRAMMAR_KEY = "speech_to_speech_audio_grammar"
+_AUDIO_SEQUENCE_LAYOUT_KEY = "speech_to_speech_audio_sequence_layout"
 _PEFT_KEY = "speech_to_speech_peft"
 
 
@@ -236,14 +238,20 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         self._current_gradient_loss_groups = None
 
     def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
-        checkpoint[_AUDIO_ROUTE_KEY] = _audio_route_payload(
-            self.model.runtime.audio_route
+        checkpoint[_AUDIO_SEQUENCE_LAYOUT_KEY] = _audio_sequence_layout_payload(
+            self.model.runtime.audio_sequence_layout
         )
         checkpoint[_PEFT_KEY] = _peft_payload(self.model.lora_config)
 
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
-        expected = _audio_route_payload(self.model.runtime.audio_route)
-        _validate_audio_route_checkpoint(checkpoint, expected)
+        expected = _audio_sequence_layout_payload(
+            self.model.runtime.audio_sequence_layout
+        )
+        _validate_audio_sequence_layout_checkpoint(
+            checkpoint,
+            expected,
+            self.model.runtime,
+        )
         _validate_peft_checkpoint(checkpoint, self.model.lora_config)
 
     @torch.no_grad()
@@ -333,20 +341,28 @@ def _reference_texts(batch: ModelBatch, runtime: Any) -> list[str]:
     return references
 
 
-def _validate_audio_route_checkpoint(
+def _validate_audio_sequence_layout_checkpoint(
     checkpoint: dict[str, Any],
-    expected: dict[str, object] | None,
+    expected: str,
+    runtime: Any,
 ) -> None:
-    if _AUDIO_ROUTE_KEY not in checkpoint:
-        if expected is not None:
+    if _AUDIO_SEQUENCE_LAYOUT_KEY in checkpoint:
+        actual = checkpoint[_AUDIO_SEQUENCE_LAYOUT_KEY]
+        if actual != expected:
             raise ValueError(
-                "checkpoint is missing the fixed audio route contract."
+                f"checkpoint audio sequence layout does not match runtime: "
+                f"{actual!r} != {expected!r}."
             )
         return
-    actual = checkpoint[_AUDIO_ROUTE_KEY]
-    if actual != expected:
+
+    actual = checkpoint.get(_AUDIO_GRAMMAR_KEY)
+    if actual is None:
+        return
+    expected_legacy = _legacy_audio_grammar_payload(runtime)
+    if actual != expected_legacy:
         raise ValueError(
-            f"checkpoint audio route does not match runtime: {actual!r} != {expected!r}."
+            f"checkpoint legacy audio grammar does not match runtime layout: "
+            f"{actual!r} != {expected_legacy!r}."
         )
 
 
@@ -445,20 +461,33 @@ def _checkpoint_value(value: Any) -> Any:
     )
 
 
-def _audio_route_payload(route: AudioRouteConfig | None) -> dict[str, object] | None:
-    if route is None:
-        return None
+def _audio_sequence_layout_payload(layout: AudioSequenceLayout) -> str:
+    if not isinstance(layout, AudioSequenceLayout):
+        raise TypeError("runtime audio_sequence_layout must be an AudioSequenceLayout.")
+    return layout.value
+
+
+def _legacy_audio_grammar_payload(runtime: Any) -> dict[str, object]:
+    layout = runtime.audio_sequence_layout
+    if not isinstance(layout, AudioSequenceLayout):
+        raise TypeError("runtime audio_sequence_layout must be an AudioSequenceLayout.")
+    audio_view = runtime.audio_view
+    if layout is AudioSequenceLayout.FLATTENED:
+        streams = ["acoustic", "semantic"]
+        acoustic = "output"
+    elif audio_view is AudioView.BICODEC:
+        streams = ["semantic"]
+        acoustic = "prompt"
+    else:
+        streams = ["semantic"]
+        acoustic = "generator"
     return {
-        "prompt": {
-            "source": route.prompt.source.value,
-            "streams": [stream.value for stream in route.prompt.canonical_streams],
-        },
         "output": {
-            "streams": [stream.value for stream in route.output.canonical_streams],
+            "streams": streams,
         },
         "decode": {
-            "semantic": route.decode.semantic.value,
-            "acoustic": route.decode.acoustic.value,
+            "semantic": "output",
+            "acoustic": acoustic,
         },
-        "grammar": "audio-route-v1",
+        "grammar": "audio-grammar-v1",
     }

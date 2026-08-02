@@ -16,6 +16,7 @@ from ..prediction import PredictionModality
 from ..task import Task
 from ._helper.text import TextLoader
 from .collate.collator import Collator
+from .config import TaskConfig
 from .config import DataLoaderConfig, SpeechConfig
 from .dataset.speech import load_dataset
 from .diagnostic import SampleSplit
@@ -47,6 +48,7 @@ class LoaderSpec:
     sample_index: int | None = None
     prediction: PredictionModality | None = None
     max_samples: int | None = None
+    task_configs: Mapping[Task, TaskConfig] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, LoaderKind):
@@ -100,6 +102,7 @@ class LoaderSpec:
         *,
         prediction: PredictionModality | None = None,
         max_samples: int | None = None,
+        tasks: Mapping[Task, TaskConfig] | None = None,
     ) -> LoaderSpec:
         return cls(
             kind=LoaderKind.TEXT,
@@ -107,6 +110,7 @@ class LoaderSpec:
             text_config=config,
             max_samples=max_samples,
             prediction=prediction,
+            task_configs=tasks,
         )
 
 
@@ -152,6 +156,7 @@ class _SpeechLoader:
             mask_text_ratio=config.mask_text_ratio,
             mask_audio_ratio=config.mask_audio_ratio,
             prediction=prediction,
+            tasks=config.tasks,
         )
         self.sample_index = sample_index
         self._dataset = None
@@ -196,6 +201,7 @@ class _SpeechLoader:
             mask_text_ratio=self.config.mask_text_ratio,
             mask_audio_ratio=self.config.mask_audio_ratio,
             prediction=self.collator.prediction,
+            tasks=self.config.tasks,
         )
 
     def train_dataloader(self) -> Iterable[TrainInput]:
@@ -376,6 +382,7 @@ def _build_loader(
         spec.task_weights,
         prediction=spec.prediction,
         max_samples=spec.max_samples,
+        tasks=spec.task_configs,
     )
 
 
@@ -399,6 +406,7 @@ def _build_validation_loader(
         spec.task_weights,
         prediction=spec.prediction,
         max_samples=spec.max_samples,
+        tasks=spec.task_configs,
     )
 
 
@@ -539,6 +547,7 @@ def _collator(
     mask_text_ratio: float = 0.5,
     mask_audio_ratio: float = 0.5,
     prediction: PredictionModality | None = None,
+    tasks: Mapping[Task, TaskConfig] | None = None,
 ):
     if shape is DataShape.PAIR:
         return Collator(
@@ -549,6 +558,7 @@ def _collator(
             mask_text_ratio=mask_text_ratio,
             mask_audio_ratio=mask_audio_ratio,
             prediction=prediction,
+            tasks=tasks,
         )
     if shape is DataShape.SINGLE:
         return SingleCollator(
@@ -559,5 +569,6 @@ def _collator(
             mask_text_ratio=mask_text_ratio,
             mask_audio_ratio=mask_audio_ratio,
             prediction=prediction,
+            tasks=tasks,
         )
     raise AssertionError(f"unsupported data shape: {shape}")

@@ -10,10 +10,7 @@ from anytrain.codec import AcousticLayout, SemanticAcousticCodes
 from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 
-from speech_to_speech.audio_route import (
-    BICODEC_GENERATE_GLOBAL,
-    BICODEC_REUSE_PROMPT_GLOBAL,
-)
+from speech_to_speech.audio_stream import AudioStream
 from speech_to_speech.generation.chat import (
     ChatRequest,
     create,
@@ -21,7 +18,7 @@ from speech_to_speech.generation.chat import (
     to_request,
 )
 from speech_to_speech.generation.protocol import TokenGenerator
-from speech_to_speech.runtime import AudioRepresentation
+from speech_to_speech.runtime import AudioRepresentation, AudioSequenceLayout
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.runtime.protocol import GenerationRuntime
 from speech_to_speech.runtime.types import Backbone
@@ -103,7 +100,7 @@ def _codes() -> SemanticAcousticCodes:
 
 def _runtime(
     *,
-    route=BICODEC_REUSE_PROMPT_GLOBAL,
+    audio_sequence_layout: AudioSequenceLayout = AudioSequenceLayout.SEMANTIC,
     codec_name: str = "bicodec",
     codec: object | None = None,
 ) -> GenerationRuntime:
@@ -112,29 +109,27 @@ def _runtime(
         acoustic_codebook_sizes=(3,),
         acoustic_unit_length=2,
     )
-    return cast(
-        GenerationRuntime,
-        SimpleNamespace(
-            audio_route=route,
-            audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
-            audio_tokenizer=tokenizer,
-            text_tokenizer=_TextTokenizer(),
-            layout=Layout(
-                text=(0, 8),
-                audio=(8, 8 + tokenizer.vocab_size + 3),
-            ),
-            boa_token_id=8 + tokenizer.vocab_size,
-            eoa_token_id=8 + tokenizer.vocab_size + 1,
-            eos_token_id=7,
-            pad_token_id=0,
-            codec_audio_range=(8, 8 + tokenizer.vocab_size),
-            structured_full_sequence=True,
-            acoustic_side_channel=False,
-            codec_name=codec_name,
-            audio_view=AudioView.BICODEC,
-            codec=codec,
+    runtime = SimpleNamespace(
+        audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
+        audio_sequence_layout=audio_sequence_layout,
+        audio_tokenizer=tokenizer,
+        text_tokenizer=_TextTokenizer(),
+        layout=Layout(
+            text=(0, 8),
+            audio=(8, 8 + tokenizer.vocab_size + 3),
         ),
+        boa_token_id=8 + tokenizer.vocab_size,
+        eoa_token_id=8 + tokenizer.vocab_size + 1,
+        eos_token_id=7,
+        pad_token_id=0,
+        codec_audio_range=(8, 8 + tokenizer.vocab_size),
+        structured_full_sequence=True,
+        acoustic_side_channel=False,
+        codec_name=codec_name,
+        audio_view=AudioView.BICODEC,
+        codec=codec,
     )
+    return cast(GenerationRuntime, runtime)
 
 
 class _RouteModel:
@@ -152,12 +147,14 @@ class _RouteModel:
                 SimpleNamespace(get_input_embeddings=lambda: embedding),
             ),
         )
-        route = runtime.audio_route
-        if route is None:
-            raise ValueError("route model requires an audio route")
+        streams = (
+            (AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
+            if runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED
+            else (AudioStream.SEMANTIC,)
+        )
         local_ids = runtime.audio_tokenizer.encode_streams(
             output,
-            route.output.canonical_streams,
+            streams,
         )
         self.response = torch.cat(
             (
@@ -268,7 +265,7 @@ class _TextModel:
 
 class ChatAdapterTest(unittest.TestCase):
     def test_text_only_messages_build_private_request(self) -> None:
-        runtime = _runtime(route=BICODEC_GENERATE_GLOBAL)
+        runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
         request: ChatRequest = {
             "messages": [{"role": "user", "content": "hello world"}],
             "task": Task.T2TT,
@@ -280,7 +277,7 @@ class ChatAdapterTest(unittest.TestCase):
         self.assertGreater(private["prompt_ids"].numel(), 0)
 
     def test_messages_history_is_preserved_and_encoded_once(self) -> None:
-        runtime = _runtime(route=BICODEC_GENERATE_GLOBAL)
+        runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
         request: ChatRequest = {
             "messages": [
                 {"role": "system", "content": "Use terse wording."},
@@ -378,7 +375,7 @@ class ChatAdapterTest(unittest.TestCase):
         self.assertEqual(codes.acoustic.size(0), 2)
 
     def test_create_returns_completion_for_text_task(self) -> None:
-        runtime = _runtime(route=BICODEC_GENERATE_GLOBAL)
+        runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
         model = cast(TokenGenerator, _TextModel(runtime))
         completion = create(
             {

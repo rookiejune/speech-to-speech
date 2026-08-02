@@ -11,7 +11,7 @@ from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
 from transformers.cache_utils import Cache
 
-from ..audio_route import AudioStream
+from ..audio_stream import AudioStream
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ._helper import top_p_filter
 from .protocol import TokenModelRuntime
@@ -721,10 +721,10 @@ def _generate_bicodec_row(
             dtype=torch.long,
         )
 
-    if AudioStream.GLOBAL in streams:
-        row.step(local(tokenizer.global_token_id))
-        for _ in range(tokenizer.global_unit_length):
-            for start, end in tokenizer.global_token_ranges:
+    if AudioStream.ACOUSTIC in streams:
+        row.step(local(tokenizer.acoustic_token_id))
+        for _ in range(tokenizer.acoustic_unit_length):
+            for start, end in tokenizer.acoustic_token_ranges:
                 row.step(range_ids(start, end - start))
 
     if AudioStream.SEMANTIC in streams:
@@ -746,13 +746,13 @@ def _audio_streams(streams: Sequence[AudioStream]) -> tuple[AudioStream, ...]:
         raise ValueError("BiCodec generation requires at least one output stream.")
     if any(not isinstance(stream, AudioStream) for stream in values):
         raise TypeError("BiCodec generation streams must contain AudioStream values.")
-    if AudioStream.ACOUSTIC in values:
-        raise ValueError(
-            "BiCodec generation streams must use global instead of acoustic."
-        )
+    unknown = set(values) - {AudioStream.ACOUSTIC, AudioStream.SEMANTIC}
+    if unknown:
+        labels = ", ".join(sorted(stream.value for stream in unknown))
+        raise ValueError(f"BiCodec generation streams do not support: {labels}.")
     return tuple(
         stream
-        for stream in (AudioStream.GLOBAL, AudioStream.SEMANTIC)
+        for stream in (AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
         if stream in values
     )
 

@@ -1,7 +1,6 @@
 codec: unicodec
 backbone: Qwen/Qwen3-0.6B
 backbone_initialization: pretrained
-audio_representation: full_codec_sequence
 audio_tokenizer:
 semantic_codec_artifact:
 device: cuda

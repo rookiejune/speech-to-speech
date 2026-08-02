@@ -5,7 +5,7 @@ from anydataset.types import Modality
 from torch import Tensor
 
 from ...prediction import PredictionModality
-from ...runtime import AudioRepresentation
+from ...runtime import AudioSequenceLayout
 from ...task import Task
 from .._helper.tokenization import token_ids
 from ..protocol import DataRuntime
@@ -296,7 +296,7 @@ def _acoustic_from_positions(
 ) -> AcousticTarget | None:
     if speech.acoustic_codes is None or runtime.semantic_codec_artifact is not None:
         return None
-    if runtime.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE:
+    if runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
         return None
     if token_positions.numel() != speech.acoustic_codes.size(0):
         raise ValueError("target acoustic frames and audio tokens must align.")

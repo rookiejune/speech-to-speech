@@ -33,8 +33,7 @@ from omegaconf import DictConfig, OmegaConf
 from torch import nn
 from anydataset.dataset import MapStyleABC
 
-from speech_to_speech.audio_route import BICODEC_GENERATE_GLOBAL, FULL_OUTPUT
-from speech_to_speech.callback import OnDeviceCodecMaterializer
+from speech_to_speech.callback import OnDeviceCodecMaterializer, build_parameter_policy
 from speech_to_speech.datamodule.config import (
     DataLoaderConfig,
     DataLoaderCostsConfig,
@@ -77,7 +76,12 @@ from speech_to_speech.datamodule.types import (
 )
 from speech_to_speech.model import Config as ModelConfig, ToyConfig
 from speech_to_speech.model.acoustic import AcousticType
-from speech_to_speech.runtime import AudioRepresentation, Config, Runtime
+from speech_to_speech.runtime import (
+    AudioRepresentation,
+    AudioSequenceLayout,
+    Config,
+    Runtime,
+)
 from speech_to_speech.runtime.runtime import audio_tokenizer, dtype
 from speech_to_speech.runtime.audio_tokenizer import (
     BiCodecAudioTokenizer,
@@ -90,6 +94,7 @@ from speech_to_speech.stage import (
     ParameterGroup,
     ParameterPolicyName,
     apply_parameter_policy,
+    default_parameter_policy_config,
 )
 from speech_to_speech.task import Task
 from scripts._overfit_config import overfit as parse_overfit
@@ -276,7 +281,7 @@ class ContractTest(unittest.TestCase):
             audio_view=AudioView.LONGCAT,
             codec_frame_rate=50.0,
             audio_representation=AudioRepresentation.DECOUPLED,
-            audio_route=None,
+            audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
             semantic_codec_artifact=None,
             acoustic_layout=AcousticLayout.FRAME_ALIGNED,
             acoustic_unit_length=None,
@@ -416,9 +421,9 @@ class ContractTest(unittest.TestCase):
                     f"repo_output_root={output_dir}",
                     "output_subdir=contract-test",
                     "train.max_steps=1",
-                    "acoustic.decoder.layers=1",
-                    "acoustic.decoder.heads=1",
-                    "acoustic.decoder.ffn_ratio=1",
+                    "model.acoustic.decoder.layers=1",
+                    "model.acoustic.decoder.heads=1",
+                    "model.acoustic.decoder.ffn_ratio=1",
                 )
             )
             with (
@@ -430,17 +435,12 @@ class ContractTest(unittest.TestCase):
                     "scripts.overfit.build",
                     return_value=(AcousticType.FLOW, Mock(), model),
                 ),
-                patch("scripts.overfit.apply_parameter_policy") as apply_policy,
                 patch(
                     "scripts.overfit.AcousticEvaluation", side_effect=EvaluationReached
                 ),
             ):
                 with self.assertRaises(EvaluationReached):
                     run(config)
-                apply_policy.assert_called_once_with(
-                    model,
-                    config.parameter_policy.spec(),
-                )
 
     @patch("scripts.overfit.torch.cuda.set_device")
     def test_post_fit_generation_uses_runtime_device(self, set_device):
@@ -550,7 +550,7 @@ class ContractTest(unittest.TestCase):
                 _compose(
                     "runtime=unicodec",
                     "model/acoustic=none",
-                    "audio_route=full_output",
+                    "audio_sequence_layout=flattened",
                     "runtime.backbone=fake/backbone",
                     f"repo_output_root={output_root}",
                 )
@@ -899,7 +899,7 @@ class ContractTest(unittest.TestCase):
             audio_view=AudioView.LONGCAT,
             codec_frame_rate=50.0,
             audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
-            audio_route=FULL_OUTPUT,
+            audio_sequence_layout=AudioSequenceLayout.FLATTENED,
             semantic_codec_artifact=None,
             acoustic_layout=AcousticLayout.FRAME_ALIGNED,
             acoustic_unit_length=None,
@@ -2083,6 +2083,22 @@ class ContractTest(unittest.TestCase):
         self.assertFalse(model.acoustic_decoder.codebook_embeddings[-1].weight.requires_grad)
         self.assertFalse(model.acoustic_decoder.embedding_projections[-1].weight.requires_grad)
 
+    def test_parameter_policy_callback_applies_on_fit_setup(self):
+        model = _StageModel()
+        callback = build_parameter_policy(
+            default_parameter_policy_config(ParameterPolicyName.SPEECH_INTERFACE)
+        )
+
+        callback.setup(Mock(), cast(Any, SimpleNamespace(model=model)), "validate")
+        self.assertIsNone(callback.summary)
+        self.assertTrue(model.backbone.model.layers[0].weight.requires_grad)
+
+        callback.setup(Mock(), cast(Any, SimpleNamespace(model=model)), "fit")
+
+        self.assertIsNotNone(callback.summary)
+        self.assertFalse(model.backbone.model.layers[0].weight.requires_grad)
+        self.assertTrue(model.token_embedding.embeddings["audio"].weight.requires_grad)
+
     def test_partial_qwen_policy_unfreezes_top_layers_and_final_norm(self):
         model = _StageModel()
 
@@ -2156,7 +2172,7 @@ def _data_runtime():
         audio_view=AudioView.LONGCAT,
         codec_frame_rate=50.0,
         audio_representation=AudioRepresentation.DECOUPLED,
-        audio_route=None,
+        audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
         semantic_codec_artifact=None,
         acoustic_layout=AcousticLayout.FRAME_ALIGNED,
         acoustic_unit_length=None,
@@ -2185,7 +2201,7 @@ def _bicodec_data_runtime():
         audio_view=AudioView.BICODEC,
         codec_frame_rate=50.0,
         audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
-        audio_route=BICODEC_GENERATE_GLOBAL,
+        audio_sequence_layout=AudioSequenceLayout.FLATTENED,
         semantic_codec_artifact=None,
         acoustic_layout=AcousticLayout.FIXED_LENGTH,
         acoustic_unit_length=2,

@@ -17,7 +17,7 @@ from speech_to_speech.datamodule.types import ModelBatch, TrainInput
 from speech_to_speech.generation.batch import requests_from_batch
 from speech_to_speech.generation.eval.reporting import compare, summary
 from speech_to_speech.model.acoustic import FlowModel
-from speech_to_speech.runtime import Runtime
+from speech_to_speech.runtime import runtime_for_sequence_layout
 from speech_to_speech.task import Task
 
 if __package__:
@@ -50,16 +50,16 @@ def run(config: GenerationSmokeConfig) -> None:
     rt_config = runtime_config(config.runtime)
     device = None if rt_config.device is None else torch.device(rt_config.device)
     _seed(config.seed, device or torch.device("cpu"))
-    runtime = Runtime(rt_config)
+    runtime = runtime_for_sequence_layout(rt_config, config.audio_sequence_layout)
     task = Task(config.task)
-    dataset = load_dataset(config.data.dataset, runtime)
+    dataset = load_dataset(config.datamodule.dataset, runtime)
     collator = Collator(
         runtime,
         {task: 1.0},
-        encode_missing_codes=config.data.encode_missing_codes,
-        interleave_audio_frames=config.data.interleave_audio_frames,
-        mask_text_ratio=config.data.mask_text_ratio,
-        mask_audio_ratio=config.data.mask_audio_ratio,
+        encode_missing_codes=config.datamodule.encode_missing_codes,
+        interleave_audio_frames=config.datamodule.interleave_audio_frames,
+        mask_text_ratio=config.datamodule.mask_text_ratio,
+        mask_audio_ratio=config.datamodule.mask_audio_ratio,
     )
     batch = _prepared_batch(
         collator([dataset[config.sample_index]]),
@@ -119,14 +119,14 @@ def run(config: GenerationSmokeConfig) -> None:
     result = {
         "task": task.value,
         "dataset": {
-            "split": config.data.dataset.split,
-            "data_root": config.data.dataset.root,
-            "filter": config.data.dataset.filter,
-            "split_manifest": config.data.dataset.split_manifest,
-            "split_label": config.data.dataset.split_label,
+            "split": config.datamodule.dataset.split,
+            "data_root": config.datamodule.dataset.root,
+            "filter": config.datamodule.dataset.filter,
+            "split_manifest": config.datamodule.dataset.split_manifest,
+            "split_label": config.datamodule.dataset.split_label,
             "split_manifest_sha256": (
-                _sha256(config.data.dataset.split_manifest)
-                if config.data.dataset.split_manifest
+                _sha256(config.datamodule.dataset.split_manifest)
+                if config.datamodule.dataset.split_manifest
                 else None
             ),
         },
@@ -181,14 +181,14 @@ def _prepared_batch(
     device: torch.device | None,
 ) -> ModelBatch:
     if not isinstance(batch, ModelBatch):
-        if config.data.encode_missing_codes:
+        if config.datamodule.encode_missing_codes:
             return OnDeviceCodecMaterializer(runtime)(
                 cast(TrainInput, batch),
                 device=device,
             )
         raise TypeError(
             "generation smoke requires prepared codec data; set "
-            "data.encode_missing_codes=true to online encode raw waveform samples."
+            "datamodule.encode_missing_codes=true to online encode raw waveform samples."
         )
     return batch
 

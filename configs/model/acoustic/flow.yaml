@@ -1,4 +1,4 @@
-# @package acoustic
+# @package model.acoustic
 type: flow
 name: ${.type}-${.decoder.layers}l
 init_artifact:

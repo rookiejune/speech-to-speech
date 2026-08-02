@@ -1,16 +1,19 @@
 # @package _global_
 defaults:
+  - /stage@stage: stage_0
+  - /callback/parameter_policy@callbacks.parameter_policy: full
   - /model: default
-  - /model/acoustic: flow
+  - /model/acoustic@model.acoustic: flow
   - /runtime: longcat
-  - /data@data.dataset: wmt19_tts
+  - /audio_sequence_layout: semantic
+  - /datamodule/dataset@datamodule.dataset: wmt19_tts
   - /pl_module: sft
   - /trainer: default
   - /logging: tensorboard
   - _self_
 
 task: tts
-run_name: ${oc.select:acoustic.name,token}
+run_name: ${oc.select:model.acoustic.name,token}
 output_subdir: 002-single-batch-overfit/${task}/${run_name}
 
 sample_index: 0

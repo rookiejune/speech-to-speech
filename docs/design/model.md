@@ -128,7 +128,8 @@ adapter 前的 backbone hidden。
 `HiddenConditionAdapter`。
 
 `lora` 直接持有 `peft.LoraConfig | None`，项目不再维护本地 LoRA config、layer 或注入 facade。
-正式 train 默认组合 `model/lora=qwen`（`init_lora_weights=pissa`）与 `parameter_policy=lora`。
+正式 train 默认组合 LoRA preset（`init_lora_weights=pissa`）与
+`callback/parameter_policy=lora`。
 选择该组合后，model 把该 config 直接传给 PEFT
 `inject_adapter_in_model()`；rank、alpha、dropout、target modules、初始化方法与 PEFT 后续支持的
 字段都沿用官方命名和校验。PiSSA 保证 A/B 满秩，以便 `pl_module.optimizer=muon` 时 anytrain
@@ -151,18 +152,18 @@ codebooks 的 unified-token codec 必须使用 `model/acoustic=none`；有独立
 codec 也可以显式选择 `none` 作为 token-only baseline。入口不根据 codec 静默覆盖用户选择。
 fixed-length structured codec（例如 BiCodec）使用独立的 model-facing token layout。它只支持
 按 `audio_route` 固定的 structured sequence 路线，不接入当前 frame-aligned Flow/RVQ acoustic
-side channel。新 route 使用 `global` 表示固定长度 speaker/style stream：
-`bicodec_reuse_prompt_global` 只输出 semantic，`bicodec_generate_global` 同时输出 global 与
-semantic。BiCodec route 不接受 FrameCodec 使用的 `acoustic` stream。两条 route 使用同一套稳定
-vocabulary，route 只改变 grammar 的
-output groups 与 decode stream ownership，不按 request 动态改变模型 head。
-无 reference 的 `bicodec_generate_global` 不自带 speaker ID；多 speaker 训练若没有额外条件或
-latent sampling，global 预测可能偏向数据中的主导 speaker，这属于模型条件设计而不是 codec
-序列化问题。
+side channel。route 只声明 `acoustic` / `semantic`；fixed-length speaker/style 含义来自
+`AcousticLayout.FIXED_LENGTH`，不是单独的 stream 枚举。`reuse_prompt_acoustic` 只输出
+semantic 并复用 prompt acoustic；`generate_acoustic` 同时输出 acoustic 与 semantic。两条
+route 使用同一套稳定 vocabulary，route 只改变 grammar 的 output groups 与 decode stream
+ownership，不按 request 动态改变模型 head。
+无 reference 的 `generate_acoustic` 不自带 speaker ID；多 speaker 训练若没有额外条件或
+latent sampling，acoustic（speaker）预测可能偏向数据中的主导 speaker，这属于模型条件设计而
+不是 codec 序列化问题。
 
 底层 acoustic decoder 的所有权在 `semantic-acoustic-codec`：S2S 的 Flow/RVQ model 只负责
 从 backbone hidden state 取 frame-aligned condition，经 `HiddenConditionAdapter` 映射后送入 SAC 的
-DiT/DiT+REPA/RVQ decoder。`acoustic.init_artifact` 可在 composition 边界加载 SAC generator；model
+DiT/DiT+REPA/RVQ decoder。`model.acoustic.init_artifact` 可在 composition 边界加载 SAC generator；model
 构造器不执行 artifact I/O。S2S 不维护 acoustic-only codec oracle，也不复制底层 decoder 实现。
 
 ## Embedding
@@ -186,9 +187,10 @@ cast 到 backbone embedding dtype。`token_embedding.*` 为唯一参数路径；
 strict resume 显式失败。
 
 Native/BPE semantic tokenizers 使用 codec codebook 初始化；完整 codec sequence tokenizer
-通常使用随机初始化，因为它的 vocab 同时包含多 codebook offset tokens、BiCodec semantic/global
-ranges 与 codec/stream/end markers。BiCodec 的 semantic payload、各 fixed-length global slot
-和 marker 共用这一稳定 global vocabulary，候选范围由 route grammar 在每个位置收窄。
+通常使用随机初始化，因为它的 vocab 同时包含多 codebook offset tokens、BiCodec
+semantic/acoustic ranges 与 codec/stream/end markers。BiCodec 的 semantic payload、各
+fixed-length acoustic slot 和 marker 共用这一稳定 layout vocabulary，候选范围由 route
+grammar 在每个位置收窄。
 随机初始化只读取 codec 声明的 semantic feature dimension，并使用 backbone embedding 作为
 device reference，不要求 backend 暴露虚构的 codebook tensor。
 
@@ -245,7 +247,7 @@ TEXT/AUDIO 交替与 force-BOA 规则在 `generation.mixed`，不进入该通用
 `FlattenedAudioTokenizer` 使用 codebook-block 状态机，首码本决定 frame count 并约束后续等长
 payload；fixed-length `BiCodecAudioTokenizer` 使用 `audio_route.output.streams` 选择 grammar：
 reuse route 生成 `semantic_marker, semantic..., end`，generate route 生成
-`global_marker, global..., semantic_marker, semantic..., end`。service 不复制 marker、
+`acoustic_marker, acoustic..., semantic_marker, semantic..., end`。service 不复制 marker、
 range 或 block-length 规则。
 
 route 的 prompt 属于调用前已序列化的 token context，model 只生成固定的 output streams；model 不

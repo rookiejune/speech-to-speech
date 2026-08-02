@@ -1,26 +1,30 @@
 # @package _global_
 defaults:
+  - /stage@stage: stage_0
+  - /callback/parameter_policy@callbacks.parameter_policy: full
   - /model: toy
-  - /model/acoustic: flow
+  - /model/acoustic@model.acoustic: flow
   - /runtime: longcat_native
-  - /data@data.dataset: toy
+  - /audio_sequence_layout: semantic
+  - /datamodule/dataset@datamodule.dataset: toy
   - /pl_module: sft
   - /trainer: default
   - /logging: csv
   - _self_
 
 task: tts
-run_name: toy-${acoustic.name}
+run_name: toy-${model.acoustic.name}
 output_subdir: toy-smoke/${task}/${run_name}
 
 sample_index: 0
 
-acoustic:
-  decoder:
-    hidden_dim: 32
-    layers: 1
-    heads: 2
-    ffn_ratio: 2
+model:
+  acoustic:
+    decoder:
+      hidden_dim: 32
+      layers: 1
+      heads: 2
+      ffn_ratio: 2
 
 runtime:
   device: cpu

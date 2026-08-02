@@ -865,20 +865,20 @@ def _partial_bicodec_metadata(
     audio_mask = ids.ge(start) & ids.lt(end)
     local = ids[audio_mask] - start
     values = [int(value) for value in local.tolist()]
-    expected_global = tokenizer.global_unit_length * len(
-        tokenizer.global_codebook_sizes
+    expected_acoustic = tokenizer.acoustic_unit_length * len(
+        tokenizer.acoustic_codebook_sizes
     )
     semantic_start, semantic_end = tokenizer.semantic_token_range
     summary: dict[str, Any] = {
-        "expected_global_tokens": expected_global,
-        "global_tokens": 0,
+        "expected_acoustic_tokens": expected_acoustic,
+        "acoustic_tokens": 0,
         "semantic_tokens": 0,
         "has_end_marker": tokenizer.end_token_id in values,
     }
 
-    global_marker_index = _first_index(values, tokenizer.global_token_id)
-    if global_marker_index is not None:
-        payload_start = global_marker_index + 1
+    acoustic_marker_index = _first_index(values, tokenizer.acoustic_token_id)
+    if acoustic_marker_index is not None:
+        payload_start = acoustic_marker_index + 1
         payload_end = _first_marker_index(
             values,
             (
@@ -889,8 +889,8 @@ def _partial_bicodec_metadata(
         )
         if payload_end is None:
             payload_end = len(values)
-        global_payload = values[payload_start:payload_end]
-        summary["global_tokens"] = len(global_payload)
+        acoustic_payload = values[payload_start:payload_end]
+        summary["acoustic_tokens"] = len(acoustic_payload)
 
     semantic_marker_index = _first_index(values, tokenizer.semantic_token_id)
     if semantic_marker_index is not None:

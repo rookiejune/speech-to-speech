@@ -1,32 +1,35 @@
 # @package _global_
 defaults:
-  - /stage: stage_1
-  - /parameter_policy: lora
-  - /model: default
-  - /model/acoustic: rvq
-  - /runtime: longcat_native
-  - /audio_route: semantic_generator
-  - /data@data.dataset: wmt19_tts
-  - /pl_module: sft
-  - /trainer: staged_static_ddp
-  - /logging: tensorboard
   - /callback/performance@callbacks.performance
   - _self_
 
-run_name: ${stage.name}-${oc.select:acoustic.name,token}
+run_name: ${stage_id}-${oc.select:model.acoustic.name,token}
 repo_output_root: ${oc.env:SPEECH_TO_SPEECH_TRAIN_ROOT,${oc.env:DYNAMIC_HOME}/train/speech-to-speech}
-output_subdir: 011-staged-joint-train/${stage.name}/${run_name}
+output_subdir: 011-staged-joint-train/${stage_id}/${run_name}
 output_dir: ${repo_output_root}/${output_subdir}
 
-data:
+datamodule:
   codec: ${runtime.codec}
   dataloader:
     batch_size: 8
     num_workers: 4
     pin_memory: true
     persistent_workers: true
+  tasks:
+    audio_ar: { template: 0 }
+    asr: { template: 0 }
+    interleaved_ar: { template: 0 }
+    masked_ar: { template: 0 }
+    mt: { template: 0 }
+    parallel_ar: { template: 0 }
+    s2st: { template: 0 }
+    s2tt: { template: 0 }
+    text_ar: { template: 0 }
+    t2st: { template: 0 }
+    t2tt: { template: 0 }
+    tts: { template: 0 }
 
-text_data:
+text_datamodule:
   dataloader:
     batch_size: 8
     num_workers: 4

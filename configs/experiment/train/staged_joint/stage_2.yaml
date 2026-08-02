@@ -1,0 +1,35 @@
+# @package _global_
+defaults:
+  - /runtime: longcat_native
+  - /model: default
+  - /model/acoustic@model.acoustic: rvq
+  - /audio_sequence_layout: semantic
+  - /datamodule/dataset@datamodule.dataset: wmt19_tts
+  - /stage@stage: stage_2
+  - /callback/parameter_policy@callbacks.parameter_policy: speech_interface
+  - /pl_module: sft
+  - /trainer: staged_static_ddp
+  - /logging: tensorboard
+  - _self_
+
+stage_id: stage_2
+
+model:
+  lora: null
+
+callbacks:
+  task_sample:
+    enabled: true
+    panels:
+      - split: train
+        loader: asr
+        task: asr
+        indices: [0, 1, 2]
+      - split: train
+        loader: tts
+        task: tts
+        indices: [0, 1, 2]
+      - split: train
+        loader: mt
+        task: mt
+        indices: [0, 1, 2]

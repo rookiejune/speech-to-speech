@@ -6,11 +6,7 @@ from typing import Any, Type, TypeVar, cast
 from omegaconf import DictConfig, ListConfig, OmegaConf
 from peft import LoraConfig
 
-from speech_to_speech.audio_route import (
-    AudioStream,
-    PromptSource,
-    StreamSource,
-)
+from speech_to_speech.task import Task
 from speech_to_speech.datamodule.dataset.speech import DatasetName
 from speech_to_speech.datamodule.dataset.text import TextDatasetName
 from speech_to_speech.datamodule.types import DataShape
@@ -19,15 +15,16 @@ from speech_to_speech.model import (
     AudioInputAdapterType,
     AudioOutputAdapterType,
 )
+from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.runtime import (
     AudioRepresentation,
+    AudioSequenceLayout,
     BackboneInitialization,
     BackboneType,
 )
 from speech_to_speech.stage import (
     ParameterGroup,
     ParameterPolicyName,
-    StageName,
 )
 
 ConfigT = TypeVar("ConfigT")
@@ -55,11 +52,19 @@ def prepare(config: DictConfig) -> DictConfig:
             value = audio_output.get("type")
             if value is not None:
                 audio_output.type = _enum_name(AudioOutputAdapterType, value)
-    _dataset(result.get("data"))
-    _dataset(result.get("data", {}).get("dataset"))
-    _data_shape(result.get("data"))
-    _text_dataset(result.get("text_data", {}).get("dataset"))
-    _audio_route(result.get("audio_route"))
+    acoustic = model.get("acoustic") if isinstance(model, DictConfig) else None
+    if isinstance(acoustic, DictConfig):
+        acoustic_type = acoustic.get("type")
+        if acoustic_type is not None:
+            acoustic.type = _enum_value(AcousticType, acoustic_type)
+    _dataset(result.get("datamodule"))
+    _dataset(result.get("datamodule", {}).get("dataset"))
+    _data_shape(result.get("datamodule"))
+    _data_tasks(result.get("datamodule"))
+    _text_dataset(result.get("text_datamodule", {}).get("dataset"))
+    _audio_sequence_layout(result)
+    _reject_audio_representation(result)
+    _audio_layout_defaults(result)
     runtime = result.get("runtime")
     if runtime is not None:
         backbone_type = runtime.get("backbone_type")
@@ -74,19 +79,12 @@ def prepare(config: DictConfig) -> DictConfig:
                 BackboneInitialization,
                 initialization,
             )
-        representation = runtime.get("audio_representation")
-        if representation is not None:
-            runtime.audio_representation = _enum_name(
-                AudioRepresentation,
-                representation,
-            )
-    stage = result.get("stage")
-    if stage is not None:
-        name = stage.get("name")
-        if name is not None:
-            stage.name = _enum_name(StageName, name)
-    policy = result.get("parameter_policy")
-    if policy is not None:
+    callbacks = result.get("callbacks")
+    if isinstance(callbacks, DictConfig):
+        policy = callbacks.get("parameter_policy")
+    else:
+        policy = None
+    if isinstance(policy, DictConfig):
         name = policy.get("name")
         if name is not None:
             policy.name = _enum_name(ParameterPolicyName, name)
@@ -139,6 +137,20 @@ def _data_shape(value: object) -> None:
         value.shape = _enum_name(DataShape, shape)
 
 
+def _data_tasks(value: object) -> None:
+    if not isinstance(value, DictConfig):
+        return
+    tasks = value.get("tasks")
+    if isinstance(tasks, DictConfig):
+        renamed: dict[str, Any] = {}
+        for key in list(tasks.keys()):
+            # Keep Task.value keys so StageLoaderConfig / Task() accept them.
+            raw = str(key)
+            task = Task[raw] if raw in Task.__members__ else Task(raw)
+            renamed[task.value] = tasks[key]
+        value.tasks = renamed
+
+
 def _text_dataset(value: object) -> None:
     if not isinstance(value, DictConfig):
         return
@@ -147,24 +159,68 @@ def _text_dataset(value: object) -> None:
         value.name = _enum_name(TextDatasetName, dataset)
 
 
-def _audio_route(value: object) -> None:
-    if not isinstance(value, DictConfig):
+def _audio_sequence_layout(config: DictConfig) -> None:
+    layout = config.get("audio_sequence_layout")
+    if layout is not None:
+        config.audio_sequence_layout = _enum_name(AudioSequenceLayout, layout)
+
+
+def _reject_audio_representation(config: DictConfig) -> None:
+    runtime = config.get("runtime")
+    if not isinstance(runtime, DictConfig):
         return
-    prompt = value.get("prompt")
-    output = value.get("output")
-    decode = value.get("decode")
-    if not all(isinstance(item, DictConfig) for item in (prompt, output, decode)):
+    if "audio_representation" not in runtime:
         return
-    prompt.source = _enum_name(PromptSource, prompt.source)
-    prompt.streams = [_enum_name(AudioStream, stream) for stream in prompt.streams]
-    output.streams = [_enum_name(AudioStream, stream) for stream in output.streams]
-    decode.semantic = _enum_name(StreamSource, decode.semantic)
-    decode.acoustic = _enum_name(StreamSource, decode.acoustic)
+    if OmegaConf.is_missing(runtime, "audio_representation"):
+        return
+    raise ValueError(
+        "runtime.audio_representation is internal; use audio_sequence_layout."
+    )
+
+
+def _audio_layout_defaults(config: DictConfig) -> None:
+    layout = _layout(config)
+    if layout is None:
+        return
+    runtime = config.get("runtime")
+    if isinstance(runtime, DictConfig):
+        runtime.audio_representation = _layout_representation(layout, runtime)
+
+
+def _layout(config: DictConfig) -> AudioSequenceLayout | None:
+    value = config.get("audio_sequence_layout")
+    if value is None:
+        return None
+    raw = str(value)
+    return (
+        AudioSequenceLayout[raw]
+        if raw in AudioSequenceLayout.__members__
+        else AudioSequenceLayout(raw)
+    )
+
+
+def _layout_representation(
+    layout: AudioSequenceLayout,
+    runtime: DictConfig,
+) -> str:
+    if layout is AudioSequenceLayout.FLATTENED:
+        return AudioRepresentation.FULL_CODEC_SEQUENCE.name
+    if str(runtime.get("codec")) == "bicodec":
+        # BiCodec semantic layout still needs the structured tokenizer so the
+        # reference acoustic stream can be read from the logical full-code input.
+        return AudioRepresentation.FULL_CODEC_SEQUENCE.name
+    return AudioRepresentation.DECOUPLED.name
 
 
 def _enum_name(enum: Type[EnumT], value: object) -> str:
     raw = str(value)
     return enum[raw].name if raw in enum.__members__ else enum(raw).name
+
+
+def _enum_value(enum: Type[EnumT], value: object) -> str:
+    raw = str(value)
+    member = enum[raw] if raw in enum.__members__ else enum(raw)
+    return str(member.value)
 
 
 def _writable(config: DictConfig | ListConfig) -> None:

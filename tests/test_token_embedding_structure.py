@@ -51,7 +51,6 @@ class _Runtime:
         self.layout = Layout(text=(0, 8), audio=(8, 8 + audio_vocab_size))
         self.audio_tokenizer = audio_tokenizer or NativeAudioTokenizer(vocab_size=2)
         self.codec = codec or _Codec()
-        self.audio_route = None
         self.audio_representation = AudioRepresentation.DECOUPLED
         self.eos_token_id = 3
         self.pad_token_id = 0

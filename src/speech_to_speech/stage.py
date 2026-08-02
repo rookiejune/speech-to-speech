@@ -4,7 +4,7 @@ import math
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Optional, Protocol
+from typing import Optional, Protocol, cast
 
 from anydataset.types import Modality
 from torch import nn
@@ -31,14 +31,6 @@ class ParameterPolicyName(StrEnum):
     SEMANTIC_ONLY = auto()
     ACOUSTIC_ONLY = auto()
     SPEECH_INTERFACE_TOP_THIRD = auto()
-
-
-class StageName(StrEnum):
-    STAGE_0 = auto()
-    STAGE_1 = auto()
-    STAGE_2 = auto()
-    STAGE_3 = auto()
-    STAGE_4 = auto()
 
 
 class StagedModel(Protocol):
@@ -154,7 +146,6 @@ class StageLoaderConfig:
 
 @dataclass
 class StageConfig:
-    name: StageName = StageName.STAGE_0
     loaders: dict[str, StageLoaderConfig] = field(default_factory=dict)
     accumulate_grad_batches: int = 1
     fuse_loaders_per_step: bool = False
@@ -267,31 +258,66 @@ def apply_parameter_policy(
     spec: ParameterPolicySpec,
 ) -> dict[ParameterGroup, int]:
     counts = {group: 0 for group in ParameterGroup}
+    trainability = ParameterPolicyTrainability(spec)
     for name, parameter in model.named_parameters():
-        peft_trainable = (
-            spec.name is ParameterPolicyName.LORA
-            and name.startswith("backbone.")
-            and parameter.requires_grad
-        )
-        group = (
-            ParameterGroup.BACKBONE_ADAPTER
-            if peft_trainable
-            else parameter_group(name)
-        )
+        group = _policy_group(name, parameter, spec)
         counts[group] += parameter.numel()
+        parameter.requires_grad_(trainability(cast(nn.Module, model), name, parameter))
+    return counts
+
+
+@dataclass(frozen=True)
+class ParameterPolicyTrainability:
+    spec: ParameterPolicySpec
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.spec, ParameterPolicySpec):
+            raise TypeError("parameter policy trainability requires a spec.")
+
+    def __call__(
+        self,
+        model: nn.Module,
+        name: str,
+        parameter: nn.Parameter,
+    ) -> bool:
+        group = _policy_group(name, parameter, self.spec)
         if _structurally_frozen(name, model):
-            parameter.requires_grad_(False)
-            continue
+            return False
         trainable = (
-            peft_trainable
-            if spec.name is ParameterPolicyName.LORA
+            _peft_trainable(name, parameter, self.spec)
+            if self.spec.name is ParameterPolicyName.LORA
             and name.startswith("backbone.")
-            else group in spec.trainable_groups
+            else group in self.spec.trainable_groups
         )
         if group is ParameterGroup.BACKBONE and trainable:
-            trainable = _backbone_trainable(name, model, spec.backbone_top_fraction)
-        parameter.requires_grad_(trainable)
-    return counts
+            return _backbone_trainable(
+                name,
+                model,
+                self.spec.backbone_top_fraction,
+            )
+        return trainable
+
+
+def _policy_group(
+    name: str,
+    parameter: nn.Parameter,
+    spec: ParameterPolicySpec,
+) -> ParameterGroup:
+    if _peft_trainable(name, parameter, spec):
+        return ParameterGroup.BACKBONE_ADAPTER
+    return parameter_group(name)
+
+
+def _peft_trainable(
+    name: str,
+    parameter: nn.Parameter,
+    spec: ParameterPolicySpec,
+) -> bool:
+    return (
+        spec.name is ParameterPolicyName.LORA
+        and name.startswith("backbone.")
+        and parameter.requires_grad
+    )
 
 
 def parameter_group(name: str) -> ParameterGroup:
@@ -401,9 +427,9 @@ __all__ = [
     "ParameterPolicyConfig",
     "ParameterPolicyName",
     "ParameterPolicySpec",
+    "ParameterPolicyTrainability",
     "StageConfig",
     "StageLoaderConfig",
-    "StageName",
     "apply_parameter_policy",
     "default_parameter_policy_config",
     "parameter_group",

@@ -8,19 +8,13 @@ import torch
 from anydataset.types import AudioView
 from anytrain.codec import AcousticLayout
 
-from speech_to_speech.audio_route import (
-    BICODEC_GENERATE_GLOBAL,
-    BICODEC_REUSE_PROMPT_GLOBAL,
-    FULL_OUTPUT,
-    SEMANTIC_GENERATOR,
-    Config as AudioRouteConfig,
-    Decode,
-    Output,
-    Prompt,
-    PromptSource,
-    StreamSource,
+from speech_to_speech.runtime import (
+    AudioRepresentation,
+    AudioSequenceLayout,
+    Config,
+    Runtime,
+    runtime_for_sequence_layout,
 )
-from speech_to_speech.runtime import AudioRepresentation, Config, Runtime
 from speech_to_speech.runtime.audio_tokenizer import (
     BiCodecAudioTokenizer,
     FlattenedAudioTokenizer,
@@ -177,72 +171,44 @@ class RuntimeCodecTest(unittest.TestCase):
                 supports_structured(codec)
 
 
-class RuntimeAudioRouteTest(unittest.TestCase):
-    def test_route_is_optional_for_standalone_runtime_use(self) -> None:
+class RuntimeAudioSequenceLayoutTest(unittest.TestCase):
+    def test_runtime_defaults_to_semantic_layout(self) -> None:
         runtime = Runtime(Config())
 
-        self.assertIsNone(runtime.audio_route)
+        self.assertIs(runtime.audio_sequence_layout, AudioSequenceLayout.SEMANTIC)
 
-    def test_decoupled_representation_only_accepts_semantic_generator(self) -> None:
-        config = Config()
+    def test_runtime_requires_sequence_layout_enum(self) -> None:
+        with self.assertRaisesRegex(TypeError, "AudioSequenceLayout"):
+            Runtime(Config(), audio_sequence_layout="semantic")
 
-        Runtime(config, audio_route=SEMANTIC_GENERATOR)
-        with self.assertRaisesRegex(ValueError, "requires audio_route=semantic_generator"):
-            Runtime(config, audio_route=FULL_OUTPUT)
-
-    def test_full_sequence_rejects_generator_owned_decode(self) -> None:
-        config = Config(
-            codec="stable_codec",
-            audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
-        )
-
-        with self.assertRaisesRegex(ValueError, "generator-owned decode"):
-            Runtime(config, audio_route=SEMANTIC_GENERATOR)
-
-    def test_frame_full_sequence_only_accepts_full_output(self) -> None:
-        config = Config(
-            codec="stable_codec",
-            audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
-        )
-
-        Runtime(config, audio_route=FULL_OUTPUT)
-        with self.assertRaisesRegex(ValueError, "requires audio_route=full_output"):
-            Runtime(config, audio_route=BICODEC_GENERATE_GLOBAL)
-
-    def test_bicodec_full_sequence_accepts_global_routes(self) -> None:
+    def test_runtime_for_sequence_layout_sets_layout(self) -> None:
         config = Config(
             codec="bicodec",
             audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
         )
 
-        for route in (
-            BICODEC_GENERATE_GLOBAL,
-            BICODEC_REUSE_PROMPT_GLOBAL,
-        ):
-            with self.subTest(route=route):
-                Runtime(config, audio_route=route)
+        runtime = runtime_for_sequence_layout(
+            config,
+            AudioSequenceLayout.FLATTENED,
+        )
 
-    def test_bicodec_full_sequence_rejects_generic_frame_route(self) -> None:
+        self.assertIs(runtime.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
+        self.assertIs(runtime.audio_representation, AudioRepresentation.FULL_CODEC_SEQUENCE)
+        self.assertIs(runtime.audio_view, AudioView.BICODEC)
+
+    def test_runtime_for_sequence_layout_preserves_config(self) -> None:
         config = Config(
-            codec="bicodec",
+            codec="stable_codec",
             audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
         )
 
-        with self.assertRaisesRegex(ValueError, "supported global route"):
-            Runtime(config, audio_route=FULL_OUTPUT)
-
-    def test_runtime_route_requires_an_output_stream(self) -> None:
-        route = AudioRouteConfig(
-            prompt=Prompt(source=PromptSource.SOURCE, streams=()),
-            output=Output(streams=()),
-            decode=Decode(
-                semantic=StreamSource.GENERATOR,
-                acoustic=StreamSource.GENERATOR,
-            ),
+        runtime = runtime_for_sequence_layout(
+            config,
+            AudioSequenceLayout.FLATTENED,
         )
 
-        with self.assertRaisesRegex(ValueError, "at least one output stream"):
-            Runtime(Config(), audio_route=route)
+        self.assertIs(runtime.config, config)
+        self.assertIs(runtime.audio_view, AudioView.STABLE)
 
 
 class _StableSource:

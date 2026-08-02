@@ -36,8 +36,8 @@ class GenerationSmokeTest(unittest.TestCase):
                     "runtime.audio_tokenizer=/tmp/audio-tokenizer",
                     "runtime.device=cpu",
                     "batch_sizes=[1]",
-                    "data.dataset.filter=null",
-                    "data.encode_missing_codes=true",
+                    "datamodule.dataset.filter=null",
+                    "datamodule.encode_missing_codes=true",
                 ],
             )
             experiment_config = compose(
@@ -46,7 +46,7 @@ class GenerationSmokeTest(unittest.TestCase):
                     "repo_output_root=/tmp/generation-smoke-test",
                     "runtime.audio_tokenizer=/tmp/audio-tokenizer",
                     "runtime.device=cpu",
-                    "experiment=generation_online_encode_smoke",
+                    "experiment=generation/online_encode_smoke",
                 ],
             )
 
@@ -56,11 +56,11 @@ class GenerationSmokeTest(unittest.TestCase):
         self.assertEqual(parsed.sample_index, 0)
         self.assertEqual(parsed.batch_sizes, [1])
         self.assertEqual(parsed.max_new_tokens, 2)
-        self.assertIsNone(parsed.data.dataset.filter)
-        self.assertTrue(parsed.data.encode_missing_codes)
+        self.assertIsNone(parsed.datamodule.dataset.filter)
+        self.assertTrue(parsed.datamodule.encode_missing_codes)
         self.assertEqual(experiment.batch_sizes, [1])
-        self.assertIsNone(experiment.data.dataset.filter)
-        self.assertTrue(experiment.data.encode_missing_codes)
+        self.assertIsNone(experiment.datamodule.dataset.filter)
+        self.assertTrue(experiment.datamodule.encode_missing_codes)
 
     def test_config_validates_entry_budgets_before_execution(self) -> None:
         parsed = generation_smoke(_config())
@@ -220,7 +220,8 @@ def _config(override: dict[str, object] | None = None) -> DictConfig:
             "repo_output_root": "/tmp/generation-smoke-test",
             "output_subdir": "004-real-cached-generation",
             "output_dir": "/tmp/generation-smoke-test/004-real-cached-generation",
-            "data": {
+            "audio_sequence_layout": "semantic",
+            "datamodule": {
                 "codec": "longcat",
                 "dataloader": {
                     "batch_size": 1,

@@ -5,22 +5,21 @@ from typing import Type, Union
 
 from omegaconf import MISSING, DictConfig
 
-from speech_to_speech.audio_route import Config as AudioRouteConfig
 from speech_to_speech.datamodule.config import SpeechConfig
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.pl_module import Config as ModuleConfig
-from speech_to_speech.runtime import Config as RuntimeConfig
+from speech_to_speech.runtime import AudioSequenceLayout, Config as RuntimeConfig
 from speech_to_speech.stage import ParameterPolicyConfig, StageConfig
 
 if __package__:
     from ._config_common import (
-        AcousticNoneConfig,
-        FlowConfig,
+        FlowModelConfig,
         LoggingConfig,
         PerformanceConfig,
-        RVQConfig,
+        RVQModelConfig,
         TextRetentionCallbackConfig,
+        TokenModelConfig,
         TrainConfig,
         TrainerConfig,
         non_empty_string,
@@ -31,12 +30,12 @@ if __package__:
     from ._config_normalization import parse, peft_lora, prepare
 else:
     from _config_common import (
-        AcousticNoneConfig,
-        FlowConfig,
+        FlowModelConfig,
         LoggingConfig,
         PerformanceConfig,
-        RVQConfig,
+        RVQModelConfig,
         TextRetentionCallbackConfig,
+        TokenModelConfig,
         TrainConfig,
         TrainerConfig,
         non_empty_string,
@@ -81,6 +80,9 @@ class FlowMatchingCallbackConfig:
 
 @dataclass
 class OverfitCallbacksConfig:
+    parameter_policy: ParameterPolicyConfig = field(
+        default_factory=ParameterPolicyConfig
+    )
     task_sample: TaskSampleCallbackConfig = field(
         default_factory=TaskSampleCallbackConfig
     )
@@ -103,18 +105,16 @@ class OverfitCallbacksConfig:
 class _OverfitConfig:
     task: str = MISSING
     sample_index: int = MISSING
-    stage: StageConfig = field(default_factory=StageConfig)
-    parameter_policy: ParameterPolicyConfig = field(
-        default_factory=ParameterPolicyConfig
-    )
     run_name: str = MISSING
+    stage_id: str = MISSING
     repo_output_root: str = MISSING
     output_subdir: str = MISSING
     output_dir: str = MISSING
+    stage: StageConfig = field(default_factory=StageConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
-    audio_route: AudioRouteConfig = MISSING
-    data: SpeechConfig = MISSING
+    audio_sequence_layout: AudioSequenceLayout = MISSING
+    datamodule: SpeechConfig = MISSING
     pl_module: ModuleConfig = field(default_factory=ModuleConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
@@ -124,17 +124,17 @@ class _OverfitConfig:
 
 @dataclass
 class OverfitTokenConfig(_OverfitConfig):
-    acoustic: AcousticNoneConfig = field(default_factory=AcousticNoneConfig)
+    model: TokenModelConfig = field(default_factory=TokenModelConfig)
 
 
 @dataclass
 class OverfitFlowConfig(_OverfitConfig):
-    acoustic: FlowConfig = field(default_factory=FlowConfig)
+    model: FlowModelConfig = field(default_factory=FlowModelConfig)
 
 
 @dataclass
 class OverfitRVQConfig(_OverfitConfig):
-    acoustic: RVQConfig = field(default_factory=RVQConfig)
+    model: RVQModelConfig = field(default_factory=RVQModelConfig)
 
 
 OverfitConfig = Union[OverfitTokenConfig, OverfitFlowConfig, OverfitRVQConfig]
@@ -144,7 +144,7 @@ def overfit(config: DictConfig) -> OverfitConfig:
     config = prepare(config)
     lora = peft_lora(config)
     schema: Type[OverfitConfig]
-    acoustic = AcousticType(str(config.acoustic.type))
+    acoustic = AcousticType(str(config.model.acoustic.type))
     if acoustic is AcousticType.NONE:
         schema = OverfitTokenConfig
     elif acoustic is AcousticType.FLOW:
@@ -154,6 +154,7 @@ def overfit(config: DictConfig) -> OverfitConfig:
     result = parse(config, schema)
     result.model.lora = lora
     validate_training(result)
+    non_empty_string(result.stage_id, "stage_id")
     non_negative_integer(result.sample_index, "sample_index")
     _validate_callbacks(result.callbacks)
     if result.callbacks.performance.enabled and result.callbacks.task_sample.enabled:

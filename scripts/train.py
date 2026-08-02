@@ -19,7 +19,11 @@ from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig
 
-from speech_to_speech.callback import OOMDiagnostics, OnDeviceCodecMaterializer
+from speech_to_speech.callback import (
+    OOMDiagnostics,
+    OnDeviceCodecMaterializer,
+    build_parameter_policy,
+)
 from speech_to_speech.callback.logging import (
     GradLogger,
     LossSummary,
@@ -32,8 +36,8 @@ from speech_to_speech.datamodule.collate.joint import LoaderSchedule
 from speech_to_speech.datamodule.module import LoaderSpec
 from speech_to_speech.performance import BatchTokenUnits
 from speech_to_speech.pl_module.composition import build
-from speech_to_speech.runtime import Runtime
-from speech_to_speech.stage import StageLoaderConfig, apply_parameter_policy
+from speech_to_speech.runtime import runtime_for_sequence_layout
+from speech_to_speech.stage import StageLoaderConfig
 from speech_to_speech.task import Task
 
 if TYPE_CHECKING:
@@ -72,18 +76,17 @@ def run(config: StagedTrainConfig) -> None:
 
     pl.seed_everything(config.train.seed, workers=True)
     rt_config = runtime_config(config.runtime)
-    rt = Runtime(rt_config, audio_route=config.audio_route)
+    rt = runtime_for_sequence_layout(rt_config, config.audio_sequence_layout)
 
     torch.manual_seed(config.train.seed)
     acoustic_type, module, model = build(
         rt,
         config.pl_module,
         config.model,
-        config.acoustic,
+        config.model.acoustic,
     )
-    if config.data.encode_missing_codes is True:
+    if config.datamodule.encode_missing_codes is True:
         module.batch_materializer = OnDeviceCodecMaterializer(rt)
-    apply_parameter_policy(model, config.parameter_policy.spec())
 
     datamodule = build_datamodule(config, rt)
     summary = LossSummary()
@@ -102,8 +105,8 @@ def run(config: StagedTrainConfig) -> None:
         return
 
     result: dict[str, object] = {
-        "stage": config.stage.name.value,
-        "parameter_policy": config.parameter_policy.name.value,
+        "stage": config.stage_id,
+        "parameter_policy": config.callbacks.parameter_policy.name.value,
         "loaders": {
             name: {
                 "weight": loader.weight,
@@ -157,12 +160,13 @@ def _loader_spec(
 ):
     if loader.is_text:
         return LoaderSpec.text(
-            config.text_data,
+            config.text_datamodule,
             loader.tasks,
             prediction=loader.prediction_modality,
+            tasks=config.datamodule.tasks,
         )
     return LoaderSpec.speech(
-        config.data,
+        config.datamodule,
         loader.tasks,
         prediction=loader.prediction_modality,
     )
@@ -172,21 +176,21 @@ def _validation_spec(config: StagedTrainConfig) -> LoaderSpec:
     loader = config.stage.loaders[config.validation.loader]
     if loader.is_text:
         dataset = replace(
-            config.text_data.dataset,
+            config.text_datamodule.dataset,
             split=config.validation.text_split,
         )
         return LoaderSpec.text(
-            replace(config.text_data, dataset=dataset),
+            replace(config.text_datamodule, dataset=dataset),
             loader.tasks,
             prediction=loader.prediction_modality,
             max_samples=config.validation.max_samples,
         )
     dataset = replace(
-        config.data.dataset,
+        config.datamodule.dataset,
         split_label=config.validation.split_label,
     )
     return LoaderSpec.speech(
-        replace(config.data, dataset=dataset),
+        replace(config.datamodule, dataset=dataset),
         loader.tasks,
         prediction=loader.prediction_modality,
     )
@@ -231,7 +235,9 @@ def training_callbacks(
     summary: Callback,
     validation_history: Callback | None = None,
 ) -> list[Callback]:
-    callbacks: list[Callback] = []
+    callbacks: list[Callback] = [
+        build_parameter_policy(config.callbacks.parameter_policy)
+    ]
     performance_callback = performance(config.callbacks.performance)
     if performance_callback is not None:
         callbacks.append(performance_callback)

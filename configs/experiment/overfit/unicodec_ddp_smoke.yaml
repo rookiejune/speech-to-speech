@@ -1,13 +1,15 @@
 # @package _global_
 defaults:
+  - /stage@stage: stage_0
+  - /callback/parameter_policy@callbacks.parameter_policy: full
   - /model: default
-  - /model/acoustic: none
+  - /model/acoustic@model.acoustic: none
   - /runtime: unicodec
-  - /data@data.dataset: wmt19_tts
+  - /audio_sequence_layout: flattened
+  - /datamodule/dataset@datamodule.dataset: wmt19_tts
   - /pl_module: sft
   - /trainer: ddp
   - /logging: tensorboard
-  - override /audio_route: full_output
   - _self_
 
 task: tts

@@ -5,7 +5,6 @@ from typing import Optional, Type, Union
 
 from omegaconf import MISSING, DictConfig
 
-from speech_to_speech.audio_route import Config as AudioRouteConfig
 from speech_to_speech.datamodule.config import SpeechConfig
 from speech_to_speech.datamodule.collate.joint import LoaderSchedule
 from speech_to_speech.datamodule.dataset.text import (
@@ -15,20 +14,20 @@ from speech_to_speech.datamodule.dataset.text import (
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.pl_module import Config as ModuleConfig
-from speech_to_speech.runtime import Config as RuntimeConfig
+from speech_to_speech.runtime import AudioSequenceLayout, Config as RuntimeConfig
 from speech_to_speech.stage import ParameterPolicyConfig, StageConfig
 from speech_to_speech.task import Task
 
 if __package__:
     from ._config_common import (
-        AcousticNoneConfig,
         DataThroughputConfig,
-        FlowConfig,
+        FlowModelConfig,
         LoggingConfig,
         PerformanceConfig,
-        RVQConfig,
+        RVQModelConfig,
         TextProbeConfig,
         TextRetentionCallbackConfig,
+        TokenModelConfig,
         TrainConfig,
         TrainerConfig,
         non_empty_string,
@@ -39,14 +38,14 @@ if __package__:
     from ._config_normalization import parse, peft_lora, prepare
 else:
     from _config_common import (
-        AcousticNoneConfig,
         DataThroughputConfig,
-        FlowConfig,
+        FlowModelConfig,
         LoggingConfig,
         PerformanceConfig,
-        RVQConfig,
+        RVQModelConfig,
         TextProbeConfig,
         TextRetentionCallbackConfig,
+        TokenModelConfig,
         TrainConfig,
         TrainerConfig,
         non_empty_string,
@@ -131,6 +130,9 @@ class GradientProbeCallbackConfig:
 
 @dataclass
 class StagedCallbacksConfig:
+    parameter_policy: ParameterPolicyConfig = field(
+        default_factory=ParameterPolicyConfig
+    )
     task_sample: StagedTaskSampleCallbackConfig = field(
         default_factory=StagedTaskSampleCallbackConfig
     )
@@ -151,19 +153,17 @@ class StagedCallbacksConfig:
 
 @dataclass
 class _StagedTrainConfig:
-    stage: StageConfig = field(default_factory=StageConfig)
-    parameter_policy: ParameterPolicyConfig = field(
-        default_factory=ParameterPolicyConfig
-    )
     run_name: str = MISSING
+    stage_id: str = MISSING
     repo_output_root: str = MISSING
     output_subdir: str = MISSING
     output_dir: str = MISSING
+    stage: StageConfig = field(default_factory=StageConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
-    audio_route: AudioRouteConfig = MISSING
-    data: SpeechConfig = MISSING
-    text_data: TextDataConfig = MISSING
+    audio_sequence_layout: AudioSequenceLayout = MISSING
+    datamodule: SpeechConfig = MISSING
+    text_datamodule: TextDataConfig = MISSING
     pl_module: ModuleConfig = field(default_factory=ModuleConfig)
     train: ResumableTrainConfig = field(default_factory=ResumableTrainConfig)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
@@ -174,17 +174,17 @@ class _StagedTrainConfig:
 
 @dataclass
 class StagedTrainTokenConfig(_StagedTrainConfig):
-    acoustic: AcousticNoneConfig = field(default_factory=AcousticNoneConfig)
+    model: TokenModelConfig = field(default_factory=TokenModelConfig)
 
 
 @dataclass
 class StagedTrainFlowConfig(_StagedTrainConfig):
-    acoustic: FlowConfig = field(default_factory=FlowConfig)
+    model: FlowModelConfig = field(default_factory=FlowModelConfig)
 
 
 @dataclass
 class StagedTrainRVQConfig(_StagedTrainConfig):
-    acoustic: RVQConfig = field(default_factory=RVQConfig)
+    model: RVQModelConfig = field(default_factory=RVQModelConfig)
 
 
 StagedTrainConfig = Union[
@@ -198,7 +198,7 @@ def train(config: DictConfig) -> StagedTrainConfig:
     config = prepare(config)
     lora = peft_lora(config)
     schema: Type[StagedTrainConfig]
-    acoustic = AcousticType(str(config.acoustic.type))
+    acoustic = AcousticType(str(config.model.acoustic.type))
     if acoustic is AcousticType.NONE:
         schema = StagedTrainTokenConfig
     elif acoustic is AcousticType.FLOW:
@@ -208,6 +208,7 @@ def train(config: DictConfig) -> StagedTrainConfig:
     result = parse(config, schema)
     result.model.lora = lora
     validate_training(result)
+    non_empty_string(result.stage_id, "stage_id")
     if result.callbacks.performance.enabled and result.callbacks.task_sample.enabled:
         raise ValueError(
             "train performance requires callbacks.task_sample.enabled=false "
@@ -402,6 +403,15 @@ def _validate_loader_schedule(config: StagedTrainConfig) -> None:
         accumulate_grad_batches=config.stage.accumulate_grad_batches,
         fuse_loaders_per_step=config.stage.fuse_loaders_per_step,
     )
+    required: set[Task] = set()
+    for loader in config.stage.loaders.values():
+        required.update(task for task, weight in loader.tasks.items() if weight > 0)
+    missing = sorted(task.value for task in required if task not in config.datamodule.tasks)
+    if missing:
+        raise KeyError(
+            "datamodule.tasks must declare every positive-weight stage loader task; "
+            "missing: " + ", ".join(missing)
+        )
 
 
 def _uses_static_ddp(config: StagedTrainConfig) -> bool:
@@ -446,12 +456,14 @@ def _validate_validation(config: StagedTrainConfig) -> None:
     if loader.is_text:
         if loader.tasks != {Task.MT: 1.0}:
             raise ValueError("text validation loader must contain only MT.")
-        if config.text_data.dataset.name is not TextDatasetName.WMT19:
+        if config.text_datamodule.dataset.name is not TextDatasetName.WMT19:
             raise ValueError("MT text validation requires the WMT19 dataset.")
         return
-    dataset = config.data.dataset
+    dataset = config.datamodule.dataset
     if dataset.split_manifest is None:
-        raise ValueError("enabled validation requires data.dataset.split_manifest.")
+        raise ValueError(
+            "enabled validation requires datamodule.dataset.split_manifest."
+        )
     if validation.split_label == dataset.split_label:
         raise ValueError(
             "validation split_label must differ from the train split_label."

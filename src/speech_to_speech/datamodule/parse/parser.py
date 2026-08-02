@@ -9,6 +9,7 @@ from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
 from .._helper.duration import from_frames, from_samples
+from .._helper.audio_context import needs_reference_audio_context
 from .._helper.tokenization import token_ids
 from ..protocol import DataRuntime, TextRuntime
 from ..types import (
@@ -21,7 +22,7 @@ from ..types import (
     Text,
     TextPair,
 )
-from ...runtime import AudioRepresentation
+from ...runtime import AudioSequenceLayout
 from ...runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ...source import SourceLayout
 from ...task import Task
@@ -82,7 +83,33 @@ def parse_task_sample(
             runtime,
             encode_missing_codes=encode_missing_codes,
         )
-    audio_context = None
+    audio_context = _parse_audio_context(
+        sample,
+        runtime,
+        encode_missing_codes=encode_missing_codes,
+    )
+    return SpeechTaskSample(
+        source=source,
+        target=target,
+        task=task,
+        prediction=prediction,
+        audio_context=audio_context,
+    )
+
+
+def _parse_audio_context(
+    sample: types.Sample,
+    runtime: DataRuntime,
+    *,
+    encode_missing_codes: bool,
+) -> Speech | RawSpeech | None:
+    """Resolve layout-owned reference audio for the current sample.
+
+    AudioContextSample (speaker-grid) wins. Otherwise, BiCodec semantic
+    layout uses Role.SOURCE audio as same-speaker enrollment.
+    """
+    if not needs_reference_audio_context(runtime):
+        return None
     if isinstance(sample, AudioContextSample):
         context = _parse_task_item(
             sample.audio_context,
@@ -93,14 +120,17 @@ def parse_task_sample(
         )
         if isinstance(context, Text):
             raise AssertionError("audio context parser returned text.")
-        audio_context = context
-    return SpeechTaskSample(
-        source=source,
-        target=target,
-        task=task,
-        prediction=prediction,
-        audio_context=audio_context,
+        return context
+    context = _parse_task_item(
+        sample,
+        types.Role.SOURCE,
+        types.Modality.AUDIO,
+        runtime,
+        encode_missing_codes=encode_missing_codes,
     )
+    if isinstance(context, Text):
+        raise AssertionError("audio context parser returned text.")
+    return context
 
 
 def parse_text_sample(sample: types.Sample, runtime: TextRuntime) -> TextPair:
@@ -124,7 +154,7 @@ def parse_audio_codes(
 ) -> tuple[Tensor, Tensor | None]:
     semantic_codes, acoustic_codes = _split_audio_codes(codes, runtime.audio_view)
     if (
-        runtime.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE
+        runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED
         and runtime.audio_view is not types.AudioView.BICODEC
     ):
         if not isinstance(codes, Tensor):
@@ -145,7 +175,7 @@ def speech_from_codes(
 ) -> Speech:
     semantic_codes, acoustic_codes = parse_audio_codes(codes, runtime)
     if (
-        runtime.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE
+        runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED
         and runtime.audio_view is types.AudioView.BICODEC
     ):
         tokenizer = runtime.audio_tokenizer

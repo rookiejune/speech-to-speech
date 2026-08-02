@@ -23,7 +23,7 @@ ChatRequest(messages, task, language?)
   - `audio`：`waveform` + `sample_rate`；入口侧用 runtime codec encode 成 codes
   - `codec_codes`：已 materialize 的 codes，携带 `codec` 名（须等于 `runtime.codec_name`）与
     `codes`（`SemanticAcousticCodes` 或 frame `[frames, codebooks]`）。不同 codec 的轴序/stream
-    排列只委托现有 audio tokenizer + `audio_route` + layout，不在 messages 层另造布局。
+    排列只委托现有 audio tokenizer、内部固定 route 和 `audio_sequence_layout`，不在 messages 层另造布局。
 - `task` / `language` 是旁路字段，不伪装成 OpenAI 官方 schema。
 - `ChatCompletion`：`choices[].message` 含 `role=assistant`、可选 text `content`、可选
   `audio`（`AudioOutput`）。
@@ -32,10 +32,12 @@ ChatRequest(messages, task, language?)
 
 - `Request(prompt_ids, task, audio_input_positions, audio_context, prediction?)`：无 target、无
   batch padding 的单条推理输入，与训练 `ModelSample.request` 共用同一类型。`prompt_ids` 是一维
-  layout global token IDs；当固定 `audio_route` 的 decode 需要 prompt stream 时，`audio_context`
+  layout global token IDs；内部过渡 helper `fixed_audio_route(task)` 只用于判断 decode 是否需要
+  prompt stream，此时 `audio_context`
   提供同一 reference 的 structured semantic/acoustic codes。可选的 `audio_input_positions` 只标记
   source audio payload 在 prompt 中的位置。可选的 `prediction` 覆写 task 默认 prediction；未设置
-  时与原先一样使用 `task.prediction_modality`。
+  时与原先一样使用 `task.prediction_modality`。请求不能选择 route，公开配置只选择
+  `audio_sequence_layout`。
 - `Result(response_ids, audio)`：按原请求顺序返回的单条结果。TEXT / AUDIO 路径的
   `response_ids` 是裁掉 stop token 后的 layout global token IDs；mixed 路径当前保留状态机产生的
   EOS/BOA/EOA，供 audio span 抽取。纯 text prediction 的 `audio=None`；AUDIO 与 token-only mixed
@@ -57,7 +59,7 @@ ChatRequest(messages, task, language?)
 
 - `TokenGenerator`：公开 runtime、backbone、`generate_tokens()`，以及供 mixed AR 使用的
   `generation_step()`（按 modality 或候选 `token_ids` 选择输出 head）。
-- `FullCodecSequenceGenerator`：在基础 token generation 上增加受 tokenizer grammar 约束的
+- `FullCodecSequenceGenerator`：在基础 token generation 上增加受 tokenizer state machine 约束的
   `generate_full_codec_sequence()`；frame-aligned flattened codec 与 fixed-length BiCodec
   共用这一 service 能力边界。
 - `AcousticFeatureGeneration`：只描述可选的 `generate_audio_features()` 能力。顶层入口的
@@ -95,7 +97,7 @@ reference builder 生成的结尾严格为
 `BiCodecAudioTokenizer.encode_streams()` 在同一条路径校验，不接受“可解码但不是当前 prompt”的
 近似匹配。
 `FlattenedAudioTokenizer` 的 codebook marker 和各 codebook range 是 codec serialization
-grammar。model 侧 full-sequence generation 强制 marker 顺序，首个 codebook 生成至少一个
+state machine。model 侧 full-sequence generation 强制 marker 顺序，首个 codebook 生成至少一个
 payload 并决定 frame count，其余 codebook 只能生成相同数量、属于各自 range 的 payload，完整
 block 结束后才允许 EOA。marker 与 EOA 都计入 `max_new_tokens`，marker 也保留在
 `response_ids` 中供 frame count 与 decode 使用。单码本是同一契约的批量化简化路径：
@@ -106,9 +108,9 @@ codebook/stream 时仍显式失败，不把不完整结构交给 codec。
 request 的调用方负责保持相同 task 状态机。
 当前 prompt 只由 layout global token IDs 表达；普通 audio-source 内容编码为 semantic audio token，
 并可通过 `audio_input_positions` 让 model 在这些 payload 的 embedding 上运行可配置的
-`AudioInputTower`。该 tower 只处理 source input，不改变 prompt 长度、generation grammar 或
+`AudioInputTower`。该 tower 只处理 source input，不改变 prompt 长度、generation state machine 或
 output head。structured BiCodec route 另外通过 `audio_context` 携带 decode 所需的 reference
-global/semantic codes，其中 global 仍使用 `SemanticAcousticCodes.acoustic` 字段；reference
+acoustic/semantic codes（acoustic 字段在 `FIXED_LENGTH` 下为 speaker slots）；reference
 context 不是 `audio_input_positions` 的替代品，当前不会再次经过 source tower。`Request` 不接受
 可切换的 acoustic feature side channel。
 
@@ -133,17 +135,17 @@ service 在 padding 前校验每条 request 的通用外形，audio strategy 继
 
 - `TEXT`：调用 `generate_tokens(generation_modality=TEXT, stop=EOS)`。
 - `AUDIO`：调用统一的 `generate_audio_responses()`，按 runtime/model capability 选择策略。
-- `PARALLEL` / `INTERLEAVED`：调用 `generate_mixed_responses()`；mixed grammar 属于 generation，
+- `PARALLEL` / `INTERLEAVED`：调用 `generate_mixed_responses()`；mixed state machine 属于 generation，
   不进入 `model.generate_tokens(generation_modality=...)`。
 
 AUDIO 策略：
 
 - semantic-only：semantic token generation + `SemanticCodec.decode()`。
 - acoustic side channel：semantic token/condition generation + `AcousticCodec.decode_features()`。
-- frame full-sequence：flattened grammar + `FrameCodec.decode()`。
-- structured full-sequence：BiCodec grammar + route stream resolve + `StructuredCodec.detokenize()`。
+- frame full-sequence：flattened state machine + `FrameCodec.decode()`。
+- structured full-sequence：BiCodec state machine + route stream resolve + `StructuredCodec.detokenize()`。
 
-strategy factory 只检查 representation、structured layout 和 model capability，不按 codec 名称分派。
+strategy factory 只检查 `audio_sequence_layout`、structured layout 和 model capability，不按 codec 名称分派。
 各策略拥有本路径的 generation/decode 配对；共享层只负责 frame count 校验、同 shape 行合批和
 `AudioOutput` 构造。
 
@@ -184,24 +186,25 @@ mixed prediction (PARALLEL | INTERLEAVED)
 
 audio 路径至少要生成一个 codec-decodable token。audio strategy 共享层按
 `(generated_token_count, generated_frame_count)` 合并 shape 相同的行执行 codec decode，并要求
-codec 保留 batch 轴。`audio_representation=full_codec_sequence` 只对 FrameCodec 通过 `FlattenedAudioTokenizer` 把完整
+codec 保留 batch 轴。当 `audio_sequence_layout=flattened` 时，FrameCodec 通过 `FlattenedAudioTokenizer` 把完整
 `[frames, codebooks]` 还原后直接调用 `codec.decode()`，不会因为 LongCat codec 暴露 acoustic
 codebooks 而进入 Flow/RVQ acoustic feature generation。flow 与 RVQ 都返回相同的
 `AcousticGeneration`；`model/acoustic=none` 即使搭配 LongCat 这类带 acoustic codebook 的
 codec，也只走 token-only generation 分支；实际 waveform decoder 仍按 full-code sequence 或
 semantic artifact 路径选择。
-`FULL_CODEC_SEQUENCE` 对普通 `FrameCodec` 仍调用 `decode(full_codes)`；flattened codec 使用受约束
+`flattened` layout 对普通 `FrameCodec` 仍调用 `decode(full_codes)`；flattened codec 使用受约束
 状态机生成有序 marker、各 codebook 等长 payload 和 EOA，避免 audio head 产生不可解析序列；
 多码本每行可独立决定 frame count，返回 batch 以 EOA padding 对齐。BiCodec 使用另一套受约束的
 structured state machine，根据固定 route.output 生成 marker、semantic token 和可选的固定数量
-slot-major global codebook token，恢复 `SemanticAcousticCodes` 后按 route.decode 合并 prompt
-与 output stream，再调用 `detokenize()`。global reuse route 只生成 semantic 并复用 prompt global；
-global generate route 生成并使用 output global。配置
+slot-major acoustic codebook token，恢复 `SemanticAcousticCodes` 后按 route.decode 合并 prompt
+与 output stream，再调用 `detokenize()`。`reuse_prompt_acoustic` 只生成 semantic 并复用 prompt
+acoustic；`generate_acoustic` 生成并使用 output acoustic。配置
 `runtime.semantic_codec_artifact` 后，semantic strategy 只处理 structured backend 的 semantic tokens，
 并把 waveform decode 交给 `SemanticCodecRuntime`；普通 frame codec 的 `decode()` 不再接收
 semantic-only codes。semantic-artifact 与 structured full-sequence 是配置阶段选择的两条解码路径；
-structured full-sequence 内部的 prompt/output/decode stream 仍由固定 `audio_route` 决定，不会把
-fixed-length global units 伪装成 frame-aligned codes。
+structured full-sequence 内部的 prompt/output/decode ownership 由内部固定 route 决定，generation
+请求不能覆盖；
+fixed-length 与 frame-aligned 的区别由 `AcousticLayout` 提供，不由第三种 stream 名伪装。
 
 自回归 cache、sampling、动态 allowed IDs、逐行 stop 状态和 frame condition 收集属于 model。已有行
 生成 stop token 后，后续步骤只对剩余 active rows 执行 backbone 与 sampling；cache 同步收缩，
@@ -211,7 +214,7 @@ fixed-length global units 伪装成 frame-aligned codes。
 
 普通 semantic/audio-feature 自回归路径同样在第一步屏蔽 EOA，避免固定样本以零 frame
 结束。达到 `max_new_tokens` 但没有 EOA 时，只要已有 token 都是 codec-decodable，audio strategy 将其
-作为截断结果解码；零 frame 或不完整 grammar 不会伪造静音 waveform。
+作为截断结果解码；零 frame 或不完整 state machine 不会伪造静音 waveform。
 
 ## 训练桥接与文本评估
 
@@ -255,7 +258,7 @@ cached/full、batched/serial 任一 waveform 非 finite，或 greedy token 不�
 - route-aware BiCodec decode 必须同时拥有 route 所声明的 prompt/output stream；缺失
   `audio_context` 或 output stream 时显式失败，不用 target codes 或另一条 route 静默补齐。
 - service 与 audio strategy 只依赖 Protocol，不依赖具体 flow/RVQ model 或 LightningModule；
-  codec-specific grammar 留在 model，codec-specific decode 配对留在 audio strategy。
+  codec-specific constrained state machine 留在 model，codec-specific decode 配对留在 audio strategy。
 - `generate_responses()` / `evaluate_text()` 使用 `no_grad`，但不切换 model 的 train/eval mode；
   直接调用包级入口时由调用方先进入 eval mode，`SpeechToSpeechModule` 才会代为切换并恢复状态。
 - 一次请求的 KV cache 不跨调用持久化；cache 与 full-recompute 必须保持相同序列语义。

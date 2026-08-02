@@ -14,11 +14,11 @@
 - `semantic_codec`：semantic token generation 的 waveform decoder。配置
   `semantic_codec_artifact` 时惰性加载 `semantic-acoustic-codec` artifact，并复用同一个
   structured backend；FrameCodec 不把 semantic-only codes 传给自身 `decode()`。
-- `audio_representation`：只选择 FrameCodec 的 audio token 序列格式，当前为 `decoupled` 或
-  `full_codec_sequence`；不拥有 prompt/output/decode stream 的选择。
-- `audio_route`：本次 experiment 固定的 prompt、output、decode stream ownership。route 位于
-  `Runtime` 顶层而不属于 `runtime.Config`，并沿同一运行实例传给 DataModule、model 与 generation
-  service。构造 Runtime 时由 `validate_audio_route()` 校验 route 与 codec representation 是否可执行。
+- `audio_sequence_layout`：公开音频序列格式，当前为 `flattened` 或 `semantic`。`flattened`
+  表示完整 codec codes 被序列化为 acoustic-first / semantic-last 的 token 序列；`semantic`
+  表示逻辑输入输出仍是 full codes，但 token sequence 只处理 semantic，acoustic 由 side module 或
+  semantic-acoustic codec 补齐。Runtime 构造时按该字段派生内部 route，并沿同一运行实例传给
+  DataModule、model 与 generation。
 - `backbone`：Qwen-compatible HF causal LM。
 - `layout`：text/audio global token blocks。
 - `pad/bos/eos_token_id` 与 `boa/eoa_token_id`。
@@ -27,9 +27,9 @@
 
 `runtime.Config.codec` 是 codec identity 的唯一配置源；`audio_view` 由字符串枚举转换，未知 codec
 显式报错。Hydra runtime preset 直接映射完整 `runtime.Config`，同时选择相互兼容的 codec、FrameCodec
-audio representation、audio tokenizer 与 backbone snapshot。`full_codec_sequence` 直接把完整
-FrameCodec codebooks 编入 token 序列，因此不能同时配置 BPE audio tokenizer；它不是 prompt/output
-route 的替代物。ODE method、NFE 与 step 数直接使用 `flow_method`、`flow_nfe` 与
+audio sequence layout、audio tokenizer 与 backbone snapshot。`flattened` 直接把完整
+FrameCodec codebooks 编入 token 序列，因此不能同时配置 BPE audio tokenizer；其顺序固定为
+acoustic-first / semantic-last。ODE method、NFE 与 step 数直接使用 `flow_method`、`flow_nfe` 与
 `flow_num_steps`，不再通过独立 sampler 组转换；`Config` 在构造时校验 method、正 NFE 和至少
 2 个 steps，因此 token/RVQ composition 也不会静默携带无效 runtime。model composition 由
 `model/acoustic` 选择。
@@ -37,7 +37,8 @@ route 的替代物。ODE method、NFE 与 step 数直接使用 `flow_method`、`
 `backbone_initialization` 显式选择 backbone 权重来源：`pretrained` 使用
 `AutoModelForCausalLM.from_pretrained()`；`random` 仍从 `backbone` snapshot 读取 tokenizer 与完整
 HF config，但通过 `AutoModelForCausalLM.from_config()` 随机构造同架构模型，不读取 checkpoint
-权重。随机初始化由训练入口的 `train.seed` 控制，并要求 `parameter_policy=full`，避免随机 backbone
+权重。随机初始化由训练入口的 `train.seed` 控制，并要求
+`callback/parameter_policy=full`，避免随机 backbone
 被全部或部分冻结。`model.toy` 自己构造 tiny Qwen，不能与 `random` 同时启用。
 
 非标准 HF backbone 通过三个 runtime 字段显式声明边界：`backbone_trust_remote_code` 同时传给
@@ -76,23 +77,17 @@ LongCat 的 `DECOUPLED + model/acoustic=none` 必须配置 `semantic_codec_artif
 训练路径，仍由 `Codec.decode_features()` 消费生成的 features；它不代表 anytrain 提供
 semantic-only decoder。
 
-BiCodec 使用同一个 structured backend。它的 `global` stream 是固定长度的 speaker/style codes，
-底层继续存放在 `SemanticAcousticCodes.acoustic` 字段；route 层只接受 `global`，不会把 FrameCodec
-使用的 `acoustic` stream 自动解释为 BiCodec global units。
-`FULL_CODEC_SEQUENCE` 下，固定的 `audio_route` 同时
-决定 prompt/output/decode 的 stream ownership；`audio_representation` 只负责说明这是 structured
-full sequence，而不决定 route：
+BiCodec 使用同一个 structured backend。非 semantic 单元存放在 `SemanticAcousticCodes.acoustic`；
+`AcousticLayout.FIXED_LENGTH` 表示这些单元是固定长度 speaker/style slots（口语里的 global），
+`FRAME_ALIGNED` 则与 semantic 时间对齐。`audio_route` 只声明有没有 `acoustic` stream 以及谁提供它，
+不把 layout 再抬成第三种 stream 名。
+`flattened` layout 下，完整 codec codes 进入同一 token 序列；BiCodec 的 fixed-length acoustic
+payload 使用 slot-major 布局，并固定排在 semantic payload 之前。`semantic` layout 下，输出 token
+只含 semantic；如果 decode 需要 acoustic，BiCodec 从输入 full codes/context 复用 reference acoustic，
+LongCat 等 semantic-only 路径则交给 side module 或 semantic-acoustic codec。markers 与 end marker
+属于内部 route，强制位置不作为可训练 payload。
 
-- `bicodec_reuse_prompt_global` 的 prompt 只含 reference global stream，output 只含 semantic，
-  解码使用 output semantic 与 prompt global。
-- `bicodec_generate_global` 没有 audio prompt，output 同时生成 global、semantic，解码使用 output
-  的两条 stream。
-- 输出 grammar 按 route 固定为 `semantic_marker, semantic..., end`（reuse）或
-  `global_marker, global..., semantic_marker, semantic..., end`（generate）；prompt
-  序列则按 `prompt.streams` 序列化。global payload 使用 slot-major 固定长度布局，semantic
-  token 仍是逐单元序列。markers 与 end marker 属于 grammar，强制位置不作为可训练 payload。
-
-无 reference 的 global 路由把 speaker/style latent 交给语言模型从 text 条件中自回归预测；在多
+无 reference 的 generate 路由把 speaker/style latent 交给语言模型从 text 条件中自回归预测；在多
 speaker 数据上如果没有额外 speaker/style 条件或 latent sampling，模型可能收敛到主导 speaker。
 这是建模条件的限制，不由 BiCodec tokenizer 隐式解决；需要在 experiment/checkpoint 设计中显式
 加入条件或采样策略。
@@ -132,12 +127,11 @@ encode/decode 保持原 device，并直接使用向量视图，不经过逐标�
 DataModule 与 generation service。runtime 不保存进程级 singleton；同一进程需要多套配置时，
 每套配置各自拥有一个 `Runtime`，其惰性资源缓存互不共享。
 
-`Runtime.audio_route` 在入口解析时一次确定，DataModule worker 使用的 `DataRuntimeSnapshot` 也携带
-同一 route。运行中不从请求或 batch 字段重写 route；checkpoint 的严格匹配由
-`SpeechToSpeechModule` 负责。`audio_route=None` 只为独立 runtime/capability 测试保留；配置 route
-时必须有 output stream。`DECOUPLED` 只接受 `semantic_generator`；full codec sequence 禁止
-generator-owned decode，普通 FrameCodec 只接受 `full_output`，BiCodec 只接受上述两条 global
-route。
+`Runtime` 在入口解析时一次确定 `audio_sequence_layout`，并派生内部 route；`DataRuntimeSnapshot`
+携带该派生结果。checkpoint 严格匹配派生 route metadata，由 `SpeechToSpeechModule` 负责。
+校验按结构能力而非 preset 身份：`semantic` layout 要求 semantic-only decode provider 或 acoustic
+side module；`flattened` layout 要求 codec 能消费完整 full codes；BiCodec 的 fixed-length 语义由
+codec layout 提供，reference acoustic 来自输入 full codes/context 而不是额外配置轴。
 
 文件职责保持分离：`runtime/runtime.py` 实现配置与资源聚合，`runtime/codec.py` 隔离 codec
 adapter 和加载，`runtime/audio_tokenizer/` 按实现拆分 Native / Flattened / BiCodec / CodecBPE。

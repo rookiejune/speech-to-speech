@@ -6,7 +6,7 @@ from pathlib import Path
 from omegaconf import MISSING, DictConfig
 
 from speech_to_speech.datamodule.config import SpeechConfig
-from speech_to_speech.runtime import Config as RuntimeConfig
+from speech_to_speech.runtime import AudioSequenceLayout, Config as RuntimeConfig
 from speech_to_speech.task import Task
 
 if __package__:
@@ -25,7 +25,8 @@ class GenerationSmokeConfig:
     output_subdir: str = MISSING
     output_dir: str = MISSING
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
-    data: SpeechConfig = MISSING
+    audio_sequence_layout: AudioSequenceLayout = MISSING
+    datamodule: SpeechConfig = MISSING
     sample_index: int = 0
     batch_sizes: list[int] = field(default_factory=lambda: [1, 2, 4])
     max_new_tokens: int = 2

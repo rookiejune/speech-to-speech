@@ -24,13 +24,13 @@ from anydataset.types import (
 from torch.utils.data import Dataset
 
 from ..._compat import StrEnum, auto
-from ...audio_route import PromptSource
 from ...runtime.types import (
     CodecBackend,
     acoustic_codec,
     frame_codebook_sizes,
     structured_codec,
 )
+from .._helper.audio_context import needs_reference_audio_context
 from ..protocol import DatasetRuntime
 from ..types import AudioContextSample
 
@@ -415,11 +415,7 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
             SpeakerGridCellsDataset(
                 grid,
                 speaker=config.speaker,
-                with_audio_context=(
-                    runtime.audio_route is not None
-                    and bool(runtime.audio_route.prompt.streams)
-                    and runtime.audio_route.prompt.source is PromptSource.REFERENCE
-                ),
+                with_audio_context=needs_reference_audio_context(runtime),
             ),
             config,
         )

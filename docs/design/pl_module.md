@@ -30,12 +30,12 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
   自动路由到 LoRA-Muon + AdamW。
 - `generate()` / `evaluate_text()` 只负责切换 eval mode、调用 generation 包并恢复原 mode。
 
-`pl_module.composition.build()` 根据 `acoustic.type` 统一分发，校验 runtime 是否提供所选
+`pl_module.composition.build()` 根据 `model.acoustic.type` 统一分发，校验 runtime 是否提供所选
 acoustic composition 需要的独立 side channel，并组装
 `model + objective + SpeechToSpeechModule` 的 token/Flow/RVQ 组合；`token()`、`flow()`、`rvq()`
 分别封闭具体构造；返回值同时携带实际 `AcousticType`，入口不再重复解析或校验 composition。
 该模块通过窄 Protocol 消费 acoustic config，不反向依赖 scripts 入口 schema。当
-`acoustic.init_artifact` 非空时，composition 负责加载 SAC
+`model.acoustic.init_artifact` 非空时，composition 负责加载 SAC
 `AcousticGeneratorArtifact`，校验 route、frame layout 与 backend metadata，并把已加载对象传给 model；
 model 构造器不接收路径或执行文件 I/O。
 

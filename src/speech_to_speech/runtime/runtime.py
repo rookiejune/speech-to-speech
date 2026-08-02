@@ -40,14 +40,6 @@ from .types import (
     validate_backbone_readout,
 )
 from .._compat import StrEnum, auto
-from ..audio_route import (
-    BICODEC_GENERATE_GLOBAL,
-    BICODEC_REUSE_PROMPT_GLOBAL,
-    FULL_OUTPUT,
-    SEMANTIC_GENERATOR,
-    Config as AudioRouteConfig,
-    StreamSource,
-)
 
 if TYPE_CHECKING:
     from anytrain.codec import SemanticAcousticCodec
@@ -76,6 +68,11 @@ _FLOW_METHODS = frozenset(
 class AudioRepresentation(StrEnum):
     DECOUPLED = auto()
     FULL_CODEC_SEQUENCE = auto()
+
+
+class AudioSequenceLayout(StrEnum):
+    FLATTENED = auto()
+    SEMANTIC = auto()
 
 
 @dataclass(frozen=True)
@@ -161,15 +158,11 @@ class Config:
 @dataclass(frozen=True)
 class Runtime:
     config: Config
-    audio_route: AudioRouteConfig | None = None
+    audio_sequence_layout: AudioSequenceLayout = AudioSequenceLayout.SEMANTIC
 
     def __post_init__(self) -> None:
-        if self.audio_route is not None and not isinstance(
-            self.audio_route,
-            AudioRouteConfig,
-        ):
-            raise TypeError("runtime audio_route must be an audio route Config.")
-        validate_audio_route(self.config, self.audio_route)
+        if not isinstance(self.audio_sequence_layout, AudioSequenceLayout):
+            raise TypeError("audio_sequence_layout must be an AudioSequenceLayout.")
 
     @property
     def codec_name(self) -> str:
@@ -393,44 +386,11 @@ class Runtime:
         return start <= token_id < end
 
 
-def validate_audio_route(
-    config: Config,
-    route: AudioRouteConfig | None,
-) -> None:
-    """Validate that an audio route is executable by the runtime representation."""
-    if route is None:
-        return
-    if not route.output.streams:
-        raise ValueError("runtime audio route must declare at least one output stream.")
-
-    representation = config.audio_representation
-    if representation is AudioRepresentation.DECOUPLED:
-        if route != SEMANTIC_GENERATOR:
-            raise ValueError(
-                "decoupled audio representation requires audio_route=semantic_generator."
-            )
-        return
-
-    if StreamSource.GENERATOR in {
-        route.decode.semantic,
-        route.decode.acoustic,
-    }:
-        raise ValueError(
-            "full codec sequence routes cannot use generator-owned decode streams."
-        )
-    if config.audio_view is AudioView.BICODEC:
-        if route not in (
-            BICODEC_GENERATE_GLOBAL,
-            BICODEC_REUSE_PROMPT_GLOBAL,
-        ):
-            raise ValueError(
-                "BiCodec full codec sequence requires a supported global route."
-            )
-        return
-    if route != FULL_OUTPUT:
-        raise ValueError(
-            "frame codec full sequence representation requires audio_route=full_output."
-        )
+def runtime_for_sequence_layout(config: Config, layout: AudioSequenceLayout) -> Runtime:
+    return Runtime(
+        config,
+        audio_sequence_layout=layout,
+    )
 
 
 def audio_tokenizer(path: str | Path) -> AudioTokenizer:

@@ -11,6 +11,7 @@ from anytrain.lightning import (
     GradientProbe,
     GradientTarget,
     ModelCheckpoint,
+    ParameterPolicyCallback,
 )
 from hydra import compose, initialize_config_dir
 from hydra.errors import ConfigCompositionException
@@ -46,10 +47,6 @@ from scripts.overfit import (
 from scripts.train import (
     build_datamodule as build_train_datamodule,
 )
-from speech_to_speech.audio_route import (
-    BICODEC_GENERATE_GLOBAL,
-    BICODEC_REUSE_PROMPT_GLOBAL,
-)
 from speech_to_speech.datamodule import DataModule
 from speech_to_speech.datamodule.module import LoaderKind
 from speech_to_speech.datamodule.dataset.speech import DatasetName
@@ -64,6 +61,7 @@ from speech_to_speech.model import (
 from speech_to_speech.model.acoustic import AcousticType, DecoderConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.runtime import (
+    AudioSequenceLayout,
     BackboneInitialization,
     BackboneType,
     Config as RuntimeConfig,
@@ -72,7 +70,6 @@ from speech_to_speech.stage import (
     ParameterGroup,
     ParameterPolicyName,
     StageLoaderConfig,
-    StageName,
 )
 from speech_to_speech.task import Task
 
@@ -104,18 +101,18 @@ class ConfigTest(unittest.TestCase):
                 "overfit",
                 "runtime=unicodec",
                 "model/acoustic=none",
-                "audio_route=full_output",
+                "audio_sequence_layout=flattened",
             )
         )
 
         self.assertIsInstance(flow, OverfitFlowConfig)
         self.assertIsInstance(rvq, OverfitRVQConfig)
         self.assertIsInstance(token, OverfitTokenConfig)
-        self.assertEqual(token.acoustic.type, AcousticType.NONE.value)
+        self.assertEqual(token.model.acoustic.type, AcousticType.NONE.value)
         self.assertIsInstance(flow.runtime, RuntimeConfig)
         self.assertIsInstance(flow.model, ModelConfig)
         self.assertIsInstance(flow.pl_module, ModuleConfig)
-        self.assertIsInstance(flow.acoustic.decoder, DecoderConfig)
+        self.assertIsInstance(flow.model.acoustic.decoder, DecoderConfig)
         self.assertEqual(flow.runtime.codec, "longcat")
         self.assertEqual(token.runtime.codec, "unicodec")
         self.assertIs(flow.model.semantic_audio_adapter, AdapterType.LINEAR)
@@ -123,21 +120,21 @@ class ConfigTest(unittest.TestCase):
 
     def test_acoustic_generator_initialization_is_explicit(self):
         flow = overfit(
-            _compose("overfit", "acoustic.init_artifact=/tmp/flow-artifact")
+            _compose("overfit", "model.acoustic.init_artifact=/tmp/flow-artifact")
         )
         rvq = overfit(
             _compose(
                 "overfit",
                 "model/acoustic=rvq",
-                "acoustic.init_artifact=/tmp/rvq-artifact",
+                "model.acoustic.init_artifact=/tmp/rvq-artifact",
             )
         )
 
-        self.assertEqual(flow.acoustic.init_artifact, "/tmp/flow-artifact")
-        self.assertEqual(rvq.acoustic.init_artifact, "/tmp/rvq-artifact")
+        self.assertEqual(flow.model.acoustic.init_artifact, "/tmp/flow-artifact")
+        self.assertEqual(rvq.model.acoustic.init_artifact, "/tmp/rvq-artifact")
 
     def test_toy_smoke_selects_model_and_dataset_without_a_toy_runtime(self):
-        config = overfit(_compose("overfit", "experiment=toy_smoke"))
+        config = overfit(_compose("overfit", "experiment=overfit/toy_smoke"))
 
         self.assertIsInstance(config, OverfitFlowConfig)
         self.assertIsInstance(config.runtime, RuntimeConfig)
@@ -146,22 +143,26 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.runtime.device, "cpu")
         self.assertIsInstance(config.model.toy, ToyConfig)
         self.assertEqual(config.model.toy.hidden_size, 32)
-        self.assertIs(config.data.dataset.name, DatasetName.TOY)
-        self.assertEqual(config.data.dataset.toy_samples, 8)
-        self.assertEqual(config.data.dataset.toy_frames, 4)
+        self.assertIs(config.datamodule.dataset.name, DatasetName.TOY)
+        self.assertEqual(config.datamodule.dataset.toy_samples, 8)
+        self.assertEqual(config.datamodule.dataset.toy_frames, 4)
         self.assertEqual(config.train.max_steps, 2)
         self.assertFalse(config.callbacks.task_sample.enabled)
         self.assertFalse(config.callbacks.evaluation.enabled)
 
         production = overfit(_compose("overfit"))
         self.assertIsNone(production.model.toy)
-        self.assertIs(production.data.dataset.name, DatasetName.WMT19_TTS)
+        self.assertIs(production.datamodule.dataset.name, DatasetName.WMT19_TTS)
 
         selected = overfit(
-            _compose("overfit", "model=toy", "data@data.dataset=toy")
+            _compose(
+                "overfit",
+                "model=toy",
+                "datamodule/dataset=toy",
+            )
         )
         self.assertIsInstance(selected.model.toy, ToyConfig)
-        self.assertIs(selected.data.dataset.name, DatasetName.TOY)
+        self.assertIs(selected.datamodule.dataset.name, DatasetName.TOY)
 
     def test_qwen2_5_omni_text_runtime_uses_thinker_adapter(self):
         config = overfit(_compose("overfit", "runtime=qwen2_5_omni_text"))
@@ -192,7 +193,7 @@ class ConfigTest(unittest.TestCase):
                 _compose(
                     "overfit",
                     "model=toy",
-                    "data@data.dataset=toy",
+                    "datamodule/dataset=toy",
                     "runtime.backbone_initialization=random",
                 )
             )
@@ -205,7 +206,7 @@ class ConfigTest(unittest.TestCase):
             _compose(
                 "train",
                 "runtime.backbone_initialization=random",
-                "parameter_policy=full",
+                "callback/parameter_policy=full",
                 "model.lora=null",
             )
         )
@@ -215,14 +216,16 @@ class ConfigTest(unittest.TestCase):
         )
 
     def test_full_codec_sequence_smoke_is_token_only_comparison(self):
-        config = overfit(_compose("overfit", "experiment=longcat_full_sequence_smoke"))
+        config = overfit(
+            _compose("overfit", "experiment=overfit/longcat_full_sequence_smoke")
+        )
 
         self.assertIsInstance(config, OverfitTokenConfig)
         self.assertEqual(config.runtime.codec, "longcat")
-        self.assertEqual(config.runtime.audio_representation.value, "full_codec_sequence")
-        self.assertEqual(config.acoustic.type, AcousticType.NONE.value)
+        self.assertIs(config.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
+        self.assertEqual(config.model.acoustic.type, AcousticType.NONE.value)
         self.assertIsInstance(config.model.toy, ToyConfig)
-        self.assertIs(config.data.dataset.name, DatasetName.TOY)
+        self.assertIs(config.datamodule.dataset.name, DatasetName.TOY)
         self.assertEqual(config.run_name, "longcat-full-sequence-token")
         self.assertEqual(config.train.max_steps, 2)
         self.assertFalse(config.callbacks.task_sample.enabled)
@@ -236,7 +239,7 @@ class ConfigTest(unittest.TestCase):
             config = overfit(
                 _compose(
                     "overfit",
-                    "experiment=longcat_decoupled_semantic_only_smoke",
+                    "experiment=overfit/longcat_semantic_only_smoke",
                 )
             )
 
@@ -247,34 +250,34 @@ class ConfigTest(unittest.TestCase):
             "/tmp/semantic-codec",
         )
         self.assertEqual(config.runtime.device, "cpu")
-        self.assertEqual(config.acoustic.type, AcousticType.NONE.value)
+        self.assertEqual(config.model.acoustic.type, AcousticType.NONE.value)
         self.assertIsInstance(config.model.toy, ToyConfig)
-        self.assertIs(config.data.dataset.name, DatasetName.TOY)
+        self.assertIs(config.datamodule.dataset.name, DatasetName.TOY)
 
     def test_bicodec_smokes_use_qwen_single_speaker_cells(self):
         semantic = overfit(
-            _compose("overfit", "experiment=bicodec_semantic_only_smoke")
+            _compose("overfit", "experiment=overfit/bicodec_semantic_only_smoke")
         )
         full = overfit(
-            _compose("overfit", "experiment=bicodec_full_sequence_smoke")
+            _compose("overfit", "experiment=overfit/bicodec_full_sequence_smoke")
         )
 
         for config in (semantic, full):
             self.assertIsInstance(config, OverfitTokenConfig)
             self.assertEqual(config.runtime.codec, "bicodec")
             self.assertIs(
-                config.data.dataset.name,
+                config.datamodule.dataset.name,
                 DatasetName.QWEN_TTS_SPEAKER,
             )
-            self.assertIs(config.data.shape, DataShape.SINGLE)
-            self.assertIsNone(config.data.dataset.speaker)
+            self.assertIs(config.datamodule.shape, DataShape.SINGLE)
+            self.assertIsNone(config.datamodule.dataset.speaker)
 
-        self.assertEqual(semantic.audio_route, BICODEC_REUSE_PROMPT_GLOBAL)
-        self.assertEqual(full.audio_route, BICODEC_GENERATE_GLOBAL)
-        self.assertEqual(semantic.run_name, "bicodec-reuse-prompt-global")
-        self.assertEqual(full.run_name, "bicodec-generate-global")
-        self.assertIn("bicodec-reuse-prompt-global-smoke", semantic.output_dir)
-        self.assertIn("bicodec-generate-global-smoke", full.output_dir)
+        self.assertIs(semantic.audio_sequence_layout, AudioSequenceLayout.SEMANTIC)
+        self.assertIs(full.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
+        self.assertEqual(semantic.run_name, "bicodec-reuse-prompt-acoustic")
+        self.assertEqual(full.run_name, "bicodec-generate-acoustic")
+        self.assertIn("bicodec-reuse-prompt-acoustic-smoke", semantic.output_dir)
+        self.assertIn("bicodec-generate-acoustic-smoke", full.output_dir)
         self.assertIsNone(semantic.runtime.semantic_codec_artifact)
         self.assertIsNone(full.runtime.semantic_codec_artifact)
 
@@ -283,17 +286,17 @@ class ConfigTest(unittest.TestCase):
             (overfit, _compose("overfit", "+unknown=1"), "unknown"),
             (
                 overfit,
-                _compose("overfit", "+acoustic.normalize_features=true"),
-                "acoustic.normalize_features",
+                _compose("overfit", "+model.acoustic.normalize_features=true"),
+                "model.acoustic.normalize_features",
             ),
             (
                 overfit,
                 _compose(
                     "overfit",
                     "model/acoustic=rvq",
-                    "+acoustic.repa.weight=0.1",
+                    "+model.acoustic.repa.weight=0.1",
                 ),
-                "acoustic.repa",
+                "model.acoustic.repa",
             ),
             (
                 overfit,
@@ -417,12 +420,20 @@ class ConfigTest(unittest.TestCase):
         )
         grad_logger.assert_not_called()
 
-        frozen = overfit(_compose("overfit", "parameter_policy=speech_interface"))
+        frozen = overfit(
+            _compose(
+                "overfit",
+                "callback/parameter_policy=speech_interface",
+            )
+        )
         self.assertIsNone(_gradient_logger(frozen, AcousticType.RVQ, rvq_comparison))
         grad_logger.assert_not_called()
 
         partial = overfit(
-            _compose("overfit", "parameter_policy=speech_interface_top_third")
+            _compose(
+                "overfit",
+                "callback/parameter_policy=speech_interface_top_third",
+            )
         )
         partial_gradient = _gradient_logger(partial, AcousticType.RVQ, rvq_comparison)
 
@@ -438,7 +449,7 @@ class ConfigTest(unittest.TestCase):
     def test_training_outputs_use_one_tensorboard_root(self):
         configs = (
             overfit(_compose("overfit")),
-            overfit(_compose("overfit", "experiment=unicodec_overfit")),
+            overfit(_compose("overfit", "experiment=overfit/unicodec")),
         )
 
         for config in configs:
@@ -454,7 +465,7 @@ class ConfigTest(unittest.TestCase):
                 )
                 self.assertEqual(config.logging.run_name, config.output_subdir)
 
-        csv = overfit(_compose("overfit", "experiment=toy_smoke"))
+        csv = overfit(_compose("overfit", "experiment=overfit/toy_smoke"))
         self.assertEqual(csv.logging.save_dir, csv.output_dir)
         self.assertEqual(csv.logging.run_name, "csv")
 
@@ -502,7 +513,7 @@ class ConfigTest(unittest.TestCase):
             name=tensorboard.run_name,
         )
 
-        csv = overfit(_compose("overfit", "experiment=toy_smoke")).logging
+        csv = overfit(_compose("overfit", "experiment=overfit/toy_smoke")).logging
         with patch("scripts._logging.CSVLogger") as logger:
             built = build_logger(csv)
 
@@ -521,7 +532,7 @@ class ConfigTest(unittest.TestCase):
     def test_unicodec_experiments_close_the_token_training_chain(self):
         cases = [
             (
-                "unicodec_overfit",
+                "overfit/unicodec",
                 100,
                 "auto",
                 "auto",
@@ -529,7 +540,7 @@ class ConfigTest(unittest.TestCase):
                 True,
             ),
             (
-                "unicodec_ddp_smoke",
+                "overfit/unicodec_ddp_smoke",
                 2,
                 "auto",
                 "ddp_find_unused_parameters_true",
@@ -560,8 +571,8 @@ class ConfigTest(unittest.TestCase):
         default = parse_train(_compose("train"))
 
         self.assertIsInstance(default, StagedTrainRVQConfig)
-        self.assertEqual(default.stage.name, StageName.STAGE_1)
-        self.assertIs(default.parameter_policy.name, ParameterPolicyName.LORA)
+        self.assertEqual(default.stage_id, "stage_1")
+        self.assertIs(default.callbacks.parameter_policy.name, ParameterPolicyName.LORA)
         self.assertIsInstance(default.model.lora, LoraConfig)
         if default.model.lora is None:
             self.fail("default train config must enable PEFT LoRA")
@@ -580,16 +591,18 @@ class ConfigTest(unittest.TestCase):
         )
         self.assertTrue(default.stage.fuse_loaders_per_step)
         with self.assertRaises(AttributeError):
-            getattr(default.data, "sample_index")
+            getattr(default.datamodule, "sample_index")
 
-        config = parse_train(_compose("train", "stage=stage_2"))
-        self.assertEqual(config.stage.name, StageName.STAGE_2)
+        config = parse_train(
+            _compose("train", "experiment=train/staged_joint/stage_2")
+        )
+        self.assertEqual(config.stage_id, "stage_2")
         self.assertEqual(set(config.stage.loaders), {"asr", "tts", "mt"})
         self.assertEqual(config.stage.accumulate_grad_batches, 10)
         self.assertTrue(config.stage.fuse_loaders_per_step)
-        self.assertEqual(config.data.codec, "longcat")
-        self.assertEqual(config.data.dataset.name, DatasetName.WMT19_TTS)
-        self.assertEqual(config.text_data.dataset.name.value, "wmt19")
+        self.assertEqual(config.datamodule.codec, "longcat")
+        self.assertEqual(config.datamodule.dataset.name, DatasetName.WMT19_TTS)
+        self.assertEqual(config.text_datamodule.dataset.name.value, "wmt19")
         self.assertEqual(config.train.max_steps, 1000000)
         self.assertIsNone(config.train.ckpt_path)
 
@@ -600,7 +613,7 @@ class ConfigTest(unittest.TestCase):
             parse_train(
                 _compose(
                     "train",
-                    "stage=stage_4",
+                    "experiment=train/staged_joint/stage_4",
                     "stage.fuse_loaders_per_step=false",
                     "trainer.strategy=ddp_find_unused_parameters_false",
                 )
@@ -611,12 +624,12 @@ class ConfigTest(unittest.TestCase):
                 "train",
                 "runtime=longcat_full_sequence",
                 "model/acoustic=none",
-                "audio_route=full_output",
+                "audio_sequence_layout=flattened",
             )
         )
 
         self.assertIsInstance(token, StagedTrainTokenConfig)
-        self.assertEqual(token.acoustic.type, AcousticType.NONE.value)
+        self.assertEqual(token.model.acoustic.type, AcousticType.NONE.value)
         self.assertEqual(token.run_name, "stage_1-token")
         with self.assertRaisesRegex(ValueError, "semantic_codec_artifact"):
             parse_train(_compose("train", "model/acoustic=none"))
@@ -634,25 +647,25 @@ class ConfigTest(unittest.TestCase):
         for policy in policies:
             with self.subTest(policy=policy.value):
                 overrides = [
-                    "experiment=train/parameter_policy_smoke",
-                    f"parameter_policy={policy.value}",
+                    "experiment=train/smoke/parameter_policy",
+                    f"callback/parameter_policy={policy.value}",
                 ]
                 if policy is ParameterPolicyName.LORA:
-                    overrides.append("model/lora=qwen")
+                    overrides.append("+model/lora@model.lora=qwen")
                 else:
                     overrides.append("model.lora=null")
                 config = parse_train(
                     _compose("train", *overrides)
                 )
 
-                self.assertIs(config.parameter_policy.name, policy)
+                self.assertIs(config.callbacks.parameter_policy.name, policy)
                 self.assertEqual(config.train.max_steps, 2)
                 self.assertEqual(config.trainer.accelerator, "cpu")
                 self.assertIn(policy.value, config.output_subdir)
 
     def test_staged_joint_experiments_bind_stage_and_parameter_policy(self):
         policies = (
-            ParameterPolicyName.SPEECH_INTERFACE,
+            ParameterPolicyName.LORA,
             ParameterPolicyName.SPEECH_INTERFACE,
             ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD,
             ParameterPolicyName.FULL,
@@ -685,12 +698,12 @@ class ConfigTest(unittest.TestCase):
                 config = parse_train(
                     _compose(
                         "train",
-                        f"experiment=train/staged_joint_stage_{index}",
+                        f"experiment=train/staged_joint/stage_{index}",
                     )
                 )
 
-                self.assertIs(config.stage.name, StageName(f"stage_{index}"))
-                self.assertIs(config.parameter_policy.name, policy)
+                self.assertEqual(config.stage_id, f"stage_{index}")
+                self.assertIs(config.callbacks.parameter_policy.name, policy)
                 self.assertEqual(
                     config.trainer.strategy,
                     "ddp_find_unused_parameters_false",
@@ -718,7 +731,7 @@ class ConfigTest(unittest.TestCase):
             parse_train(
                 _compose(
                     "train",
-                    "stage=stage_4",
+                    "experiment=train/staged_joint/stage_4",
                     "stage.fuse_loaders_per_step=false",
                     "trainer.strategy=ddp_find_unused_parameters_false",
                 )
@@ -729,7 +742,7 @@ class ConfigTest(unittest.TestCase):
             parse_train(
                 _compose(
                     "train",
-                    "stage=stage_4",
+                    "experiment=train/staged_joint/stage_4",
                     "stage.accumulate_grad_batches=1",
                     "trainer.strategy=ddp_find_unused_parameters_false",
                 )
@@ -739,15 +752,15 @@ class ConfigTest(unittest.TestCase):
         config = parse_train(
             _compose(
                 "train",
-                "experiment=train/stable_codec_stage1_train",
-                "data.dataset.split_manifest=/tmp/splits.json",
+                "experiment=train/stable_codec/stage_1",
+                "datamodule.dataset.split_manifest=/tmp/splits.json",
             )
         )
 
         self.assertEqual(config.train.max_steps, 1_000_000)
-        self.assertEqual(config.stage.name, StageName.STAGE_1)
+        self.assertEqual(config.stage_id, "stage_1")
         self.assertEqual(config.runtime.codec, "stable_codec")
-        self.assertEqual(config.runtime.audio_representation.value, "full_codec_sequence")
+        self.assertIs(config.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
         self.assertIsNone(config.runtime.audio_tokenizer)
         self.assertTrue(config.callbacks.task_sample.enabled)
         self.assertTrue(config.validation.enabled)
@@ -770,7 +783,7 @@ class ConfigTest(unittest.TestCase):
             parse_train(
                 _compose(
                     "train",
-                    "experiment=train/stable_codec_stage1_train",
+                    "experiment=train/stable_codec/stage_1",
                 )
             )
 
@@ -779,16 +792,16 @@ class ConfigTest(unittest.TestCase):
             parse_train(
                 _compose(
                     "train",
-                    "stage=stage_2",
+                    "experiment=train/staged_joint/stage_2",
                     "callbacks.task_sample.enabled=true",
                     "callbacks.task_sample.panels=[{split:validation,loader:mt,task:mt,indices:[0]}]",
                     "validation.enabled=true",
-                    "data.dataset.split_manifest=/tmp/splits.json",
+                    "datamodule.dataset.split_manifest=/tmp/splits.json",
                 )
             )
 
     def test_train_datamodule_routes_mt_to_text_loader(self):
-        config = parse_train(_compose("train", "stage=stage_2"))
+        config = parse_train(_compose("train", "experiment=train/staged_joint/stage_2"))
 
         datamodule = build_train_datamodule(config, object())
 
@@ -820,11 +833,11 @@ class ConfigTest(unittest.TestCase):
         config = parse_train(
             _compose(
                 "train",
-                "stage=stage_2",
+                "experiment=train/staged_joint/stage_2",
                 "validation.enabled=true",
                 "validation.loader=tts",
                 "validation.split_label=dev",
-                "data.dataset.split_manifest=/tmp/splits.json",
+                "datamodule.dataset.split_manifest=/tmp/splits.json",
             )
         )
 
@@ -847,7 +860,7 @@ class ConfigTest(unittest.TestCase):
         config = parse_train(
             _compose(
                 "train",
-                "stage=stage_2",
+                "experiment=train/staged_joint/stage_2",
                 "validation.enabled=true",
                 "validation.loader=mt",
             )
@@ -872,13 +885,13 @@ class ConfigTest(unittest.TestCase):
                     "train",
                     "validation.enabled=true",
                     "validation.loader=missing",
-                    "data.dataset.split_manifest=/tmp/splits.json",
+                    "datamodule.dataset.split_manifest=/tmp/splits.json",
                 )
             )
         mt = parse_train(
             _compose(
                 "train",
-                "stage=stage_2",
+                "experiment=train/staged_joint/stage_2",
                 "validation.enabled=true",
                 "validation.loader=mt",
             )
@@ -891,7 +904,7 @@ class ConfigTest(unittest.TestCase):
                     "train",
                     "validation.enabled=true",
                     "validation.split_label=train",
-                    "data.dataset.split_manifest=/tmp/splits.json",
+                    "datamodule.dataset.split_manifest=/tmp/splits.json",
                 )
             )
 
@@ -902,7 +915,7 @@ class ConfigTest(unittest.TestCase):
                 "validation.enabled=true",
                 "validation.every_n_steps=25",
                 "validation.sanity_steps=2",
-                "data.dataset.split_manifest=/tmp/splits.json",
+                "datamodule.dataset.split_manifest=/tmp/splits.json",
             )
         )
         callbacks = []
@@ -928,6 +941,7 @@ class ConfigTest(unittest.TestCase):
             Mock(),
         )
 
+        self.assertIsInstance(callbacks[0], ParameterPolicyCallback)
         checkpoint = next(
             callback
             for callback in callbacks
@@ -998,13 +1012,13 @@ class ConfigTest(unittest.TestCase):
                 Mock(),
             )
 
-        self.assertIs(callbacks[0], performance)
+        self.assertIsInstance(callbacks[0], ParameterPolicyCallback)
+        self.assertIs(callbacks[1], performance)
         factory.assert_not_called()
 
     @patch("scripts.train.build_trainer")
     @patch("scripts.train.training_callbacks", return_value=[])
     @patch("scripts.train.build_datamodule")
-    @patch("scripts.train.apply_parameter_policy")
     @patch("scripts.train.build")
     @patch("scripts.train.Runtime")
     @patch("scripts.train.pl.seed_everything")
@@ -1013,12 +1027,11 @@ class ConfigTest(unittest.TestCase):
         seed,
         runtime,
         build,
-        policy,
         datamodule,
         callbacks,
         trainer_factory,
     ):
-        del seed, policy, callbacks
+        del seed, callbacks
         config = parse_train(
             _compose(
                 "train",
@@ -1114,8 +1127,8 @@ class ConfigTest(unittest.TestCase):
         config = overfit(
             _compose(
                 "overfit",
-                "model/lora=qwen",
-                "parameter_policy=lora",
+                "+model/lora@model.lora=qwen",
+                "callback/parameter_policy=lora",
             )
         )
 
@@ -1125,9 +1138,9 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.model.lora.r, 16)
         self.assertEqual(config.model.lora.lora_alpha, 32)
         self.assertEqual(config.model.lora.init_lora_weights, "pissa")
-        self.assertIs(config.parameter_policy.name, ParameterPolicyName.LORA)
+        self.assertIs(config.callbacks.parameter_policy.name, ParameterPolicyName.LORA)
         self.assertEqual(
-            config.parameter_policy.trainable_groups,
+            config.callbacks.parameter_policy.trainable_groups,
             [
                 ParameterGroup.BACKBONE_ADAPTER,
                 ParameterGroup.SEMANTIC_AUDIO_EMBEDDING,
@@ -1139,8 +1152,8 @@ class ConfigTest(unittest.TestCase):
         )
 
         for overrides in (
-            ("model/lora=qwen",),
-            ("parameter_policy=lora",),
+            ("+model/lora@model.lora=qwen",),
+            ("callback/parameter_policy=lora",),
         ):
             with (
                 self.subTest(overrides=overrides),
@@ -1152,8 +1165,8 @@ class ConfigTest(unittest.TestCase):
         config = overfit(
             _compose(
                 "overfit",
-                "model/lora=qwen",
-                "parameter_policy=lora",
+                "+model/lora@model.lora=qwen",
+                "callback/parameter_policy=lora",
                 "pl_module.optimizer=muon",
             )
         )
@@ -1164,9 +1177,9 @@ class ConfigTest(unittest.TestCase):
             overfit(
                 _compose(
                     "overfit",
-                    "model/lora=qwen",
+                    "+model/lora@model.lora=qwen",
                     "model.lora.init_lora_weights=gaussian",
-                    "parameter_policy=lora",
+                    "callback/parameter_policy=lora",
                     "pl_module.optimizer=muon",
                 )
             )
@@ -1184,8 +1197,8 @@ class ConfigTest(unittest.TestCase):
             overfit(
                 _compose(
                     "overfit",
-                    "model/lora=qwen",
-                    "parameter_policy=lora",
+                    "+model/lora@model.lora=qwen",
+                    "callback/parameter_policy=lora",
                     "callbacks.performance.enabled=true",
                 )
             )
@@ -1195,9 +1208,9 @@ class ConfigTest(unittest.TestCase):
             overfit(
                 _compose(
                     "overfit",
-                    "model/lora=qwen",
+                    "+model/lora@model.lora=qwen",
                     "+model.lora.inference_mode=true",
-                    "parameter_policy=lora",
+                    "callback/parameter_policy=lora",
                 )
             )
 
@@ -1252,7 +1265,7 @@ class ConfigTest(unittest.TestCase):
                     "overfit",
                     "runtime=unicodec",
                     "model/acoustic=none",
-                    "audio_route=full_output",
+                    "audio_sequence_layout=flattened",
                     override,
                 )
                 with self.assertRaises(ValueError):
@@ -1264,12 +1277,12 @@ class ConfigTest(unittest.TestCase):
                 "overfit",
                 "runtime=longcat_full_sequence",
                 "model/acoustic=none",
-                "audio_route=full_output",
+                "audio_sequence_layout=flattened",
             )
         )
 
         self.assertIsInstance(token, OverfitTokenConfig)
-        self.assertEqual(token.runtime.audio_representation.value, "full_codec_sequence")
+        self.assertIs(token.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
         with self.assertRaisesRegex(ValueError, "model/acoustic=none"):
             overfit(_compose("overfit", "runtime=longcat_full_sequence"))
         with self.assertRaisesRegex(ValueError, "model/acoustic=none"):
@@ -1334,12 +1347,12 @@ class ConfigTest(unittest.TestCase):
         cases = [
             ((), "flow-8l"),
             (("model/acoustic=rvq",), "rvq-8l"),
-            (("acoustic.decoder.layers=3",), "flow-3l"),
+            (("model.acoustic.decoder.layers=3",), "flow-3l"),
             (
                 (
                     "runtime=unicodec",
                     "model/acoustic=none",
-                    "audio_route=full_output",
+                    "audio_sequence_layout=flattened",
                 ),
                 "token",
             ),
@@ -1366,7 +1379,7 @@ class ConfigTest(unittest.TestCase):
                         "overfit",
                         "runtime=unicodec",
                         "model/acoustic=none",
-                        "audio_route=full_output",
+                        "audio_sequence_layout=flattened",
                         f"task={task}",
                         "repo_output_root=/tmp/train",
                         f"output_subdir={subdir}",
@@ -1409,11 +1422,11 @@ class ConfigTest(unittest.TestCase):
         self.assertIn("scripts/train.py", source)
         self.assertNotIn("scripts/overfit.py", source)
         self.assertIn('"trainer=staged_static_ddp"', source)
-        self.assertIn("fdu_stage_data_args data.dataset.root", source)
+        self.assertIn("fdu_stage_data_args datamodule.dataset.root", source)
         self.assertIn("SPEECH_TO_SPEECH_STAGE:-stage_1", source)
-        self.assertIn('experiment="train/staged_joint_${stage}"', source)
+        self.assertIn('experiment="train/staged_joint/${stage}"', source)
         self.assertIn('"experiment=${experiment}"', source)
-        self.assertIn('job_reject_overrides experiment task stage -- "$@"', source)
+        self.assertIn('job_reject_overrides experiment task stage stage_id -- "$@"', source)
 
     def test_job_wrappers_source_existing_project_environment(self):
         root = Path(__file__).parents[1]
@@ -1475,8 +1488,8 @@ class ConfigTest(unittest.TestCase):
         root = Path(__file__).parents[1]
         env = (root / "jobs" / "env.sh").read_text()
         jobs = {
-            "02_unicodec.sh": ("unicodec_overfit", "overfit"),
-            "05_unicodec_ddp.sh": ("unicodec_ddp_smoke", "ddp-smoke"),
+            "02_unicodec.sh": ("overfit/unicodec", "overfit"),
+            "05_unicodec_ddp.sh": ("overfit/unicodec_ddp_smoke", "ddp-smoke"),
         }
 
         self.assertNotIn(
@@ -1500,15 +1513,15 @@ class ConfigTest(unittest.TestCase):
     def test_unicodec_smoke_jobs_select_complete_experiments(self):
         root = Path(__file__).parents[1]
         jobs = {
-            "02_unicodec.sh": "unicodec_overfit",
-            "05_unicodec_ddp.sh": "unicodec_ddp_smoke",
+            "02_unicodec.sh": "overfit/unicodec",
+            "05_unicodec_ddp.sh": "overfit/unicodec_ddp_smoke",
         }
 
         for filename, expected in jobs.items():
             with self.subTest(job=filename):
                 source = (root / "jobs" / "005" / filename).read_text()
                 self.assertEqual(
-                    re.findall(r"\bexperiment=([a-z0-9_]+)", source),
+                    re.findall(r"\bexperiment=([a-z0-9_/]+)", source),
                     [expected],
                 )
 

@@ -1,8 +1,0 @@
-prompt:
-  source: source
-  streams: []
-output:
-  streams: [acoustic, semantic]
-decode:
-  semantic: output
-  acoustic: output
