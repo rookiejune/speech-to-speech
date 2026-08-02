@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol, TypedDict, cast
 
 import torch
@@ -106,6 +107,23 @@ class _LoggingRuntime(Protocol):
 
     @property
     def layout(self) -> Layout: ...
+
+
+@dataclass(frozen=True)
+class _RowLogContext:
+    audio_writer: Any | None
+    scalar_writer: Any | None
+    text_writer: Any | None
+    datamodule: _DataModule
+    module: _Module
+    row_batch: ModelBatch
+    dataset_index: int
+    sample: types.Sample
+    request: Request
+    result: Result
+    generation_metadata: Mapping[str, Any]
+    tag: str
+    step: int
 
 
 def _attached_datamodule(trainer: Trainer) -> object:
@@ -228,19 +246,21 @@ class TaskSampleLogger(Callback):
             zip(self.indices, self.samples, requests, results)
         ):
             self._log_result_row(
-                audio_writer,
-                scalar_writer,
-                text_writer,
-                datamodule,
-                module,
-                sample_batch,
-                row,
-                dataset_index,
-                sample,
-                request,
-                result,
-                generation_metadata,
-                step=trainer.global_step,
+                _RowLogContext(
+                    audio_writer=audio_writer,
+                    scalar_writer=scalar_writer,
+                    text_writer=text_writer,
+                    datamodule=datamodule,
+                    module=module,
+                    row_batch=sample_batch.row(row),
+                    dataset_index=dataset_index,
+                    sample=sample,
+                    request=request,
+                    result=result,
+                    generation_metadata=generation_metadata,
+                    tag=self._tag(dataset_index),
+                    step=trainer.global_step,
+                )
             )
 
     def _should_log(self, trainer: Trainer) -> bool:
@@ -357,32 +377,17 @@ class TaskSampleLogger(Callback):
 
     def _log_result_row(
         self,
-        audio_writer: Any | None,
-        scalar_writer: Any | None,
-        text_writer: Any | None,
-        datamodule: _DataModule,
-        module: _Module,
-        sample_batch: ModelBatch,
-        row: int,
-        dataset_index: int,
-        sample: types.Sample,
-        request: Request,
-        result: Result,
-        generation_metadata: Mapping[str, Any],
-        *,
-        step: int,
+        context: _RowLogContext,
     ) -> None:
-        tag = self._tag(dataset_index)
-        row_batch = sample_batch.row(row)
         metrics: dict[str, float] = {}
-        prediction = _prediction_modality(request)
-        decode_error = result.get("decode_error")
+        prediction = _prediction_modality(context.request)
+        decode_error = context.result.get("decode_error")
         status = "partial" if decode_error is not None else "ok"
         result_metadata = _result_metadata(
-            result,
+            context.result,
             max_new_tokens=self.max_new_tokens,
             prediction=prediction,
-            runtime=datamodule.runtime,
+            runtime=context.datamodule.runtime,
         )
         metrics.update(
             {
@@ -392,74 +397,45 @@ class TaskSampleLogger(Callback):
                 ),
             }
         )
-        if audio_writer is not None:
-            _log_source_audio(audio_writer, datamodule, sample, request["task"], tag, step)
+        if context.audio_writer is not None:
+            _log_source_audio(
+                context.audio_writer,
+                context.datamodule,
+                context.sample,
+                context.request["task"],
+                context.tag,
+                context.step,
+            )
         generated_text = self._log_generation_payload(
-            audio_writer,
-            datamodule,
-            module,
-            row_batch,
-            sample,
-            request,
-            result,
+            context,
             result_metadata,
             prediction,
             metrics,
-            tag=tag,
-            step=step,
         )
         self._write_row_outputs(
-            audio_writer,
-            scalar_writer,
-            text_writer,
-            datamodule,
-            row_batch,
-            dataset_index,
-            sample,
-            request,
-            result,
-            generation_metadata,
+            context,
             result_metadata,
             metrics,
             status=status,
             generated_text=generated_text,
-            tag=tag,
-            step=step,
         )
 
     def _log_generation_payload(
         self,
-        audio_writer: Any | None,
-        datamodule: _DataModule,
-        module: _Module,
-        row_batch: ModelBatch,
-        sample: types.Sample,
-        request: Request,
-        result: Result,
+        context: _RowLogContext,
         result_metadata: Mapping[str, Any],
         prediction: PredictionModality,
         metrics: dict[str, float],
-        *,
-        tag: str,
-        step: int,
     ) -> str | None:
-        audio = result["audio"]
-        decode_error = result.get("decode_error")
+        audio = context.result["audio"]
+        decode_error = context.result.get("decode_error")
         if audio is None:
             return self._log_text_or_partial_audio(
-                audio_writer,
-                datamodule,
-                module,
-                row_batch,
-                sample,
-                request,
-                result,
+                context,
                 result_metadata,
                 prediction,
                 metrics,
                 decode_error,
-                tag=tag,
-                step=step,
             )
         metrics["generation/stopped_without_eoa"] = float(
             result_metadata["stopped_without_eoa"]
@@ -467,14 +443,14 @@ class TaskSampleLogger(Callback):
         metrics["generation/audio_available"] = 1.0
         metrics["generation/audio_decode_failed"] = 0.0
         target_audio = _log_target_reference_audio(
-            audio_writer,
-            datamodule,
-            module,
-            row_batch,
-            sample,
-            request["task"],
-            tag,
-            step,
+            context.audio_writer,
+            context.datamodule,
+            context.module,
+            context.row_batch,
+            context.sample,
+            context.request["task"],
+            context.tag,
+            context.step,
         )
         metrics.update(
             audio_metrics(
@@ -491,20 +467,11 @@ class TaskSampleLogger(Callback):
 
     def _log_text_or_partial_audio(
         self,
-        audio_writer: Any | None,
-        datamodule: _DataModule,
-        module: _Module,
-        row_batch: ModelBatch,
-        sample: types.Sample,
-        request: Request,
-        result: Result,
+        context: _RowLogContext,
         result_metadata: Mapping[str, Any],
         prediction: PredictionModality,
         metrics: dict[str, float],
         decode_error: Mapping[str, str] | None,
-        *,
-        tag: str,
-        step: int,
     ) -> str | None:
         if prediction.supervises_audio:
             metrics["generation/stopped_without_eoa"] = float(
@@ -513,24 +480,30 @@ class TaskSampleLogger(Callback):
             metrics["generation/audio_available"] = 0.0
             if decode_error is not None:
                 metrics["generation/audio_decode_failed"] = 1.0
-            if audio_writer is not None:
+            if context.audio_writer is not None:
                 _log_target_reference_audio(
-                    audio_writer,
-                    datamodule,
-                    module,
-                    row_batch,
-                    sample,
-                    request["task"],
-                    tag,
-                    step,
+                    context.audio_writer,
+                    context.datamodule,
+                    context.module,
+                    context.row_batch,
+                    context.sample,
+                    context.request["task"],
+                    context.tag,
+                    context.step,
                 )
             if prediction.supervises_text:
-                return _decode_chat_template(datamodule, result["response_ids"])
+                return _decode_chat_template(
+                    context.datamodule,
+                    context.result["response_ids"],
+                )
             return None
         if not prediction.supervises_text:
             return None
-        generated_text = _generated_text(datamodule, result["response_ids"])
-        target_text = _target_text(sample, request["task"])
+        generated_text = _generated_text(
+            context.datamodule,
+            context.result["response_ids"],
+        )
+        target_text = _target_text(context.sample, context.request["task"])
         if generated_text is not None and target_text is not None:
             metrics.update(text_metrics(target_text, generated_text))
         metrics["generation/stopped_without_eos"] = float(
@@ -540,88 +513,77 @@ class TaskSampleLogger(Callback):
 
     def _write_row_outputs(
         self,
-        audio_writer: Any | None,
-        scalar_writer: Any | None,
-        text_writer: Any | None,
-        datamodule: _DataModule,
-        row_batch: ModelBatch,
-        dataset_index: int,
-        sample: types.Sample,
-        request: Request,
-        result: Result,
-        generation_metadata: Mapping[str, Any],
+        context: _RowLogContext,
         result_metadata: Mapping[str, Any],
         metrics: Mapping[str, float],
         *,
         status: str,
         generated_text: str | None,
-        tag: str,
-        step: int,
     ) -> None:
-        if scalar_writer is not None:
+        if context.scalar_writer is not None:
             for name, value in metrics.items():
-                scalar_writer.add_scalar(f"{tag}/{name}", value, step)
-        if text_writer is not None:
-            text_writer.add_text(
-                f"{tag}/metadata",
+                context.scalar_writer.add_scalar(
+                    f"{context.tag}/{name}",
+                    value,
+                    context.step,
+                )
+        if context.text_writer is not None:
+            context.text_writer.add_text(
+                f"{context.tag}/metadata",
                 _metadata_json(
                     _sample_log_record(
-                        datamodule,
-                        row_batch,
-                        dataset_index,
-                        sample,
-                        request,
+                        context.datamodule,
+                        context.row_batch,
+                        context.dataset_index,
+                        context.sample,
+                        context.request,
                         status=status,
-                        generation_settings=generation_metadata,
+                        generation_settings=context.generation_metadata,
                         result_metadata=result_metadata,
-                        response_ids=result["response_ids"],
+                        response_ids=context.result["response_ids"],
                         generated_text=generated_text,
                         metrics=metrics,
                     )
                 ),
-                step,
+                context.step,
             )
-        audio = result["audio"]
-        if audio is not None and audio_writer is not None:
-            audio_writer.add_audio(
-                f"{tag}/generated",
+        audio = context.result["audio"]
+        if audio is not None and context.audio_writer is not None:
+            context.audio_writer.add_audio(
+                f"{context.tag}/generated",
                 audio["waveform"].detach().cpu(),
-                step,
+                context.step,
                 sample_rate=audio["sample_rate"],
             )
-        elif text_writer is not None:
-            self._write_text_fallback(
-                text_writer,
-                sample,
-                request,
-                result,
-                generated_text,
-                tag=tag,
-                step=step,
-            )
+        elif context.text_writer is not None:
+            self._write_text_fallback(context, generated_text)
 
     def _write_text_fallback(
         self,
-        text_writer: Any,
-        sample: types.Sample,
-        request: Request,
-        result: Result,
+        context: _RowLogContext,
         generated_text: str | None,
-        *,
-        tag: str,
-        step: int,
     ) -> None:
-        if _prediction_modality(request).supervises_text:
-            target_text = _target_text(sample, request["task"])
+        if context.text_writer is None:
+            return
+        if _prediction_modality(context.request).supervises_text:
+            target_text = _target_text(context.sample, context.request["task"])
             if target_text is not None:
-                text_writer.add_text(f"{tag}/target", target_text, step)
-        text_writer.add_text(
-            f"{tag}/generated_ids",
-            " ".join(str(value) for value in result["response_ids"].tolist()),
-            step,
+                context.text_writer.add_text(
+                    f"{context.tag}/target",
+                    target_text,
+                    context.step,
+                )
+        context.text_writer.add_text(
+            f"{context.tag}/generated_ids",
+            " ".join(str(value) for value in context.result["response_ids"].tolist()),
+            context.step,
         )
         if generated_text is not None:
-            text_writer.add_text(f"{tag}/generated", generated_text, step)
+            context.text_writer.add_text(
+                f"{context.tag}/generated",
+                generated_text,
+                context.step,
+            )
 
     def _tag(self, dataset_index: int) -> str:
         return f"sample/{self.task.value}/{dataset_index}"

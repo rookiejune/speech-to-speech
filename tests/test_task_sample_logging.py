@@ -21,15 +21,16 @@ from anytrain.codec import AcousticLayout, SemanticAcousticCodes
 from anytrain.module.idspace import Layout
 
 from speech_to_speech.callback.logging import TaskSampleLogger
+from speech_to_speech.callback.logging._sample_metrics import audio_metrics, text_metrics
 from speech_to_speech.callback.logging.task_sample import (
     _log_source_audio,
     _log_target_audio,
     _request_metadata,
     _target_text,
 )
-from speech_to_speech.callback.logging._sample_metrics import audio_metrics, text_metrics
-from speech_to_speech.generation import Request, decode_reference_codes
 from speech_to_speech.datamodule import SampleSplit
+from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
+from speech_to_speech.datamodule.module import DataModule, LoaderSpec
 from speech_to_speech.datamodule.types import (
     Language,
     ModelBatch,
@@ -38,6 +39,7 @@ from speech_to_speech.datamodule.types import (
     SpeechTaskSample,
     Text,
 )
+from speech_to_speech.generation import Request, Result, decode_reference_codes
 from speech_to_speech.task import Task
 
 
@@ -47,52 +49,20 @@ class TaskSampleLoggingTest(unittest.TestCase):
         return_value=True,
     )
     def test_materialization_oom_records_the_diagnostic_batch(self, report_oom):
-        sample = _sample()
-        diagnostic_batch = RawSpeechBatch(
-            samples=(
-                SpeechTaskSample(
-                    source=Text(torch.tensor([1, 2]), Language.EN),
-                    target=RawSpeech(
-                        text_token_ids=torch.tensor([3]),
-                        waveform=torch.zeros(2, 160),
-                        sample_rate=16_000,
-                        language=Language.EN,
-                    ),
-                    task=Task.TTS,
-                    prediction=Task.TTS.prediction_modality,
-                ),
-            ),
-            pad_token_id=0,
-        )
-        datamodule = SimpleNamespace(
-            runtime=SimpleNamespace(),
-            diagnostic_samples=Mock(return_value=[sample]),
-            diagnostic_collator=Mock(
-                return_value=Mock(return_value=diagnostic_batch)
-            ),
-        )
-        experiment = Mock()
-        trainer = SimpleNamespace(
-            global_step=10,
-            is_global_zero=True,
-            logger=SimpleNamespace(experiment=experiment),
-            datamodule=datamodule,
-        )
+        diagnostic_batch = _raw_speech_batch()
         error = torch.OutOfMemoryError("codec allocation failed")
-        module = SimpleNamespace(
-            materialize_batch=Mock(side_effect=error),
-            generate=Mock(),
-        )
-        callback = TaskSampleLogger(
-            [0],
-            every_n_steps=1,
+        ctx = _started_logger(
+            diagnostic_batch,
+            Task.TTS,
+            sample=_sample(),
+            materialize=error,
             loader_name="tts",
-            task=Task.TTS,
         )
 
-        callback.on_fit_start(trainer, module)
         with self.assertRaises(torch.OutOfMemoryError) as raised:
-            callback.on_train_batch_start(trainer, module, diagnostic_batch, 0)
+            ctx.callback.on_train_batch_start(
+                ctx.trainer, ctx.module, diagnostic_batch, 0
+            )
 
         self.assertIs(raised.exception, error)
         report_oom.assert_called_once()
@@ -106,51 +76,26 @@ class TaskSampleLoggingTest(unittest.TestCase):
             inputs["samples"][0]["target"]["waveform"]["shape"],
             [2, 160],
         )
-        module.generate.assert_not_called()
+        ctx.module.generate.assert_not_called()
 
     @patch(
         "speech_to_speech.callback.logging.task_sample.report_oom",
         return_value=True,
     )
     def test_generation_oom_records_the_fixed_sample_context(self, report_oom):
-        sample = _sample()
-        batch = ModelBatch(
-            input_ids=torch.tensor([[1, 2]]),
-            token_labels=torch.tensor([[-100, 2]]),
-            acoustic_target=None,
-            tasks=[Task.TTS],
-            predictions=[Task.TTS.prediction_modality],
-            pad_token_id=0,
-        )
-        datamodule = SimpleNamespace(
-            runtime=SimpleNamespace(),
-            diagnostic_samples=Mock(return_value=[sample]),
-            diagnostic_collator=Mock(return_value=Mock(return_value=batch)),
-        )
-        experiment = Mock()
-        trainer = SimpleNamespace(
-            global_step=10,
-            is_global_zero=True,
-            logger=SimpleNamespace(experiment=experiment),
-            datamodule=datamodule,
-        )
+        batch = _batch(Task.TTS)
         error = torch.OutOfMemoryError("generation allocation failed")
-        module = SimpleNamespace(
-            materialize_batch=Mock(side_effect=lambda value: value),
-            generate=Mock(side_effect=error),
-        )
-        callback = TaskSampleLogger(
-            [0],
-            every_n_steps=1,
+        ctx = _started_logger(
+            batch,
+            Task.TTS,
+            generate=error,
             loader_name="tts",
-            task=Task.TTS,
             max_new_tokens=32,
             do_sample=False,
         )
 
-        callback.on_fit_start(trainer, module)
         with self.assertRaises(torch.OutOfMemoryError) as raised:
-            callback.on_train_batch_start(trainer, module, batch, 0)
+            ctx.callback.on_train_batch_start(ctx.trainer, ctx.module, batch, 0)
 
         self.assertIs(raised.exception, error)
         report_oom.assert_called_once()
@@ -166,208 +111,93 @@ class TaskSampleLoggingTest(unittest.TestCase):
             report_oom.call_args.kwargs["inputs"]["max_new_tokens"],
             32,
         )
-        experiment.add_text.assert_not_called()
+        ctx.experiment.add_text.assert_not_called()
 
     def test_train_mt_panel_logs_translation_and_text_metrics(self):
-        sample = {
-            (Role.SOURCE, Modality.TEXT): TextItem(
-                views={TextView.TEXT: "hello source"},
-                meta={TextMeta.LANG: Lang.ZH},
-            ),
-            (Role.TARGET, Modality.TEXT): TextItem(
-                views={TextView.TEXT: "hello"},
-                meta={TextMeta.LANG: Lang.EN},
-            ),
-        }
-        batch = ModelBatch(
-            input_ids=torch.tensor([[1, 2]]),
-            token_labels=torch.tensor([[-100, 2]]),
-            acoustic_target=None,
-            tasks=[Task.MT],
-            predictions=[Task.MT.prediction_modality],
-            pad_token_id=0,
-        )
-        datamodule = SimpleNamespace(
-            runtime=SimpleNamespace(
-                layout=Layout(text=(0, 10), audio=(10, 20)),
-                text_tokenizer=SimpleNamespace(decode=Mock(return_value="hello")),
-            ),
-            diagnostic_samples=Mock(return_value=[sample]),
-            diagnostic_collator=Mock(return_value=Mock(return_value=batch)),
-        )
-        experiment = Mock()
-        trainer = SimpleNamespace(
-            global_step=10,
-            is_global_zero=True,
-            logger=SimpleNamespace(experiment=experiment),
-            datamodule=datamodule,
-        )
-        module = SimpleNamespace(
-            model=Mock(),
-            materialize_batch=Mock(side_effect=lambda value: value),
-            generate=Mock(
-                return_value=[{"response_ids": torch.tensor([1]), "audio": None}]
-            ),
-        )
-        callback = TaskSampleLogger(
-            [0],
-            every_n_steps=1,
+        batch = _batch(Task.MT)
+        ctx = _started_logger(
+            batch,
+            Task.MT,
+            sample=_text_sample("hello source", "hello"),
+            runtime=_text_runtime(),
+            results=[_text_result()],
             loader_name="mt",
             split=SampleSplit.TRAIN,
-            task=Task.MT,
             do_sample=False,
         )
 
-        callback.on_fit_start(trainer, module)
-        callback.on_train_batch_start(trainer, module, batch, 0)
+        ctx.callback.on_train_batch_start(ctx.trainer, ctx.module, batch, 0)
 
-        datamodule.diagnostic_samples.assert_called_once_with(
+        ctx.datamodule.diagnostic_samples.assert_called_once_with(
             [0], split=SampleSplit.TRAIN, loader_name="mt"
         )
-        datamodule.diagnostic_collator.assert_called_once_with(
+        ctx.datamodule.diagnostic_collator.assert_called_once_with(
             Task.MT, split=SampleSplit.TRAIN, loader_name="mt"
         )
-        experiment.add_audio.assert_not_called()
-        text_tags = {call.args[0] for call in experiment.add_text.call_args_list}
+        ctx.experiment.add_audio.assert_not_called()
+        text_tags = _tags(ctx.experiment.add_text)
         self.assertIn("sample/mt/0/target", text_tags)
         self.assertIn("sample/mt/0/generated", text_tags)
-        scalar_tags = {call.args[0] for call in experiment.add_scalar.call_args_list}
-        self.assertIn("sample/mt/0/text/cer", scalar_tags)
+        self.assertIn("sample/mt/0/text/cer", _tags(ctx.experiment.add_scalar))
 
     def test_validation_asr_panel_logs_source_and_model_free_metrics(self):
-        sample = _sample()
-        batch = ModelBatch(
-            input_ids=torch.tensor([[1, 2]]),
-            token_labels=torch.tensor([[-100, 2]]),
-            acoustic_target=None,
-            tasks=[Task.ASR],
-            predictions=[Task.ASR.prediction_modality],
-            pad_token_id=0,
-        )
+        batch = _batch(Task.ASR)
         codec = _StructuredCodec()
-        datamodule = SimpleNamespace(
-            runtime=SimpleNamespace(
+        ctx = _started_logger(
+            batch,
+            Task.ASR,
+            runtime=_text_runtime(
                 codec=codec,
                 audio_view=AudioView.BICODEC,
-                layout=Layout(text=(0, 10), audio=(10, 20)),
-                text_tokenizer=SimpleNamespace(
-                    decode=Mock(return_value="hello")
-                ),
             ),
-            diagnostic_samples=Mock(return_value=[sample]),
-            diagnostic_collator=Mock(return_value=Mock(return_value=batch)),
-        )
-        experiment = Mock()
-        trainer = SimpleNamespace(
-            global_step=10,
-            is_global_zero=True,
-            logger=SimpleNamespace(experiment=experiment),
-            datamodule=datamodule,
-        )
-        module = SimpleNamespace(
-            model=Mock(),
-            materialize_batch=Mock(side_effect=lambda value: value),
-            generate=Mock(
-                return_value=[
-                    {"response_ids": torch.tensor([1]), "audio": None}
-                ]
-            ),
-        )
-        callback = TaskSampleLogger(
-            [0],
-            every_n_steps=1,
+            results=[_text_result()],
             loader_name="asr",
             split=SampleSplit.VALIDATION,
-            task=Task.ASR,
             seed=7,
             do_sample=False,
         )
 
-        callback.on_fit_start(trainer, module)
-        callback.on_train_batch_start(trainer, module, batch, 0)
+        ctx.callback.on_train_batch_start(ctx.trainer, ctx.module, batch, 0)
 
-        datamodule.diagnostic_samples.assert_called_once_with(
+        ctx.datamodule.diagnostic_samples.assert_called_once_with(
             [0], split=SampleSplit.VALIDATION, loader_name="asr"
         )
-        datamodule.diagnostic_collator.assert_called_once_with(
+        ctx.datamodule.diagnostic_collator.assert_called_once_with(
             Task.ASR, split=SampleSplit.VALIDATION, loader_name="asr"
         )
         self.assertEqual(
-            experiment.add_audio.call_args.args[0],
+            ctx.experiment.add_audio.call_args.args[0],
             "sample/asr/0/source",
         )
-        scalar_tags = {call.args[0] for call in experiment.add_scalar.call_args_list}
-        self.assertIn(
-            "sample/asr/0/text/cer", scalar_tags
-        )
+        scalar_tags = _tags(ctx.experiment.add_scalar)
+        self.assertIn("sample/asr/0/text/cer", scalar_tags)
         self.assertIn(
             "sample/asr/0/generation/response_tokens",
             scalar_tags,
         )
-        metadata = experiment.add_text.call_args_list[0].args[1]
+        metadata = ctx.experiment.add_text.call_args_list[0].args[1]
         self.assertIn('"seed": 7', metadata)
-        self.assertIn("validation", callback.state_key)
+        self.assertIn("validation", ctx.callback.state_key)
 
     def test_tts_decode_error_logs_partial_audio_metadata(self):
-        sample = _sample()
-        batch = ModelBatch(
-            input_ids=torch.tensor([[1, 2, 3]]),
-            token_labels=torch.tensor([[-100, 2, 3]]),
-            acoustic_target=None,
-            tasks=[Task.TTS],
-            predictions=[Task.TTS.prediction_modality],
-            pad_token_id=0,
-        )
+        batch = _batch(Task.TTS, input_ids=[1, 2, 3], token_labels=[-100, 2, 3])
         codec = _StructuredCodec()
-        datamodule = SimpleNamespace(
+        ctx = _started_logger(
+            batch,
+            Task.TTS,
             runtime=SimpleNamespace(
                 codec=codec,
                 audio_view=AudioView.BICODEC,
             ),
-            diagnostic_samples=Mock(return_value=[sample]),
-            diagnostic_collator=Mock(return_value=Mock(return_value=batch)),
-        )
-        experiment = Mock()
-        trainer = SimpleNamespace(
-            global_step=10,
-            is_global_zero=True,
-            logger=SimpleNamespace(experiment=experiment),
-            datamodule=datamodule,
-        )
-        module = SimpleNamespace(
-            model=Mock(),
-            materialize_batch=Mock(side_effect=lambda value: value),
-            generate=Mock(
-                return_value=[
-                    {
-                        "response_ids": torch.tensor([11, 12]),
-                        "audio": None,
-                        "decode_error": {
-                            "type": "ValueError",
-                            "message": "incomplete",
-                        },
-                    }
-                ]
-            ),
-        )
-        callback = TaskSampleLogger(
-            [0],
-            every_n_steps=1,
+            results=[_decode_error_result()],
             loader_name="tts",
-            task=Task.TTS,
             max_new_tokens=2,
             do_sample=False,
         )
 
-        callback.on_fit_start(trainer, module)
-        callback.on_train_batch_start(trainer, module, batch, 0)
+        ctx.callback.on_train_batch_start(ctx.trainer, ctx.module, batch, 0)
 
-        metadata_text = next(
-            call.args[1]
-            for call in experiment.add_text.call_args_list
-            if call.args[0] == "sample/tts/0/metadata"
-        )
-        metadata = json.loads(metadata_text)
+        metadata = _metadata(ctx.experiment, "sample/tts/0/metadata")
         generation = metadata["generation"]
         self.assertEqual(generation["status"], "partial")
         self.assertIs(generation["result"]["audio_decode_failed"], True)
@@ -381,7 +211,7 @@ class TaskSampleLoggingTest(unittest.TestCase):
             "generation/audio_decode_failed",
             generation["metrics"],
         )
-        scalar_tags = {call.args[0] for call in experiment.add_scalar.call_args_list}
+        scalar_tags = _tags(ctx.experiment.add_scalar)
         self.assertIn(
             "sample/tts/0/generation/audio_decode_failed",
             scalar_tags,
@@ -394,11 +224,120 @@ class TaskSampleLoggingTest(unittest.TestCase):
             "sample/tts/0/generation/stopped_without_eos",
             scalar_tags,
         )
-        text_tags = {call.args[0] for call in experiment.add_text.call_args_list}
-        self.assertIn("sample/tts/0/generated_ids", text_tags)
+        self.assertIn("sample/tts/0/generated_ids", _tags(ctx.experiment.add_text))
+
+    def test_task_sample_logger_reuses_one_generation_result(self):
+        batch = _batch(
+            Task.TTS,
+            input_ids=[1, 6, 4, 7],
+            token_labels=[-100, -100, 4, 7],
+        )
+        result = Result(
+            response_ids=torch.tensor([4]),
+            audio={
+                "features": torch.zeros(1, 2),
+                "waveform": torch.zeros(1, 8),
+                "sample_rate": 16_000,
+            },
+        )
+        ctx = _started_logger(
+            batch,
+            Task.TTS,
+            sample=_longcat_tts_sample(),
+            runtime=_longcat_runtime(),
+            results=[result],
+            experiment=Mock(),
+            global_step=1,
+            loader_name="tts",
+        )
+
+        ctx.callback.on_train_batch_start(ctx.trainer, ctx.module, None, 0)
+
+        ctx.module.generate.assert_called_once()
+        self.assertEqual(ctx.experiment.add_audio.call_count, 2)
+        audio_call = ctx.experiment.add_audio.call_args_list[1]
+        self.assertEqual(audio_call.args[0], "sample/tts/0/generated")
+        self.assertTrue(torch.equal(audio_call.args[1], result["audio"]["waveform"]))
+        self.assertEqual(audio_call.args[2], 1)
+        self.assertEqual(audio_call.kwargs, {"sample_rate": 16_000})
+        ctx.experiment.add_text.assert_called_once()
+        metadata = _metadata(ctx.experiment, "sample/tts/0/metadata")
+        self.assertEqual(set(metadata), {"chat_template", "labels", "generation"})
+        self.assertEqual(metadata["chat_template"]["task"], "tts")
+        self.assertEqual(metadata["chat_template"]["dataset_index"], 0)
+        self.assertEqual(metadata["chat_template"]["prompt_ids"]["ids"], [1, 6])
+        self.assertEqual(metadata["chat_template"]["text"], "generated<audio>")
+        self.assertEqual(metadata["labels"]["supervised_token_ids"]["ids"], [4, 7])
+        self.assertEqual(metadata["generation"]["status"], "ok")
+        self.assertEqual(metadata["generation"]["response_ids"]["ids"], [4])
+        self.assertEqual(metadata["generation"]["result"]["duration_seconds"], 0.0005)
+        self.assertTrue(metadata["generation"]["result"]["waveform_finite"])
+
+    def test_task_sample_logger_loads_samples_from_real_datamodule(self):
+        samples = [Mock(), Mock()]
+        config = SpeechConfig(
+            codec="longcat",
+            dataloader=DataLoaderConfig(batch_size=1, num_workers=0),
+        )
+        datamodule = DataModule(
+            SimpleNamespace(codec_name="longcat"),
+            {"train": LoaderSpec.speech(config, {Task.TTS: 1.0})},
+        )
+        with patch(
+            "speech_to_speech.datamodule.module.load_dataset",
+            return_value=samples,
+        ):
+            datamodule.setup()
+        trainer = SimpleNamespace(is_global_zero=True, datamodule=datamodule)
+        callback = _logger(Task.TTS, loader_name="train", indices=[1, 0])
+
+        callback.on_fit_start(trainer, SimpleNamespace())
+
+        self.assertEqual(callback.samples, [samples[1], samples[0]])
+
+    def test_task_sample_logger_state_key_distinguishes_fixed_loaders(self):
+        asr = _logger(Task.ASR, loader_name="asr", every_n_steps=10)
+        same_asr = _logger(Task.ASR, loader_name="asr", every_n_steps=10)
+        tts = _logger(Task.TTS, loader_name="tts", every_n_steps=10)
+
+        self.assertEqual(asr.state_key, same_asr.state_key)
+        self.assertNotEqual(asr.state_key, tts.state_key)
+
+    def test_task_sample_logger_logs_generation_failure(self):
+        batch = _batch(Task.T2TT)
+        ctx = _started_logger(batch, Task.T2TT, generate=RuntimeError("boom"))
+
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            ctx.callback.on_train_batch_start(ctx.trainer, ctx.module, None, 0)
+
+        ctx.experiment.add_text.assert_called_once()
+        metadata = _metadata(ctx.experiment)
+        self.assertEqual(metadata["generation"]["status"], "failed")
+        self.assertEqual(metadata["generation"]["error"]["type"], "RuntimeError")
+        self.assertEqual(metadata["labels"]["supervised_token_ids"]["ids"], [2])
+
+    def test_task_sample_logger_logs_row_count_mismatch(self):
+        batch = _batch(Task.T2TT)
+        ctx = _started_logger(batch, Task.T2TT, results=[])
+
+        with self.assertRaisesRegex(RuntimeError, "wrong row count"):
+            ctx.callback.on_train_batch_start(ctx.trainer, ctx.module, None, 0)
+
+        metadata = _metadata(ctx.experiment)
+        self.assertEqual(metadata["generation"]["status"], "failed")
+        self.assertIn("wrong row count", metadata["generation"]["error"]["message"])
+
+    def test_task_sample_logger_skips_nonzero_ranks(self):
+        module = SimpleNamespace(generate=Mock())
+        trainer = SimpleNamespace(global_step=1, is_global_zero=False)
+        callback = _logger(Task.T2TT)
+
+        callback.on_train_batch_start(trainer, module, None, 0)
+
+        module.generate.assert_not_called()
 
     def test_text_metrics_are_model_free_and_normalized(self):
-        metrics = text_metrics(" Ｈｅｌｌｏ  WORLD！ " , "hello world!")
+        metrics = text_metrics(" Ｈｅｌｌｏ  WORLD！ ", "hello world!")
 
         self.assertEqual(metrics["text/cer"], 0.0)
         self.assertEqual(metrics["text/exact_match"], 1.0)
@@ -451,10 +390,14 @@ class TaskSampleLoggingTest(unittest.TestCase):
             meta={AudioMeta.DURATION: 1.0},
         )
 
-        metadata = _request_metadata(3, sample, Request(
-            prompt_ids=torch.tensor([1, 2]),
-            task=Task.ASR,
-        ))
+        metadata = _request_metadata(
+            3,
+            sample,
+            Request(
+                prompt_ids=torch.tensor([1, 2]),
+                task=Task.ASR,
+            ),
+        )
 
         self.assertEqual(metadata["source"]["view"], AudioView.WAVEFORM.value)
         self.assertEqual(metadata["source"]["sample_rate"], 8)
@@ -535,6 +478,218 @@ class _FrameCodec:
     def decode(self, codes: torch.Tensor) -> torch.Tensor:
         self.decoded = codes
         return codes[..., 0].float()
+
+
+def _batch(
+    task: Task,
+    *,
+    input_ids: list[int] | None = None,
+    token_labels: list[int] | None = None,
+) -> ModelBatch:
+    input_ids = [1, 2] if input_ids is None else input_ids
+    token_labels = [-100, 2] if token_labels is None else token_labels
+    return ModelBatch(
+        input_ids=torch.tensor([input_ids]),
+        token_labels=torch.tensor([token_labels]),
+        acoustic_target=None,
+        tasks=[task],
+        predictions=[task.prediction_modality],
+        pad_token_id=0,
+    )
+
+
+def _started_logger(
+    batch: object,
+    task: Task,
+    *,
+    sample: object | None = None,
+    runtime: object | None = None,
+    results: list[object] | None = None,
+    generate: Exception | None = None,
+    materialize: Exception | None = None,
+    experiment: object | None = None,
+    global_step: int = 10,
+    loader_name: str = "train",
+    split: SampleSplit = SampleSplit.TRAIN,
+    **logger_kwargs: object,
+):
+    datamodule = _datamodule(batch, sample=sample, runtime=runtime)
+    trainer, experiment = _trainer(
+        datamodule,
+        experiment=experiment,
+        global_step=global_step,
+    )
+    module = _module(results, generate=generate, materialize=materialize)
+    callback = _logger(
+        task,
+        loader_name=loader_name,
+        split=split,
+        **logger_kwargs,
+    )
+    callback.on_fit_start(trainer, module)
+    return SimpleNamespace(
+        callback=callback,
+        datamodule=datamodule,
+        experiment=experiment,
+        module=module,
+        trainer=trainer,
+    )
+
+
+def _raw_speech_batch() -> RawSpeechBatch:
+    return RawSpeechBatch(
+        samples=(
+            SpeechTaskSample(
+                source=Text(torch.tensor([1, 2]), Language.EN),
+                target=RawSpeech(
+                    text_token_ids=torch.tensor([3]),
+                    waveform=torch.zeros(2, 160),
+                    sample_rate=16_000,
+                    language=Language.EN,
+                ),
+                task=Task.TTS,
+                prediction=Task.TTS.prediction_modality,
+            ),
+        ),
+        pad_token_id=0,
+    )
+
+
+def _datamodule(
+    batch: object,
+    *,
+    sample: object | None = None,
+    runtime: object | None = None,
+):
+    return SimpleNamespace(
+        runtime=SimpleNamespace() if runtime is None else runtime,
+        diagnostic_samples=Mock(return_value=[_sample() if sample is None else sample]),
+        diagnostic_collator=Mock(return_value=Mock(return_value=batch)),
+    )
+
+
+def _trainer(
+    datamodule: object,
+    *,
+    experiment: object | None = None,
+    global_step: int = 10,
+    is_global_zero: bool = True,
+):
+    experiment = Mock() if experiment is None else experiment
+    return (
+        SimpleNamespace(
+            global_step=global_step,
+            is_global_zero=is_global_zero,
+            logger=SimpleNamespace(experiment=experiment),
+            datamodule=datamodule,
+        ),
+        experiment,
+    )
+
+
+def _module(
+    results: list[object] | None = None,
+    *,
+    generate: Exception | None = None,
+    materialize: Exception | None = None,
+):
+    return SimpleNamespace(
+        model=Mock(),
+        materialize_batch=Mock(
+            side_effect=materialize if materialize is not None else lambda value: value
+        ),
+        generate=Mock(
+            side_effect=generate,
+            return_value=[] if results is None else results,
+        ),
+    )
+
+
+def _logger(
+    task: Task,
+    *,
+    indices: list[int] | None = None,
+    every_n_steps: int = 1,
+    loader_name: str = "train",
+    split: SampleSplit = SampleSplit.TRAIN,
+    **kwargs,
+) -> TaskSampleLogger:
+    return TaskSampleLogger(
+        [0] if indices is None else indices,
+        every_n_steps=every_n_steps,
+        loader_name=loader_name,
+        split=split,
+        task=task,
+        **kwargs,
+    )
+
+
+def _metadata(experiment: Mock, tag: str | None = None):
+    if tag is None:
+        return json.loads(experiment.add_text.call_args.args[1])
+    text = next(
+        call.args[1]
+        for call in experiment.add_text.call_args_list
+        if call.args[0] == tag
+    )
+    return json.loads(text)
+
+
+def _tags(writer: Mock) -> set[str]:
+    return {call.args[0] for call in writer.call_args_list}
+
+
+def _longcat_runtime():
+    return SimpleNamespace(
+        codec=_FrameCodec(),
+        audio_view=AudioView.LONGCAT,
+        layout=Layout(text=(0, 4), audio=(4, 8)),
+        text_tokenizer=SimpleNamespace(decode=Mock(return_value="generated")),
+    )
+
+
+def _text_runtime(decoded: str = "hello", **kwargs: object):
+    values = {
+        "layout": Layout(text=(0, 10), audio=(10, 20)),
+        "text_tokenizer": SimpleNamespace(decode=Mock(return_value=decoded)),
+    }
+    values.update(kwargs)
+    return SimpleNamespace(**values)
+
+
+def _text_result(token_id: int = 1):
+    return {"response_ids": torch.tensor([token_id]), "audio": None}
+
+
+def _decode_error_result():
+    return {
+        "response_ids": torch.tensor([11, 12]),
+        "audio": None,
+        "decode_error": {
+            "type": "ValueError",
+            "message": "incomplete",
+        },
+    }
+
+
+def _text_item(text: str, lang: Lang) -> TextItem:
+    return TextItem(views={TextView.TEXT: text}, meta={TextMeta.LANG: lang})
+
+
+def _text_sample(source: str, target: str):
+    return {
+        (Role.SOURCE, Modality.TEXT): _text_item(source, Lang.ZH),
+        (Role.TARGET, Modality.TEXT): _text_item(target, Lang.EN),
+    }
+
+
+def _longcat_tts_sample():
+    sample = _text_sample("source", "target")
+    sample[(Role.TARGET, Modality.AUDIO)] = AudioItem(
+        views={AudioView.LONGCAT: torch.zeros(1, 2, dtype=torch.long)},
+        meta={AudioMeta.DURATION: 0.02},
+    )
+    return sample
 
 
 def _sample():

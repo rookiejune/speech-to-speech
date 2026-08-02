@@ -300,39 +300,19 @@ class _BatchObjective(Objective[Any]):
 
 class ModelLossContractTest(unittest.TestCase):
     def test_bicodec_grouped_loss_restricts_each_prediction_head(self):
-        tokenizer = BiCodecAudioTokenizer(
-            semantic_vocab_size=4,
-            acoustic_codebook_sizes=(2,),
-            acoustic_unit_length=1,
-        )
-        layout = Layout(text=(0, 4), audio=(4, 4 + tokenizer.vocab_size))
-        codes = SemanticAcousticCodes(
-            semantic=torch.tensor([[1]]),
-            acoustic=torch.tensor([[0]]),
-        )
-        local_ids, local_groups = tokenizer.encode_streams_with_groups(
-            codes,
-            (AudioStream.ACOUSTIC, AudioStream.SEMANTIC),
-        )
-        global_ids = layout.to_global(Modality.AUDIO.value, local_ids)
-        input_ids = torch.cat((torch.tensor([1]), global_ids)).unsqueeze(0)
-        labels = torch.full_like(input_ids, -100)
-        groups = torch.full_like(input_ids, -1)
-        supervised = local_groups.ge(0)
-        labels[0, 1:][supervised] = global_ids[supervised]
-        groups[0, 1:][supervised] = local_groups[supervised]
+        case = _bicodec_group_case()
         calls: list[Tensor] = []
 
         def selected(hidden: Tensor, allowed: Tensor) -> Tensor:
             calls.append(allowed.detach().clone())
             return torch.zeros(hidden.size(0), allowed.numel())
 
-        item = TokenLoss(layout, tokenizer)(
-            torch.zeros(1, input_ids.size(1), 3),
-            labels,
+        item = TokenLoss(case.layout, case.tokenizer)(
+            torch.zeros(1, case.input_ids.size(1), 3),
+            case.labels,
             Modality.AUDIO,
             lambda hidden, modality: torch.empty(0),
-            token_groups=groups,
+            token_groups=case.groups,
             selected_logits=selected,
         )
 
@@ -340,9 +320,9 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         expected = {
             tuple(
-                layout.to_global(
+                case.layout.to_global(
                     Modality.AUDIO.value,
-                    tokenizer.prediction_ids(group, device=torch.device("cpu")),
+                    case.tokenizer.prediction_ids(group, device=torch.device("cpu")),
                 ).tolist()
             )
             for group in (0, 1, 2)
@@ -365,9 +345,7 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertEqual(model.project_audio_calls, 1)
         self.assertEqual(model.logit_modalities, [Modality.AUDIO, Modality.TEXT])
         self.assertEqual(model.logit_rows, 2)
-        details = outputs["token"].details
-        if details is None:
-            self.fail("token loss details are unavailable")
+        details = _require_details(self, outputs["token"], "token loss")
         self.assertEqual(float(details["text_tokens"].sum()), 1.0)
         self.assertEqual(float(details["audio_tokens"].sum()), 1.0)
 
@@ -388,46 +366,24 @@ class ModelLossContractTest(unittest.TestCase):
             {Modality.TEXT, Modality.AUDIO},
         )
         self.assertEqual(model.logit_rows, 3)
-        details = outputs["token"].details
-        if details is None:
-            self.fail("token loss details are unavailable")
+        details = _require_details(self, outputs["token"], "token loss")
         self.assertEqual(float(details["text_tokens"].sum()), 1.0)
         self.assertEqual(float(details["audio_tokens"].sum()), 2.0)
 
     def test_token_objective_uses_selected_logits_for_bicodec_groups(self):
-        tokenizer = BiCodecAudioTokenizer(
-            semantic_vocab_size=4,
-            acoustic_codebook_sizes=(2,),
-            acoustic_unit_length=1,
-        )
-        layout = Layout(text=(0, 4), audio=(4, 4 + tokenizer.vocab_size))
-        codes = SemanticAcousticCodes(
-            semantic=torch.tensor([[1]]),
-            acoustic=torch.tensor([[0]]),
-        )
-        local_ids, local_groups = tokenizer.encode_streams_with_groups(
-            codes,
-            (AudioStream.ACOUSTIC, AudioStream.SEMANTIC),
-        )
-        global_ids = layout.to_global(Modality.AUDIO.value, local_ids)
-        input_ids = torch.cat((torch.tensor([1]), global_ids)).unsqueeze(0)
-        labels = torch.full_like(input_ids, -100)
-        groups = torch.full_like(input_ids, -1)
-        supervised = local_groups.ge(0)
-        labels[0, 1:][supervised] = global_ids[supervised]
-        groups[0, 1:][supervised] = local_groups[supervised]
-        model = _TokenForwardModel(layout)
+        case = _bicodec_group_case()
+        model = _TokenForwardModel(case.layout)
         batch = ModelBatch(
-            input_ids=input_ids,
-            token_labels=labels,
-            token_groups=groups,
+            input_ids=case.input_ids,
+            token_labels=case.labels,
+            token_groups=case.groups,
             acoustic_target=None,
             tasks=[Task.TTS],
             predictions=[PredictionModality.AUDIO],
             pad_token_id=99,
         )
 
-        outputs = TokenObjective(layout, tokenizer)(batch, model)
+        outputs = TokenObjective(case.layout, case.tokenizer)(batch, model)
 
         self.assertIn("token", outputs)
         self.assertEqual(model.token_hidden_calls, 1)
@@ -606,11 +562,7 @@ class ModelLossContractTest(unittest.TestCase):
             pad_token_id=99,
             audio_contexts=(context,),
         )
-        module = SpeechToSpeechModule(
-            ModuleConfig(),
-            model=cast(Any, SimpleNamespace()),
-            objective=cast(Any, SimpleNamespace()),
-        )
+        module = _module()
 
         with patch.object(
             LightningModule,
@@ -630,27 +582,8 @@ class ModelLossContractTest(unittest.TestCase):
         torch.testing.assert_close(moved_context[0].acoustic, context.acoustic)
 
     def test_transfer_batch_keeps_raw_fallback_on_cpu(self):
-        raw = RawSpeechBatch(
-            samples=(
-                SpeechTaskSample(
-                    source=Text(torch.tensor([1]), Language.EN),
-                    target=RawSpeech(
-                        text_token_ids=torch.tensor([2]),
-                        waveform=torch.ones(4),
-                        sample_rate=4,
-                        language=Language.ZH,
-                    ),
-                    task=Task.TTS,
-                    prediction=Task.TTS.prediction_modality,
-                ),
-            ),
-            pad_token_id=99,
-        )
-        module = SpeechToSpeechModule(
-            ModuleConfig(),
-            model=cast(Any, SimpleNamespace()),
-            objective=cast(Any, SimpleNamespace()),
-        )
+        raw = _raw_tts_batch()
+        module = _module()
         device = torch.device("cpu")
 
         with patch.object(
@@ -787,9 +720,7 @@ class ModelLossContractTest(unittest.TestCase):
             return torch.stack((value, -value), dim=-1)
 
         item = loss(hidden, labels, Modality.TEXT, logits)
-        details = item.details
-        if details is None:
-            self.fail("token loss details are unavailable")
+        details = _require_details(self, item, "token loss")
 
         weighted = item.weighted_mean(details["tokens"])
         unweighted = item.loss.mean()
@@ -805,11 +736,7 @@ class ModelLossContractTest(unittest.TestCase):
 
     def test_training_step_consumes_one_accumulation_microbatch(self):
         objective = _BatchObjective()
-        module = SpeechToSpeechModule(
-            ModuleConfig(),
-            model=cast(Any, SimpleNamespace()),
-            objective=objective,
-        )
+        module = _module(objective=objective)
         asr = _batch(Task.ASR, token_labels=torch.tensor([[-100, 1]]))
         mt = _batch(Task.MT, token_labels=torch.tensor([[-100, 1]]))
 
@@ -823,11 +750,7 @@ class ModelLossContractTest(unittest.TestCase):
 
     def test_training_step_fuses_accumulation_window_for_static_ddp(self):
         objective = _BatchObjective()
-        module = SpeechToSpeechModule(
-            ModuleConfig(),
-            model=cast(Any, SimpleNamespace()),
-            objective=objective,
-        )
+        module = _module(objective=objective)
         asr = _batch(Task.ASR, token_labels=torch.tensor([[-100, 1]]))
         mt = _batch(Task.MT, token_labels=torch.tensor([[-100, 1]]))
 
@@ -840,10 +763,9 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertEqual(objective.tasks, [Task.ASR, Task.MT])
         torch.testing.assert_close(outputs["loss"], torch.tensor(2.0))
         torch.testing.assert_close(outputs["token"].loss, torch.tensor([1.0, 3.0]))
-        if outputs["token"].details is None:
-            self.fail("fused token loss details are unavailable")
+        details = _require_details(self, outputs["token"], "fused token loss")
         torch.testing.assert_close(
-            outputs["token"].details["tokens"],
+            details["tokens"],
             torch.tensor([1.0, 3.0]),
         )
         groups = module.current_gradient_loss_groups()
@@ -853,11 +775,7 @@ class ModelLossContractTest(unittest.TestCase):
         torch.testing.assert_close(groups["mt"]["loss"], torch.tensor(3.0))
 
     def test_validation_step_logs_effective_unit_weighted_metrics(self):
-        module = SpeechToSpeechModule(
-            ModuleConfig(),
-            model=cast(Any, SimpleNamespace()),
-            objective=_BatchObjective(),
-        )
+        module = _module(objective=_BatchObjective())
         outputs: Outputs = {
             "loss": torch.tensor(3.0),
             "token": LossItem(
@@ -931,9 +849,9 @@ class ModelLossContractTest(unittest.TestCase):
             pad_token_id=0,
             eos_token_id=31,
         )
-        module = SpeechToSpeechModule(
+        module = _module(
             ModuleConfig(mt_validation_max_new_tokens=8),
-            model=cast(Any, SimpleNamespace(runtime=runtime)),
+            model=SimpleNamespace(runtime=runtime),
             objective=_BatchObjective(),
         )
         batch = _batch(
@@ -992,21 +910,7 @@ class ModelLossContractTest(unittest.TestCase):
 
     def test_backbone_text_embedding_has_one_registered_path(self):
         backbone = _Backbone()
-        rt = SimpleNamespace(
-            layout=Layout(text=(0, 4), audio=(4, 10)),
-            backbone=backbone,
-            codec=_Codec(),
-            audio_tokenizer=NativeAudioTokenizer(vocab_size=3),
-        )
-        model = Model(
-            Config(
-                semantic_audio_adapter=None,
-                audio_output_adapter=AudioOutputAdapterConfig(
-                    type=AudioOutputAdapterType.NONE
-                ),
-            ),
-            runtime=rt,
-        )
+        model = _model(backbone)
 
         paths = [
             name
@@ -1021,23 +925,7 @@ class ModelLossContractTest(unittest.TestCase):
 
     def test_token_model_injects_the_configured_peft_adapter(self):
         backbone = _Backbone()
-        rt = SimpleNamespace(
-            layout=Layout(text=(0, 4), audio=(4, 10)),
-            backbone=backbone,
-            codec=_Codec(),
-            audio_tokenizer=NativeAudioTokenizer(vocab_size=3),
-        )
-
-        model = Model(
-            Config(
-                semantic_audio_adapter=None,
-                audio_output_adapter=AudioOutputAdapterConfig(
-                    type=AudioOutputAdapterType.NONE
-                ),
-                lora=LoraConfig(r=1, target_modules=["q_proj"]),
-            ),
-            runtime=rt,
-        )
+        model = _model(backbone, lora=LoraConfig(r=1, target_modules=["q_proj"]))
 
         self.assertIs(model.backbone, backbone)
         self.assertIn("speech", backbone.q_proj.lora_A)
@@ -1046,21 +934,7 @@ class ModelLossContractTest(unittest.TestCase):
 
     def test_text_logits_only_cover_the_layout_vocabulary(self):
         backbone = _Backbone(text_vocab_size=4, embedding_rows=4)
-        rt = SimpleNamespace(
-            layout=Layout(text=(2, 6), audio=(6, 12)),
-            backbone=backbone,
-            codec=_Codec(),
-            audio_tokenizer=NativeAudioTokenizer(vocab_size=3),
-        )
-        model = Model(
-            Config(
-                semantic_audio_adapter=None,
-                audio_output_adapter=AudioOutputAdapterConfig(
-                    type=AudioOutputAdapterType.NONE
-                ),
-            ),
-            runtime=rt,
-        )
+        model = _model(backbone, layout=Layout(text=(2, 6), audio=(6, 12)))
         with torch.no_grad():
             backbone.input_embeddings.weight.copy_(
                 torch.arange(8, dtype=torch.float32).reshape(4, 2)
@@ -1073,23 +947,8 @@ class ModelLossContractTest(unittest.TestCase):
 
     def test_backbone_embeddings_must_cover_the_text_layout(self):
         backbone = _Backbone(text_vocab_size=4, embedding_rows=3)
-        rt = SimpleNamespace(
-            layout=Layout(text=(0, 4), audio=(4, 10)),
-            backbone=backbone,
-            codec=_Codec(),
-            audio_tokenizer=NativeAudioTokenizer(vocab_size=3),
-        )
-
         with self.assertRaisesRegex(ValueError, "input embedding"):
-            Model(
-                Config(
-                    semantic_audio_adapter=None,
-                    audio_output_adapter=AudioOutputAdapterConfig(
-                        type=AudioOutputAdapterType.NONE
-                    ),
-                ),
-                runtime=rt,
-            )
+            _model(backbone)
 
     def test_condition_methods_own_the_causal_shift(self):
         model = _ConditionModel()
@@ -1294,10 +1153,8 @@ class ModelLossContractTest(unittest.TestCase):
         validation = objective.validation(batch, model)
 
         self.assertIn("rvq", outputs)
-        training_details = outputs["rvq"].details
-        validation_details = validation["rvq"].details
-        if training_details is None or validation_details is None:
-            self.fail("RVQ loss details are unavailable")
+        training_details = _require_details(self, outputs["rvq"], "RVQ training loss")
+        validation_details = _require_details(self, validation["rvq"], "RVQ validation loss")
         self.assertNotIn("codebook_0_top1", training_details)
         self.assertIn("codebook_0_top1", validation_details)
         self.assertEqual(model.token_hidden_calls, 2)
@@ -1314,10 +1171,112 @@ def _checkpoint_module(config: LoraConfig | None) -> SpeechToSpeechModule[Any]:
         ),
         lora_config=config,
     )
+    return _module(model=model)
+
+
+def _module(
+    config: ModuleConfig | None = None,
+    *,
+    model: object | None = None,
+    objective: object | None = None,
+) -> SpeechToSpeechModule[Any]:
     return SpeechToSpeechModule(
-        ModuleConfig(),
-        model=cast(Any, model),
-        objective=cast(Any, SimpleNamespace()),
+        ModuleConfig() if config is None else config,
+        model=cast(Any, SimpleNamespace() if model is None else model),
+        objective=cast(Any, SimpleNamespace() if objective is None else objective),
+    )
+
+
+def _require_details(
+    test: unittest.TestCase,
+    item: LossItem,
+    name: str,
+) -> dict[str, Tensor]:
+    details = item.details
+    if details is None:
+        test.fail(f"{name} details are unavailable")
+    return details
+
+
+def _bicodec_group_case() -> SimpleNamespace:
+    tokenizer = BiCodecAudioTokenizer(
+        semantic_vocab_size=4,
+        acoustic_codebook_sizes=(2,),
+        acoustic_unit_length=1,
+    )
+    layout = Layout(text=(0, 4), audio=(4, 4 + tokenizer.vocab_size))
+    codes = SemanticAcousticCodes(
+        semantic=torch.tensor([[1]]),
+        acoustic=torch.tensor([[0]]),
+    )
+    local_ids, local_groups = tokenizer.encode_streams_with_groups(
+        codes,
+        (AudioStream.ACOUSTIC, AudioStream.SEMANTIC),
+    )
+    global_ids = layout.to_global(Modality.AUDIO.value, local_ids)
+    input_ids = torch.cat((torch.tensor([1]), global_ids)).unsqueeze(0)
+    labels = torch.full_like(input_ids, -100)
+    groups = torch.full_like(input_ids, -1)
+    supervised = local_groups.ge(0)
+    labels[0, 1:][supervised] = global_ids[supervised]
+    groups[0, 1:][supervised] = local_groups[supervised]
+    return SimpleNamespace(
+        tokenizer=tokenizer,
+        layout=layout,
+        input_ids=input_ids,
+        labels=labels,
+        groups=groups,
+    )
+
+
+def _runtime(
+    backbone: _Backbone,
+    *,
+    layout: Layout | None = None,
+    tokenizer: NativeAudioTokenizer | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        layout=Layout(text=(0, 4), audio=(4, 10)) if layout is None else layout,
+        backbone=backbone,
+        codec=_Codec(),
+        audio_tokenizer=NativeAudioTokenizer(vocab_size=3) if tokenizer is None else tokenizer,
+    )
+
+
+def _model(
+    backbone: _Backbone,
+    *,
+    layout: Layout | None = None,
+    lora: LoraConfig | None = None,
+) -> Model:
+    return Model(
+        Config(
+            semantic_audio_adapter=None,
+            audio_output_adapter=AudioOutputAdapterConfig(
+                type=AudioOutputAdapterType.NONE
+            ),
+            lora=lora,
+        ),
+        runtime=_runtime(backbone, layout=layout),
+    )
+
+
+def _raw_tts_batch() -> RawSpeechBatch:
+    return RawSpeechBatch(
+        samples=(
+            SpeechTaskSample(
+                source=Text(torch.tensor([1]), Language.EN),
+                target=RawSpeech(
+                    text_token_ids=torch.tensor([2]),
+                    waveform=torch.ones(4),
+                    sample_rate=4,
+                    language=Language.ZH,
+                ),
+                task=Task.TTS,
+                prediction=Task.TTS.prediction_modality,
+            ),
+        ),
+        pad_token_id=99,
     )
 
 
