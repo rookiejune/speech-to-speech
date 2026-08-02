@@ -3,7 +3,7 @@ defaults:
   - /callback/parameter_policy@callbacks.parameter_policy: full
   - /model: toy
   - /model/acoustic@model.acoustic: none
-  - /runtime: longcat_full_sequence
+  - /runtime: longcat_native
   - /audio_sequence_layout: flattened
   - /datamodule/dataset@datamodule.dataset: toy
   - /pl_module: sft
@@ -12,8 +12,8 @@ defaults:
   - _self_
 
 task: tts
-run_name: longcat-full-sequence-token
-output_subdir: longcat-full-sequence-smoke/${task}/${run_name}
+run_name: longcat-flattened-token
+output_subdir: longcat-flattened-smoke/${task}/${run_name}
 
 sample_index: 0
 

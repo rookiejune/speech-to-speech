@@ -217,7 +217,7 @@ class ConfigTest(unittest.TestCase):
 
     def test_full_codec_sequence_smoke_is_token_only_comparison(self):
         config = overfit(
-            _compose("overfit", "experiment=overfit/longcat_full_sequence_smoke")
+            _compose("overfit", "experiment=overfit/longcat_flattened_smoke")
         )
 
         self.assertIsInstance(config, OverfitTokenConfig)
@@ -226,7 +226,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.model.acoustic.type, AcousticType.NONE.value)
         self.assertIsInstance(config.model.toy, ToyConfig)
         self.assertIs(config.datamodule.dataset.name, DatasetName.TOY)
-        self.assertEqual(config.run_name, "longcat-full-sequence-token")
+        self.assertEqual(config.run_name, "longcat-flattened-token")
         self.assertEqual(config.train.max_steps, 2)
         self.assertFalse(config.callbacks.task_sample.enabled)
         self.assertFalse(config.callbacks.evaluation.enabled)
@@ -259,7 +259,7 @@ class ConfigTest(unittest.TestCase):
             _compose("overfit", "experiment=overfit/bicodec_semantic_only_smoke")
         )
         full = overfit(
-            _compose("overfit", "experiment=overfit/bicodec_full_sequence_smoke")
+            _compose("overfit", "experiment=overfit/bicodec_flattened_smoke")
         )
 
         for config in (semantic, full):
@@ -275,9 +275,9 @@ class ConfigTest(unittest.TestCase):
         self.assertIs(semantic.audio_sequence_layout, AudioSequenceLayout.SEMANTIC)
         self.assertIs(full.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
         self.assertEqual(semantic.run_name, "bicodec-reuse-prompt-acoustic")
-        self.assertEqual(full.run_name, "bicodec-generate-acoustic")
+        self.assertEqual(full.run_name, "bicodec-flattened-token")
         self.assertIn("bicodec-reuse-prompt-acoustic-smoke", semantic.output_dir)
-        self.assertIn("bicodec-generate-acoustic-smoke", full.output_dir)
+        self.assertIn("bicodec-flattened-smoke", full.output_dir)
         self.assertIsNone(semantic.runtime.semantic_codec_artifact)
         self.assertIsNone(full.runtime.semantic_codec_artifact)
 
@@ -621,7 +621,7 @@ class ConfigTest(unittest.TestCase):
         token = parse_train(
             _compose(
                 "train",
-                "runtime=longcat_full_sequence",
+                "runtime=longcat_native",
                 "model/acoustic=none",
                 "audio_sequence_layout=flattened",
             )
@@ -1277,7 +1277,7 @@ class ConfigTest(unittest.TestCase):
         token = overfit(
             _compose(
                 "overfit",
-                "runtime=longcat_full_sequence",
+                "runtime=longcat_native",
                 "model/acoustic=none",
                 "audio_sequence_layout=flattened",
             )
@@ -1289,7 +1289,7 @@ class ConfigTest(unittest.TestCase):
             overfit(
                 _compose(
                     "overfit",
-                    "runtime=longcat_full_sequence",
+                    "runtime=longcat_native",
                     "audio_sequence_layout=flattened",
                 )
             )
@@ -1297,7 +1297,7 @@ class ConfigTest(unittest.TestCase):
             overfit(
                 _compose(
                     "overfit",
-                    "runtime=longcat_full_sequence",
+                    "runtime=longcat_native",
                     "audio_sequence_layout=flattened",
                     "model/acoustic=rvq",
                 )
@@ -1346,7 +1346,7 @@ class ConfigTest(unittest.TestCase):
             overfit(
                 _compose(
                     "overfit",
-                    "runtime=longcat_full_sequence",
+                    "runtime=longcat_native",
                     "audio_sequence_layout=flattened",
                     "model/acoustic=none",
                     "runtime.semantic_codec_artifact=/tmp/semantic-codec",

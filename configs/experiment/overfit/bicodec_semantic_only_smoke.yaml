@@ -3,7 +3,7 @@ defaults:
   - /callback/parameter_policy@callbacks.parameter_policy: semantic_only
   - /model: toy
   - /model/acoustic@model.acoustic: none
-  - /runtime: bicodec_full_sequence
+  - /runtime: bicodec
   - /audio_sequence_layout: semantic
   - /datamodule/dataset@datamodule.dataset: qwen_tts_speaker
   - /pl_module: sft

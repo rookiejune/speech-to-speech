@@ -11,7 +11,7 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
   `audio_sequence_layout=flattened|semantic` 是公开的音频序列轴：`flattened` 把完整 codec
   codes 作为 acoustic-first / semantic-last 的 token 序列训练；`semantic` 的逻辑输入输出仍是
   full codes，但 token sequence 只处理 semantic，acoustic 由 Flow/RVQ side module 或
-  `semantic-acoustic-codec` artifact 补齐。`longcat`、`longcat_native`、`longcat_full_sequence`、
+  `semantic-acoustic-codec` artifact 补齐。`longcat`、`longcat_native`、`bicodec`、
   `unicodec` 表示相互兼容的资源 snapshot；不再拆分 `codec` 和 `sampler` 组。
 - `model`：完整映射 `model.Config` 的 semantic adapter、可选 source-audio input adapter、
   `ToyConfig`、`AudioOutputAdapterConfig` 与 `peft.LoraConfig | None`。
