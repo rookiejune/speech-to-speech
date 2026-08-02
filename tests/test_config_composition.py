@@ -169,10 +169,6 @@ class ConfigCompositionTest(ConfigTestCase):
             )
             self.assertIs(config.datamodule.shape, DataShape.SINGLE)
             self.assertIsNone(config.datamodule.dataset.speaker)
-            self.assertEqual(
-                config.runtime.codec_revision,
-                "642071559bfc6346c2359d19dcb6be3f9dd8a05d",
-            )
 
         self.assertIs(semantic.audio_sequence_layout, AudioSequenceLayout.SEMANTIC)
         self.assertIs(full.audio_sequence_layout, AudioSequenceLayout.FLATTENED)

@@ -80,57 +80,10 @@ class RuntimeCodecTest(unittest.TestCase):
         torch.testing.assert_close(waveform, backend.waveform)
         load_codec_backend.assert_called_once_with("unicodec", device="cuda")
 
-    def test_load_codec_bicodec_forwards_pinned_revision(self) -> None:
-        backend = SimpleNamespace(name="bicodec")
-
-        with patch(
-            "speech_to_speech.runtime.codec._load_bicodec",
-            return_value=backend,
-        ) as load_bicodec:
-            codec = load_codec(
-                "bicodec",
-                device="cuda",
-                codec_revision="642071559bfc6346c2359d19dcb6be3f9dd8a05d",
-            )
-
-        self.assertIs(codec, backend)
-        load_bicodec.assert_called_once_with(
-            device="cuda",
-            revision="642071559bfc6346c2359d19dcb6be3f9dd8a05d",
-        )
-
     def test_stable_runtime_uses_stable_audio_view(self) -> None:
         config = Config(codec="stable_codec")
 
         self.assertIs(config.audio_view, AudioView.STABLE)
-
-    def test_codec_revision_requires_supported_codec(self) -> None:
-        with self.assertRaisesRegex(ValueError, "codec_revision"):
-            Config(codec="longcat", codec_revision="revision")
-
-    def test_runtime_codec_forwards_codec_revision(self) -> None:
-        runtime = Runtime(
-            Config(
-                codec="bicodec",
-                device="cuda",
-                codec_revision="642071559bfc6346c2359d19dcb6be3f9dd8a05d",
-            ),
-            audio_sequence_layout=AudioSequenceLayout.FLATTENED,
-        )
-        backend = SimpleNamespace(name="bicodec")
-
-        with patch(
-            "speech_to_speech.runtime.runtime.load_codec",
-            return_value=backend,
-        ) as load_codec_backend:
-            codec = runtime.codec
-
-        self.assertIs(codec, backend)
-        load_codec_backend.assert_called_once_with(
-            "bicodec",
-            "cuda",
-            codec_revision="642071559bfc6346c2359d19dcb6be3f9dd8a05d",
-        )
 
     def test_frame_aligned_structured_codec_uses_frame_full_sequence(self) -> None:
         runtime = _runtime("longcat", _codec(AcousticLayout.FRAME_ALIGNED))

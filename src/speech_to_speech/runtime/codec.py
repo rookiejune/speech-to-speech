@@ -173,19 +173,17 @@ class StableCodec:
         return self.codec.decode(codes)
 
 
-def load_codec(
-    name: str,
-    device: str | None,
-    *,
-    codec_revision: str | None = None,
-) -> CodecBackend:
+def load_codec(name: str, device: str | None) -> CodecBackend:
     if name == "longcat":
         return cast(
             CodecBackend,
             cast(object, load_semantic_acoustic("longcat", device=device)),
         )
     if name == "bicodec":
-        return _load_bicodec(device=device, revision=codec_revision)
+        return cast(
+            StructuredCodec,
+            cast(object, load_semantic_acoustic("bicodec", device=device)),
+        )
     if name == "unicodec":
         source = cast(
             UnifiedCodecSource,
@@ -198,16 +196,3 @@ def load_codec(
             StableCodec(cast(StableCodecSource, load_frame("stable_codec", device=device))),
         )
     raise NotImplementedError(f"unsupported codec: {name}")
-
-
-def _load_bicodec(
-    *,
-    device: str | None,
-    revision: str | None,
-) -> StructuredCodec:
-    from anytrain.codec.bicodec.codec import BiCodec
-
-    return cast(
-        StructuredCodec,
-        cast(object, BiCodec.from_pretrained(device=device, revision=revision)),
-    )

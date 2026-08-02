@@ -53,10 +53,6 @@ class TrainConfigContractTest(ConfigTestCase):
         self.assertIs(config.callbacks.parameter_policy.name, ParameterPolicyName.LORA)
         self.assertIsInstance(config.model.lora, LoraConfig)
         self.assertTrue(config.runtime.gradient_checkpointing)
-        self.assertEqual(
-            config.runtime.codec_revision,
-            "642071559bfc6346c2359d19dcb6be3f9dd8a05d",
-        )
 
     def test_train_stage_2_uses_accumulation_safe_loader_plan(self):
         config = _train("experiment=train/staged_joint/stage_2")
