@@ -206,7 +206,7 @@ class ConfigTest(unittest.TestCase):
             _compose(
                 "train",
                 "runtime.backbone_initialization=random",
-                "callback/parameter_policy=full",
+                "callback/parameter_policy@callbacks.parameter_policy=full",
                 "model.lora=null",
             )
         )
@@ -423,7 +423,7 @@ class ConfigTest(unittest.TestCase):
         frozen = overfit(
             _compose(
                 "overfit",
-                "callback/parameter_policy=speech_interface",
+                "callback/parameter_policy@callbacks.parameter_policy=speech_interface",
             )
         )
         self.assertIsNone(_gradient_logger(frozen, AcousticType.RVQ, rvq_comparison))
@@ -432,7 +432,7 @@ class ConfigTest(unittest.TestCase):
         partial = overfit(
             _compose(
                 "overfit",
-                "callback/parameter_policy=speech_interface_top_third",
+                "callback/parameter_policy@callbacks.parameter_policy=speech_interface_top_third",
             )
         )
         partial_gradient = _gradient_logger(partial, AcousticType.RVQ, rvq_comparison)
@@ -648,7 +648,7 @@ class ConfigTest(unittest.TestCase):
             with self.subTest(policy=policy.value):
                 overrides = [
                     "experiment=train/smoke/parameter_policy",
-                    f"callback/parameter_policy={policy.value}",
+                    f"callback/parameter_policy@callbacks.parameter_policy={policy.value}",
                 ]
                 if policy is ParameterPolicyName.LORA:
                     overrides.append("+model/lora@model.lora=qwen")
@@ -1020,12 +1020,12 @@ class ConfigTest(unittest.TestCase):
     @patch("scripts.train.training_callbacks", return_value=[])
     @patch("scripts.train.build_datamodule")
     @patch("scripts.train.build")
-    @patch("scripts.train.Runtime")
+    @patch("scripts.train.runtime_for_sequence_layout")
     @patch("scripts.train.pl.seed_everything")
     def test_train_run_passes_ckpt_path_to_trainer_fit(
         self,
         seed,
-        runtime,
+        runtime_for_sequence_layout,
         build,
         datamodule,
         callbacks,
@@ -1042,7 +1042,7 @@ class ConfigTest(unittest.TestCase):
         module = Mock()
         model = Mock()
         build.return_value = (AcousticType.RVQ, module, model)
-        runtime.return_value = Mock(acoustic_side_channel=False)
+        runtime_for_sequence_layout.return_value = Mock(acoustic_side_channel=False)
         trainer = Mock(is_global_zero=False)
         trainer_factory.return_value = trainer
 
@@ -1128,7 +1128,7 @@ class ConfigTest(unittest.TestCase):
             _compose(
                 "overfit",
                 "+model/lora@model.lora=qwen",
-                "callback/parameter_policy=lora",
+                "callback/parameter_policy@callbacks.parameter_policy=lora",
             )
         )
 
@@ -1153,7 +1153,7 @@ class ConfigTest(unittest.TestCase):
 
         for overrides in (
             ("+model/lora@model.lora=qwen",),
-            ("callback/parameter_policy=lora",),
+            ("callback/parameter_policy@callbacks.parameter_policy=lora",),
         ):
             with (
                 self.subTest(overrides=overrides),
@@ -1166,7 +1166,7 @@ class ConfigTest(unittest.TestCase):
             _compose(
                 "overfit",
                 "+model/lora@model.lora=qwen",
-                "callback/parameter_policy=lora",
+                "callback/parameter_policy@callbacks.parameter_policy=lora",
                 "pl_module.optimizer=muon",
             )
         )
@@ -1179,7 +1179,7 @@ class ConfigTest(unittest.TestCase):
                     "overfit",
                     "+model/lora@model.lora=qwen",
                     "model.lora.init_lora_weights=gaussian",
-                    "callback/parameter_policy=lora",
+                    "callback/parameter_policy@callbacks.parameter_policy=lora",
                     "pl_module.optimizer=muon",
                 )
             )
@@ -1198,7 +1198,7 @@ class ConfigTest(unittest.TestCase):
                 _compose(
                     "overfit",
                     "+model/lora@model.lora=qwen",
-                    "callback/parameter_policy=lora",
+                    "callback/parameter_policy@callbacks.parameter_policy=lora",
                     "callbacks.performance.enabled=true",
                 )
             )
@@ -1210,7 +1210,7 @@ class ConfigTest(unittest.TestCase):
                     "overfit",
                     "+model/lora@model.lora=qwen",
                     "+model.lora.inference_mode=true",
-                    "callback/parameter_policy=lora",
+                    "callback/parameter_policy@callbacks.parameter_policy=lora",
                 )
             )
 
@@ -1284,12 +1284,19 @@ class ConfigTest(unittest.TestCase):
         self.assertIsInstance(token, OverfitTokenConfig)
         self.assertIs(token.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
         with self.assertRaisesRegex(ValueError, "model/acoustic=none"):
-            overfit(_compose("overfit", "runtime=longcat_full_sequence"))
+            overfit(
+                _compose(
+                    "overfit",
+                    "runtime=longcat_full_sequence",
+                    "audio_sequence_layout=flattened",
+                )
+            )
         with self.assertRaisesRegex(ValueError, "model/acoustic=none"):
             overfit(
                 _compose(
                     "overfit",
                     "runtime=longcat_full_sequence",
+                    "audio_sequence_layout=flattened",
                     "model/acoustic=rvq",
                 )
             )
@@ -1324,7 +1331,7 @@ class ConfigTest(unittest.TestCase):
                     "runtime.semantic_codec_artifact=/tmp/semantic-codec",
                 )
             )
-        with self.assertRaisesRegex(ValueError, "decoupled"):
+        with self.assertRaisesRegex(ValueError, "semantic codec artifacts"):
             overfit(
                 _compose(
                     "overfit",
@@ -1338,6 +1345,7 @@ class ConfigTest(unittest.TestCase):
                 _compose(
                     "overfit",
                     "runtime=longcat_full_sequence",
+                    "audio_sequence_layout=flattened",
                     "model/acoustic=none",
                     "runtime.semantic_codec_artifact=/tmp/semantic-codec",
                 )
