@@ -87,15 +87,6 @@ class PerformanceConfig:
 
 
 @dataclass
-class DataThroughputConfig:
-    enabled: bool = False
-    log_every_n_steps: int = 100
-    warmup_steps: int = 20
-    measure_window_steps: int = 100
-    sync_cuda: bool = True
-
-
-@dataclass
 class TextProbeConfig:
     instruction: str = MISSING
     reference: str = MISSING
@@ -347,7 +338,6 @@ def _validate_lora(config: _EntryConfig) -> None:
 
 __all__ = [
     "AcousticNoneConfig",
-    "DataThroughputConfig",
     "FlowConfig",
     "FlowModelConfig",
     "LoggingConfig",

@@ -92,7 +92,7 @@ class ConfigSafetyTest(unittest.TestCase):
             train(
                 _compose(
                     "train",
-                    "callback/parameter_policy=speech_interface",
+                    "callback/parameter_policy@callbacks.parameter_policy=speech_interface",
                     "model.lora=null",
                     "callbacks.performance.enabled=true",
                     "callbacks.task_sample.enabled=true",

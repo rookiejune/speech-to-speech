@@ -5,7 +5,7 @@ from typing import Any, Protocol, cast
 
 import torch
 from anydataset.types import Modality
-from anytrain.lightning import DataUnits, GradientProbeLoggerCallback
+from anytrain.lightning import GradientProbeLoggerCallback
 from anytrain.lightning.perf import training_flops_from_forward
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
@@ -21,7 +21,7 @@ from ._flops import (
     qwen_backbone,
     rvq_decoder,
 )
-from .datamodule.types import FusedBatch, ModelBatch
+from .datamodule.types import ModelBatch
 from .loss.module import FlowObjective, RVQObjective, TokenObjective
 from .loss.types import LossItem
 from .model import Model
@@ -34,23 +34,6 @@ from .pl_module import SpeechToSpeechModule
 
 class _Trainer(Protocol):
     callbacks: list[Callback]
-
-
-class BatchTokenUnits:
-    """Measure valid vs padded token slots for training batches."""
-
-    def __call__(
-        self,
-        *,
-        trainer: pl.Trainer,
-        pl_module: pl.LightningModule,
-        outputs: Any,
-        batch: Any,
-        batch_idx: int,
-    ) -> DataUnits:
-        del trainer, pl_module, outputs, batch_idx
-        valid, padded = _token_units(batch)
-        return DataUnits(valid=float(valid), padded=float(padded), unit="tokens")
 
 
 class TrainingFlops:
@@ -162,26 +145,6 @@ def _acoustic_condition(adapter: HiddenConditionAdapter, mask: Tensor) -> int:
     if adapter.projection.out_features != adapter.condition_dim:
         raise ValueError("hidden condition projection does not match condition_dim.")
     return linear(adapter.projection, mask.numel())
-
-
-def _token_units(batch: Any) -> tuple[int, int]:
-    if isinstance(batch, ModelBatch):
-        return (
-            int(batch.attention_mask.sum().item()),
-            int(batch.input_ids.numel()),
-        )
-    if isinstance(batch, FusedBatch):
-        valid = 0
-        padded = 0
-        for microbatch in batch.batches:
-            micro_valid, micro_padded = _token_units(microbatch)
-            valid += micro_valid
-            padded += micro_padded
-        return valid, padded
-    raise TypeError(
-        "token data-throughput metrics require a ModelBatch or FusedBatch, got "
-        f"{type(batch).__name__}."
-    )
 
 
 def _flow_objective(objective: FlowObjective, model: nn.Module) -> None:
@@ -415,4 +378,4 @@ def _target(
     return codes, mask
 
 
-__all__ = ["BatchTokenUnits", "TrainingFlops"]
+__all__ = ["TrainingFlops"]

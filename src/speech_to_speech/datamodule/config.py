@@ -89,7 +89,7 @@ class SpeechConfig:
     mask_text_ratio: float = 0.5
     mask_audio_ratio: float = 0.5
     # Dict[str, ...] for OmegaConf.structured; runtime keys are Task after __post_init__.
-    tasks: Dict[str, TaskConfig] = field(default_factory=dict)
+    tasks: Optional[Dict[str, TaskConfig]] = None
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
 
     def __post_init__(self) -> None:
@@ -111,7 +111,7 @@ class SpeechConfig:
                 raise TypeError(f"{name} must be a float.")
             if not 0.0 <= float(value) <= 1.0:
                 raise ValueError(f"{name} must be in [0, 1].")
-        self.tasks = _tasks(self.tasks)  # type: ignore[assignment]
+        self.tasks = None if self.tasks is None else _tasks(self.tasks)  # type: ignore[assignment]
         if (
             self.dataset.name is DatasetName.QWEN_TTS_SPEAKER
             and self.shape is not DataShape.SINGLE

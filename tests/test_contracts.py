@@ -97,6 +97,7 @@ from speech_to_speech.stage import (
 )
 from speech_to_speech.task import Task
 from scripts._overfit_config import overfit as parse_overfit
+from scripts._config_common import TokenModelConfig
 from scripts._entry import runtime_config
 from scripts.create_split_manifest import build_manifest
 from scripts.overfit import (
@@ -308,7 +309,7 @@ class ContractTest(unittest.TestCase):
             _compose(),
             _compose("trainer=ddp"),
             _compose(
-                "experiment=unicodec_ddp_smoke",
+                "experiment=overfit/unicodec_ddp_smoke",
             ),
         ]
         expected = {
@@ -350,7 +351,7 @@ class ContractTest(unittest.TestCase):
         with TemporaryDirectory() as output_root:
             config = parse_overfit(
                 _compose(
-                    "experiment=unicodec_ddp_smoke",
+                    "experiment=overfit/unicodec_ddp_smoke",
                     f"repo_output_root={output_root}",
                 )
             )
@@ -373,7 +374,7 @@ class ContractTest(unittest.TestCase):
 
     def test_public_configs_support_omegaconf_structured(self):
         runtime_config = OmegaConf.structured(Config)
-        model_config = OmegaConf.structured(ModelConfig)
+        model_config = OmegaConf.structured(TokenModelConfig)
 
         self.assertIsNone(runtime_config.audio_tokenizer)
         self.assertIsNone(runtime_config.device)
@@ -386,17 +387,17 @@ class ContractTest(unittest.TestCase):
         rvq = _compose("model/acoustic=rvq")
         none = _compose("model/acoustic=none")
 
-        self.assertEqual(flow.acoustic.type, "flow")
-        self.assertEqual(flow.acoustic.repa.teacher_layer, 9)
-        self.assertIn("student_layer", flow.acoustic.repa)
-        self.assertNotIn("normalize_features", flow.acoustic)
+        self.assertEqual(flow.model.acoustic.type, "flow")
+        self.assertEqual(flow.model.acoustic.repa.teacher_layer, 9)
+        self.assertIn("student_layer", flow.model.acoustic.repa)
+        self.assertNotIn("normalize_features", flow.model.acoustic)
         self.assertEqual(flow.runtime.codec, "longcat")
         self.assertEqual(flow.model.semantic_audio_adapter, "linear")
-        self.assertEqual(rvq.acoustic.type, "rvq")
-        self.assertNotIn("repa", rvq.acoustic)
-        self.assertEqual(none.acoustic.type, "none")
-        self.assertEqual(none.acoustic.name, "token")
-        self.assertNotIn("decoder", none.acoustic)
+        self.assertEqual(rvq.model.acoustic.type, "rvq")
+        self.assertNotIn("repa", rvq.model.acoustic)
+        self.assertEqual(none.model.acoustic.type, "none")
+        self.assertEqual(none.model.acoustic.name, "token")
+        self.assertNotIn("decoder", none.model.acoustic)
 
     def test_overfit_acoustic_branch_constructs_evaluation_on_py39(self):
         class EvaluationReached(Exception):
@@ -427,7 +428,7 @@ class ContractTest(unittest.TestCase):
             with (
                 patch("scripts.overfit.pl.seed_everything"),
                 patch("scripts.overfit.runtime_config", return_value=Mock()),
-                patch("scripts.overfit.Runtime", return_value=runtime),
+                patch("scripts.overfit.runtime_for_sequence_layout", return_value=runtime),
                 patch("scripts.overfit.DataModule", return_value=datamodule),
                 patch(
                     "scripts.overfit.build",
@@ -499,8 +500,8 @@ class ContractTest(unittest.TestCase):
         self.assertIsNone(acoustic)
 
     def test_bicodec_runtime_rejects_fixed_length_structured_codec(self):
-        with self.assertRaisesRegex(ValueError, "fixed-length structured codec"):
-            Config(codec="bicodec")
+        with self.assertRaisesRegex(ValueError, "semantic_codec_artifact"):
+            Runtime(Config(codec="bicodec"))
 
     def test_parser_rejects_non_codec_audio_views(self):
         item = AudioItem(

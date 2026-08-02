@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+import sys
 from collections.abc import Iterator, Sequence
 from pathlib import Path
+from types import ModuleType
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -127,8 +129,8 @@ class SpeakerGridDatasetTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at least two"):
             SpeakerGridCellsDataset(one_row, with_audio_context=True)
 
-    @patch("zhuyin.datasets.wmt19.qwen_tts.speaker_grid")
-    def test_loader_selects_runtime_codec_and_speaker(self, load: Mock):
+    def test_loader_selects_runtime_codec_and_speaker(self):
+        load = Mock()
         load.return_value = SimpleNamespace(load=lambda: _grid())
         config = DatasetConfig(
             name=DatasetName.QWEN_TTS_SPEAKER,
@@ -137,10 +139,11 @@ class SpeakerGridDatasetTest(unittest.TestCase):
             speaker="bob",
         )
 
-        dataset = load_dataset(
-            config,
-            _runtime(AudioSequenceLayout.FLATTENED),
-        )
+        with _qwen_tts_loader(load):
+            dataset = load_dataset(
+                config,
+                _runtime(AudioSequenceLayout.FLATTENED),
+            )
 
         self.assertIsInstance(dataset, SpeakerGridCellsDataset)
         self.assertEqual(len(dataset), 2)
@@ -150,22 +153,23 @@ class SpeakerGridDatasetTest(unittest.TestCase):
             split="train",
         )
 
-    @patch("zhuyin.datasets.wmt19.qwen_tts.speaker_grid")
-    def test_loader_enables_reference_context_for_reference_route(self, load: Mock):
+    def test_loader_enables_reference_context_for_reference_route(self):
+        load = Mock()
         load.return_value = SimpleNamespace(load=lambda: _grid())
-        dataset = load_dataset(
-            DatasetConfig(name=DatasetName.QWEN_TTS_SPEAKER),
-            SimpleNamespace(
-                codec_name="bicodec",
-                audio_view=AudioView.BICODEC,
-                audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
-                audio_tokenizer=BiCodecAudioTokenizer(
-                    semantic_vocab_size=16,
-                    acoustic_codebook_sizes=(5, 7),
-                    acoustic_unit_length=3,
+        with _qwen_tts_loader(load):
+            dataset = load_dataset(
+                DatasetConfig(name=DatasetName.QWEN_TTS_SPEAKER),
+                SimpleNamespace(
+                    codec_name="bicodec",
+                    audio_view=AudioView.BICODEC,
+                    audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
+                    audio_tokenizer=BiCodecAudioTokenizer(
+                        semantic_vocab_size=16,
+                        acoustic_codebook_sizes=(5, 7),
+                        acoustic_unit_length=3,
+                    ),
                 ),
-            ),
-        )
+            )
 
         self.assertIsInstance(dataset, SpeakerGridCellsDataset)
         self.assertTrue(dataset.with_audio_context)
@@ -180,7 +184,7 @@ class SpeakerGridDatasetTest(unittest.TestCase):
             )
 
     def test_speaker_grid_requires_single_data_shape(self):
-        with self.assertRaisesRegex(ValueError, "requires data shape single"):
+        with self.assertRaisesRegex(ValueError, "datamodule shape single"):
             SpeechConfig(
                 codec="bicodec",
                 dataloader=DataLoaderConfig(batch_size=1, num_workers=0),
@@ -389,6 +393,23 @@ def _runtime(audio_sequence_layout: AudioSequenceLayout):
         eos_token_id=1,
         boa_token_id=10 + tokenizer.vocab_size,
         eoa_token_id=11 + tokenizer.vocab_size,
+    )
+
+
+def _qwen_tts_loader(load: Mock):
+    zhuyin = ModuleType("zhuyin")
+    datasets = ModuleType("zhuyin.datasets")
+    wmt19 = ModuleType("zhuyin.datasets.wmt19")
+    qwen_tts = ModuleType("zhuyin.datasets.wmt19.qwen_tts")
+    qwen_tts.speaker_grid = load
+    return patch.dict(
+        sys.modules,
+        {
+            "zhuyin": zhuyin,
+            "zhuyin.datasets": datasets,
+            "zhuyin.datasets.wmt19": wmt19,
+            "zhuyin.datasets.wmt19.qwen_tts": qwen_tts,
+        },
     )
 
 

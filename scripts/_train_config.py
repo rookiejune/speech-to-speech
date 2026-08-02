@@ -20,7 +20,6 @@ from speech_to_speech.task import Task
 
 if __package__:
     from ._config_common import (
-        DataThroughputConfig,
         FlowModelConfig,
         LoggingConfig,
         PerformanceConfig,
@@ -38,7 +37,6 @@ if __package__:
     from ._config_normalization import parse, peft_lora, prepare
 else:
     from _config_common import (
-        DataThroughputConfig,
         FlowModelConfig,
         LoggingConfig,
         PerformanceConfig,
@@ -146,9 +144,6 @@ class StagedCallbacksConfig:
         default_factory=CheckpointCallbackConfig
     )
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
-    data_throughput: DataThroughputConfig = field(
-        default_factory=DataThroughputConfig
-    )
 
 
 @dataclass
@@ -294,20 +289,6 @@ def _validate_task_samples(config: StagedTrainConfig) -> None:
 
 
 def _validate_callback_cadences(config: StagedCallbacksConfig) -> None:
-    positive_integer(
-        config.data_throughput.log_every_n_steps,
-        "callbacks.data_throughput.log_every_n_steps",
-    )
-    non_negative_integer(
-        config.data_throughput.warmup_steps,
-        "callbacks.data_throughput.warmup_steps",
-    )
-    positive_integer(
-        config.data_throughput.measure_window_steps,
-        "callbacks.data_throughput.measure_window_steps",
-    )
-    if not isinstance(config.data_throughput.sync_cuda, bool):
-        raise TypeError("callbacks.data_throughput.sync_cuda must be a boolean.")
     positive_integer(
         config.gradient_probe.every_n_steps,
         "callbacks.gradient_probe.every_n_steps",

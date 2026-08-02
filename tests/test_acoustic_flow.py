@@ -81,14 +81,14 @@ class AcousticRepaLossTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(gradient).all())
         self.assertTrue(torch.equal(gradient[:, 1], torch.zeros_like(gradient[:, 1])))
 
-    def test_wavlm_teacher_uses_layer_nine_and_preserves_mask_positions(self):
+    def test_wavlm_teacher_uses_layer_nine_and_preserves_prefix_padding_mask(self):
         wavlm = _WavLM()
         with patch(
             "transformers.WavLMModel.from_pretrained",
             return_value=wavlm,
         ):
             teacher = WavLMTeacher(_Codec(), layer=9)
-        mask = torch.tensor([[True, False, True, True], [False, True, False, True]])
+        mask = torch.tensor([[True, True, True, False], [True, True, False, False]])
 
         features = teacher(
             torch.zeros(2, 4, 1, dtype=torch.long),

@@ -65,7 +65,7 @@ class _IterableSamples(IterableAnyDataset):
 
     def iter_shard(self, num_shards: int, shard_id: int) -> Iterator[object]:
         self.shards.append((num_shards, shard_id))
-        yield from self.samples
+        yield from enumerate(self.samples)
 
 
 class ScheduledDataLoaderTest(unittest.TestCase):

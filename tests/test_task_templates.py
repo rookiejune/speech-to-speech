@@ -134,12 +134,6 @@ class TaskTemplateTest(unittest.TestCase):
                         "tts": {"template": None},
                         "asr": {"template": 2},
                     },
-                    "loaders": {
-                        "tts": {
-                            "weight": 1.0,
-                            "task_weights": {"tts": 1.0},
-                        },
-                    },
                 }
             }
         )
@@ -157,20 +151,13 @@ class TaskTemplateTest(unittest.TestCase):
         self.assertIsInstance(text, TextConfig)
 
     def test_missing_task_config_for_loader_fails(self):
+        config = SpeechConfig(
+            codec="longcat",
+            dataloader=DataLoaderConfig(batch_size=1, num_workers=0),
+            tasks={},
+        )
         with self.assertRaisesRegex(KeyError, "missing"):
-            SpeechConfig(
-                codec="longcat",
-                dataloader=DataLoaderConfig(batch_size=1, num_workers=0),
-                tasks={},
-                loaders={
-                    "tts": __import__(
-                        "speech_to_speech.stage", fromlist=["StageLoaderConfig"]
-                    ).StageLoaderConfig(
-                        weight=1.0,
-                        task_weights={"tts": 1.0},
-                    )
-                },
-            )
+            config.template_index(Task.TTS)
 
     def test_prediction_modality_contract(self):
         self.assertIs(Task.TEXT_AR.prediction_modality, PredictionModality.TEXT)

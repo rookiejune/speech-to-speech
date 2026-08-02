@@ -57,9 +57,3 @@ callbacks:
     save_last: true
     save_top_k: -1
     every_n_train_steps: 10000
-  data_throughput:
-    enabled: true
-    log_every_n_steps: 10
-    warmup_steps: 1
-    measure_window_steps: 10
-    sync_cuda: true

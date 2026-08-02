@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, cast
 import hydra
 import torch
 from anytrain.lightning import (
-    DataThroughputCallback,
     GradientComparison,
     GradientProbe,
     GradientTarget,
@@ -34,7 +33,6 @@ from speech_to_speech.callback.logging import (
 from speech_to_speech.datamodule import DataModule, SampleSplit
 from speech_to_speech.datamodule.collate.joint import LoaderSchedule
 from speech_to_speech.datamodule.module import LoaderSpec
-from speech_to_speech.performance import BatchTokenUnits
 from speech_to_speech.pl_module.composition import build
 from speech_to_speech.runtime import runtime_for_sequence_layout
 from speech_to_speech.stage import StageLoaderConfig
@@ -241,17 +239,6 @@ def training_callbacks(
     performance_callback = performance(config.callbacks.performance)
     if performance_callback is not None:
         callbacks.append(performance_callback)
-    data_throughput = config.callbacks.data_throughput
-    if data_throughput.enabled:
-        callbacks.append(
-            DataThroughputCallback(
-                data_units=BatchTokenUnits(),
-                log_every_n_steps=data_throughput.log_every_n_steps,
-                warmup_steps=data_throughput.warmup_steps,
-                measure_window_steps=data_throughput.measure_window_steps,
-                sync_cuda=data_throughput.sync_cuda,
-            )
-        )
     callbacks.append(OOMDiagnostics())
     callbacks.extend(
         cast(

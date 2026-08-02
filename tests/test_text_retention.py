@@ -352,8 +352,8 @@ class TextRetentionConfigTest(unittest.TestCase):
                 Mock(),
             )
 
-        self.assertIs(callbacks[0], performance)
-        self.assertIsInstance(callbacks[1], OOMDiagnostics)
+        self.assertIs(callbacks[1], performance)
+        self.assertIsInstance(callbacks[2], OOMDiagnostics)
 
 
 def _compose_train(*overrides: str):

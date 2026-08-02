@@ -144,6 +144,7 @@ class OverfitContractTest(unittest.TestCase):
         self.assertEqual(
             callbacks,
             [
+                callbacks[0],
                 factories["OOMDiagnostics"].return_value,
                 factories["OutputsLogger"].return_value,
                 factories["FlowMatchingLogger"].return_value,
@@ -154,6 +155,7 @@ class OverfitContractTest(unittest.TestCase):
                 evaluation,
             ],
         )
+        self.assertIsInstance(callbacks[0], ParameterPolicyCallback)
         performance.assert_called_once_with(config.callbacks.performance)
         factories["FlowMatchingLogger"].assert_called_once_with(
             runtime.flow_matching,
@@ -267,7 +269,7 @@ class OverfitContractTest(unittest.TestCase):
         config = overfit(
             _compose(
                 "overfit",
-                "callback/parameter_policy=speech_interface_top_third",
+                "callback/parameter_policy@callbacks.parameter_policy=speech_interface_top_third",
                 "model/acoustic=rvq",
                 "callbacks.gradient_probe.partial_probes.backbone_norm.parameters=[partial.weight]",
             )
