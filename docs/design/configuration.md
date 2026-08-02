@@ -25,12 +25,10 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
   train/dev/test 子集时，通过 `DatasetConfig.split_manifest` 和 `split_label` 显式选择
   manifest 中的索引集合。task template 也在 `datamodule` 上：
   `datamodule.tasks.<task>.template`（`int` 固定下标，`null` 随机；默认 `0`）。
-- `stage`：正式训练 stage 与参数策略 preset，通过
-  `stage=<name>` 写入
-  `StageConfig.loaders/accumulate_grad_batches/fuse_loaders_per_step`，通过
-  `callback/parameter_policy=<name>`
-  写入 `ParameterPolicyConfig`。stage preset 位于 `configs/stage/stage_*.yaml`
-  （`# @package stage`）；parameter policy 位于 `configs/callback/parameter_policy/`。
+- `callback/parameter_policy`：写入 `callbacks.parameter_policy`，声明可训练参数组、
+  冻结参数组和 `backbone_top_fraction`。这是通用训练 callback 能力，由 experiment 显式选择。
+  正式 train 的 loader mix 不再是独立 Hydra group，而是由 train experiment 内联的
+  `loader_plan` 持有。
 - `scripts/create_split_manifest.py`：把 distribution candidate 与 formal-root audit 转成
   可追溯的 split manifest。它要求候选索引覆盖 audited `samples.parquet` 的全部行，绑定
   audit 文件 fingerprint，并把 split method 作为显式参数；它不是训练入口，也不会修改原始
@@ -114,9 +112,9 @@ Hydra metadata 与 `metrics.json` 写入 `output_dir`；TensorBoard/CSV logger �
 `MapStyleABC.dataloader()` 暴露 deterministic shuffle 与 batch planning；UniCodec DDP smoke
 同样要求每个 rank 重复读取同一个固定样本，因此其 experiment 也显式设置
 `use_distributed_sampler: false`。
-正式 staged train 的入口策略为 `ddp_find_unused_parameters_false`。stage 通过
-`accumulate_grad_batches` 定义一个 optimizer step 的 loader microbatch 数；当
-`fuse_loaders_per_step=true` 时，多 loader schedule 在每个 window 内按权重交错 microbatch，
+正式 staged train 的入口策略为 `ddp_find_unused_parameters_false`。
+`loader_plan.accumulate_grad_batches` 定义一个 optimizer step 的 loader microbatch 数；当
+`loader_plan.fuse_loaders_per_step=true` 时，入口构造的 `LoaderSchedule` 在每个 window 内按权重交错 microbatch，
 并把整组 window 作为一个 fused training batch 返回。module 在一次 `training_step()` 内逐个
 forward，按原 Lightning accumulation 语义平均各 microbatch scalar loss，再执行一次 backward。
 配置要求每个非零 loader 在 fused window 内至少出现一次；未启用 fuse 的多 loader static DDP 会被
@@ -133,9 +131,10 @@ experiment 之前，以便非 LoRA experiment 用 `model.lora: null` 覆盖）�
 - `overfit/unicodec`：UniCodec fixed-sample 100-step overfit。
 - `unicodec_ddp_smoke`：UniCodec 显式 DDP 两步验收。
 - `overfit`：TTS/S2ST fixed-sample 完整链路实验。
-- `train/staged_joint/stage_1..4`：正式 staged joint experiments。每个文件显式绑定
-  `stage` 与 `callback/parameter_policy`，并通过 `stage_id` 记录运行身份；
-  `stage.loaders` / `stage.accumulate_grad_batches` 等持有 loader/task 契约，再构造唯一 `DataModule`。每个 speech
+- `train/staged_joint/stage_1..4`：正式 staged joint experiments。每个文件显式内联
+  `loader_plan` 并选择 `callback/parameter_policy`；`stage_1..4` 只是 experiment 目录名，
+  不再生成运行身份字段或独立 stage config。`loader_plan.loaders` /
+  `loader_plan.accumulate_grad_batches` 等持有 loader/task 契约，再构造唯一 `DataModule`。每个 speech
   loader 使用 `LoaderSpec.speech(...)`，纯文本 MT loader 使用 `LoaderSpec.text(...)`（读
   `datamodule.tasks`），多 loader 调度由 `LoaderSchedule` 持有。四个正式 stage 都启用每 10,000
   optimizer steps 的 train fixed panels；Stage 2-4 的 panels 包含 MT；正式 entry 还默认启用独立的
@@ -153,9 +152,9 @@ experiment 之前，以便非 LoRA experiment 用 `model.lora: null` 覆盖）�
 
 `jobs/011/03_staged_joint_train.sh` 是正式 staged joint training wrapper，调用
 `scripts/train.py`，固定 `trainer=staged_static_ddp`，并根据
-`SPEECH_TO_SPEECH_STAGE=stage_1..stage_4` 选择对应的 `train/staged_joint/stage_*` experiment，
-由 experiment 同时覆盖 `stage` schedule 与 `callbacks.parameter_policy`；未设置时默认 `stage_1`。该
-wrapper 在启动 Python 前拒绝通过末尾 `"$@"` 覆写 `experiment`、`task` 或 `stage`，需要切换
+`SPEECH_TO_SPEECH_EXPERIMENT=train/staged_joint/stage_*` 选择对应 experiment，
+由 experiment 同时持有 `loader_plan` 与 `callbacks.parameter_policy`；未设置时默认 `train/staged_joint/stage_1`。该
+wrapper 在启动 Python 前拒绝通过末尾 `"$@"` 覆写 `experiment`、`task` 或 `loader_plan`，需要切换
 identity 时必须使用对应环境选择器并单独提交一次 wrapper。正式 train 入口通过
 `train.ckpt_path=<checkpoint>` 显式恢复 Lightning checkpoint；默认值为空，普通训练不走 resume。
 该字段只属于 staged train，overfit 配置不接受它。
@@ -174,11 +173,11 @@ identity 时必须使用对应环境选择器并单独提交一次 wrapper。正
 该 wrapper 要求显式设置 `SPEECH_TO_SPEECH_STABLE_PYTHON`，因为 Stable Codec 的
 `stable-codec` 依赖使用独立兼容环境，不能默认复用普通训练 Python。
 
-正式 train 的 `validation` 默认关闭。启用时，`loader` 必须选择当前 stage 的一个 speech loader，
+正式 train 的 `validation` 默认关闭。启用时，`loader` 必须选择当前 `loader_plan` 的一个 speech loader，
 且 `datamodule.dataset.split_manifest` 必须存在、`split_label` 必须与训练 split 不同。入口复制该 loader
 的 task weights 与 speech data config，仅替换 dev `split_label`；配置的 `every_n_steps` 使用
 optimizer-step 语义；fused loader 下入口传给 Lightning 的 batch 级 `val_check_interval` 等于该
-step 数，非 fused accumulation 下才乘以 `stage.accumulate_grad_batches`。`sanity_steps=-1` 表示 fit 前遍历完整 dev split，非负值表示对应 sanity batch
+step 数，非 fused accumulation 下才乘以 `loader_plan.accumulate_grad_batches`。`sanity_steps=-1` 表示 fit 前遍历完整 dev split，非负值表示对应 sanity batch
 数。为了让 step interval 不受 epoch 边界控制，入口同时设置
 `check_val_every_n_epoch=None`。每次 sanity/interval 结果按 step 记录到 `metrics.json.validation`。
 
@@ -194,7 +193,7 @@ model/objective/module 组装、基于 `model.acoustic.type` 的统一分发，�
 `runtime.Config`、`model.Config`、`pl_module.Config`、`model.DecoderConfig`、
 `datamodule.config.SpeechConfig`、`DataLoaderConfig` 和 `datamodule.dataset.text.TextConfig` 直接进入 root
 schema，不重复声明字段；`scripts/overfit.py` 与 `scripts/train.py` 都直接把解析后的 datamodule config 交给 `LoaderSpec`，不做
-同构对象转换。`stage.loaders` 使用 `StageLoaderConfig`：把字符串 task weights 暴露为 `Task` 映射，并根据非零任务
+同构对象转换。`loader_plan.loaders` 使用 `LoaderConfig`：把字符串 task weights 暴露为 `Task` 映射，并根据非零任务
 维护 text-only 与 speech loader 不可混合的不变量；配置解析校验 validation/panel 选择，训练组装不
 重复这些条件。OmegaConf 对字符串枚举只接受成员
 名，入口在合并前把公开的小写 value 转成 enum member name；除此之外不做兼容重写。
@@ -254,16 +253,17 @@ sequence layout 不是服务请求参数，而是实验与 checkpoint 的不变�
 layout/route metadata；恢复 checkpoint 时要求 metadata 存在且与当前 `Runtime` 派生的 route 严格相等，
 缺失或不一致都直接失败。reference/context 数据只属于样本或请求本身，不作为可在恢复时切换的配置轴。
 
-## Schedule 与参数策略
+## Loader plan 与参数策略
 
-loader mix 属于 `stage`（`StageConfig`），由
-`stage: stage_*` preset 写入；`train/staged_joint/stage_*` experiment
-通过 `/stage@stage: stage_*` 替换整段 stage（避免 dict merge 残留旧 loader）。
+loader mix 属于 train experiment 内联的 `loader_plan`，由
+`loader_plan.loaders`、`loader_plan.accumulate_grad_batches` 和
+`loader_plan.fuse_loaders_per_step` 描述；不再提供独立 `configs/stage/` Hydra group。
 参数冻结和 backbone top-fraction 位于
 `callbacks.parameter_policy`，由 `callback/parameter_policy` 组写入，并在 Trainer/optimizer
 创建前一次性应用。一个正式 job 只选择一个 experiment，运行中不切换数据计划或参数冻结。
-约定组合：stage 0/4 使用 `full`，stage 1/2 使用 `speech_interface`，stage 3 使用
-`speech_interface_top_third`；这不是 `schedule_name` 的隐式映射。这些非 LoRA 对照
+`staged_joint/stage_1..4` 只是人工训练里程碑目录名；它不生成运行身份字段，也不隐式选择
+policy。约定组合：stage 1 使用 `lora`，stage 2 使用 `speech_interface`，stage 3 使用
+`speech_interface_top_third`，stage 4 使用 `full`。这些非 LoRA 对照
 experiment 会在配置体中显式写 `model.lora: null`，以覆盖正式 train 的默认 LoRA。需要只训练
 semantic token interface 时在专用 experiment 中显式选择
 `callback/parameter_policy=semantic_only`。
@@ -281,6 +281,6 @@ nested structured config 展开，因此 normalization 边界先用官方字段�
 
 overfit 入口继续默认 `callbacks.parameter_policy.name=full` 且不启用 LoRA，专门验收全参闭环。
 
-Stage 0-4 是 S2S 内部的数据/任务/参数策略阶段（`stage_id` + stage preset），
+`staged_joint/stage_1..4` 是 S2S 内部的数据/任务/参数策略里程碑命名，
 不等同于“先在 SAC 预训练 generator、再在 S2S 用 hidden state 联合训练”的两个 phase。artifact
-初始化只在 model composition 时发生一次，schedule 不拥有 artifact 导出或切换逻辑。
+初始化只在 model composition 时发生一次，loader plan 不拥有 artifact 导出或切换逻辑。

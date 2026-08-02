@@ -3,9 +3,9 @@ defaults:
   - /callback/performance@callbacks.performance
   - _self_
 
-run_name: ${stage_id}-${oc.select:model.acoustic.name,token}
+run_name: ${oc.select:model.acoustic.name,token}
 repo_output_root: ${oc.env:SPEECH_TO_SPEECH_TRAIN_ROOT,${oc.env:DYNAMIC_HOME}/train/speech-to-speech}
-output_subdir: 011-staged-joint-train/${stage_id}/${run_name}
+output_subdir: train/${run_name}
 output_dir: ${repo_output_root}/${output_subdir}
 
 datamodule:

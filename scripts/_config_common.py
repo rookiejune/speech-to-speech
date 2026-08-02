@@ -27,7 +27,6 @@ from speech_to_speech.stage import (
     ParameterGroup,
     ParameterPolicyConfig,
     ParameterPolicyName,
-    StageConfig,
 )
 
 
@@ -164,9 +163,6 @@ class _EntryConfig(Protocol):
 
     @property
     def datamodule(self) -> SpeechConfig: ...
-
-    @property
-    def stage(self) -> StageConfig: ...
 
     @property
     def pl_module(self) -> ModuleConfig: ...

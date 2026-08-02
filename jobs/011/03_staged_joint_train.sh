@@ -6,23 +6,22 @@ source "${JOB_DIR%/jobs/*}/jobs/env.sh"
 
 qwen_root="$(fdu_qwen_root)"
 
-stage="${SPEECH_TO_SPEECH_STAGE:-stage_1}"
-case "$stage" in
-  stage_1 | stage_2 | stage_3 | stage_4)
+experiment="${SPEECH_TO_SPEECH_EXPERIMENT:-train/staged_joint/stage_1}"
+case "$experiment" in
+  train/staged_joint/stage_1 | train/staged_joint/stage_2 | train/staged_joint/stage_3 | train/staged_joint/stage_4)
     ;;
   *)
-    echo "SPEECH_TO_SPEECH_STAGE must be stage_1 through stage_4, got: $stage" >&2
+    echo "SPEECH_TO_SPEECH_EXPERIMENT must be train/staged_joint/stage_1 through stage_4, got: $experiment" >&2
     exit 2
     ;;
 esac
-experiment="train/staged_joint/${stage}"
-visible_devices="${CUDA_VISIBLE_DEVICES:-${SPEECH_TO_SPEECH_STAGE_GPUS:-0,1}}"
-job_reject_overrides experiment task stage stage_id -- "$@"
+visible_devices="${CUDA_VISIBLE_DEVICES:-${SPEECH_TO_SPEECH_EXPERIMENT_GPUS:-0,1}}"
+job_reject_overrides experiment task loader_plan -- "$@"
 
 fdu_stage_data_args datamodule.dataset.root
 
 cd "${SPEECH_TO_SPEECH_ROOT}"
-echo "{\"event\":\"job.launch\",\"entry\":\"scripts/train.py\",\"experiment\":\"${experiment}\",\"stage\":\"${stage}\",\"devices\":\"${visible_devices}\"}"
+echo "{\"event\":\"job.launch\",\"entry\":\"scripts/train.py\",\"experiment\":\"${experiment}\",\"devices\":\"${visible_devices}\"}"
 CUDA_VISIBLE_DEVICES="${visible_devices}" "${SPEECH_TO_SPEECH_PYTHON}" scripts/train.py \
   "experiment=${experiment}" \
   "trainer=staged_static_ddp" \

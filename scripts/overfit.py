@@ -172,7 +172,6 @@ def run(config: OverfitConfig) -> None:
     result = {
         "task": task.value,
         "parameter_policy": config.callbacks.parameter_policy.name.value,
-        "stage": config.stage_id,
         "sample_index": config.sample_index,
         "max_steps": config.train.max_steps,
         "parameters": {

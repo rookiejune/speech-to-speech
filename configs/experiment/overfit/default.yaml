@@ -1,6 +1,5 @@
 # @package _global_
 defaults:
-  - /stage@stage: stage_0
   - /callback/parameter_policy@callbacks.parameter_policy: full
   - /model: default
   - /model/acoustic@model.acoustic: flow

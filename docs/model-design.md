@@ -355,9 +355,9 @@ representation 时直接复用 model 返回的 frame count 裁剪 features；`(t
 相同的行合并执行 codec decode。unified-token codec 直接解码 semantic codes，返回
 `AudioOutput(features=None, waveform, sample_rate)`。
 
-## 7. Data 与阶段配置
+## 7. Data 与 loader plan
 
-DataModule 显式持有 runtime 与 Collator。一个正式 job 只运行一个 stage；loader/task 权重在
+DataModule 显式持有 runtime 与 Collator。一个正式 job 只选择一个 train experiment；loader/task 权重在
 DataModule 构造时确定，训练过程中保持不变。task weights 位于进程共享数组，持久 worker 在
 collate 时读取；worker 侧 runtime 是不含 backbone/codec 的数据快照。
 
@@ -369,15 +369,15 @@ fused loss 保持原 Lightning accumulation 语义：各 microbatch scalar loss 
 和 token/frame count 只用于日志与 summary 拼接统计。
 
 `scripts/overfit.py` 只用于 fixed-sample overfit、smoke 和参数冻结合同验收；正式训练入口是
-`scripts/train.py`。`configs/stage/stage_*.yaml` 是 Stage 0-4 的数据计划契约：每个 stage 显式声明 loader
-权重、loader 内 task 权重和 `accumulate_grad_batches`。多 loader schedule 在每个 accumulation
-window 内按权重交错单个 homogeneous microbatch；正式 stage 默认 `fuse_loaders_per_step=true`，
+`scripts/train.py`。train experiment 内联的 `loader_plan` 显式声明 loader 权重、loader 内 task
+权重和 `accumulate_grad_batches`。运行时构造的 `LoaderSchedule` 在每个 accumulation
+window 内按权重交错单个 homogeneous microbatch；正式 staged_joint experiment 默认 `fuse_loaders_per_step=true`，
 因此 DataLoader 返回一个 fused window batch。独立的
 `callbacks.parameter_policy` 显式声明可训练参数组、
 冻结参数组和 `backbone_top_fraction`，入口在 Trainer 创建前应用一次。正式
 `experiment=train/staged_joint/stage_1..4` 当前约定
 Stage 1 使用 LoRA policy，Stage 2 使用 speech-interface policy，Stage 3 解冻 Qwen 顶部 1/3 block 与 final norm，
-Stage 4 使用 full policy；stage 本身不隐式选择 policy。RVQ decoder 的结构性冻结参数始终保持
+Stage 4 使用 full policy；experiment 文件显式选择 policy。RVQ decoder 的结构性冻结参数始终保持
 frozen。正式 joint entry 使用 `ddp_find_unused_parameters_false`，依赖 fused window 在每次
 backward 覆盖多 loader 动态分支；未 fuse 的 staged fallback 继续使用
 `ddp_find_unused_parameters_true`。
@@ -388,8 +388,8 @@ facade。PEFT 决定 backbone 内 trainable 参数，speech/acoustic interface �
 LoRA 的正式文本保真度先由固定
 `TextRetentionLogger` baseline 验证。
 
-这里的 Stage 0-4 只表示 S2S 数据、任务和参数策略日程，不是上文 Phase A/B。SAC generator pretraining
-在进入任一使用 `model.acoustic.init_artifact` 的 S2S experiment 之前独立完成；S2S stage 不在运行中创建或
+这里的 `staged_joint/stage_1..4` 只表示 S2S 数据、任务和参数策略里程碑，不是上文 Phase A/B。SAC generator pretraining
+在进入任一使用 `model.acoustic.init_artifact` 的 S2S experiment 之前独立完成；S2S train experiment 不在运行中创建或
 替换 SAC artifact。
 
 正式 train 只在配置了独立 speech validation spec 时让 `val_dataloader()` 返回真实 loader；

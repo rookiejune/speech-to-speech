@@ -15,7 +15,8 @@ from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.runtime import AudioSequenceLayout, Config as RuntimeConfig
-from speech_to_speech.stage import ParameterPolicyConfig, StageConfig
+from speech_to_speech.loader_plan import LoaderPlanConfig
+from speech_to_speech.stage import ParameterPolicyConfig
 from speech_to_speech.task import Task
 
 if __package__:
@@ -149,11 +150,10 @@ class StagedCallbacksConfig:
 @dataclass
 class _StagedTrainConfig:
     run_name: str = MISSING
-    stage_id: str = MISSING
     repo_output_root: str = MISSING
     output_subdir: str = MISSING
     output_dir: str = MISSING
-    stage: StageConfig = field(default_factory=StageConfig)
+    loader_plan: LoaderPlanConfig = field(default_factory=LoaderPlanConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     audio_sequence_layout: AudioSequenceLayout = MISSING
@@ -203,15 +203,14 @@ def train(config: DictConfig) -> StagedTrainConfig:
     result = parse(config, schema)
     result.model.lora = lora
     validate_training(result)
-    non_empty_string(result.stage_id, "stage_id")
     if result.callbacks.performance.enabled and result.callbacks.task_sample.enabled:
         raise ValueError(
             "train performance requires callbacks.task_sample.enabled=false "
             "because task sample generation cannot be excluded from distributed "
             "step timing."
         )
-    if not result.stage.loaders:
-        raise ValueError("formal train requires stage.loaders.")
+    if not result.loader_plan.loaders:
+        raise ValueError("formal train requires loader_plan.loaders.")
     _validate_loader_schedule(result)
     _validate_validation(result)
     _validate_task_samples(result)
@@ -242,11 +241,11 @@ def _validate_task_samples(config: StagedTrainConfig) -> None:
         loader_name = panel.loader
         if not isinstance(loader_name, str) or not loader_name:
             raise TypeError("task sample loader names must be non-empty strings.")
-        if loader_name not in config.stage.loaders:
+        if loader_name not in config.loader_plan.loaders:
             raise ValueError(
                 f"task sample callback references unknown loader {loader_name!r}."
             )
-        loader = config.stage.loaders[loader_name]
+        loader = config.loader_plan.loaders[loader_name]
         try:
             task = Task(panel.task)
         except ValueError as error:
@@ -315,17 +314,17 @@ def _validate_gradient_probe(config: StagedTrainConfig) -> None:
         raise ValueError("enabled gradient probe requires at least one probe.")
     if not callback.comparisons:
         raise ValueError("enabled gradient probe requires at least one comparison.")
-    allowed_sources = {"batch", *config.stage.loaders}
+    allowed_sources = {"batch", *config.loader_plan.loaders}
     for comparison in callback.comparisons:
         for target in (comparison.left, comparison.right):
             if target.group not in allowed_sources:
                 raise ValueError(
                     f"gradient comparison references unknown group {target.group!r}."
                 )
-            if target.group != "batch" and not config.stage.fuse_loaders_per_step:
+            if target.group != "batch" and not config.loader_plan.fuse_loaders_per_step:
                 raise ValueError(
                     "gradient non-batch comparisons require "
-                    "stage.fuse_loaders_per_step=true."
+                    "loader_plan.fuse_loaders_per_step=true."
                 )
 
 
@@ -367,7 +366,7 @@ def _validate_gradient_target(target: GradientTargetConfig, path: str) -> None:
 
 
 def _validate_loader_schedule(config: StagedTrainConfig) -> None:
-    if len(config.stage.loaders) > 1 and config.trainer.use_distributed_sampler:
+    if len(config.loader_plan.loaders) > 1 and config.trainer.use_distributed_sampler:
         raise ValueError(
             "multi-loader staged training requires trainer.use_distributed_sampler=false; "
             "select trainer=staged_static_ddp or trainer=staged_ddp."
@@ -376,21 +375,21 @@ def _validate_loader_schedule(config: StagedTrainConfig) -> None:
         raise ValueError(
             "multi-loader staged training executes one loader branch per "
             "microbatch and requires DDP unused-parameter detection; select "
-            "trainer=staged_static_ddp with stage.fuse_loaders_per_step=true, "
+            "trainer=staged_static_ddp with loader_plan.fuse_loaders_per_step=true, "
             "or use trainer=staged_ddp."
         )
     LoaderSchedule(
-        config.stage.loader_weights(),
-        accumulate_grad_batches=config.stage.accumulate_grad_batches,
-        fuse_loaders_per_step=config.stage.fuse_loaders_per_step,
+        config.loader_plan.loader_weights(),
+        accumulate_grad_batches=config.loader_plan.accumulate_grad_batches,
+        fuse_loaders_per_step=config.loader_plan.fuse_loaders_per_step,
     )
     required: set[Task] = set()
-    for loader in config.stage.loaders.values():
+    for loader in config.loader_plan.loaders.values():
         required.update(task for task, weight in loader.tasks.items() if weight > 0)
     missing = sorted(task.value for task in required if task not in config.datamodule.tasks)
     if missing:
         raise KeyError(
-            "datamodule.tasks must declare every positive-weight stage loader task; "
+            "datamodule.tasks must declare every positive-weight loader_plan task; "
             "missing: " + ", ".join(missing)
         )
 
@@ -403,7 +402,7 @@ def _uses_static_ddp(config: StagedTrainConfig) -> bool:
 
 
 def _requires_unused_parameter_detection(config: StagedTrainConfig) -> bool:
-    return len(config.stage.loaders) > 1 and not config.stage.fuse_loaders_per_step
+    return len(config.loader_plan.loaders) > 1 and not config.loader_plan.fuse_loaders_per_step
 
 
 def _validate_validation(config: StagedTrainConfig) -> None:
@@ -431,9 +430,9 @@ def _validate_validation(config: StagedTrainConfig) -> None:
         raise TypeError("validation sanity_steps must be -1 or non-negative.")
     if not validation.enabled:
         return
-    if validation.loader not in config.stage.loaders:
+    if validation.loader not in config.loader_plan.loaders:
         raise ValueError(f"unknown validation loader {validation.loader!r}.")
-    loader = config.stage.loaders[validation.loader]
+    loader = config.loader_plan.loaders[validation.loader]
     if loader.is_text:
         if loader.tasks != {Task.MT: 1.0}:
             raise ValueError("text validation loader must contain only MT.")

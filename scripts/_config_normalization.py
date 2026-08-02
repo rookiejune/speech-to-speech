@@ -142,7 +142,7 @@ def _data_tasks(value: object) -> None:
     if isinstance(tasks, DictConfig):
         renamed: dict[str, Any] = {}
         for key in list(tasks.keys()):
-            # Keep Task.value keys so StageLoaderConfig / Task() accept them.
+            # Keep Task.value keys so LoaderConfig / Task() accept them.
             raw = str(key)
             task = Task[raw] if raw in Task.__members__ else Task(raw)
             renamed[task.value] = tasks[key]

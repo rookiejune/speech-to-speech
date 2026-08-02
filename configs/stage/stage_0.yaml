@@ -1,4 +1,0 @@
-# @package stage
-loaders: {}
-accumulate_grad_batches: 1
-fuse_loaders_per_step: false

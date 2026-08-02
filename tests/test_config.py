@@ -66,10 +66,10 @@ from speech_to_speech.runtime import (
     BackboneType,
     Config as RuntimeConfig,
 )
+from speech_to_speech.loader_plan import LoaderConfig
 from speech_to_speech.stage import (
     ParameterGroup,
     ParameterPolicyName,
-    StageLoaderConfig,
 )
 from speech_to_speech.task import Task
 
@@ -567,11 +567,10 @@ class ConfigTest(unittest.TestCase):
                 self.assertTrue(config.callbacks.task_sample.enabled)
                 self.assertEqual(config.callbacks.task_sample.every_n_steps, 1)
 
-    def test_train_root_uses_stage_config_and_accumulation_safe_ddp(self):
+    def test_train_root_uses_loader_plan_and_accumulation_safe_ddp(self):
         default = parse_train(_compose("train"))
 
         self.assertIsInstance(default, StagedTrainRVQConfig)
-        self.assertEqual(default.stage_id, "stage_1")
         self.assertIs(default.callbacks.parameter_policy.name, ParameterPolicyName.LORA)
         self.assertIsInstance(default.model.lora, LoraConfig)
         if default.model.lora is None:
@@ -589,17 +588,17 @@ class ConfigTest(unittest.TestCase):
             default.trainer.strategy,
             "ddp_find_unused_parameters_false",
         )
-        self.assertTrue(default.stage.fuse_loaders_per_step)
+        self.assertTrue(default.loader_plan.fuse_loaders_per_step)
         with self.assertRaises(AttributeError):
             getattr(default.datamodule, "sample_index")
 
         config = parse_train(
             _compose("train", "experiment=train/staged_joint/stage_2")
         )
-        self.assertEqual(config.stage_id, "stage_2")
-        self.assertEqual(set(config.stage.loaders), {"asr", "tts", "mt"})
-        self.assertEqual(config.stage.accumulate_grad_batches, 10)
-        self.assertTrue(config.stage.fuse_loaders_per_step)
+        self.assertEqual(config.output_subdir, "staged-joint/stage_2/rvq-8l")
+        self.assertEqual(set(config.loader_plan.loaders), {"asr", "tts", "mt"})
+        self.assertEqual(config.loader_plan.accumulate_grad_batches, 10)
+        self.assertTrue(config.loader_plan.fuse_loaders_per_step)
         self.assertEqual(config.datamodule.codec, "longcat")
         self.assertEqual(config.datamodule.dataset.name, DatasetName.WMT19_TTS)
         self.assertEqual(config.text_datamodule.dataset.name.value, "wmt19")
@@ -614,7 +613,7 @@ class ConfigTest(unittest.TestCase):
                 _compose(
                     "train",
                     "experiment=train/staged_joint/stage_4",
-                    "stage.fuse_loaders_per_step=false",
+                    "loader_plan.fuse_loaders_per_step=false",
                     "trainer.strategy=ddp_find_unused_parameters_false",
                 )
             )
@@ -630,7 +629,7 @@ class ConfigTest(unittest.TestCase):
 
         self.assertIsInstance(token, StagedTrainTokenConfig)
         self.assertEqual(token.model.acoustic.type, AcousticType.NONE.value)
-        self.assertEqual(token.run_name, "stage_1-token")
+        self.assertEqual(token.run_name, "token")
         with self.assertRaisesRegex(ValueError, "semantic_codec_artifact"):
             parse_train(_compose("train", "model/acoustic=none"))
 
@@ -663,7 +662,7 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual(config.trainer.accelerator, "cpu")
                 self.assertIn(policy.value, config.output_subdir)
 
-    def test_staged_joint_experiments_bind_stage_and_parameter_policy(self):
+    def test_staged_joint_experiments_bind_loader_plan_and_parameter_policy(self):
         policies = (
             ParameterPolicyName.LORA,
             ParameterPolicyName.SPEECH_INTERFACE,
@@ -702,14 +701,17 @@ class ConfigTest(unittest.TestCase):
                     )
                 )
 
-                self.assertEqual(config.stage_id, f"stage_{index}")
+                self.assertEqual(
+                    config.output_subdir,
+                    f"staged-joint/stage_{index}/{config.run_name}",
+                )
                 self.assertIs(config.callbacks.parameter_policy.name, policy)
                 self.assertEqual(
                     config.trainer.strategy,
                     "ddp_find_unused_parameters_false",
                 )
-                self.assertGreater(config.stage.accumulate_grad_batches, 1)
-                self.assertTrue(config.stage.fuse_loaders_per_step)
+                self.assertGreater(config.loader_plan.accumulate_grad_batches, 1)
+                self.assertTrue(config.loader_plan.fuse_loaders_per_step)
                 self.assertTrue(config.callbacks.task_sample.enabled)
                 self.assertEqual(config.callbacks.task_sample.every_n_steps, 10_000)
                 self.assertEqual(
@@ -732,7 +734,7 @@ class ConfigTest(unittest.TestCase):
                 _compose(
                     "train",
                     "experiment=train/staged_joint/stage_4",
-                    "stage.fuse_loaders_per_step=false",
+                    "loader_plan.fuse_loaders_per_step=false",
                     "trainer.strategy=ddp_find_unused_parameters_false",
                 )
             )
@@ -743,7 +745,7 @@ class ConfigTest(unittest.TestCase):
                 _compose(
                     "train",
                     "experiment=train/staged_joint/stage_4",
-                    "stage.accumulate_grad_batches=1",
+                    "loader_plan.accumulate_grad_batches=1",
                     "trainer.strategy=ddp_find_unused_parameters_false",
                 )
             )
@@ -758,7 +760,7 @@ class ConfigTest(unittest.TestCase):
         )
 
         self.assertEqual(config.train.max_steps, 1_000_000)
-        self.assertEqual(config.stage_id, "stage_1")
+        self.assertEqual(config.output_subdir, "stable-codec/stage_1/token")
         self.assertEqual(config.runtime.codec, "stable_codec")
         self.assertIs(config.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
         self.assertIsNone(config.runtime.audio_tokenizer)
@@ -819,12 +821,12 @@ class ConfigTest(unittest.TestCase):
             datamodule.loader_specs["mt"].kind,
             LoaderKind.TEXT,
         )
-        self.assertEqual(datamodule.schedule.weights, config.stage.loader_weights())
+        self.assertEqual(datamodule.schedule.weights, config.loader_plan.loader_weights())
         self.assertEqual(datamodule.schedule.accumulate_grad_batches, 10)
         self.assertTrue(datamodule.schedule.fuse_loaders_per_step)
 
         with self.assertRaisesRegex(ValueError, "cannot mix pure text and speech"):
-            StageLoaderConfig(
+            LoaderConfig(
                 weight=1.0,
                 task_weights={"mt": 1.0, "tts": 1.0},
             )
@@ -1055,7 +1057,7 @@ class ConfigTest(unittest.TestCase):
         )
 
     def test_text_ar_uses_the_text_loader(self):
-        loader = StageLoaderConfig(
+        loader = LoaderConfig(
             weight=1.0,
             task_weights={"text_ar": 1.0},
         )
@@ -1431,10 +1433,9 @@ class ConfigTest(unittest.TestCase):
         self.assertNotIn("scripts/overfit.py", source)
         self.assertIn('"trainer=staged_static_ddp"', source)
         self.assertIn("fdu_stage_data_args datamodule.dataset.root", source)
-        self.assertIn("SPEECH_TO_SPEECH_STAGE:-stage_1", source)
-        self.assertIn('experiment="train/staged_joint/${stage}"', source)
+        self.assertIn("SPEECH_TO_SPEECH_EXPERIMENT:-train/staged_joint/stage_1", source)
         self.assertIn('"experiment=${experiment}"', source)
-        self.assertIn('job_reject_overrides experiment task stage stage_id -- "$@"', source)
+        self.assertIn('job_reject_overrides experiment task loader_plan -- "$@"', source)
 
     def test_job_wrappers_source_existing_project_environment(self):
         root = Path(__file__).parents[1]

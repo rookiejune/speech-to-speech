@@ -33,9 +33,9 @@ from speech_to_speech.callback.logging import (
 from speech_to_speech.datamodule import DataModule, SampleSplit
 from speech_to_speech.datamodule.collate.joint import LoaderSchedule
 from speech_to_speech.datamodule.module import LoaderSpec
+from speech_to_speech.loader_plan import LoaderConfig
 from speech_to_speech.pl_module.composition import build
 from speech_to_speech.runtime import runtime_for_sequence_layout
-from speech_to_speech.stage import StageLoaderConfig
 from speech_to_speech.task import Task
 
 if TYPE_CHECKING:
@@ -103,16 +103,15 @@ def run(config: StagedTrainConfig) -> None:
         return
 
     result: dict[str, object] = {
-        "stage": config.stage_id,
         "parameter_policy": config.callbacks.parameter_policy.name.value,
         "loaders": {
             name: {
                 "weight": loader.weight,
                 "task_weights": dict(loader.task_weights),
             }
-            for name, loader in config.stage.loaders.items()
+            for name, loader in config.loader_plan.loaders.items()
         },
-        "accumulate_grad_batches": config.stage.accumulate_grad_batches,
+        "accumulate_grad_batches": config.loader_plan.accumulate_grad_batches,
         "max_steps": config.train.max_steps,
         "composition": acoustic_type.value,
         "parameters": {
@@ -136,15 +135,15 @@ def run(config: StagedTrainConfig) -> None:
 def build_datamodule(config: StagedTrainConfig, runtime: Runtime) -> DataModule:
     loaders = {
         name: _loader_spec(config, loader)
-        for name, loader in config.stage.loaders.items()
+        for name, loader in config.loader_plan.loaders.items()
     }
     return DataModule(
         runtime,
         loaders,
         LoaderSchedule(
-            config.stage.loader_weights(),
-            accumulate_grad_batches=config.stage.accumulate_grad_batches,
-            fuse_loaders_per_step=config.stage.fuse_loaders_per_step,
+            config.loader_plan.loader_weights(),
+            accumulate_grad_batches=config.loader_plan.accumulate_grad_batches,
+            fuse_loaders_per_step=config.loader_plan.fuse_loaders_per_step,
         ),
         validation=(
             _validation_spec(config) if config.validation.enabled else None
@@ -154,7 +153,7 @@ def build_datamodule(config: StagedTrainConfig, runtime: Runtime) -> DataModule:
 
 def _loader_spec(
     config: StagedTrainConfig,
-    loader: StageLoaderConfig,
+    loader: LoaderConfig,
 ):
     if loader.is_text:
         return LoaderSpec.text(
@@ -171,7 +170,7 @@ def _loader_spec(
 
 
 def _validation_spec(config: StagedTrainConfig) -> LoaderSpec:
-    loader = config.stage.loaders[config.validation.loader]
+    loader = config.loader_plan.loaders[config.validation.loader]
     if loader.is_text:
         dataset = replace(
             config.text_datamodule.dataset,
@@ -224,7 +223,11 @@ def build_trainer(
 
 
 def _trainer_accumulate_grad_batches(config: StagedTrainConfig) -> int:
-    return 1 if config.stage.fuse_loaders_per_step else config.stage.accumulate_grad_batches
+    return (
+        1
+        if config.loader_plan.fuse_loaders_per_step
+        else config.loader_plan.accumulate_grad_batches
+    )
 
 
 def training_callbacks(

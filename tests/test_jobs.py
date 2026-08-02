@@ -17,7 +17,7 @@ def _environment(**overrides: str) -> dict[str, str]:
         "REPOS_ROOT",
         "WORKSPACE_ROOT",
         "SPEECH_TO_SPEECH_ROOT",
-        "SPEECH_TO_SPEECH_STAGE",
+        "SPEECH_TO_SPEECH_EXPERIMENT",
         "CUDA_VISIBLE_DEVICES",
     ):
         environment.pop(name, None)
@@ -54,7 +54,7 @@ class JobsTest(unittest.TestCase):
     def test_identity_guard_rejects_hydra_override_forms(self) -> None:
         command = (
             'source "$1"; shift; '
-            'job_reject_overrides experiment task stage stage_id -- "$@"'
+            'job_reject_overrides experiment task loader_plan -- "$@"'
         )
         valid = subprocess.run(
             ["bash", "-c", command, "jobs-test", str(JOBS / "env.sh"), "train.max_steps=1"],
@@ -69,8 +69,7 @@ class JobsTest(unittest.TestCase):
         for override in (
             "experiment=other",
             "+task=s2st",
-            "++stage=stage_4",
-            "stage_id=stage_4",
+            "++loader_plan.loaders.extra.weight=1.0",
             "~task",
             "experiment@_global_=other",
         ):
@@ -98,10 +97,10 @@ class JobsTest(unittest.TestCase):
         self.assertIn("experiment", result.stderr)
         self.assertIn("cannot be overridden", result.stderr)
 
-    def test_staged_wrapper_rejects_stage_zero(self) -> None:
+    def test_staged_wrapper_rejects_unknown_experiment(self) -> None:
         result = _run(
             JOBS / "011" / "03_staged_joint_train.sh",
-            environment=_environment(SPEECH_TO_SPEECH_STAGE="stage_0"),
+            environment=_environment(SPEECH_TO_SPEECH_EXPERIMENT="train/staged_joint/stage_0"),
         )
 
         self.assertEqual(result.returncode, 2)

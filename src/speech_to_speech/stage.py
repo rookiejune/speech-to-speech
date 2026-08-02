@@ -6,12 +6,9 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Optional, Protocol, cast
 
-from anydataset.types import Modality
 from torch import nn
 
 from ._compat import StrEnum, auto
-from .prediction import PredictionModality
-from .task import Task
 
 
 class ParameterGroup(StrEnum):
@@ -96,80 +93,6 @@ class ParameterPolicyConfig:
             )
         return spec
 
-
-@dataclass
-class StageLoaderConfig:
-    weight: float
-    task_weights: dict[str, float]
-    prediction: Optional[str] = None
-
-    def __post_init__(self) -> None:
-        if (
-            isinstance(self.weight, bool)
-            or not isinstance(self.weight, (float, int))
-            or not math.isfinite(self.weight)
-            or self.weight <= 0
-        ):
-            raise ValueError("stage loader weight must be finite and positive.")
-        _validate_weights(self.task_weights, name="stage loader task weights")
-        if self.prediction is not None:
-            if not isinstance(self.prediction, str):
-                raise TypeError("stage loader prediction must be a string or None.")
-            PredictionModality(self.prediction)
-        self.is_text
-
-    @property
-    def tasks(self) -> dict[Task, float]:
-        return {Task(name): weight for name, weight in self.task_weights.items()}
-
-    @property
-    def prediction_modality(self) -> PredictionModality | None:
-        if self.prediction is None:
-            return None
-        return PredictionModality(self.prediction)
-
-    @property
-    def is_text(self) -> bool:
-        from .task_spec import resolve_prediction
-
-        active = [task for task, weight in self.tasks.items() if weight > 0]
-        text = [
-            task.source_modality is not Modality.AUDIO
-            and resolve_prediction(task, self.prediction_modality)
-            is PredictionModality.TEXT
-            for task in active
-        ]
-        if any(text) and not all(text):
-            raise ValueError("a staged loader cannot mix pure text and speech tasks.")
-        return all(text)
-
-
-@dataclass
-class StageConfig:
-    loaders: dict[str, StageLoaderConfig] = field(default_factory=dict)
-    accumulate_grad_batches: int = 1
-    fuse_loaders_per_step: bool = False
-
-    def __post_init__(self) -> None:
-        if (
-            isinstance(self.accumulate_grad_batches, bool)
-            or not isinstance(self.accumulate_grad_batches, int)
-        ):
-            raise TypeError("stage accumulate_grad_batches must be an integer.")
-        if self.accumulate_grad_batches < 1:
-            raise ValueError("stage accumulate_grad_batches must be positive.")
-        if not isinstance(self.fuse_loaders_per_step, bool):
-            raise TypeError("stage fuse_loaders_per_step must be a boolean.")
-        if not isinstance(self.loaders, Mapping):
-            raise TypeError("stage loaders must be a mapping.")
-        if self.loaders:
-            _validate_weights(self.loader_weights(), name="stage loader weights")
-            for name in self.loaders:
-                if not name:
-                    raise ValueError("stage loader names must not be empty.")
-
-    def loader_weights(self) -> dict[str, float]:
-        return {name: loader.weight for name, loader in self.loaders.items()}
 
 SPEECH_INTERFACE_GROUPS = frozenset(
     {
@@ -399,25 +322,6 @@ def _last_module_index(value: object) -> int | None:
     return len(value) - 1
 
 
-def _validate_weights(weights: Mapping[str, float], *, name: str) -> None:
-    if not weights:
-        raise ValueError(f"{name} must contain at least one item.")
-    if any(not key for key in weights):
-        raise ValueError(f"{name} names must not be empty.")
-    values = list(weights.values())
-    if any(
-        isinstance(value, bool)
-        or not isinstance(value, (float, int))
-        or not math.isfinite(value)
-        or value <= 0
-        for value in values
-    ):
-        raise ValueError(f"{name} must be finite and positive.")
-    total = sum(values)
-    if not math.isfinite(total) or total <= 0:
-        raise ValueError(f"{name} must have a finite positive total.")
-
-
 __all__ = [
     "ACOUSTIC_GROUPS",
     "PARAMETER_POLICY_SPECS",
@@ -428,8 +332,6 @@ __all__ = [
     "ParameterPolicyName",
     "ParameterPolicySpec",
     "ParameterPolicyTrainability",
-    "StageConfig",
-    "StageLoaderConfig",
     "apply_parameter_policy",
     "default_parameter_policy_config",
     "parameter_group",
