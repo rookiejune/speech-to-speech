@@ -11,6 +11,7 @@ from anytrain.lightning import (
     GradientTarget,
     ParameterPolicyCallback,
 )
+from anytrain.lightning.schedule import UnitScheduleCallback
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig
 
@@ -146,6 +147,7 @@ class OverfitContractTest(unittest.TestCase):
             [
                 callbacks[0],
                 factories["OOMDiagnostics"].return_value,
+                callbacks[2],
                 factories["OutputsLogger"].return_value,
                 factories["FlowMatchingLogger"].return_value,
                 factories["GradLogger"].return_value,
@@ -156,6 +158,7 @@ class OverfitContractTest(unittest.TestCase):
             ],
         )
         self.assertIsInstance(callbacks[0], ParameterPolicyCallback)
+        self.assertIsInstance(callbacks[2], UnitScheduleCallback)
         performance.assert_called_once_with(config.callbacks.performance)
         factories["FlowMatchingLogger"].assert_called_once_with(
             runtime.flow_matching,
@@ -234,7 +237,9 @@ class OverfitContractTest(unittest.TestCase):
             )
 
         self.assertIsInstance(callbacks[0], ParameterPolicyCallback)
-        self.assertEqual(callbacks[1:], [oom, outputs, summary])
+        self.assertIs(callbacks[1], oom)
+        self.assertIsInstance(callbacks[2], UnitScheduleCallback)
+        self.assertEqual(callbacks[3:], [outputs, summary])
 
     def test_oom_follows_performance_before_other_callbacks(self) -> None:
         config = overfit(

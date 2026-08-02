@@ -28,6 +28,8 @@ from speech_to_speech.parameter_policy import (
     ParameterPolicyConfig,
     ParameterPolicyName,
 )
+from speech_to_speech.callback.schedule import SUPPORTED_UNIT_NAMES
+from speech_to_speech.optim import Config as OptimBaseConfig
 
 
 @dataclass
@@ -83,6 +85,39 @@ class PerformanceConfig:
     measure_window_steps: int = MISSING
     sync_cuda: bool = MISSING
     sync_distributed: bool = MISSING
+
+
+@dataclass
+class UnitScheduleCurveConfig:
+    type: str = "constant"
+    value: Optional[float] = None
+    start: Optional[float] = None
+    end: Optional[float] = None
+
+
+@dataclass
+class UnitSchedulePhaseConfig:
+    name: str = MISSING
+    duration: float = MISSING
+    lr: UnitScheduleCurveConfig = field(default_factory=UnitScheduleCurveConfig)
+
+
+@dataclass
+class UnitScheduleConfig:
+    unit: str = "tokens"
+    log_every_n_units: Optional[float] = None
+    measure_window_batches: int = 100
+    sync_cuda: bool = True
+    sync_distributed: bool = True
+    allow_external_lr_changes: bool = False
+    stop_at: Optional[float] = None
+    stop_at_end: bool = False
+    phases: list[UnitSchedulePhaseConfig] = field(default_factory=list)
+
+
+@dataclass
+class OptimConfig(OptimBaseConfig):
+    schedule: UnitScheduleConfig = field(default_factory=UnitScheduleConfig)
 
 
 @dataclass
@@ -168,6 +203,9 @@ class _EntryConfig(Protocol):
     def pl_module(self) -> ModuleConfig: ...
 
     @property
+    def optim(self) -> OptimConfig: ...
+
+    @property
     def train(self) -> _TrainValues: ...
 
     @property
@@ -184,6 +222,7 @@ def validate_training(config: _EntryConfig) -> None:
         config.trainer.log_every_n_steps,
         "trainer.log_every_n_steps",
     )
+    _validate_optim(config.optim)
     _validate_performance(config.callbacks.performance)
     _validate_output(config)
     _validate_audio_sequence_layout(config)
@@ -323,13 +362,90 @@ def _validate_lora(config: _EntryConfig) -> None:
             "LoRA training FLOPs are not supported by the current performance provider; "
             "set callbacks.performance.enabled=false."
         )
-    if enabled and config.pl_module.optimizer == "muon":
+    if enabled and config.optim.name == "muon":
         init = config.model.lora.init_lora_weights if config.model.lora is not None else None
         if not isinstance(init, str) or not init.startswith("pissa"):
             raise ValueError(
-                "pl_module.optimizer=muon with LoRA requires model.lora.init_lora_weights "
+                "optim.name=muon with LoRA requires model.lora.init_lora_weights "
                 "to be a pissa initialization (for example 'pissa')."
             )
+
+
+def _validate_optim(config: OptimConfig) -> None:
+    if config.name not in {"adamw", "muon"}:
+        raise ValueError("optim.name must be adamw or muon.")
+    _positive_number(config.learning_rate, "optim.learning_rate")
+    _non_negative_number(config.weight_decay, "optim.weight_decay")
+    _validate_unit_schedule(config.schedule)
+
+
+def _validate_unit_schedule(config: UnitScheduleConfig) -> None:
+    if config.unit not in SUPPORTED_UNIT_NAMES:
+        raise ValueError(
+            "optim.schedule.unit must be one of "
+            + ", ".join(sorted(SUPPORTED_UNIT_NAMES))
+        )
+    if config.log_every_n_units is not None:
+        _positive_number(config.log_every_n_units, "optim.schedule.log_every_n_units")
+    positive_integer(
+        config.measure_window_batches,
+        "optim.schedule.measure_window_batches",
+    )
+    if not isinstance(config.sync_cuda, bool):
+        raise TypeError("optim.schedule.sync_cuda must be a boolean.")
+    if not isinstance(config.sync_distributed, bool):
+        raise TypeError("optim.schedule.sync_distributed must be a boolean.")
+    if not isinstance(config.allow_external_lr_changes, bool):
+        raise TypeError(
+            "optim.schedule.allow_external_lr_changes must be a boolean."
+        )
+    if config.stop_at is not None:
+        _positive_number(config.stop_at, "optim.schedule.stop_at")
+    if not isinstance(config.stop_at_end, bool):
+        raise TypeError("optim.schedule.stop_at_end must be a boolean.")
+    if not config.phases:
+        raise ValueError("optim.schedule requires phases.")
+    seen: set[str] = set()
+    for index, phase in enumerate(config.phases):
+        path = f"optim.schedule.phases[{index}]"
+        non_empty_string(phase.name, f"{path}.name")
+        if phase.name in seen:
+            raise ValueError(f"duplicate optim.schedule phase {phase.name!r}.")
+        seen.add(phase.name)
+        _positive_number(phase.duration, f"{path}.duration")
+        _validate_schedule_curve(phase.lr, f"{path}.lr")
+
+
+def _validate_schedule_curve(config: UnitScheduleCurveConfig, path: str) -> None:
+    if config.type not in {"constant", "linear", "cosine"}:
+        raise ValueError(f"{path}.type must be constant, linear, or cosine.")
+    if config.value is not None:
+        _non_negative_number(config.value, f"{path}.value")
+    if config.start is not None:
+        _non_negative_number(config.start, f"{path}.start")
+    if config.end is not None:
+        _non_negative_number(config.end, f"{path}.end")
+
+
+def _positive_number(value: object, name: str) -> None:
+    number = _number(value, name)
+    if number <= 0:
+        raise ValueError(f"{name} must be positive.")
+
+
+def _non_negative_number(value: object, name: str) -> None:
+    number = _number(value, name)
+    if number < 0:
+        raise ValueError(f"{name} must be non-negative.")
+
+
+def _number(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (float, int)):
+        raise TypeError(f"{name} must be a number.")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{name} must be finite.")
+    return number
 
 
 __all__ = [
@@ -337,6 +453,7 @@ __all__ = [
     "FlowConfig",
     "FlowModelConfig",
     "LoggingConfig",
+    "OptimConfig",
     "PerformanceConfig",
     "RVQConfig",
     "RVQModelConfig",
@@ -346,6 +463,9 @@ __all__ = [
     "TokenModelConfig",
     "TrainConfig",
     "TrainerConfig",
+    "UnitScheduleConfig",
+    "UnitScheduleCurveConfig",
+    "UnitSchedulePhaseConfig",
     "non_empty_string",
     "non_negative_integer",
     "optional_positive_number",

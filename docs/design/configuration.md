@@ -33,10 +33,12 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
   可追溯的 split manifest。它要求候选索引覆盖 audited `samples.parquet` 的全部行，绑定
   audit 文件 fingerprint，并把 split method 作为显式参数；它不是训练入口，也不会修改原始
   parquet 或 payload。
-- `pl_module`：完整映射 `pl_module.Config` 的 learning rate、weight decay 与 anytrain LLM
-  optimizer 选择（`adamw` / `muon`）；不再使用含义重复的独立 `optimizer` 组。默认
-  `optimizer=adamw`；Muon 对比时设 `pl_module.optimizer=muon`。有 PEFT LoRA 时，anytrain 会把
+- `optim`：完整映射训练 optimizer 策略，包括 learning rate、weight decay、anytrain LLM
+  optimizer 选择（`adamw` / `muon`）和 unit-based LR schedule。默认
+  `optim.name=adamw`；Muon 对比时设 `optim.name=muon`。有 PEFT LoRA 时，anytrain 会把
   `muon` 自动路由到 LoRA-Muon（adapter）+ AdamW（其余可训参数）。
+- `pl_module`：只保留 Lightning module 自身行为配置，例如 validation generation token budget；
+  不再持有 optimizer 或 LR schedule knobs。
 
 Acoustic-only codec screening 已迁入 `semantic-acoustic-codec`。本仓库不再维护对应的 Hydra root、
 job wrapper 或 config schema；历史实验记录仍保存在 `docs/experiments/` 中。
@@ -276,7 +278,7 @@ PEFT LoRA 必须同时选择 `+model/lora@model.lora=qwen` 与
 nested structured config 展开，因此 normalization 边界先用官方字段构造 `peft.LoraConfig`，再把
 该对象写回公开 `model.Config`；它不复制字段或二次校验。PEFT 负责 backbone 内参数的冻结语义，
 该 policy 再训练现有 speech/acoustic interface；当前 performance FLOPs provider 不支持 LoRA，入口
-拒绝同时启用 performance callback。`pl_module.optimizer=muon` 与 LoRA 组合时，要求
+拒绝同时启用 performance callback。`optim.name=muon` 与 LoRA 组合时，要求
 `init_lora_weights` 为 PiSSA 系满秩初始化，否则入口早失败。
 
 overfit 入口继续默认 `callbacks.parameter_policy.name=full` 且不启用 LoRA，专门验收全参闭环。

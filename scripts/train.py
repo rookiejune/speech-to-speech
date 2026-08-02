@@ -86,7 +86,8 @@ def run(config: StagedTrainConfig) -> None:
         config.model,
         config.model.acoustic,
     )
-    schedule_runtime = build_unit_schedule(config.callbacks.schedule)
+    schedule_runtime = build_unit_schedule(config.optim.schedule)
+    module.optim = config.optim
     module.schedule_runtime = schedule_runtime
     if config.datamodule.encode_missing_codes is True:
         module.batch_materializer = OnDeviceCodecMaterializer(rt)
@@ -249,11 +250,10 @@ def training_callbacks(
     performance_callback = performance(config.callbacks.performance)
     if performance_callback is not None:
         callbacks.append(performance_callback)
-    if schedule_runtime is None:
-        schedule_runtime = build_unit_schedule(config.callbacks.schedule)
-    if schedule_runtime is not None:
-        callbacks.extend(schedule_runtime.callbacks())
     callbacks.append(OOMDiagnostics())
+    if schedule_runtime is None:
+        schedule_runtime = build_unit_schedule(config.optim.schedule)
+    callbacks.extend(schedule_runtime.callbacks())
     callbacks.extend(_logging_callbacks(summary, validation_history))
     callbacks.extend(_task_sample_loggers(config))
     text_retention = _text_retention_logger(config)

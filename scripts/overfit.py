@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Union, cast
 import hydra
 import torch
 from anytrain.lightning import GradientComparison, GradientProbe, GradientTarget
+from anytrain.lightning.schedule import ScheduleRuntime
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig
@@ -14,6 +15,7 @@ from omegaconf import DictConfig
 from speech_to_speech.callback import (
     OOMDiagnostics,
     OnDeviceCodecMaterializer,
+    build_unit_schedule,
     build_parameter_policy,
 )
 from speech_to_speech.callback.logging import (
@@ -39,6 +41,7 @@ from speech_to_speech.parameter_policy import ParameterGroup
 from speech_to_speech.task import Task
 
 if TYPE_CHECKING:
+    from speech_to_speech.runtime import Runtime
     from scripts._overfit_config import GradientProbeConfig, OverfitConfig
 
 if __package__:
@@ -88,6 +91,9 @@ def run(config: OverfitConfig) -> None:
         config.model,
         config.model.acoustic,
     )
+    schedule_runtime = build_unit_schedule(config.optim.schedule)
+    module.optim = config.optim
+    module.schedule_runtime = schedule_runtime
     uses_acoustic_decoder = acoustic_type is not AcousticType.NONE
     evaluation: AcousticEvaluation | None = None
     repa_weight = (
@@ -144,6 +150,7 @@ def run(config: OverfitConfig) -> None:
         task=task,
         summary=summary,
         evaluation=evaluation,
+        schedule_runtime=schedule_runtime,
     )
     trainer = build_trainer(config, output_dir, callbacks)
     trainer.fit(module, datamodule=datamodule)
@@ -216,6 +223,7 @@ def training_callbacks(
     task: Task,
     summary: LossSummary,
     evaluation: AcousticEvaluation | None,
+    schedule_runtime: ScheduleRuntime | None = None,
 ) -> list[Callback]:
     performance_callback = performance(config.callbacks.performance)
     callbacks: list[Callback] = [
@@ -223,7 +231,11 @@ def training_callbacks(
     ]
     if performance_callback is not None:
         callbacks.append(performance_callback)
-    callbacks.extend([OOMDiagnostics(), OutputsLogger()])
+    callbacks.append(OOMDiagnostics())
+    if schedule_runtime is None:
+        schedule_runtime = build_unit_schedule(config.optim.schedule)
+    callbacks.extend(schedule_runtime.callbacks())
+    callbacks.append(OutputsLogger())
 
     flow = config.callbacks.flow_matching
     if flow.enabled and acoustic_type is AcousticType.FLOW:

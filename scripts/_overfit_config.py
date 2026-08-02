@@ -16,6 +16,7 @@ if __package__:
     from ._config_common import (
         FlowModelConfig,
         LoggingConfig,
+        OptimConfig,
         PerformanceConfig,
         RVQModelConfig,
         TextRetentionCallbackConfig,
@@ -32,6 +33,7 @@ else:
     from _config_common import (
         FlowModelConfig,
         LoggingConfig,
+        OptimConfig,
         PerformanceConfig,
         RVQModelConfig,
         TextRetentionCallbackConfig,
@@ -114,6 +116,7 @@ class _OverfitConfig:
     audio_sequence_layout: AudioSequenceLayout = MISSING
     datamodule: SpeechConfig = MISSING
     pl_module: ModuleConfig = field(default_factory=ModuleConfig)
+    optim: OptimConfig = field(default_factory=OptimConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)

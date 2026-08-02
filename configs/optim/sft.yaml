@@ -1,0 +1,18 @@
+name: adamw
+learning_rate: 0.00002
+weight_decay: 0.01
+schedule:
+  unit: tokens
+  log_every_n_units: 100000
+  measure_window_batches: 100
+  sync_cuda: true
+  sync_distributed: true
+  allow_external_lr_changes: false
+  stop_at:
+  stop_at_end: false
+  phases:
+    - name: main
+      duration: 1
+      lr:
+        type: constant
+        value: 1.0

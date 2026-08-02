@@ -49,9 +49,6 @@ class PhaseConfig(Protocol):
 
 class ScheduleConfig(Protocol):
     @property
-    def enabled(self) -> bool: ...
-
-    @property
     def unit(self) -> str: ...
 
     @property
@@ -104,9 +101,7 @@ class BatchUnits:
         return _batch_units(batch, self.unit)
 
 
-def build_unit_schedule(config: ScheduleConfig) -> ScheduleRuntime | None:
-    if not config.enabled:
-        return None
+def build_unit_schedule(config: ScheduleConfig) -> ScheduleRuntime:
     schedule = LRSchedule(
         clock=UnitClock(
             unit=config.unit,

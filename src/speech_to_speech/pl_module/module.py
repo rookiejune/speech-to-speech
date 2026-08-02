@@ -38,13 +38,11 @@ from ..generation.protocol import TextEvaluationModel
 from ..prediction import PredictionModality
 from ..runtime import AudioSequenceLayout
 from ..task import Task
+from ..optim import Config as OptimConfig
 
 
 @dataclass(frozen=True)
 class Config:
-    learning_rate: float = 2e-5
-    weight_decay: float = 0.01
-    optimizer: str = "adamw"
     mt_validation_max_new_tokens: int = 256
 
     def __post_init__(self) -> None:
@@ -79,6 +77,7 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         *,
         model: ModelT,
         objective: Objective[ModelT],
+        optim: OptimConfig | None = None,
         batch_materializer: BatchMaterializer | None = None,
         schedule_runtime: ScheduleRuntime | None = None,
     ) -> None:
@@ -88,6 +87,7 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
 
         self.model = model
         self.objective = objective
+        self.optim = OptimConfig() if optim is None else optim
         self.batch_materializer = batch_materializer
         self.schedule_runtime = schedule_runtime
         self._current_loss_outputs: Outputs | None = None
@@ -302,9 +302,9 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         optimizer = create_optimizer(
             cast(nn.Module, cast(object, self.model)),
             preset="sft",
-            optimizer=self.config.optimizer,
-            lr=self.config.learning_rate,
-            weight_decay=self.config.weight_decay,
+            optimizer=self.optim.name,
+            lr=self.optim.learning_rate,
+            weight_decay=self.optim.weight_decay,
         )
         if self.schedule_runtime is None:
             return optimizer

@@ -63,6 +63,7 @@ from speech_to_speech.model import (
 from speech_to_speech.model.acoustic import AcousticType, DecoderConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.pl_module import SpeechToSpeechModule
+from speech_to_speech.optim import Config as OptimConfig
 from speech_to_speech.runtime import (
     AudioSequenceLayout,
     BackboneInitialization,
@@ -99,6 +100,43 @@ class _OptimizerModel(torch.nn.Module):
         return None
 
 
+_STAGED_JOINT_CASES = (
+    (
+        1,
+        ParameterPolicyName.LORA,
+        (("asr", "asr"), ("tts", "tts")),
+    ),
+    (
+        2,
+        ParameterPolicyName.SPEECH_INTERFACE,
+        (("asr", "asr"), ("tts", "tts"), ("mt", "mt")),
+    ),
+    (
+        3,
+        ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD,
+        (
+            ("asr_s2tt", "asr"),
+            ("asr_s2tt", "s2tt"),
+            ("tts_t2st", "tts"),
+            ("tts_t2st", "t2st"),
+            ("mt", "mt"),
+        ),
+    ),
+    (
+        4,
+        ParameterPolicyName.FULL,
+        (
+            ("asr_s2tt", "asr"),
+            ("asr_s2tt", "s2tt"),
+            ("tts_t2st", "tts"),
+            ("tts_t2st", "t2st"),
+            ("s2st", "s2st"),
+            ("mt", "mt"),
+        ),
+    ),
+)
+
+
 @patch.dict(
     "os.environ",
     {
@@ -107,16 +145,32 @@ class _OptimizerModel(torch.nn.Module):
     },
 )
 class ConfigTest(unittest.TestCase):
+    def _assert_gradient_logger(
+        self,
+        grad_logger,
+        config,
+        acoustic_type,
+        loss_name,
+        probes,
+    ):
+        comparison = GradientComparison(
+            GradientTarget("token"),
+            GradientTarget(loss_name),
+        )
+        callback = _gradient_logger(config, acoustic_type, comparison)
+
+        self.assertIs(callback, grad_logger.return_value)
+        grad_logger.assert_called_once_with((comparison,), probes, every_n_steps=1)
+        grad_logger.reset_mock()
+        return comparison
+
     def test_roots_parse_to_src_aligned_configs(self):
-        flow = overfit(_compose("overfit"))
-        rvq = overfit(_compose("overfit", "model/acoustic=rvq"))
-        token = overfit(
-            _compose(
-                "overfit",
-                "runtime=unicodec",
-                "model/acoustic=none",
-                "audio_sequence_layout=flattened",
-            )
+        flow = _overfit()
+        rvq = _overfit("model/acoustic=rvq")
+        token = _overfit(
+            "runtime=unicodec",
+            "model/acoustic=none",
+            "audio_sequence_layout=flattened",
         )
 
         self.assertIsInstance(flow, OverfitFlowConfig)
@@ -133,22 +187,17 @@ class ConfigTest(unittest.TestCase):
         self.assertFalse(flow.callbacks.performance.enabled)
 
     def test_acoustic_generator_initialization_is_explicit(self):
-        flow = overfit(
-            _compose("overfit", "model.acoustic.init_artifact=/tmp/flow-artifact")
-        )
-        rvq = overfit(
-            _compose(
-                "overfit",
-                "model/acoustic=rvq",
-                "model.acoustic.init_artifact=/tmp/rvq-artifact",
-            )
+        flow = _overfit("model.acoustic.init_artifact=/tmp/flow-artifact")
+        rvq = _overfit(
+            "model/acoustic=rvq",
+            "model.acoustic.init_artifact=/tmp/rvq-artifact",
         )
 
         self.assertEqual(flow.model.acoustic.init_artifact, "/tmp/flow-artifact")
         self.assertEqual(rvq.model.acoustic.init_artifact, "/tmp/rvq-artifact")
 
     def test_toy_smoke_selects_model_and_dataset_without_a_toy_runtime(self):
-        config = overfit(_compose("overfit", "experiment=overfit/toy_smoke"))
+        config = _overfit("experiment=overfit/toy_smoke")
 
         self.assertIsInstance(config, OverfitFlowConfig)
         self.assertIsInstance(config.runtime, RuntimeConfig)
@@ -164,29 +213,23 @@ class ConfigTest(unittest.TestCase):
         self.assertFalse(config.callbacks.task_sample.enabled)
         self.assertFalse(config.callbacks.evaluation.enabled)
 
-        production = overfit(_compose("overfit"))
+        production = _overfit()
         self.assertIsNone(production.model.toy)
         self.assertIs(production.datamodule.dataset.name, DatasetName.WMT19_TTS)
 
-        selected = overfit(
-            _compose(
-                "overfit",
-                "model=toy",
-                "datamodule/dataset=toy",
-            )
-        )
+        selected = _overfit("model=toy", "datamodule/dataset=toy")
         self.assertIsInstance(selected.model.toy, ToyConfig)
         self.assertIs(selected.datamodule.dataset.name, DatasetName.TOY)
 
     def test_qwen2_5_omni_text_runtime_uses_thinker_adapter(self):
-        config = overfit(_compose("overfit", "runtime=qwen2_5_omni_text"))
+        config = _overfit("runtime=qwen2_5_omni_text")
 
         self.assertIs(config.runtime.backbone_type, BackboneType.QWEN2_5_OMNI_THINKER)
         self.assertEqual(config.runtime.backbone, "Qwen/Qwen2.5-Omni-7B")
         self.assertEqual(config.runtime.backbone_body, "model")
 
     def test_kimi_audio_runtime_uses_tuple_readout(self):
-        config = overfit(_compose("overfit", "runtime=kimi_audio"))
+        config = _overfit("runtime=kimi_audio")
 
         self.assertEqual(config.runtime.backbone, "moonshotai/Kimi-Audio-7B-Instruct")
         self.assertTrue(config.runtime.backbone_trust_remote_code)
@@ -194,35 +237,25 @@ class ConfigTest(unittest.TestCase):
         self.assertFalse(config.runtime.backbone_supports_cache_position)
 
     def test_random_backbone_requires_unambiguous_full_training(self):
-        random = overfit(
-            _compose("overfit", "runtime.backbone_initialization=random")
-        )
+        random = _overfit("runtime.backbone_initialization=random")
 
         self.assertIs(
             random.runtime.backbone_initialization,
             BackboneInitialization.RANDOM,
         )
         with self.assertRaisesRegex(ValueError, "cannot be combined with model.toy"):
-            overfit(
-                _compose(
-                    "overfit",
-                    "model=toy",
-                    "datamodule/dataset=toy",
-                    "runtime.backbone_initialization=random",
-                )
+            _overfit(
+                "model=toy",
+                "datamodule/dataset=toy",
+                "runtime.backbone_initialization=random",
             )
         with self.assertRaisesRegex(ValueError, "fully trainable backbone"):
-            parse_train(
-                _compose("train", "runtime.backbone_initialization=random")
-            )
+            _train("runtime.backbone_initialization=random")
 
-        train = parse_train(
-            _compose(
-                "train",
-                "runtime.backbone_initialization=random",
-                "callback/parameter_policy@callbacks.parameter_policy=full",
-                "model.lora=null",
-            )
+        train = _train(
+            "runtime.backbone_initialization=random",
+            "callback/parameter_policy@callbacks.parameter_policy=full",
+            "model.lora=null",
         )
         self.assertIs(
             train.runtime.backbone_initialization,
@@ -328,14 +361,9 @@ class ConfigTest(unittest.TestCase):
                 self.assertIn(key, str(raised.exception))
 
     def test_overfit_performance_is_explicitly_opt_in(self):
-        default = overfit(_compose("overfit"))
-        enabled = overfit(
-            _compose(
-                "overfit",
-                "callbacks.performance.enabled=true",
-                "callbacks.task_sample.enabled=false",
-                "callbacks.performance.hardware_peak_flops=123.0",
-            )
+        default = _overfit()
+        enabled = _performance_overfit(
+            "callbacks.performance.hardware_peak_flops=123.0"
         )
 
         self.assertFalse(default.callbacks.performance.enabled)
@@ -348,12 +376,7 @@ class ConfigTest(unittest.TestCase):
         self.assertTrue(enabled.callbacks.performance.sync_distributed)
 
         with self.assertRaisesRegex(ValueError, "task_sample.enabled=false"):
-            overfit(
-                _compose(
-                    "overfit",
-                    "callbacks.performance.enabled=true",
-                )
-            )
+            _overfit("callbacks.performance.enabled=true")
 
     @patch("scripts._entry.TrainingFlops")
     @patch("scripts._entry.PerformanceCallback")
@@ -362,14 +385,9 @@ class ConfigTest(unittest.TestCase):
         performance,
         training_flops,
     ):
-        disabled = overfit(_compose("overfit"))
-        enabled = overfit(
-            _compose(
-                "overfit",
-                "callbacks.task_sample.enabled=false",
-                "callbacks.performance.enabled=true",
-                "callbacks.performance.hardware_peak_flops=123.0",
-            )
+        disabled = _overfit()
+        enabled = _performance_overfit(
+            "callbacks.performance.hardware_peak_flops=123.0"
         )
 
         self.assertIsNone(build_performance(disabled.callbacks.performance))
@@ -388,66 +406,36 @@ class ConfigTest(unittest.TestCase):
 
     @patch("scripts.overfit.GradLogger")
     def test_overfit_performance_omits_extra_gradient_passes(self, grad_logger):
-        default = overfit(_compose("overfit"))
-        performance = overfit(
-            _compose(
-                "overfit",
-                "callbacks.task_sample.enabled=false",
-                "callbacks.performance.enabled=true",
-            )
-        )
-        flow_comparison = GradientComparison(
-            GradientTarget("token"),
-            GradientTarget("flow_matching"),
-        )
-
-        gradient = _gradient_logger(default, AcousticType.FLOW, flow_comparison)
-
-        self.assertIs(gradient, grad_logger.return_value)
-        grad_logger.assert_called_once_with(
-            (
-                flow_comparison,
-            ),
+        default = _overfit()
+        performance = _performance_overfit()
+        flow_comparison = self._assert_gradient_logger(
+            grad_logger,
+            default,
+            AcousticType.FLOW,
+            "flow_matching",
             _default_gradient_probes(),
-            every_n_steps=1,
         )
-        grad_logger.reset_mock()
-
-        rvq_comparison = GradientComparison(
-            GradientTarget("token"),
-            GradientTarget("rvq"),
-        )
-        rvq_gradient = _gradient_logger(default, AcousticType.RVQ, rvq_comparison)
-
-        self.assertIs(rvq_gradient, grad_logger.return_value)
-        grad_logger.assert_called_once_with(
-            (
-                rvq_comparison,
-            ),
+        rvq_comparison = self._assert_gradient_logger(
+            grad_logger,
+            default,
+            AcousticType.RVQ,
+            "rvq",
             _default_gradient_probes(),
-            every_n_steps=1,
         )
-        grad_logger.reset_mock()
 
         self.assertIsNone(
             _gradient_logger(performance, AcousticType.FLOW, flow_comparison)
         )
         grad_logger.assert_not_called()
 
-        frozen = overfit(
-            _compose(
-                "overfit",
-                "callback/parameter_policy@callbacks.parameter_policy=speech_interface",
-            )
+        frozen = _overfit(
+            "callback/parameter_policy@callbacks.parameter_policy=speech_interface"
         )
         self.assertIsNone(_gradient_logger(frozen, AcousticType.RVQ, rvq_comparison))
         grad_logger.assert_not_called()
 
-        partial = overfit(
-            _compose(
-                "overfit",
-                "callback/parameter_policy@callbacks.parameter_policy=speech_interface_top_third",
-            )
+        partial = _overfit(
+            "callback/parameter_policy@callbacks.parameter_policy=speech_interface_top_third"
         )
         partial_gradient = _gradient_logger(partial, AcousticType.RVQ, rvq_comparison)
 
@@ -462,8 +450,8 @@ class ConfigTest(unittest.TestCase):
 
     def test_training_outputs_use_one_tensorboard_root(self):
         configs = (
-            overfit(_compose("overfit")),
-            overfit(_compose("overfit", "experiment=overfit/unicodec")),
+            _overfit(),
+            _overfit("experiment=overfit/unicodec"),
         )
 
         for config in configs:
@@ -479,7 +467,7 @@ class ConfigTest(unittest.TestCase):
                 )
                 self.assertEqual(config.logging.run_name, config.output_subdir)
 
-        csv = overfit(_compose("overfit", "experiment=overfit/toy_smoke"))
+        csv = _overfit("experiment=overfit/toy_smoke")
         self.assertEqual(csv.logging.save_dir, csv.output_dir)
         self.assertEqual(csv.logging.run_name, "csv")
 
@@ -488,7 +476,7 @@ class ConfigTest(unittest.TestCase):
             "os.environ",
             {"SPEECH_TO_SPEECH_TRAIN_ROOT": "/tmp/speech-train"},
         ):
-            overfit_config = overfit(_compose("overfit"))
+            overfit_config = _overfit()
 
         self.assertEqual(overfit_config.repo_output_root, "/tmp/speech-train")
 
@@ -501,7 +489,7 @@ class ConfigTest(unittest.TestCase):
             },
             clear=True,
         ):
-            config = overfit(_compose("overfit"))
+            config = _overfit()
 
         self.assertEqual(config.repo_output_root, "/tmp/dynamic/train/speech-to-speech")
 
@@ -514,10 +502,10 @@ class ConfigTest(unittest.TestCase):
             ),
             self.assertRaisesRegex(InterpolationResolutionError, "DYNAMIC_HOME"),
         ):
-            overfit(_compose("overfit"))
+            _overfit()
 
     def test_logging_builder_uses_the_configured_layout(self):
-        tensorboard = overfit(_compose("overfit")).logging
+        tensorboard = _overfit().logging
         with patch("scripts._logging.TensorBoardLogger") as logger:
             built = build_logger(tensorboard)
 
@@ -527,7 +515,7 @@ class ConfigTest(unittest.TestCase):
             name=tensorboard.run_name,
         )
 
-        csv = overfit(_compose("overfit", "experiment=overfit/toy_smoke")).logging
+        csv = _overfit("experiment=overfit/toy_smoke").logging
         with patch("scripts._logging.CSVLogger") as logger:
             built = build_logger(csv)
 
@@ -538,10 +526,10 @@ class ConfigTest(unittest.TestCase):
         for override in ("output_subdir=/tmp/run", "output_subdir=../run"):
             with self.subTest(override=override):
                 with self.assertRaisesRegex(ValueError, "output_subdir"):
-                    overfit(_compose("overfit", override))
+                    _overfit(override)
 
         with self.assertRaisesRegex(ValueError, "output_dir must equal"):
-            overfit(_compose("overfit", "output_dir=/tmp/other"))
+            _overfit("output_dir=/tmp/other")
 
     def test_unicodec_experiments_close_the_token_training_chain(self):
         cases = [
@@ -565,7 +553,7 @@ class ConfigTest(unittest.TestCase):
 
         for experiment, max_steps, devices, strategy, checkpointing, sampler in cases:
             with self.subTest(experiment=experiment):
-                config = overfit(_compose("overfit", f"experiment={experiment}"))
+                config = _overfit(f"experiment={experiment}")
 
                 self.assertIsInstance(config, OverfitTokenConfig)
                 self.assertEqual(config.runtime.codec, "unicodec")
@@ -581,8 +569,8 @@ class ConfigTest(unittest.TestCase):
                 self.assertTrue(config.callbacks.task_sample.enabled)
                 self.assertEqual(config.callbacks.task_sample.every_n_steps, 1)
 
-    def test_train_root_uses_loader_plan_and_accumulation_safe_ddp(self):
-        default = parse_train(_compose("train"))
+    def test_train_root_defaults_to_loader_plan_and_lora_policy(self):
+        default = _train()
 
         self.assertIsInstance(default, StagedTrainRVQConfig)
         self.assertIs(default.callbacks.parameter_policy.name, ParameterPolicyName.LORA)
@@ -590,7 +578,7 @@ class ConfigTest(unittest.TestCase):
         if default.model.lora is None:
             self.fail("default train config must enable PEFT LoRA")
         self.assertEqual(default.model.lora.init_lora_weights, "pissa")
-        self.assertEqual(default.pl_module.optimizer, "adamw")
+        self.assertEqual(default.optim.name, "adamw")
         self.assertFalse(default.validation.enabled)
         self.assertEqual(default.validation.loader, "tts")
         self.assertEqual(default.validation.split_label, "dev")
@@ -606,9 +594,9 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaises(AttributeError):
             getattr(default.datamodule, "sample_index")
 
-        config = parse_train(
-            _compose("train", "experiment=train/staged_joint/stage_2")
-        )
+    def test_train_stage_2_uses_accumulation_safe_loader_plan(self):
+        config = _train("experiment=train/staged_joint/stage_2")
+
         self.assertEqual(config.output_subdir, "staged-joint/stage_2/rvq-8l")
         self.assertEqual(set(config.loader_plan.loaders), {"asr", "tts", "mt"})
         self.assertEqual(config.loader_plan.accumulate_grad_batches, 10)
@@ -619,33 +607,29 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.train.max_steps, 1000000)
         self.assertIsNone(config.train.ckpt_path)
 
-        resumed = parse_train(_compose("train", "train.ckpt_path=/tmp/last.ckpt"))
+    def test_train_resume_ckpt_and_static_ddp_guards_are_preserved(self):
+        resumed = _train("train.ckpt_path=/tmp/last.ckpt")
         self.assertEqual(resumed.train.ckpt_path, "/tmp/last.ckpt")
 
         with self.assertRaisesRegex(ValueError, "unused-parameter"):
-            parse_train(
-                _compose(
-                    "train",
-                    "experiment=train/staged_joint/stage_4",
-                    "loader_plan.fuse_loaders_per_step=false",
-                    "trainer.strategy=ddp_find_unused_parameters_false",
-                )
+            _train(
+                "experiment=train/staged_joint/stage_4",
+                "loader_plan.fuse_loaders_per_step=false",
+                "trainer.strategy=ddp_find_unused_parameters_false",
             )
 
-        token = parse_train(
-            _compose(
-                "train",
-                "runtime=longcat_native",
-                "model/acoustic=none",
-                "audio_sequence_layout=flattened",
-            )
+    def test_train_token_config_requires_semantic_codec_artifact(self):
+        token = _train(
+            "runtime=longcat_native",
+            "model/acoustic=none",
+            "audio_sequence_layout=flattened",
         )
 
         self.assertIsInstance(token, StagedTrainTokenConfig)
         self.assertEqual(token.model.acoustic.type, AcousticType.NONE.value)
         self.assertEqual(token.run_name, "token")
         with self.assertRaisesRegex(ValueError, "semantic_codec_artifact"):
-            parse_train(_compose("train", "model/acoustic=none"))
+            _train("model/acoustic=none")
 
     def test_parameter_policy_smoke_composes_each_supported_policy(self):
         policies = (
@@ -667,9 +651,7 @@ class ConfigTest(unittest.TestCase):
                     overrides.append("+model/lora@model.lora=qwen")
                 else:
                     overrides.append("model.lora=null")
-                config = parse_train(
-                    _compose("train", *overrides)
-                )
+                config = _train(*overrides)
 
                 self.assertIs(config.callbacks.parameter_policy.name, policy)
                 self.assertEqual(config.train.max_steps, 2)
@@ -677,43 +659,9 @@ class ConfigTest(unittest.TestCase):
                 self.assertIn(policy.value, config.output_subdir)
 
     def test_staged_joint_experiments_bind_loader_plan_and_parameter_policy(self):
-        policies = (
-            ParameterPolicyName.LORA,
-            ParameterPolicyName.SPEECH_INTERFACE,
-            ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD,
-            ParameterPolicyName.FULL,
-        )
-        panels = (
-            (("asr", "asr"), ("tts", "tts")),
-            (("asr", "asr"), ("tts", "tts"), ("mt", "mt")),
-            (
-                ("asr_s2tt", "asr"),
-                ("asr_s2tt", "s2tt"),
-                ("tts_t2st", "tts"),
-                ("tts_t2st", "t2st"),
-                ("mt", "mt"),
-            ),
-            (
-                ("asr_s2tt", "asr"),
-                ("asr_s2tt", "s2tt"),
-                ("tts_t2st", "tts"),
-                ("tts_t2st", "t2st"),
-                ("s2st", "s2st"),
-                ("mt", "mt"),
-            ),
-        )
-
-        for index, (policy, expected_panels) in enumerate(
-            zip(policies, panels),
-            start=1,
-        ):
+        for index, policy, expected_panels in _STAGED_JOINT_CASES:
             with self.subTest(stage=index):
-                config = parse_train(
-                    _compose(
-                        "train",
-                        f"experiment=train/staged_joint/stage_{index}",
-                    )
-                )
+                config = _train(f"experiment=train/staged_joint/stage_{index}")
 
                 self.assertEqual(
                     config.output_subdir,
@@ -744,33 +692,24 @@ class ConfigTest(unittest.TestCase):
 
     def test_static_ddp_rejects_multi_loader_dynamic_branches(self):
         with self.assertRaisesRegex(ValueError, "one loader branch per microbatch"):
-            parse_train(
-                _compose(
-                    "train",
-                    "experiment=train/staged_joint/stage_4",
-                    "loader_plan.fuse_loaders_per_step=false",
-                    "trainer.strategy=ddp_find_unused_parameters_false",
-                )
+            _train(
+                "experiment=train/staged_joint/stage_4",
+                "loader_plan.fuse_loaders_per_step=false",
+                "trainer.strategy=ddp_find_unused_parameters_false",
             )
 
     def test_fused_multi_loader_requires_a_full_window(self):
         with self.assertRaisesRegex(ValueError, "too small"):
-            parse_train(
-                _compose(
-                    "train",
-                    "experiment=train/staged_joint/stage_4",
-                    "loader_plan.accumulate_grad_batches=1",
-                    "trainer.strategy=ddp_find_unused_parameters_false",
-                )
+            _train(
+                "experiment=train/staged_joint/stage_4",
+                "loader_plan.accumulate_grad_batches=1",
+                "trainer.strategy=ddp_find_unused_parameters_false",
             )
 
     def test_stable_codec_stage1_long_run_enables_fixed_samples_for_asr_and_tts(self):
-        config = parse_train(
-            _compose(
-                "train",
-                "experiment=train/stable_codec/stage_1",
-                "datamodule.dataset.split_manifest=/tmp/splits.json",
-            )
+        config = _train(
+            "experiment=train/stable_codec/stage_1",
+            "datamodule.dataset.split_manifest=/tmp/splits.json",
         )
 
         self.assertEqual(config.train.max_steps, 1_000_000)
@@ -796,28 +735,20 @@ class ConfigTest(unittest.TestCase):
 
     def test_validation_sample_panel_requires_validation_dataset(self):
         with self.assertRaisesRegex(ValueError, "split_manifest"):
-            parse_train(
-                _compose(
-                    "train",
-                    "experiment=train/stable_codec/stage_1",
-                )
-            )
+            _train("experiment=train/stable_codec/stage_1")
 
     def test_mt_sample_panel_requires_train_split(self):
         with self.assertRaisesRegex(ValueError, "validation.*speech loaders"):
-            parse_train(
-                _compose(
-                    "train",
-                    "experiment=train/staged_joint/stage_2",
-                    "callbacks.task_sample.enabled=true",
-                    "callbacks.task_sample.panels=[{split:validation,loader:mt,task:mt,indices:[0]}]",
-                    "validation.enabled=true",
-                    "datamodule.dataset.split_manifest=/tmp/splits.json",
-                )
+            _train(
+                "experiment=train/staged_joint/stage_2",
+                "callbacks.task_sample.enabled=true",
+                "callbacks.task_sample.panels=[{split:validation,loader:mt,task:mt,indices:[0]}]",
+                "validation.enabled=true",
+                "datamodule.dataset.split_manifest=/tmp/splits.json",
             )
 
     def test_train_datamodule_routes_mt_to_text_loader(self):
-        config = parse_train(_compose("train", "experiment=train/staged_joint/stage_2"))
+        config = _train("experiment=train/staged_joint/stage_2")
 
         datamodule = build_train_datamodule(config, object())
 
@@ -846,15 +777,12 @@ class ConfigTest(unittest.TestCase):
             )
 
     def test_train_datamodule_clones_the_selected_loader_for_validation(self):
-        config = parse_train(
-            _compose(
-                "train",
-                "experiment=train/staged_joint/stage_2",
-                "validation.enabled=true",
-                "validation.loader=tts",
-                "validation.split_label=dev",
-                "datamodule.dataset.split_manifest=/tmp/splits.json",
-            )
+        config = _train(
+            "experiment=train/staged_joint/stage_2",
+            "validation.enabled=true",
+            "validation.loader=tts",
+            "validation.split_label=dev",
+            "datamodule.dataset.split_manifest=/tmp/splits.json",
         )
 
         datamodule = build_train_datamodule(config, object())
@@ -873,13 +801,10 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(validation.task_weights, {Task.TTS: 1.0})
 
     def test_train_datamodule_builds_limited_wmt19_mt_validation(self):
-        config = parse_train(
-            _compose(
-                "train",
-                "experiment=train/staged_joint/stage_2",
-                "validation.enabled=true",
-                "validation.loader=mt",
-            )
+        config = _train(
+            "experiment=train/staged_joint/stage_2",
+            "validation.enabled=true",
+            "validation.loader=mt",
         )
 
         datamodule = build_train_datamodule(config, object())
@@ -894,45 +819,33 @@ class ConfigTest(unittest.TestCase):
 
     def test_enabled_validation_requires_a_distinct_manifest_split(self):
         with self.assertRaisesRegex(ValueError, "split_manifest"):
-            parse_train(_compose("train", "validation.enabled=true"))
+            _train("validation.enabled=true")
         with self.assertRaisesRegex(ValueError, "unknown validation loader"):
-            parse_train(
-                _compose(
-                    "train",
-                    "validation.enabled=true",
-                    "validation.loader=missing",
-                    "datamodule.dataset.split_manifest=/tmp/splits.json",
-                )
-            )
-        mt = parse_train(
-            _compose(
-                "train",
-                "experiment=train/staged_joint/stage_2",
+            _train(
                 "validation.enabled=true",
-                "validation.loader=mt",
+                "validation.loader=missing",
+                "datamodule.dataset.split_manifest=/tmp/splits.json",
             )
+        mt = _train(
+            "experiment=train/staged_joint/stage_2",
+            "validation.enabled=true",
+            "validation.loader=mt",
         )
         self.assertEqual(mt.validation.text_split, "validation")
         self.assertEqual(mt.validation.max_samples, 1000)
         with self.assertRaisesRegex(ValueError, "must differ"):
-            parse_train(
-                _compose(
-                    "train",
-                    "validation.enabled=true",
-                    "validation.split_label=train",
-                    "datamodule.dataset.split_manifest=/tmp/splits.json",
-                )
+            _train(
+                "validation.enabled=true",
+                "validation.split_label=train",
+                "datamodule.dataset.split_manifest=/tmp/splits.json",
             )
 
     def test_train_trainer_forwards_step_validation_options(self):
-        config = parse_train(
-            _compose(
-                "train",
-                "validation.enabled=true",
-                "validation.every_n_steps=25",
-                "validation.sanity_steps=2",
-                "datamodule.dataset.split_manifest=/tmp/splits.json",
-            )
+        config = _train(
+            "validation.enabled=true",
+            "validation.every_n_steps=25",
+            "validation.sanity_steps=2",
+            "datamodule.dataset.split_manifest=/tmp/splits.json",
         )
         callbacks = []
 
@@ -949,7 +862,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(entry.call_args.kwargs["num_sanity_val_steps"], 2)
 
     def test_train_uses_async_checkpoint(self):
-        config = parse_train(_compose("train"))
+        config = _train()
 
         callbacks = train_script.training_callbacks(
             config,
@@ -967,21 +880,17 @@ class ConfigTest(unittest.TestCase):
         self.assertFalse(checkpoint._enable_version_counter)
 
     def test_train_constructs_unit_schedule_callback(self):
-        config = parse_train(
-            _compose(
-                "train",
-                "callbacks.schedule.enabled=true",
-                "callbacks.schedule.log_every_n_units=25",
-                "callbacks.schedule.measure_window_batches=3",
-                "callbacks.schedule.sync_cuda=false",
-                "callbacks.schedule.stop_at_end=true",
-                (
-                    "callbacks.schedule.phases=["
-                    "{name:warmup,duration:100,lr:{type:linear,start:0.0,end:1.0}},"
-                    "{name:main,duration:900,lr:{type:constant,value:1.0}}"
-                    "]"
-                ),
-            )
+        config = _train(
+            "optim.schedule.log_every_n_units=25",
+            "optim.schedule.measure_window_batches=3",
+            "optim.schedule.sync_cuda=false",
+            "optim.schedule.stop_at_end=true",
+            (
+                "optim.schedule.phases=["
+                "{name:warmup,duration:100,lr:{type:linear,start:0.0,end:1.0}},"
+                "{name:main,duration:900,lr:{type:constant,value:1.0}}"
+                "]"
+            ),
         )
 
         callbacks = train_script.training_callbacks(
@@ -1041,15 +950,10 @@ class ConfigTest(unittest.TestCase):
 
         self.assertEqual(configured, "configured")
         optimizer = runtime.configure_optimizers.call_args.args[0]
-        self.assertEqual(optimizer.param_groups[0]["lr"], ModuleConfig().learning_rate)
+        self.assertEqual(optimizer.param_groups[0]["lr"], OptimConfig().learning_rate)
 
     def test_train_constructs_gradient_probe_callback(self):
-        config = parse_train(
-            _compose(
-                "train",
-                "callbacks.gradient_probe.enabled=true",
-            )
-        )
+        config = _train("callbacks.gradient_probe.enabled=true")
         built = Mock()
 
         with patch("scripts.train.GradLogger", return_value=built) as factory:
@@ -1087,12 +991,7 @@ class ConfigTest(unittest.TestCase):
         )
 
     def test_train_performance_omits_gradient_probe_callback(self):
-        config = parse_train(
-            _compose(
-                "train",
-                "callbacks.gradient_probe.enabled=true",
-            )
-        )
+        config = _train("callbacks.gradient_probe.enabled=true")
         performance = Mock()
 
         with (
@@ -1125,12 +1024,9 @@ class ConfigTest(unittest.TestCase):
         trainer_factory,
     ):
         del seed, callbacks
-        config = parse_train(
-            _compose(
-                "train",
-                "train.ckpt_path=/tmp/resume.ckpt",
-                "trainer.enable_checkpointing=false",
-            )
+        config = _train(
+            "train.ckpt_path=/tmp/resume.ckpt",
+            "trainer.enable_checkpointing=false",
         )
         module = Mock()
         model = Mock()
@@ -1171,12 +1067,9 @@ class ConfigTest(unittest.TestCase):
                     _compose(config_name, override)
 
     def test_public_model_config_parses_domain_enums(self):
-        config = overfit(
-            _compose(
-                "overfit",
-                "model.semantic_audio_adapter=mlp",
-                "model.audio_output_adapter.type=none",
-            )
+        config = _overfit(
+            "model.semantic_audio_adapter=mlp",
+            "model.audio_output_adapter.type=none",
         )
 
         self.assertIs(config.model.semantic_audio_adapter, AdapterType.MLP)
@@ -1186,44 +1079,34 @@ class ConfigTest(unittest.TestCase):
         )
 
         with self.assertRaises(ValueError):
-            overfit(_compose("overfit", "model.semantic_audio_adapter=invalid"))
+            _overfit("model.semantic_audio_adapter=invalid")
 
     def test_audio_input_adapter_is_structured_and_mlp_by_default(self):
-        default = overfit(_compose("overfit"))
+        default = _overfit()
         self.assertIs(
             default.model.audio_input_adapter.type,
             AudioInputAdapterType.MLP,
         )
-        configured = overfit(
-            _compose("overfit", "model.audio_input_adapter.type=transformer")
-        )
+        configured = _overfit("model.audio_input_adapter.type=transformer")
         self.assertIs(
             configured.model.audio_input_adapter.type,
             AudioInputAdapterType.TRANSFORMER,
         )
 
     def test_audio_output_adapter_is_structured_and_tied_by_default(self):
-        default = overfit(_compose("overfit"))
+        default = _overfit()
         self.assertIs(
             default.model.audio_output_adapter.type,
             AudioOutputAdapterType.NONE,
         )
-        configured = overfit(
-            _compose("overfit", "model.audio_output_adapter.type=mlp")
-        )
+        configured = _overfit("model.audio_output_adapter.type=mlp")
         self.assertIs(
             configured.model.audio_output_adapter.type,
             AudioOutputAdapterType.MLP,
         )
 
     def test_lora_model_and_parameter_policy_must_be_selected_together(self):
-        config = overfit(
-            _compose(
-                "overfit",
-                "+model/lora@model.lora=qwen",
-                "callback/parameter_policy@callbacks.parameter_policy=lora",
-            )
-        )
+        config = _lora_overfit()
 
         self.assertIsInstance(config.model.lora, LoraConfig)
         if config.model.lora is None:
@@ -1252,69 +1135,40 @@ class ConfigTest(unittest.TestCase):
                 self.subTest(overrides=overrides),
                 self.assertRaisesRegex(ValueError, "must be selected together"),
             ):
-                overfit(_compose("overfit", *overrides))
+                _overfit(*overrides)
 
     def test_lora_muon_requires_pissa_initialization(self):
-        config = overfit(
-            _compose(
-                "overfit",
-                "+model/lora@model.lora=qwen",
-                "callback/parameter_policy@callbacks.parameter_policy=lora",
-                "pl_module.optimizer=muon",
-            )
-        )
-        self.assertEqual(config.pl_module.optimizer, "muon")
+        config = _lora_overfit("optim.name=muon")
+        self.assertEqual(config.optim.name, "muon")
         self.assertEqual(config.model.lora.init_lora_weights, "pissa")
 
         with self.assertRaisesRegex(ValueError, "pissa initialization"):
-            overfit(
-                _compose(
-                    "overfit",
-                    "+model/lora@model.lora=qwen",
-                    "model.lora.init_lora_weights=gaussian",
-                    "callback/parameter_policy@callbacks.parameter_policy=lora",
-                    "pl_module.optimizer=muon",
-                )
+            _lora_overfit(
+                "model.lora.init_lora_weights=gaussian",
+                "optim.name=muon",
             )
 
-    def test_pl_module_optimizer_is_selectable(self):
-        default = parse_train(_compose("train"))
-        muon = parse_train(_compose("train", "pl_module.optimizer=muon"))
+    def test_optim_name_is_selectable(self):
+        default = _train()
+        muon = _train("optim.name=muon")
 
-        self.assertEqual(default.pl_module.optimizer, "adamw")
-        self.assertEqual(muon.pl_module.optimizer, "muon")
+        self.assertEqual(default.optim.name, "adamw")
+        self.assertEqual(muon.optim.name, "muon")
         self.assertEqual(muon.model.lora.init_lora_weights, "pissa")
 
     def test_lora_rejects_unsupported_performance_provider(self):
         with self.assertRaisesRegex(ValueError, "LoRA training FLOPs"):
-            overfit(
-                _compose(
-                    "overfit",
-                    "+model/lora@model.lora=qwen",
-                    "callback/parameter_policy@callbacks.parameter_policy=lora",
-                    "callbacks.performance.enabled=true",
-                )
-            )
+            _lora_overfit("callbacks.performance.enabled=true")
 
     def test_lora_rejects_peft_inference_mode_for_training(self):
         with self.assertRaisesRegex(ValueError, "inference_mode=false"):
-            overfit(
-                _compose(
-                    "overfit",
-                    "+model/lora@model.lora=qwen",
-                    "+model.lora.inference_mode=true",
-                    "callback/parameter_policy@callbacks.parameter_policy=lora",
-                )
-            )
+            _lora_overfit("+model.lora.inference_mode=true")
 
     def test_runtime_owns_codec_and_flow_sampling(self):
-        config = overfit(
-            _compose(
-                "overfit",
-                "runtime.flow_method=euler",
-                "runtime.flow_nfe=4",
-                "runtime.flow_num_steps=2",
-            )
+        config = _overfit(
+            "runtime.flow_method=euler",
+            "runtime.flow_nfe=4",
+            "runtime.flow_num_steps=2",
         )
 
         with patch.dict("os.environ", {"LOCAL_RANK": "1"}):
@@ -1652,6 +1506,30 @@ def _compose(config_name: str, *overrides: str) -> DictConfig:
     root = Path(__file__).parents[1]
     with initialize_config_dir(version_base=None, config_dir=str(root / "configs")):
         return compose(config_name=config_name, overrides=list(overrides))
+
+
+def _overfit(*overrides: str):
+    return overfit(_compose("overfit", *overrides))
+
+
+def _performance_overfit(*overrides: str):
+    return _overfit(
+        "callbacks.performance.enabled=true",
+        "callbacks.task_sample.enabled=false",
+        *overrides,
+    )
+
+
+def _lora_overfit(*overrides: str):
+    return _overfit(
+        "+model/lora@model.lora=qwen",
+        "callback/parameter_policy@callbacks.parameter_policy=lora",
+        *overrides,
+    )
+
+
+def _train(*overrides: str):
+    return parse_train(_compose("train", *overrides))
 
 
 if __name__ == "__main__":

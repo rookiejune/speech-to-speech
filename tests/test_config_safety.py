@@ -65,11 +65,14 @@ class ConfigSafetyTest(unittest.TestCase):
             "callbacks.performance.measure_window_steps=0": (
                 "callbacks.performance.measure_window_steps"
             ),
-            "callbacks.schedule.unit=bad-unit": "callbacks.schedule.unit",
-            "callbacks.schedule.measure_window_batches=0": (
-                "callbacks.schedule.measure_window_batches"
+            "optim.name=sgd": "optim.name",
+            "optim.learning_rate=0": "optim.learning_rate",
+            "optim.weight_decay=-1": "optim.weight_decay",
+            "optim.schedule.unit=bad-unit": "optim.schedule.unit",
+            "optim.schedule.measure_window_batches=0": (
+                "optim.schedule.measure_window_batches"
             ),
-            "callbacks.schedule.enabled=true": "enabled callbacks.schedule requires phases",
+            "optim.schedule.phases=[]": "optim.schedule requires phases",
         }
 
         for override, message in cases.items():
