@@ -90,7 +90,7 @@ class RuntimeCodecTest(unittest.TestCase):
             codec = load_codec(
                 "bicodec",
                 device="cuda",
-                bicodec_revision="642071559bfc6346c2359d19dcb6be3f9dd8a05d",
+                codec_revision="642071559bfc6346c2359d19dcb6be3f9dd8a05d",
             )
 
         self.assertIs(codec, backend)
@@ -104,16 +104,16 @@ class RuntimeCodecTest(unittest.TestCase):
 
         self.assertIs(config.audio_view, AudioView.STABLE)
 
-    def test_bicodec_revision_requires_bicodec_codec(self) -> None:
-        with self.assertRaisesRegex(ValueError, "bicodec_revision"):
-            Config(codec="longcat", bicodec_revision="revision")
+    def test_codec_revision_requires_supported_codec(self) -> None:
+        with self.assertRaisesRegex(ValueError, "codec_revision"):
+            Config(codec="longcat", codec_revision="revision")
 
-    def test_runtime_codec_forwards_bicodec_revision(self) -> None:
+    def test_runtime_codec_forwards_codec_revision(self) -> None:
         runtime = Runtime(
             Config(
                 codec="bicodec",
                 device="cuda",
-                bicodec_revision="642071559bfc6346c2359d19dcb6be3f9dd8a05d",
+                codec_revision="642071559bfc6346c2359d19dcb6be3f9dd8a05d",
             ),
             audio_sequence_layout=AudioSequenceLayout.FLATTENED,
         )
@@ -129,7 +129,7 @@ class RuntimeCodecTest(unittest.TestCase):
         load_codec_backend.assert_called_once_with(
             "bicodec",
             "cuda",
-            bicodec_revision="642071559bfc6346c2359d19dcb6be3f9dd8a05d",
+            codec_revision="642071559bfc6346c2359d19dcb6be3f9dd8a05d",
         )
 
     def test_frame_aligned_structured_codec_uses_frame_full_sequence(self) -> None:

@@ -54,7 +54,7 @@ class TrainConfigContractTest(ConfigTestCase):
         self.assertIsInstance(config.model.lora, LoraConfig)
         self.assertTrue(config.runtime.gradient_checkpointing)
         self.assertEqual(
-            config.runtime.bicodec_revision,
+            config.runtime.codec_revision,
             "642071559bfc6346c2359d19dcb6be3f9dd8a05d",
         )
 

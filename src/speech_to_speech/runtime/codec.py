@@ -177,7 +177,7 @@ def load_codec(
     name: str,
     device: str | None,
     *,
-    bicodec_revision: str | None = None,
+    codec_revision: str | None = None,
 ) -> CodecBackend:
     if name == "longcat":
         return cast(
@@ -185,7 +185,7 @@ def load_codec(
             cast(object, load_semantic_acoustic("longcat", device=device)),
         )
     if name == "bicodec":
-        return _load_bicodec(device=device, revision=bicodec_revision)
+        return _load_bicodec(device=device, revision=codec_revision)
     if name == "unicodec":
         source = cast(
             UnifiedCodecSource,

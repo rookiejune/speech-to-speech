@@ -170,7 +170,7 @@ class ConfigCompositionTest(ConfigTestCase):
             self.assertIs(config.datamodule.shape, DataShape.SINGLE)
             self.assertIsNone(config.datamodule.dataset.speaker)
             self.assertEqual(
-                config.runtime.bicodec_revision,
+                config.runtime.codec_revision,
                 "642071559bfc6346c2359d19dcb6be3f9dd8a05d",
             )
 

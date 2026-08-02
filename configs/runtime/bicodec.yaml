@@ -1,5 +1,5 @@
 codec: bicodec
-bicodec_revision: 642071559bfc6346c2359d19dcb6be3f9dd8a05d
+codec_revision: 642071559bfc6346c2359d19dcb6be3f9dd8a05d
 backbone: Qwen/Qwen3-0.6B
 backbone_initialization: pretrained
 audio_tokenizer:

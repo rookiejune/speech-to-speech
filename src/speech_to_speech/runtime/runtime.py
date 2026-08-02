@@ -83,7 +83,7 @@ class Config:
     backbone_body: str = "base_model"
     audio_tokenizer: Optional[Union[str, Path]] = None
     semantic_codec_artifact: Optional[str] = None
-    bicodec_revision: Optional[str] = None
+    codec_revision: Optional[str] = None
     device: Optional[str] = None
     dtype: Optional[str] = None
     attn_implementation: Optional[str] = None
@@ -111,13 +111,13 @@ class Config:
                 raise ValueError(
                     "semantic codec artifacts currently require LongCat or BiCodec."
                 )
-        if self.bicodec_revision is not None:
-            if not isinstance(self.bicodec_revision, str):
-                raise TypeError("bicodec_revision must be a string.")
-            if not self.bicodec_revision:
-                raise ValueError("bicodec_revision must not be empty.")
+        if self.codec_revision is not None:
+            if not isinstance(self.codec_revision, str):
+                raise TypeError("codec_revision must be a string.")
+            if not self.codec_revision:
+                raise ValueError("codec_revision must not be empty.")
             if self.codec != "bicodec":
-                raise ValueError("runtime.bicodec_revision requires codec=bicodec.")
+                raise ValueError("runtime.codec_revision currently requires codec=bicodec.")
         if not isinstance(self.gradient_checkpointing, bool):
             raise TypeError("gradient_checkpointing must be a bool.")
         if self.flow_method not in _FLOW_METHODS:
@@ -252,7 +252,7 @@ class Runtime:
         return load_codec(
             self.config.codec,
             self.config.device,
-            bicodec_revision=self.config.bicodec_revision,
+            codec_revision=self.config.codec_revision,
         )
 
     @property
