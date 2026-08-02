@@ -65,11 +65,6 @@ _FLOW_METHODS = frozenset(
 )
 
 
-class AudioRepresentation(StrEnum):
-    DECOUPLED = auto()
-    FULL_CODEC_SEQUENCE = auto()
-
-
 class AudioSequenceLayout(StrEnum):
     FLATTENED = auto()
     SEMANTIC = auto()
@@ -86,7 +81,6 @@ class Config:
     backbone_supports_cache_position: bool = True
     backbone_module: str = ""
     backbone_body: str = "base_model"
-    audio_representation: AudioRepresentation = AudioRepresentation.DECOUPLED
     audio_tokenizer: Optional[Union[str, Path]] = None
     semantic_codec_artifact: Optional[str] = None
     device: Optional[str] = None
@@ -108,32 +102,12 @@ class Config:
             raise TypeError("backbone_supports_cache_position must be a bool.")
         _validate_path(self.backbone_module, "backbone_module")
         _validate_path(self.backbone_body, "backbone_body", allow_empty=False)
-        if not isinstance(self.audio_representation, AudioRepresentation):
-            raise TypeError("audio_representation must be an AudioRepresentation.")
-        if (
-            self.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE
-            and self.audio_tokenizer is not None
-        ):
-            raise ValueError(
-                "full codec sequence representation cannot use a BPE audio tokenizer."
-            )
         if self.semantic_codec_artifact is not None:
             if not self.semantic_codec_artifact:
                 raise ValueError("semantic_codec_artifact must not be empty.")
-            if self.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE:
-                raise ValueError(
-                    "semantic codec artifacts require the decoupled audio representation."
-                )
             if self.audio_view not in {AudioView.LONGCAT, AudioView.BICODEC}:
                 raise ValueError(
                     "semantic codec artifacts currently require LongCat or BiCodec."
-                )
-        if self.audio_view is AudioView.BICODEC and self.semantic_codec_artifact is None:
-            if self.audio_representation is not AudioRepresentation.FULL_CODEC_SEQUENCE:
-                raise ValueError(
-                    "BiCodec is a fixed-length structured codec and requires "
-                    "semantic_codec_artifact for semantic-only decoding or "
-                    "full_codec_sequence for token-only decoding."
                 )
         if self.flow_method not in _FLOW_METHODS:
             raise ValueError(f"unsupported flow method: {self.flow_method}")
@@ -163,6 +137,7 @@ class Runtime:
     def __post_init__(self) -> None:
         if not isinstance(self.audio_sequence_layout, AudioSequenceLayout):
             raise TypeError("audio_sequence_layout must be an AudioSequenceLayout.")
+        _validate_sequence_layout_config(self.config, self.audio_sequence_layout)
 
     @property
     def codec_name(self) -> str:
@@ -177,24 +152,20 @@ class Runtime:
         return validated_codec_frame_rate(self.codec)
 
     @property
-    def audio_representation(self) -> AudioRepresentation:
-        return self.config.audio_representation
-
-    @property
     def semantic_codec_artifact(self) -> str | None:
         return self.config.semantic_codec_artifact
 
     @property
     def acoustic_side_channel(self) -> bool:
         return (
-            self.audio_representation is AudioRepresentation.DECOUPLED
+            self.audio_sequence_layout is AudioSequenceLayout.SEMANTIC
             and self.config.semantic_codec_artifact is None
             and supports_acoustic(self.codec)
         )
 
     @property
     def structured_full_sequence(self) -> bool:
-        if self.audio_representation is not AudioRepresentation.FULL_CODEC_SEQUENCE:
+        if self.audio_sequence_layout is not AudioSequenceLayout.FLATTENED:
             return False
         if not supports_structured(self.codec):
             return False
@@ -276,7 +247,7 @@ class Runtime:
         if artifact is None:
             raise RuntimeError(
                 "semantic-only waveform decoding requires runtime.semantic_codec_artifact; "
-                "use full_codec_sequence for FrameCodec token generation."
+                "use audio_sequence_layout=flattened for token-only generation."
             )
         from semantic_acoustic_codec.runtime import SemanticCodecRuntime, load_artifact
 
@@ -292,7 +263,7 @@ class Runtime:
 
     @cached_property
     def audio_tokenizer(self) -> AudioTokenizer:
-        if self.config.audio_representation is AudioRepresentation.FULL_CODEC_SEQUENCE:
+        if self.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
             if self.structured_full_sequence:
                 codec = structured_codec(self.codec)
                 return BiCodecAudioTokenizer(
@@ -303,6 +274,13 @@ class Runtime:
             return FlattenedAudioTokenizer(
                 codebook_sizes=frame_codec(self.codec).codebook_sizes,
                 codec_name=self.codec_name,
+            )
+        if self.audio_view is AudioView.BICODEC:
+            codec = structured_codec(self.codec)
+            return BiCodecAudioTokenizer(
+                semantic_vocab_size=self.semantic_codebook_sizes[0],
+                acoustic_codebook_sizes=codec.acoustic_codebook_sizes,
+                acoustic_unit_length=codec.acoustic_unit_length,
             )
         if self.config.audio_tokenizer is None:
             return NativeAudioTokenizer(vocab_size=int(self.semantic_codebook_sizes[0]))
@@ -391,6 +369,31 @@ def runtime_for_sequence_layout(config: Config, layout: AudioSequenceLayout) -> 
         config,
         audio_sequence_layout=layout,
     )
+
+
+def _validate_sequence_layout_config(config: Config, layout: AudioSequenceLayout) -> None:
+    if not isinstance(layout, AudioSequenceLayout):
+        raise TypeError("audio_sequence_layout must be an AudioSequenceLayout.")
+    if layout is AudioSequenceLayout.FLATTENED:
+        if config.audio_tokenizer is not None:
+            raise ValueError(
+                "audio_sequence_layout=flattened cannot use a BPE audio tokenizer."
+            )
+        if config.semantic_codec_artifact is not None:
+            raise ValueError(
+                "runtime.semantic_codec_artifact requires audio_sequence_layout=semantic."
+            )
+    if layout is AudioSequenceLayout.SEMANTIC and config.audio_view is AudioView.BICODEC:
+        if config.semantic_codec_artifact is None:
+            raise ValueError(
+                "BiCodec semantic audio_sequence_layout requires "
+                "runtime.semantic_codec_artifact."
+            )
+        if config.audio_tokenizer is not None:
+            raise ValueError(
+                "BiCodec semantic audio_sequence_layout uses structured audio tokens "
+                "and cannot use a BPE audio tokenizer."
+            )
 
 
 def audio_tokenizer(path: str | Path) -> AudioTokenizer:

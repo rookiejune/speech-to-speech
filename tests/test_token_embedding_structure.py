@@ -13,7 +13,7 @@ from speech_to_speech.model.audio_output import (
 from speech_to_speech.model.base import Config, Model
 from speech_to_speech.model.embedding.fsq import FsqAffineEmbedding
 from speech_to_speech.model.toy import ToyConfig
-from speech_to_speech.runtime import AudioRepresentation
+from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.runtime.audio_tokenizer import (
     FlattenedAudioTokenizer,
     NativeAudioTokenizer,
@@ -51,7 +51,7 @@ class _Runtime:
         self.layout = Layout(text=(0, 8), audio=(8, 8 + audio_vocab_size))
         self.audio_tokenizer = audio_tokenizer or NativeAudioTokenizer(vocab_size=2)
         self.codec = codec or _Codec()
-        self.audio_representation = AudioRepresentation.DECOUPLED
+        self.audio_sequence_layout = AudioSequenceLayout.SEMANTIC
         self.eos_token_id = 3
         self.pad_token_id = 0
         self.bos_token_id = 1

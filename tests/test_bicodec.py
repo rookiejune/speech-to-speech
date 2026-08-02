@@ -15,7 +15,7 @@ from speech_to_speech.generation.decode import (
 from speech_to_speech.generation._request import validate
 from speech_to_speech.task import Task
 from anytrain.module.idspace import Layout
-from speech_to_speech.runtime import AudioRepresentation, AudioSequenceLayout, Config
+from speech_to_speech.runtime import AudioSequenceLayout, Config, Runtime
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.model._generation import generate_bicodec_sequence
 
@@ -311,20 +311,25 @@ class BiCodecDecodeTest(unittest.TestCase):
 
 
 class BiCodecConfigTest(unittest.TestCase):
-    def test_semantic_only_requires_artifact(self):
+    def test_semantic_layout_requires_artifact(self):
+        with self.assertRaisesRegex(ValueError, "semantic_codec_artifact"):
+            Runtime(
+                Config(codec="bicodec"),
+                audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
+            )
         config = Config(
             codec="bicodec",
-            audio_representation=AudioRepresentation.DECOUPLED,
             semantic_codec_artifact="/tmp/bicodec-semantic",
         )
-        self.assertEqual(config.codec, "bicodec")
+        runtime = Runtime(config, audio_sequence_layout=AudioSequenceLayout.SEMANTIC)
+        self.assertEqual(runtime.codec_name, "bicodec")
 
-    def test_full_sequence_does_not_require_artifact(self):
-        config = Config(
-            codec="bicodec",
-            audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
+    def test_flattened_layout_does_not_require_artifact(self):
+        runtime = Runtime(
+            Config(codec="bicodec"),
+            audio_sequence_layout=AudioSequenceLayout.FLATTENED,
         )
-        self.assertIsNone(config.semantic_codec_artifact)
+        self.assertIsNone(runtime.semantic_codec_artifact)
 
 
 class _StructuredCodec:

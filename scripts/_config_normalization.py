@@ -17,7 +17,6 @@ from speech_to_speech.model import (
 )
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.runtime import (
-    AudioRepresentation,
     AudioSequenceLayout,
     BackboneInitialization,
     BackboneType,
@@ -64,7 +63,6 @@ def prepare(config: DictConfig) -> DictConfig:
     _text_dataset(result.get("text_datamodule", {}).get("dataset"))
     _audio_sequence_layout(result)
     _reject_audio_representation(result)
-    _audio_layout_defaults(result)
     runtime = result.get("runtime")
     if runtime is not None:
         backbone_type = runtime.get("backbone_type")
@@ -176,40 +174,6 @@ def _reject_audio_representation(config: DictConfig) -> None:
     raise ValueError(
         "runtime.audio_representation is internal; use audio_sequence_layout."
     )
-
-
-def _audio_layout_defaults(config: DictConfig) -> None:
-    layout = _layout(config)
-    if layout is None:
-        return
-    runtime = config.get("runtime")
-    if isinstance(runtime, DictConfig):
-        runtime.audio_representation = _layout_representation(layout, runtime)
-
-
-def _layout(config: DictConfig) -> AudioSequenceLayout | None:
-    value = config.get("audio_sequence_layout")
-    if value is None:
-        return None
-    raw = str(value)
-    return (
-        AudioSequenceLayout[raw]
-        if raw in AudioSequenceLayout.__members__
-        else AudioSequenceLayout(raw)
-    )
-
-
-def _layout_representation(
-    layout: AudioSequenceLayout,
-    runtime: DictConfig,
-) -> str:
-    if layout is AudioSequenceLayout.FLATTENED:
-        return AudioRepresentation.FULL_CODEC_SEQUENCE.name
-    if str(runtime.get("codec")) == "bicodec":
-        # BiCodec semantic layout still needs the structured tokenizer so the
-        # reference acoustic stream can be read from the logical full-code input.
-        return AudioRepresentation.FULL_CODEC_SEQUENCE.name
-    return AudioRepresentation.DECOUPLED.name
 
 
 def _enum_name(enum: Type[EnumT], value: object) -> str:

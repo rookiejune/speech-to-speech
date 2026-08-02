@@ -34,7 +34,7 @@ from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.build.single import SingleCollator
 from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.audio_stream import AudioStream
-from speech_to_speech.runtime import AudioRepresentation, AudioSequenceLayout
+from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.task import Task
 
@@ -139,7 +139,7 @@ class SpeakerGridDatasetTest(unittest.TestCase):
 
         dataset = load_dataset(
             config,
-            _runtime(AudioRepresentation.FULL_CODEC_SEQUENCE),
+            _runtime(AudioSequenceLayout.FLATTENED),
         )
 
         self.assertIsInstance(dataset, SpeakerGridCellsDataset)
@@ -190,7 +190,7 @@ class SpeakerGridDatasetTest(unittest.TestCase):
 
 class BiCodecSpeakerCellTest(unittest.TestCase):
     def test_reference_route_keeps_target_semantic_out_of_prompt(self):
-        runtime = _runtime(AudioRepresentation.DECOUPLED)
+        runtime = _runtime(AudioSequenceLayout.SEMANTIC)
         sample = SpeakerGridCellsDataset(
             _grid(),
             with_audio_context=True,
@@ -226,12 +226,12 @@ class BiCodecSpeakerCellTest(unittest.TestCase):
         )
 
     def test_semantic_only_and_full_sequence_build_tts_batches(self):
-        for representation in (
-            AudioRepresentation.DECOUPLED,
-            AudioRepresentation.FULL_CODEC_SEQUENCE,
+        for audio_sequence_layout in (
+            AudioSequenceLayout.SEMANTIC,
+            AudioSequenceLayout.FLATTENED,
         ):
-            with self.subTest(representation=representation.value):
-                runtime = _runtime(representation)
+            with self.subTest(audio_sequence_layout=audio_sequence_layout.value):
+                runtime = _runtime(audio_sequence_layout)
                 cell = SpeakerGridCellsDataset(
                     _grid(),
                     with_audio_context=(
@@ -364,7 +364,7 @@ def _cells() -> tuple[Sample, ...]:
     return tuple(samples)
 
 
-def _runtime(representation: AudioRepresentation):
+def _runtime(audio_sequence_layout: AudioSequenceLayout):
     tokenizer = BiCodecAudioTokenizer(
         semantic_vocab_size=16,
         acoustic_codebook_sizes=(5, 7),
@@ -374,15 +374,10 @@ def _runtime(representation: AudioRepresentation):
         codec_name="bicodec",
         audio_view=AudioView.BICODEC,
         codec_frame_rate=50.0,
-        audio_representation=representation,
-        audio_sequence_layout=(
-            AudioSequenceLayout.FLATTENED
-            if representation is AudioRepresentation.FULL_CODEC_SEQUENCE
-            else AudioSequenceLayout.SEMANTIC
-        ),
+        audio_sequence_layout=audio_sequence_layout,
         semantic_codec_artifact=(
             "/tmp/bicodec-semantic"
-            if representation is AudioRepresentation.DECOUPLED
+            if audio_sequence_layout is AudioSequenceLayout.SEMANTIC
             else None
         ),
         acoustic_layout=AcousticLayout.FIXED_LENGTH,

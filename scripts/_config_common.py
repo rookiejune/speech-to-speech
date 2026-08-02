@@ -270,6 +270,13 @@ def _validate_audio_sequence_layout(config: _EntryConfig) -> None:
         )
     if (
         config.runtime.semantic_codec_artifact is not None
+        and config.audio_sequence_layout is AudioSequenceLayout.FLATTENED
+    ):
+        raise ValueError(
+            "runtime.semantic_codec_artifact requires audio_sequence_layout=semantic."
+        )
+    if (
+        config.runtime.semantic_codec_artifact is not None
         and acoustic is not AcousticType.NONE
     ):
         raise ValueError(
@@ -278,7 +285,7 @@ def _validate_audio_sequence_layout(config: _EntryConfig) -> None:
     if config.runtime.audio_view is AudioView.BICODEC and acoustic is not AcousticType.NONE:
         raise ValueError(
             "BiCodec fixed-length acoustic units require model/acoustic=none; "
-            "use a semantic codec artifact or full_codec_sequence."
+            "use runtime.semantic_codec_artifact or audio_sequence_layout=flattened."
         )
     if (
         acoustic is AcousticType.NONE

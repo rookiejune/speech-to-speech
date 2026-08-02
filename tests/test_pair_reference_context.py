@@ -22,7 +22,7 @@ from speech_to_speech.audio_stream import AudioStream
 from speech_to_speech.datamodule.build.sample import build_task_sample
 from speech_to_speech.datamodule.parse.parser import parse_task_sample
 from speech_to_speech.datamodule.types import AudioContextSample, Speech
-from speech_to_speech.runtime import AudioRepresentation, AudioSequenceLayout
+from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.task import Task
 
@@ -148,7 +148,6 @@ def _bicodec_runtime(audio_sequence_layout: AudioSequenceLayout):
         codec_name="bicodec",
         audio_view=AudioView.BICODEC,
         codec_frame_rate=50.0,
-        audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
         audio_sequence_layout=audio_sequence_layout,
         semantic_codec_artifact=None,
         acoustic_layout=AcousticLayout.FIXED_LENGTH,

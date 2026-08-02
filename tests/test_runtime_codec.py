@@ -9,7 +9,6 @@ from anydataset.types import AudioView
 from anytrain.codec import AcousticLayout
 
 from speech_to_speech.runtime import (
-    AudioRepresentation,
     AudioSequenceLayout,
     Config,
     Runtime,
@@ -82,10 +81,7 @@ class RuntimeCodecTest(unittest.TestCase):
         load_codec_backend.assert_called_once_with("unicodec", device="cuda")
 
     def test_stable_runtime_uses_stable_audio_view(self) -> None:
-        config = Config(
-            codec="stable_codec",
-            audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
-        )
+        config = Config(codec="stable_codec")
 
         self.assertIs(config.audio_view, AudioView.STABLE)
 
@@ -182,10 +178,7 @@ class RuntimeAudioSequenceLayoutTest(unittest.TestCase):
             Runtime(Config(), audio_sequence_layout="semantic")
 
     def test_runtime_for_sequence_layout_sets_layout(self) -> None:
-        config = Config(
-            codec="bicodec",
-            audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
-        )
+        config = Config(codec="bicodec")
 
         runtime = runtime_for_sequence_layout(
             config,
@@ -193,14 +186,10 @@ class RuntimeAudioSequenceLayoutTest(unittest.TestCase):
         )
 
         self.assertIs(runtime.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
-        self.assertIs(runtime.audio_representation, AudioRepresentation.FULL_CODEC_SEQUENCE)
         self.assertIs(runtime.audio_view, AudioView.BICODEC)
 
     def test_runtime_for_sequence_layout_preserves_config(self) -> None:
-        config = Config(
-            codec="stable_codec",
-            audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
-        )
+        config = Config(codec="stable_codec")
 
         runtime = runtime_for_sequence_layout(
             config,
@@ -255,10 +244,8 @@ class _UnifiedSource:
 
 def _runtime(codec_name: str, codec: object) -> Runtime:
     runtime = Runtime(
-        Config(
-            codec=codec_name,
-            audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
-        )
+        Config(codec=codec_name),
+        audio_sequence_layout=AudioSequenceLayout.FLATTENED,
     )
     runtime.__dict__["codec"] = codec
     return runtime

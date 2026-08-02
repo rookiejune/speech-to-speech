@@ -44,7 +44,7 @@ from speech_to_speech.generation import (
     decode_generated_audio,
     decode_generated_codes,
 )
-from speech_to_speech.runtime import AudioRepresentation
+from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
 from speech_to_speech.task import Task
 
@@ -154,7 +154,7 @@ class _Runtime:
         self.codec_name = "longcat"
         self.audio_view = AudioView.LONGCAT
         self.codec_frame_rate = 50.0
-        self.audio_representation = AudioRepresentation.DECOUPLED
+        self.audio_sequence_layout = AudioSequenceLayout.SEMANTIC
         self.semantic_codec_artifact = None
         self.acoustic_layout = AcousticLayout.FRAME_ALIGNED
         self.acoustic_unit_length = None

@@ -77,7 +77,6 @@ from speech_to_speech.datamodule.types import (
 from speech_to_speech.model import Config as ModelConfig, ToyConfig
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.runtime import (
-    AudioRepresentation,
     AudioSequenceLayout,
     Config,
     Runtime,
@@ -280,7 +279,6 @@ class ContractTest(unittest.TestCase):
             codec_name="longcat",
             audio_view=AudioView.LONGCAT,
             codec_frame_rate=50.0,
-            audio_representation=AudioRepresentation.DECOUPLED,
             audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
             semantic_codec_artifact=None,
             acoustic_layout=AcousticLayout.FRAME_ALIGNED,
@@ -607,7 +605,7 @@ class ContractTest(unittest.TestCase):
         runtime = SimpleNamespace(
             audio_view=AudioView.LONGCAT,
             codec_frame_rate=50.0,
-            audio_representation=AudioRepresentation.DECOUPLED,
+            audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
             semantic_codec_artifact=None,
             acoustic_layout=AcousticLayout.FRAME_ALIGNED,
             acoustic_unit_length=None,
@@ -898,7 +896,6 @@ class ContractTest(unittest.TestCase):
         runtime = SimpleNamespace(
             audio_view=AudioView.LONGCAT,
             codec_frame_rate=50.0,
-            audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
             audio_sequence_layout=AudioSequenceLayout.FLATTENED,
             semantic_codec_artifact=None,
             acoustic_layout=AcousticLayout.FRAME_ALIGNED,
@@ -2171,7 +2168,6 @@ def _data_runtime():
         codec_name="longcat",
         audio_view=AudioView.LONGCAT,
         codec_frame_rate=50.0,
-        audio_representation=AudioRepresentation.DECOUPLED,
         audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
         semantic_codec_artifact=None,
         acoustic_layout=AcousticLayout.FRAME_ALIGNED,
@@ -2200,7 +2196,6 @@ def _bicodec_data_runtime():
         codec_name="bicodec",
         audio_view=AudioView.BICODEC,
         codec_frame_rate=50.0,
-        audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
         audio_sequence_layout=AudioSequenceLayout.FLATTENED,
         semantic_codec_artifact=None,
         acoustic_layout=AcousticLayout.FIXED_LENGTH,

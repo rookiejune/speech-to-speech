@@ -1,5 +1,4 @@
 from .runtime import (
-    AudioRepresentation,
     AudioSequenceLayout,
     BackboneInitialization,
     BackboneType,
@@ -9,7 +8,6 @@ from .runtime import (
 )
 
 __all__ = [
-    "AudioRepresentation",
     "AudioSequenceLayout",
     "BackboneInitialization",
     "BackboneType",

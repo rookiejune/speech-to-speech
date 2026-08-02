@@ -1340,7 +1340,7 @@ class ConfigTest(unittest.TestCase):
                     "runtime.semantic_codec_artifact=/tmp/semantic-codec",
                 )
             )
-        with self.assertRaisesRegex(ValueError, "decoupled"):
+        with self.assertRaisesRegex(ValueError, "audio_sequence_layout=semantic"):
             overfit(
                 _compose(
                     "overfit",

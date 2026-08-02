@@ -8,7 +8,7 @@ from anydataset.types import AudioView
 from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 
-from ..runtime import AudioRepresentation, AudioSequenceLayout
+from ..runtime import AudioSequenceLayout
 from ..runtime.protocol import DataRuntime
 from ..runtime.types import AudioTokenizer, CodecBackend, TextTokenizer
 
@@ -62,7 +62,6 @@ class DataRuntimeSnapshot:
     codec_name: str
     audio_view: AudioView
     codec_frame_rate: float
-    audio_representation: AudioRepresentation
     audio_sequence_layout: AudioSequenceLayout
     semantic_codec_artifact: str | None
     acoustic_layout: AcousticLayout
@@ -82,7 +81,6 @@ class DataRuntimeSnapshot:
             codec_name=runtime.codec_name,
             audio_view=runtime.audio_view,
             codec_frame_rate=runtime.codec_frame_rate,
-            audio_representation=runtime.audio_representation,
             audio_sequence_layout=runtime.audio_sequence_layout,
             semantic_codec_artifact=runtime.semantic_codec_artifact,
             acoustic_layout=runtime.acoustic_layout,

@@ -18,7 +18,7 @@ from speech_to_speech.generation.chat import (
     to_request,
 )
 from speech_to_speech.generation.protocol import TokenGenerator
-from speech_to_speech.runtime import AudioRepresentation, AudioSequenceLayout
+from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.runtime.protocol import GenerationRuntime
 from speech_to_speech.runtime.types import Backbone
@@ -110,7 +110,6 @@ def _runtime(
         acoustic_unit_length=2,
     )
     runtime = SimpleNamespace(
-        audio_representation=AudioRepresentation.FULL_CODEC_SEQUENCE,
         audio_sequence_layout=audio_sequence_layout,
         audio_tokenizer=tokenizer,
         text_tokenizer=_TextTokenizer(),
