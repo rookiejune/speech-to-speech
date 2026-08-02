@@ -4,12 +4,13 @@ defaults:
   - /model: default
   - /model/acoustic@model.acoustic: none
   - /runtime: unicodec
-  - /audio_sequence_layout: flattened
   - /datamodule/dataset@datamodule.dataset: wmt19_tts
   - /pl_module: sft
   - /trainer: default
   - /logging: tensorboard
   - _self_
+
+audio_sequence_layout: flattened
 
 task: tts
 run_name: token

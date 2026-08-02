@@ -6,9 +6,9 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
 
 ## 源码模块
 
-- `runtime`：完整映射 `runtime.Config`，统一拥有 codec、`audio_sequence_layout`、backbone、
-  backbone initialization、audio tokenizer、device、dtype、attention backend 与 flow sampling。
-  `audio_sequence_layout=flattened|semantic` 是公开的音频序列轴：`flattened` 把完整 codec
+- `runtime`：完整映射 `runtime.Config`，统一拥有 codec、backbone、backbone initialization、
+  audio tokenizer、device、dtype、attention backend 与 flow sampling。
+  root-level `audio_sequence_layout=flattened|semantic` 是公开的音频序列轴：`flattened` 把完整 codec
   codes 作为 acoustic-first / semantic-last 的 token 序列训练；`semantic` 的逻辑输入输出仍是
   full codes，但 token sequence 只处理 semantic，acoustic 由 Flow/RVQ side module 或
   `semantic-acoustic-codec` artifact 补齐。`longcat`、`longcat_native`、`bicodec`、
@@ -214,11 +214,11 @@ codes/context 中取得 reference acoustic。
 
 - `model/acoustic=none|flow|rvq` 显式选择下游 acoustic path；`none` 只训练
   audio token，flow/RVQ 才启用 acoustic objective，RVQ schema 不接受 REPA。
-- `runtime.audio_sequence_layout=flattened` 切换到完整 codebook 序列化格式，只允许
+- `audio_sequence_layout=flattened` 切换到完整 codebook 序列化格式，只允许
   `model/acoustic=none`，因为完整 codec codes 已作为 token objective 训练，不能再同时构造
   frame-aligned acoustic side channel。flattened layout 的 token 顺序固定为 acoustic-first /
   semantic-last。
-- `runtime.audio_sequence_layout=semantic` 保持逻辑输入输出为 full codes，但模型 token sequence
+- `audio_sequence_layout=semantic` 保持逻辑输入输出为 full codes，但模型 token sequence
   只预测 semantic。需要 waveform 时，acoustic 由 Flow/RVQ side module 或
   `runtime.semantic_codec_artifact` 提供。
 - reference 不是公开 config 轴。BiCodec 的 semantic layout 从输入 full codes/context 取得

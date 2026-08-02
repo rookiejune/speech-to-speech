@@ -4,12 +4,13 @@ defaults:
   - /model: default
   - /model/acoustic@model.acoustic: flow
   - /runtime: longcat
-  - /audio_sequence_layout: semantic
   - /datamodule/dataset@datamodule.dataset: wmt19_tts
   - /pl_module: sft
   - /trainer: default
   - /logging: tensorboard
   - _self_
+
+audio_sequence_layout: semantic
 
 task: tts
 run_name: ${oc.select:model.acoustic.name,token}

@@ -3,13 +3,14 @@ defaults:
   - /runtime: longcat_native
   - /model: toy
   - /model/acoustic@model.acoustic: rvq
-  - /audio_sequence_layout: semantic
   - /datamodule/dataset@datamodule.dataset: toy
   - /callback/parameter_policy@callbacks.parameter_policy: speech_interface
   - /pl_module: sft
   - /trainer: staged_ddp
   - /logging: csv
   - _self_
+
+audio_sequence_layout: semantic
 
 run_name: parameter-policy-${callbacks.parameter_policy.name}
 output_subdir: parameter-policy-smoke/${run_name}

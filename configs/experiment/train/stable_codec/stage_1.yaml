@@ -3,13 +3,14 @@ defaults:
   - /runtime: stable_codec
   - /model: default
   - /model/acoustic@model.acoustic: none
-  - /audio_sequence_layout: flattened
   - /datamodule/dataset@datamodule.dataset: wmt19_tts
   - /callback/parameter_policy@callbacks.parameter_policy: speech_interface
   - /pl_module: sft
   - /trainer: staged_static_ddp
   - /logging: tensorboard
   - _self_
+
+audio_sequence_layout: flattened
 
 output_subdir: stable-codec/stage_1/${run_name}
 
