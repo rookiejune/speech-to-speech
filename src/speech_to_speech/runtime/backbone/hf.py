@@ -2,14 +2,22 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cached_property, partial
 from numbers import Integral
 from typing import Protocol, cast
 
 import torch
 from torch import nn
-from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor, AutoTokenizer
+from torch.utils.checkpoint import checkpoint
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoProcessor,
+    AutoTokenizer,
+    PreTrainedModel,
+)
 from transformers.cache_utils import Cache
+from transformers.modeling_layers import GradientCheckpointingLayer
 
 from ..types import Backbone, BackboneOutput, TextTokenizer
 from .adapter import BackboneBodyAdapter, BackboneExtra, BackboneOutputView
@@ -50,6 +58,8 @@ class HuggingFaceBackboneAdapter:
             if self.config.initialization is BackboneInitialization.PRETRAINED
             else self._random(**kwargs)
         )
+        if self.config.gradient_checkpointing:
+            _enable_gradient_checkpointing(model)
         if self.config.device is not None:
             model = cast(nn.Module, cast(object, model)).to(self.config.device)
         return cast(nn.Module, cast(object, model))
@@ -170,6 +180,92 @@ def _hidden_size(config: object) -> int:
             raise ValueError("backbone hidden size must be positive.")
         return size
     raise AttributeError("backbone config does not expose a text hidden size.")
+
+
+def _enable_gradient_checkpointing(model: object) -> None:
+    if not isinstance(model, nn.Module):
+        raise TypeError(
+            "runtime.gradient_checkpointing requires a Hugging Face "
+            "backbone module."
+        )
+
+    backbones = _gradient_checkpointing_backbones(model)
+    if backbones:
+        for backbone in backbones:
+            _enable_backbone_gradient_checkpointing(backbone)
+    else:
+        _enable_layer_gradient_checkpointing(model)
+    _enable_input_require_grads(model)
+    _disable_cache(model)
+
+
+def _gradient_checkpointing_backbones(model: nn.Module) -> tuple[PreTrainedModel, ...]:
+    if isinstance(model, PreTrainedModel):
+        return (model,)
+
+    backbones: list[PreTrainedModel] = []
+
+    def visit(module: nn.Module) -> None:
+        for child in module.children():
+            if isinstance(child, PreTrainedModel):
+                backbones.append(child)
+            else:
+                visit(child)
+
+    visit(model)
+    return tuple(backbones)
+
+
+def _enable_backbone_gradient_checkpointing(model: PreTrainedModel) -> None:
+    if not model.supports_gradient_checkpointing:
+        raise TypeError(
+            "backbone does not support Hugging Face gradient checkpointing; "
+            "disable runtime.gradient_checkpointing for this backbone."
+        )
+    if not callable(model.gradient_checkpointing_enable):
+        raise TypeError(
+            "backbone does not expose gradient_checkpointing_enable(); "
+            "disable runtime.gradient_checkpointing for this backbone."
+        )
+    model.gradient_checkpointing_enable()
+
+
+def _enable_layer_gradient_checkpointing(model: nn.Module) -> None:
+    modules = tuple(
+        module
+        for module in model.modules()
+        if isinstance(module, GradientCheckpointingLayer)
+    )
+    if not modules:
+        raise TypeError(
+            "backbone does not expose Hugging Face gradient checkpointing layers; "
+            "disable runtime.gradient_checkpointing for this backbone."
+        )
+    gradient_checkpointing_func = partial(checkpoint, use_reentrant=False)
+    for module in modules:
+        module._gradient_checkpointing_func = gradient_checkpointing_func
+        module.gradient_checkpointing = True
+
+
+def _enable_input_require_grads(model: nn.Module) -> None:
+    hook = getattr(model, "enable_input_require_grads", None)
+    if callable(hook):
+        hook()
+        return
+
+    for module in model.children():
+        hook = getattr(module, "enable_input_require_grads", None)
+        if callable(hook):
+            hook()
+            continue
+        _enable_input_require_grads(module)
+
+
+def _disable_cache(model: nn.Module) -> None:
+    for module in model.modules():
+        config = getattr(module, "config", None)
+        if hasattr(config, "use_cache"):
+            config.use_cache = False
 
 
 # Qwen chat turn start; stock HF leaves bos_token unset while keeping this in vocab.

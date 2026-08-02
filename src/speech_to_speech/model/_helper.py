@@ -7,6 +7,7 @@ import torch
 from torch import Tensor, nn
 
 from .._compat import StrEnum, auto
+from ._checkpointing import GradientCheckpointingLayer
 
 
 class AdapterType(StrEnum):
@@ -164,7 +165,7 @@ class EmbeddingView:
         return self._embedding(input_ids)
 
 
-class CastOutput(nn.Module):
+class CastOutput(GradientCheckpointingLayer):
     """Cast adapter outputs to the backbone embedding dtype at the idspace boundary."""
 
     def __init__(self, module: nn.Module, *, dtype: torch.dtype) -> None:
@@ -172,5 +173,13 @@ class CastOutput(nn.Module):
         self.module = module
         self._dtype = dtype
 
-    def forward(self, values: torch.Tensor) -> torch.Tensor:
-        return self.module(values).to(dtype=self._dtype)
+    def forward(
+        self,
+        values: torch.Tensor,
+        *,
+        cast_output: bool = True,
+    ) -> torch.Tensor:
+        output = self.module(values)
+        if cast_output:
+            output = output.to(dtype=self._dtype)
+        return output

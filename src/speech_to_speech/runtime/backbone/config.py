@@ -31,6 +31,7 @@ class AdapterConfig:
     device: Optional[str] = None
     dtype: Optional[str] = None
     attn_implementation: Optional[str] = None
+    gradient_checkpointing: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.type, BackboneType):
@@ -56,6 +57,8 @@ class AdapterConfig:
             self.attn_implementation,
             "backbone adapter attention implementation",
         )
+        if not isinstance(self.gradient_checkpointing, bool):
+            raise TypeError("backbone adapter gradient_checkpointing must be a bool.")
 
 
 def _optional_string(value: object, name: str) -> None:

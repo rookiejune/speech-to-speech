@@ -6,6 +6,7 @@ semantic_codec_artifact:
 device: cuda
 dtype: bfloat16
 attn_implementation: flash_attention_2
+gradient_checkpointing: true
 flow_method: midpoint
 flow_nfe: 20
 flow_num_steps: 10

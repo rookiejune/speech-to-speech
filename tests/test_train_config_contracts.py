@@ -24,6 +24,7 @@ class TrainConfigContractTest(ConfigTestCase):
         if default.model.lora is None:
             self.fail("default train config must enable PEFT LoRA")
         self.assertEqual(default.model.lora.init_lora_weights, "pissa")
+        self.assertFalse(default.runtime.gradient_checkpointing)
         self.assertEqual(default.optim.name, "adamw")
         self.assertFalse(default.validation.enabled)
         self.assertEqual(default.validation.loader, "tts")
@@ -39,6 +40,19 @@ class TrainConfigContractTest(ConfigTestCase):
         self.assertTrue(default.loader_plan.fuse_loaders_per_step)
         with self.assertRaises(AttributeError):
             getattr(default.datamodule, "sample_index")
+
+    def test_bicodec_runtime_enables_gradient_checkpointing(self):
+        config = _train(
+            "runtime=bicodec",
+            "audio_sequence_layout=flattened",
+            "model/acoustic=none",
+            "datamodule/dataset=qwen_tts_speaker",
+            "+datamodule.shape=single",
+        )
+
+        self.assertIs(config.callbacks.parameter_policy.name, ParameterPolicyName.LORA)
+        self.assertIsInstance(config.model.lora, LoraConfig)
+        self.assertTrue(config.runtime.gradient_checkpointing)
 
     def test_train_stage_2_uses_accumulation_safe_loader_plan(self):
         config = _train("experiment=train/staged_joint/stage_2")

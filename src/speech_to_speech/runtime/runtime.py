@@ -86,6 +86,7 @@ class Config:
     device: Optional[str] = None
     dtype: Optional[str] = None
     attn_implementation: Optional[str] = None
+    gradient_checkpointing: bool = False
     flow_method: str = "midpoint"
     flow_nfe: int = 20
     flow_num_steps: int = 10
@@ -109,6 +110,8 @@ class Config:
                 raise ValueError(
                     "semantic codec artifacts currently require LongCat or BiCodec."
                 )
+        if not isinstance(self.gradient_checkpointing, bool):
+            raise TypeError("gradient_checkpointing must be a bool.")
         if self.flow_method not in _FLOW_METHODS:
             raise ValueError(f"unsupported flow method: {self.flow_method}")
         if self.flow_nfe <= 0:
@@ -196,6 +199,10 @@ class Runtime:
         return self.config.backbone_supports_cache_position
 
     @property
+    def gradient_checkpointing(self) -> bool:
+        return self.config.gradient_checkpointing
+
+    @property
     def backbone_module(self) -> str:
         return self.config.backbone_module
 
@@ -217,6 +224,7 @@ class Runtime:
             device=self.config.device,
             dtype=self.config.dtype,
             attn_implementation=self.config.attn_implementation,
+            gradient_checkpointing=self.config.gradient_checkpointing,
         )
 
     @cached_property

@@ -52,8 +52,10 @@ class VocabularyHeadMixin:
         if "audio" not in self.token_embedding.adapters:
             return weight
         adapter = self.token_embedding.adapters["audio"]
-        module = adapter.module if isinstance(adapter, CastOutput) else adapter
-        return module(weight.to(dtype=torch.float32))
+        values = weight.to(dtype=torch.float32)
+        if isinstance(adapter, CastOutput):
+            return adapter(values, cast_output=False)
+        return adapter(values)
 
     def project_audio_hidden(
         self,

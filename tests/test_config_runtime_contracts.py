@@ -361,9 +361,7 @@ class ConfigRuntimeContractTest(unittest.TestCase):
 
     @patch("speech_to_speech.runtime.backbone.hf.AutoModelForCausalLM.from_pretrained")
     def test_backbone_loading_forwards_runtime_configuration(self, from_pretrained):
-        backbone = Mock()
-        moved = Mock()
-        backbone.to.return_value = moved
+        backbone = GradientCheckpointingBackbone()
         from_pretrained.return_value = backbone
         rt = Runtime(
             Config(
@@ -371,6 +369,7 @@ class ConfigRuntimeContractTest(unittest.TestCase):
                 device="cuda",
                 dtype="bfloat16",
                 attn_implementation="flash_attention_2",
+                gradient_checkpointing=True,
             )
         )
 
@@ -382,8 +381,11 @@ class ConfigRuntimeContractTest(unittest.TestCase):
             dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
         )
-        backbone.to.assert_called_once_with("cuda")
-        self.assertIs(loaded, moved)
+        self.assertEqual(backbone.gradient_checkpointing_calls, 1)
+        self.assertEqual(backbone.input_require_grads_calls, 1)
+        self.assertFalse(backbone.config.use_cache)
+        self.assertEqual(backbone.moves, ["cuda"])
+        self.assertIs(loaded, backbone)
 
     def test_runtime_dtype_is_explicit(self):
         self.assertIs(dtype("float16"), torch.float16)

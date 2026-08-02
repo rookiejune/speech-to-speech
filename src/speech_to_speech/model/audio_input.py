@@ -8,6 +8,7 @@ import torch
 from torch import Tensor, nn
 
 from .._compat import StrEnum, auto
+from ._checkpointing import GradientCheckpointingLayer
 from ._helper import (
     MLPAdapter,
     safe_transformer_mask,
@@ -70,7 +71,7 @@ def audio_input_options(
     )
 
 
-class AudioInputTower(nn.Module):
+class AudioInputTower(GradientCheckpointingLayer):
     """Encode source-audio features without changing their frame length.
 
     The tower accepts ``[B, F, D]`` features and returns ``[B, F, H]``. A

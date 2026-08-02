@@ -15,6 +15,7 @@ from typing import Any, cast
 from unittest.mock import Mock, patch
 
 import torch
+from transformers import PretrainedConfig, PreTrainedModel
 from anydataset import AnyDataset, Source, Spec
 from anydataset.store import DatasetWriter
 from anydataset.types import (
@@ -99,6 +100,8 @@ from speech_to_speech.parameter_policy import (
     default_parameter_policy_config,
 )
 from speech_to_speech.task import Task
+
+
 from scripts._overfit_config import overfit as parse_overfit
 from scripts._config_common import TokenModelConfig
 from scripts._entry import runtime_config
@@ -108,6 +111,28 @@ from scripts.overfit import (
     build_trainer,
     run,
 )
+
+
+class GradientCheckpointingBackbone(PreTrainedModel):
+    config_class = PretrainedConfig
+    supports_gradient_checkpointing = True
+
+    def __init__(self) -> None:
+        super().__init__(PretrainedConfig(use_cache=True))
+        self.gradient_checkpointing_calls = 0
+        self.input_require_grads_calls = 0
+        self.moves: list[str] = []
+
+    def gradient_checkpointing_enable(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+        self.gradient_checkpointing_calls += 1
+
+    def enable_input_require_grads(self) -> None:
+        self.input_require_grads_calls += 1
+
+    def to(self, device: str):  # type: ignore[override]
+        self.moves.append(device)
+        return self
 
 
 class _Tokenizer:

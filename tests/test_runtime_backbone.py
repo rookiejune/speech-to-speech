@@ -5,8 +5,51 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
+from torch import nn
+from transformers import PretrainedConfig, PreTrainedModel
+from transformers.modeling_layers import GradientCheckpointingLayer
 
 from speech_to_speech.runtime import BackboneInitialization, BackboneType, Config, Runtime
+
+
+class GradientCheckpointingBackbone(PreTrainedModel):
+    config_class = PretrainedConfig
+    supports_gradient_checkpointing = True
+
+    def __init__(self) -> None:
+        super().__init__(PretrainedConfig(use_cache=True))
+        self.gradient_checkpointing_calls = 0
+        self.input_require_grads_calls = 0
+        self.moves: list[str] = []
+
+    def gradient_checkpointing_enable(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+        self.gradient_checkpointing_calls += 1
+
+    def enable_input_require_grads(self) -> None:
+        self.input_require_grads_calls += 1
+
+    def to(self, device: str):  # type: ignore[override]
+        self.moves.append(device)
+        return self
+
+
+class ExternalAdapter(nn.Module):
+    def __init__(self, backbone: nn.Module) -> None:
+        super().__init__()
+        self.backbone = backbone
+        self.config = SimpleNamespace(use_cache=True)
+
+
+class CheckpointingLayer(GradientCheckpointingLayer):
+    pass
+
+
+class LayerCheckpointingBackbone(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.block = CheckpointingLayer()
+        self.config = SimpleNamespace(use_cache=True)
 
 
 class RuntimeBackboneTest(unittest.TestCase):
@@ -84,6 +127,71 @@ class RuntimeBackboneTest(unittest.TestCase):
         )
         from_config.assert_not_called()
         config_from_pretrained.assert_not_called()
+        self.assertIs(loaded, backbone)
+
+    def test_gradient_checkpointing_uses_hf_backbone_hook_and_disables_cache(self):
+        backbone = GradientCheckpointingBackbone()
+
+        with patch(
+            "speech_to_speech.runtime.backbone.hf.AutoModelForCausalLM.from_pretrained",
+            return_value=backbone,
+        ):
+            runtime = Runtime(
+                Config(
+                    backbone="fake/backbone",
+                    gradient_checkpointing=True,
+                )
+            )
+
+            loaded = runtime.backbone
+
+        self.assertEqual(backbone.gradient_checkpointing_calls, 1)
+        self.assertEqual(backbone.input_require_grads_calls, 1)
+        self.assertFalse(backbone.config.use_cache)
+        self.assertIs(loaded, backbone)
+
+    def test_gradient_checkpointing_enters_external_adapter_wrapper(self):
+        backbone = GradientCheckpointingBackbone()
+        adapter = ExternalAdapter(backbone)
+
+        with patch(
+            "speech_to_speech.runtime.backbone.hf.AutoModelForCausalLM.from_pretrained",
+            return_value=adapter,
+        ):
+            runtime = Runtime(
+                Config(
+                    backbone="fake/wrapped-backbone",
+                    gradient_checkpointing=True,
+                )
+            )
+
+            loaded = runtime.backbone
+
+        self.assertEqual(backbone.gradient_checkpointing_calls, 1)
+        self.assertEqual(backbone.input_require_grads_calls, 1)
+        self.assertFalse(adapter.config.use_cache)
+        self.assertFalse(backbone.config.use_cache)
+        self.assertIs(loaded, adapter)
+
+    def test_gradient_checkpointing_can_target_checkpointing_layers(self):
+        backbone = LayerCheckpointingBackbone()
+
+        with patch(
+            "speech_to_speech.runtime.backbone.hf.AutoModelForCausalLM.from_pretrained",
+            return_value=backbone,
+        ):
+            runtime = Runtime(
+                Config(
+                    backbone="fake/layer-backbone",
+                    gradient_checkpointing=True,
+                )
+            )
+
+            loaded = runtime.backbone
+
+        self.assertTrue(backbone.block.gradient_checkpointing)
+        self.assertTrue(callable(backbone.block._gradient_checkpointing_func))
+        self.assertFalse(backbone.config.use_cache)
         self.assertIs(loaded, backbone)
 
     def test_qwen_omni_uses_processor_tokenizer_and_thinker_model(self):

@@ -25,6 +25,7 @@ from ._generation import (
 )
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer, FlattenedAudioTokenizer
 from ..runtime.backbone import BackboneBodyAdapter, BackboneEncoder, BackboneOutputView
+from ._checkpointing import enable_gradient_checkpointing
 from ._head import VocabularyHeadMixin
 from ._helper import (
     AdapterType,
@@ -201,6 +202,8 @@ class Model(VocabularyHeadMixin, nn.Module):
             device=backbone_weight.device,
             dtype=torch.float32,
         )
+        if _runtime_gradient_checkpointing(self.runtime):
+            _enable_external_gradient_checkpointing(self)
 
     def audio_output_adapter_batch_select(
         self,
@@ -711,6 +714,24 @@ def _replace_registered_embedding(
         if _replace_registered_embedding(child, current, view, seen=seen):
             return True
     return False
+
+
+def _runtime_gradient_checkpointing(runtime: object) -> bool:
+    config = getattr(runtime, "config", None)
+    return bool(getattr(config, "gradient_checkpointing", False))
+
+
+def _enable_external_gradient_checkpointing(model: Model) -> None:
+    count = enable_gradient_checkpointing(model.token_embedding)
+    if model.audio_input_adapter is not None:
+        count += enable_gradient_checkpointing(model.audio_input_adapter)
+    if model.audio_output_adapter.config.type is not AudioOutputAdapterType.NONE:
+        count += enable_gradient_checkpointing(model.audio_output_adapter)
+    if count == 0:
+        raise RuntimeError(
+            "runtime.gradient_checkpointing requested custom adapter checkpointing, "
+            "but no checkpointable adapter layers were found."
+        )
 
 
 def _frame_span_lookup(runtime: TokenModelRuntime) -> torch.Tensor:

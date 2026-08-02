@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 import unittest
 from types import SimpleNamespace
 from typing import cast
@@ -11,6 +12,7 @@ from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 from speech_to_speech.datamodule.types import ModelBatch
 from speech_to_speech.model import (
+    AdapterType,
     AudioOutputAdapter,
     AudioInputAdapterConfig,
     AudioInputAdapterType,
@@ -44,6 +46,13 @@ from speech_to_speech.runtime import (
 from speech_to_speech.runtime import Runtime
 from speech_to_speech.runtime.types import supports_acoustic
 from speech_to_speech.task import Task
+
+
+def _has_gradient(parameters: Iterable[nn.Parameter]) -> bool:
+    return any(
+        parameter.grad is not None and bool(torch.isfinite(parameter.grad).all())
+        for parameter in parameters
+    )
 
 
 class _Codec:
@@ -696,6 +705,75 @@ class GenerationTest(unittest.TestCase):
 
         self.assertEqual(logits.shape[:2], (1, 2))
         self.assertTrue(torch.isfinite(logits).all())
+
+    def test_runtime_gradient_checkpointing_enables_external_adapters(self):
+        runtime = _TinyRuntime()
+        runtime.config = SimpleNamespace(gradient_checkpointing=True)
+        model = Model(
+            ModelConfig(
+                semantic_audio_adapter=None,
+                audio_output_adapter=AudioOutputAdapterConfig(
+                    type=AudioOutputAdapterType.MLP,
+                ),
+                audio_input_adapter=AudioInputAdapterConfig(
+                    type=AudioInputAdapterType.MLP,
+                ),
+                toy=ToyConfig(
+                    hidden_size=8,
+                    intermediate_size=16,
+                    layers=1,
+                    heads=2,
+                    max_position_embeddings=32,
+                ),
+            ),
+            runtime=runtime,
+        )
+
+        semantic_adapter = model.token_embedding.adapters["audio"]
+        if model.audio_input_adapter is None:
+            self.fail("audio input adapter was not constructed")
+        self.assertTrue(semantic_adapter.gradient_checkpointing)
+        self.assertTrue(model.audio_input_adapter.gradient_checkpointing)
+        self.assertTrue(model.audio_output_adapter.gradient_checkpointing)
+
+    def test_runtime_gradient_checkpointing_keeps_external_adapter_gradients(self):
+        runtime = _TinyRuntime()
+        runtime.config = SimpleNamespace(gradient_checkpointing=True)
+        model = Model(
+            ModelConfig(
+                semantic_audio_adapter=AdapterType.MLP,
+                audio_output_adapter=AudioOutputAdapterConfig(
+                    type=AudioOutputAdapterType.MLP,
+                ),
+                audio_input_adapter=AudioInputAdapterConfig(
+                    type=AudioInputAdapterType.MLP,
+                ),
+                toy=ToyConfig(
+                    hidden_size=8,
+                    intermediate_size=16,
+                    layers=1,
+                    heads=2,
+                    max_position_embeddings=32,
+                ),
+            ),
+            runtime=runtime,
+        ).train()
+
+        input_ids = torch.tensor([[1, 8, 9, 11]])
+        output = model(
+            input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            audio_input_positions=torch.tensor([[1, 2]], dtype=torch.long),
+        )
+        loss = output.logits.float().sum()
+        loss.backward()
+
+        semantic_adapter = model.token_embedding.adapters["audio"]
+        if model.audio_input_adapter is None:
+            self.fail("audio input adapter was not constructed")
+        self.assertTrue(_has_gradient(semantic_adapter.parameters()))
+        self.assertTrue(_has_gradient(model.audio_input_adapter.parameters()))
+        self.assertTrue(_has_gradient(model.audio_output_adapter.parameters()))
 
     def test_audio_input_adapter_overlays_only_source_positions(self):
         model = Model(

@@ -8,6 +8,7 @@ import torch
 from torch import Tensor, nn
 
 from .._compat import StrEnum, auto
+from ._checkpointing import GradientCheckpointingLayer
 from ._helper import (
     MLPAdapter,
     safe_transformer_mask,
@@ -71,7 +72,7 @@ def audio_output_options(
     )
 
 
-class AudioOutputAdapter(nn.Module):
+class AudioOutputAdapter(GradientCheckpointingLayer):
     """Optional legacy projection before the semantic-audio tied head.
 
     Pointwise variants ignore cache arguments. The transformer variant is causal
