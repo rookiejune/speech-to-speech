@@ -500,6 +500,14 @@ class ModelLossContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not match"):
             module.on_load_checkpoint(checkpoint)
 
+    def test_checkpoint_requires_audio_sequence_layout_contract(self):
+        module = _checkpoint_module(None)
+
+        with self.assertRaisesRegex(ValueError, "audio sequence layout contract"):
+            module.on_load_checkpoint({})
+        with self.assertRaisesRegex(ValueError, "audio sequence layout contract"):
+            module.on_load_checkpoint({"speech_to_speech_audio_grammar": None})
+
     def test_checkpoint_lora_contract_roundtrips_complete_config(self):
         config = LoraConfig(
             r=8,
@@ -565,13 +573,13 @@ class ModelLossContractTest(unittest.TestCase):
             module.on_load_checkpoint(checkpoint)
 
     def test_checkpoint_requires_lora_contract_only_when_enabled(self):
-        legacy_checkpoint = {"speech_to_speech_audio_grammar": None}
+        checkpoint = {"speech_to_speech_audio_sequence_layout": "semantic"}
 
-        _checkpoint_module(None).on_load_checkpoint(legacy_checkpoint)
+        _checkpoint_module(None).on_load_checkpoint(checkpoint)
         with self.assertRaisesRegex(ValueError, "missing the PEFT LoRA contract"):
             _checkpoint_module(
                 LoraConfig(),
-            ).on_load_checkpoint(legacy_checkpoint)
+            ).on_load_checkpoint(checkpoint)
 
     def test_checkpoint_rejects_lora_config_mismatch(self):
         checkpoint: dict[str, object] = {}

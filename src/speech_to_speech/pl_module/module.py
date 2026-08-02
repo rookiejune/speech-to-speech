@@ -6,7 +6,6 @@ from enum import Enum
 from typing import Any, Generic, Protocol, TypeVar, cast
 
 import torch
-from anydataset.types import AudioView
 from anytrain.evaluator.text import TextComparisonEvaluator
 from anytrain.lightning import validation
 from anytrain.optim.llm import create_optimizer
@@ -59,7 +58,6 @@ class ModuleModel(TextEvaluationModel, TokenObjectiveModel, Protocol):
 
 
 ModelT = TypeVar("ModelT", bound=ModuleModel)
-_AUDIO_GRAMMAR_KEY = "speech_to_speech_audio_grammar"
 _AUDIO_SEQUENCE_LAYOUT_KEY = "speech_to_speech_audio_sequence_layout"
 _PEFT_KEY = "speech_to_speech_peft"
 
@@ -250,7 +248,6 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         _validate_audio_sequence_layout_checkpoint(
             checkpoint,
             expected,
-            self.model.runtime,
         )
         _validate_peft_checkpoint(checkpoint, self.model.lora_config)
 
@@ -344,25 +341,16 @@ def _reference_texts(batch: ModelBatch, runtime: Any) -> list[str]:
 def _validate_audio_sequence_layout_checkpoint(
     checkpoint: dict[str, Any],
     expected: str,
-    runtime: Any,
 ) -> None:
-    if _AUDIO_SEQUENCE_LAYOUT_KEY in checkpoint:
-        actual = checkpoint[_AUDIO_SEQUENCE_LAYOUT_KEY]
-        if actual != expected:
-            raise ValueError(
-                f"checkpoint audio sequence layout does not match runtime: "
-                f"{actual!r} != {expected!r}."
-            )
-        return
-
-    actual = checkpoint.get(_AUDIO_GRAMMAR_KEY)
-    if actual is None:
-        return
-    expected_legacy = _legacy_audio_grammar_payload(runtime)
-    if actual != expected_legacy:
+    if _AUDIO_SEQUENCE_LAYOUT_KEY not in checkpoint:
         raise ValueError(
-            f"checkpoint legacy audio grammar does not match runtime layout: "
-            f"{actual!r} != {expected_legacy!r}."
+            "checkpoint is missing the audio sequence layout contract."
+        )
+    actual = checkpoint[_AUDIO_SEQUENCE_LAYOUT_KEY]
+    if actual != expected:
+        raise ValueError(
+            f"checkpoint audio sequence layout does not match runtime: "
+            f"{actual!r} != {expected!r}."
         )
 
 
@@ -465,29 +453,3 @@ def _audio_sequence_layout_payload(layout: AudioSequenceLayout) -> str:
     if not isinstance(layout, AudioSequenceLayout):
         raise TypeError("runtime audio_sequence_layout must be an AudioSequenceLayout.")
     return layout.value
-
-
-def _legacy_audio_grammar_payload(runtime: Any) -> dict[str, object]:
-    layout = runtime.audio_sequence_layout
-    if not isinstance(layout, AudioSequenceLayout):
-        raise TypeError("runtime audio_sequence_layout must be an AudioSequenceLayout.")
-    audio_view = runtime.audio_view
-    if layout is AudioSequenceLayout.FLATTENED:
-        streams = ["acoustic", "semantic"]
-        acoustic = "output"
-    elif audio_view is AudioView.BICODEC:
-        streams = ["semantic"]
-        acoustic = "prompt"
-    else:
-        streams = ["semantic"]
-        acoustic = "generator"
-    return {
-        "output": {
-            "streams": streams,
-        },
-        "decode": {
-            "semantic": "output",
-            "acoustic": acoustic,
-        },
-        "grammar": "audio-grammar-v1",
-    }
