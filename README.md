@@ -58,7 +58,7 @@ overrides:
 jobs/002/01_tts.sh train.max_steps=2
 jobs/002/02_s2st.sh train.max_steps=2 model/acoustic=rvq
 jobs/004/01_s2st.sh 'batch_sizes=[1,2,4]'
-jobs/004/01_s2st.sh experiment=generation_online_encode_smoke
+jobs/004/01_s2st.sh experiment=generation/online_encode_smoke
 jobs/004/01_s2st.sh 'batch_sizes=[1]' data.dataset.filter=null data.encode_missing_codes=true
 jobs/005/02_unicodec.sh
 jobs/005/05_unicodec_ddp.sh
@@ -86,7 +86,7 @@ dataset, but it is not an offline fake runtime and does not replace the real
 LongCat/UniCodec acceptance runs.
 
 For the flattened-code comparison path, select
-`experiment=longcat_full_sequence_smoke`. It uses the LongCat codec with
+`experiment=overfit/longcat_flattened_smoke`. It uses the LongCat codec with
 `runtime=longcat_full_sequence model/acoustic=none`, so the full codec
 codebook sequence is trained as audio tokens and the Flow/RVQ acoustic side
 channel stays disabled.
