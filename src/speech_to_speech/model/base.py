@@ -94,45 +94,9 @@ class Model(VocabularyHeadMixin, nn.Module):
         self.runtime = runtime
         self.layout = self.runtime.layout
         text_start, text_end = self.layout.blocks["text"]
-        self.backbone = (
-            self.runtime.backbone
-            if self.config.toy is None
-            else create_toy_backbone(self.config.toy, text_end - text_start)
-        )
-        backbone = cast(nn.Module, cast(object, self.backbone))
-        if self.config.lora is not None:
-            adapted = inject_adapter_in_model(
-                self.config.lora,
-                backbone,
-                adapter_name="speech",
-            )
-            if adapted is not backbone:
-                raise RuntimeError(
-                    "PEFT adapter injection must preserve the backbone object."
-                )
-            reference = next(backbone.parameters(), None)
-            if reference is not None and reference.dtype in {
-                torch.float16,
-                torch.bfloat16,
-            }:
-                cast_mixed_precision_params(backbone, reference.dtype)
-        self.backbone = cast(Backbone, cast(object, backbone))
-        text_source = self.backbone.get_input_embeddings()
         text_vocab_size = text_end - text_start
-        if text_source.weight.size(0) < text_vocab_size:
-            raise ValueError(
-                "backbone input embedding does not cover the text layout vocabulary."
-            )
-        if text_source.num_embeddings != text_vocab_size:
-            # Layout text block may be a prefix of a larger backbone table.
-            text_embedding = nn.Embedding.from_pretrained(
-                text_source.weight[:text_vocab_size].detach().clone(),
-                freeze=False,
-            )
-        else:
-            text_embedding = text_source
-        # Backbone keeps a non-Module view; idspace owns the real embedding once.
-        _install_text_embedding_view(self.backbone, EmbeddingView(text_embedding))
+        self.backbone = _backbone(self.runtime, self.config, text_vocab_size)
+        text_embedding = _text_embedding(self.backbone, text_vocab_size)
         self._backbone_body = _backbone_adapter(
             self.runtime,
             self.backbone,
@@ -143,26 +107,11 @@ class Model(VocabularyHeadMixin, nn.Module):
             self.backbone,
             prefer_runtime=self.config.toy is None,
         )
-        audio_embedding = create_semantic_audio_embedding(
+        self.token_embedding = _token_embedding(
             self.runtime,
-            reference=text_embedding.weight,
-            embedding_dim=hidden_size,
-        ).to(device=text_embedding.weight.device, dtype=torch.float32)
-        audio_weight = cast(torch.Tensor, audio_embedding.weight)
-        audio_feature_dim = int(audio_weight.shape[-1])
-        audio_adapter = CastOutput(
-            create_adapter(
-                _aligned_audio_adapter(self.config.semantic_audio_adapter, audio_feature_dim, hidden_size),
-                audio_feature_dim,
-                hidden_size,
-            ).to(device=text_embedding.weight.device, dtype=torch.float32),
-            dtype=text_embedding.weight.dtype,
-        )
-        self.token_embedding = Embedding(
-            self.layout,
-            text=text_embedding,
-            audio=audio_embedding,  # pyright: ignore[reportArgumentType]
-            adapters={"audio": audio_adapter},
+            self.config,
+            text_embedding,
+            hidden_size,
         )
         backbone_weight = text_embedding.weight
         register(
@@ -175,32 +124,17 @@ class Model(VocabularyHeadMixin, nn.Module):
             self.token_embedding.embeddings["audio"],
             "semantic audio embedding",
         ).weight
-        self.audio_input_adapter = (
-            None
-            if self.config.audio_input_adapter.type is AudioInputAdapterType.NONE
-            else create_audio_input_adapter(
-                self.config.audio_input_adapter,
-                semantic_audio_weight.size(1),
-                hidden_size,
-            ).to(device=backbone_weight.device)
-        )
-        audio_output_adapter = _aligned_audio_output_adapter(
-            self.config.audio_output_adapter,
-            hidden_size,
+        self.audio_input_adapter = _audio_input_adapter(
+            self.config,
             semantic_audio_weight.size(1),
-        )
-        audio_output_dim = (
-            hidden_size
-            if audio_output_adapter.type is AudioOutputAdapterType.NONE
-            else semantic_audio_weight.size(1)
-        )
-        self.audio_output_adapter = create_audio_output_adapter(
-            audio_output_adapter,
             hidden_size,
-            audio_output_dim,
-        ).to(
             device=backbone_weight.device,
-            dtype=torch.float32,
+        )
+        self.audio_output_adapter = _audio_output_adapter(
+            self.config.audio_output_adapter,
+            semantic_audio_weight.size(1),
+            hidden_size,
+            device=backbone_weight.device,
         )
         if _runtime_gradient_checkpointing(self.runtime):
             _enable_external_gradient_checkpointing(self)
@@ -621,6 +555,129 @@ class Model(VocabularyHeadMixin, nn.Module):
             dtype=output.dtype
         )
         return output
+
+
+def _backbone(
+    runtime: TokenModelRuntime,
+    config: Config,
+    text_vocab_size: int,
+) -> Backbone:
+    backbone = (
+        runtime.backbone
+        if config.toy is None
+        else create_toy_backbone(config.toy, text_vocab_size)
+    )
+    module = cast(nn.Module, cast(object, backbone))
+    if config.lora is not None:
+        adapted = inject_adapter_in_model(
+            config.lora,
+            module,
+            adapter_name="speech",
+        )
+        if adapted is not module:
+            raise RuntimeError("PEFT adapter injection must preserve the backbone object.")
+        reference = next(module.parameters(), None)
+        if reference is not None and reference.dtype in {
+            torch.float16,
+            torch.bfloat16,
+        }:
+            cast_mixed_precision_params(module, reference.dtype)
+    return cast(Backbone, cast(object, module))
+
+
+def _text_embedding(backbone: Backbone, text_vocab_size: int) -> nn.Embedding:
+    text_source = backbone.get_input_embeddings()
+    if text_source.weight.size(0) < text_vocab_size:
+        raise ValueError(
+            "backbone input embedding does not cover the text layout vocabulary."
+        )
+    if text_source.num_embeddings != text_vocab_size:
+        # Layout text block may be a prefix of a larger backbone table.
+        text_embedding = nn.Embedding.from_pretrained(
+            text_source.weight[:text_vocab_size].detach().clone(),
+            freeze=False,
+        )
+    else:
+        text_embedding = text_source
+    # Backbone keeps a non-Module view; idspace owns the real embedding once.
+    _install_text_embedding_view(backbone, EmbeddingView(text_embedding))
+    return text_embedding
+
+
+def _token_embedding(
+    runtime: TokenModelRuntime,
+    config: Config,
+    text_embedding: nn.Embedding,
+    hidden_size: int,
+) -> Embedding:
+    audio_embedding = create_semantic_audio_embedding(
+        runtime,
+        reference=text_embedding.weight,
+        embedding_dim=hidden_size,
+    ).to(device=text_embedding.weight.device, dtype=torch.float32)
+    audio_weight = cast(torch.Tensor, audio_embedding.weight)
+    audio_feature_dim = int(audio_weight.shape[-1])
+    audio_adapter = CastOutput(
+        create_adapter(
+            _aligned_audio_adapter(
+                config.semantic_audio_adapter,
+                audio_feature_dim,
+                hidden_size,
+            ),
+            audio_feature_dim,
+            hidden_size,
+        ).to(device=text_embedding.weight.device, dtype=torch.float32),
+        dtype=text_embedding.weight.dtype,
+    )
+    return Embedding(
+        runtime.layout,
+        text=text_embedding,
+        audio=audio_embedding,  # pyright: ignore[reportArgumentType]
+        adapters={"audio": audio_adapter},
+    )
+
+
+def _audio_input_adapter(
+    config: Config,
+    semantic_audio_dim: int,
+    hidden_size: int,
+    *,
+    device: torch.device,
+) -> AudioInputTower | None:
+    if config.audio_input_adapter.type is AudioInputAdapterType.NONE:
+        return None
+    return create_audio_input_adapter(
+        config.audio_input_adapter,
+        semantic_audio_dim,
+        hidden_size,
+    ).to(device=device)
+
+
+def _audio_output_adapter(
+    config: AudioOutputAdapterConfig,
+    semantic_audio_dim: int,
+    hidden_size: int,
+    *,
+    device: torch.device,
+) -> AudioOutputAdapter:
+    audio_output_adapter = _aligned_audio_output_adapter(
+        config,
+        hidden_size,
+        semantic_audio_dim,
+    )
+    audio_output_dim = (
+        hidden_size
+        if audio_output_adapter.type is AudioOutputAdapterType.NONE
+        else semantic_audio_dim
+    )
+    return create_audio_output_adapter(
+        audio_output_adapter,
+        hidden_size,
+        audio_output_dim,
+    ).to(
+        device=device,
+        dtype=torch.float32,
+    )
 
 
 def _install_text_embedding_view(backbone: Backbone, view: EmbeddingView) -> None:

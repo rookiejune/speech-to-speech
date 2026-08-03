@@ -245,7 +245,7 @@ class TaskSampleLogger(Callback):
         for row, (dataset_index, sample, request, result) in enumerate(
             zip(self.indices, self.samples, requests, results)
         ):
-            self._log_result_row(
+            _log_result_row(
                 _RowLogContext(
                     audio_writer=audio_writer,
                     scalar_writer=scalar_writer,
@@ -260,7 +260,8 @@ class TaskSampleLogger(Callback):
                     generation_metadata=generation_metadata,
                     tag=self._tag(dataset_index),
                     step=trainer.global_step,
-                )
+                ),
+                max_new_tokens=self.max_new_tokens,
             )
 
     def _should_log(self, trainer: Trainer) -> bool:
@@ -375,216 +376,6 @@ class TaskSampleLogger(Callback):
                 step,
             )
 
-    def _log_result_row(
-        self,
-        context: _RowLogContext,
-    ) -> None:
-        metrics: dict[str, float] = {}
-        prediction = _prediction_modality(context.request)
-        decode_error = context.result.get("decode_error")
-        status = "partial" if decode_error is not None else "ok"
-        result_metadata = _result_metadata(
-            context.result,
-            max_new_tokens=self.max_new_tokens,
-            prediction=prediction,
-            runtime=context.datamodule.runtime,
-        )
-        metrics.update(
-            {
-                "generation/response_tokens": float(result_metadata["response_tokens"]),
-                "generation/reached_max_new_tokens": float(
-                    result_metadata["reached_max_new_tokens"]
-                ),
-            }
-        )
-        if context.audio_writer is not None:
-            _log_source_audio(
-                context.audio_writer,
-                context.datamodule,
-                context.sample,
-                context.request["task"],
-                context.tag,
-                context.step,
-            )
-        generated_text = self._log_generation_payload(
-            context,
-            result_metadata,
-            prediction,
-            metrics,
-        )
-        self._write_row_outputs(
-            context,
-            result_metadata,
-            metrics,
-            status=status,
-            generated_text=generated_text,
-        )
-
-    def _log_generation_payload(
-        self,
-        context: _RowLogContext,
-        result_metadata: Mapping[str, Any],
-        prediction: PredictionModality,
-        metrics: dict[str, float],
-    ) -> str | None:
-        audio = context.result["audio"]
-        decode_error = context.result.get("decode_error")
-        if audio is None:
-            return self._log_text_or_partial_audio(
-                context,
-                result_metadata,
-                prediction,
-                metrics,
-                decode_error,
-            )
-        metrics["generation/stopped_without_eoa"] = float(
-            result_metadata["stopped_without_eoa"]
-        )
-        metrics["generation/audio_available"] = 1.0
-        metrics["generation/audio_decode_failed"] = 0.0
-        target_audio = _log_target_reference_audio(
-            context.audio_writer,
-            context.datamodule,
-            context.module,
-            context.row_batch,
-            context.sample,
-            context.request["task"],
-            context.tag,
-            context.step,
-        )
-        metrics.update(
-            audio_metrics(
-                audio["waveform"],
-                audio["sample_rate"],
-                target_duration=(
-                    None
-                    if target_audio is None
-                    else target_audio[0].size(-1) / target_audio[1]
-                ),
-            )
-        )
-        return None
-
-    def _log_text_or_partial_audio(
-        self,
-        context: _RowLogContext,
-        result_metadata: Mapping[str, Any],
-        prediction: PredictionModality,
-        metrics: dict[str, float],
-        decode_error: Mapping[str, str] | None,
-    ) -> str | None:
-        if prediction.supervises_audio:
-            metrics["generation/stopped_without_eoa"] = float(
-                result_metadata["stopped_without_eoa"]
-            )
-            metrics["generation/audio_available"] = 0.0
-            if decode_error is not None:
-                metrics["generation/audio_decode_failed"] = 1.0
-            if context.audio_writer is not None:
-                _log_target_reference_audio(
-                    context.audio_writer,
-                    context.datamodule,
-                    context.module,
-                    context.row_batch,
-                    context.sample,
-                    context.request["task"],
-                    context.tag,
-                    context.step,
-                )
-            if prediction.supervises_text:
-                return _decode_chat_template(
-                    context.datamodule,
-                    context.result["response_ids"],
-                )
-            return None
-        if not prediction.supervises_text:
-            return None
-        generated_text = _generated_text(
-            context.datamodule,
-            context.result["response_ids"],
-        )
-        target_text = _target_text(context.sample, context.request["task"])
-        if generated_text is not None and target_text is not None:
-            metrics.update(text_metrics(target_text, generated_text))
-        metrics["generation/stopped_without_eos"] = float(
-            result_metadata["stopped_without_eos"]
-        )
-        return generated_text
-
-    def _write_row_outputs(
-        self,
-        context: _RowLogContext,
-        result_metadata: Mapping[str, Any],
-        metrics: Mapping[str, float],
-        *,
-        status: str,
-        generated_text: str | None,
-    ) -> None:
-        if context.scalar_writer is not None:
-            for name, value in metrics.items():
-                context.scalar_writer.add_scalar(
-                    f"{context.tag}/{name}",
-                    value,
-                    context.step,
-                )
-        if context.text_writer is not None:
-            context.text_writer.add_text(
-                f"{context.tag}/metadata",
-                _metadata_json(
-                    _sample_log_record(
-                        context.datamodule,
-                        context.row_batch,
-                        context.dataset_index,
-                        context.sample,
-                        context.request,
-                        status=status,
-                        generation_settings=context.generation_metadata,
-                        result_metadata=result_metadata,
-                        response_ids=context.result["response_ids"],
-                        generated_text=generated_text,
-                        metrics=metrics,
-                    )
-                ),
-                context.step,
-            )
-        audio = context.result["audio"]
-        if audio is not None and context.audio_writer is not None:
-            context.audio_writer.add_audio(
-                f"{context.tag}/generated",
-                audio["waveform"].detach().cpu(),
-                context.step,
-                sample_rate=audio["sample_rate"],
-            )
-        elif context.text_writer is not None:
-            self._write_text_fallback(context, generated_text)
-
-    def _write_text_fallback(
-        self,
-        context: _RowLogContext,
-        generated_text: str | None,
-    ) -> None:
-        if context.text_writer is None:
-            return
-        if _prediction_modality(context.request).supervises_text:
-            target_text = _target_text(context.sample, context.request["task"])
-            if target_text is not None:
-                context.text_writer.add_text(
-                    f"{context.tag}/target",
-                    target_text,
-                    context.step,
-                )
-        context.text_writer.add_text(
-            f"{context.tag}/generated_ids",
-            " ".join(str(value) for value in context.result["response_ids"].tolist()),
-            context.step,
-        )
-        if generated_text is not None:
-            context.text_writer.add_text(
-                f"{context.tag}/generated",
-                generated_text,
-                context.step,
-            )
-
     def _tag(self, dataset_index: int) -> str:
         return f"sample/{self.task.value}/{dataset_index}"
 
@@ -602,6 +393,216 @@ class TaskSampleLogger(Callback):
 
     def load_state_dict(self, state_dict: dict[str, dict[str, int | None]]) -> None:
         self.interval.load_state_dict(state_dict.get("interval", {}))
+
+
+def _log_result_row(
+    context: _RowLogContext,
+    *,
+    max_new_tokens: int,
+) -> None:
+    metrics: dict[str, float] = {}
+    prediction = _prediction_modality(context.request)
+    decode_error = context.result.get("decode_error")
+    status = "partial" if decode_error is not None else "ok"
+    result_metadata = _result_metadata(
+        context.result,
+        max_new_tokens=max_new_tokens,
+        prediction=prediction,
+        runtime=context.datamodule.runtime,
+    )
+    metrics.update(
+        {
+            "generation/response_tokens": float(result_metadata["response_tokens"]),
+            "generation/reached_max_new_tokens": float(
+                result_metadata["reached_max_new_tokens"]
+            ),
+        }
+    )
+    if context.audio_writer is not None:
+        _log_source_audio(
+            context.audio_writer,
+            context.datamodule,
+            context.sample,
+            context.request["task"],
+            context.tag,
+            context.step,
+        )
+    generated_text = _log_generation_payload(
+        context,
+        result_metadata,
+        prediction,
+        metrics,
+    )
+    _write_row_outputs(
+        context,
+        result_metadata,
+        metrics,
+        status=status,
+        generated_text=generated_text,
+    )
+
+
+def _log_generation_payload(
+    context: _RowLogContext,
+    result_metadata: Mapping[str, Any],
+    prediction: PredictionModality,
+    metrics: dict[str, float],
+) -> str | None:
+    audio = context.result["audio"]
+    decode_error = context.result.get("decode_error")
+    if audio is None:
+        return _log_text_or_partial_audio(
+            context,
+            result_metadata,
+            prediction,
+            metrics,
+            decode_error,
+        )
+    metrics["generation/stopped_without_eoa"] = float(
+        result_metadata["stopped_without_eoa"]
+    )
+    metrics["generation/audio_available"] = 1.0
+    metrics["generation/audio_decode_failed"] = 0.0
+    target_audio = _log_target_reference_audio(
+        context.audio_writer,
+        context.datamodule,
+        context.module,
+        context.row_batch,
+        context.sample,
+        context.request["task"],
+        context.tag,
+        context.step,
+    )
+    metrics.update(
+        audio_metrics(
+            audio["waveform"],
+            audio["sample_rate"],
+            target_duration=(
+                None if target_audio is None else target_audio[0].size(-1) / target_audio[1]
+            ),
+        )
+    )
+    return None
+
+
+def _log_text_or_partial_audio(
+    context: _RowLogContext,
+    result_metadata: Mapping[str, Any],
+    prediction: PredictionModality,
+    metrics: dict[str, float],
+    decode_error: Mapping[str, str] | None,
+) -> str | None:
+    if prediction.supervises_audio:
+        metrics["generation/stopped_without_eoa"] = float(
+            result_metadata["stopped_without_eoa"]
+        )
+        metrics["generation/audio_available"] = 0.0
+        if decode_error is not None:
+            metrics["generation/audio_decode_failed"] = 1.0
+        if context.audio_writer is not None:
+            _log_target_reference_audio(
+                context.audio_writer,
+                context.datamodule,
+                context.module,
+                context.row_batch,
+                context.sample,
+                context.request["task"],
+                context.tag,
+                context.step,
+            )
+        if prediction.supervises_text:
+            return _decode_chat_template(
+                context.datamodule,
+                context.result["response_ids"],
+            )
+        return None
+    if not prediction.supervises_text:
+        return None
+    generated_text = _generated_text(
+        context.datamodule,
+        context.result["response_ids"],
+    )
+    target_text = _target_text(context.sample, context.request["task"])
+    if generated_text is not None and target_text is not None:
+        metrics.update(text_metrics(target_text, generated_text))
+    metrics["generation/stopped_without_eos"] = float(
+        result_metadata["stopped_without_eos"]
+    )
+    return generated_text
+
+
+def _write_row_outputs(
+    context: _RowLogContext,
+    result_metadata: Mapping[str, Any],
+    metrics: Mapping[str, float],
+    *,
+    status: str,
+    generated_text: str | None,
+) -> None:
+    if context.scalar_writer is not None:
+        for name, value in metrics.items():
+            context.scalar_writer.add_scalar(
+                f"{context.tag}/{name}",
+                value,
+                context.step,
+            )
+    if context.text_writer is not None:
+        context.text_writer.add_text(
+            f"{context.tag}/metadata",
+            _metadata_json(
+                _sample_log_record(
+                    context.datamodule,
+                    context.row_batch,
+                    context.dataset_index,
+                    context.sample,
+                    context.request,
+                    status=status,
+                    generation_settings=context.generation_metadata,
+                    result_metadata=result_metadata,
+                    response_ids=context.result["response_ids"],
+                    generated_text=generated_text,
+                    metrics=metrics,
+                )
+            ),
+            context.step,
+        )
+    audio = context.result["audio"]
+    if audio is not None and context.audio_writer is not None:
+        context.audio_writer.add_audio(
+            f"{context.tag}/generated",
+            audio["waveform"].detach().cpu(),
+            context.step,
+            sample_rate=audio["sample_rate"],
+        )
+    elif context.text_writer is not None:
+        _write_text_fallback(context, generated_text)
+
+
+def _write_text_fallback(
+    context: _RowLogContext,
+    generated_text: str | None,
+) -> None:
+    if context.text_writer is None:
+        return
+    if _prediction_modality(context.request).supervises_text:
+        target_text = _target_text(context.sample, context.request["task"])
+        if target_text is not None:
+            context.text_writer.add_text(
+                f"{context.tag}/target",
+                target_text,
+                context.step,
+            )
+    context.text_writer.add_text(
+        f"{context.tag}/generated_ids",
+        " ".join(str(value) for value in context.result["response_ids"].tolist()),
+        context.step,
+    )
+    if generated_text is not None:
+        context.text_writer.add_text(
+            f"{context.tag}/generated",
+            generated_text,
+            context.step,
+        )
 
 
 def _request_metadata(
