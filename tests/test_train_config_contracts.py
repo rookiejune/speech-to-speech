@@ -32,6 +32,9 @@ class TrainConfigContractTest(ConfigTestCase):
         self.assertEqual(default.validation.every_n_steps, 1000)
         self.assertEqual(default.validation.sanity_steps, -1)
         self.assertFalse(default.callbacks.performance.enabled)
+        self.assertTrue(default.datamodule.dataloader.costs.enabled)
+        self.assertEqual(default.datamodule.dataloader.costs.max_batch_frames, 4800)
+        self.assertEqual(default.datamodule.dataloader.costs.planning_window, 256)
         self.assertFalse(default.trainer.use_distributed_sampler)
         self.assertEqual(
             default.trainer.strategy,
@@ -53,6 +56,10 @@ class TrainConfigContractTest(ConfigTestCase):
         self.assertIs(config.callbacks.parameter_policy.name, ParameterPolicyName.LORA)
         self.assertIsInstance(config.model.lora, LoraConfig)
         self.assertTrue(config.runtime.gradient_checkpointing)
+        self.assertEqual(config.datamodule.dataloader.batch_size, 8)
+        self.assertTrue(config.datamodule.dataloader.costs.enabled)
+        self.assertEqual(config.datamodule.dataloader.costs.max_batch_frames, 4800)
+        self.assertEqual(config.datamodule.dataloader.costs.planning_window, 256)
 
     def test_train_stage_2_uses_accumulation_safe_loader_plan(self):
         config = _train("experiment=train/staged_joint/stage_2")

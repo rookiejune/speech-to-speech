@@ -16,6 +16,10 @@ datamodule:
     num_workers: 4
     pin_memory: true
     persistent_workers: true
+    costs:
+      enabled: true
+      max_batch_frames: 4800
+      planning_window: 256
   tasks:
     audio_ar: { template: 0 }
     asr: { template: 0 }
