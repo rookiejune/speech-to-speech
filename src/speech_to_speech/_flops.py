@@ -42,9 +42,13 @@ def adapter(
         require_linear(module.gate_proj, in_features, intermediate, f"{name} gate")
         require_linear(module.up_proj, in_features, intermediate, f"{name} up")
         require_linear(module.down_proj, intermediate, out_features, f"{name} down")
-        return sum(
-            linear(projection, rows)
-            for projection in (module.gate_proj, module.up_proj, module.down_proj)
+        return _linear_sum(
+            (
+                module.gate_proj,
+                module.up_proj,
+                module.down_proj,
+            ),
+            rows,
         )
     if type(module) is AudioOutputAdapter:
         if module.config.type is AudioOutputAdapterType.TRANSFORMER:
@@ -105,9 +109,7 @@ def audio_input_tower(
     if type(tower) is not AudioInputTower:
         raise TypeError("audio input FLOPs require the standard AudioInputTower.")
     if batch < 1 or frames < 1:
-        raise ValueError(
-            "audio input FLOPs batch and frame dimensions must be positive."
-        )
+        raise ValueError("audio input FLOPs batch and frame dimensions must be positive.")
 
     rows = batch * frames
     in_features = tower.in_features
@@ -124,9 +126,7 @@ def audio_input_tower(
         )
 
     if tower.config.type is not AudioInputAdapterType.TRANSFORMER:
-        raise ValueError(
-            "audio input FLOPs require an enabled MLP or transformer tower."
-        )
+        raise ValueError("audio input FLOPs require an enabled MLP or transformer tower.")
     if type(tower.input_projection) is not nn.Linear:
         raise TypeError("audio input transformer must use a linear input projection.")
     require_linear(
@@ -164,9 +164,7 @@ def _audio_input_encoder_layer(
     heads: int,
 ) -> int:
     if type(layer) is not nn.TransformerEncoderLayer:
-        raise TypeError(
-            "audio input FLOPs require standard TransformerEncoderLayer layers."
-        )
+        raise TypeError("audio input FLOPs require standard TransformerEncoderLayer layers.")
     if not layer.self_attn.batch_first:
         raise TypeError("audio input transformer must use batch-first attention.")
     attention = layer.self_attn
@@ -187,9 +185,7 @@ def _audio_input_encoder_layer(
         output_projection.in_features,
         output_projection.out_features,
     ) != (hidden, hidden):
-        raise ValueError(
-            "audio input transformer output projection shape is unsupported."
-        )
+        raise ValueError("audio input transformer output projection shape is unsupported.")
 
     linear1 = layer.linear1
     linear2 = layer.linear2
@@ -353,24 +349,44 @@ def qwen_backbone(
     key_value_width = config.num_key_value_heads * config.head_dim
     forward = 0
     for layer in core.layers:
-        if type(layer) is not Qwen3DecoderLayer:
-            raise TypeError("Qwen FLOPs require standard Qwen3DecoderLayer layers.")
-        attention = layer.self_attn
-        mlp = layer.mlp
-        if type(attention) is not Qwen3Attention or type(mlp) is not Qwen3MLP:
-            raise TypeError(
-                "Qwen FLOPs require standard Qwen3 attention and MLP layers."
-            )
-        require_linear(attention.q_proj, hidden, query_width, "Qwen query")
-        require_linear(attention.k_proj, hidden, key_value_width, "Qwen key")
-        require_linear(attention.v_proj, hidden, key_value_width, "Qwen value")
-        require_linear(attention.o_proj, query_width, hidden, "Qwen attention output")
-        require_linear(mlp.gate_proj, hidden, config.intermediate_size, "Qwen MLP gate")
-        require_linear(mlp.up_proj, hidden, config.intermediate_size, "Qwen MLP up")
-        require_linear(mlp.down_proj, config.intermediate_size, hidden, "Qwen MLP down")
-        forward += sum(
-            linear(projection, rows)
-            for projection in (
+        forward += _qwen_layer(
+            layer,
+            rows=rows,
+            hidden=hidden,
+            intermediate=config.intermediate_size,
+            query_width=query_width,
+            key_value_width=key_value_width,
+            attention_lengths=attention_lengths,
+        )
+    return forward
+
+
+def _qwen_layer(
+    layer: nn.Module,
+    *,
+    rows: int,
+    hidden: int,
+    intermediate: int,
+    query_width: int,
+    key_value_width: int,
+    attention_lengths: int,
+) -> int:
+    if type(layer) is not Qwen3DecoderLayer:
+        raise TypeError("Qwen FLOPs require standard Qwen3DecoderLayer layers.")
+    attention = layer.self_attn
+    mlp = layer.mlp
+    if type(attention) is not Qwen3Attention or type(mlp) is not Qwen3MLP:
+        raise TypeError("Qwen FLOPs require standard Qwen3 attention and MLP layers.")
+    require_linear(attention.q_proj, hidden, query_width, "Qwen query")
+    require_linear(attention.k_proj, hidden, key_value_width, "Qwen key")
+    require_linear(attention.v_proj, hidden, key_value_width, "Qwen value")
+    require_linear(attention.o_proj, query_width, hidden, "Qwen attention output")
+    require_linear(mlp.gate_proj, hidden, intermediate, "Qwen MLP gate")
+    require_linear(mlp.up_proj, hidden, intermediate, "Qwen MLP up")
+    require_linear(mlp.down_proj, intermediate, hidden, "Qwen MLP down")
+    return (
+        _linear_sum(
+            (
                 attention.q_proj,
                 attention.k_proj,
                 attention.v_proj,
@@ -378,10 +394,11 @@ def qwen_backbone(
                 mlp.gate_proj,
                 mlp.up_proj,
                 mlp.down_proj,
-            )
+            ),
+            rows,
         )
-        forward += 2 * query_width * attention_lengths
-    return forward
+        + 2 * query_width * attention_lengths
+    )
 
 
 def linear(module: nn.Linear, rows: int) -> int:
@@ -448,7 +465,27 @@ def _dit_block(block: DiTBlock, batch: int, frames: int, hidden: int) -> int:
     if block.cross_attention:
         raise TypeError("Flow FLOPs support self-attention DiT blocks only.")
     require_linear(block.film, hidden, hidden * 6, "Flow FiLM")
-    attention = block.attention
+    return (
+        linear(block.film, rows)
+        + _dit_attention(
+            block.attention,
+            rows=rows,
+            batch=batch,
+            frames=frames,
+            hidden=hidden,
+        )
+        + _dit_ffn(block.ffn, rows=rows, hidden=hidden)
+    )
+
+
+def _dit_attention(
+    attention: nn.Module,
+    *,
+    rows: int,
+    batch: int,
+    frames: int,
+    hidden: int,
+) -> int:
     if (
         type(attention) is not SequenceAttention
         or attention.hidden_dim != hidden
@@ -462,7 +499,21 @@ def _dit_block(block: DiTBlock, batch: int, frames: int, hidden: int) -> int:
         ("output", attention.output),
     ):
         require_linear(projection, hidden, hidden, f"Flow attention {name}")
-    ffn = block.ffn
+    return (
+        _linear_sum(
+            (
+                attention.query,
+                attention.key,
+                attention.value,
+                attention.output,
+            ),
+            rows,
+        )
+        + 4 * batch * frames * frames * hidden
+    )
+
+
+def _dit_ffn(ffn: nn.Module, *, rows: int, hidden: int) -> int:
     if len(ffn) != 3:
         raise TypeError("Flow FLOPs require the standard DiT feed-forward network.")
     ffn_input = ffn[0]
@@ -477,20 +528,15 @@ def _dit_block(block: DiTBlock, batch: int, frames: int, hidden: int) -> int:
         or ffn_output.out_features != hidden
     ):
         raise TypeError("Flow FLOPs require the standard DiT feed-forward network.")
-    return (
-        linear(block.film, rows)
-        + linear(attention.query, rows)
-        + linear(attention.key, rows)
-        + linear(attention.value, rows)
-        + linear(attention.output, rows)
-        + linear(ffn_input, rows)
-        + linear(ffn_output, rows)
-        + 4 * batch * frames * frames * hidden
-    )
+    return _linear_sum((ffn_input, ffn_output), rows)
 
 
 def _linear(module: nn.Linear, rows: int) -> int:
     return 2 * rows * module.in_features * module.out_features
+
+
+def _linear_sum(modules: Sequence[nn.Linear], rows: int) -> int:
+    return sum(linear(module, rows) for module in modules)
 
 
 def _lengths(
@@ -515,9 +561,7 @@ def _lengths(
     if len(lengths) != batch:
         raise ValueError("Qwen attention lengths must contain one value per batch row.")
     if any(
-        isinstance(length, bool)
-        or not isinstance(length, int)
-        or not 1 <= length <= sequence
+        isinstance(length, bool) or not isinstance(length, int) or not 1 <= length <= sequence
         for length in lengths
     ):
         raise ValueError("Qwen attention lengths must be integers in [1, sequence].")
