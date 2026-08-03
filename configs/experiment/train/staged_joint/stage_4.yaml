@@ -16,16 +16,22 @@ output_subdir: staged-joint/stage_4/${run_name}
 
 loader_plan:
   loaders:
-    asr_s2tt:
-      weight: 0.1
+    asr:
+      weight: 0.05
       task_weights:
-        asr: 0.5
-        s2tt: 0.5
-    tts_t2st:
-      weight: 0.1
+        asr: 1.0
+    s2tt:
+      weight: 0.05
       task_weights:
-        tts: 0.5
-        t2st: 0.5
+        s2tt: 1.0
+    tts:
+      weight: 0.05
+      task_weights:
+        tts: 1.0
+    t2st:
+      weight: 0.05
+      task_weights:
+        t2st: 1.0
     s2st:
       weight: 0.7
       task_weights:
@@ -34,7 +40,8 @@ loader_plan:
       weight: 0.1
       task_weights:
         mt: 1.0
-  accumulate_grad_batches: 10
+  accumulate_grad_batches: 20
+  step_mode: weighted_window
   fuse_loaders_per_step: true
 
 model:
@@ -45,19 +52,19 @@ callbacks:
     enabled: true
     panels:
       - split: train
-        loader: asr_s2tt
+        loader: asr
         task: asr
         indices: [0, 1, 2]
       - split: train
-        loader: asr_s2tt
+        loader: s2tt
         task: s2tt
         indices: [0, 1, 2]
       - split: train
-        loader: tts_t2st
+        loader: tts
         task: tts
         indices: [0, 1, 2]
       - split: train
-        loader: tts_t2st
+        loader: t2st
         task: t2st
         indices: [0, 1, 2]
       - split: train

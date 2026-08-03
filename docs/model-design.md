@@ -362,25 +362,28 @@ DataModule 构造时确定，训练过程中保持不变。task weights 位于�
 collate 时读取；worker 侧 runtime 是不含 backbone/codec 的数据快照。
 
 同一组 task weights 只能包含相同 `(source_layout, prediction)` 执行签名的任务，权重必须有限、非负且总和为
-正，以保证每个子 batch 的执行签名稳定。task 与 loader 权重只控制进入训练 step 的数据频率，
-不额外乘到 loss 上；每个 microbatch 独立按有效 token/frame 归约 token、flow、RVQ 与 REPA loss，
-在默认 fused schedule 下由 module 在同一次 `training_step()` 内归约为一个 backward graph。
-fused loss 保持原 Lightning accumulation 语义：各 microbatch scalar loss 等权平均，分项 loss
-和 token/frame count 只用于日志与 summary 拼接统计。
+正，以保证每个子 batch 的执行签名稳定。正式 joint loader 以 task 为最小调度单元：
+`fused_joint` 与 `serial_joint` 下每个 loader 必须且只能包含一个非零 task，避免 TTS/ASR
+这类输入输出 head 相反的任务在单个 microbatch 内隐式混合。task 与 loader 权重只控制进入训练 step
+的数据频率，不额外乘到 loss 上；每个 microbatch 独立按有效 token/frame 归约 token、flow、RVQ 与
+REPA loss。fused loss 保持原 Lightning accumulation 语义：各 microbatch scalar loss 等权平均，
+分项 loss 和 token/frame count 只用于日志与 summary 拼接统计。
 
 `scripts/overfit.py` 只用于 fixed-sample overfit、smoke 和参数冻结合同验收；正式训练入口是
-`scripts/train.py`。train experiment 内联的 `loader_plan` 显式声明 loader 权重、loader 内 task
-权重和 `accumulate_grad_batches`。运行时构造的 `LoaderSchedule` 在每个 accumulation
-window 内按权重交错单个 homogeneous microbatch；正式 staged_joint experiment 默认 `fuse_loaders_per_step=true`，
-因此 DataLoader 返回一个 fused window batch。独立的
+`scripts/train.py`。train experiment 内联的 `loader_plan` 显式声明 loader、`step_mode` 和
+mode-specific accumulation 约束。`loader_plan.step_mode=fused_joint` 表示 DataLoader 返回 fused
+window batch，module 在一次 `training_step()` 内按 loader 顺序 forward，合并各 task loss 后执行
+一次 backward；该模式要求每个 fused window 覆盖所有非零 loader，并使用
+`trainer=staged_static_ddp` / `ddp_find_unused_parameters_false`。`loader_plan.step_mode=serial_joint`
+表示每个 Lightning microbatch 只来自一个 task loader，通过串行 accumulation 组成一个 optimizer step；
+该模式要求 `loader_plan.accumulate_grad_batches == 非零 loader 数量`，并使用
+`trainer=staged_ddp` / `ddp_find_unused_parameters_true`。独立的
 `callbacks.parameter_policy` 显式声明可训练参数组、
 冻结参数组和 `backbone_top_fraction`，入口在 Trainer 创建前应用一次。正式
 `experiment=train/staged_joint/stage_1..4` 当前约定
 Stage 1 使用 LoRA policy，Stage 2 使用 speech-interface policy，Stage 3 解冻 Qwen 顶部 1/3 block 与 final norm，
 Stage 4 使用 full policy；experiment 文件显式选择 policy。RVQ decoder 的结构性冻结参数始终保持
-frozen。正式 joint entry 使用 `ddp_find_unused_parameters_false`，依赖 fused window 在每次
-backward 覆盖多 loader 动态分支；未 fuse 的 staged fallback 继续使用
-`ddp_find_unused_parameters_true`。
+frozen。
 
 需要参数高效适配时，`model.lora` 直接持有 Hugging Face `peft.LoraConfig`，通过
 `+model/lora@model.lora=qwen callback/parameter_policy=lora` 成对选择；项目不维护本地 LoRA config、layer 或注入

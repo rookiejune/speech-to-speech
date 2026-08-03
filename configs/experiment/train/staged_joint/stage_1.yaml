@@ -26,7 +26,7 @@ loader_plan:
       task_weights:
         tts: 1.0
   accumulate_grad_batches: 2
-  fuse_loaders_per_step: true
+  step_mode: fused_joint
 
 callbacks:
   task_sample:

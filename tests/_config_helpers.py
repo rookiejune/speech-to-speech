@@ -73,6 +73,7 @@ from speech_to_speech.runtime import (
     Config as RuntimeConfig,
 )
 from speech_to_speech.loader_plan import LoaderConfig
+from speech_to_speech.loader_step import LoaderStepMode
 from speech_to_speech.parameter_policy import (
     ParameterGroup,
     ParameterPolicyName,
@@ -117,10 +118,10 @@ _STAGED_JOINT_CASES = (
         3,
         ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD,
         (
-            ("asr_s2tt", "asr"),
-            ("asr_s2tt", "s2tt"),
-            ("tts_t2st", "tts"),
-            ("tts_t2st", "t2st"),
+            ("asr", "asr"),
+            ("s2tt", "s2tt"),
+            ("tts", "tts"),
+            ("t2st", "t2st"),
             ("mt", "mt"),
         ),
     ),
@@ -128,10 +129,10 @@ _STAGED_JOINT_CASES = (
         4,
         ParameterPolicyName.FULL,
         (
-            ("asr_s2tt", "asr"),
-            ("asr_s2tt", "s2tt"),
-            ("tts_t2st", "tts"),
-            ("tts_t2st", "t2st"),
+            ("asr", "asr"),
+            ("s2tt", "s2tt"),
+            ("tts", "tts"),
+            ("t2st", "t2st"),
             ("s2st", "s2st"),
             ("mt", "mt"),
         ),

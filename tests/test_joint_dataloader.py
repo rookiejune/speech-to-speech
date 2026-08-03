@@ -348,6 +348,35 @@ class ScheduledDataLoaderTest(unittest.TestCase):
             ],
         )
 
+    def test_serial_joint_returns_each_loader_once_per_step_window(self) -> None:
+        loader = ScheduledDataLoader(
+            {
+                "asr": [_batch(Task.ASR)],
+                "tts": [_batch(Task.TTS)],
+                "mt": [_batch(Task.MT)],
+            },
+            LoaderSchedule(
+                {"asr": 0.45, "tts": 0.45, "mt": 0.1},
+                accumulate_grad_batches=3,
+                step_mode="serial_joint",
+            ),
+        )
+
+        batches = list(islice(loader, 6))
+
+        self.assertEqual(
+            [batch.tasks[0] for batch in batches],
+            [Task.ASR, Task.TTS, Task.MT, Task.ASR, Task.TTS, Task.MT],
+        )
+
+    def test_serial_joint_requires_loader_count_accumulation(self) -> None:
+        with self.assertRaisesRegex(ValueError, "serial_joint.*positive loaders"):
+            LoaderSchedule(
+                {"asr": 0.45, "tts": 0.45, "mt": 0.1},
+                accumulate_grad_batches=10,
+                step_mode="serial_joint",
+            )
+
     def test_epoch_cycles_are_deterministic_across_ranks(self) -> None:
         events = [_rank_events(), _rank_events()]
 

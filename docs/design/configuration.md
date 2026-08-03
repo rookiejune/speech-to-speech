@@ -114,13 +114,12 @@ Hydra metadata 与 `metrics.json` 写入 `output_dir`；TensorBoard/CSV logger �
 `MapStyleABC.dataloader()` 暴露 deterministic shuffle 与 batch planning；UniCodec DDP smoke
 同样要求每个 rank 重复读取同一个固定样本，因此其 experiment 也显式设置
 `use_distributed_sampler: false`。
-正式 staged train 的入口策略为 `ddp_find_unused_parameters_false`。
-`loader_plan.accumulate_grad_batches` 定义一个 optimizer step 的 loader microbatch 数；当
-`loader_plan.fuse_loaders_per_step=true` 时，入口构造的 `LoaderSchedule` 在每个 window 内按权重交错 microbatch，
-并把整组 window 作为一个 fused training batch 返回。module 在一次 `training_step()` 内逐个
-forward，按原 Lightning accumulation 语义平均各 microbatch scalar loss，再执行一次 backward。
-配置要求每个非零 loader 在 fused window 内至少出现一次；未启用 fuse 的多 loader static DDP 会被
-入口拒绝。
+正式 staged train 的 DDP 策略由 `loader_plan.step_mode` 决定。`fused_joint` 使用
+`trainer=staged_static_ddp`，关闭 distributed sampler，并要求
+`ddp_find_unused_parameters_false`；入口构造 fused joint batch，使一次 backward 覆盖所有非零
+loader/task branch。`serial_joint` 使用 `trainer=staged_ddp`，要求
+`ddp_find_unused_parameters_true`，并约束 `loader_plan.accumulate_grad_batches == 非零 loader 数量`。
+入口拒绝 mode 与 DDP unused-parameter 策略不一致的组合。
 
 完整链路实验分别负责其 composition、数据范围、trainer、callback 和 step budget：
 
@@ -136,7 +135,7 @@ experiment 之前，以便非 LoRA experiment 用 `model.lora: null` 覆盖）�
 - `train/staged_joint/stage_1..4`：正式 staged joint experiments。每个文件显式内联
   `loader_plan` 并选择 `callback/parameter_policy`；`stage_1..4` 只是 experiment 目录名，
   不再生成运行身份字段或独立 stage config。`loader_plan.loaders` /
-  `loader_plan.accumulate_grad_batches` 等持有 loader/task 契约，再构造唯一 `DataModule`。每个 speech
+  `loader_plan.step_mode` / `loader_plan.accumulate_grad_batches` 等持有 loader/task 契约，再构造唯一 `DataModule`。每个 speech
   loader 使用 `LoaderSpec.speech(...)`，纯文本 MT loader 使用 `LoaderSpec.text(...)`（读
   `datamodule.tasks`），多 loader 调度由 `LoaderSchedule` 持有。四个正式 stage 都启用每 10,000
   optimizer steps 的 train fixed panels；Stage 2-4 的 panels 包含 MT；正式 entry 还默认启用独立的
@@ -153,11 +152,12 @@ experiment 之前，以便非 LoRA experiment 用 `model.lora: null` 覆盖）�
 再传 `train.max_steps=2`。`jobs/004/01_s2st.sh` 是独立的 generation smoke，不属于训练入口。
 
 `jobs/011/03_staged_joint_train.sh` 是正式 staged joint training wrapper，调用
-`scripts/train.py`，固定 `trainer=staged_static_ddp`，并根据
-`SPEECH_TO_SPEECH_EXPERIMENT=train/staged_joint/stage_*` 选择对应 experiment，
-由 experiment 同时持有 `loader_plan` 与 `callbacks.parameter_policy`；未设置时默认 `train/staged_joint/stage_1`。该
-wrapper 在启动 Python 前拒绝通过末尾 `"$@"` 覆写 `experiment`、`task` 或 `loader_plan`，需要切换
-identity 时必须使用对应环境选择器并单独提交一次 wrapper。正式 train 入口通过
+`scripts/train.py`，根据 `SPEECH_TO_SPEECH_EXPERIMENT=train/staged_joint/stage_*` 选择对应 experiment，
+并通过 `SPEECH_TO_SPEECH_STEP_MODE=fused_joint|serial_joint` 成对选择
+`trainer=staged_static_ddp` 或 `trainer=staged_ddp`；未设置时默认
+`train/staged_joint/stage_1` + `fused_joint`。该 wrapper 在启动 Python 前拒绝通过末尾 `"$@"`
+覆写 `experiment`、`task` 或 `loader_plan`，需要切换 identity 时必须使用对应环境选择器并单独提交一次
+wrapper。正式 train 入口通过
 `train.ckpt_path=<checkpoint>` 显式恢复 Lightning checkpoint；默认值为空，普通训练不走 resume。
 该字段只属于 staged train，overfit 配置不接受它。
 
@@ -178,8 +178,8 @@ identity 时必须使用对应环境选择器并单独提交一次 wrapper。正
 正式 train 的 `validation` 默认关闭。启用时，`loader` 必须选择当前 `loader_plan` 的一个 speech loader，
 且 `datamodule.dataset.split_manifest` 必须存在、`split_label` 必须与训练 split 不同。入口复制该 loader
 的 task weights 与 speech data config，仅替换 dev `split_label`；配置的 `every_n_steps` 使用
-optimizer-step 语义；fused loader 下入口传给 Lightning 的 batch 级 `val_check_interval` 等于该
-step 数，非 fused accumulation 下才乘以 `loader_plan.accumulate_grad_batches`。`sanity_steps=-1` 表示 fit 前遍历完整 dev split，非负值表示对应 sanity batch
+optimizer-step 语义；`fused_joint` 下入口传给 Lightning 的 batch 级 `val_check_interval` 等于该
+step 数，`serial_joint` 下乘以 `loader_plan.accumulate_grad_batches`。`sanity_steps=-1` 表示 fit 前遍历完整 dev split，非负值表示对应 sanity batch
 数。为了让 step interval 不受 epoch 边界控制，入口同时设置
 `check_val_every_n_epoch=None`。每次 sanity/interval 结果按 step 记录到 `metrics.json.validation`。
 
@@ -258,8 +258,8 @@ layout/route metadata；恢复 checkpoint 时要求 metadata 存在且与当前 
 ## Loader plan 与参数策略
 
 loader mix 属于 train experiment 内联的 `loader_plan`，由
-`loader_plan.loaders`、`loader_plan.accumulate_grad_batches` 和
-`loader_plan.fuse_loaders_per_step` 描述；不再提供独立 `configs/stage/` Hydra group。
+`loader_plan.loaders`、`loader_plan.step_mode` 和
+`loader_plan.accumulate_grad_batches` 描述；不再提供独立 `configs/stage/` Hydra group。
 参数冻结和 backbone top-fraction 位于
 `callbacks.parameter_policy`，由 `callback/parameter_policy` 组写入，并在 Trainer/optimizer
 创建前一次性应用。一个正式 job 只选择一个 experiment，运行中不切换数据计划或参数冻结。

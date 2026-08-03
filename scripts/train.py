@@ -35,6 +35,7 @@ from speech_to_speech.callback.logging import (
 from speech_to_speech.datamodule import DataModule, SampleSplit
 from speech_to_speech.datamodule.collate.joint import LoaderSchedule
 from speech_to_speech.datamodule.module import LoaderSpec
+from speech_to_speech.loader_step import LoaderStepMode
 from speech_to_speech.loader_plan import LoaderConfig
 from speech_to_speech.pl_module.composition import build
 from speech_to_speech.runtime import runtime_for_sequence_layout
@@ -119,6 +120,7 @@ def run(config: StagedTrainConfig) -> None:
             for name, loader in config.loader_plan.loaders.items()
         },
         "accumulate_grad_batches": config.loader_plan.accumulate_grad_batches,
+        "step_mode": config.loader_plan.step_mode,
         "max_steps": config.train.max_steps,
         "composition": acoustic_type.value,
         "parameters": {
@@ -151,6 +153,7 @@ def build_datamodule(config: StagedTrainConfig, runtime: Runtime) -> DataModule:
             config.loader_plan.loader_weights(),
             accumulate_grad_batches=config.loader_plan.accumulate_grad_batches,
             fuse_loaders_per_step=config.loader_plan.fuse_loaders_per_step,
+            step_mode=config.loader_plan.step_mode,
         ),
         validation=(
             _validation_spec(config) if config.validation.enabled else None
@@ -232,7 +235,7 @@ def build_trainer(
 def _trainer_accumulate_grad_batches(config: StagedTrainConfig) -> int:
     return (
         1
-        if config.loader_plan.fuse_loaders_per_step
+        if config.loader_plan.mode is LoaderStepMode.FUSED_JOINT
         else config.loader_plan.accumulate_grad_batches
     )
 

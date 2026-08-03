@@ -5,6 +5,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from ...loader_step import LoaderStepMode
 from ..types import FusedBatch, TrainBatch, TrainInput
 
 
@@ -18,6 +19,7 @@ class LoaderSchedule:
     weights: dict[str, float]
     accumulate_grad_batches: int = 1
     fuse_loaders_per_step: bool = False
+    step_mode: str | None = None
 
     def __post_init__(self) -> None:
         _validate_weights(self.weights)
@@ -30,8 +32,33 @@ class LoaderSchedule:
             raise ValueError("accumulate_grad_batches must be positive.")
         if not isinstance(self.fuse_loaders_per_step, bool):
             raise TypeError("fuse_loaders_per_step must be a boolean.")
+        mode = self.mode
+        if mode is LoaderStepMode.WEIGHTED_WINDOW:
+            mode = None
+        if mode is LoaderStepMode.FUSED_JOINT:
+            if not self.fuse_loaders_per_step:
+                raise ValueError("fused_joint requires fuse_loaders_per_step=true.")
+            _validate_one_each_window(self.weights, self.accumulate_grad_batches)
+            return
+        if mode is LoaderStepMode.SERIAL_JOINT:
+            if self.fuse_loaders_per_step:
+                raise ValueError("serial_joint requires fuse_loaders_per_step=false.")
+            _validate_one_each_window(self.weights, self.accumulate_grad_batches)
+            return
         if self.accumulate_grad_batches > 1 or self.fuse_loaders_per_step:
             _accumulation_window(self.weights, self.accumulate_grad_batches)
+
+    @property
+    def mode(self) -> LoaderStepMode | None:
+        if self.step_mode is None:
+            return None
+        try:
+            return LoaderStepMode(self.step_mode)
+        except ValueError as error:
+            raise ValueError(
+                "step_mode must be 'weighted_window', 'fused_joint', or "
+                "'serial_joint'."
+            ) from error
 
 
 class ScheduledDataLoader:
@@ -58,6 +85,11 @@ class ScheduledDataLoader:
         weights = self.schedule.weights
         iterators = {key: iter(self.loaders[key]) for key in keys}
         cycles = {key: 0 for key in keys}
+        if self.schedule.mode is LoaderStepMode.SERIAL_JOINT:
+            window = _one_each_window(weights)
+            while True:
+                for key in window:
+                    yield _next_batch(key, iterators, self.loaders, cycles)
         if self.schedule.accumulate_grad_batches > 1:
             credits = [0.0 for _ in keys]
             while True:
@@ -99,6 +131,22 @@ def _validate_weights(weights: Mapping[str, float]) -> None:
         raise ValueError("loader weights must have a finite positive total.")
     if any(not key for key in weights):
         raise ValueError("loader names must not be empty.")
+
+
+def _one_each_window(weights: Mapping[str, float]) -> tuple[str, ...]:
+    return tuple(key for key, weight in weights.items() if weight > 0)
+
+
+def _validate_one_each_window(
+    weights: Mapping[str, float],
+    accumulate_grad_batches: int,
+) -> None:
+    loader_count = len(_one_each_window(weights))
+    if accumulate_grad_batches != loader_count:
+        raise ValueError(
+            "serial_joint requires accumulate_grad_batches to equal the "
+            f"number of positive loaders ({loader_count})."
+        )
 
 
 def _accumulation_window(

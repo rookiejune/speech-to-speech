@@ -1,4 +1,5 @@
 from __future__ import annotations
+import math
 from dataclasses import dataclass, field
 from typing import Optional, Type, Union
 
@@ -10,6 +11,7 @@ from speech_to_speech.datamodule.dataset.text import (
     TextConfig as TextDataConfig,
     TextDatasetName,
 )
+from speech_to_speech.loader_step import LoaderStepMode
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.pl_module import Config as ModuleConfig
@@ -323,10 +325,10 @@ def _validate_gradient_probe(config: StagedTrainConfig) -> None:
                 raise ValueError(
                     f"gradient comparison references unknown group {target.group!r}."
                 )
-            if target.group != "batch" and not config.loader_plan.fuse_loaders_per_step:
+            if target.group != "batch" and config.loader_plan.mode is not LoaderStepMode.FUSED_JOINT:
                 raise ValueError(
                     "gradient non-batch comparisons require "
-                    "loader_plan.fuse_loaders_per_step=true."
+                    "loader_plan.step_mode=fused_joint."
                 )
 
 
@@ -373,17 +375,24 @@ def _validate_loader_schedule(config: StagedTrainConfig) -> None:
             "multi-loader staged training requires trainer.use_distributed_sampler=false; "
             "select trainer=staged_static_ddp or trainer=staged_ddp."
         )
-    if _uses_static_ddp(config) and _requires_unused_parameter_detection(config):
+    if config.loader_plan.mode is LoaderStepMode.FUSED_JOINT and not _uses_static_ddp(config):
         raise ValueError(
-            "multi-loader staged training executes one loader branch per "
-            "microbatch and requires DDP unused-parameter detection; select "
-            "trainer=staged_static_ddp with loader_plan.fuse_loaders_per_step=true, "
-            "or use trainer=staged_ddp."
+            "loader_plan.step_mode=fused_joint requires static DDP; select "
+            "trainer=staged_static_ddp / ddp_find_unused_parameters_false."
         )
+    if config.loader_plan.mode is LoaderStepMode.SERIAL_JOINT and not _uses_unused_parameter_detection(config):
+        raise ValueError(
+            "loader_plan.step_mode=serial_joint requires DDP unused-parameter "
+            "detection; select trainer=staged_ddp / "
+            "ddp_find_unused_parameters_true."
+        )
+    if config.loader_plan.mode is not LoaderStepMode.WEIGHTED_WINDOW:
+        _validate_joint_loader_weights(config)
     LoaderSchedule(
         config.loader_plan.loader_weights(),
         accumulate_grad_batches=config.loader_plan.accumulate_grad_batches,
         fuse_loaders_per_step=config.loader_plan.fuse_loaders_per_step,
+        step_mode=config.loader_plan.step_mode,
     )
     required: set[Task] = set()
     for loader in config.loader_plan.loaders.values():
@@ -403,8 +412,22 @@ def _uses_static_ddp(config: StagedTrainConfig) -> bool:
     }
 
 
-def _requires_unused_parameter_detection(config: StagedTrainConfig) -> bool:
-    return len(config.loader_plan.loaders) > 1 and not config.loader_plan.fuse_loaders_per_step
+def _uses_unused_parameter_detection(config: StagedTrainConfig) -> bool:
+    return config.trainer.strategy == "ddp_find_unused_parameters_true"
+
+
+def _validate_joint_loader_weights(config: StagedTrainConfig) -> None:
+    weights = list(config.loader_plan.loader_weights().values())
+    if not weights:
+        return
+    first = weights[0]
+    if all(math.isclose(weight, first, rel_tol=1e-9, abs_tol=1e-12) for weight in weights):
+        return
+    raise ValueError(
+        "joint loader step modes run each loader once per optimizer step; "
+        "loader_plan loader weights must be equal until task loss weights are "
+        "configured separately."
+    )
 
 
 def _validate_validation(config: StagedTrainConfig) -> None:

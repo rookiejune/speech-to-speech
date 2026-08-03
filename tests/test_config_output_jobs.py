@@ -158,7 +158,10 @@ class ConfigOutputJobTest(ConfigTestCase):
 
         self.assertIn("scripts/train.py", source)
         self.assertNotIn("scripts/overfit.py", source)
-        self.assertIn('"trainer=staged_static_ddp"', source)
+        self.assertIn('SPEECH_TO_SPEECH_STEP_MODE:-fused_joint', source)
+        self.assertIn('trainer="staged_static_ddp"', source)
+        self.assertIn('trainer="staged_ddp"', source)
+        self.assertIn('"loader_plan.step_mode=${step_mode}"', source)
         self.assertIn("fdu_stage_data_args datamodule.dataset.root", source)
         self.assertIn("SPEECH_TO_SPEECH_EXPERIMENT:-train/staged_joint/stage_1", source)
         self.assertIn('"experiment=${experiment}"', source)

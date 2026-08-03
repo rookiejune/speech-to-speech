@@ -44,7 +44,7 @@
   `TEXT_AUDIO` source（mask 后）与 mixed prediction。instruction 文案在
   `speech_to_speech.templates` 的每任务 paraphrase 池中；`SpeechConfig.tasks.<task>.template`
   为每 task 的 `int|null`（`null`=该 task 池内随机，整数=固定下标；默认 `0`）。loader
-  schedule（`loaders` / `accumulate_grad_batches` / `fuse_loaders_per_step`）同属
+  schedule（`loaders` / `step_mode` / `accumulate_grad_batches`）同属
   `SpeechConfig`。训练构建调用 `sample_template(index)`；generation 要求固定下标，可用
   `evaluation_template_index()`（把 `null` 钉成 `0`）。正权重 loader task 必须在
   `datamodule.tasks` 中声明。
@@ -55,9 +55,9 @@
   配置为 anydataset `WMT19` preset 或 deterministic toy text samples，不消费 codec/audio
   tokenizer。
 - `LoaderSchedule` / `ScheduledDataLoader`：为唯一 `DataModule` 组织多个 homogeneous loader。
-  `accumulate_grad_batches=1` 时按 batch 确定性轮转；大于 1 时构造固定长度的 accumulation window，
-  按 loader 权重交错产出单个 microbatch，小数配额跨相邻 window 结转。启用
-  `fuse_loaders_per_step` 时，window 作为一个 `FusedBatch` 返回；每个子 loader 自己保持单一 execution signature。
+  未指定 `step_mode` 时保留历史 weighted accumulation window 行为。`fused_joint` 返回覆盖所有非零
+  loader 的 `FusedBatch`，用于 static DDP；`serial_joint` 每个 optimizer step 串行消费每个非零 loader
+  一次，用于 find-unused DDP。每个子 loader 自己保持单一 execution signature。
 - `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts`、`qwen_tts_speaker` prepared data
   或确定性的内存 `toy` data。`qwen_tts_speaker` 通过 workspace 加载
   `SpeakerAudioGrid`，再由 `SpeakerGridCellsDataset` 暴露 `Role.DEFAULT` flat cells；默认覆盖
@@ -271,13 +271,13 @@ response、generated token 以及 BiCodec route 的 reference `audio_context` �
   task allocator 把 weighted round-robin credit 跨 collate 调用保存在进程共享状态中。小 batch
   可以暂时不含某个低权重 task，但不会丢弃尾批样本，并会在后续 batch 归还配额。DataModule
   构造时必须提供 task weights，collator 构造后不可修改；切换任务组合必须构造新的 loader。
-- `LoaderSchedule.accumulate_grad_batches=1` 保留逐 batch 轮转；大于 1 时，每个 accumulation
-  window 按 loader 权重分配并交错排列 microbatch，任一非 0 权重 loader 拿不到至少 1 个
-  microbatch 会报错。largest-remainder 的小数席位跨 window 累积，避免固定 tie-break 使长期
-  比例偏向同一个 loader。loss 不额外乘 loader 权重，权重只改变数据进入训练的频率；每次
-  非 fused `training_step()` 只消费一个 `ModelBatch`，梯度缩放与 optimizer-step cadence 由 Lightning 的
-  `accumulate_grad_batches` 负责；fused 模式每次返回一个完整 window，并由 module 在一次 step 内
-  平均 microbatch scalar loss。每个子 loader 独立维护从 0 开始的 cycle；耗尽后
+- 未指定 `step_mode` 的 `LoaderSchedule.accumulate_grad_batches=1` 保留逐 batch 轮转；大于 1 时，
+  每个 accumulation window 按 loader 权重分配并交错排列 microbatch，任一非 0 权重 loader 拿不到至少
+  1 个 microbatch 会报错。`fused_joint` 复用该 weighted window 并把完整 window 作为一个
+  `FusedBatch` 返回；`serial_joint` 要求 `accumulate_grad_batches` 等于非零 loader 数量，并按 loader
+  声明顺序每个 step 取一次。loss 不额外乘 loader 权重；每次 serial `training_step()` 只消费一个
+  `ModelBatch`，梯度缩放与 optimizer-step cadence 由 Lightning 的 `accumulate_grad_batches` 负责。
+  每个子 loader 独立维护从 0 开始的 cycle；耗尽后
   先推进到下一 cycle，再通过 loader 的 `set_epoch()` 或其 `batch_sampler.set_epoch()` 更新
   deterministic shuffle，然后重建 iterator。同一 schedule 和 per-rank batch count 下，各 rank
   会在相同 accumulation-window 位置推进相同子 loader 的 epoch。

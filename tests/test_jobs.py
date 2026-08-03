@@ -97,6 +97,15 @@ class JobsTest(unittest.TestCase):
         self.assertIn("experiment", result.stderr)
         self.assertIn("cannot be overridden", result.stderr)
 
+    def test_staged_wrapper_rejects_unknown_step_mode(self) -> None:
+        result = _run(
+            JOBS / "011" / "03_staged_joint_train.sh",
+            environment=_environment(SPEECH_TO_SPEECH_STEP_MODE="other"),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("SPEECH_TO_SPEECH_STEP_MODE", result.stderr)
+
     def test_staged_wrapper_rejects_unknown_experiment(self) -> None:
         result = _run(
             JOBS / "011" / "03_staged_joint_train.sh",

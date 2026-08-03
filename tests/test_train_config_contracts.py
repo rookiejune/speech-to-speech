@@ -40,6 +40,8 @@ class TrainConfigContractTest(ConfigTestCase):
             default.trainer.strategy,
             "ddp_find_unused_parameters_false",
         )
+        self.assertIs(default.loader_plan.mode, LoaderStepMode.FUSED_JOINT)
+        self.assertEqual(default.loader_plan.step_mode, "fused_joint")
         self.assertTrue(default.loader_plan.fuse_loaders_per_step)
         with self.assertRaises(AttributeError):
             getattr(default.datamodule, "sample_index")
@@ -67,6 +69,7 @@ class TrainConfigContractTest(ConfigTestCase):
         self.assertEqual(config.output_subdir, "staged-joint/stage_2/rvq-8l")
         self.assertEqual(set(config.loader_plan.loaders), {"asr", "tts", "mt"})
         self.assertEqual(config.loader_plan.accumulate_grad_batches, 10)
+        self.assertIs(config.loader_plan.mode, LoaderStepMode.WEIGHTED_WINDOW)
         self.assertTrue(config.loader_plan.fuse_loaders_per_step)
         self.assertEqual(config.datamodule.codec, "longcat")
         self.assertEqual(config.datamodule.dataset.name, DatasetName.WMT19_TTS)
@@ -81,7 +84,8 @@ class TrainConfigContractTest(ConfigTestCase):
         with self.assertRaisesRegex(ValueError, "unused-parameter"):
             _train(
                 "experiment=train/staged_joint/stage_4",
-                "loader_plan.fuse_loaders_per_step=false",
+                "loader_plan.step_mode=serial_joint",
+                "loader_plan.accumulate_grad_batches=6",
                 "trainer.strategy=ddp_find_unused_parameters_false",
             )
 
@@ -113,6 +117,12 @@ class TrainConfigContractTest(ConfigTestCase):
                     "ddp_find_unused_parameters_false",
                 )
                 self.assertGreater(config.loader_plan.accumulate_grad_batches, 1)
+                expected_mode = (
+                    LoaderStepMode.FUSED_JOINT
+                    if index == 1
+                    else LoaderStepMode.WEIGHTED_WINDOW
+                )
+                self.assertIs(config.loader_plan.mode, expected_mode)
                 self.assertTrue(config.loader_plan.fuse_loaders_per_step)
                 self.assertTrue(config.callbacks.task_sample.enabled)
                 self.assertEqual(config.callbacks.task_sample.every_n_steps, 10_000)
@@ -131,11 +141,66 @@ class TrainConfigContractTest(ConfigTestCase):
                 )
 
     def test_static_ddp_rejects_multi_loader_dynamic_branches(self):
-        with self.assertRaisesRegex(ValueError, "one loader branch per microbatch"):
+        with self.assertRaisesRegex(ValueError, "serial_joint.*unused-parameter"):
             _train(
                 "experiment=train/staged_joint/stage_4",
-                "loader_plan.fuse_loaders_per_step=false",
+                "loader_plan.step_mode=serial_joint",
+                "loader_plan.accumulate_grad_batches=6",
                 "trainer.strategy=ddp_find_unused_parameters_false",
+            )
+
+    def test_fused_joint_rejects_find_unused_ddp(self):
+        with self.assertRaisesRegex(ValueError, "fused_joint.*static DDP"):
+            _train(
+                "experiment=train/staged_joint/stage_2",
+                "loader_plan.step_mode=fused_joint",
+                "trainer.strategy=ddp_find_unused_parameters_true",
+            )
+
+    def test_serial_joint_uses_loader_count_accumulation_and_find_unused_ddp(self):
+        config = _train(
+            "experiment=train/staged_joint/stage_2",
+            "trainer=staged_ddp",
+            "loader_plan.step_mode=serial_joint",
+            "loader_plan.loaders.asr.weight=1.0",
+            "loader_plan.loaders.tts.weight=1.0",
+            "loader_plan.loaders.mt.weight=1.0",
+            "loader_plan.accumulate_grad_batches=3",
+        )
+
+        self.assertIs(config.loader_plan.mode, LoaderStepMode.SERIAL_JOINT)
+        self.assertFalse(config.loader_plan.fuse_loaders_per_step)
+        self.assertEqual(config.loader_plan.accumulate_grad_batches, 3)
+        self.assertEqual(
+            config.trainer.strategy,
+            "ddp_find_unused_parameters_true",
+        )
+
+        with self.assertRaisesRegex(ValueError, "serial_joint.*positive loaders"):
+            _train(
+                "experiment=train/staged_joint/stage_2",
+                "trainer=staged_ddp",
+                "loader_plan.step_mode=serial_joint",
+                "loader_plan.loaders.asr.weight=1.0",
+                "loader_plan.loaders.tts.weight=1.0",
+                "loader_plan.loaders.mt.weight=1.0",
+                "loader_plan.accumulate_grad_batches=10",
+            )
+
+        with self.assertRaisesRegex(ValueError, "loader weights must be equal"):
+            _train(
+                "experiment=train/staged_joint/stage_2",
+                "trainer=staged_ddp",
+                "loader_plan.step_mode=serial_joint",
+                "loader_plan.accumulate_grad_batches=3",
+            )
+
+    def test_joint_step_modes_require_single_task_loaders(self):
+        with self.assertRaisesRegex(ValueError, "exactly one positive task"):
+            _train(
+                "experiment=train/staged_joint/stage_2",
+                "loader_plan.step_mode=fused_joint",
+                "++loader_plan.loaders.asr.task_weights.s2tt=1.0",
             )
 
     def test_fused_multi_loader_requires_a_full_window(self):
@@ -208,6 +273,7 @@ class TrainConfigContractTest(ConfigTestCase):
         )
         self.assertEqual(datamodule.schedule.weights, config.loader_plan.loader_weights())
         self.assertEqual(datamodule.schedule.accumulate_grad_batches, 10)
+        self.assertEqual(datamodule.schedule.step_mode, "weighted_window")
         self.assertTrue(datamodule.schedule.fuse_loaders_per_step)
 
         with self.assertRaisesRegex(ValueError, "cannot mix pure text and speech"):
@@ -300,6 +366,29 @@ class TrainConfigContractTest(ConfigTestCase):
         self.assertEqual(entry.call_args.kwargs["accumulate_grad_batches"], 1)
         self.assertEqual(entry.call_args.kwargs["val_check_interval"], 25)
         self.assertEqual(entry.call_args.kwargs["num_sanity_val_steps"], 2)
+
+    def test_serial_joint_trainer_forwards_accumulation_window(self):
+        config = _train(
+            "experiment=train/staged_joint/stage_2",
+            "trainer=staged_ddp",
+            "loader_plan.step_mode=serial_joint",
+            "loader_plan.loaders.asr.weight=1.0",
+            "loader_plan.loaders.tts.weight=1.0",
+            "loader_plan.loaders.mt.weight=1.0",
+            "loader_plan.accumulate_grad_batches=3",
+            "validation.enabled=true",
+            "validation.loader=mt",
+            "validation.every_n_steps=25",
+        )
+
+        with (
+            patch("scripts.train.entry_trainer") as entry,
+            patch("scripts.train.build_logger"),
+        ):
+            train_script.build_trainer(config, Path("/tmp/output"), [])
+
+        self.assertEqual(entry.call_args.kwargs["accumulate_grad_batches"], 3)
+        self.assertEqual(entry.call_args.kwargs["val_check_interval"], 75)
 
     @patch("scripts.train.build_trainer")
     @patch("scripts.train.training_callbacks", return_value=[])
