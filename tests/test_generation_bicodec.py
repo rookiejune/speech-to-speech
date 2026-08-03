@@ -318,38 +318,11 @@ class _RouteModel:
 
     def generation_step(self, *args, **kwargs):
         del args, kwargs
-        raise AssertionError("structured route must use constrained generation")
+        raise AssertionError("structured route should use generate_tokens")
 
     def audio_output_adapter_batch_select(self, past_key_values, indices):
         del past_key_values, indices
         return None
-
-    def generate_full_codec_sequence(
-        self,
-        prompt_ids: Tensor,
-        *,
-        max_new_tokens: int,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
-        prompt_attention_mask: Tensor | None = None,
-        audio_input_positions: Tensor | None = None,
-        do_sample: bool = True,
-        use_cache: bool = True,
-    ) -> Tensor:
-        del (
-            max_new_tokens,
-            temperature,
-            top_p,
-            prompt_attention_mask,
-            audio_input_positions,
-            do_sample,
-            use_cache,
-        )
-        response = self.response.to(device=prompt_ids.device).expand(
-            prompt_ids.size(0),
-            -1,
-        )
-        return torch.cat((prompt_ids, response), dim=1)
 
     def generate_tokens(
         self,
@@ -367,7 +340,6 @@ class _RouteModel:
         use_cache: bool = True,
     ) -> Tensor:
         del (
-            prompt_ids,
             max_new_tokens,
             temperature,
             top_p,
@@ -379,7 +351,11 @@ class _RouteModel:
             do_sample,
             use_cache,
         )
-        raise AssertionError("structured route must use constrained generation")
+        response = self.response.to(device=prompt_ids.device).expand(
+            prompt_ids.size(0),
+            -1,
+        )
+        return torch.cat((prompt_ids, response), dim=1)
 
 
 if __name__ == "__main__":

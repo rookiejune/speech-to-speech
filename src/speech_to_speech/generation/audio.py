@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol, cast
@@ -31,7 +32,7 @@ from .decode import (
     decode_generated_frame_codes,
     decode_generated_semantic,
 )
-from .protocol import AcousticFeatureGeneration, FullCodecSequenceGenerator, TokenGenerator
+from .protocol import AcousticFeatureGeneration, TokenGenerator
 from .types import AudioOutput, Request, Result
 
 
@@ -101,9 +102,7 @@ def validate_audio_request(request: Request, model: TokenGenerator) -> None:
     if prediction is None:
         prediction = request["task"].prediction_modality
     if prediction is not PredictionModality.AUDIO:
-        raise ValueError(
-            "audio generation validation requires an audio prediction task."
-        )
+        raise ValueError("audio generation validation requires an audio prediction task.")
     if "audio_route" in request:
         raise ValueError(
             "generation request audio_route is internal; use runtime audio_sequence_layout."
@@ -116,25 +115,19 @@ def validate_audio_request(request: Request, model: TokenGenerator) -> None:
     layout = runtime.audio_sequence_layout
     if layout is AudioSequenceLayout.FLATTENED:
         if context is not None:
-            raise ValueError(
-                "flattened audio_sequence_layout cannot include audio context."
-            )
+            raise ValueError("flattened audio_sequence_layout cannot include audio context.")
         return
     tokenizer = runtime.audio_tokenizer
     if not isinstance(tokenizer, BiCodecAudioTokenizer):
         if context is not None:
-            raise ValueError(
-                "audio context is supported only for BiCodec semantic layout."
-            )
+            raise ValueError("audio context is supported only for BiCodec semantic layout.")
         return
     if layout is not AudioSequenceLayout.SEMANTIC:
         if context is not None:
             raise ValueError(f"unsupported audio_sequence_layout: {layout}")
         return
     if context is None:
-        raise ValueError(
-            "BiCodec semantic audio_sequence_layout requires audio context."
-        )
+        raise ValueError("BiCodec semantic audio_sequence_layout requires audio context.")
 
     local_ids = tokenizer.encode_acoustic(context)
     prompt = request["prompt_ids"]
@@ -146,32 +139,22 @@ def validate_audio_request(request: Request, model: TokenGenerator) -> None:
         (
             prompt.new_tensor([runtime.boa_token_id]),
             global_ids,
-            prompt.new_tensor(
-                [runtime.eoa_token_id, runtime.boa_token_id]
-            ),
+            prompt.new_tensor([runtime.eoa_token_id, runtime.boa_token_id]),
         )
     )
     if prompt.numel() < expected.numel() or not torch.equal(
         prompt[-expected.numel() :],
         expected,
     ):
-        raise ValueError(
-            "generation audio context does not serialize to the prompt suffix."
-        )
+        raise ValueError("generation audio context does not serialize to the prompt suffix.")
 
 
 def _strategy(model: TokenGenerator) -> _Strategy:
-    if model.runtime.acoustic_side_channel and isinstance(
-        model, AcousticFeatureGeneration
-    ):
+    if model.runtime.acoustic_side_channel and isinstance(model, AcousticFeatureGeneration):
         return _Acoustic(model)
     if model.runtime.structured_full_sequence:
-        if not isinstance(model, FullCodecSequenceGenerator):
-            raise TypeError("structured full sequence requires constrained token generation.")
         return _Structured(model)
     if model.runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
-        if not isinstance(model, FullCodecSequenceGenerator):
-            raise TypeError("full codec sequence requires constrained token generation.")
         return _Frame(model)
     return _Semantic(model)
 
@@ -274,19 +257,28 @@ class _Acoustic:
 
 
 class _Frame:
-    def __init__(self, model: FullCodecSequenceGenerator) -> None:
+    def __init__(self, model: TokenGenerator) -> None:
         self.model = model
         self.codec: Codec = frame_codec(model.runtime.codec)
         self.sample_rate = codec_sample_rate(self.codec)
 
     def generate(self, batch: _Batch) -> list[Result]:
-        responses = _full_responses(batch, self.model)
-        return _decoded_results(
-            responses,
-            None,
-            _frame_counts(responses, self.model),
-            self,
-        )
+        return [self._decode_result(token_ids) for token_ids in _token_responses(batch)]
+
+    def _decode_result(self, token_ids: Tensor) -> Result:
+        try:
+            waveform = self._decode_row(token_ids)
+        except torch.OutOfMemoryError:
+            raise
+        except Exception as error:
+            return _decode_error_result(token_ids, error)
+        return _audio_result(token_ids, waveform, self.sample_rate)
+
+    def _decode_row(self, token_ids: Tensor) -> Tensor:
+        decoded = self.decode(token_ids.unsqueeze(0), None)
+        if decoded.dim() < 1 or decoded.size(0) != 1:
+            raise ValueError("codec decode must preserve a batch size of one.")
+        return decoded[0]
 
     def decode(self, token_ids: Tensor, features: Tensor | None) -> Tensor:
         if features is not None:
@@ -300,7 +292,7 @@ class _Frame:
 
 
 class _Structured:
-    def __init__(self, model: FullCodecSequenceGenerator) -> None:
+    def __init__(self, model: TokenGenerator) -> None:
         tokenizer = model.runtime.audio_tokenizer
         if not isinstance(tokenizer, BiCodecAudioTokenizer):
             raise TypeError("structured full sequence requires BiCodecAudioTokenizer.")
@@ -310,54 +302,44 @@ class _Structured:
         self.sample_rate = codec_sample_rate(self.codec)
 
     def generate(self, batch: _Batch) -> list[Result]:
-        responses = _full_responses(batch, self.model)
-        results = []
-        for token_ids, request in zip(responses, batch.requests):
-            try:
-                if (
-                    self.model.runtime.audio_sequence_layout
-                    is AudioSequenceLayout.FLATTENED
-                ):
-                    waveform, codes = decode_generated_bicodec_full_row(
-                        token_ids,
-                        codec=self.codec,
-                        audio_tokenizer=self.tokenizer,
-                        audio_token_range=self.model.runtime.codec_audio_range,
-                    )
-                else:
-                    waveform, codes = decode_generated_bicodec_semantic_with_reference(
-                        token_ids,
-                        request.get("audio_context"),
-                        codec=self.codec,
-                        audio_tokenizer=self.tokenizer,
-                        audio_token_range=self.model.runtime.codec_audio_range,
-                    )
-            except torch.OutOfMemoryError:
-                raise
-            except Exception as error:
-                results.append(
-                    Result(
-                        response_ids=token_ids,
-                        audio=None,
-                        decode_error={
-                            "type": type(error).__name__,
-                            "message": str(error),
-                        },
-                    )
-                )
-                continue
-            results.append(
-                Result(
-                    response_ids=token_ids,
-                    audio=AudioOutput(
-                        features=None,
-                        codes=codes,
-                        waveform=waveform,
-                        sample_rate=self.sample_rate,
-                    ),
-                )
+        return [
+            self._decode_result(token_ids, request)
+            for token_ids, request in zip(_token_responses(batch), batch.requests)
+        ]
+
+    def _decode_result(self, token_ids: Tensor, request: Request | None) -> Result:
+        try:
+            waveform, codes = self._decode_row(token_ids, request)
+        except torch.OutOfMemoryError:
+            raise
+        except Exception as error:
+            return _decode_error_result(token_ids, error)
+        return _audio_result(
+            token_ids,
+            waveform,
+            self.sample_rate,
+            codes=codes,
+        )
+
+    def _decode_row(
+        self,
+        token_ids: Tensor,
+        request: Request | None,
+    ) -> tuple[Tensor, SemanticAcousticCodes]:
+        if self.model.runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
+            return decode_generated_bicodec_full_row(
+                token_ids,
+                codec=self.codec,
+                audio_tokenizer=self.tokenizer,
+                audio_token_range=self.model.runtime.codec_audio_range,
             )
-        return results
+        return decode_generated_bicodec_semantic_with_reference(
+            token_ids,
+            None if request is None else request.get("audio_context"),
+            codec=self.codec,
+            audio_tokenizer=self.tokenizer,
+            audio_token_range=self.model.runtime.codec_audio_range,
+        )
 
     def decode(self, token_ids: Tensor, features: Tensor | None) -> Tensor:
         if features is not None:
@@ -390,31 +372,9 @@ def _token_responses(batch: _Batch) -> list[Tensor]:
     )
 
 
-def _full_responses(
-    batch: _Batch,
-    model: FullCodecSequenceGenerator,
-) -> list[Tensor]:
-    sequence = model.generate_full_codec_sequence(
-        batch.prompt,
-        max_new_tokens=batch.max_new_tokens,
-        temperature=batch.temperature,
-        top_p=batch.top_p,
-        prompt_attention_mask=batch.prompt_mask,
-        audio_input_positions=batch.audio_input_positions,
-        do_sample=batch.do_sample,
-        use_cache=batch.use_cache,
-    )
-    return _responses(
-        sequence,
-        batch.prompt.size(1),
-        model.runtime.eoa_token_id,
-    )
-
-
 def _responses(sequence: Tensor, prompt_length: int, stop_token_id: int) -> list[Tensor]:
     return [
-        _response(sequence[row], prompt_length, stop_token_id)
-        for row in range(sequence.size(0))
+        _response(sequence[row], prompt_length, stop_token_id) for row in range(sequence.size(0))
     ]
 
 
@@ -454,17 +414,50 @@ def _decoded_results(
         decoder,
     )
     return [
-        Result(
-            response_ids=token_ids,
-            audio=AudioOutput(
-                features=row_features[row],
-                codes=None,
-                waveform=waveforms[row],
-                sample_rate=decoder.sample_rate,
-            ),
+        _audio_result(
+            token_ids,
+            waveforms[row],
+            decoder.sample_rate,
+            features=row_features[row],
         )
         for row, token_ids in enumerate(token_rows)
     ]
+
+
+def _audio_result(
+    token_ids: Tensor,
+    waveform: Tensor,
+    sample_rate: int,
+    *,
+    features: Tensor | None = None,
+    codes: SemanticAcousticCodes | None = None,
+) -> Result:
+    return Result(
+        response_ids=token_ids,
+        audio=AudioOutput(
+            features=features,
+            codes=codes,
+            waveform=waveform,
+            sample_rate=sample_rate,
+        ),
+    )
+
+
+def _decode_error_result(token_ids: Tensor, error: Exception) -> Result:
+    warnings.warn(
+        "skipping invalid generated audio sequence: "
+        f"{type(error).__name__}: {error}",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return Result(
+        response_ids=token_ids,
+        audio=None,
+        decode_error={
+            "type": type(error).__name__,
+            "message": str(error),
+        },
+    )
 
 
 def _decode_rows(
@@ -473,30 +466,52 @@ def _decode_rows(
     frame_counts: Tensor,
     decoder: _Decoder,
 ) -> tuple[list[Tensor | None], list[Tensor]]:
+    counts = _frame_count_values(frame_counts, rows=len(token_rows))
+    row_features = _feature_rows(features, rows=len(token_rows), counts=counts)
+    waveforms = _decode_grouped_rows(
+        token_rows,
+        row_features,
+        counts,
+        decoder,
+    )
+    return row_features, waveforms
+
+
+def _frame_count_values(frame_counts: Tensor, *, rows: int) -> list[int]:
     frame_counts = _integer_tensor(
         frame_counts,
         "generated audio frame counts",
         dimensions=1,
     )
-    if frame_counts.shape != (len(token_rows),):
+    if frame_counts.shape != (rows,):
         raise ValueError("generated audio frame counts must provide one value per row.")
-    counts = frame_counts.detach().cpu().tolist()
+    counts = [int(count) for count in frame_counts.detach().cpu().tolist()]
     if any(count < 1 for count in counts):
         raise ValueError("each audio generation row must contain at least one frame.")
+    return counts
 
+
+def _feature_rows(
+    features: Tensor | None,
+    *,
+    rows: int,
+    counts: list[int],
+) -> list[Tensor | None]:
     if features is not None:
-        if features.dim() != 3 or features.size(0) != len(token_rows):
-            raise ValueError(
-                "generated acoustic features must have shape [batch, frames, dim]."
-            )
+        if features.dim() != 3 or features.size(0) != rows:
+            raise ValueError("generated acoustic features must have shape [batch, frames, dim].")
         if any(count > features.size(1) for count in counts):
             raise ValueError("generated frame count exceeds acoustic feature padding.")
-        row_features: list[Tensor | None] = [
-            features[row, :count] for row, count in enumerate(counts)
-        ]
-    else:
-        row_features = [None] * len(token_rows)
+        return [features[row, :count] for row, count in enumerate(counts)]
+    return [None] * rows
 
+
+def _decode_grouped_rows(
+    token_rows: list[Tensor],
+    row_features: list[Tensor | None],
+    counts: list[int],
+    decoder: _Decoder,
+) -> list[Tensor]:
     groups: dict[tuple[int, int], list[int]] = {}
     for row, (token_ids, count) in enumerate(zip(token_rows, counts)):
         groups.setdefault((token_ids.numel(), count), []).append(row)
@@ -518,7 +533,7 @@ def _decode_rows(
 
     if any(waveform is None for waveform in waveforms):
         raise RuntimeError("codec decode did not produce every generation row.")
-    return row_features, cast(list[Tensor], waveforms)
+    return cast(list[Tensor], waveforms)
 
 
 def _integer_tensor(value: object, name: str, *, dimensions: int) -> Tensor:
@@ -540,12 +555,8 @@ def decode_token_audio_rows(
     Used by mixed AR after token generation. Does not collect or consume acoustic
     frame conditions; acoustic feature generators must fail explicitly.
     """
-    if model.runtime.acoustic_side_channel and isinstance(
-        model, AcousticFeatureGeneration
-    ):
-        raise ValueError(
-            "token-row audio decode does not support acoustic feature side channel."
-        )
+    if model.runtime.acoustic_side_channel and isinstance(model, AcousticFeatureGeneration):
+        raise ValueError("token-row audio decode does not support acoustic feature side channel.")
     codec_rows = [_codec_payload(row, model) for row in token_rows]
     if not any(row.numel() > 0 for row in codec_rows):
         return [None] * len(token_rows)
@@ -553,13 +564,21 @@ def decode_token_audio_rows(
     decoder = _token_decoder(model)
     active_index = [index for index, row in enumerate(codec_rows) if row.numel() > 0]
     active_rows = [codec_rows[index] for index in active_index]
+    outputs: list[AudioOutput | None] = [None] * len(token_rows)
+    if isinstance(decoder, _Frame):
+        for index, row in zip(active_index, active_rows):
+            outputs[index] = decoder._decode_result(row)["audio"]
+        return outputs
+    if isinstance(decoder, _Structured):
+        for index, row in zip(active_index, active_rows):
+            outputs[index] = decoder._decode_result(row, None)["audio"]
+        return outputs
     decoded = _decoded_results(
         active_rows,
         None,
         _frame_counts(active_rows, model),
         decoder,
     )
-    outputs: list[AudioOutput | None] = [None] * len(token_rows)
     for index, result in zip(active_index, decoded):
         outputs[index] = result["audio"]
     return outputs
@@ -573,12 +592,8 @@ def _codec_payload(token_ids: Tensor, model: TokenGenerator) -> Tensor:
 
 def _token_decoder(model: TokenGenerator) -> _Decoder:
     if model.runtime.structured_full_sequence:
-        if not isinstance(model, FullCodecSequenceGenerator):
-            raise TypeError("structured full sequence requires constrained token generation.")
         return _Structured(model)
     if model.runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
-        if not isinstance(model, FullCodecSequenceGenerator):
-            raise TypeError("full codec sequence requires constrained token generation.")
         return _Frame(model)
     return _Semantic(model)
 
@@ -601,9 +616,7 @@ def _validate_semantic_decode_options(
         model.runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED
         or model.runtime.structured_full_sequence
     ):
-        raise ValueError(
-            "semantic decode options require semantic-only audio generation."
-        )
+        raise ValueError("semantic decode options require semantic-only audio generation.")
     if model.runtime.acoustic_side_channel and isinstance(
         model,
         AcousticFeatureGeneration,
@@ -617,9 +630,7 @@ def _validate_semantic_decode_options(
         if not isinstance(features, Tensor):
             raise TypeError("semantic reference features must be a Tensor.")
         if features.dim() != 2:
-            raise ValueError(
-                "semantic reference features must have shape [frames, dim]."
-            )
+            raise ValueError("semantic reference features must have shape [frames, dim].")
     mask = request.get("semantic_reference_mask")
     if mask is not None:
         if not isinstance(mask, Tensor):
@@ -629,13 +640,9 @@ def _validate_semantic_decode_options(
         if mask.dim() != 1:
             raise ValueError("semantic reference mask must have shape [frames].")
         if features is None:
-            raise ValueError(
-                "semantic reference mask requires semantic reference features."
-            )
+            raise ValueError("semantic reference mask requires semantic reference features.")
         if mask.size(0) != features.size(0):
-            raise ValueError(
-                "semantic reference mask must align with reference feature frames."
-            )
+            raise ValueError("semantic reference mask must align with reference feature frames.")
     generator = request.get("semantic_decode_generator")
     if generator is not None and not isinstance(generator, torch.Generator):
         raise TypeError("semantic decode generator must be a torch.Generator.")

@@ -26,10 +26,6 @@ class BiCodecAudioTokenizer:
     """Serialize BiCodec semantic units and fixed-length acoustic speaker slots."""
 
     embedding_initialization = "random"
-    forced_group = -1
-    semantic_group = 0
-    semantic_or_end_group = 1
-    acoustic_group_start = 2
 
     def __init__(
         self,
@@ -173,50 +169,6 @@ class BiCodecAudioTokenizer:
             )
         values.append(anchor.new_tensor([self._end_token_id]))
         return torch.cat(values).to(dtype=torch.long)
-
-    def encode_streams_with_groups(
-        self,
-        value: SemanticAcousticCodes,
-        streams: Sequence[AudioStream],
-    ) -> tuple[Tensor, Tensor]:
-        streams = _bicodec_streams(streams)
-        token_ids = self.encode_streams(value, streams)
-        groups = token_ids.new_full(token_ids.shape, self.forced_group)
-        cursor = 0
-        if AudioStream.ACOUSTIC in streams:
-            cursor += 1
-            for _ in range(self._acoustic_unit_length):
-                for codebook in range(len(self._acoustic_codebook_sizes)):
-                    groups[cursor] = self.acoustic_group_start + codebook
-                    cursor += 1
-        if AudioStream.SEMANTIC in streams:
-            cursor += 1
-            semantic_count = token_ids.numel() - cursor - 1
-            if semantic_count < 1:
-                raise AssertionError("BiCodec semantic serialization produced no payload.")
-            groups[cursor] = self.semantic_group
-            if semantic_count > 1:
-                groups[cursor + 1 : cursor + semantic_count] = (
-                    self.semantic_or_end_group
-                )
-            groups[-1] = self.semantic_or_end_group
-        return token_ids, groups
-
-    def prediction_ids(self, group: int, *, device: torch.device) -> Tensor:
-        if isinstance(group, bool) or not isinstance(group, int):
-            raise TypeError("BiCodec prediction group must be an integer.")
-        if group == self.semantic_group:
-            start, end = self.semantic_token_range
-            return torch.arange(start, end, dtype=torch.long, device=device)
-        if group == self.semantic_or_end_group:
-            start, end = self.semantic_token_range
-            semantic = torch.arange(start, end, dtype=torch.long, device=device)
-            return torch.cat((semantic, semantic.new_tensor([self._end_token_id])))
-        codebook = group - self.acoustic_group_start
-        if codebook < 0 or codebook >= len(self.acoustic_token_ranges):
-            raise ValueError(f"unknown BiCodec prediction group: {group}.")
-        start, end = self.acoustic_token_ranges[codebook]
-        return torch.arange(start, end, dtype=torch.long, device=device)
 
     def decode(
         self,

@@ -17,7 +17,10 @@ from speech_to_speech.task import Task
 from anytrain.module.idspace import Layout
 from speech_to_speech.runtime import AudioSequenceLayout, Config, Runtime
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
-from speech_to_speech.model._generation import generate_bicodec_sequence
+
+from _constrained_codec_generation import (
+    generate_marker_stream_bicodec_sequence_for_test,
+)
 
 
 class BiCodecTokenizerTest(unittest.TestCase):
@@ -241,7 +244,7 @@ class BiCodecDecodeTest(unittest.TestCase):
             acoustic_unit_length=2,
         )
         model = _GenerationModel(30)
-        output = generate_bicodec_sequence(
+        output = generate_marker_stream_bicodec_sequence_for_test(
             model,
             torch.tensor([[1]]),
             tokenizer=tokenizer,
@@ -265,7 +268,7 @@ class BiCodecDecodeTest(unittest.TestCase):
             acoustic_unit_length=2,
         )
         model = _GenerationModel(30)
-        output = generate_bicodec_sequence(
+        output = generate_marker_stream_bicodec_sequence_for_test(
             model,
             torch.tensor([[1]]),
             tokenizer=tokenizer,
@@ -292,7 +295,7 @@ class BiCodecDecodeTest(unittest.TestCase):
             acoustic_unit_length=2,
         )
         model = _GenerationModel(30)
-        output = generate_bicodec_sequence(
+        output = generate_marker_stream_bicodec_sequence_for_test(
             model,
             torch.tensor([[1]]),
             tokenizer=tokenizer,

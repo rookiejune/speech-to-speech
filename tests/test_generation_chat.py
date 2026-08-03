@@ -168,13 +168,13 @@ class _RouteModel:
 
     def generation_step(self, *args, **kwargs):
         del args, kwargs
-        raise AssertionError("structured route must use constrained generation")
+        raise AssertionError("structured route should use generate_tokens")
 
     def audio_output_adapter_batch_select(self, past_key_values, indices):
         del past_key_values, indices
         return None
 
-    def generate_full_codec_sequence(
+    def generate_tokens(
         self,
         prompt_ids: Tensor,
         *,
@@ -183,6 +183,9 @@ class _RouteModel:
         top_p: float = 1.0,
         prompt_attention_mask: Tensor | None = None,
         audio_input_positions: Tensor | None = None,
+        stop_token_id: int | None = None,
+        generation_modality: Modality | None = None,
+        allowed_token_ids=None,
         do_sample: bool = True,
         use_cache: bool = True,
     ) -> Tensor:
@@ -192,6 +195,9 @@ class _RouteModel:
             top_p,
             prompt_attention_mask,
             audio_input_positions,
+            stop_token_id,
+            generation_modality,
+            allowed_token_ids,
             do_sample,
             use_cache,
         )
@@ -200,10 +206,6 @@ class _RouteModel:
             -1,
         )
         return torch.cat((prompt_ids, response), dim=1)
-
-    def generate_tokens(self, *args, **kwargs):
-        del args, kwargs
-        raise AssertionError("structured route must use constrained generation")
 
 
 class _TextModel:

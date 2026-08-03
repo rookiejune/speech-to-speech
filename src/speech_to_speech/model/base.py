@@ -13,17 +13,13 @@ from torch import nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.cache_utils import Cache
 
-from ..audio_stream import AudioStream
 from .._tensor import is_signed_integer_dtype
 from ._generation import (
     GenerationOutput,
     GenerationStepResult,
-    generate_bicodec_sequence,
-    generate_flattened_sequence,
     generate_sequence,
     generate_sequence_full,
 )
-from ..runtime.audio_tokenizer import BiCodecAudioTokenizer, FlattenedAudioTokenizer
 from ..runtime.backbone import BackboneBodyAdapter, BackboneEncoder, BackboneOutputView
 from ._checkpointing import enable_gradient_checkpointing
 from ._head import VocabularyHeadMixin
@@ -322,12 +318,6 @@ class Model(VocabularyHeadMixin, nn.Module):
             do_sample=do_sample,
             use_cache=use_cache,
             collect_audio_condition=False,
-            min_new_tokens=(
-                1
-                if generation_modality is Modality.AUDIO
-                and stop_token_id == self.runtime.eoa_token_id
-                else 0
-            ),
         )
         return generated
 
@@ -361,12 +351,6 @@ class Model(VocabularyHeadMixin, nn.Module):
             use_cache=use_cache,
             collect_audio_condition=False,
             collect_logprobs=True,
-            min_new_tokens=(
-                1
-                if generation_modality is Modality.AUDIO
-                and stop_token_id == self.runtime.eoa_token_id
-                else 0
-            ),
         )
 
     def generate_audio_condition(
@@ -408,53 +392,6 @@ class Model(VocabularyHeadMixin, nn.Module):
             < frame_counts[:, None]
         )
         return generated, condition, frame_mask
-
-    @torch.no_grad()
-    def generate_full_codec_sequence(
-        self,
-        prompt_ids: torch.Tensor,
-        *,
-        max_new_tokens: int,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
-        prompt_attention_mask: torch.Tensor | None = None,
-        audio_input_positions: torch.Tensor | None = None,
-        do_sample: bool = True,
-        use_cache: bool = True,
-    ) -> torch.Tensor:
-        tokenizer = self.runtime.audio_tokenizer
-        if isinstance(tokenizer, FlattenedAudioTokenizer):
-            return generate_flattened_sequence(
-                self,
-                prompt_ids,
-                codebook_ranges=tokenizer.codebook_ranges,
-                codebook_token_ids=tokenizer.codebook_token_ids,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                prompt_attention_mask=prompt_attention_mask,
-                audio_input_positions=audio_input_positions,
-                do_sample=do_sample,
-                use_cache=use_cache,
-            )
-        if not isinstance(tokenizer, BiCodecAudioTokenizer):
-            raise TypeError(
-                "full codec sequence generation requires a structured audio tokenizer."
-            )
-        streams = (AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
-        return generate_bicodec_sequence(
-            self,
-            prompt_ids,
-            tokenizer=tokenizer,
-            streams=streams,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            prompt_attention_mask=prompt_attention_mask,
-            audio_input_positions=audio_input_positions,
-            do_sample=do_sample,
-            use_cache=use_cache,
-        )
 
     def target_frame_condition(
         self,

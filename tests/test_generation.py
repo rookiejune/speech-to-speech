@@ -342,7 +342,7 @@ class _UnifiedGenerationModel(Model):
         encoded = self.runtime.audio_tokenizer.encode(torch.tensor([[0], [1]]))
         self._tokens = [
             start + token_id
-            for token_id in encoded[1:].tolist()
+            for token_id in encoded.tolist()
         ]
         self._tokens.append(self.runtime.eoa_token_id)
         self._step = 0
@@ -487,8 +487,6 @@ class _FullSequenceGenerationModel(Model):
         )
         start, _ = self.runtime.codec_audio_range
         encoded = self.runtime.audio_tokenizer.encode(codes)
-        if len(self.runtime.audio_tokenizer.codebook_sizes) == 1:
-            encoded = encoded[1:]
         self._tokens = [
             start + token_id
             for token_id in encoded.tolist()
@@ -1395,20 +1393,10 @@ class GenerationTest(unittest.TestCase):
                 self.assertTrue(
                     torch.equal(result["response_ids"], expected_response)
                 )
-                self.assertEqual(
-                    [
-                        None if ids is None else ids.tolist()
-                        for ids in model.allowed_token_ids
-                    ],
-                    [
-                        [start + tokenizer.codebook_token_ids[0]],
-                        list(range(start, start + 4)),
-                        [*range(start, start + 4), start + tokenizer.codebook_token_ids[1]],
-                        [*range(start, start + 4), start + tokenizer.codebook_token_ids[1]],
-                        list(range(start + 4, start + 14)),
-                        list(range(start + 4, start + 14)),
-                        [model.runtime.eoa_token_id],
-                    ],
+                self.assertTrue(model.allowed_token_ids)
+                self.assertTrue(all(ids is None for ids in model.allowed_token_ids))
+                self.assertTrue(
+                    torch.equal(model.generation_inputs[0], torch.tensor([[1]]))
                 )
                 self.assertIsNotNone(result["audio"])
                 audio = result["audio"]
@@ -1427,7 +1415,7 @@ class GenerationTest(unittest.TestCase):
                     torch.equal(audio["waveform"], torch.tensor([6.0, 8.0]))
                 )
 
-    def test_single_codebook_full_sequence_forces_prefix_and_code_range(self):
+    def test_single_codebook_generation_does_not_force_prefix_or_code_range(self):
         codes = torch.tensor([[1], [2]])
         for use_cache in (False, True):
             with self.subTest(use_cache=use_cache):
@@ -1447,23 +1435,11 @@ class GenerationTest(unittest.TestCase):
                 self.assertTrue(
                     torch.equal(result["response_ids"], expected_local + start)
                 )
-                prefix = expected_local[:1] + start
                 self.assertTrue(
-                    torch.equal(model.generation_inputs[0][0, -1:], prefix)
+                    torch.equal(model.generation_inputs[0], torch.tensor([[1]]))
                 )
-                allowed_token_ids = model.allowed_token_ids[0]
-                self.assertIsNotNone(allowed_token_ids)
-                self.assertTrue(
-                    torch.equal(
-                        allowed_token_ids,
-                        torch.tensor(
-                            [
-                                *range(start, start + 4),
-                                model.runtime.eoa_token_id,
-                            ]
-                        ),
-                    )
-                )
+                self.assertTrue(model.allowed_token_ids)
+                self.assertTrue(all(ids is None for ids in model.allowed_token_ids))
                 self.assertIsNotNone(result["audio"])
                 self.assertTrue(
                     torch.equal(
@@ -1472,35 +1448,25 @@ class GenerationTest(unittest.TestCase):
                     )
                 )
 
-    def test_flattened_markers_count_toward_generation_budget(self):
+    def test_short_flattened_generation_warns_and_skips_invalid_decode(self):
         model = _FullSequenceGenerationModel(
-            torch.tensor([[1]]),
-            codebook_sizes=(4,),
+            torch.tensor([[1, 5]]),
+            codebook_sizes=(4, 10),
         )
 
-        with self.assertRaisesRegex(ValueError, "markers.*EOA.*3 minimum"):
-            generate_responses(
+        with self.assertWarnsRegex(RuntimeWarning, "skipping invalid"):
+            result = generate_responses(
                 [Request(prompt_ids=torch.tensor([1]), task=Task.TTS)],
                 model,
                 max_new_tokens=2,
                 do_sample=False,
                 use_cache=False,
-            )
+            )[0]
 
-        multi_codebook = _FullSequenceGenerationModel(
-            torch.tensor([[1, 5]]),
-            codebook_sizes=(4, 10),
-        )
-        with self.assertRaisesRegex(ValueError, "markers.*EOA.*5 minimum"):
-            generate_responses(
-                [Request(prompt_ids=torch.tensor([1]), task=Task.TTS)],
-                multi_codebook,
-                max_new_tokens=4,
-                do_sample=False,
-                use_cache=False,
-            )
+        self.assertIsNone(result["audio"])
+        self.assertIn("decode_error", result)
 
-    def test_incomplete_multi_codebook_sequence_fails_explicitly(self):
+    def test_incomplete_multi_codebook_sequence_warns_and_skips_decode(self):
         model = _FullSequenceGenerationModel()
         start, _ = model.runtime.codec_audio_range
         tokenizer = model.runtime.audio_tokenizer
@@ -1509,16 +1475,19 @@ class GenerationTest(unittest.TestCase):
             *([start + 1] * 8),
         ]
 
-        with self.assertRaisesRegex(ValueError, "exceeded max_new_tokens"):
-            generate_responses(
+        with self.assertWarnsRegex(RuntimeWarning, "skipping invalid"):
+            result = generate_responses(
                 [Request(prompt_ids=torch.tensor([1]), task=Task.TTS)],
                 model,
                 max_new_tokens=8,
                 do_sample=False,
                 use_cache=False,
-            )
+            )[0]
 
-    def test_single_codebook_generation_truncates_without_forcing_eoa(self):
+        self.assertIsNone(result["audio"])
+        self.assertIn("decode_error", result)
+
+    def test_single_codebook_generation_truncates_and_skips_invalid_decode(self):
         model = _FullSequenceGenerationModel(
             torch.tensor([[1]]),
             codebook_sizes=(4,),
@@ -1526,43 +1495,41 @@ class GenerationTest(unittest.TestCase):
         start, _ = model.runtime.codec_audio_range
         model._tokens = [start + 1] * 4
 
-        result = generate_responses(
-            [Request(prompt_ids=torch.tensor([1]), task=Task.TTS)],
-            model,
-            max_new_tokens=4,
-            do_sample=False,
-            use_cache=False,
-        )[0]
+        with self.assertWarnsRegex(RuntimeWarning, "skipping invalid"):
+            result = generate_responses(
+                [Request(prompt_ids=torch.tensor([1]), task=Task.TTS)],
+                model,
+                max_new_tokens=4,
+                do_sample=False,
+                use_cache=False,
+            )[0]
 
-        self.assertIsNotNone(result["audio"])
+        self.assertIsNone(result["audio"])
         self.assertFalse(
             bool(result["response_ids"].eq(model.runtime.eoa_token_id).any())
         )
         self.assertEqual(int(result["response_ids"].numel()), 4)
-        self.assertTrue(
-            torch.equal(
-                model.runtime.codec.decoded_codes,
-                torch.tensor([[[1], [1], [1]]]),
-            )
-        )
+        self.assertIn("decode_error", result)
 
-    def test_single_codebook_generation_suppresses_zero_frame_eoa(self):
+    def test_single_codebook_generation_allows_immediate_eoa_and_skips_decode(self):
         model = _FullSequenceGenerationModel(
             torch.tensor([[1]]),
             codebook_sizes=(4,),
         )
         model._tokens = [model.runtime.eoa_token_id]
 
-        result = generate_responses(
-            [Request(prompt_ids=torch.tensor([1]), task=Task.TTS)],
-            model,
-            max_new_tokens=4,
-            do_sample=False,
-            use_cache=False,
-        )[0]
+        with self.assertWarnsRegex(RuntimeWarning, "skipping invalid"):
+            result = generate_responses(
+                [Request(prompt_ids=torch.tensor([1]), task=Task.TTS)],
+                model,
+                max_new_tokens=4,
+                do_sample=False,
+                use_cache=False,
+            )[0]
 
-        self.assertIsNotNone(result["audio"])
-        self.assertEqual(model.runtime.codec.decoded_codes.shape, (1, 1, 1))
+        self.assertEqual(int(result["response_ids"].numel()), 0)
+        self.assertIsNone(result["audio"])
+        self.assertIn("decode_error", result)
 
     def test_generation_batches_variable_length_requests(self):
         model = _UnifiedGenerationModel()
@@ -1577,9 +1544,9 @@ class GenerationTest(unittest.TestCase):
         )
 
         self.assertEqual(len(results), 2)
-        self.assertEqual([call[1] for call in model.calls], [2, 2, 2])
+        self.assertEqual([call[1] for call in model.calls], [2, 2, 2, 2])
         self.assertEqual(model.runtime.audio_tokenizer.frame_spans.call_count, 0)
-        self.assertEqual(model.runtime.codec.decode_calls, 1)
+        self.assertEqual(model.runtime.codec.decode_calls, 2)
 
     def test_generation_reuses_frame_counts_and_batches_acoustic_decode(self):
         model = _GenerationModel()
