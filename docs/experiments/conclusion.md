@@ -2,7 +2,15 @@
 
 ## 适用范围
 
-本页最新真实实验是 016 的 Stable Codec stage 1 单步验收（2026-07-28）：真实
+本页最新真实实验是 020 的 performance hot-path 四段反转对照（2026-08-04）：复旦 `145`
+三张 RTX 4090 D、真实 BiCodec/Qwen3-0.6B、bs8 TTS+MT `serial_joint` 完成
+`A1 -> B1 -> B2 -> A2` 各 100 optimizer steps。optimized revision 的两个顺序方向都更快，
+optimizer steps/s 几何平均改善 `4.9989%`，但略低于预注册 `>=5%` 门槛，且 exact workload、
+global compute-token、monotonic timestamp 和 parameter fingerprint gate 未满足，因此只接受“约 5%
+的可重复正向证据”，不接受“正式吞吐晋级通过”。最高 rank 峰值显存降低 `624 MiB`、参数库存减少
+`19.88%` 的独立结论成立；anytrain GRPO trusted-path 局部 forward 在 exact loss/details/gradient
+parity 后为 `1.817x`，不外推为完整 RL 训练加速。016 的 Stable Codec stage 1 单步验收
+（2026-07-28）使用真实
 `stabilityai/stable-codec-speech-16k`、Qwen3-0.6B 和 WMT19 prepared data 完成无 audio BPE 的
 ASR/TTS optimizer step 与 fixed-sample TensorBoard 闭环；loss 与 target/generated waveform finite，
 Stable 路线没有 Flow/RVQ `reference_generation`。该 smoke 不支持质量或收敛结论。015 的
@@ -39,6 +47,21 @@ model/runtime/data/generation 和按模态 token CE 仍有调整，因此相应 
 
 ## 已验证结论
 
+- 020 的 `A1 -> B1 -> B2 -> A2` 四段 100-step 对照均 exit 0；固定 step 19 -> 99 诊断窗口内，
+  B1/A1 与 B2/A2 的 optimizer steps/s 分别提高 `6.4435%/3.5740%`，几何平均为
+  `4.9989%`，高于 `1.6281%` repeat drift；按实际监督 token 归一化为 `4.9670%`。但预注册
+  `>=5%` 门槛未达到，A/B interval supervised tokens 还相差 `0.0304%`，B 的 progress counter
+  是 rank-local，monotonic endpoint 与 trainable fingerprint 也未记录。因此已验证结论是“存在约
+  5% 的可重复正向证据，但 020 的正式吞吐晋级未通过”，不得四舍五入越线或事后换窗口
+  （[020 result, lines 5-29](results/020-performance-hot-paths.md#L5-L29)，
+  [lines 91-138](results/020-performance-hot-paths.md#L91-L138)）。
+- 020 的独立资源结论通过：两次配对中最高 rank peak memory 均由 `22213 MiB` 降到
+  `21589 MiB`，减少 `624 MiB/2.81%`；total parameters 减少 `155582464/19.88%`，trainable
+  parameters 保持 `31071232`。anytrain GRPO trusted path 在 shape `[8,8,256]` float32 上通过
+  bit-exact loss/details/gradient parity，CUDA-event median 由 `2131.684` 降到
+  `1173.135 us/call`，为 `1.817x` 的局部 forward speedup；它不代表完整 RL 训练吞吐
+  （[020 result, lines 140-168](results/020-performance-hot-paths.md#L140-L168)，
+  [lines 170-187](results/020-performance-hot-paths.md#L170-L187)）。
 - 真实 Stable Codec stage 1 无 BPE 路线已完成单步 smoke：Stable backend 为 16 kHz、25 Hz、
   单码本 46656 codes；ASR/TTS 每个 optimizer step 各提供一个 batch，total/token loss 为
   `9.965052/8.360746`，均 finite。TensorBoard 的 ASR index 0 写出 target/generated text；TTS
