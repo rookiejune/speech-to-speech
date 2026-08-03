@@ -382,6 +382,10 @@ class ConfigRuntimeContractTest(unittest.TestCase):
             attn_implementation="flash_attention_2",
         )
         self.assertEqual(backbone.gradient_checkpointing_calls, 1)
+        self.assertEqual(
+            backbone.gradient_checkpointing_kwargs,
+            {"gradient_checkpointing_kwargs": {"use_reentrant": False}},
+        )
         self.assertEqual(backbone.input_require_grads_calls, 1)
         self.assertFalse(backbone.config.use_cache)
         self.assertEqual(backbone.moves, ["cuda"])

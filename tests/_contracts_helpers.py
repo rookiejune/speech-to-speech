@@ -120,12 +120,14 @@ class GradientCheckpointingBackbone(PreTrainedModel):
     def __init__(self) -> None:
         super().__init__(PretrainedConfig(use_cache=True))
         self.gradient_checkpointing_calls = 0
+        self.gradient_checkpointing_kwargs: dict[str, object] | None = None
         self.input_require_grads_calls = 0
         self.moves: list[str] = []
 
     def gradient_checkpointing_enable(self, *args: object, **kwargs: object) -> None:
-        del args, kwargs
+        del args
         self.gradient_checkpointing_calls += 1
+        self.gradient_checkpointing_kwargs = kwargs
 
     def enable_input_require_grads(self) -> None:
         self.input_require_grads_calls += 1

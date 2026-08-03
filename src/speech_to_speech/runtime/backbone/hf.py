@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cached_property, partial
+from inspect import Parameter, signature
 from numbers import Integral
 from typing import Protocol, cast
 
@@ -227,7 +228,28 @@ def _enable_backbone_gradient_checkpointing(model: PreTrainedModel) -> None:
             "backbone does not expose gradient_checkpointing_enable(); "
             "disable runtime.gradient_checkpointing for this backbone."
         )
-    model.gradient_checkpointing_enable()
+    if not _accepts_gradient_checkpointing_kwargs(model.gradient_checkpointing_enable):
+        raise TypeError(
+            "backbone gradient_checkpointing_enable() must accept "
+            "gradient_checkpointing_kwargs; upgrade transformers or disable "
+            "runtime.gradient_checkpointing for this backbone."
+        )
+    model.gradient_checkpointing_enable(
+        gradient_checkpointing_kwargs={"use_reentrant": False}
+    )
+
+
+def _accepts_gradient_checkpointing_kwargs(callback: Callable[..., object]) -> bool:
+    parameters = signature(callback).parameters.values()
+    return any(
+        parameter.kind is Parameter.VAR_KEYWORD
+        or (
+            parameter.name == "gradient_checkpointing_kwargs"
+            and parameter.kind
+            in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
+        )
+        for parameter in parameters
+    )
 
 
 def _enable_layer_gradient_checkpointing(model: nn.Module) -> None:

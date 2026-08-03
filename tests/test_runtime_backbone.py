@@ -19,12 +19,14 @@ class GradientCheckpointingBackbone(PreTrainedModel):
     def __init__(self) -> None:
         super().__init__(PretrainedConfig(use_cache=True))
         self.gradient_checkpointing_calls = 0
+        self.gradient_checkpointing_kwargs: dict[str, object] | None = None
         self.input_require_grads_calls = 0
         self.moves: list[str] = []
 
     def gradient_checkpointing_enable(self, *args: object, **kwargs: object) -> None:
-        del args, kwargs
+        del args
         self.gradient_checkpointing_calls += 1
+        self.gradient_checkpointing_kwargs = kwargs
 
     def enable_input_require_grads(self) -> None:
         self.input_require_grads_calls += 1
@@ -146,6 +148,10 @@ class RuntimeBackboneTest(unittest.TestCase):
             loaded = runtime.backbone
 
         self.assertEqual(backbone.gradient_checkpointing_calls, 1)
+        self.assertEqual(
+            backbone.gradient_checkpointing_kwargs,
+            {"gradient_checkpointing_kwargs": {"use_reentrant": False}},
+        )
         self.assertEqual(backbone.input_require_grads_calls, 1)
         self.assertFalse(backbone.config.use_cache)
         self.assertIs(loaded, backbone)
@@ -168,10 +174,37 @@ class RuntimeBackboneTest(unittest.TestCase):
             loaded = runtime.backbone
 
         self.assertEqual(backbone.gradient_checkpointing_calls, 1)
+        self.assertEqual(
+            backbone.gradient_checkpointing_kwargs,
+            {"gradient_checkpointing_kwargs": {"use_reentrant": False}},
+        )
         self.assertEqual(backbone.input_require_grads_calls, 1)
         self.assertFalse(adapter.config.use_cache)
         self.assertFalse(backbone.config.use_cache)
         self.assertIs(loaded, adapter)
+
+    def test_gradient_checkpointing_rejects_legacy_hf_hook(self):
+        class LegacyGradientCheckpointingBackbone(GradientCheckpointingBackbone):
+            def gradient_checkpointing_enable(self) -> None:
+                self.gradient_checkpointing_calls += 1
+
+        backbone = LegacyGradientCheckpointingBackbone()
+
+        with patch(
+            "speech_to_speech.runtime.backbone.hf.AutoModelForCausalLM.from_pretrained",
+            return_value=backbone,
+        ):
+            runtime = Runtime(
+                Config(
+                    backbone="fake/legacy-backbone",
+                    gradient_checkpointing=True,
+                )
+            )
+
+            with self.assertRaisesRegex(TypeError, "gradient_checkpointing_kwargs"):
+                _ = runtime.backbone
+
+        self.assertEqual(backbone.gradient_checkpointing_calls, 0)
 
     def test_gradient_checkpointing_can_target_checkpointing_layers(self):
         backbone = LayerCheckpointingBackbone()
