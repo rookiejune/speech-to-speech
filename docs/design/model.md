@@ -72,7 +72,7 @@ def generate_tokens(...) -> Tensor: ...
   reference `audio_context` 都不经过 `AudioInputTower`。
 - `generation_step()` 返回 `GenerationStepResult`：最后位置目标 modality / 显式 token 子集
   logits，以及 backbone `past_key_values` 与 audio output adapter 的独立 `audio_output_past`。
-  PARALLEL / INTERLEAVED 的切换 grammar 不属于本接口，由 `generation.mixed` 持有状态机，并反复
+  PARALLEL / INTERLEAVED 的切换规则不属于本接口，由 `generation.mixed` 持有状态机，并反复
   调用本步进原语。
 - 训练先用 `token_hidden_states()` 取得完整表示，再由 objective 按
   `prediction_modality.supervised_modalities()` 选有效 predictor rows，并对每个 `Modality`
@@ -124,7 +124,7 @@ adapter 前的 backbone hidden。
 同长度、causal 的 Transformer encoder 跨 source frames 建立上下文。两种 tower 都保持 frame
 数量不变，并在 overlay 到 `inputs_embeds` 前清零 padding。训练和完整 prompt 的首步会传入显式
 `audio_input_positions`；启用 KV cache 后后续 token 只走 backbone，不重复运行 source tower。
-该配置不会改变生成 grammar，也不会替换 Flow/RVQ
+该配置不会改变 token generation 契约，也不会替换 Flow/RVQ
 `HiddenConditionAdapter`。
 
 `lora` 直接持有 `peft.LoraConfig | None`，项目不再维护本地 LoRA config、layer 或注入 facade。
@@ -155,8 +155,8 @@ fixed-length structured codec（例如 BiCodec）使用独立的 model-facing to
 side channel。route 只声明 `acoustic` / `semantic`；fixed-length speaker/style 含义来自
 `AcousticLayout.FIXED_LENGTH`，不是单独的 stream 枚举。`reuse_prompt_acoustic` 只输出
 semantic 并复用 prompt acoustic；`generate_acoustic` 同时输出 acoustic 与 semantic。两条
-route 使用同一套稳定 vocabulary，route 只改变 grammar 的 output groups 与 decode stream
-ownership，不按 request 动态改变模型 head。
+route 使用同一套稳定 vocabulary，route 只改变训练时的 output groups 与推理解码时的
+decode stream ownership，不按 request 动态改变模型 head 或 token generation 规则。
 无 reference 的 `generate_acoustic` 不自带 speaker ID；多 speaker 训练若没有额外条件或
 latent sampling，acoustic（speaker）预测可能偏向数据中的主导 speaker，这属于模型条件设计而
 不是 codec 序列化问题。
@@ -189,8 +189,9 @@ strict resume 显式失败。
 Native/BPE semantic tokenizers 使用 codec codebook 初始化；完整 codec sequence tokenizer
 通常使用随机初始化，因为它的 vocab 同时包含多 codebook offset tokens、BiCodec
 semantic/acoustic ranges 与 codec/stream/end markers。BiCodec 的 semantic payload、各
-fixed-length acoustic slot 和 marker 共用这一稳定 layout vocabulary，候选范围由 route
-grammar 在每个位置收窄。
+fixed-length acoustic slot 和 marker 共用这一稳定 layout vocabulary；训练 objective
+根据 route 解释各位置的监督 groups，普通 generation 仍统一建模，不把这些 group 下推为
+隐式结构约束。
 随机初始化只读取 codec 声明的 semantic feature dimension，并使用 backbone embedding 作为
 device reference，不要求 backend 暴露虚构的 codebook tensor。
 
@@ -238,17 +239,18 @@ RVQ 只接收 `codebook_ar` generator。route、decoder topology、REPA 和 acou
 
 `generate_tokens()` 与 `generate_audio_condition()` 是 `Model` 的公开原语；flow/RVQ 的
 `generate_audio_features()` 在其上采样对应 acoustic representation，并以结构化结果返回
-sequence、padded features 与每行有效 frame count。通用 cache、stop state、allowed IDs 和
+sequence、padded features 与每行有效 frame count。通用 cache、sampling、stop state 和
 frame condition 的 `generate_sequence()` 循环位于私有
-`model/_generation.py`，只通过有类型的 `generation_step()` 驱动模型。mixed prediction 的
-TEXT/AUDIO 交替与 force-BOA 规则在 `generation.mixed`，不进入该通用循环，也不扩展
+`model/_generation.py`，只通过有类型的 `generation_step()` 驱动模型。训练和 ordinary AUDIO
+token generation 统一建模，推理原语只调用
+`generate_tokens(generation_modality=AUDIO, stop=EOA)`，不在 token generation 阶段根据
+flattened frame codec 或 BiCodec route 强制 marker/range/block-length 结构。
+codec-specific 的 marker、range、block-length 与 route stream ownership 只由推理层解析和
+decode 使用；非法 generated codec span 按行 warning 并跳过 audio decode，model 不重试或
+补齐结构。产品推理可以在 model 外显式使用 codec-specific 策略，但不能改变训练或普通
+generation 的模型契约。mixed prediction 的 TEXT/AUDIO 交替与 force-BOA 规则在
+`generation.mixed`，不进入该通用循环，也不扩展
 `generate_tokens(generation_modality=...)`。
-`generate_full_codec_sequence()` 按 audio tokenizer 分派：frame-aligned
-`FlattenedAudioTokenizer` 使用 codebook-block 状态机，首码本决定 frame count 并约束后续等长
-payload；fixed-length `BiCodecAudioTokenizer` 使用 `audio_route.output.streams` 选择 grammar：
-reuse route 生成 `semantic_marker, semantic..., end`，generate route 生成
-`acoustic_marker, acoustic..., semantic_marker, semantic..., end`。service 不复制 marker、
-range 或 block-length 规则。
 
 route 的 prompt 属于调用前已序列化的 token context，model 只生成固定的 output streams；model 不
 从 target labels 推断 prompt 边界，也不允许 request 临时切换 route。`SpeechToSpeechModule` 保存
