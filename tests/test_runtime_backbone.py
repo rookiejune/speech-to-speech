@@ -54,7 +54,42 @@ class LayerCheckpointingBackbone(nn.Module):
         self.config = SimpleNamespace(use_cache=True)
 
 
+class OutputHeadBackbone(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.embed_tokens = nn.Embedding(8, 4)
+        self.lm_head: nn.Module | None = nn.Linear(4, 8, bias=False)
+        self.config = SimpleNamespace(hidden_size=4)
+
+    def get_input_embeddings(self) -> nn.Embedding:
+        return self.embed_tokens
+
+    def get_output_embeddings(self) -> nn.Module | None:
+        return self.lm_head
+
+    def set_output_embeddings(self, output: nn.Module | None) -> None:
+        self.lm_head = output
+
+
 class RuntimeBackboneTest(unittest.TestCase):
+    def test_loading_releases_output_head(self):
+        backbone = OutputHeadBackbone()
+        input_embeddings = backbone.get_input_embeddings()
+
+        with patch(
+            "speech_to_speech.runtime.backbone.hf.AutoModelForCausalLM.from_pretrained",
+            return_value=backbone,
+        ):
+            loaded = Runtime(Config(backbone="fake/backbone")).backbone
+
+        self.assertIs(loaded, backbone)
+        self.assertIsNone(backbone.get_output_embeddings())
+        self.assertIs(backbone.get_input_embeddings(), input_embeddings)
+        self.assertNotIn("lm_head.weight", backbone.state_dict())
+        self.assertFalse(
+            any(name.startswith("lm_head.") for name, _ in backbone.named_parameters())
+        )
+
     def test_random_initialization_loads_config_without_pretrained_weights(self):
         hf_config = Mock()
         backbone = Mock()
@@ -185,7 +220,9 @@ class RuntimeBackboneTest(unittest.TestCase):
 
     def test_gradient_checkpointing_rejects_legacy_hf_hook(self):
         class LegacyGradientCheckpointingBackbone(GradientCheckpointingBackbone):
-            def gradient_checkpointing_enable(self) -> None:
+            def gradient_checkpointing_enable(  # pyright: ignore[reportIncompatibleMethodOverride]
+                self,
+            ) -> None:
                 self.gradient_checkpointing_calls += 1
 
         backbone = LegacyGradientCheckpointingBackbone()
@@ -277,7 +314,8 @@ class RuntimeBackboneTest(unittest.TestCase):
         self.assertEqual(hidden_size, 3584)
 
     def test_qwen_omni_random_initialization_uses_thinker_config_factory(self):
-        hf_config = Mock()
+        thinker_config = PretrainedConfig()
+        hf_config = SimpleNamespace(thinker_config=thinker_config)
         backbone = Mock()
         model_class = Mock()
         model_class._from_config.return_value = backbone
@@ -308,7 +346,7 @@ class RuntimeBackboneTest(unittest.TestCase):
             trust_remote_code=False,
         )
         model_class._from_config.assert_called_once_with(
-            hf_config,
+            thinker_config,
             dtype=torch.bfloat16,
         )
         model_class.from_pretrained.assert_not_called()

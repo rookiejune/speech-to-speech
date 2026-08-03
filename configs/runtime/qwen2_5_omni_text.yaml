@@ -1,13 +1,15 @@
-codec: longcat
-backbone_type: qwen2_5_omni_thinker
+codec: bicodec
+backbone_type: qwen2_5_omni_text
 backbone: Qwen/Qwen2.5-Omni-7B
 backbone_initialization: pretrained
-backbone_body: model
-audio_tokenizer: ${oc.env:SPEECH_TO_SPEECH_AUDIO_TOKENIZER}
+backbone_module: ""
+backbone_body: base_model
+audio_tokenizer:
 semantic_codec_artifact:
 device: cuda
 dtype: bfloat16
 attn_implementation: flash_attention_2
+gradient_checkpointing: true
 flow_method: midpoint
 flow_nfe: 20
 flow_num_steps: 10

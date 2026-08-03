@@ -29,6 +29,7 @@ class TokenLoss(nn.Module):
         *,
         audio_hidden_states: Tensor | None = None,
         attention_mask: Tensor | None = None,
+        validate: bool = True,
     ) -> LossItem:
         if hidden_states.dim() != 3 or token_labels.dim() != 2:
             raise ValueError(
@@ -38,6 +39,8 @@ class TokenLoss(nn.Module):
             raise ValueError("token hidden states and labels must align on sequence.")
         if not is_signed_integer_dtype(token_labels.dtype):
             raise TypeError("token labels must use a signed integer dtype.")
+        if not isinstance(validate, bool):
+            raise TypeError("validate must be a boolean.")
         modalities = _modalities(prediction)
         target = token_labels[:, 1:]
         prediction_states = hidden_states[:, :-1]
@@ -47,38 +50,33 @@ class TokenLoss(nn.Module):
         for modality in modalities:
             start, end = self.layout.blocks[modality.value]
             modality_mask |= target.ge(start) & target.lt(end)
-        invalid = torch.stack(
-            (
-                (valid & ~modality_mask).any(),
-                ~valid.any(dim=1).all(),
-            )
-        )
-        if bool(invalid.any()):
-            if bool(invalid[0]):
-                names = ", ".join(sorted(modality.value for modality in modalities))
-                raise ValueError(
-                    f"labels contain an id outside the supervised layout blocks: {names}."
+        if validate:
+            invalid = torch.stack(
+                (
+                    (valid & ~modality_mask).any(),
+                    ~valid.any(dim=1).all(),
                 )
-            raise ValueError(
-                "each token label row must contain at least one target token."
             )
-        selected_loss = self._loss(
+            if bool(invalid.any()):
+                if bool(invalid[0]):
+                    names = ", ".join(sorted(modality.value for modality in modalities))
+                    raise ValueError(
+                        f"labels contain an id outside the supervised layout blocks: {names}."
+                    )
+                raise ValueError(
+                    "each token label row must contain at least one target token."
+                )
+        token_loss = self._loss(
             prediction_states,
             target,
             valid,
             modalities,
             token_logits,
             audio_hidden_states=(
-                None
-                if audio_hidden_states is None
-                else audio_hidden_states[:, :-1]
+                None if audio_hidden_states is None else audio_hidden_states[:, :-1]
             ),
-            attention_mask=(
-                None if attention_mask is None else attention_mask[:, :-1]
-            ),
+            attention_mask=(None if attention_mask is None else attention_mask[:, :-1]),
         )
-        token_loss = selected_loss.new_zeros(target.shape)
-        token_loss[valid] = selected_loss
         text_start, text_end = self.layout.blocks[Modality.TEXT.value]
         audio_start, audio_end = self.layout.blocks[Modality.AUDIO.value]
         text_mask = valid & target.ge(text_start) & target.lt(text_end)
@@ -111,18 +109,10 @@ class TokenLoss(nn.Module):
         audio_hidden_states: Tensor | None,
         attention_mask: Tensor | None,
     ) -> Tensor:
-        losses = prediction_states.new_empty(int(valid.sum().item()))
-        flat_offsets = valid.flatten().nonzero(as_tuple=False).flatten()
-        loss_offsets = torch.empty_like(valid, dtype=torch.long)
-        loss_offsets.flatten()[flat_offsets] = torch.arange(
-            flat_offsets.numel(),
-            device=target.device,
-        )
+        losses = prediction_states.new_zeros(target.shape)
         for modality in sorted(modalities, key=lambda value: value.value):
             start, end = self.layout.blocks[modality.value]
             mask = valid & target.ge(start) & target.lt(end)
-            if not bool(mask.any()):
-                continue
             selected_target = (target[mask] - start).to(dtype=torch.long)
             if modality is Modality.AUDIO and audio_hidden_states is not None:
                 logits = token_logits(
@@ -141,7 +131,7 @@ class TokenLoss(nn.Module):
                 selected_target,
                 reduction="none",
             )
-            losses[loss_offsets[mask]] = group_loss.to(dtype=losses.dtype)
+            losses[mask] = group_loss.to(dtype=losses.dtype)
         return losses
 
 

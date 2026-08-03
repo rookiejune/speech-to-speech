@@ -172,14 +172,19 @@ class OverfitContractTest(unittest.TestCase):
                 ),
             ),
             (
-                GradientProbe("backbone_l0_attn", ("full.weight",)),
+                GradientProbe(
+                    "backbone_l0_attn",
+                    ("full.weight",),
+                    match="regex",
+                ),
                 GradientProbe(
                     "backbone_l0_ffn",
                     (
-                        "model.backbone.model.layers.0.mlp.gate_proj.weight",
-                        "model.backbone.model.layers.0.mlp.up_proj.weight",
-                        "model.backbone.model.layers.0.mlp.down_proj.weight",
+                        r"model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.mlp\.gate_proj\.weight$",
+                        r"model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.mlp\.up_proj\.weight$",
+                        r"model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.mlp\.down_proj\.weight$",
                     ),
+                    match="regex",
                 ),
             ),
             every_n_steps=5,
@@ -298,7 +303,13 @@ class OverfitContractTest(unittest.TestCase):
                     GradientTarget("rvq"),
                 ),
             ),
-            (GradientProbe("backbone_norm", ("partial.weight",)),),
+            (
+                GradientProbe(
+                    "backbone_norm",
+                    ("partial.weight",),
+                    match="regex",
+                ),
+            ),
             every_n_steps=1,
         )
 

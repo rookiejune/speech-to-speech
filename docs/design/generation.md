@@ -26,7 +26,7 @@ ChatRequest(messages, task, language?)
     排列只委托现有 audio tokenizer、内部固定 route 和 `audio_sequence_layout`，不在 messages 层另造布局。
 - `task` / `language` 是旁路字段，不伪装成 OpenAI 官方 schema。
 - `ChatCompletion`：`choices[].message` 含 `role=assistant`、可选 text `content`、可选
-  `audio`（`AudioOutput`）。
+  `audio`（`AudioOutput`）；逐行 audio decode 失败时还保留 `decode_error` 的异常类型与消息。
 
 私有张量契约（service / strategy 仍使用，不作为包级推荐入口）：
 
@@ -38,10 +38,11 @@ ChatRequest(messages, task, language?)
   source audio payload 在 prompt 中的位置。可选的 `prediction` 覆写 task 默认 prediction；未设置
   时与原先一样使用 `task.prediction_modality`。请求不能选择 route，公开配置只选择
   `audio_sequence_layout`。
-- `Result(response_ids, audio)`：按原请求顺序返回的单条结果。TEXT / AUDIO 路径的
+- `Result(response_ids, audio, decode_error?)`：按原请求顺序返回的单条结果。TEXT / AUDIO 路径的
   `response_ids` 是裁掉 stop token 后的 layout global token IDs；mixed 路径当前保留状态机产生的
   EOS/BOA/EOA，供 audio span 抽取。纯 text prediction 的 `audio=None`；AUDIO 与 token-only mixed
-  在成功 decode 后填充 `AudioOutput`。
+  在成功 decode 后填充 `AudioOutput`。可恢复的逐行 audio decode 失败返回 `audio=None`，并在
+  `decode_error` 暴露异常类型与消息。
 - `AudioOutput(features, codes, waveform, sample_rate)`：audio task 的 decode 结果。`codes` 保存
   route resolve 后的 structured semantic/acoustic codes；unified-token codec 没有独立 acoustic
   representation，因此 `features=None`。
@@ -82,6 +83,7 @@ class Request(TypedDict):
 class Result(TypedDict):
     response_ids: Tensor
     audio: AudioOutput | None
+    decode_error: NotRequired[dict[str, str]]
 ```
 
 `prompt_ids` 必须是调用方已经准备好的完整 generation prompt。公开 `create()` 负责 messages →
@@ -165,6 +167,9 @@ model 只提供单步 head 选择与 cache；mixed 不收集 acoustic frame cond
 `acoustic_side_channel` 且模型实现 `AcousticFeatureGeneration` 时显式失败。token-only 路径在
 生成结束后从 `response_ids` 抽出 codec-decodable audio span，复用与 AUDIO 相同的 semantic /
 frame / structured decode 配对写入 `Result.audio`；没有 codec audio token 时 `audio=None`。
+structured BiCodec full-output route 只支持 `PARALLEL` 的单个完整 audio span；`INTERLEAVED`
+可能产生多个独立 structured span，而当前单一 `Result.audio` 无法保留这些边界，因此在 request
+校验时显式拒绝。
 
 ```text
 text prediction
@@ -210,11 +215,12 @@ structured full-sequence 内部的 prompt/output/decode ownership 由内部固�
 fixed-length 与 frame-aligned 的区别由 `AcousticLayout` 提供，不由第三种 stream 名伪装。
 
 自回归 cache、sampling、逐行 stop 状态和 frame condition 收集属于 model；mixed AR 的动态
-allowed IDs 属于 `generation.mixed`。已有行
-生成 stop token 后，后续步骤只对剩余 active rows 执行 backbone 与 sampling；cache 同步收缩，
+allowed IDs 属于 `generation.mixed`。循环的 backbone forward 与 cache 始终保留原 batch 轴；结束行
+通过 device mask 屏蔽，避免逐步压缩 cache 和 host 同步。随机 sampling 只接收仍 active 的普通路径行，
+mixed 中进一步只接收 `TEXT` / `AUDIO` 行；`DONE` 与确定性发 BOA 的 `FORCE_BOA` 均不消耗 RNG。
 最终 sequence 仍保持原 batch 顺序。请求分组、padding 与结果顺序属于 service；audio route 校验、
-结果裁剪与 decode 属于 audio strategy；ID range、token frame span 与 codec 能力属于 runtime。
-各层不重复推导同一约束。
+结果裁剪与 decode 属于 audio strategy；ID range、token frame span 与 codec 能力属于 runtime。各层不重复
+推导同一约束。
 
 普通 semantic/audio-feature 自回归路径同样在第一步屏蔽 EOA，避免固定样本以零 frame
 结束。达到 `max_new_tokens` 但没有 EOA 时，只要已有 token 都是 codec-decodable，audio strategy 将其

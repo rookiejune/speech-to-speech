@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import cached_property, partial
 from inspect import Parameter, signature
@@ -8,21 +8,30 @@ from numbers import Integral
 from typing import Protocol, cast
 
 import torch
+from anydataset.types import Modality
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 from transformers import (
     AutoConfig,
+    AutoModel,
     AutoModelForCausalLM,
     AutoProcessor,
     AutoTokenizer,
+    PretrainedConfig,
     PreTrainedModel,
 )
 from transformers.cache_utils import Cache
 from transformers.modeling_layers import GradientCheckpointingLayer
 
-from ..types import Backbone, BackboneOutput, TextTokenizer
+from ..types import Backbone, BackboneOutput, BackboneReadout, TextTokenizer
 from .adapter import BackboneBodyAdapter, BackboneExtra, BackboneOutputView
 from .config import AdapterConfig, BackboneInitialization, BackboneType
+from .kimi import (
+    KimiRawTokenizer,
+    KimiTokenizerAdapter,
+    call_kimi_body,
+    should_checkpoint_kimi_body,
+)
 
 
 @dataclass(frozen=True)
@@ -31,7 +40,10 @@ class HuggingFaceBackboneAdapter:
 
     @cached_property
     def text_tokenizer(self) -> TextTokenizer:
-        if self.config.type is BackboneType.QWEN2_5_OMNI_THINKER:
+        if self.config.type in {
+            BackboneType.QWEN2_5_OMNI_TEXT,
+            BackboneType.QWEN2_5_OMNI_THINKER,
+        }:
             processor = AutoProcessor.from_pretrained(
                 self.config.path,
                 trust_remote_code=self.config.trust_remote_code,
@@ -39,11 +51,25 @@ class HuggingFaceBackboneAdapter:
             tokenizer = getattr(processor, "tokenizer", None)
             if tokenizer is None:
                 raise TypeError("Qwen2.5-Omni processor must expose a text tokenizer.")
+        elif self.config.type is BackboneType.KIMI_AUDIO:
+            raw_tokenizer = AutoTokenizer.from_pretrained(
+                self.config.path,
+                trust_remote_code=self.config.trust_remote_code,
+            )
+            tokenizer = KimiTokenizerAdapter(
+                cast(KimiRawTokenizer, raw_tokenizer),
+                chat_template=self.config.chat_template,
+            )
         else:
             tokenizer = AutoTokenizer.from_pretrained(
                 self.config.path,
                 trust_remote_code=self.config.trust_remote_code,
             )
+        if (
+            self.config.chat_template is not None
+            and not isinstance(tokenizer, KimiTokenizerAdapter)
+        ):
+            setattr(tokenizer, "chat_template", self.config.chat_template)
         bind_chat_bos(tokenizer)
         return cast(TextTokenizer, cast(object, tokenizer))
 
@@ -59,8 +85,15 @@ class HuggingFaceBackboneAdapter:
             if self.config.initialization is BackboneInitialization.PRETRAINED
             else self._random(**kwargs)
         )
+        if self.config.type is BackboneType.KIMI_AUDIO:
+            model = _prepare_kimi_body(model)
+        else:
+            _remove_output_head(model)
         if self.config.gradient_checkpointing:
-            _enable_gradient_checkpointing(model)
+            if self.config.type is BackboneType.KIMI_AUDIO:
+                _disable_cache(cast(nn.Module, model))
+            else:
+                _enable_gradient_checkpointing(model)
         if self.config.device is not None:
             model = cast(nn.Module, cast(object, model)).to(self.config.device)
         return cast(nn.Module, cast(object, model))
@@ -73,15 +106,27 @@ class HuggingFaceBackboneAdapter:
     def hidden_size(self) -> int:
         return _hidden_size(getattr(self.model, "config", None))
 
+    @property
+    def has_modality_readouts(self) -> bool:
+        return self.body.has_modality_readouts
+
     @cached_property
     def body(self) -> BackboneBodyAdapter:
         target = _path(cast(object, self.model), self.config.body)
         if not callable(target):
             raise TypeError(f"backbone body path {self.config.body!r} is not callable.")
+        body = cast(Callable[..., BackboneOutput], target)
+        if self.config.type is BackboneType.KIMI_AUDIO:
+            body = _kimi_body_callable(
+                self.model,
+                body,
+                enabled=self.config.gradient_checkpointing,
+            )
         return BackboneBodyAdapter(
-            cast(Callable[..., BackboneOutput], target),
-            readout=self.config.readout,
+            body,
+            readout=BackboneReadout(self.config.readout),
             supports_cache_position=self.config.supports_cache_position,
+            modality_readouts=_modality_readouts(self.config.readouts),
         )
 
     def input_embeddings(self) -> nn.Embedding:
@@ -97,6 +142,7 @@ class HuggingFaceBackboneAdapter:
         use_cache: bool = False,
         position_ids: torch.Tensor | None = None,
         cache_position: torch.Tensor | None = None,
+        modality: Modality | None = None,
         extra: BackboneExtra | None = None,
     ) -> BackboneOutputView:
         return self.body.encode(
@@ -107,10 +153,29 @@ class HuggingFaceBackboneAdapter:
             use_cache=use_cache,
             position_ids=position_ids,
             cache_position=cache_position,
+            modality=modality,
             extra=extra,
         )
 
     def _pretrained(self, **kwargs: object) -> object:
+        if self.config.type is BackboneType.KIMI_AUDIO:
+            return AutoModel.from_pretrained(
+                self.config.path,
+                trust_remote_code=self.config.trust_remote_code,
+                **kwargs,
+            )
+        if self.config.type is BackboneType.QWEN2_5_OMNI_TEXT:
+            config = AutoConfig.from_pretrained(
+                self.config.path,
+                trust_remote_code=self.config.trust_remote_code,
+            )
+            return _omni_text_model_factory().from_pretrained(
+                self.config.path,
+                config=_omni_text_config(config),
+                key_mapping={r"^thinker\.model\.": ""},
+                trust_remote_code=self.config.trust_remote_code,
+                **kwargs,
+            )
         if self.config.type is BackboneType.QWEN2_5_OMNI_THINKER:
             return _omni_model_factory().from_pretrained(
                 self.config.path,
@@ -128,8 +193,22 @@ class HuggingFaceBackboneAdapter:
             self.config.path,
             trust_remote_code=self.config.trust_remote_code,
         )
+        if self.config.type is BackboneType.QWEN2_5_OMNI_TEXT:
+            return _omni_text_model_factory()._from_config(
+                _omni_text_config(config),
+                **kwargs,
+            )
         if self.config.type is BackboneType.QWEN2_5_OMNI_THINKER:
-            return _omni_model_factory()._from_config(config, **kwargs)
+            return _omni_model_factory()._from_config(
+                _omni_thinker_config(config),
+                **kwargs,
+            )
+        if self.config.type is BackboneType.KIMI_AUDIO:
+            return AutoModel.from_config(
+                config,
+                trust_remote_code=self.config.trust_remote_code,
+                **kwargs,
+            )
         return AutoModelForCausalLM.from_config(config, **kwargs)
 
 
@@ -156,6 +235,114 @@ def _omni_model_factory() -> _OmniModelFactory:
             "Qwen2_5OmniThinkerForConditionalGeneration."
         ) from error
     return cast(_OmniModelFactory, Qwen2_5OmniThinkerForConditionalGeneration)
+
+
+def _omni_text_model_factory() -> _OmniModelFactory:
+    try:
+        from transformers.models.qwen2_5_omni import Qwen2_5OmniThinkerTextModel
+    except ImportError as error:
+        raise RuntimeError(
+            "Qwen2.5-Omni text backbone requires a transformers build that "
+            "exposes Qwen2_5OmniThinkerTextModel."
+        ) from error
+    return cast(_OmniModelFactory, Qwen2_5OmniThinkerTextModel)
+
+
+def _omni_text_config(config: object) -> PretrainedConfig:
+    thinker = getattr(config, "thinker_config", None)
+    text = getattr(thinker, "text_config", None)
+    if not isinstance(text, PretrainedConfig):
+        raise TypeError(
+            "Qwen2.5-Omni config must expose thinker_config.text_config."
+        )
+    return text
+
+
+def _omni_thinker_config(config: object) -> PretrainedConfig:
+    thinker = getattr(config, "thinker_config", None)
+    if not isinstance(thinker, PretrainedConfig):
+        raise TypeError(
+            "Qwen2.5-Omni config must expose a thinker_config for the Thinker "
+            "backbone."
+        )
+    return thinker
+
+
+def _prepare_kimi_body(model: object) -> nn.Module:
+    if not isinstance(model, nn.Module):
+        raise TypeError("Kimi-Audio model body must be a torch.nn.Module.")
+    for name in ("lm_head", "mimo_output"):
+        if getattr(model, name, None) is not None:
+            raise TypeError(
+                "Kimi-Audio backbone must load the base AutoModel without "
+                f"the {name} output head."
+            )
+    vq_adaptor = getattr(model, "vq_adaptor", None)
+    if vq_adaptor is not None and not isinstance(vq_adaptor, nn.Module):
+        raise TypeError("Kimi-Audio vq_adaptor must be a torch.nn.Module or None.")
+    if hasattr(model, "vq_adaptor"):
+        setattr(model, "vq_adaptor", None)
+    return model
+
+
+def _modality_readouts(
+    readouts: Mapping[str, str],
+) -> dict[Modality, BackboneReadout]:
+    return {
+        Modality(modality): BackboneReadout(path)
+        for modality, path in readouts.items()
+    }
+
+
+def _kimi_body_callable(
+    model: object,
+    body: Callable[..., object],
+    *,
+    enabled: bool,
+) -> Callable[..., BackboneOutput]:
+    if not isinstance(model, nn.Module):
+        raise TypeError("Kimi-Audio model body must be a torch.nn.Module.")
+
+    def call(**kwargs: object) -> BackboneOutput:
+        kwargs["return_dict"] = True
+        output = call_kimi_body(
+            body,
+            checkpointed=should_checkpoint_kimi_body(model, enabled),
+            **kwargs,
+        )
+        return cast(BackboneOutput, output)
+
+    return call
+
+
+def _remove_output_head(model: object) -> None:
+    owner = _output_head_owner(model)
+    if owner is None:
+        return
+    setter = getattr(owner, "set_output_embeddings")
+    if not isinstance(owner, nn.Module):
+        setter(None)
+        return
+
+    input_getter = getattr(owner, "get_input_embeddings", None)
+    input_embeddings = input_getter() if callable(input_getter) else None
+    setter(None)
+    if getattr(owner, "get_output_embeddings")() is not None:
+        raise RuntimeError("Hugging Face backbone did not release its output head.")
+    if callable(input_getter) and input_getter() is not input_embeddings:
+        raise RuntimeError("removing the output head replaced the input embeddings.")
+
+
+def _output_head_owner(model: object) -> object | None:
+    candidates = tuple(model.modules()) if isinstance(model, nn.Module) else (model,)
+    for candidate in candidates:
+        getter = getattr(candidate, "get_output_embeddings", None)
+        setter = getattr(candidate, "set_output_embeddings", None)
+        if not callable(getter) or not callable(setter):
+            continue
+        if getter() is not None:
+            return candidate
+    return None
 
 
 def _path(root: object, path: str) -> object:
@@ -265,7 +452,7 @@ def _enable_layer_gradient_checkpointing(model: nn.Module) -> None:
         )
     gradient_checkpointing_func = partial(checkpoint, use_reentrant=False)
     for module in modules:
-        module._gradient_checkpointing_func = gradient_checkpointing_func
+        setattr(module, "_gradient_checkpointing_func", gradient_checkpointing_func)
         module.gradient_checkpointing = True
 
 
@@ -286,7 +473,7 @@ def _enable_input_require_grads(model: nn.Module) -> None:
 def _disable_cache(model: nn.Module) -> None:
     for module in model.modules():
         config = getattr(module, "config", None)
-        if hasattr(config, "use_cache"):
+        if config is not None and hasattr(config, "use_cache"):
             config.use_cache = False
 
 

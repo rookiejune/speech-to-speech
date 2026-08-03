@@ -438,7 +438,8 @@ def select_template(task: Task, index: Optional[int] = 0) -> str:
 
 def evaluation_template_index(index: Optional[int]) -> int:
     """Fixed index for reproducible eval/generation (``null`` -> ``0``)."""
-    return 0 if index is None else _index(index, name="evaluation template")
+    resolved = _index(index, name="evaluation template")
+    return 0 if resolved is None else resolved
 
 
 def format_instruction(

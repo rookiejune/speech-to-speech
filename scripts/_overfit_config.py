@@ -6,7 +6,6 @@ from typing import Type, Union
 from omegaconf import MISSING, DictConfig
 
 from speech_to_speech.datamodule.config import SpeechConfig
-from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.runtime import AudioSequenceLayout, Config as RuntimeConfig
@@ -111,7 +110,6 @@ class _OverfitConfig:
     repo_output_root: str = MISSING
     output_subdir: str = MISSING
     output_dir: str = MISSING
-    model: ModelConfig = field(default_factory=ModelConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     audio_sequence_layout: AudioSequenceLayout = MISSING
     datamodule: SpeechConfig = MISSING

@@ -25,7 +25,9 @@ from .bicodec import (
 )
 from .protocol import TokenGenerator
 from .service import generate_responses
+from .text import decode_response_text
 from .types import AudioOutput, Request, Result
+
 
 class TextPart(TypedDict):
     type: Literal["text"]
@@ -62,6 +64,7 @@ class ChatMessage(TypedDict):
     role: Literal["assistant"]
     content: str | None
     audio: AudioOutput | None
+    decode_error: NotRequired[dict[str, str]]
 
 
 class ChatChoice(TypedDict):
@@ -136,14 +139,18 @@ def completion_from_result(
     runtime: GenerationRuntime,
 ) -> ChatCompletion:
     task = _task(request)
-    content: str | None = None
-    if task.prediction_modality is PredictionModality.TEXT:
-        content = _decode_text(runtime, result["response_ids"])
+    content = decode_response_text(
+        runtime,
+        result["response_ids"],
+        prediction=task.prediction_modality,
+    )
     message = ChatMessage(
         role="assistant",
         content=content,
         audio=result["audio"],
     )
+    if "decode_error" in result:
+        message["decode_error"] = result["decode_error"]
     return ChatCompletion(choices=[ChatChoice(index=0, message=message)])
 
 
@@ -297,16 +304,6 @@ def _token_ids(text: str, runtime: GenerationRuntime) -> Tensor:
     if values.dim() != 1:
         raise ValueError("text tokenizer must return a 1D token sequence.")
     return values
-
-
-def _decode_text(runtime: GenerationRuntime, token_ids: Tensor) -> str:
-    if token_ids.dim() != 1:
-        raise ValueError("response token ids must be one-dimensional.")
-    if token_ids.numel():
-        local_ids = runtime.layout.to_local(token_ids).detach().cpu().tolist()
-    else:
-        local_ids = []
-    return runtime.text_tokenizer.decode(local_ids, skip_special_tokens=True)
 
 
 def _encode_audio(part: AudioPart, runtime: GenerationRuntime) -> SemanticAcousticCodes | Tensor:

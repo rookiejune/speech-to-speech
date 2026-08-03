@@ -6,6 +6,7 @@ from anytrain.lightning import (
     GradientComparison,
     GradientProbe,
     GradientProbeLoggerCallback,
+    gradient_loss_groups,
 )
 from lightning import LightningModule, Trainer
 
@@ -23,6 +24,7 @@ class GradLogger(GradientProbeLoggerCallback):
         super().__init__(
             comparisons,
             probes,
+            loss_groups=gradient_loss_groups,
             every_n_steps=every_n_steps,
             eps=eps,
         )

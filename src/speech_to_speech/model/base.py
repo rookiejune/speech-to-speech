@@ -6,7 +6,7 @@ from typing import Optional, cast
 
 import torch
 from anydataset.types import Modality
-from anytrain.module.idspace import Embedding
+from anytrain.module.idspace import Embedding, Layout
 from peft import LoraConfig, inject_adapter_in_model
 from peft.utils.other import cast_mixed_precision_params
 from torch import nn
@@ -42,14 +42,14 @@ from .audio_output import (
     AudioOutputAdapterType,
     create_audio_output_adapter,
 )
-from .acoustic._config import AcousticConfig, AcousticNoneConfig
 from .embedding.audio import (
     create_semantic_audio_embedding,
     require_semantic_audio_embedding,
 )
 from .protocol import TokenModelRuntime
 from .toy import ToyConfig, create_toy_backbone
-from ..runtime.types import Backbone, BackboneOutput
+from ..prediction import PredictionModality
+from ..runtime.types import Backbone, BackboneOutput, BackboneReadout
 
 
 @dataclass
@@ -63,7 +63,6 @@ class Config:
     )
     toy: Optional[ToyConfig] = None
     lora: Optional[LoraConfig] = None
-    acoustic: AcousticConfig = field(default_factory=AcousticNoneConfig)
 
 
 class Model(VocabularyHeadMixin, nn.Module):
@@ -176,6 +175,7 @@ class Model(VocabularyHeadMixin, nn.Module):
         attention_mask: torch.Tensor,
         output_hidden_states: bool,
         token_ids: torch.Tensor | None,
+        token_kind: str | None = None,
         modality: Modality | None,
         past_key_values: Cache | None,
         use_cache: bool,
@@ -187,12 +187,20 @@ class Model(VocabularyHeadMixin, nn.Module):
             raise ValueError(
                 "generation token ids and modality cannot both be provided."
             )
+        if token_kind is not None and token_ids is None:
+            raise ValueError("generation token kind requires explicit token ids.")
+        readout_modality = _generation_readout_modality(
+            modality,
+            token_kind,
+            has_modality_readouts=self._backbone_body.has_modality_readouts,
+        )
         backbone_output = self._backbone_output(
             input_ids,
             attention_mask=attention_mask,
             audio_input_positions=audio_input_positions,
             past_key_values=past_key_values,
             use_cache=use_cache,
+            modality=readout_modality,
         )
         hidden_states = backbone_output.last_hidden_state
         last_hidden_state = hidden_states[:, -1:]
@@ -210,6 +218,7 @@ class Model(VocabularyHeadMixin, nn.Module):
             logits, audio_past = self.selected_logits(
                 last_hidden_state,
                 token_ids,
+                token_kind=token_kind,
                 attention_mask=step_mask,
                 past_key_values=audio_output_past,
                 use_cache=use_cache,
@@ -255,14 +264,44 @@ class Model(VocabularyHeadMixin, nn.Module):
         *,
         attention_mask: torch.Tensor | None = None,
         audio_input_positions: torch.Tensor | None = None,
+        embedding_blocks: frozenset[str] | None = None,
+        validate_input: bool = True,
+        validate_audio_input_positions: bool = True,
+        prediction: PredictionModality | None = None,
     ) -> torch.Tensor:
         """Encode one training batch without constructing vocabulary logits."""
+        modality = _prediction_readout_modality(
+            prediction,
+            has_modality_readouts=self._backbone_body.has_modality_readouts,
+        )
         return self._backbone_output(
             input_ids,
             attention_mask=attention_mask,
             audio_input_positions=audio_input_positions,
+            embedding_blocks=embedding_blocks,
+            validate_input=validate_input,
+            validate_audio_input_positions=validate_audio_input_positions,
             use_cache=False,
+            modality=modality,
         ).last_hidden_state
+
+    def training_input_hints(
+        self,
+        input_ids: torch.Tensor,
+        audio_input_positions: torch.Tensor | None,
+    ) -> tuple[frozenset[str], bool] | None:
+        """Validate CPU batch routing once before it is asynchronously transferred."""
+        if input_ids.device.type != "cpu":
+            return None
+        blocks = self.token_embedding.selected_blocks(input_ids)
+        if audio_input_positions is None:
+            return blocks, True
+        _validate_audio_input_positions(
+            input_ids,
+            audio_input_positions,
+            self.runtime.codec_audio_range,
+        )
+        return blocks, True
 
     def _backbone_output(
         self,
@@ -274,10 +313,20 @@ class Model(VocabularyHeadMixin, nn.Module):
         use_cache: bool = False,
         position_ids: torch.Tensor | None = None,
         cache_position: torch.Tensor | None = None,
+        embedding_blocks: frozenset[str] | None = None,
+        validate_input: bool = True,
+        validate_audio_input_positions: bool = True,
+        modality: Modality | None = None,
     ) -> BackboneOutputView:
         if input_ids.dim() != 2:
             raise ValueError("input_ids must have shape [batch, sequence].")
-        inputs_embeds = self._input_embedding(input_ids, audio_input_positions)
+        inputs_embeds = self._input_embedding(
+            input_ids,
+            audio_input_positions,
+            embedding_blocks=embedding_blocks,
+            validate_input=validate_input,
+            validate_audio_input_positions=validate_audio_input_positions,
+        )
 
         return self._backbone_body.encode(
             inputs_embeds=inputs_embeds,
@@ -287,6 +336,7 @@ class Model(VocabularyHeadMixin, nn.Module):
             use_cache=use_cache,
             position_ids=position_ids,
             cache_position=cache_position,
+            modality=modality,
         )
 
     def generate_tokens(
@@ -315,6 +365,7 @@ class Model(VocabularyHeadMixin, nn.Module):
             stop_token_id=stop_token_id,
             generation_modality=generation_modality,
             allowed_token_ids=allowed_token_ids,
+            token_kind=_allowed_token_kind(allowed_token_ids, self.layout),
             do_sample=do_sample,
             use_cache=use_cache,
             collect_audio_condition=False,
@@ -347,6 +398,7 @@ class Model(VocabularyHeadMixin, nn.Module):
             stop_token_id=stop_token_id,
             generation_modality=generation_modality,
             allowed_token_ids=allowed_token_ids,
+            token_kind=_allowed_token_kind(allowed_token_ids, self.layout),
             do_sample=do_sample,
             use_cache=use_cache,
             collect_audio_condition=False,
@@ -437,13 +489,22 @@ class Model(VocabularyHeadMixin, nn.Module):
         self,
         input_ids: torch.Tensor,
         audio_input_positions: torch.Tensor | None = None,
+        *,
+        embedding_blocks: frozenset[str] | None = None,
+        validate_input: bool = True,
+        validate_audio_input_positions: bool = True,
     ) -> torch.Tensor:
-        output = self.token_embedding(input_ids)
+        output = self.token_embedding(
+            input_ids,
+            selected_blocks=embedding_blocks,
+            validate=validate_input,
+        )
         if self.audio_input_adapter is not None and audio_input_positions is not None:
             output = self._overlay_audio_input(
                 output,
                 input_ids,
                 audio_input_positions,
+                validate=validate_audio_input_positions,
             )
         return output
 
@@ -452,26 +513,21 @@ class Model(VocabularyHeadMixin, nn.Module):
         output: torch.Tensor,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        *,
+        validate: bool = True,
     ) -> torch.Tensor:
-        if positions.dim() != 2 or positions.size(0) != input_ids.size(0):
-            raise ValueError("audio_input_positions must have shape [batch, frames].")
-        if not is_signed_integer_dtype(positions.dtype):
-            raise TypeError("audio_input_positions must use a signed integer dtype.")
-        if positions.device != input_ids.device:
-            raise ValueError("audio_input_positions must be on the input device.")
+        if validate:
+            _validate_audio_input_positions(
+                input_ids,
+                positions,
+                self.runtime.codec_audio_range,
+            )
         if positions.numel() == 0:
             return output
 
         valid = positions.ge(0)
         safe_positions = positions.clamp(0, input_ids.size(1) - 1)
         selected_ids = input_ids.gather(1, safe_positions)
-        codec_start, codec_end = self.runtime.codec_audio_range
-        if bool((valid & (selected_ids < codec_start)).any()) or bool(
-            (valid & (selected_ids >= codec_end)).any()
-        ):
-            raise ValueError(
-                "audio_input_positions must point to visible codec audio payload tokens."
-            )
         audio_start, _ = self.layout.blocks["audio"]
         audio_embedding = require_semantic_audio_embedding(
             self.token_embedding.embeddings["audio"],
@@ -492,6 +548,31 @@ class Model(VocabularyHeadMixin, nn.Module):
             dtype=output.dtype
         )
         return output
+
+
+def _validate_audio_input_positions(
+    input_ids: torch.Tensor,
+    positions: torch.Tensor,
+    codec_audio_range: tuple[int, int],
+) -> None:
+    if positions.dim() != 2 or positions.size(0) != input_ids.size(0):
+        raise ValueError("audio_input_positions must have shape [batch, frames].")
+    if not is_signed_integer_dtype(positions.dtype):
+        raise TypeError("audio_input_positions must use a signed integer dtype.")
+    if positions.device != input_ids.device:
+        raise ValueError("audio_input_positions must be on the input device.")
+    if positions.numel() == 0:
+        return
+    valid = positions.ge(0)
+    safe_positions = positions.clamp(0, input_ids.size(1) - 1)
+    selected_ids = input_ids.gather(1, safe_positions)
+    codec_start, codec_end = codec_audio_range
+    if bool((valid & (selected_ids < codec_start)).any()) or bool(
+        (valid & (selected_ids >= codec_end)).any()
+    ):
+        raise ValueError(
+            "audio_input_positions must point to visible codec audio payload tokens."
+        )
 
 
 def _backbone(
@@ -657,7 +738,9 @@ def _backbone_adapter(
         BackboneEncoder,
         BackboneBodyAdapter(
             cast(Callable[..., BackboneOutput], body),
-            readout=str(getattr(runtime, "backbone_readout", "last_hidden_state")),
+            readout=BackboneReadout.from_path(
+                getattr(runtime, "backbone_readout", "last_hidden_state")
+            ),
             supports_cache_position=bool(
                 getattr(runtime, "backbone_supports_cache_position", True)
             ),
@@ -766,3 +849,68 @@ def _aligned_audio_output_adapter(
             dropout=configured.dropout,
         )
     return configured
+
+
+def _allowed_token_kind(
+    token_ids: Sequence[int] | torch.Tensor | None,
+    layout: Layout,
+) -> str | None:
+    """Classify CPU constrained ids once for the per-token output-head route."""
+    if token_ids is None:
+        return None
+    if isinstance(token_ids, torch.Tensor) and token_ids.device.type != "cpu":
+        return None
+    ids = torch.as_tensor(token_ids, dtype=torch.long)
+    if ids.dim() != 1 or ids.numel() == 0:
+        return None
+    text_start, text_end = layout.blocks["text"]
+    audio_start, audio_end = layout.blocks["audio"]
+    text = ids.ge(text_start) & ids.lt(text_end)
+    audio = ids.ge(audio_start) & ids.lt(audio_end)
+    if not bool((text | audio).all()):
+        return None
+    if bool(text.all()):
+        return "text"
+    if bool(audio.all()):
+        return "audio"
+    return "mixed"
+
+
+def _prediction_readout_modality(
+    prediction: PredictionModality | None,
+    *,
+    has_modality_readouts: bool,
+) -> Modality | None:
+    if prediction is None:
+        return None
+    if not isinstance(prediction, PredictionModality):
+        raise TypeError("prediction must be a PredictionModality or None.")
+    modalities = prediction.supervised_modalities()
+    if len(modalities) == 1:
+        return next(iter(modalities))
+    if has_modality_readouts:
+        raise ValueError(
+            "mixed prediction modalities require a shared backbone readout; "
+            "modality-specific readouts only support homogeneous text or audio batches."
+        )
+    return None
+
+
+def _generation_readout_modality(
+    modality: Modality | None,
+    token_kind: str | None,
+    *,
+    has_modality_readouts: bool,
+) -> Modality | None:
+    if modality is not None:
+        return modality
+    if token_kind == Modality.TEXT.value:
+        return Modality.TEXT
+    if token_kind == Modality.AUDIO.value:
+        return Modality.AUDIO
+    if token_kind == "mixed" and has_modality_readouts:
+        raise ValueError(
+            "mixed generation tokens require a shared backbone readout; "
+            "modality-specific readouts only support homogeneous text or audio generation."
+        )
+    return None

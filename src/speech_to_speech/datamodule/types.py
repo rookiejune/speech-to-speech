@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from collections.abc import Iterator, Mapping
 from typing import TypeVar, TypedDict, Union
@@ -140,7 +140,9 @@ class RawSpeech:
         if not is_signed_integer_dtype(self.text_token_ids.dtype):
             raise TypeError("raw speech text_token_ids must use signed integer dtype.")
         if self.waveform.dim() not in {1, 2}:
-            raise ValueError("raw speech waveform must have shape [time] or [channel, time].")
+            raise ValueError(
+                "raw speech waveform must have shape [time] or [channel, time]."
+            )
         if self.waveform.numel() == 0:
             raise ValueError("raw speech waveform must not be empty.")
         if isinstance(self.sample_rate, bool) or not isinstance(self.sample_rate, int):
@@ -173,7 +175,9 @@ class SpeechTaskSample:
         if not isinstance(self.task, Task):
             raise TypeError("speech task sample task must be a Task.")
         if not isinstance(self.prediction, PredictionModality):
-            raise TypeError("speech task sample prediction must be a PredictionModality.")
+            raise TypeError(
+                "speech task sample prediction must be a PredictionModality."
+            )
         if self.prediction not in self.task.allowed_predictions:
             raise ValueError(
                 f"{self.task.value} does not allow prediction={self.prediction.value}."
@@ -223,7 +227,9 @@ class RawSpeechBatch:
     def __post_init__(self) -> None:
         if not self.samples:
             raise ValueError("RawSpeechBatch requires at least one sample.")
-        if isinstance(self.pad_token_id, bool) or not isinstance(self.pad_token_id, int):
+        if isinstance(self.pad_token_id, bool) or not isinstance(
+            self.pad_token_id, int
+        ):
             raise TypeError("RawSpeechBatch pad_token_id must be an integer.")
         if (
             isinstance(self.interleave_audio_frames, bool)
@@ -448,12 +454,14 @@ class ModelSample:
             if positions.numel() == 0:
                 raise ValueError("model sample must contain at least one target token.")
             generation_prompt_length = int(positions[0].item())
-        if (
-            isinstance(generation_prompt_length, bool)
-            or not isinstance(generation_prompt_length, int)
+        if isinstance(generation_prompt_length, bool) or not isinstance(
+            generation_prompt_length, int
         ):
             raise TypeError("generation_prompt_length must be an integer or None.")
-        if generation_prompt_length < 1 or generation_prompt_length >= input_ids.numel():
+        if (
+            generation_prompt_length < 1
+            or generation_prompt_length >= input_ids.numel()
+        ):
             raise ValueError(
                 "generation_prompt_length must leave a non-empty generated response."
             )
@@ -530,6 +538,15 @@ class _BatchGenerationFields:
     audio_contexts: tuple[SemanticAcousticCodes | None, ...]
 
 
+@dataclass(frozen=True)
+class _BatchUnitCounts:
+    tokens: float
+    padded_tokens: float
+    frames: float | None
+    padded_frames: float | None
+    audio_seconds: float
+
+
 @dataclass
 class ModelBatch:
     input_ids: Tensor
@@ -542,6 +559,17 @@ class ModelBatch:
     generation_prompt_lengths: Tensor | None = None
     audio_input_positions: Tensor | None = None
     audio_contexts: tuple[SemanticAcousticCodes | None, ...] | None = None
+    _unit_counts: _BatchUnitCounts = field(init=False, repr=False)
+    _embedding_blocks: frozenset[str] | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _audio_input_positions_validated: bool = field(
+        init=False,
+        default=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         batch_size = _validate_batch_tensors(
@@ -576,6 +604,12 @@ class ModelBatch:
             minimum_position=1,
         )
         _validate_batch_target_labels(self.token_labels, self.acoustic_target)
+        self._unit_counts = _batch_unit_counts(
+            self.input_ids,
+            self.pad_token_id,
+            self.acoustic_target,
+            fields.audio_seconds,
+        )
 
     @property
     def prediction_modality(self) -> PredictionModality:
@@ -608,10 +642,7 @@ class ModelBatch:
 
     @cached_property
     def acoustic_target_mask(self) -> Tensor | None:
-        if self.acoustic_target is None:
-            return None
-        code_mask = (self.acoustic_target["codes"] != ACOUSTIC_PAD_ID).all(dim=-1)
-        return (self.acoustic_target["token_positions"] >= 0) & code_mask
+        return _acoustic_target_mask(self.acoustic_target)
 
     def pin_memory(self) -> ModelBatch:
         fields = self._generation_fields()
@@ -629,23 +660,80 @@ class ModelBatch:
             ),
         )
 
-    def to(self, device: torch.device) -> ModelBatch:
+    def to(
+        self,
+        device: torch.device,
+        *,
+        non_blocking: bool = False,
+    ) -> ModelBatch:
         fields = self._generation_fields()
         return self._replace(
-            input_ids=self.input_ids.to(device=device),
-            token_labels=self.token_labels.to(device=device),
-            acoustic_target=_to_target(self.acoustic_target, device),
+            input_ids=self.input_ids.to(device=device, non_blocking=non_blocking),
+            token_labels=self.token_labels.to(
+                device=device,
+                non_blocking=non_blocking,
+            ),
+            acoustic_target=_to_target(
+                self.acoustic_target,
+                device,
+                non_blocking=non_blocking,
+            ),
             fields=_BatchGenerationFields(
-                audio_seconds=fields.audio_seconds.to(device=device),
-                generation_prompt_lengths=fields.generation_prompt_lengths.to(
-                    device=device
+                audio_seconds=fields.audio_seconds.to(
+                    device=device,
+                    non_blocking=non_blocking,
                 ),
-                audio_input_positions=_to_optional(fields.audio_input_positions, device),
+                generation_prompt_lengths=fields.generation_prompt_lengths.to(
+                    device=device,
+                    non_blocking=non_blocking,
+                ),
+                audio_input_positions=_to_optional(
+                    fields.audio_input_positions,
+                    device,
+                    non_blocking=non_blocking,
+                ),
                 audio_contexts=tuple(
-                    _to_audio_context(value, device) for value in fields.audio_contexts
+                    _to_audio_context(
+                        value,
+                        device,
+                        non_blocking=non_blocking,
+                    )
+                    for value in fields.audio_contexts
                 ),
             ),
         )
+
+    def training_units(self, unit: str) -> tuple[float, float | None]:
+        counts = self._unit_counts
+        if unit == "tokens":
+            return counts.tokens, counts.padded_tokens
+        if unit == "frames":
+            if counts.frames is None:
+                raise ValueError("frames require an acoustic target mask.")
+            return counts.frames, counts.padded_frames
+        if unit == "audio_seconds":
+            return counts.audio_seconds, None
+        raise ValueError(f"unsupported training unit: {unit!r}.")
+
+    @property
+    def embedding_blocks(self) -> frozenset[str] | None:
+        """Exact id-space blocks validated before this batch moved to a device."""
+        return self._embedding_blocks
+
+    @property
+    def audio_input_positions_validated(self) -> bool:
+        return self._audio_input_positions_validated
+
+    def set_embedding_hints(
+        self,
+        blocks: frozenset[str],
+        *,
+        audio_input_positions_validated: bool,
+    ) -> None:
+        if not blocks:
+            raise ValueError("embedding block hints must not be empty.")
+        self._embedding_blocks = blocks
+        self._audio_input_positions_validated = audio_input_positions_validated
 
     def row(self, index: int) -> ModelBatch:
         if isinstance(index, bool) or not isinstance(index, int):
@@ -690,18 +778,35 @@ class ModelBatch:
         tasks: list[Task] | None = None,
         predictions: list[PredictionModality] | None = None,
     ) -> ModelBatch:
-        return ModelBatch(
-            input_ids=input_ids,
-            token_labels=token_labels,
-            acoustic_target=acoustic_target,
-            tasks=list(self.tasks) if tasks is None else tasks,
-            predictions=list(self.predictions) if predictions is None else predictions,
-            pad_token_id=self.pad_token_id,
-            audio_seconds=fields.audio_seconds,
-            generation_prompt_lengths=fields.generation_prompt_lengths,
-            audio_input_positions=fields.audio_input_positions,
-            audio_contexts=fields.audio_contexts,
+        result = ModelBatch.__new__(ModelBatch)
+        result.input_ids = input_ids
+        result.token_labels = token_labels
+        result.acoustic_target = acoustic_target
+        result.tasks = list(self.tasks) if tasks is None else tasks
+        result.predictions = (
+            list(self.predictions) if predictions is None else predictions
         )
+        result.pad_token_id = self.pad_token_id
+        result.audio_seconds = fields.audio_seconds
+        result.generation_prompt_lengths = fields.generation_prompt_lengths
+        result.audio_input_positions = fields.audio_input_positions
+        result.audio_contexts = fields.audio_contexts
+        if tasks is None and predictions is None:
+            result._unit_counts = self._unit_counts
+            result._embedding_blocks = self._embedding_blocks
+            result._audio_input_positions_validated = (
+                self._audio_input_positions_validated
+            )
+        else:
+            result._unit_counts = _batch_unit_counts(
+                input_ids,
+                self.pad_token_id,
+                acoustic_target,
+                fields.audio_seconds,
+            )
+            result._embedding_blocks = None
+            result._audio_input_positions_validated = False
+        return result
 
 
 TrainInput = Union[ModelBatch, RawSpeechBatch]
@@ -759,9 +864,7 @@ class FusedBatch:
                     "FusedBatch loader_names must align with microbatches."
                 )
             if any(not isinstance(name, str) or not name for name in self.loader_names):
-                raise TypeError(
-                    "FusedBatch loader_names must be non-empty strings."
-                )
+                raise TypeError("FusedBatch loader_names must be non-empty strings.")
         if self.loss_weights is not None:
             if len(self.loss_weights) != len(self.batches):
                 raise ValueError(
@@ -772,7 +875,9 @@ class FusedBatch:
                 for weight in self.loss_weights
             ):
                 raise TypeError("FusedBatch loss_weights must contain numbers.")
-            if any(not math.isfinite(weight) or weight < 0 for weight in self.loss_weights):
+            if any(
+                not math.isfinite(weight) or weight < 0 for weight in self.loss_weights
+            ):
                 raise ValueError(
                     "FusedBatch loss_weights must be finite and non-negative."
                 )
@@ -817,16 +922,24 @@ def _validate_batch_tasks(
         raise ValueError("ModelBatch predictions must provide one value per row.")
     if any(not isinstance(task, Task) for task in tasks):
         raise TypeError("ModelBatch tasks must contain Task values.")
-    if any(not isinstance(prediction, PredictionModality) for prediction in predictions):
-        raise TypeError("ModelBatch predictions must contain PredictionModality values.")
+    if any(
+        not isinstance(prediction, PredictionModality) for prediction in predictions
+    ):
+        raise TypeError(
+            "ModelBatch predictions must contain PredictionModality values."
+        )
     for task, prediction in zip(tasks, predictions):
         if prediction not in task.allowed_predictions:
-            raise ValueError(f"{task.value} does not allow prediction={prediction.value}.")
+            raise ValueError(
+                f"{task.value} does not allow prediction={prediction.value}."
+            )
     signatures = {
         (task.source_layout, prediction) for task, prediction in zip(tasks, predictions)
     }
     if len(signatures) != 1:
-        raise ValueError("all samples in a batch must use the same execution signature.")
+        raise ValueError(
+            "all samples in a batch must use the same execution signature."
+        )
     _, prediction = next(iter(signatures))
     return prediction
 
@@ -868,7 +981,9 @@ def _checked_batch_generation_fields(
     if audio_seconds is None:
         raise RuntimeError("ModelBatch audio_seconds is unavailable after validation.")
     if generation_prompt_lengths is None or audio_contexts is None:
-        raise RuntimeError("ModelBatch generation fields are unavailable after validation.")
+        raise RuntimeError(
+            "ModelBatch generation fields are unavailable after validation."
+        )
     return _BatchGenerationFields(
         audio_seconds=audio_seconds,
         generation_prompt_lengths=generation_prompt_lengths,
@@ -902,8 +1017,13 @@ def _pin_optional(value: Tensor | None) -> Tensor | None:
     return None if value is None else value.pin_memory()
 
 
-def _to_optional(value: Tensor | None, device: torch.device) -> Tensor | None:
-    return None if value is None else value.to(device=device)
+def _to_optional(
+    value: Tensor | None,
+    device: torch.device,
+    *,
+    non_blocking: bool,
+) -> Tensor | None:
+    return None if value is None else value.to(device=device, non_blocking=non_blocking)
 
 
 def _optional_row(value: Tensor | None, index: int) -> Tensor | None:
@@ -933,6 +1053,30 @@ def _target(values: list[AcousticTarget | None]) -> AcousticTarget | None:
     )
 
 
+def _acoustic_target_mask(value: AcousticTarget | None) -> Tensor | None:
+    if value is None:
+        return None
+    code_mask = (value["codes"] != ACOUSTIC_PAD_ID).all(dim=-1)
+    return (value["token_positions"] >= 0) & code_mask
+
+
+def _batch_unit_counts(
+    input_ids: Tensor,
+    pad_token_id: int,
+    acoustic_target: AcousticTarget | None,
+    audio_seconds: Tensor,
+) -> _BatchUnitCounts:
+    token_mask = input_ids != pad_token_id
+    frame_mask = _acoustic_target_mask(acoustic_target)
+    return _BatchUnitCounts(
+        tokens=float(token_mask.sum().item()),
+        padded_tokens=float(token_mask.numel()),
+        frames=(None if frame_mask is None else float(frame_mask.sum().item())),
+        padded_frames=(None if frame_mask is None else float(frame_mask.numel())),
+        audio_seconds=float(audio_seconds.sum().item()),
+    )
+
+
 def _optional_tensor(
     values: list[Tensor | None],
     *,
@@ -957,13 +1101,21 @@ def _pin_target(value: AcousticTarget | None) -> AcousticTarget | None:
 def _to_target(
     value: AcousticTarget | None,
     device: torch.device,
+    *,
+    non_blocking: bool,
 ) -> AcousticTarget | None:
     if value is None:
         return None
     return AcousticTarget(
-        semantic_codes=value["semantic_codes"].to(device=device),
-        codes=value["codes"].to(device=device),
-        token_positions=value["token_positions"].to(device=device),
+        semantic_codes=value["semantic_codes"].to(
+            device=device,
+            non_blocking=non_blocking,
+        ),
+        codes=value["codes"].to(device=device, non_blocking=non_blocking),
+        token_positions=value["token_positions"].to(
+            device=device,
+            non_blocking=non_blocking,
+        ),
     )
 
 
@@ -978,16 +1130,24 @@ def _target_row(value: AcousticTarget | None, index: int) -> AcousticTarget | No
 
 
 def _audio_seconds(samples: list[ModelSample]) -> Tensor:
-    return samples[0].request["prompt_ids"].new_tensor(
-        [sample.labels.audio_seconds for sample in samples],
-        dtype=torch.float32,
+    return (
+        samples[0]
+        .request["prompt_ids"]
+        .new_tensor(
+            [sample.labels.audio_seconds for sample in samples],
+            dtype=torch.float32,
+        )
     )
 
 
 def _sample_prompt_lengths(samples: list[ModelSample]) -> Tensor:
-    return samples[0].request["prompt_ids"].new_tensor(
-        [sample.request["prompt_ids"].numel() for sample in samples],
-        dtype=torch.long,
+    return (
+        samples[0]
+        .request["prompt_ids"]
+        .new_tensor(
+            [sample.request["prompt_ids"].numel() for sample in samples],
+            dtype=torch.long,
+        )
     )
 
 
@@ -996,7 +1156,9 @@ def _generation_prompt_lengths(token_labels: Tensor) -> Tensor:
     for labels in token_labels:
         positions = labels.ne(-100).nonzero(as_tuple=False)
         if positions.numel() == 0:
-            raise ValueError("each token label row must contain at least one target token.")
+            raise ValueError(
+                "each token label row must contain at least one target token."
+            )
         values.append(int(positions[0].item()))
     return token_labels.new_tensor(values, dtype=torch.long)
 
@@ -1039,7 +1201,9 @@ def _validate_batch_audio_input_positions(
     for row in value:
         valid = row[row.ge(0)]
         if valid.numel() != torch.unique(valid).numel():
-            raise ValueError("ModelBatch audio_input_positions must not repeat positions.")
+            raise ValueError(
+                "ModelBatch audio_input_positions must not repeat positions."
+            )
 
 
 def _validate_audio_context(value: SemanticAcousticCodes | None) -> None:
@@ -1054,7 +1218,9 @@ def _validate_audio_context(value: SemanticAcousticCodes | None) -> None:
                 f"audio context {name} codes must have shape [units, codebooks]."
             )
         if not is_signed_integer_dtype(codes.dtype):
-            raise TypeError(f"audio context {name} codes must use a signed integer dtype.")
+            raise TypeError(
+                f"audio context {name} codes must use a signed integer dtype."
+            )
 
 
 def _validate_audio_contexts(
@@ -1081,12 +1247,14 @@ def _pin_audio_context(
 def _to_audio_context(
     value: SemanticAcousticCodes | None,
     device: torch.device,
+    *,
+    non_blocking: bool,
 ) -> SemanticAcousticCodes | None:
     if value is None:
         return None
     return SemanticAcousticCodes(
-        semantic=value.semantic.to(device=device),
-        acoustic=value.acoustic.to(device=device),
+        semantic=value.semantic.to(device=device, non_blocking=non_blocking),
+        acoustic=value.acoustic.to(device=device, non_blocking=non_blocking),
     )
 
 
@@ -1133,11 +1301,13 @@ def _validate_sample(sample: ModelSample, pad_token_id: int) -> None:
         if positions.dim() != 1:
             raise ValueError("sample audio_input_positions must have shape [frames].")
         if not is_signed_integer_dtype(positions.dtype):
-            raise TypeError("sample audio_input_positions must use a signed integer dtype.")
-        if bool((positions < 0).any()) or bool(
-            (positions >= input_ids.numel()).any()
-        ):
-            raise ValueError("sample audio_input_positions must be valid sequence positions.")
+            raise TypeError(
+                "sample audio_input_positions must use a signed integer dtype."
+            )
+        if bool((positions < 0).any()) or bool((positions >= input_ids.numel()).any()):
+            raise ValueError(
+                "sample audio_input_positions must be valid sequence positions."
+            )
         if positions.numel() != torch.unique(positions).numel():
             raise ValueError("sample audio_input_positions must not repeat positions.")
     _validate_audio_context(sample.request["audio_context"])

@@ -32,6 +32,31 @@ class AudioOutputAdapterTest(unittest.TestCase):
         )
         self.assertTrue(torch.isfinite(output).all())
 
+    def test_pointwise_selection_projects_only_supervised_rows(self) -> None:
+        adapter = create_audio_output_adapter(
+            AudioOutputAdapterConfig(type=AudioOutputAdapterType.MLP),
+            in_features=4,
+            out_features=6,
+        )
+        hidden = torch.randn(2, 4, 4, dtype=torch.bfloat16)
+        selection = torch.tensor(
+            [[False, True, False, True], [False, False, True, False]]
+        )
+        full, _ = adapter(hidden)
+        input_shapes: list[torch.Size] = []
+        handle = adapter.adapter.register_forward_pre_hook(
+            lambda _module, args: input_shapes.append(args[0].shape)
+        )
+
+        try:
+            selected, past = adapter(hidden, selection_mask=selection)
+        finally:
+            handle.remove()
+
+        self.assertIsNone(past)
+        self.assertEqual(input_shapes, [torch.Size((3, 4))])
+        torch.testing.assert_close(selected, full[selection])
+
     def test_none_requires_matching_dimensions(self) -> None:
         adapter = create_audio_output_adapter(
             AudioOutputAdapterConfig(type=AudioOutputAdapterType.NONE),
@@ -105,6 +130,34 @@ class AudioOutputAdapterTest(unittest.TestCase):
             steps.append(step)
         cached = torch.cat(steps, dim=1)
         torch.testing.assert_close(cached, full, atol=1e-5, rtol=1e-5)
+
+    def test_transformer_selection_preserves_full_sequence_context(self) -> None:
+        adapter = create_audio_output_adapter(
+            AudioOutputAdapterConfig(
+                type=AudioOutputAdapterType.TRANSFORMER,
+                layers=1,
+                heads=2,
+                ffn_ratio=2.0,
+            ),
+            in_features=8,
+            out_features=8,
+        ).eval()
+        hidden = torch.randn(2, 4, 8)
+        attention = torch.tensor(
+            [[True, True, True, False], [True, True, False, False]]
+        )
+        selection = torch.tensor(
+            [[False, True, True, False], [True, False, False, False]]
+        )
+
+        full, _ = adapter(hidden, attention_mask=attention)
+        selected, _ = adapter(
+            hidden,
+            attention_mask=attention,
+            selection_mask=selection,
+        )
+
+        torch.testing.assert_close(selected, full[selection])
 
     def test_transformer_batch_select_past(self) -> None:
         adapter = create_audio_output_adapter(

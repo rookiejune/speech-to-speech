@@ -38,6 +38,7 @@ class TextLoader:
             tasks=tasks,
         )
         self.max_samples = max_samples
+        self.num_workers = config.dataloader.num_workers
         self._train_dataset: Dataset[RawSample] | IterableAnyDataset | None = None
 
     def setup(self, stage: str | None = None) -> None:
@@ -71,7 +72,7 @@ class TextLoader:
                 "text loader setup() must run before building a dataloader."
             )
         loader = self.config.dataloader
-        num_workers = loader.num_workers
+        num_workers = self.num_workers
         if not isinstance(self.collator.runtime, TextRuntimeSnapshot):
             self.collator.runtime = cast(
                 TextRuntime,

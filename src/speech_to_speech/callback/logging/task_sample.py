@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Any, Protocol, TypedDict, cast
 
 import torch
@@ -14,7 +15,7 @@ from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 from torch import Tensor
 
-from ...generation import Request, Result
+from ...generation import Request, Result, decode_response_text
 from ...generation.batch import requests_from_batch
 from ...generation.decode import decode_reference_codes
 from ...generation.eval.acoustic import reference_audio
@@ -102,10 +103,10 @@ class _LoggingRuntime(Protocol):
     @property
     def codec_audio_range(self) -> tuple[int, int]: ...
 
-    @property
+    @cached_property
     def text_tokenizer(self) -> TextTokenizer: ...
 
-    @property
+    @cached_property
     def layout(self) -> Layout: ...
 
 
@@ -450,6 +451,19 @@ def _log_generation_payload(
 ) -> str | None:
     audio = context.result["audio"]
     decode_error = context.result.get("decode_error")
+    generated_text = decode_response_text(
+        context.datamodule.runtime,
+        context.result["response_ids"],
+        prediction=prediction,
+    )
+    if generated_text is not None:
+        target_text = _target_text(
+            context.sample,
+            context.request["task"],
+            prediction,
+        )
+        if target_text is not None:
+            metrics.update(text_metrics(target_text, generated_text))
     if audio is None:
         return _log_text_or_partial_audio(
             context,
@@ -457,6 +471,7 @@ def _log_generation_payload(
             prediction,
             metrics,
             decode_error,
+            generated_text,
         )
     metrics["generation/stopped_without_eoa"] = float(
         result_metadata["stopped_without_eoa"]
@@ -482,7 +497,7 @@ def _log_generation_payload(
             ),
         )
     )
-    return None
+    return generated_text
 
 
 def _log_text_or_partial_audio(
@@ -491,6 +506,7 @@ def _log_text_or_partial_audio(
     prediction: PredictionModality,
     metrics: dict[str, float],
     decode_error: Mapping[str, str] | None,
+    generated_text: str | None,
 ) -> str | None:
     if prediction.supervises_audio:
         metrics["generation/stopped_without_eoa"] = float(
@@ -510,21 +526,9 @@ def _log_text_or_partial_audio(
                 context.tag,
                 context.step,
             )
-        if prediction.supervises_text:
-            return _decode_chat_template(
-                context.datamodule,
-                context.result["response_ids"],
-            )
-        return None
+        return generated_text
     if not prediction.supervises_text:
         return None
-    generated_text = _generated_text(
-        context.datamodule,
-        context.result["response_ids"],
-    )
-    target_text = _target_text(context.sample, context.request["task"])
-    if generated_text is not None and target_text is not None:
-        metrics.update(text_metrics(target_text, generated_text))
     metrics["generation/stopped_without_eos"] = float(
         result_metadata["stopped_without_eos"]
     )
@@ -574,29 +578,41 @@ def _write_row_outputs(
             context.step,
             sample_rate=audio["sample_rate"],
         )
-    elif context.text_writer is not None:
-        _write_text_fallback(context, generated_text)
+    if context.text_writer is not None:
+        _write_text_outputs(
+            context,
+            generated_text,
+            include_ids=audio is None,
+        )
 
 
-def _write_text_fallback(
+def _write_text_outputs(
     context: _RowLogContext,
     generated_text: str | None,
+    *,
+    include_ids: bool,
 ) -> None:
     if context.text_writer is None:
         return
-    if _prediction_modality(context.request).supervises_text:
-        target_text = _target_text(context.sample, context.request["task"])
+    prediction = _prediction_modality(context.request)
+    if prediction.supervises_text:
+        target_text = _target_text(
+            context.sample,
+            context.request["task"],
+            prediction,
+        )
         if target_text is not None:
             context.text_writer.add_text(
                 f"{context.tag}/target",
                 target_text,
                 context.step,
             )
-    context.text_writer.add_text(
-        f"{context.tag}/generated_ids",
-        " ".join(str(value) for value in context.result["response_ids"].tolist()),
-        context.step,
-    )
+    if include_ids:
+        context.text_writer.add_text(
+            f"{context.tag}/generated_ids",
+            " ".join(str(value) for value in context.result["response_ids"].tolist()),
+            context.step,
+        )
     if generated_text is not None:
         context.text_writer.add_text(
             f"{context.tag}/generated",
@@ -653,7 +669,11 @@ def _sample_log_record(
     if response_ids is not None:
         response_ids = response_ids.detach().cpu()
         generation["response_ids"] = _token_sequence(response_ids)
-        decoded = generated_text or _decode_text(datamodule, response_ids)
+        decoded = (
+            generated_text
+            if generated_text is not None
+            else _decode_text(datamodule, response_ids)
+        )
         if decoded is not None:
             generation["text"] = decoded
     if metrics is not None:
@@ -804,10 +824,6 @@ def _sample_audio(
     return waveform[0].detach().cpu(), codec_sample_rate(runtime.codec)
 
 
-def _generated_text(datamodule: _DataModule, response_ids: Tensor) -> str | None:
-    return _decode_text(datamodule, response_ids)
-
-
 def _decode_chat_template(
     datamodule: _DataModule,
     token_ids: Tensor,
@@ -879,10 +895,14 @@ def _token_sequence(token_ids: Tensor) -> dict[str, Any]:
     }
 
 
-def _target_text(sample: types.Sample, task: Task) -> str | None:
-    if not task.prediction_modality.supervises_text:
+def _target_text(
+    sample: types.Sample,
+    task: Task,
+    prediction: PredictionModality,
+) -> str | None:
+    if not prediction.supervises_text:
         return None
-    if task.prediction_modality.is_mixed:
+    if prediction.is_mixed:
         # Mixed targets are Speech items; read aligned text from the DEFAULT/TARGET
         # text view when present.
         role = _text_role(sample, task)

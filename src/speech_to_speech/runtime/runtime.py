@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from functools import cached_property
 from numbers import Integral
 from pathlib import Path
@@ -77,7 +78,9 @@ class Config:
     backbone: str = "Qwen/Qwen3-0.6B"
     backbone_initialization: BackboneInitialization = BackboneInitialization.PRETRAINED
     backbone_trust_remote_code: bool = False
+    backbone_chat_template: Optional[str] = None
     backbone_readout: str = "last_hidden_state"
+    backbone_readouts: dict[str, str] = field(default_factory=dict)
     backbone_supports_cache_position: bool = True
     backbone_module: str = ""
     backbone_body: str = "base_model"
@@ -98,7 +101,12 @@ class Config:
             raise TypeError("backbone_initialization must be a BackboneInitialization.")
         if not isinstance(self.backbone_trust_remote_code, bool):
             raise TypeError("backbone_trust_remote_code must be a bool.")
+        _validate_optional_nonempty_string(
+            self.backbone_chat_template,
+            "backbone_chat_template",
+        )
         validate_backbone_readout(self.backbone_readout)
+        _validate_backbone_readouts(self.backbone_readouts)
         if not isinstance(self.backbone_supports_cache_position, bool):
             raise TypeError("backbone_supports_cache_position must be a bool.")
         _validate_path(self.backbone_module, "backbone_module")
@@ -195,6 +203,14 @@ class Runtime:
         return self.config.backbone_readout
 
     @property
+    def backbone_chat_template(self) -> str | None:
+        return self.config.backbone_chat_template
+
+    @property
+    def backbone_readouts(self) -> Mapping[str, str]:
+        return self.config.backbone_readouts
+
+    @property
     def backbone_supports_cache_position(self) -> bool:
         return self.config.backbone_supports_cache_position
 
@@ -217,7 +233,9 @@ class Runtime:
             path=self.config.backbone,
             initialization=self.config.backbone_initialization,
             trust_remote_code=self.config.backbone_trust_remote_code,
+            chat_template=self.config.backbone_chat_template,
             readout=self.config.backbone_readout,
+            readouts=self.config.backbone_readouts,
             supports_cache_position=self.config.backbone_supports_cache_position,
             module=self.config.backbone_module,
             body=self.config.backbone_body,
@@ -477,3 +495,21 @@ def _validate_path(value: object, name: str, *, allow_empty: bool = True) -> Non
     for part in value.split("."):
         if not part.isidentifier():
             raise ValueError(f"{name} must contain identifier path components.")
+
+
+def _validate_backbone_readouts(value: object) -> None:
+    if not isinstance(value, Mapping):
+        raise TypeError("backbone_readouts must be a mapping.")
+    for modality, readout in value.items():
+        if not isinstance(modality, str):
+            raise TypeError("backbone_readouts keys must be strings.")
+        if modality not in {Modality.TEXT.value, Modality.AUDIO.value}:
+            raise ValueError("backbone_readouts keys must be 'text' or 'audio'.")
+        validate_backbone_readout(readout)
+
+
+def _validate_optional_nonempty_string(value: object, name: str) -> None:
+    if value is not None and not isinstance(value, str):
+        raise TypeError(f"{name} must be a string or None.")
+    if value == "":
+        raise ValueError(f"{name} must not be empty.")

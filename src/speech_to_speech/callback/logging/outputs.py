@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, cast
 
 import torch
@@ -28,8 +29,14 @@ _OBJECTIVE_PREFIX = {
 _COUNT_KEYS = frozenset({"tokens", "text_tokens", "audio_tokens", "frames"})
 
 
+@dataclass
+class _PendingStat:
+    total: Tensor
+    weight: Tensor | None
+
+
 class OutputsLogger(LossItemLoggerCallback):
-    """Log per-task loss means and cumulative supervised token/frame counts."""
+    """Log cadence-window task means and cumulative supervised unit counts."""
 
     def __init__(self) -> None:
         super().__init__(
@@ -39,6 +46,8 @@ class OutputsLogger(LossItemLoggerCallback):
             loss_items_fn=loss_items,
         )
         self._counts: dict[str, float] = {}
+        self._pending: dict[str, _PendingStat] = {}
+        self._last_logged_step: int | None = None
 
     def on_train_batch_end(
         self,
@@ -58,58 +67,134 @@ class OutputsLogger(LossItemLoggerCallback):
                 raise ValueError(
                     f"{objective} loss rows must align with logged label rows."
                 )
-            self._log_output_item(trainer, pl_module, objective, item, labels)
+            self._accumulate_output_item(objective, item, labels)
+        if self._should_log(trainer):
+            self._flush(trainer, pl_module)
 
-    def _log_output_item(
+    def on_train_end(
         self,
         trainer: pl.Trainer,
         pl_module: pl.LightningModule,
+    ) -> None:
+        self._flush(trainer, pl_module)
+
+    def _accumulate_output_item(
+        self,
         objective: str,
         item: LossItem,
         labels: list[object],
     ) -> None:
-        for label in _distributed_labels(trainer, labels):
+        for label in _ordered(labels):
             mask = torch.tensor(
                 [value == label for value in labels],
                 device=item.loss.device,
                 dtype=torch.bool,
             )
-            loss, count = _distributed_mean(trainer, pl_module, item.loss, mask)
-            if _empty(count):
-                continue
-            pl_module.log(
+            self._accumulate(
                 self._tag(objective=objective, key="loss", label=label),
-                loss,
+                item.loss,
+                mask,
+                count=False,
+            )
+            details = item.details
+            if details is None:
+                continue
+            for key, values in details.items():
+                if values.shape != item.loss.shape:
+                    raise ValueError(
+                        f"{objective} detail {key!r} rows must align with loss rows."
+                    )
+                self._accumulate(
+                    self._tag(objective=objective, key=key, label=label),
+                    values,
+                    mask,
+                    count=key in _COUNT_KEYS,
+                )
+
+    def _accumulate(
+        self,
+        tag: str,
+        values: Tensor,
+        mask: Tensor,
+        *,
+        count: bool,
+    ) -> None:
+        total = values.detach()[mask].sum(dtype=torch.float32)
+        weight = None if count else mask.sum().to(dtype=torch.float32)
+        pending = self._pending.get(tag)
+        if pending is None:
+            self._pending[tag] = _PendingStat(total, weight)
+            return
+        if (pending.weight is None) != count:
+            raise RuntimeError(
+                f"metric {tag!r} changed count semantics within a window."
+            )
+        if pending.total.device != total.device:
+            pending.total = pending.total.to(device=total.device)
+            if pending.weight is not None:
+                pending.weight = pending.weight.to(device=total.device)
+        pending.total = pending.total + total
+        if weight is not None:
+            if pending.weight is None:
+                raise RuntimeError(f"metric {tag!r} lost its mean weight.")
+            pending.weight = pending.weight + weight
+
+    def _should_log(self, trainer: pl.Trainer) -> bool:
+        step = getattr(trainer, "global_step", None)
+        if step is None:
+            return True
+        if isinstance(step, bool) or not isinstance(step, int):
+            raise TypeError("trainer.global_step must be an integer.")
+        every = getattr(trainer, "log_every_n_steps", 1)
+        if isinstance(every, bool) or not isinstance(every, int) or every <= 0:
+            raise ValueError("trainer.log_every_n_steps must be a positive integer.")
+        if step <= 0 or step % every != 0 or self._last_logged_step == step:
+            return False
+        self._last_logged_step = step
+        return True
+
+    def _flush(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+    ) -> None:
+        schema = _distributed_schema(self._pending)
+        if not schema:
+            return
+        device = _pending_device(self._pending, pl_module)
+        payload = torch.zeros(
+            (len(schema), 2),
+            dtype=torch.float32,
+            device=device,
+        )
+        for index, (tag, is_count) in enumerate(schema):
+            pending = self._pending.get(tag)
+            if pending is None:
+                continue
+            payload[index, 0] = pending.total.to(device=device)
+            if not is_count:
+                if pending.weight is None:
+                    raise RuntimeError(f"metric {tag!r} is missing its mean weight.")
+                payload[index, 1] = pending.weight.to(device=device)
+        reduced = _reduce_sum(trainer, payload)
+        values = reduced.detach().cpu().tolist()
+        self._pending.clear()
+        for (tag, is_count), (total, weight) in zip(schema, values):
+            if is_count:
+                cumulative = self._counts.get(tag, 0.0) + float(total)
+                self._counts[tag] = cumulative
+                value = cumulative
+            else:
+                if weight <= 0:
+                    continue
+                value = float(total) / float(weight)
+            pl_module.log(
+                tag,
+                value,
                 on_step=True,
                 on_epoch=False,
                 sync_dist=False,
             )
-            if item.details is None:
-                continue
-            for key, values in item.details.items():
-                tag = self._tag(objective=objective, key=key, label=label)
-                if key in _COUNT_KEYS:
-                    step = _reduce_sum(trainer, pl_module, values[mask].sum())
-                    total = self._counts.get(tag, 0.0) + float(step.detach().cpu())
-                    self._counts[tag] = total
-                    pl_module.log(
-                        tag,
-                        total,
-                        on_step=True,
-                        on_epoch=False,
-                        sync_dist=False,
-                    )
-                    continue
-                mean, count = _distributed_mean(trainer, pl_module, values, mask)
-                if _empty(count):
-                    continue
-                pl_module.log(
-                    tag,
-                    mean,
-                    on_step=True,
-                    on_epoch=False,
-                    sync_dist=False,
-                )
 
     def _tag(self, *, objective: str, key: str, label: object) -> str:
         try:
@@ -118,8 +203,20 @@ class OutputsLogger(LossItemLoggerCallback):
             raise ValueError(f"unsupported loss objective: {objective}") from error
         return f"{prefix}/{key}/{label}"
 
-    def state_dict(self) -> dict[str, dict[str, float]]:
-        return {"counts": dict(self._counts)}
+    def state_dict(self) -> dict[str, object]:
+        return {
+            "counts": dict(self._counts),
+            "last_logged_step": self._last_logged_step,
+            "pending": {
+                tag: {
+                    "total": stat.total.detach().cpu(),
+                    "weight": (
+                        None if stat.weight is None else stat.weight.detach().cpu()
+                    ),
+                }
+                for tag, stat in self._pending.items()
+            },
+        }
 
     def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         counts = state_dict.get("counts", {})
@@ -136,6 +233,37 @@ class OutputsLogger(LossItemLoggerCallback):
                 )
             resolved[key] = number
         self._counts = resolved
+        last_logged_step = state_dict.get("last_logged_step")
+        if last_logged_step is not None and (
+            isinstance(last_logged_step, bool)
+            or not isinstance(last_logged_step, int)
+            or last_logged_step < 0
+        ):
+            raise ValueError(
+                "OutputsLogger last_logged_step must be non-negative or None."
+            )
+        self._last_logged_step = last_logged_step
+        pending = state_dict.get("pending", {})
+        if not isinstance(pending, Mapping):
+            raise TypeError("OutputsLogger pending stats must be a mapping.")
+        restored: dict[str, _PendingStat] = {}
+        for tag, raw in pending.items():
+            if not isinstance(tag, str) or not isinstance(raw, Mapping):
+                raise TypeError("OutputsLogger pending entries must be named mappings.")
+            total = raw.get("total")
+            weight = raw.get("weight")
+            if not isinstance(total, Tensor) or total.numel() != 1:
+                raise TypeError("OutputsLogger pending totals must be scalar tensors.")
+            if weight is not None and (
+                not isinstance(weight, Tensor) or weight.numel() != 1
+            ):
+                raise TypeError(
+                    "OutputsLogger pending weights must be scalar tensors or None."
+                )
+            restored[tag] = _PendingStat(
+                total.detach(), None if weight is None else weight.detach()
+            )
+        self._pending = restored
 
 
 def _tasks(objective: str, batch: Any) -> list[object]:
@@ -167,12 +295,7 @@ def _has_acoustic_target(batch: TrainInput) -> bool:
     raise TypeError("training batch must be ModelBatch or RawSpeechBatch.")
 
 
-def _reduce_sum(
-    trainer: pl.Trainer,
-    pl_module: pl.LightningModule,
-    value: Tensor,
-) -> Tensor:
-    del pl_module
+def _reduce_sum(trainer: pl.Trainer, value: Tensor) -> Tensor:
     world_size = int(getattr(trainer, "world_size", 1))
     if world_size <= 1:
         return value
@@ -183,44 +306,43 @@ def _reduce_sum(
     return cast(Tensor, reduce(value.detach(), reduce_op="sum"))
 
 
-def _distributed_labels(trainer: pl.Trainer, labels: list[object]) -> list[object]:
-    del trainer
-    local = _ordered(labels)
-    if (
-        not torch.distributed.is_available()
-        or not torch.distributed.is_initialized()
-    ):
+def _distributed_schema(
+    pending: Mapping[str, _PendingStat],
+) -> list[tuple[str, bool]]:
+    local = [(tag, stat.weight is None) for tag, stat in pending.items()]
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
         return local
-    gathered: list[list[object] | None] = [
+    gathered: list[list[tuple[str, bool]] | None] = [
         None for _ in range(torch.distributed.get_world_size())
     ]
     torch.distributed.all_gather_object(gathered, local)
-    ordered: list[object] = []
-    for rank_labels in gathered:
-        if rank_labels is None:
+    kinds: dict[str, bool] = {}
+    for rank_schema in gathered:
+        if rank_schema is None:
             continue
-        for label in rank_labels:
-            if not any(existing == label for existing in ordered):
-                ordered.append(label)
-    return ordered
+        for tag, is_count in rank_schema:
+            existing = kinds.get(tag)
+            if existing is not None and existing != is_count:
+                raise RuntimeError(
+                    f"metric {tag!r} has inconsistent count semantics across ranks."
+                )
+            kinds[tag] = is_count
+    return list(kinds.items())
 
 
-def _distributed_mean(
-    trainer: pl.Trainer,
+def _pending_device(
+    pending: Mapping[str, _PendingStat],
     pl_module: pl.LightningModule,
-    values: Tensor,
-    mask: Tensor,
-) -> tuple[Tensor, Tensor]:
-    dtype = values.dtype if values.is_floating_point() else torch.float32
-    local_sum = values[mask].sum().to(dtype=dtype)
-    local_count = mask.sum().to(device=values.device, dtype=dtype)
-    global_sum = _reduce_sum(trainer, pl_module, local_sum)
-    global_count = _reduce_sum(trainer, pl_module, local_count)
-    return global_sum / global_count.clamp_min(1), global_count
-
-
-def _empty(count: Tensor) -> bool:
-    return bool((count <= 0).detach().cpu())
+) -> torch.device:
+    first = next(iter(pending.values()), None)
+    if first is not None:
+        return first.total.device
+    try:
+        return pl_module.device
+    except (AttributeError, RuntimeError) as error:
+        raise RuntimeError(
+            "distributed output logging requires a module device on ranks without metrics."
+        ) from error
 
 
 def _ordered(labels: list[object]) -> list[object]:

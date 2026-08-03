@@ -1,3 +1,4 @@
+from ..types import BackboneReadout
 from .adapter import (
     BackboneAdapter,
     BackboneBodyAdapter,
@@ -16,6 +17,7 @@ __all__ = [
     "BackboneExtra",
     "BackboneInitialization",
     "BackboneOutputView",
+    "BackboneReadout",
     "BackboneType",
     "HuggingFaceBackboneAdapter",
     "bind_chat_bos",

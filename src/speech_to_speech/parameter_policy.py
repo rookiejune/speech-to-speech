@@ -173,7 +173,14 @@ def default_parameter_policy_config(
     )
 
 
-_LAYER_PATTERN = re.compile(r"^backbone\.model\.layers\.(\d+)\.")
+# HF bodies are exposed either directly (``backbone.layers``) or through the
+# conventional ``base_model`` wrapper (``backbone.model.layers``). Keep the
+# optional segment narrow so unrelated nested modules are not classified as
+# transformer layers by the top-fraction policy.
+_LAYER_PATTERN = re.compile(r"^backbone\.(?:model\.)?layers\.(\d+)\.")
+_FINAL_NORM_PATTERN = re.compile(
+    r"^backbone\.(?:model\.)?(?:norm|final_layernorm)\."
+)
 
 
 def apply_parameter_policy(
@@ -199,12 +206,12 @@ class ParameterPolicyTrainability:
 
     def __call__(
         self,
-        model: nn.Module,
+        module: nn.Module,
         name: str,
         parameter: nn.Parameter,
     ) -> bool:
         group = _policy_group(name, parameter, self.spec)
-        if _structurally_frozen(name, model):
+        if _structurally_frozen(name, module):
             return False
         trainable = (
             _peft_trainable(name, parameter, self.spec)
@@ -215,7 +222,7 @@ class ParameterPolicyTrainability:
         if group is ParameterGroup.BACKBONE and trainable:
             return _backbone_trainable(
                 name,
-                model,
+                module,
                 self.spec.backbone_top_fraction,
             )
         return trainable
@@ -284,9 +291,7 @@ def _backbone_trainable(
 
 
 def _is_final_norm(name: str) -> bool:
-    return name.startswith("backbone.model.norm.") or name.startswith(
-        "backbone.model.final_layernorm."
-    )
+    return _FINAL_NORM_PATTERN.match(name) is not None
 
 
 def _num_layers(model: ParameterPolicyModel, minimum: int) -> int:

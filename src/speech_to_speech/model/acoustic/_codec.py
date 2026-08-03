@@ -9,7 +9,9 @@ def code_features(
     codec: AcousticCodec,
     backbone: Backbone,
     codes: Tensor,
+    *,
+    like: Tensor | None = None,
 ) -> Tensor:
     features = codec.acoustic_codes_to_features(codes)
-    weight = backbone.get_input_embeddings().weight
-    return features.to(device=weight.device, dtype=weight.dtype)
+    reference = backbone.get_input_embeddings().weight if like is None else like
+    return features.to(device=reference.device, dtype=reference.dtype)

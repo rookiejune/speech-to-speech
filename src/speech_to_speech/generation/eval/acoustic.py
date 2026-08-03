@@ -13,7 +13,8 @@ from ..batch import requests_from_batch
 from .reporting import audio_output
 
 if TYPE_CHECKING:
-    from ...model.acoustic import FlowModel, RVQModel
+    from ...model.acoustic.flow import FlowModel
+    from ...model.acoustic.rvq import RVQModel
     from ...pl_module import SpeechToSpeechModule
 
 
@@ -82,6 +83,7 @@ def evaluate(
         hidden_states = model.token_hidden_states(
             batch.input_ids,
             attention_mask=batch.attention_mask,
+            prediction=batch.prediction_modality,
         )
         condition = model.target_frame_condition(
             hidden_states, target_data["token_positions"]
@@ -149,6 +151,7 @@ def reference_audio(
         hidden_states = model.token_hidden_states(
             batch.input_ids,
             attention_mask=batch.attention_mask,
+            prediction=batch.prediction_modality,
         )
         condition = model.target_frame_condition(
             hidden_states, target_data["token_positions"]

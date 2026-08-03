@@ -138,6 +138,7 @@ class AudioOutputAdapter(GradientCheckpointingLayer):
         hidden_state: Tensor,
         *,
         attention_mask: Tensor | None = None,
+        selection_mask: Tensor | None = None,
         past_key_values: object | None = None,
         use_cache: bool = False,
     ) -> tuple[Tensor, object | None]:
@@ -147,22 +148,41 @@ class AudioOutputAdapter(GradientCheckpointingLayer):
             raise ValueError(
                 "audio output hidden dimension does not match the adapter config."
             )
-        values = hidden_state.to(dtype=torch.float32)
+        if selection_mask is not None:
+            if selection_mask.dtype != torch.bool:
+                raise TypeError("audio output selection mask must be boolean.")
+            if selection_mask.shape != hidden_state.shape[:-1]:
+                raise ValueError(
+                    "audio output selection mask must align with the hidden state."
+                )
+            if selection_mask.device != hidden_state.device:
+                raise ValueError(
+                    "audio output selection mask must be on the hidden-state device."
+                )
         if self.is_pointwise:
             if past_key_values is not None:
                 raise ValueError("pointwise audio output adapter does not use cache.")
+            values = (
+                hidden_state
+                if selection_mask is None
+                else hidden_state[selection_mask]
+            ).to(dtype=torch.float32)
             return self.adapter(values), None
 
+        values = hidden_state.to(dtype=torch.float32)
         if values.dim() != 3:
             raise ValueError(
                 "causal audio output transformer requires shape [batch, sequence, hidden]."
             )
-        return self._forward_transformer(
+        values, next_past = self._forward_transformer(
             values,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             use_cache=use_cache,
         )
+        if selection_mask is not None:
+            values = values[selection_mask]
+        return values, next_past
 
     def batch_select_past(
         self,

@@ -101,7 +101,7 @@ def _save(path: Path) -> None:
         acoustic_layout=backend.acoustic_layout,
         acoustic_unit_length=backend.acoustic_unit_length,
     )
-    save_artifact(path, support, config, backend=cast(SemanticAcousticCodec, backend))
+    save_artifact(path, support, backend=cast(SemanticAcousticCodec, backend))
 
 
 if __name__ == "__main__":

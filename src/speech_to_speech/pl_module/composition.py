@@ -14,10 +14,10 @@ from speech_to_speech.model.acoustic import (
     AcousticType,
     DecoderConfig,
     FlowRepaConfig,
-    FlowModel,
-    RVQModel,
 )
+from speech_to_speech.model.acoustic.flow import FlowModel
 from speech_to_speech.model.acoustic.initialization import load_acoustic_initialization
+from speech_to_speech.model.acoustic.rvq import RVQModel
 from speech_to_speech.runtime import Runtime
 from speech_to_speech.runtime.types import frame_codec
 

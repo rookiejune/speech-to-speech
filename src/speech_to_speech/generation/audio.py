@@ -182,17 +182,22 @@ class _Semantic:
 
     def _decode_result(self, token_ids: Tensor, request: Request) -> Result:
         options = _semantic_decode_options(request)
-        decoded = decode_generated_semantic(
-            token_ids.unsqueeze(0),
-            codec=self.codec,
-            audio_tokenizer=self.model.runtime.audio_tokenizer,
-            audio_token_range=self.model.runtime.codec_audio_range,
-            semantic_reference_features=_batched(options.reference_features),
-            semantic_reference_mask=_batched(options.reference_mask),
-            semantic_decode_generator=options.generator,
-        )
-        if decoded.dim() < 1 or decoded.size(0) != 1:
-            raise ValueError("codec decode must preserve the generation batch axis.")
+        try:
+            decoded = decode_generated_semantic(
+                token_ids.unsqueeze(0),
+                codec=self.codec,
+                audio_tokenizer=self.model.runtime.audio_tokenizer,
+                audio_token_range=self.model.runtime.codec_audio_range,
+                semantic_reference_features=_batched(options.reference_features),
+                semantic_reference_mask=_batched(options.reference_mask),
+                semantic_decode_generator=options.generator,
+            )
+            if decoded.dim() < 1 or decoded.size(0) != 1:
+                raise ValueError("codec decode must preserve the generation batch axis.")
+        except torch.OutOfMemoryError:
+            raise
+        except Exception as error:
+            return _decode_error_result(token_ids, error)
         return Result(
             response_ids=token_ids,
             audio=AudioOutput(
@@ -407,21 +412,33 @@ def _decoded_results(
     frame_counts: Tensor,
     decoder: _Decoder,
 ) -> list[Result]:
-    row_features, waveforms = _decode_rows(
-        token_rows,
+    counts = _frame_count_values(frame_counts, rows=len(token_rows))
+    row_features = _feature_rows(
         features,
-        frame_counts,
+        rows=len(token_rows),
+        counts=counts,
+    )
+    decoded_rows = _decode_grouped_rows(
+        token_rows,
+        row_features,
+        counts,
         decoder,
     )
-    return [
-        _audio_result(
-            token_ids,
-            waveforms[row],
-            decoder.sample_rate,
-            features=row_features[row],
-        )
-        for row, token_ids in enumerate(token_rows)
-    ]
+    results: list[Result] = []
+    for row, token_ids in enumerate(token_rows):
+        decoded = decoded_rows[row]
+        if isinstance(decoded, Exception):
+            results.append(_decode_error_result(token_ids, decoded))
+        else:
+            results.append(
+                _audio_result(
+                    token_ids,
+                    decoded,
+                    decoder.sample_rate,
+                    features=row_features[row],
+                )
+            )
+    return results
 
 
 def _audio_result(
@@ -460,23 +477,6 @@ def _decode_error_result(token_ids: Tensor, error: Exception) -> Result:
     )
 
 
-def _decode_rows(
-    token_rows: list[Tensor],
-    features: Tensor | None,
-    frame_counts: Tensor,
-    decoder: _Decoder,
-) -> tuple[list[Tensor | None], list[Tensor]]:
-    counts = _frame_count_values(frame_counts, rows=len(token_rows))
-    row_features = _feature_rows(features, rows=len(token_rows), counts=counts)
-    waveforms = _decode_grouped_rows(
-        token_rows,
-        row_features,
-        counts,
-        decoder,
-    )
-    return row_features, waveforms
-
-
 def _frame_count_values(frame_counts: Tensor, *, rows: int) -> list[int]:
     frame_counts = _integer_tensor(
         frame_counts,
@@ -511,29 +511,64 @@ def _decode_grouped_rows(
     row_features: list[Tensor | None],
     counts: list[int],
     decoder: _Decoder,
-) -> list[Tensor]:
+) -> list[Tensor | Exception]:
     groups: dict[tuple[int, int], list[int]] = {}
     for row, (token_ids, count) in enumerate(zip(token_rows, counts)):
         groups.setdefault((token_ids.numel(), count), []).append(row)
 
-    waveforms: list[Tensor | None] = [None] * len(token_rows)
+    decoded_rows: list[Tensor | Exception | None] = [None] * len(token_rows)
     for rows in groups.values():
-        token_batch = torch.stack([token_rows[row] for row in rows])
-        first_features = row_features[rows[0]]
-        feature_batch = (
-            None
-            if first_features is None
-            else torch.stack([cast(Tensor, row_features[row]) for row in rows])
-        )
-        decoded = decoder.decode(token_batch, feature_batch)
-        if decoded.dim() < 1 or decoded.size(0) != len(rows):
-            raise ValueError("codec decode must preserve the generation batch axis.")
+        try:
+            decoded = _decode_batch(token_rows, row_features, rows, decoder)
+        except torch.OutOfMemoryError:
+            raise
+        except Exception as batch_error:
+            if len(rows) == 1:
+                decoded_rows[rows[0]] = batch_error
+                continue
+            for row in rows:
+                try:
+                    decoded = _decode_batch(
+                        token_rows,
+                        row_features,
+                        [row],
+                        decoder,
+                    )
+                except torch.OutOfMemoryError:
+                    raise
+                except Exception as row_error:
+                    decoded_rows[row] = row_error
+                else:
+                    decoded_rows[row] = decoded[0]
+            continue
         for row, waveform in zip(rows, decoded):
-            waveforms[row] = waveform
+            decoded_rows[row] = waveform
 
-    if any(waveform is None for waveform in waveforms):
-        raise RuntimeError("codec decode did not produce every generation row.")
-    return cast(list[Tensor], waveforms)
+    results: list[Tensor | Exception] = []
+    for decoded in decoded_rows:
+        if decoded is None:
+            raise RuntimeError("codec decode did not produce every generation row.")
+        results.append(decoded)
+    return results
+
+
+def _decode_batch(
+    token_rows: list[Tensor],
+    row_features: list[Tensor | None],
+    rows: list[int],
+    decoder: _Decoder,
+) -> Tensor:
+    token_batch = torch.stack([token_rows[row] for row in rows])
+    first_features = row_features[rows[0]]
+    feature_batch = (
+        None
+        if first_features is None
+        else torch.stack([cast(Tensor, row_features[row]) for row in rows])
+    )
+    decoded = decoder.decode(token_batch, feature_batch)
+    if decoded.dim() < 1 or decoded.size(0) != len(rows):
+        raise ValueError("codec decode must preserve the generation batch axis.")
+    return decoded
 
 
 def _integer_tensor(value: object, name: str, *, dimensions: int) -> Tensor:
@@ -546,10 +581,10 @@ def _integer_tensor(value: object, name: str, *, dimensions: int) -> Tensor:
     return value
 
 
-def decode_token_audio_rows(
+def decode_token_audio_results(
     token_rows: Sequence[Tensor],
     model: TokenGenerator,
-) -> list[AudioOutput | None]:
+) -> list[Result]:
     """Decode codec-decodable spans already present in generated token rows.
 
     Used by mixed AR after token generation. Does not collect or consume acoustic
@@ -558,30 +593,28 @@ def decode_token_audio_rows(
     if model.runtime.acoustic_side_channel and isinstance(model, AcousticFeatureGeneration):
         raise ValueError("token-row audio decode does not support acoustic feature side channel.")
     codec_rows = [_codec_payload(row, model) for row in token_rows]
+    results = [Result(response_ids=row, audio=None) for row in token_rows]
     if not any(row.numel() > 0 for row in codec_rows):
-        return [None] * len(token_rows)
+        return results
 
     decoder = _token_decoder(model)
     active_index = [index for index, row in enumerate(codec_rows) if row.numel() > 0]
     active_rows = [codec_rows[index] for index in active_index]
-    outputs: list[AudioOutput | None] = [None] * len(token_rows)
     if isinstance(decoder, _Frame):
-        for index, row in zip(active_index, active_rows):
-            outputs[index] = decoder._decode_result(row)["audio"]
-        return outputs
-    if isinstance(decoder, _Structured):
-        for index, row in zip(active_index, active_rows):
-            outputs[index] = decoder._decode_result(row, None)["audio"]
-        return outputs
-    decoded = _decoded_results(
-        active_rows,
-        None,
-        _frame_counts(active_rows, model),
-        decoder,
-    )
+        decoded = [decoder._decode_result(row) for row in active_rows]
+    elif isinstance(decoder, _Structured):
+        decoded = [decoder._decode_result(row, None) for row in active_rows]
+    else:
+        decoded = _decoded_results(
+            active_rows,
+            None,
+            _frame_counts(active_rows, model),
+            decoder,
+        )
     for index, result in zip(active_index, decoded):
-        outputs[index] = result["audio"]
-    return outputs
+        result["response_ids"] = token_rows[index]
+        results[index] = result
+    return results
 
 
 def _codec_payload(token_ids: Tensor, model: TokenGenerator) -> Tensor:
@@ -663,7 +696,7 @@ def _batched(value: Tensor | None) -> Tensor | None:
 
 
 __all__ = [
-    "decode_token_audio_rows",
+    "decode_token_audio_results",
     "generate_audio_responses",
     "has_semantic_decode_options",
     "validate_audio_request",

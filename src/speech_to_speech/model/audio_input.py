@@ -136,10 +136,9 @@ class AudioInputTower(GradientCheckpointingLayer):
             raise ValueError("audio input must contain at least one frame.")
 
         valid = valid_mask(features, mask, name="audio input")
-        values = features.to(dtype=torch.float32)
-        values = values.masked_fill(~valid[..., None], 0)
-
         if self.config.type is AudioInputAdapterType.TRANSFORMER:
+            values = features.to(dtype=torch.float32)
+            values = values.masked_fill(~valid[..., None], 0)
             values = self.input_projection(values)
             key_padding_mask = ~safe_transformer_mask(valid)
             causal_mask = torch.ones(
@@ -152,11 +151,14 @@ class AudioInputTower(GradientCheckpointingLayer):
                 values,
                 mask=causal_mask,
                 src_key_padding_mask=key_padding_mask,
+                is_causal=True,
             )
-        else:
-            values = self.adapter(values)
+            return values.masked_fill(~valid[..., None], 0)
 
-        return values.masked_fill(~valid[..., None], 0)
+        selected = self.adapter(features[valid].to(dtype=torch.float32))
+        values = selected.new_zeros((*features.shape[:2], self.out_features))
+        values[valid] = selected
+        return values
 
 
 def create_audio_input_adapter(

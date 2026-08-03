@@ -46,8 +46,8 @@
   为每 task 的 `int|null`（`null`=该 task 池内随机，整数=固定下标；默认 `0`）。loader
   schedule（`loaders` / `step_mode` / `accumulate_grad_batches`）同属
   `SpeechConfig`。训练构建调用 `sample_template(index)`；generation 要求固定下标，可用
-  `evaluation_template_index()`（把 `null` 钉成 `0`）。正权重 loader task 必须在
-  `datamodule.tasks` 中声明。
+  `evaluation_template_index()`（把 `null` 钉成 `0`）。`datamodule.tasks=null` 表示所有任务
+  使用模板 `0`；显式提供 task 映射时，所有正权重 loader task 都必须在该映射中声明。
 - `Collator(runtime, task_weights, prediction=...)`：按任务权重为 raw samples 选择任务，依次调用
   parser、sample builder 和 batch padding；可选 loader 级 prediction override 写入
   `SpeechTaskSample.prediction`。
@@ -286,12 +286,16 @@ response、generated token 以及 BiCodec route 的 reference `audio_context` �
   会在相同 accumulation-window 位置推进相同子 loader 的 epoch。
 - `DataModule` 在构造 loader 前把 collator 的完整 runtime 替换为 `DataRuntimeSnapshot`；主进程
   仍持有正式 runtime 供 dataset setup 使用。`persistent_workers` 只在 `num_workers > 0` 时启用，
+  多个 train spec 复用同一个 `SpeechConfig` 时只加载一份 speech dataset；复用同一个
+  `DataLoaderConfig` 时，`num_workers` 是该配置组的总预算，并按 loader schedule weight
+  分配给各子 loader，不随逻辑 loader 数量成倍启动进程。
   `pin_memory` 由入口显式配置。
 - 对 anydataset `MapStyleABC`，`DataModule` 使用其 `dataloader()` 公开入口负责 deterministic
   shuffle、runtime shard 和 sample-cost batch 规划；默认 costs 关闭时以 unit cost 与
   `batch_size` 对齐，开启后按 audio-frame cost 与 `max_batch_frames` 规划。store-backed
   dataset 会额外保留 payload locality。DataLoader 仍索引原始外层 dataset，因此
-  `AnyDataset` transform 不会被绕过。普通或 iterable dataset 使用 PyTorch `DataLoader`，
+  `AnyDataset` transform 不会被绕过；split-manifest view 的 cost planning 也委托底层
+  `cost_row()`，不会为了估算 batch cost 加载完整 sample。普通或 iterable dataset 使用 PyTorch `DataLoader`，
   不能开启 costs。多 loader train 的外层 `ScheduledDataLoader` 不接受 Lightning 注入
   sampler；正式 distributed sample partition 由各 loader 的公开 dataloader 契约负责。
 - validation speech loader 使用同一公开 batch planner 和 distributed partition，但显式关闭

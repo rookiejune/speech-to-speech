@@ -532,7 +532,16 @@ def _raw_pair_waveform_sample():
 def _raw_sample_without_duration(index: int = 0):
     sample = _raw_sample(index)
     for role in (Role.SOURCE, Role.TARGET):
-        sample[(role, Modality.AUDIO)].meta.pop(AudioMeta.DURATION)
+        ref = (role, Modality.AUDIO)
+        audio = cast(AudioItem, sample[ref])
+        sample[ref] = AudioItem(
+            views=audio.views,
+            meta={
+                key: value
+                for key, value in audio.meta.items()
+                if key is not AudioMeta.DURATION
+            },
+        )
     return sample
 
 

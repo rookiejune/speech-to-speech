@@ -15,8 +15,6 @@ from anytrain.lightning.schedule import (
     UnitClock,
     require_unit_name,
 )
-from torch import Tensor
-
 from speech_to_speech.datamodule.types import (
     FusedBatch,
     LoaderBatch,
@@ -139,19 +137,8 @@ def _batch_units(batch: object, unit: str) -> UnitBatch:
         )
     if not isinstance(batch, ModelBatch):
         raise TypeError(f"unit schedule expects ModelBatch, got {type(batch)!r}.")
-    if unit == "tokens":
-        return _mask_units(batch.attention_mask, unit=unit)
-    if unit == "frames":
-        mask = batch.acoustic_target_mask
-        if mask is None:
-            raise ValueError("frames unit schedule requires an acoustic target mask.")
-        return _mask_units(mask, unit=unit)
-    if unit == "audio_seconds":
-        seconds = batch.audio_seconds
-        if seconds is None:
-            raise RuntimeError("ModelBatch audio_seconds is unavailable.")
-        return UnitBatch(valid=float(seconds.sum().item()), unit=unit)
-    raise ValueError(f"unsupported unit schedule unit: {unit!r}.")
+    valid, padded = batch.training_units(unit)
+    return UnitBatch(valid=valid, padded=padded, unit=unit)
 
 
 def _fused_units(batch: FusedBatch, unit: str) -> UnitBatch:
@@ -168,14 +155,6 @@ def _sum_optional(values: Sequence[float | None]) -> float | None:
             return None
         total += float(value)
     return total
-
-
-def _mask_units(mask: Tensor, *, unit: str) -> UnitBatch:
-    return UnitBatch(
-        valid=float(mask.sum().item()),
-        padded=float(mask.numel()),
-        unit=unit,
-    )
 
 
 def _curve(config: LRCurveConfig) -> Constant | Linear | Cosine:

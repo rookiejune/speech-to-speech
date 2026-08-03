@@ -9,7 +9,7 @@ from anytrain.loss import MaskedCosineAlignmentLoss
 from torch import Tensor, nn
 
 from semantic_acoustic_codec.loss.repa import WavLMTeacher
-from speech_to_speech.model.acoustic import AcousticFlow
+from speech_to_speech.model.acoustic.flow import AcousticFlow
 
 
 class AcousticFlowTest(unittest.TestCase):
@@ -88,6 +88,7 @@ class AcousticRepaLossTest(unittest.TestCase):
             return_value=wavlm,
         ):
             teacher = WavLMTeacher(_Codec(), layer=9)
+        self.assertEqual(len(wavlm.encoder.layers), 9)
         mask = torch.tensor([[True, True, True, False], [True, True, False, False]])
 
         features = teacher(
@@ -124,10 +125,17 @@ class _FlowRuntime:
         return SimpleNamespace(final=x_0)
 
 
+class _WavLMEncoder(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList(nn.Identity() for _ in range(12))
+
+
 class _WavLM(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.anchor = nn.Parameter(torch.zeros(()))
+        self.encoder = _WavLMEncoder()
         self.config = SimpleNamespace(
             hidden_size=3,
             num_hidden_layers=12,

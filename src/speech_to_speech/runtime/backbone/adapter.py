@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import Protocol
 
 import torch
+from anydataset.types import Modality
 from torch import nn
 from transformers.cache_utils import Cache
 
-from ..types import Backbone, BackboneOutput, TextTokenizer, select_backbone_readout
+from ..types import Backbone, BackboneOutput, BackboneReadout, TextTokenizer
 
 
 BackboneExtra = Mapping[str, object]
@@ -45,6 +46,9 @@ class BackboneAdapter(Protocol):
 
     def input_embeddings(self) -> nn.Embedding: ...
 
+    @property
+    def has_modality_readouts(self) -> bool: ...
+
     def encode(
         self,
         *,
@@ -55,11 +59,15 @@ class BackboneAdapter(Protocol):
         use_cache: bool = False,
         position_ids: torch.Tensor | None = None,
         cache_position: torch.Tensor | None = None,
+        modality: Modality | None = None,
         extra: BackboneExtra | None = None,
     ) -> BackboneOutputView: ...
 
 
 class BackboneEncoder(Protocol):
+    @property
+    def has_modality_readouts(self) -> bool: ...
+
     def encode(
         self,
         *,
@@ -70,6 +78,7 @@ class BackboneEncoder(Protocol):
         use_cache: bool = False,
         position_ids: torch.Tensor | None = None,
         cache_position: torch.Tensor | None = None,
+        modality: Modality | None = None,
         extra: BackboneExtra | None = None,
     ) -> BackboneOutputView: ...
 
@@ -77,8 +86,35 @@ class BackboneEncoder(Protocol):
 @dataclass(frozen=True)
 class BackboneBodyAdapter:
     body: Callable[..., BackboneOutput]
-    readout: str
-    supports_cache_position: bool
+    readout: BackboneReadout = field(default_factory=BackboneReadout)
+    supports_cache_position: bool = True
+    modality_readouts: Mapping[Modality, BackboneReadout] = field(
+        default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.readout, BackboneReadout):
+            raise TypeError("default backbone readout must be a BackboneReadout.")
+        if not isinstance(self.supports_cache_position, bool):
+            raise TypeError("supports_cache_position must be a bool.")
+        for modality, readout in self.modality_readouts.items():
+            if modality not in {Modality.TEXT, Modality.AUDIO}:
+                raise ValueError(
+                    f"unsupported modality-specific backbone readout: {modality.value}."
+                )
+            if not isinstance(readout, BackboneReadout):
+                raise TypeError(
+                    "modality-specific backbone readouts must be BackboneReadout values."
+                )
+
+    @property
+    def has_modality_readouts(self) -> bool:
+        return bool(self.modality_readouts)
+
+    def readout_for(self, modality: Modality | None) -> BackboneReadout:
+        if modality is None:
+            return self.readout
+        return self.modality_readouts.get(modality, self.readout)
 
     def encode(
         self,
@@ -90,13 +126,15 @@ class BackboneBodyAdapter:
         use_cache: bool = False,
         position_ids: torch.Tensor | None = None,
         cache_position: torch.Tensor | None = None,
+        modality: Modality | None = None,
         extra: BackboneExtra | None = None,
     ) -> BackboneOutputView:
+        readout = self.readout_for(modality)
         kwargs: dict[str, object] = {
             "inputs_embeds": inputs_embeds,
             "attention_mask": attention_mask,
             "output_hidden_states": output_hidden_states
-            or self.readout != "last_hidden_state",
+            or readout.requires_hidden_states,
             "past_key_values": past_key_values,
             "use_cache": use_cache,
             "position_ids": position_ids,
@@ -108,7 +146,7 @@ class BackboneBodyAdapter:
         output = self.body(**kwargs)
         return BackboneOutputView(
             output=output,
-            last_hidden_state=select_backbone_readout(output, self.readout),
+            last_hidden_state=readout.select(output),
         )
 
     def __call__(
@@ -121,6 +159,7 @@ class BackboneBodyAdapter:
         use_cache: bool = False,
         position_ids: torch.Tensor | None = None,
         cache_position: torch.Tensor | None = None,
+        modality: Modality | None = None,
         extra: BackboneExtra | None = None,
     ) -> BackboneOutputView:
         return self.encode(
@@ -131,6 +170,7 @@ class BackboneBodyAdapter:
             use_cache=use_cache,
             position_ids=position_ids,
             cache_position=cache_position,
+            modality=modality,
             extra=extra,
         )
 

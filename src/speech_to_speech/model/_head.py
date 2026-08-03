@@ -62,12 +62,14 @@ class VocabularyHeadMixin:
         hidden_state: Tensor,
         *,
         attention_mask: Tensor | None = None,
+        selection_mask: Tensor | None = None,
         past_key_values: object | None = None,
         use_cache: bool = False,
     ) -> tuple[Tensor, object | None]:
         return self.audio_output_adapter(
             hidden_state,
             attention_mask=attention_mask,
+            selection_mask=selection_mask,
             past_key_values=past_key_values,
             use_cache=use_cache,
         )
@@ -157,6 +159,7 @@ class VocabularyHeadMixin:
         hidden_state: Tensor,
         token_ids: Tensor,
         *,
+        token_kind: str | None = None,
         attention_mask: Tensor | None = None,
         audio_hidden_state: Tensor | None = None,
         past_key_values: object | None = None,
@@ -164,10 +167,53 @@ class VocabularyHeadMixin:
     ) -> tuple[Tensor, object | None]:
         text_start, text_end = self.runtime.layout.blocks["text"]
         audio_start, audio_end = self.runtime.layout.blocks["audio"]
+        if token_kind == "text":
+            return self.text_logits(hidden_state, token_ids - text_start), None
+        if token_kind == "audio":
+            if audio_hidden_state is None:
+                audio_hidden_state, audio_past = self.project_audio_hidden(
+                    hidden_state,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                )
+            else:
+                audio_past = None
+            return (
+                self.semantic_audio_logits(audio_hidden_state, token_ids - audio_start),
+                audio_past,
+            )
         text_mask = token_ids.ge(text_start) & token_ids.lt(text_end)
         audio_mask = token_ids.ge(audio_start) & token_ids.lt(audio_end)
-        if not bool((text_mask | audio_mask).all()):
-            raise ValueError("selected token ids contain an invalid vocabulary id.")
+        if token_kind is None:
+            if not bool((text_mask | audio_mask).all()):
+                raise ValueError("selected token ids contain an invalid vocabulary id.")
+        elif token_kind != "mixed":
+            raise ValueError(f"unsupported selected token kind: {token_kind!r}")
+        if token_kind == "mixed":
+            if audio_hidden_state is None:
+                audio_hidden_state, audio_past = self.project_audio_hidden(
+                    hidden_state,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                )
+            else:
+                audio_past = None
+            text = self.text_logits(hidden_state, token_ids[text_mask] - text_start)
+            audio = self.semantic_audio_logits(
+                audio_hidden_state,
+                token_ids[audio_mask] - audio_start,
+            )
+            dtype = torch.promote_types(text.dtype, audio.dtype)
+            logits = torch.empty(
+                (*hidden_state.shape[:-1], token_ids.numel()),
+                dtype=dtype,
+                device=hidden_state.device,
+            )
+            logits[..., text_mask] = text.to(dtype=dtype)
+            logits[..., audio_mask] = audio.to(dtype=dtype)
+            return logits, audio_past
         audio_past = None
         if bool(audio_mask.any()) and audio_hidden_state is None:
             audio_hidden_state, audio_past = self.project_audio_hidden(

@@ -9,9 +9,11 @@ from anydataset.types import Modality
 from torch import Tensor
 
 from ..._oom import annotate, tensor_report
+from ...prediction import PredictionModality
 from ...task import Task
 from ..protocol import GenerationRuntime, TextEvaluationModel
 from ..service import generate_responses
+from ..text import decode_text_ids as _decode_text_ids
 from ..types import Request
 
 
@@ -74,7 +76,7 @@ def evaluate_text(
     results: dict[str, TextProbeResult] = {}
     for (name, probe), generation in zip(probes.items(), generations):
         results[name] = TextProbeResult(
-            generated=decode_text_ids(runtime, generation["response_ids"]),
+            generated=_decode_text_ids(runtime, generation["response_ids"]),
             nll=_reference_nll(model, prompts[name], probe["reference"]),
         )
     return results
@@ -114,6 +116,7 @@ def _reference_nll(
         hidden_states = model.token_hidden_states(
             input_ids,
             attention_mask=torch.ones_like(input_ids, dtype=torch.bool),
+            prediction=PredictionModality.TEXT,
         )
         predictors = hidden_states[0, prompt_ids.numel() - 1 : -1]
         prediction = model.token_logits(predictors, Modality.TEXT).float()
@@ -133,12 +136,4 @@ def _reference_nll(
         raise
 
 
-def decode_text_ids(runtime: GenerationRuntime, token_ids: Tensor) -> str:
-    if token_ids.numel():
-        local_ids = runtime.layout.to_local(token_ids).detach().cpu().tolist()
-    else:
-        local_ids = []
-    return runtime.text_tokenizer.decode(local_ids, skip_special_tokens=True)
-
-
-__all__ = ["TextProbe", "TextProbeResult", "decode_text_ids", "evaluate_text"]
+__all__ = ["TextProbe", "TextProbeResult", "evaluate_text"]

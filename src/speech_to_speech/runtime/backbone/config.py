@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Optional
 
 from ..._compat import StrEnum, auto
@@ -14,6 +15,8 @@ class BackboneInitialization(StrEnum):
 
 class BackboneType(StrEnum):
     HF_CAUSAL_LM = auto()
+    KIMI_AUDIO = auto()
+    QWEN2_5_OMNI_TEXT = auto()
     QWEN2_5_OMNI_THINKER = auto()
     QWEN2_5_OMNI = "qwen2_5_omni_thinker"
 
@@ -24,7 +27,9 @@ class AdapterConfig:
     path: str = "Qwen/Qwen3-0.6B"
     initialization: BackboneInitialization = BackboneInitialization.PRETRAINED
     trust_remote_code: bool = False
+    chat_template: Optional[str] = None
     readout: str = "last_hidden_state"
+    readouts: Mapping[str, str] = field(default_factory=dict)
     supports_cache_position: bool = True
     module: str = ""
     body: str = "base_model"
@@ -46,7 +51,12 @@ class AdapterConfig:
             )
         if not isinstance(self.trust_remote_code, bool):
             raise TypeError("backbone adapter trust_remote_code must be a bool.")
+        _optional_nonempty_string(
+            self.chat_template,
+            "backbone adapter chat_template",
+        )
         validate_backbone_readout(self.readout)
+        _readouts(self.readouts, "backbone adapter readouts")
         if not isinstance(self.supports_cache_position, bool):
             raise TypeError("backbone adapter supports_cache_position must be a bool.")
         _path(self.module, "backbone adapter module")
@@ -64,6 +74,23 @@ class AdapterConfig:
 def _optional_string(value: object, name: str) -> None:
     if value is not None and not isinstance(value, str):
         raise TypeError(f"{name} must be a string or None.")
+
+
+def _optional_nonempty_string(value: object, name: str) -> None:
+    _optional_string(value, name)
+    if value == "":
+        raise ValueError(f"{name} must not be empty.")
+
+
+def _readouts(value: object, name: str) -> None:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{name} must be a mapping.")
+    for modality, readout in value.items():
+        if not isinstance(modality, str):
+            raise TypeError(f"{name} keys must be strings.")
+        if modality not in {"text", "audio"}:
+            raise ValueError(f"{name} keys must be 'text' or 'audio'.")
+        validate_backbone_readout(readout)
 
 
 def _path(value: object, name: str, *, allow_empty: bool = True) -> None:

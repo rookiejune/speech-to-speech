@@ -232,9 +232,12 @@ codes/context 中取得 reference acoustic。
 - `runtime.backbone_initialization=random` 从 `runtime.backbone` 读取 tokenizer 与完整 HF config，
   但不读取预训练权重；它不能与 `model=toy` 组合，并要求
   `callback/parameter_policy=full`。
-- `runtime.backbone_trust_remote_code`、`runtime.backbone_readout` 与
+- `runtime.backbone_trust_remote_code`、`runtime.backbone_chat_template`、
+  `runtime.backbone_readout`、`runtime.backbone_readouts` 与
   `runtime.backbone_supports_cache_position` 是替换 HF backbone 的显式兼容性开关；默认值保持
-  Qwen/Qwen3 contract，`configs/runtime/kimi_audio.yaml` 覆写为 Kimi-Audio 的 remote-code readout。
+  Qwen/Qwen3 contract。`configs/runtime/kimi_audio.yaml` 使用 Kimi-Audio 的 remote-code
+  双分支 readout，并显式配置本项目的单流 Jinja instruction template；这不是 Kimi 官方双流
+  PromptManager 格式，后者需要独立的结构化 prompt adapter。
 - `runtime.semantic_codec_artifact` 为 `semantic-acoustic-codec` 的 semantic-only waveform
   support artifact；LongCat 的 `semantic` token-only 路径可使用它。BiCodec 的 `semantic`
   layout 从 full-code input/context 复用 reference acoustic，并调用 backend `detokenize()`；它不接入

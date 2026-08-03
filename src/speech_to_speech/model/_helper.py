@@ -126,11 +126,9 @@ def valid_mask(
 
 def safe_transformer_mask(valid: Tensor) -> Tensor:
     """Keep all-padding rows finite while their final outputs remain zero."""
-    if bool(valid.any(dim=1).all()):
-        return valid
     safe = valid.clone()
     empty = ~valid.any(dim=1)
-    safe[empty, 0] = True
+    safe[:, 0] |= empty
     return safe
 
 

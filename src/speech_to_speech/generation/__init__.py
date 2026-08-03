@@ -21,6 +21,7 @@ from .chat import (
 from .service import generate_responses
 from .rollout import RolloutRow, generate_rollouts, write_rollouts_jsonl
 from .eval.text import TextProbe, TextProbeResult, evaluate_text
+from .text import decode_response_text, decode_text_ids, response_text_ids
 from .types import AcousticGeneration, AudioOutput, Request, Result
 
 __all__ = [
@@ -38,6 +39,8 @@ __all__ = [
     "TextProbe",
     "TextProbeResult",
     "create",
+    "decode_response_text",
+    "decode_text_ids",
     "decode_generated_audio",
     "decode_generated_bicodec_full",
     "decode_generated_bicodec_full_row",
@@ -49,6 +52,7 @@ __all__ = [
     "evaluate_text",
     "generate_responses",
     "generate_rollouts",
+    "response_text_ids",
     "to_request",
     "write_rollouts_jsonl",
 ]

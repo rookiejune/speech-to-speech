@@ -103,6 +103,9 @@ class TokenModelRuntime(GenerationRuntime, Protocol):
     def backbone_trust_remote_code(self) -> bool: ...
 
     @property
+    def backbone_chat_template(self) -> str | None: ...
+
+    @property
     def backbone_readout(self) -> str: ...
 
     @property

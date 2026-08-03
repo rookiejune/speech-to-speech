@@ -12,7 +12,7 @@ from transformers.cache_utils import Cache
 from ..prediction import PredictionModality
 from ..task import Task
 from ._request import prediction_of
-from .audio import decode_token_audio_rows
+from .audio import decode_token_audio_results
 from .protocol import TokenGenerator
 from .types import Request, Result
 
@@ -29,6 +29,9 @@ class _TokenSets:
     text: Tensor
     audio: Tensor
     union: Tensor
+    parallel_text_mask: Tensor
+    interleaved_text_mask: Tensor
+    audio_mask: Tensor
     boa_id: int
     eoa_id: int
     eos_id: int
@@ -42,25 +45,17 @@ class _MixedLoopState:
     input_ids: Tensor
     positions: Tensor | None
     length: int
-    states: list[_State]
-    finished: list[bool]
+    states: Tensor
+    active_mask: Tensor
     past: Cache | None = None
     audio_past: object | None = None
-    cache_rows: list[int] | None = None
 
     @property
     def batch_size(self) -> int:
-        return len(self.states)
+        return self.generated.size(0)
 
-    def active_rows(self, device: torch.device) -> Tensor:
-        return torch.tensor(
-            [index for index, done in enumerate(self.finished) if not done],
-            dtype=torch.long,
-            device=device,
-        )
 
-    def done(self) -> bool:
-        return all(self.finished)
+_DEVICE_DONE_CHECK_INTERVAL = 16
 
 
 @torch.no_grad()
@@ -90,40 +85,35 @@ def generate_mixed_responses(
         pad_token_id=tokens.pad_id,
     )
 
-    for _ in range(max_new_tokens):
-        if state.done():
-            break
-        active = state.active_rows(device)
-        active_list = active.tolist()
-        _align_cache(state, model, active_list, device=device, use_cache=use_cache)
-        forced, sampled_rows = _split_forced_rows(
-            state.states,
-            active_list,
-            boa_id=tokens.boa_id,
+    for step in range(max_new_tokens):
+        logits = _mixed_logits(
+            state,
+            model,
+            tokens,
+            temperature=temperature,
+            use_cache=use_cache,
         )
-        next_ids = state.generated.new_full((state.batch_size,), tokens.pad_id)
-        if sampled_rows:
-            logits = _sampled_logits(
-                state,
-                model,
-                active,
-                active_list,
-                tokens,
-                temperature=temperature,
-                use_cache=use_cache,
-            )
-            _sample_rows(
-                state,
-                next_ids,
-                sampled_rows,
-                logits,
-                tokens,
-                prediction,
-                top_p=top_p,
-                do_sample=do_sample,
-            )
-        _force_rows(state, next_ids, forced)
-        _advance_loop(state, next_ids, pad_token_id=tokens.pad_id, use_cache=use_cache)
+        next_ids = _mixed_next_ids(
+            logits,
+            state.states,
+            tokens,
+            prediction,
+            top_p=top_p,
+            do_sample=do_sample,
+        )
+        _advance_loop(
+            state,
+            next_ids,
+            prediction=prediction,
+            tokens=tokens,
+            use_cache=use_cache,
+        )
+        if _all_rows_finished(
+            state.active_mask,
+            step=step,
+            max_new_tokens=max_new_tokens,
+        ):
+            break
     return _mixed_results(state, prompt.size(1), model)
 
 
@@ -152,12 +142,18 @@ def _token_sets(model: TokenGenerator, device: torch.device) -> _TokenSets:
         dtype=torch.long,
         device=device,
     )
+    union = torch.unique(
+        torch.cat([text, audio, text.new_tensor([runtime.boa_token_id, runtime.eos_token_id])])
+    )
+    text_mask = _member_mask(union, text)
+    parallel_text_mask = text_mask | union.eq(runtime.eos_token_id)
     return _TokenSets(
         text=text,
         audio=audio,
-        union=torch.unique(
-            torch.cat([text, audio, text.new_tensor([runtime.boa_token_id, runtime.eos_token_id])])
-        ),
+        union=union,
+        parallel_text_mask=parallel_text_mask,
+        interleaved_text_mask=parallel_text_mask | union.eq(runtime.boa_token_id),
+        audio_mask=_member_mask(union, audio),
         boa_id=runtime.boa_token_id,
         eoa_id=runtime.eoa_token_id,
         eos_id=runtime.eos_token_id,
@@ -184,74 +180,33 @@ def _initial_state(
         input_ids=generated[:, : prompt.size(1)],
         positions=audio_input_positions,
         length=prompt.size(1),
-        states=[_State.TEXT for _ in range(prompt.size(0))],
-        finished=[False] * prompt.size(0),
+        states=torch.full(
+            (prompt.size(0),),
+            _State.TEXT.value,
+            dtype=torch.int8,
+            device=prompt.device,
+        ),
+        active_mask=torch.ones(prompt.size(0), dtype=torch.bool, device=prompt.device),
     )
 
 
-def _align_cache(
+def _mixed_logits(
     state: _MixedLoopState,
     model: TokenGenerator,
-    active_rows: list[int],
-    *,
-    device: torch.device,
-    use_cache: bool,
-) -> None:
-    if (
-        not use_cache
-        or state.past is None
-        or state.cache_rows is None
-        or state.cache_rows == active_rows
-    ):
-        return
-    indices = torch.tensor(
-        [state.cache_rows.index(row) for row in active_rows],
-        dtype=torch.long,
-        device=device,
-    )
-    state.past.batch_select_indices(indices)
-    state.audio_past = model.audio_output_adapter_batch_select(state.audio_past, indices)
-    state.cache_rows = active_rows
-
-
-def _split_forced_rows(
-    states: Sequence[_State],
-    active_rows: Sequence[int],
-    *,
-    boa_id: int,
-) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
-    forced = []
-    sampled = []
-    for local, row in enumerate(active_rows):
-        if states[row] is _State.FORCE_BOA:
-            forced.append((row, boa_id))
-        else:
-            sampled.append((local, row))
-    return forced, sampled
-
-
-def _sampled_logits(
-    state: _MixedLoopState,
-    model: TokenGenerator,
-    active: Tensor,
-    active_rows: list[int],
     tokens: _TokenSets,
     *,
     temperature: float,
     use_cache: bool,
 ) -> Tensor:
-    active_input = state.input_ids.index_select(0, active)
-    active_mask = state.attention.index_select(0, active)[:, : state.length]
-    active_positions = None if state.positions is None else state.positions.index_select(0, active)
     output = model.generation_step(
-        active_input,
-        attention_mask=active_mask,
+        state.input_ids,
+        attention_mask=state.attention[:, : state.length],
         output_hidden_states=False,
         token_ids=tokens.union,
         modality=None,
         past_key_values=state.past,
         use_cache=use_cache,
-        audio_input_positions=active_positions,
+        audio_input_positions=state.positions,
         audio_output_past=state.audio_past,
     )
     if output.logits is None:
@@ -261,120 +216,99 @@ def _sampled_logits(
     if use_cache:
         if state.past is None:
             raise RuntimeError("backbone did not return a generation cache.")
-        state.cache_rows = active_rows
     return output.logits[:, -1] / temperature
 
 
-def _sample_rows(
-    state: _MixedLoopState,
-    next_ids: Tensor,
-    sampled_rows: Sequence[tuple[int, int]],
+def _mixed_next_ids(
     logits: Tensor,
+    states: Tensor,
     tokens: _TokenSets,
     prediction: PredictionModality,
     *,
     top_p: float,
     do_sample: bool,
-) -> None:
-    for local, row in sampled_rows:
-        allowed = _allowed_for_state(state.states[row], prediction, tokens)
-        token = _sample_mixed_token(
-            logits[local],
-            tokens.union,
-            allowed,
-            top_p=top_p,
-            do_sample=do_sample,
-        )
-        next_ids[row] = token
-        _advance_row_state(state, row, token, prediction, tokens)
+) -> Tensor:
+    text_rows = states.eq(_State.TEXT.value)
+    audio_rows = states.eq(_State.AUDIO.value)
+    sampled_rows = text_rows | audio_rows
+    text_mask = (
+        tokens.parallel_text_mask
+        if prediction is PredictionModality.PARALLEL
+        else tokens.interleaved_text_mask
+    )
+    row_logits = logits[sampled_rows]
+    allowed = torch.where(
+        text_rows[sampled_rows, None],
+        text_mask[None, :],
+        tokens.audio_mask[None, :],
+    )
+    row_logits = row_logits.masked_fill(~allowed, torch.finfo(logits.dtype).min)
+    if top_p < 1.0:
+        row_logits = _top_p(row_logits, top_p)
+    choices = (
+        torch.multinomial(
+            row_logits.softmax(dim=-1),
+            1,
+            replacement=True,
+        ).squeeze(-1)
+        if do_sample
+        else row_logits.argmax(dim=-1)
+    )
+    sampled_ids = tokens.union.index_select(0, choices)
+    next_ids = torch.full_like(states, tokens.pad_id, dtype=torch.long)
+    next_ids.masked_scatter_(sampled_rows, sampled_ids)
+    return torch.where(states.eq(_State.FORCE_BOA.value), tokens.boa_id, next_ids)
 
 
-def _allowed_for_state(
-    state: _State,
+def _next_states(
+    states: Tensor,
+    next_ids: Tensor,
     prediction: PredictionModality,
     tokens: _TokenSets,
 ) -> Tensor:
-    if state is _State.TEXT:
-        if prediction is PredictionModality.PARALLEL:
-            return torch.unique(torch.cat([tokens.text, tokens.text.new_tensor([tokens.eos_id])]))
-        return torch.unique(
-            torch.cat([tokens.text, tokens.text.new_tensor([tokens.boa_id, tokens.eos_id])])
+    text_rows = states.eq(_State.TEXT.value)
+    audio_rows = states.eq(_State.AUDIO.value)
+    next_states = states.clone()
+    next_states.masked_fill_(states.eq(_State.FORCE_BOA.value), _State.AUDIO.value)
+    if prediction is PredictionModality.PARALLEL:
+        next_states.masked_fill_(
+            text_rows & next_ids.eq(tokens.eos_id),
+            _State.FORCE_BOA.value,
         )
-    if state is _State.AUDIO:
-        return tokens.audio
-    raise AssertionError(f"unexpected mixed generation state: {state}")
-
-
-def _sample_mixed_token(
-    logits: Tensor,
-    union: Tensor,
-    allowed: Tensor,
-    *,
-    top_p: float,
-    do_sample: bool,
-) -> int:
-    row_logits = _restrict(logits, union, allowed)
-    if top_p < 1.0:
-        row_logits = _top_p(row_logits, top_p)
-    choice = (
-        torch.distributions.Categorical(logits=row_logits).sample()
-        if do_sample
-        else row_logits.argmax()
+        next_states.masked_fill_(
+            audio_rows & next_ids.eq(tokens.eoa_id),
+            _State.DONE.value,
+        )
+        return next_states
+    next_states.masked_fill_(
+        text_rows & next_ids.eq(tokens.eos_id),
+        _State.DONE.value,
     )
-    return int(allowed[choice].item())
-
-
-def _advance_row_state(
-    state: _MixedLoopState,
-    row: int,
-    token: int,
-    prediction: PredictionModality,
-    tokens: _TokenSets,
-) -> None:
-    row_state = state.states[row]
-    if row_state is _State.TEXT:
-        if token == tokens.eos_id:
-            if prediction is PredictionModality.PARALLEL:
-                state.states[row] = _State.FORCE_BOA
-            else:
-                state.states[row] = _State.DONE
-                state.finished[row] = True
-        elif token == tokens.boa_id:
-            state.states[row] = _State.AUDIO
-    elif row_state is _State.AUDIO and token == tokens.eoa_id:
-        if prediction is PredictionModality.PARALLEL:
-            state.states[row] = _State.DONE
-            state.finished[row] = True
-        else:
-            state.states[row] = _State.TEXT
-
-
-def _force_rows(
-    state: _MixedLoopState,
-    next_ids: Tensor,
-    forced: Sequence[tuple[int, int]],
-) -> None:
-    for row, token in forced:
-        next_ids[row] = token
-        state.states[row] = _State.AUDIO
+    next_states.masked_fill_(
+        text_rows & next_ids.eq(tokens.boa_id),
+        _State.AUDIO.value,
+    )
+    next_states.masked_fill_(
+        audio_rows & next_ids.eq(tokens.eoa_id),
+        _State.TEXT.value,
+    )
+    return next_states
 
 
 def _advance_loop(
     state: _MixedLoopState,
     next_ids: Tensor,
     *,
-    pad_token_id: int,
+    prediction: PredictionModality,
+    tokens: _TokenSets,
     use_cache: bool,
 ) -> None:
+    emitted = state.active_mask
+    next_ids = torch.where(emitted, next_ids, tokens.pad_id)
     state.generated[:, state.length] = next_ids
-    for row in range(state.batch_size):
-        emitted = int(next_ids[row].item())
-        if state.finished[row] and emitted == pad_token_id:
-            state.attention[row, state.length] = False
-        elif not state.finished[row] or emitted != pad_token_id:
-            state.attention[row, state.length] = True
-        if state.states[row] is _State.DONE:
-            state.finished[row] = True
+    state.attention[:, state.length] = emitted
+    state.states = _next_states(state.states, next_ids, prediction, tokens)
+    state.active_mask = state.states.ne(_State.DONE.value)
     state.length += 1
     if use_cache:
         state.input_ids = next_ids.unsqueeze(1)
@@ -382,8 +316,20 @@ def _advance_loop(
         return
     state.past = None
     state.audio_past = None
-    state.cache_rows = None
     state.input_ids = state.generated[:, : state.length]
+
+
+def _all_rows_finished(
+    active_mask: Tensor,
+    *,
+    step: int,
+    max_new_tokens: int,
+) -> bool:
+    if step + 1 >= max_new_tokens:
+        return False
+    if active_mask.device.type != "cpu" and (step + 1) % _DEVICE_DONE_CHECK_INTERVAL:
+        return False
+    return not bool(active_mask.any())
 
 
 def _mixed_results(
@@ -396,18 +342,11 @@ def _mixed_results(
         response = state.generated[row, prompt_width : state.length]
         response = response[state.attention[row, prompt_width : state.length]]
         response_rows.append(response)
-    audios = decode_token_audio_rows(response_rows, model)
-    return [
-        Result(response_ids=response, audio=audio)
-        for response, audio in zip(response_rows, audios)
-    ]
+    return decode_token_audio_results(response_rows, model)
 
 
-def _restrict(logits: Tensor, union: Tensor, allowed: Tensor) -> Tensor:
-    matches = allowed[:, None].eq(union[None, :])
-    if not bool(matches.any(dim=1).all()):
-        raise RuntimeError("allowed mixed-generation ids escape the union set.")
-    return logits.index_select(0, matches.to(dtype=torch.long).argmax(dim=1))
+def _member_mask(union: Tensor, allowed: Tensor) -> Tensor:
+    return union[:, None].eq(allowed[None, :]).any(dim=1)
 
 
 def _top_p(logits: Tensor, top_p: float) -> Tensor:
@@ -419,7 +358,7 @@ def _top_p(logits: Tensor, top_p: float) -> Tensor:
     mask[..., 0] = False
     sorted_logits = sorted_logits.masked_fill(mask, torch.finfo(logits.dtype).min)
     result = torch.full_like(logits, torch.finfo(logits.dtype).min)
-    result.scatter_(0, sorted_indices, sorted_logits)
+    result.scatter_(-1, sorted_indices, sorted_logits)
     return result
 
 

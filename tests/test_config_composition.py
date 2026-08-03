@@ -72,20 +72,39 @@ class ConfigCompositionTest(ConfigTestCase):
         self.assertIsInstance(selected.model.toy, ToyConfig)
         self.assertIs(selected.datamodule.dataset.name, DatasetName.TOY)
 
-    def test_qwen2_5_omni_text_runtime_uses_thinker_adapter(self):
-        config = _overfit("runtime=qwen2_5_omni_text")
+    def test_qwen2_5_omni_text_runtime_uses_text_adapter(self):
+        config = _overfit(
+            "runtime=qwen2_5_omni_text",
+            "model/acoustic=none",
+        )
 
-        self.assertIs(config.runtime.backbone_type, BackboneType.QWEN2_5_OMNI_THINKER)
+        self.assertIs(config.runtime.backbone_type, BackboneType.QWEN2_5_OMNI_TEXT)
+        self.assertEqual(config.runtime.codec, "bicodec")
         self.assertEqual(config.runtime.backbone, "Qwen/Qwen2.5-Omni-7B")
-        self.assertEqual(config.runtime.backbone_body, "model")
+        self.assertEqual(config.runtime.backbone_module, "")
+        self.assertEqual(config.runtime.backbone_body, "base_model")
+        self.assertTrue(config.runtime.gradient_checkpointing)
 
-    def test_kimi_audio_runtime_uses_tuple_readout(self):
-        config = _overfit("runtime=kimi_audio")
+    def test_kimi_audio_runtime_uses_modality_readouts(self):
+        config = _overfit(
+            "runtime=kimi_audio",
+            "model/acoustic=none",
+        )
 
+        self.assertIs(config.runtime.backbone_type, BackboneType.KIMI_AUDIO)
+        self.assertEqual(config.runtime.codec, "bicodec")
         self.assertEqual(config.runtime.backbone, "moonshotai/Kimi-Audio-7B-Instruct")
         self.assertTrue(config.runtime.backbone_trust_remote_code)
-        self.assertEqual(config.runtime.backbone_readout, "last_hidden_state[1]")
+        self.assertIn("messages", config.runtime.backbone_chat_template)
+        self.assertEqual(config.runtime.backbone_readout, "last_hidden_state[0]")
+        self.assertEqual(
+            config.runtime.backbone_readouts,
+            {"text": "last_hidden_state[0]", "audio": "last_hidden_state[1]"},
+        )
+        self.assertEqual(config.runtime.backbone_module, "")
+        self.assertEqual(config.runtime.backbone_body, "base_model")
         self.assertFalse(config.runtime.backbone_supports_cache_position)
+        self.assertTrue(config.runtime.gradient_checkpointing)
 
     def test_random_backbone_requires_unambiguous_full_training(self):
         random = _overfit("runtime.backbone_initialization=random")

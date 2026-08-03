@@ -167,19 +167,21 @@ def _default_gradient_probes() -> tuple[GradientProbe, ...]:
         GradientProbe(
             "backbone_l0_attn",
             (
-                "model.backbone.model.layers.0.self_attn.q_proj.weight",
-                "model.backbone.model.layers.0.self_attn.k_proj.weight",
-                "model.backbone.model.layers.0.self_attn.v_proj.weight",
-                "model.backbone.model.layers.0.self_attn.o_proj.weight",
+                r"model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.self_attn\.q_proj\.weight$",
+                r"model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.self_attn\.k_proj\.weight$",
+                r"model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.self_attn\.v_proj\.weight$",
+                r"model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.self_attn\.o_proj\.weight$",
             ),
+            match="regex",
         ),
         GradientProbe(
             "backbone_l0_ffn",
             (
-                "model.backbone.model.layers.0.mlp.gate_proj.weight",
-                "model.backbone.model.layers.0.mlp.up_proj.weight",
-                "model.backbone.model.layers.0.mlp.down_proj.weight",
+                r"model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.mlp\.gate_proj\.weight$",
+                r"model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.mlp\.up_proj\.weight$",
+                r"model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.mlp\.down_proj\.weight$",
             ),
+            match="regex",
         ),
     )
 

@@ -14,6 +14,7 @@ from speech_to_speech.callback.logging.task_sample import TaskSampleLogger
 from speech_to_speech.datamodule.types import ModelBatch
 from semantic_acoustic_codec.model import AcousticRVQDecoder
 from speech_to_speech.generation import Result
+from speech_to_speech.prediction import PredictionModality
 from speech_to_speech.task import Task
 
 
@@ -38,6 +39,7 @@ class _EvaluationModel:
         self.training = True
         self.parameter = torch.nn.Parameter(torch.zeros(()))
         self.generator_seeds: list[int] = []
+        self.predictions: list[PredictionModality | None] = []
 
     def parameters(self):
         yield self.parameter
@@ -51,7 +53,8 @@ class _EvaluationModel:
         return self
 
     def token_hidden_states(self, input_ids: Tensor, **kwargs: object) -> Tensor:
-        del input_ids, kwargs
+        del input_ids
+        self.predictions.append(kwargs.get("prediction"))  # type: ignore[arg-type]
         return torch.zeros(1, 2, 3)
 
     def target_frame_condition(
@@ -134,6 +137,7 @@ class RNGCallbackTest(unittest.TestCase):
                 "token_positions": torch.zeros(1, 2, dtype=torch.long),
             },
             acoustic_target_mask=torch.ones(1, 2, dtype=torch.bool),
+            prediction_modality=PredictionModality.AUDIO,
         )
         torch.manual_seed(123)
         before = torch.random.get_rng_state().clone()
@@ -146,6 +150,7 @@ class RNGCallbackTest(unittest.TestCase):
 
         self.assertTrue(torch.equal(torch.random.get_rng_state(), before))
         self.assertEqual(model.generator_seeds, [5, 7])
+        self.assertEqual(model.predictions, [PredictionModality.AUDIO])
         self.assertTrue(model.training)
 
     def test_rvq_generator_is_reproducible_without_global_rng_use(self):

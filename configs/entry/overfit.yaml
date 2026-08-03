@@ -36,26 +36,26 @@ callbacks:
     every_n_steps: 1
     probes:
       backbone_l0_attn:
-        match: exact
+        match: regex
         trainable_only: true
         parameters:
-          - model.backbone.model.layers.0.self_attn.q_proj.weight
-          - model.backbone.model.layers.0.self_attn.k_proj.weight
-          - model.backbone.model.layers.0.self_attn.v_proj.weight
-          - model.backbone.model.layers.0.self_attn.o_proj.weight
+          - model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.self_attn\.q_proj\.weight$
+          - model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.self_attn\.k_proj\.weight$
+          - model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.self_attn\.v_proj\.weight$
+          - model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.self_attn\.o_proj\.weight$
       backbone_l0_ffn:
-        match: exact
+        match: regex
         trainable_only: true
         parameters:
-          - model.backbone.model.layers.0.mlp.gate_proj.weight
-          - model.backbone.model.layers.0.mlp.up_proj.weight
-          - model.backbone.model.layers.0.mlp.down_proj.weight
+          - model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.mlp\.gate_proj\.weight$
+          - model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.mlp\.up_proj\.weight$
+          - model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.mlp\.down_proj\.weight$
     partial_probes:
       backbone_norm:
-        match: exact
+        match: regex
         trainable_only: true
         parameters:
-          - model.backbone.model.norm.weight
+          - model\.backbone\.(?:model\.)?(?:norm|final_layernorm)\.weight$
   flow_matching:
     enabled: true
     every_n_steps: 1

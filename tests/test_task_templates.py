@@ -127,7 +127,7 @@ class TaskTemplateTest(unittest.TestCase):
 
         raw = OmegaConf.create(
             {
-                "data": {
+                "datamodule": {
                     "codec": "longcat",
                     "dataloader": {"batch_size": 1, "num_workers": 0},
                     "tasks": {
@@ -139,9 +139,13 @@ class TaskTemplateTest(unittest.TestCase):
         )
         prepared = prepare(raw)
         speech = OmegaConf.to_object(
-            OmegaConf.merge(OmegaConf.structured(SpeechConfig), prepared.data)
+            OmegaConf.merge(
+                OmegaConf.structured(SpeechConfig),
+                prepared.datamodule,
+            )
         )
         self.assertIsInstance(speech, SpeechConfig)
+        self.assertEqual(set(speech.tasks or {}), {Task.TTS, Task.ASR})
         self.assertIsNone(speech.template_index(Task.TTS))
         self.assertEqual(speech.template_index(Task.ASR), 2)
 

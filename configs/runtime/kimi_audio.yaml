@@ -1,14 +1,23 @@
-codec: longcat
+codec: bicodec
+backbone_type: kimi_audio
 backbone: moonshotai/Kimi-Audio-7B-Instruct
 backbone_initialization: pretrained
 backbone_trust_remote_code: true
-backbone_readout: last_hidden_state[1]
+# Project single-stream instruction protocol; Kimi's official prompt is dual-stream.
+backbone_chat_template: '{{ messages | map(attribute="content") | join("\n") }}{% if add_generation_prompt %}{{ "\n" }}{% endif %}'
+backbone_readout: last_hidden_state[0]
+backbone_readouts:
+  text: last_hidden_state[0]
+  audio: last_hidden_state[1]
+backbone_module: ""
+backbone_body: base_model
 backbone_supports_cache_position: false
-audio_tokenizer: ${oc.env:SPEECH_TO_SPEECH_AUDIO_TOKENIZER}
+audio_tokenizer:
 semantic_codec_artifact:
 device: cuda
 dtype: bfloat16
 attn_implementation: flash_attention_2
+gradient_checkpointing: true
 flow_method: midpoint
 flow_nfe: 20
 flow_num_steps: 10
