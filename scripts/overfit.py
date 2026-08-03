@@ -31,7 +31,9 @@ from speech_to_speech.datamodule import DataModule
 from speech_to_speech.datamodule.module import LoaderSpec
 from speech_to_speech.datamodule.types import FusedBatch, ModelBatch, TrainInput
 from speech_to_speech.generation.eval.acoustic import evaluate_autoregressive
-from speech_to_speech.model.acoustic import AcousticType, FlowModel, RVQModel
+from speech_to_speech.model.acoustic import AcousticType
+from speech_to_speech.model.acoustic.flow import FlowModel
+from speech_to_speech.model.acoustic.rvq import RVQModel
 from speech_to_speech.pl_module import SpeechToSpeechModule
 from speech_to_speech.pl_module.composition import build
 from speech_to_speech.runtime import Config as RuntimeConfig

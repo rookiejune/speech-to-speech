@@ -11,7 +11,6 @@ from speech_to_speech.datamodule.dataset.text import (
     TextDatasetName,
 )
 from speech_to_speech.loader_step import LoaderStepMode
-from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.runtime import AudioSequenceLayout, Config as RuntimeConfig
@@ -156,7 +155,6 @@ class _StagedTrainConfig:
     output_subdir: str = MISSING
     output_dir: str = MISSING
     loader_plan: LoaderPlanConfig = field(default_factory=LoaderPlanConfig)
-    model: ModelConfig = field(default_factory=ModelConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     audio_sequence_layout: AudioSequenceLayout = MISSING
     datamodule: SpeechConfig = MISSING
@@ -389,7 +387,12 @@ def _validate_loader_schedule(config: StagedTrainConfig) -> None:
     required: set[Task] = set()
     for loader in config.loader_plan.loaders.values():
         required.update(task for task, weight in loader.tasks.items() if weight > 0)
-    missing = sorted(task.value for task in required if task not in config.datamodule.tasks)
+    configured = config.datamodule.tasks
+    missing = (
+        []
+        if configured is None
+        else sorted(task.value for task in required if task not in configured)
+    )
     if missing:
         raise KeyError(
             "datamodule.tasks must declare every positive-weight loader_plan task; "

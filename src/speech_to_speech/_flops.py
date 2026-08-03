@@ -514,7 +514,7 @@ def _dit_attention(
 
 
 def _dit_ffn(ffn: nn.Module, *, rows: int, hidden: int) -> int:
-    if len(ffn) != 3:
+    if type(ffn) is not nn.Sequential or len(ffn) != 3:
         raise TypeError("Flow FLOPs require the standard DiT feed-forward network.")
     ffn_input = ffn[0]
     activation = ffn[1]

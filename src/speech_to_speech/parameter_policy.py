@@ -199,12 +199,12 @@ class ParameterPolicyTrainability:
 
     def __call__(
         self,
-        model: nn.Module,
+        module: nn.Module,
         name: str,
         parameter: nn.Parameter,
     ) -> bool:
         group = _policy_group(name, parameter, self.spec)
-        if _structurally_frozen(name, model):
+        if _structurally_frozen(name, module):
             return False
         trainable = (
             _peft_trainable(name, parameter, self.spec)
@@ -215,7 +215,7 @@ class ParameterPolicyTrainability:
         if group is ParameterGroup.BACKBONE and trainable:
             return _backbone_trainable(
                 name,
-                model,
+                module,
                 self.spec.backbone_top_fraction,
             )
         return trainable

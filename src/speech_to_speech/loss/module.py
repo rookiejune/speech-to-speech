@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from typing import Generic, TypeVar, TypedDict
+from typing import Any, Generic, TypeVar, TypedDict
 
 from anytrain.loss import (
     MaskedCodebookCrossEntropyLoss,
@@ -39,7 +39,38 @@ class Objective(nn.Module, Generic[ModelT_contra], ABC):
 
 
 def _weighted_mean(item: LossItem, key: str) -> Tensor:
-    return loss_item_mean(item, unit=key, fallback_to_mean=False)
+    return loss_item_mean(
+        item,
+        unit=key,
+        fallback_to_mean=False,
+        validate=False,
+    )
+
+
+def _audio_hidden(
+    batch: ModelBatch,
+    model: TokenObjectiveModel,
+    hidden_states: Tensor,
+) -> Tensor | None:
+    if not batch.prediction_modality.supervises_audio:
+        return None
+    start, end = model.layout.blocks["audio"]
+    targets = batch.token_labels[:, 1:]
+    target_mask = targets.ge(start) & targets.lt(end)
+    selection_mask = target_mask.new_zeros(batch.token_labels.shape)
+    selection_mask[:, :-1] = target_mask
+    selected, _ = model.project_audio_hidden(
+        hidden_states,
+        attention_mask=batch.attention_mask,
+        selection_mask=selection_mask,
+    )
+    if selected.dim() != 2:
+        raise ValueError(
+            "masked audio output projection must return one row per selected token."
+        )
+    output = selected.new_zeros((*hidden_states.shape[:2], selected.size(-1)))
+    output[selection_mask] = selected
+    return output
 
 
 class RepaConfig(TypedDict):
@@ -52,17 +83,11 @@ def _token_forward(
     model: TokenObjectiveModel,
     token: TokenLoss,
 ) -> LossItem:
-    hidden_states = model.token_hidden_states(
-        batch.input_ids,
-        attention_mask=batch.attention_mask,
-        audio_input_positions=batch.audio_input_positions,
+    hidden_states = _token_hidden_states(
+        batch,
+        model,
     )
-    audio_hidden = None
-    if batch.prediction_modality.supervises_audio:
-        audio_hidden, _ = model.project_audio_hidden(
-            hidden_states,
-            attention_mask=batch.attention_mask,
-        )
+    audio_hidden = _audio_hidden(batch, model, hidden_states)
     return token(
         hidden_states,
         batch.token_labels,
@@ -70,6 +95,26 @@ def _token_forward(
         model.token_logits,
         audio_hidden_states=audio_hidden,
         attention_mask=batch.attention_mask,
+        validate=False,
+    )
+
+
+def _token_hidden_states(
+    batch: ModelBatch,
+    model: TokenObjectiveModel,
+) -> Tensor:
+    kwargs: dict[str, Any] = {}
+    if batch.embedding_blocks is not None:
+        kwargs["embedding_blocks"] = batch.embedding_blocks
+        kwargs["validate_input"] = False
+        kwargs["validate_audio_input_positions"] = (
+            not batch.audio_input_positions_validated
+        )
+    return model.token_hidden_states(
+        batch.input_ids,
+        attention_mask=batch.attention_mask,
+        audio_input_positions=batch.audio_input_positions,
+        **kwargs,
     )
 
 
@@ -119,17 +164,8 @@ class FlowObjective(Objective[FlowObjectiveModel]):
             raise ValueError(
                 "FlowObjective requires acoustic target data for audio-supervised batches."
             )
-        hidden_states = model.token_hidden_states(
-            batch.input_ids,
-            attention_mask=batch.attention_mask,
-            audio_input_positions=batch.audio_input_positions,
-        )
-        audio_hidden = None
-        if batch.prediction_modality.supervises_audio:
-            audio_hidden, _ = model.project_audio_hidden(
-                hidden_states,
-                attention_mask=batch.attention_mask,
-            )
+        hidden_states = _token_hidden_states(batch, model)
+        audio_hidden = _audio_hidden(batch, model, hidden_states)
         token = self.token(
             hidden_states,
             batch.token_labels,
@@ -137,11 +173,13 @@ class FlowObjective(Objective[FlowObjectiveModel]):
             model.token_logits,
             audio_hidden_states=audio_hidden,
             attention_mask=batch.attention_mask,
+            validate=False,
         )
         result: Outputs = {"loss": _weighted_mean(token, "tokens"), "token": token}
 
         if target_data is not None:
-            if batch.acoustic_target_mask is None:
+            target_mask = batch.acoustic_target_mask
+            if target_mask is None:
                 raise RuntimeError(
                     "model batch did not produce an acoustic target mask."
                 )
@@ -154,7 +192,7 @@ class FlowObjective(Objective[FlowObjectiveModel]):
                     model.acoustic_decoder,
                     condition,
                     target,
-                    batch.acoustic_target_mask,
+                    target_mask,
                     self.flow_runtime,
                 )
             else:
@@ -166,18 +204,18 @@ class FlowObjective(Objective[FlowObjectiveModel]):
                     model.acoustic_decoder,
                     condition,
                     target,
-                    batch.acoustic_target_mask,
+                    target_mask,
                     self.flow_runtime,
                 )
                 teacher = self.repa_teacher(
                     target_data["semantic_codes"],
                     target_data["codes"],
-                    batch.acoustic_target_mask,
+                    target_mask,
                 )
                 repa = self.repa_loss(
                     representation,
                     teacher,
-                    batch.acoustic_target_mask,
+                    target_mask,
                 )
                 result["repa"] = repa
                 result["loss_weights"] = {"repa": self.repa_weight}
@@ -222,17 +260,8 @@ class RVQObjective(Objective[RVQObjectiveModel]):
             raise ValueError(
                 "RVQObjective requires acoustic target data for audio-supervised batches."
             )
-        hidden_states = model.token_hidden_states(
-            batch.input_ids,
-            attention_mask=batch.attention_mask,
-            audio_input_positions=batch.audio_input_positions,
-        )
-        audio_hidden = None
-        if batch.prediction_modality.supervises_audio:
-            audio_hidden, _ = model.project_audio_hidden(
-                hidden_states,
-                attention_mask=batch.attention_mask,
-            )
+        hidden_states = _token_hidden_states(batch, model)
+        audio_hidden = _audio_hidden(batch, model, hidden_states)
         token = self.token(
             hidden_states,
             batch.token_labels,
@@ -240,24 +269,26 @@ class RVQObjective(Objective[RVQObjectiveModel]):
             model.token_logits,
             audio_hidden_states=audio_hidden,
             attention_mask=batch.attention_mask,
+            validate=False,
         )
         result: Outputs = {"loss": _weighted_mean(token, "tokens"), "token": token}
 
         if target_data is not None:
-            if batch.acoustic_target_mask is None:
+            target_mask = batch.acoustic_target_mask
+            if target_mask is None:
                 raise RuntimeError(
                     "model batch did not produce an acoustic target mask."
                 )
             labels = target_data["codes"]
-            logits = model.acoustic_logits(
+            packed = model.acoustic_packed_logits(
                 hidden_states,
                 target_data["token_positions"],
-                labels.masked_fill(~batch.acoustic_target_mask[..., None], 0),
-            )
-            acoustic = self.rvq(
-                logits,
                 labels,
-                batch.acoustic_target_mask,
+                mask=target_mask,
+                validate=False,
+            )
+            acoustic = self.rvq.forward_packed(
+                packed,
                 validate=False,
                 include_top1=include_top1,
             )

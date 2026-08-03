@@ -63,6 +63,11 @@ class TrainConfigContractTest(ConfigTestCase):
         self.assertEqual(config.datamodule.dataloader.costs.max_batch_frames, 4800)
         self.assertEqual(config.datamodule.dataloader.costs.planning_window, 256)
 
+    def test_null_task_config_uses_default_template_for_loader_tasks(self):
+        config = _train("datamodule.tasks=null")
+
+        self.assertIsNone(config.datamodule.tasks)
+
     def test_train_stage_2_uses_accumulation_safe_loader_plan(self):
         config = _train("experiment=train/staged_joint/stage_2")
 
@@ -378,6 +383,25 @@ class TrainConfigContractTest(ConfigTestCase):
         self.assertEqual(entry.call_args.kwargs["accumulate_grad_batches"], 1)
         self.assertEqual(entry.call_args.kwargs["val_check_interval"], 25)
         self.assertEqual(entry.call_args.kwargs["num_sanity_val_steps"], 2)
+
+    def test_weighted_fused_window_is_not_accumulated_twice_by_trainer(self):
+        config = _train(
+            "experiment=train/staged_joint/stage_2",
+            "validation.enabled=true",
+            "validation.loader=mt",
+            "validation.every_n_steps=25",
+        )
+
+        with (
+            patch("scripts.train.entry_trainer") as entry,
+            patch("scripts.train.build_logger"),
+        ):
+            train_script.build_trainer(config, Path("/tmp/output"), [])
+
+        self.assertTrue(config.loader_plan.fuse_loaders_per_step)
+        self.assertEqual(config.loader_plan.accumulate_grad_batches, 10)
+        self.assertEqual(entry.call_args.kwargs["accumulate_grad_batches"], 1)
+        self.assertEqual(entry.call_args.kwargs["val_check_interval"], 25)
 
     def test_serial_joint_trainer_forwards_accumulation_window(self):
         config = _train(

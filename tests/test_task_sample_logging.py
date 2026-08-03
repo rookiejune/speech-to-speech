@@ -40,6 +40,7 @@ from speech_to_speech.datamodule.types import (
     Text,
 )
 from speech_to_speech.generation import Request, Result, decode_reference_codes
+from speech_to_speech.prediction import PredictionModality
 from speech_to_speech.task import Task
 
 
@@ -273,6 +274,38 @@ class TaskSampleLoggingTest(unittest.TestCase):
         self.assertEqual(metadata["generation"]["result"]["duration_seconds"], 0.0005)
         self.assertTrue(metadata["generation"]["result"]["waveform_finite"])
 
+    def test_parallel_override_logs_text_and_metrics_with_generated_audio(self):
+        batch = _batch(Task.T2ST, prediction=PredictionModality.PARALLEL)
+        result = Result(
+            response_ids=torch.tensor([2, 6, 4, 7]),
+            audio={
+                "features": None,
+                "codes": None,
+                "waveform": torch.zeros(1, 8),
+                "sample_rate": 16_000,
+            },
+        )
+        ctx = _started_logger(
+            batch,
+            Task.T2ST,
+            sample=_longcat_tts_sample(),
+            runtime=_longcat_runtime(),
+            results=[result],
+            loader_name="t2st",
+        )
+
+        ctx.callback.on_train_batch_start(ctx.trainer, ctx.module, batch, 0)
+
+        text_tags = _tags(ctx.experiment.add_text)
+        self.assertIn("sample/t2st/0/target", text_tags)
+        self.assertIn("sample/t2st/0/generated", text_tags)
+        scalar_tags = _tags(ctx.experiment.add_scalar)
+        self.assertIn("sample/t2st/0/text/cer", scalar_tags)
+        self.assertIn("sample/t2st/0/text/exact_match", scalar_tags)
+        metadata = _metadata(ctx.experiment, "sample/t2st/0/metadata")
+        self.assertEqual(metadata["chat_template"]["prediction"], "parallel")
+        self.assertEqual(metadata["generation"]["text"], "generated")
+
     def test_task_sample_logger_loads_samples_from_real_datamodule(self):
         samples = [Mock(), Mock()]
         config = SpeechConfig(
@@ -381,7 +414,10 @@ class TaskSampleLoggingTest(unittest.TestCase):
         self.assertTrue(metadata["reference"]["structured"])
 
     def test_single_sample_text_target_uses_default_role(self):
-        self.assertEqual(_target_text(_sample(), Task.ASR), "hello")
+        self.assertEqual(
+            _target_text(_sample(), Task.ASR, PredictionModality.TEXT),
+            "hello",
+        )
 
     def test_waveform_only_metadata_does_not_parse_audio_as_codes(self):
         sample = _sample()
@@ -485,6 +521,7 @@ def _batch(
     *,
     input_ids: list[int] | None = None,
     token_labels: list[int] | None = None,
+    prediction: PredictionModality | None = None,
 ) -> ModelBatch:
     input_ids = [1, 2] if input_ids is None else input_ids
     token_labels = [-100, 2] if token_labels is None else token_labels
@@ -493,7 +530,7 @@ def _batch(
         token_labels=torch.tensor([token_labels]),
         acoustic_target=None,
         tasks=[task],
-        predictions=[task.prediction_modality],
+        predictions=[task.prediction_modality if prediction is None else prediction],
         pad_token_id=0,
     )
 

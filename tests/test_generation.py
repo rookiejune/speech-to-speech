@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 import unittest
 from types import SimpleNamespace
 from typing import cast
@@ -20,10 +20,14 @@ from speech_to_speech.model import (
     AudioOutputAdapterType,
     ToyConfig,
 )
-from speech_to_speech.model.acoustic import FlowModel
+from speech_to_speech.model.acoustic.flow import FlowModel
 from speech_to_speech.model.base import Config as ModelConfig
 from speech_to_speech.model.base import Model
-from speech_to_speech.model._generation import GenerationStepResult
+from speech_to_speech.model._generation import (
+    GenerationStepResult,
+    _sampling_logits,
+    _stop_logit_index,
+)
 from speech_to_speech.generation import (
     Request,
     Result,
@@ -121,6 +125,45 @@ class _UnifiedCodec:
     def encode(self, audio: Tensor, sample_rate: int) -> Tensor:
         del audio, sample_rate
         raise NotImplementedError
+
+
+class _RowFailingSemanticCodec(_UnifiedCodec):
+    def __init__(self) -> None:
+        super().__init__()
+        self.decode_batch_sizes: list[int] = []
+
+    def decode(
+        self,
+        codes: Tensor,
+        *,
+        mask: Tensor | None = None,
+        reference_features: Tensor | None = None,
+        reference_mask: Tensor | None = None,
+        generator: torch.Generator | None = None,
+    ) -> Tensor:
+        del mask, reference_features, reference_mask, generator
+        self.decode_calls += 1
+        self.decode_batch_sizes.append(codes.size(0))
+        if bool(codes[..., 0].eq(1).any()):
+            raise ValueError("invalid semantic row")
+        return codes[..., 0].float()
+
+
+class _RowFailingAcousticCodec(_Codec):
+    def __init__(self) -> None:
+        super().__init__()
+        self.decode_batch_sizes: list[int] = []
+
+    def decode_features(
+        self,
+        semantic_codes: Tensor,
+        acoustic_features: Tensor,
+    ) -> Tensor:
+        self.decode_calls += 1
+        self.decode_batch_sizes.append(semantic_codes.size(0))
+        if bool(semantic_codes[..., 0].eq(1).any()):
+            raise ValueError("invalid acoustic row")
+        return semantic_codes[..., 0].to(acoustic_features) + acoustic_features[..., 0]
 
 
 class _Runtime:
@@ -1019,8 +1062,8 @@ class GenerationTest(unittest.TestCase):
             output.token_logprobs,
             torch.zeros_like(output.token_logprobs),
         )
-        self.assertEqual(model.batch_sizes, [2, 1])
-        self.assertEqual(model.cache_selections, [[1]])
+        self.assertEqual(model.batch_sizes, [2, 2])
+        self.assertEqual(model.cache_selections, [])
 
     def test_generation_rejects_invalid_constraints(self):
         model = Model(
@@ -1046,6 +1089,35 @@ class GenerationTest(unittest.TestCase):
         request["task"] = cast(Task, "tts")
         with self.assertRaisesRegex(TypeError, "must be a Task"):
             generate_responses([request], _GenerationModel(), max_new_tokens=1)
+
+    def test_stop_logit_index_is_resolved_before_generation(self):
+        layout = Layout(text=(0, 4), audio=(4, 8))
+
+        self.assertEqual(
+            _stop_logit_index(7, torch.tensor([2, 7, 4]), None, layout),
+            1,
+        )
+        self.assertIsNone(_stop_logit_index(7, torch.tensor([2, 4]), None, layout))
+        self.assertEqual(
+            _stop_logit_index(7, None, Modality.AUDIO, layout),
+            3,
+        )
+        self.assertEqual(_stop_logit_index(7, None, None, layout), 7)
+        with self.assertRaisesRegex(ValueError, "no non-stop token"):
+            _stop_logit_index(7, torch.tensor([7]), None, layout)
+
+    def test_minimum_length_rejects_first_step_without_non_stop_logit(self):
+        logits = torch.tensor([[[0.0, float("-inf")]]])
+
+        with self.assertRaisesRegex(ValueError, "no non-stop token"):
+            _sampling_logits(
+                logits,
+                1.0,
+                top_p=1.0,
+                step=0,
+                min_new_tokens=2,
+                stop_logit_index=0,
+            )
 
     def test_token_only_generation_requires_explicit_semantic_codec(self):
         model = _TokenGenerationModel()
@@ -1148,6 +1220,35 @@ class GenerationTest(unittest.TestCase):
             reference_mask.unsqueeze(0),
         )
         self.assertIs(actual_generator, generator)
+
+    def test_semantic_reference_decode_isolates_invalid_row(self):
+        model = _TokenGenerationModel()
+        codec = _RowFailingSemanticCodec()
+        model.runtime._semantic_codec = codec
+        requests = [_request(), _request()]
+        for request in requests:
+            request["semantic_reference_features"] = torch.zeros(1, 2)
+        sequence = torch.tensor(
+            [
+                [4, 6, 4, 4, 7],
+                [4, 6, 5, 5, 7],
+            ]
+        )
+
+        with (
+            patch.object(model, "generate_tokens", return_value=sequence),
+            self.assertWarnsRegex(RuntimeWarning, "invalid semantic row"),
+        ):
+            results = generate_responses(
+                requests,
+                model,
+                max_new_tokens=3,
+                do_sample=False,
+            )
+
+        self.assertIsNotNone(results[0]["audio"])
+        self.assertIsNone(results[1]["audio"])
+        self.assertEqual(codec.decode_batch_sizes, [1, 1])
 
     def test_full_codec_sequence_decodes_all_codebooks(self):
         tokenizer = FlattenedAudioTokenizer(
@@ -1282,7 +1383,7 @@ class GenerationTest(unittest.TestCase):
 
         self.assertTrue(torch.equal(cached, full))
 
-    def test_tiny_qwen_cache_compacts_finished_rows(self):
+    def test_tiny_qwen_cache_keeps_finished_state_on_device(self):
         def generate(use_cache: bool) -> tuple[Tensor, list[int]]:
             model = Model(
                 _model_config(),
@@ -1320,8 +1421,8 @@ class GenerationTest(unittest.TestCase):
 
         self.assertTrue(torch.equal(cached, full))
         self.assertTrue(torch.equal(cached, torch.tensor([[1, 4, 3, 3], [1, 5, 2, 3]])))
-        self.assertEqual(cached_batch_sizes, [2, 1])
-        self.assertEqual(full_batch_sizes, [2, 1])
+        self.assertEqual(cached_batch_sizes, [2, 2])
+        self.assertEqual(full_batch_sizes, [2, 2])
 
     def test_cached_audio_generation_matches_full_recompute(self):
         cached_model = _GenerationModel()
@@ -1568,6 +1669,87 @@ class GenerationTest(unittest.TestCase):
             self.assertIsNotNone(audio)
             self.assertEqual(audio["features"].size(0), 2)
 
+    def test_semantic_decode_falls_back_to_isolate_invalid_row(self):
+        model = _TokenGenerationModel()
+        codec = _RowFailingSemanticCodec()
+        model.runtime._semantic_codec = codec
+        sequence = torch.tensor(
+            [
+                [4, 6, 4, 4, 7],
+                [4, 6, 5, 5, 7],
+            ]
+        )
+
+        with (
+            patch.object(model, "generate_tokens", return_value=sequence),
+            self.assertWarnsRegex(RuntimeWarning, "invalid semantic row"),
+        ):
+            results = generate_responses(
+                [_request(), _request()],
+                model,
+                max_new_tokens=3,
+                do_sample=False,
+            )
+
+        self.assertIsNotNone(results[0]["audio"])
+        self.assertIsNone(results[1]["audio"])
+        self.assertEqual(
+            results[1].get("decode_error", {}).get("message"), "invalid semantic row"
+        )
+        self.assertEqual(codec.decode_batch_sizes, [2, 1, 1])
+
+    def test_acoustic_decode_falls_back_to_isolate_invalid_row(self):
+        model = _GenerationModel()
+        codec = _RowFailingAcousticCodec()
+        model.runtime.codec = codec
+        generated = {
+            "sequence": torch.tensor(
+                [
+                    [4, 6, 4, 4, 7],
+                    [4, 6, 5, 5, 7],
+                ]
+            ),
+            "features": torch.zeros(2, 2, 2),
+            "frame_counts": torch.tensor([2, 2]),
+        }
+
+        with (
+            patch.object(model, "generate_audio_features", return_value=generated),
+            self.assertWarnsRegex(RuntimeWarning, "invalid acoustic row"),
+        ):
+            results = generate_responses(
+                [_request(), _request()],
+                model,
+                max_new_tokens=3,
+                do_sample=False,
+            )
+
+        self.assertIsNotNone(results[0]["audio"])
+        self.assertIsNone(results[1]["audio"])
+        self.assertEqual(
+            results[1].get("decode_error", {}).get("message"), "invalid acoustic row"
+        )
+        self.assertEqual(codec.decode_batch_sizes, [2, 1, 1])
+
+    def test_grouped_decode_propagates_oom_without_row_fallback(self):
+        model = _TokenGenerationModel()
+        codec = _UnifiedCodec()
+        model.runtime._semantic_codec = codec
+        error = torch.OutOfMemoryError("codec allocation failed")
+
+        with patch.object(codec, "decode", side_effect=error) as decode:
+            with self.assertRaises(torch.OutOfMemoryError) as raised:
+                generate_responses(
+                    [_request(), _request()],
+                    model,
+                    max_new_tokens=3,
+                    do_sample=False,
+                )
+
+        self.assertIs(raised.exception, error)
+        self.assertEqual(decode.call_count, 1)
+        self.assertEqual(decode.call_args.args[0].size(0), 2)
+
     def test_batch_generation_tracks_stop_per_row(self):
         requests = [
             Request(prompt_ids=torch.tensor([1]), task=Task.T2TT),
@@ -1589,8 +1771,30 @@ class GenerationTest(unittest.TestCase):
                 self.assertTrue(
                     torch.equal(results[1]["response_ids"], torch.tensor([1]))
                 )
-                self.assertEqual(model.batch_sizes, [2, 1])
-                self.assertEqual(model.cache_selections, [[1]] if use_cache else [])
+                self.assertEqual(model.batch_sizes, [2, 2])
+                self.assertEqual(model.cache_selections, [])
+
+    def test_sampling_skips_finished_rows_without_compacting_forward(self):
+        model = _VariableStopModel()
+
+        with patch("torch.multinomial", wraps=torch.multinomial) as multinomial:
+            generated = model.generate_tokens(
+                torch.tensor([[1], [2]]),
+                max_new_tokens=3,
+                stop_token_id=model.runtime.eos_token_id,
+                allowed_token_ids=(model.runtime.eos_token_id, 1),
+                do_sample=True,
+                use_cache=True,
+            )
+
+        self.assertTrue(
+            torch.equal(generated, torch.tensor([[1, 3, 3], [2, 1, 3]]))
+        )
+        self.assertEqual(model.batch_sizes, [2, 2])
+        self.assertEqual(
+            [call.args[0].size(0) for call in multinomial.call_args_list],
+            [2, 1],
+        )
 
     def test_cache_collects_audio_condition_online(self):
         model = _GenerationModel()
@@ -1629,7 +1833,7 @@ class GenerationTest(unittest.TestCase):
 
     def test_parallel_mixed_generation_decodes_audio_span(self):
         # TEXT token, EOS, then forced BOA, codec token, EOA.
-        model = _MixedScriptModel([2, 3, 4, 7])
+        model = _MixedScriptModel([2, 3, 2, 4, 7])
         result = generate_responses(
             [_mixed_request(Task.PARALLEL_AR)],
             model,
@@ -1641,6 +1845,72 @@ class GenerationTest(unittest.TestCase):
         audio = cast(dict, result["audio"])
         self.assertEqual(audio["sample_rate"], 16_000)
         self.assertEqual(model.runtime._semantic_codec.decode_calls, 1)
+
+    def test_parallel_mixed_generation_preserves_audio_decode_error(self):
+        model = _MixedScriptModel([2, 3, 2, 5, 7])
+        model.runtime._semantic_codec = _RowFailingSemanticCodec()
+
+        with self.assertWarnsRegex(RuntimeWarning, "invalid semantic row"):
+            result = generate_responses(
+                [_mixed_request(Task.PARALLEL_AR)],
+                model,
+                max_new_tokens=8,
+                do_sample=False,
+            )[0]
+
+        self.assertTrue(
+            torch.equal(result["response_ids"], torch.tensor([2, 3, 6, 5, 7]))
+        )
+        self.assertIsNone(result["audio"])
+        self.assertEqual(
+            result.get("decode_error", {}).get("message"),
+            "invalid semantic row",
+        )
+
+    def test_parallel_mixed_sampling_skips_forced_boa_row(self):
+        model = _MixedScriptModel([2, 3, 2, 4, 7])
+
+        with patch("torch.multinomial", wraps=torch.multinomial) as multinomial:
+            result = generate_responses(
+                [_mixed_request(Task.PARALLEL_AR)],
+                model,
+                max_new_tokens=8,
+                top_p=0.9,
+                do_sample=True,
+            )[0]
+
+        self.assertTrue(
+            torch.equal(result["response_ids"], torch.tensor([2, 3, 6, 4, 7]))
+        )
+        self.assertEqual(
+            [call.args[0].size(0) for call in multinomial.call_args_list],
+            [1, 1, 0, 1, 1],
+        )
+
+    def test_mixed_sampling_skips_done_rows_without_compacting_forward(self):
+        model = _MixedScriptModel([[3, 2], [2, 3]])
+
+        with patch("torch.multinomial", wraps=torch.multinomial) as multinomial:
+            results = generate_responses(
+                [
+                    _mixed_request(Task.INTERLEAVED_AR),
+                    _mixed_request(Task.INTERLEAVED_AR),
+                ],
+                model,
+                max_new_tokens=3,
+                do_sample=True,
+                use_cache=False,
+            )
+
+        self.assertTrue(torch.equal(results[0]["response_ids"], torch.tensor([3])))
+        self.assertTrue(
+            torch.equal(results[1]["response_ids"], torch.tensor([2, 3]))
+        )
+        self.assertEqual(model.batch_sizes, [2, 2])
+        self.assertEqual(
+            [call.args[0].size(0) for call in multinomial.call_args_list],
+            [2, 1],
+        )
 
     def test_interleaved_mixed_generation_decodes_audio_span(self):
         # TEXT, BOA, codec, EOA, EOS.
@@ -1669,7 +1939,7 @@ class GenerationTest(unittest.TestCase):
 
 
 class _MixedScriptModel(Model):
-    def __init__(self, script: list[int]) -> None:
+    def __init__(self, script: Sequence[int | Sequence[int]]) -> None:
         nn.Module.__init__(self)
         self.runtime = _Runtime()
         self.runtime._semantic_codec = _UnifiedCodec()
@@ -1680,6 +1950,7 @@ class _MixedScriptModel(Model):
         )
         self._script = list(script)
         self._step = 0
+        self.batch_sizes: list[int] = []
 
     def generation_step(
         self,
@@ -1697,13 +1968,25 @@ class _MixedScriptModel(Model):
         del attention_mask, modality, audio_input_positions, audio_output_past
         if self._step >= len(self._script):
             raise RuntimeError("mixed script exhausted.")
-        next_id = self._script[self._step]
+        scripted_ids = self._script[self._step]
         self._step += 1
+        self.batch_sizes.append(input_ids.size(0))
+        next_ids = (
+            input_ids.new_full((input_ids.size(0),), scripted_ids)
+            if isinstance(scripted_ids, int)
+            else input_ids.new_tensor(scripted_ids)
+        )
+        if next_ids.shape != (input_ids.size(0),):
+            raise ValueError("mixed script step must provide one token per row.")
         logits = torch.full(
             (*input_ids.shape, self.runtime.layout.vocab_size),
             float("-inf"),
         )
-        logits[:, -1, next_id] = 0.0
+        logits[
+            torch.arange(input_ids.size(0), device=input_ids.device),
+            -1,
+            next_ids,
+        ] = 0.0
         if token_ids is not None:
             logits = logits.index_select(-1, token_ids)
         cache = SimpleNamespace(length=input_ids.size(1)) if use_cache else None

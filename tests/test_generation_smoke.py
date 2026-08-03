@@ -19,7 +19,7 @@ from scripts.generation_smoke import (
     _validate,
 )
 from speech_to_speech.generation import Request, Result
-from speech_to_speech.model.acoustic import FlowModel
+from speech_to_speech.model.acoustic.flow import FlowModel
 from speech_to_speech.task import Task
 
 

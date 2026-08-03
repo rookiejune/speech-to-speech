@@ -8,6 +8,7 @@ from unittest.mock import patch
 import torch
 from anydataset.types import AudioView, Modality
 from anytrain.codec import SemanticAcousticCodes
+from anytrain.loss import PackedCodebookLogits
 from anytrain.module.idspace import Layout
 from lightning.pytorch import LightningModule
 from peft import LoraConfig
@@ -153,6 +154,7 @@ class _FlowModel:
         self.token_hidden_calls = 0
         self.logit_rows = 0
         self.logit_modalities: list[Modality] = []
+        self.projected_audio_rows: list[int] = []
 
     def __call__(self, input_ids: Tensor, **kwargs) -> CausalLMOutputWithPast:
         logits = torch.zeros(
@@ -188,11 +190,16 @@ class _FlowModel:
         hidden_state: Tensor,
         *,
         attention_mask: Tensor | None = None,
+        selection_mask: Tensor | None = None,
         past_key_values: object | None = None,
         use_cache: bool = False,
     ) -> tuple[Tensor, object | None]:
         del attention_mask, past_key_values, use_cache
-        return hidden_state, None
+        if selection_mask is None:
+            self.projected_audio_rows.append(hidden_state.numel() // hidden_state.size(-1))
+            return hidden_state, None
+        self.projected_audio_rows.append(int(selection_mask.sum().item()))
+        return hidden_state[selection_mask], None
 
     def target_frame_condition(
         self, hidden_states: Tensor, target_positions: Tensor
@@ -209,6 +216,7 @@ class _TokenForwardModel:
         self.layout = layout
         self.token_hidden_calls = 0
         self.project_audio_calls = 0
+        self.projected_audio_rows: list[int] = []
         self.logit_rows = 0
         self.logit_modalities: list[Modality] = []
 
@@ -245,14 +253,25 @@ class _TokenForwardModel:
         hidden_state: Tensor,
         *,
         attention_mask: Tensor | None = None,
+        selection_mask: Tensor | None = None,
         past_key_values: object | None = None,
         use_cache: bool = False,
     ) -> tuple[Tensor, object | None]:
         del attention_mask, past_key_values, use_cache
         self.project_audio_calls += 1
-        return hidden_state, None
+        if selection_mask is None:
+            self.projected_audio_rows.append(hidden_state.numel() // hidden_state.size(-1))
+            return hidden_state, None
+        self.projected_audio_rows.append(int(selection_mask.sum().item()))
+        return hidden_state[selection_mask], None
+
 
 class _RVQModel(_FlowModel):
+    def __init__(self, layout: Layout) -> None:
+        super().__init__(layout)
+        self.padded_logit_calls = 0
+        self.packed_validations: list[bool] = []
+
     def acoustic_logits(
         self,
         hidden_states: Tensor,
@@ -260,8 +279,38 @@ class _RVQModel(_FlowModel):
         target_acoustic_codes: Tensor | None = None,
     ) -> tuple[Tensor, ...]:
         del target_acoustic_codes
+        self.padded_logit_calls += 1
         condition = self.target_frame_condition(hidden_states, target_positions)
         return (torch.zeros(*condition.shape[:2], 3),)
+
+    def acoustic_packed_logits(
+        self,
+        hidden_states: Tensor,
+        target_positions: Tensor,
+        target_acoustic_codes: Tensor,
+        *,
+        mask: Tensor | None = None,
+        validate: bool = True,
+    ) -> PackedCodebookLogits:
+        self.packed_validations.append(validate)
+        condition = self.target_frame_condition(hidden_states, target_positions)
+        mask = target_positions.ge(0) if mask is None else mask
+        frame_indices = mask.flatten().nonzero().flatten()
+        return PackedCodebookLogits(
+            logits=(
+                torch.zeros(
+                    frame_indices.numel(),
+                    3,
+                    device=condition.device,
+                ),
+            ),
+            labels=target_acoustic_codes.flatten(0, 1).index_select(
+                0,
+                frame_indices,
+            ),
+            row_indices=frame_indices.div(mask.size(1), rounding_mode="floor"),
+            batch_size=mask.size(0),
+        )
 
 
 class _BatchObjective(Objective[Any]):
@@ -320,6 +369,7 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertIn("token", outputs)
         self.assertEqual(model.token_hidden_calls, 1)
         self.assertEqual(model.project_audio_calls, 1)
+        self.assertEqual(model.projected_audio_rows, [1])
         self.assertEqual(model.logit_modalities, [Modality.AUDIO, Modality.TEXT])
         self.assertEqual(model.logit_rows, 2)
         details = _require_details(self, outputs["token"], "token loss")
@@ -338,6 +388,7 @@ class ModelLossContractTest(unittest.TestCase):
         outputs = TokenObjective(layout)(batch, model)
 
         self.assertEqual(model.project_audio_calls, 1)
+        self.assertEqual(model.projected_audio_rows, [2])
         self.assertEqual(
             set(model.logit_modalities),
             {Modality.TEXT, Modality.AUDIO},
@@ -364,6 +415,10 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertIn("token", outputs)
         self.assertEqual(model.token_hidden_calls, 1)
         self.assertEqual(model.project_audio_calls, 1)
+        self.assertEqual(
+            model.projected_audio_rows,
+            [int(case.labels.ne(-100).sum())],
+        )
         self.assertEqual(model.logit_rows, int(case.labels.ne(-100).sum()))
         self.assertEqual(model.logit_modalities, [Modality.AUDIO])
 
@@ -538,6 +593,34 @@ class ModelLossContractTest(unittest.TestCase):
         torch.testing.assert_close(moved_context[0].semantic, context.semantic)
         torch.testing.assert_close(moved_context[0].acoustic, context.acoustic)
 
+    def test_transfer_batch_requests_nonblocking_model_batch_copy(self):
+        batch = _batch(Task.MT, token_labels=torch.tensor([[-100, 1]]))
+        module = _module()
+        device = torch.device("cpu")
+
+        with patch.object(ModelBatch, "to", autospec=True, return_value=batch) as move:
+            moved = module.transfer_batch_to_device(batch, device, 0)
+
+        self.assertIs(moved, batch)
+        move.assert_called_once_with(batch, device, non_blocking=True)
+
+    def test_transfer_carries_exact_cpu_embedding_block_hints(self):
+        model = _model(_Backbone())
+        module = _module(model=model)
+        batch = ModelBatch(
+            input_ids=torch.tensor([[0, 4]]),
+            token_labels=torch.tensor([[-100, 4]]),
+            acoustic_target=None,
+            tasks=[Task.TTS],
+            predictions=[Task.TTS.prediction_modality],
+            pad_token_id=99,
+        )
+
+        moved = module.transfer_batch_to_device(batch, torch.device("cpu"), 0)
+
+        self.assertEqual(moved.embedding_blocks, frozenset({"text", "audio"}))
+        self.assertTrue(moved.audio_input_positions_validated)
+
     def test_transfer_batch_keeps_raw_fallback_on_cpu(self):
         raw = _raw_tts_batch()
         module = _module()
@@ -663,6 +746,31 @@ class ModelLossContractTest(unittest.TestCase):
         )
         self.assertTrue(torch.isfinite(item.loss).all())
 
+    def test_trusted_token_loss_avoids_host_predicates_for_empty_modality(self):
+        layout = Layout(text=(0, 4), audio=(4, 7))
+        modalities: list[Modality] = []
+
+        def logits(hidden: Tensor, modality: Modality) -> Tensor:
+            modalities.append(modality)
+            start, end = layout.blocks[modality.value]
+            return hidden.new_zeros((hidden.size(0), end - start))
+
+        with patch.object(
+            torch.Tensor,
+            "__bool__",
+            side_effect=AssertionError("trusted token loss must stay on device"),
+        ):
+            item = TokenLoss(layout)(
+                torch.zeros(1, 3, 2),
+                torch.tensor([[-100, 1, 2]]),
+                PredictionModality.PARALLEL,
+                logits,
+                validate=False,
+            )
+
+        self.assertEqual(set(modalities), {Modality.TEXT, Modality.AUDIO})
+        self.assertTrue(torch.isfinite(item.loss).all())
+
     def test_token_objective_uses_effective_token_mean(self):
         layout = Layout(text=(0, 2), audio=(2, 4))
         loss = TokenLoss(layout)
@@ -711,7 +819,24 @@ class ModelLossContractTest(unittest.TestCase):
         asr = _batch(Task.ASR, token_labels=torch.tensor([[-100, 1]]))
         mt = _batch(Task.MT, token_labels=torch.tensor([[-100, 1]]))
 
-        with patch.object(module, "log"):
+        with (
+            patch.object(module, "log"),
+            patch.object(
+                torch.Tensor,
+                "__bool__",
+                side_effect=AssertionError("fused loss weights must stay on device"),
+            ),
+            patch(
+                "speech_to_speech.pl_module.module.combine_outputs",
+                wraps=combine_outputs,
+            ) as combine,
+            patch(
+                "anytrain.loss.output.loss_item_mean",
+                side_effect=AssertionError(
+                    "fused training must not reduce concatenated objective losses"
+                ),
+            ),
+        ):
             outputs = module.training_step(
                 FusedBatch(
                     (asr, mt),
@@ -720,6 +845,9 @@ class ModelLossContractTest(unittest.TestCase):
                 ),
                 0,
             )
+            self.assertEqual(combine.call_count, 1)
+            groups = module.current_gradient_loss_groups()
+            self.assertEqual(combine.call_count, 1)
 
         self.assertEqual(objective.tasks, [Task.ASR, Task.MT])
         torch.testing.assert_close(outputs["loss"], torch.tensor(1.2))
@@ -729,7 +857,6 @@ class ModelLossContractTest(unittest.TestCase):
             details["tokens"],
             torch.tensor([1.0, 3.0]),
         )
-        groups = module.current_gradient_loss_groups()
         self.assertEqual(tuple(groups), ("batch", "asr", "mt"))
         torch.testing.assert_close(groups["batch"]["loss"], torch.tensor(1.2))
         torch.testing.assert_close(groups["asr"]["loss"], torch.tensor(1.0))
@@ -1137,6 +1264,8 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertIn("codebook_0_top1", validation_details)
         self.assertEqual(model.token_hidden_calls, 2)
         self.assertTrue(torch.equal(model.positions, positions))
+        self.assertEqual(model.padded_logit_calls, 0)
+        self.assertEqual(model.packed_validations, [False, False])
         self.assertEqual(outputs["loss"].shape, ())
         self.assertTrue(torch.isfinite(outputs["loss"]))
 

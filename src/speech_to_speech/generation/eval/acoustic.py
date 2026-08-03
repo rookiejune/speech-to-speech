@@ -13,7 +13,8 @@ from ..batch import requests_from_batch
 from .reporting import audio_output
 
 if TYPE_CHECKING:
-    from ...model.acoustic import FlowModel, RVQModel
+    from ...model.acoustic.flow import FlowModel
+    from ...model.acoustic.rvq import RVQModel
     from ...pl_module import SpeechToSpeechModule
 
 

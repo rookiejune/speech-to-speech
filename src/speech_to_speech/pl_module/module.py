@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -27,14 +28,15 @@ from ..generation.service import generate_responses
 from ..generation.eval.text import (
     TextProbe,
     TextProbeResult,
-    decode_text_ids,
     evaluate_text,
 )
+from ..generation.text import decode_text_ids
 from ..generation.types import Request, Result
 from ..loss.module import Objective
 from ..loss.protocol import TokenObjectiveModel
 from ..loss.types import Outputs, combine_outputs
 from ..loss.validation import validation_metrics
+from ..model.base import Model
 from ..generation.protocol import TextEvaluationModel
 from ..prediction import PredictionModality
 from ..runtime import AudioSequenceLayout
@@ -93,12 +95,16 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         self.schedule_runtime = schedule_runtime
         self._current_loss_outputs: Outputs | None = None
         self._current_gradient_loss_groups: dict[str, Outputs] | None = None
+        self._current_gradient_loader_outputs: (
+            tuple[tuple[str, Outputs], ...] | None
+        ) = None
         self.mt_validation_evaluator = TextComparisonEvaluator()
         self._mt_validation_seen = False
 
     def training_step(self, batch: TrainBatch, batch_idx: int = 0):
         del batch_idx
         self._current_gradient_loss_groups = None
+        self._current_gradient_loader_outputs = None
         outputs = self._training_outputs(batch)
         self._current_loss_outputs = outputs
         self.log(
@@ -106,7 +112,7 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
             outputs["loss"],
             prog_bar=True,
             on_step=True,
-            sync_dist=True,
+            sync_dist=False,
         )
         return outputs
 
@@ -168,7 +174,15 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         if isinstance(batch, RawSpeechBatch):
             return batch
         if isinstance(batch, ModelBatch):
-            return batch.to(device)
+            hints = self._training_input_hints(batch)
+            moved = batch.to(device, non_blocking=True)
+            if hints is not None:
+                blocks, positions_validated = hints
+                moved.set_embedding_hints(
+                    blocks,
+                    audio_input_positions_validated=positions_validated,
+                )
+            return moved
         if isinstance(batch, FusedBatch):
             return FusedBatch(
                 tuple(
@@ -201,16 +215,9 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
                 loss_weights=batch.loss_weights,
             )
             if batch.loader_names is not None:
-                grouped: dict[str, list[Outputs]] = {}
-                for name, output in zip(batch.loader_names, outputs):
-                    grouped.setdefault(name, []).append(output)
-                self._current_gradient_loss_groups = {
-                    "batch": combined,
-                    **{
-                        name: _combine_training_outputs(values)
-                        for name, values in grouped.items()
-                    },
-                }
+                self._current_gradient_loader_outputs = tuple(
+                    zip(batch.loader_names, outputs)
+                )
             return combined
         if isinstance(batch, LoaderBatch):
             output = self._loss_outputs(self.materialize_batch(batch.batch))
@@ -243,8 +250,31 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
                 raise TypeError(
                     "raw waveform batches require a batch materializer before loss."
                 )
-            return batch
-        return self.batch_materializer(batch, device=self.device)
+            return self._with_training_input_hints(batch)
+        return self._with_training_input_hints(
+            self.batch_materializer(batch, device=self.device)
+        )
+
+    def _with_training_input_hints(self, batch: ModelBatch) -> ModelBatch:
+        hints = self._training_input_hints(batch)
+        if hints is not None:
+            blocks, positions_validated = hints
+            batch.set_embedding_hints(
+                blocks,
+                audio_input_positions_validated=positions_validated,
+            )
+        return batch
+
+    def _training_input_hints(
+        self,
+        batch: ModelBatch,
+    ) -> tuple[frozenset[str], bool] | None:
+        if not isinstance(self.model, Model):
+            return None
+        return self.model.training_input_hints(
+            batch.input_ids,
+            batch.audio_input_positions,
+        )
 
     def current_loss_outputs(self) -> Outputs:
         """Return loss outputs kept alive until the backward pass completes."""
@@ -253,13 +283,31 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         return self._current_loss_outputs
 
     def current_gradient_loss_groups(self) -> Mapping[str, Outputs]:
-        if self._current_gradient_loss_groups is None:
+        groups = self._current_gradient_loss_groups
+        if groups is not None:
+            return groups
+        loader_outputs = self._current_gradient_loader_outputs
+        if loader_outputs is None:
             return {"batch": self.current_loss_outputs()}
-        return self._current_gradient_loss_groups
+        grouped: dict[str, list[Outputs]] = {}
+        for name, output in loader_outputs:
+            grouped.setdefault(name, []).append(output)
+        groups = {
+            "batch": self.current_loss_outputs(),
+            **{
+                name: (
+                    values[0] if len(values) == 1 else _combine_training_outputs(values)
+                )
+                for name, values in grouped.items()
+            },
+        }
+        self._current_gradient_loss_groups = groups
+        return groups
 
     def on_after_backward(self) -> None:
         self._current_loss_outputs = None
         self._current_gradient_loss_groups = None
+        self._current_gradient_loader_outputs = None
 
     def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         checkpoint[_AUDIO_SEQUENCE_LAYOUT_KEY] = _audio_sequence_layout_payload(
@@ -343,19 +391,20 @@ def _combine_training_outputs(
         raise ValueError("cannot combine an empty fused training step.")
     if loss_weights is not None and len(loss_weights) != len(outputs):
         raise ValueError("loss weights must align with fused training outputs.")
-    combined = combine_outputs(outputs)
     losses = torch.stack([output["loss"] for output in outputs])
     if loss_weights is None:
-        combined["loss"] = losses.mean()
-        return combined
-    weights = losses.new_tensor(tuple(float(weight) for weight in loss_weights))
-    if bool((weights < 0).any()) or not bool(torch.isfinite(weights).all()):
+        return combine_outputs(outputs, total_loss=losses.mean())
+    resolved_weights = tuple(float(weight) for weight in loss_weights)
+    if any(not math.isfinite(weight) or weight < 0 for weight in resolved_weights):
         raise ValueError("loss weights must be finite and non-negative.")
-    total = weights.sum()
-    if bool(total.le(0)):
+    if math.fsum(resolved_weights) <= 0:
         raise ValueError("loss weights must have a positive total.")
-    combined["loss"] = (losses * weights).sum() / total
-    return combined
+    weights = losses.new_tensor(resolved_weights)
+    total = weights.sum()
+    return combine_outputs(
+        outputs,
+        total_loss=(losses * weights).sum() / total,
+    )
 
 
 def _scale_training_output(output: Outputs, scale: float | None) -> Outputs:
@@ -396,14 +445,11 @@ def _validate_audio_sequence_layout_checkpoint(
     expected: str,
 ) -> None:
     if _AUDIO_SEQUENCE_LAYOUT_KEY not in checkpoint:
-        raise ValueError(
-            "checkpoint is missing the audio sequence layout contract."
-        )
+        raise ValueError("checkpoint is missing the audio sequence layout contract.")
     actual = checkpoint[_AUDIO_SEQUENCE_LAYOUT_KEY]
     if actual != expected:
         raise ValueError(
-            f"checkpoint audio sequence layout does not match runtime: "
-            f"{actual!r} != {expected!r}."
+            f"checkpoint audio sequence layout does not match runtime: {actual!r} != {expected!r}."
         )
 
 
@@ -419,8 +465,7 @@ def _validate_peft_checkpoint(
     actual = checkpoint[_PEFT_KEY]
     if not _peft_payload_matches(actual, expected):
         raise ValueError(
-            f"checkpoint PEFT LoRA contract does not match model: "
-            f"{actual!r} != {expected!r}."
+            f"checkpoint PEFT LoRA contract does not match model: {actual!r} != {expected!r}."
         )
 
 

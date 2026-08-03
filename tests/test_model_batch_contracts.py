@@ -8,6 +8,18 @@ from _contracts_helpers import *
 
 
 class ModelBatchContractTest(unittest.TestCase):
+    def test_model_batch_transfer_reuses_validated_unit_metadata(self):
+        batch = ModelBatch.from_samples([_sample(Task.ASR)], pad_token_id=99)
+        expected = batch.training_units("tokens")
+
+        with patch(
+            "speech_to_speech.datamodule.types._validate_batch_tensors",
+            side_effect=AssertionError("trusted transfer must not revalidate"),
+        ):
+            moved = batch.to(torch.device("cpu"), non_blocking=True)
+
+        self.assertEqual(moved.training_units("tokens"), expected)
+
     def test_model_batch_rejects_mixed_execution_signatures(self):
         samples = [
             _sample(Task.ASR),
@@ -181,7 +193,6 @@ class ModelBatchContractTest(unittest.TestCase):
         for sample, error, message in cases:
             with self.subTest(message=message), self.assertRaisesRegex(error, message):
                 ModelBatch.from_samples([sample], pad_token_id=99)
-
 
 
 if __name__ == "__main__":

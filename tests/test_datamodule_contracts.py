@@ -27,6 +27,52 @@ class DataModuleContractTest(unittest.TestCase):
         load_dataset.assert_called_once_with(config.dataset, runtime)
 
     @patch("speech_to_speech.datamodule.module.load_dataset")
+    def test_multi_loader_shares_speech_dataset_and_worker_budget(
+        self,
+        load_dataset,
+    ):
+        class SharedDataset(MapStyleABC):
+            def __len__(self):
+                return 2
+
+            def __getitem__(self, index):
+                if index not in (0, 1):
+                    raise IndexError(index)
+                return _raw_sample()
+
+        dataset = SharedDataset()
+        load_dataset.return_value = dataset
+        runtime = _data_runtime()
+        config = SpeechConfig(
+            codec="longcat",
+            dataloader=DataLoaderConfig(batch_size=1, num_workers=4),
+        )
+        datamodule = DataModule(
+            runtime,
+            {
+                "asr": LoaderSpec.speech(config, {Task.ASR: 1.0}),
+                "tts": LoaderSpec.speech(config, {Task.TTS: 1.0}),
+            },
+            LoaderSchedule({"asr": 0.25, "tts": 0.75}),
+        )
+
+        datamodule.setup()
+
+        loaders = cast(Any, datamodule)._loaders
+        load_dataset.assert_called_once_with(config.dataset, runtime)
+        self.assertIs(loaders["asr"]._dataset, dataset)
+        self.assertIs(loaders["tts"]._dataset, dataset)
+        self.assertEqual(loaders["asr"].num_workers, 1)
+        self.assertEqual(loaders["tts"].num_workers, 3)
+        self.assertEqual(
+            sum(loader.num_workers for loader in loaders.values()),
+            config.dataloader.num_workers,
+        )
+        scheduled = cast(Any, datamodule.train_dataloader())
+        self.assertEqual(scheduled.loaders["asr"].num_workers, 1)
+        self.assertEqual(scheduled.loaders["tts"].num_workers, 3)
+
+    @patch("speech_to_speech.datamodule.module.load_dataset")
     def test_datamodule_keeps_standard_loader_for_non_store_dataset(
         self,
         load_dataset,

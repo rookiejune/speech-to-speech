@@ -26,8 +26,10 @@ from .loss.module import FlowObjective, RVQObjective, TokenObjective
 from .loss.types import LossItem
 from .model import Model
 from .model._helper import require_embedding
+from .model.acoustic.condition import HiddenConditionAdapter
+from .model.acoustic.flow import FlowModel
+from .model.acoustic.rvq import RVQModel
 from .model.audio_output import AudioOutputAdapterType
-from .model.acoustic import FlowModel, HiddenConditionAdapter, RVQModel
 from .model.embedding.audio import require_semantic_audio_embedding
 from .pl_module import SpeechToSpeechModule
 

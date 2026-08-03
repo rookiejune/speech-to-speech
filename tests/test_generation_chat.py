@@ -13,6 +13,7 @@ from torch import Tensor, nn
 from speech_to_speech.audio_stream import AudioStream
 from speech_to_speech.generation.chat import (
     ChatRequest,
+    completion_from_result,
     create,
     materialize_codes,
     to_request,
@@ -50,8 +51,10 @@ class _TextTokenizer:
         return [1]
 
     def decode(self, token_ids, *, skip_special_tokens: bool = True) -> str:
-        del skip_special_tokens
-        return "decoded:" + ",".join(str(int(value)) for value in token_ids)
+        values = [int(value) for value in token_ids]
+        if skip_special_tokens:
+            values = [value for value in values if value != 7]
+        return "decoded:" + ",".join(str(value) for value in values)
 
 
 class _StructuredCodec:
@@ -392,6 +395,80 @@ class ChatAdapterTest(unittest.TestCase):
         self.assertEqual(message["role"], "assistant")
         self.assertEqual(message["content"], "decoded:4,5")
         self.assertIsNone(message["audio"])
+
+    def test_completion_projects_text_from_text_and_mixed_responses(self) -> None:
+        runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
+        audio_start, _ = runtime.codec_audio_range
+        cases = (
+            (Task.T2TT, [4, 5], "decoded:4,5"),
+            (
+                Task.PARALLEL_AR,
+                [
+                    4,
+                    runtime.eos_token_id,
+                    runtime.boa_token_id,
+                    audio_start,
+                    runtime.eoa_token_id,
+                ],
+                "decoded:4",
+            ),
+            (
+                Task.INTERLEAVED_AR,
+                [
+                    4,
+                    runtime.boa_token_id,
+                    audio_start,
+                    runtime.eoa_token_id,
+                    5,
+                    runtime.eos_token_id,
+                ],
+                "decoded:4,5",
+            ),
+        )
+
+        for task, response_ids, expected in cases:
+            with self.subTest(task=task):
+                completion = completion_from_result(
+                    {
+                        "response_ids": torch.tensor(response_ids),
+                        "audio": None,
+                    },
+                    {
+                        "messages": [{"role": "user", "content": "hello world"}],
+                        "task": task,
+                    },
+                    runtime,
+                )
+
+                self.assertEqual(
+                    completion["choices"][0]["message"]["content"],
+                    expected,
+                )
+
+    def test_completion_preserves_audio_decode_error(self) -> None:
+        runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
+        decode_error = {
+            "type": "ValueError",
+            "message": "invalid generated audio",
+        }
+
+        completion = completion_from_result(
+            {
+                "response_ids": torch.tensor([4, 5]),
+                "audio": None,
+                "decode_error": decode_error,
+            },
+            {
+                "messages": [{"role": "user", "content": "hello world"}],
+                "task": Task.T2TT,
+            },
+            runtime,
+        )
+
+        self.assertEqual(
+            completion["choices"][0]["message"]["decode_error"],
+            decode_error,
+        )
 
 
 if __name__ == "__main__":

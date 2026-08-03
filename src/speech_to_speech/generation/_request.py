@@ -6,6 +6,7 @@ from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
 from ..prediction import PredictionModality
+from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..task import Task
 from .audio import has_semantic_decode_options, validate_audio_request
 from .protocol import TokenGenerator
@@ -77,6 +78,14 @@ def validate(request: Request, model: TokenGenerator) -> None:
         if has_semantic_decode_options(request):
             raise ValueError(
                 "mixed AR generation requests cannot include semantic decode options."
+            )
+        if (
+            prediction is PredictionModality.INTERLEAVED
+            and model.runtime.structured_full_sequence
+            and isinstance(model.runtime.audio_tokenizer, BiCodecAudioTokenizer)
+        ):
+            raise ValueError(
+                "INTERLEAVED generation does not support structured BiCodec audio sequences."
             )
         return
     validate_audio_request(request, model)

@@ -66,7 +66,7 @@ class LoaderPlanConfig:
     loaders: dict[str, LoaderConfig] = field(default_factory=dict)
     accumulate_grad_batches: int = 1
     step_mode: str = LoaderStepMode.WEIGHTED_WINDOW.value
-    fuse_loaders_per_step: Optional[bool] = None
+    fuse_loaders_per_step: bool = False
 
     def __post_init__(self) -> None:
         mode = self._resolved_step_mode()
@@ -111,10 +111,8 @@ class LoaderPlanConfig:
 
     def _resolved_fuse_loaders_per_step(self, mode: LoaderStepMode) -> bool:
         if not isinstance(self.fuse_loaders_per_step, bool):
-            if self.fuse_loaders_per_step is None:
-                return mode is LoaderStepMode.FUSED_JOINT
             raise TypeError(
-                "loader_plan.fuse_loaders_per_step must be a boolean or None."
+                "loader_plan.fuse_loaders_per_step must be a boolean."
             )
         if mode is LoaderStepMode.FUSED_JOINT:
             return True

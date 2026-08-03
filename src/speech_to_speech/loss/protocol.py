@@ -3,9 +3,9 @@ from __future__ import annotations
 from typing import Protocol
 
 from anydataset.types import Modality
+from anytrain.loss import PackedCodebookLogits
 from anytrain.module.idspace import Layout
 from torch import Tensor
-
 
 class TokenObjectiveModel(Protocol):
     @property
@@ -17,6 +17,9 @@ class TokenObjectiveModel(Protocol):
         *,
         attention_mask: Tensor | None = None,
         audio_input_positions: Tensor | None = None,
+        embedding_blocks: frozenset[str] | None = None,
+        validate_input: bool = True,
+        validate_audio_input_positions: bool = True,
     ) -> Tensor: ...
 
     def token_logits(
@@ -33,6 +36,7 @@ class TokenObjectiveModel(Protocol):
         hidden_state: Tensor,
         *,
         attention_mask: Tensor | None = None,
+        selection_mask: Tensor | None = None,
         past_key_values: object | None = None,
         use_cache: bool = False,
     ) -> tuple[Tensor, object | None]: ...
@@ -85,3 +89,13 @@ class RVQObjectiveModel(TokenObjectiveModel, Protocol):
         target_positions: Tensor,
         target_acoustic_codes: Tensor | None = None,
     ) -> tuple[Tensor, ...]: ...
+
+    def acoustic_packed_logits(
+        self,
+        hidden_states: Tensor,
+        target_positions: Tensor,
+        target_acoustic_codes: Tensor,
+        *,
+        mask: Tensor | None = None,
+        validate: bool = True,
+    ) -> PackedCodebookLogits: ...

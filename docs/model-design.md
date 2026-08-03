@@ -235,7 +235,8 @@ class FlowRepaConfig(TypedDict):
 `decoder` 与可选 `codebook_embeddings`，但无法接收后被忽略的 REPA 字段。Hydra 使用
 `model/acoustic=none|flow|rvq`，`none` 只训练 semantic audio token，flow preset 独占
 teacher 与 student REPA 配置；训练组装由 `speech_to_speech.pl_module.composition` 持有，
-入口脚本只传入解析后的配置；root schema 直接复用基础 `model.Config`。UniCodec 也按
+入口脚本只传入解析后的配置；root schema 以基础 `model.Config` 作为共享字段，并按
+`none|flow|rvq` 分别扩展精确的 acoustic 配置。UniCodec 也按
 `FrameCodec` 处理，`runtime=unicodec model/acoustic=none` 走 full-code token 序列，只是完整
 frame 里只有一个 codebook。有独立 acoustic codebook 的 codec 只有在配置 semantic-only artifact
 或选择 full-code sequence 时才可以作为 token-only baseline。ODE sampler 由 `runtime.Config.flow_*` 统一拥有；
@@ -330,8 +331,8 @@ model 对外提供：
   每行有效 frame count。
 
 通用 `generate_sequence()` 自回归循环位于私有 `model/_generation.py`，具体模型不跨文件调用
-基类私有方法。循环首步编码完整多模态 prompt，后续复用 KV cache；已结束行会同步从输入和 cache
-移除，只让 active rows 继续计算。cache 只属于单次调用。
+基类私有方法。循环首步编码完整多模态 prompt，后续复用 KV cache；输入与 cache 保留完整 batch 轴，
+已结束行通过 device mask 屏蔽，只有 active rows 参与随机 sampling。cache 只属于单次调用。
 
 当前 generation 只接收已经映射到 layout global ID 空间的 semantic-token prompt；audio-source
 内容和 text-source 内容都编码在 `Request.prompt_ids` 中。audio-source request 可额外携带

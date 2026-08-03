@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Dict, Optional, cast
+from typing import Dict, Optional
 
 from ..task import Task
 from .dataset.speech import DatasetConfig, DatasetName
@@ -87,8 +87,7 @@ class SpeechConfig:
     interleave_audio_frames: int = 25
     mask_text_ratio: float = 0.5
     mask_audio_ratio: float = 0.5
-    # Dict[str, ...] for OmegaConf.structured; runtime keys are Task after __post_init__.
-    tasks: Optional[Dict[str, TaskConfig]] = None
+    tasks: Optional[Dict[Task, TaskConfig]] = None
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
 
     def __post_init__(self) -> None:
@@ -110,7 +109,7 @@ class SpeechConfig:
                 raise TypeError(f"{name} must be a float.")
             if not 0.0 <= float(value) <= 1.0:
                 raise ValueError(f"{name} must be in [0, 1].")
-        self.tasks = None if self.tasks is None else _tasks(self.tasks)  # type: ignore[assignment]
+        self.tasks = None if self.tasks is None else _tasks(self.tasks)
         if (
             self.dataset.name is DatasetName.QWEN_TTS_SPEAKER
             and self.shape is not DataShape.SINGLE
@@ -129,10 +128,9 @@ def task_template_index(
         raise TypeError("task must be a Task.")
     if tasks is None:
         return 0
-    configs = cast(Mapping[Task, TaskConfig], tasks)
-    if task not in configs:
+    if task not in tasks:
         raise KeyError(f"datamodule.tasks missing entry for {task.value}.")
-    return configs[task].template
+    return tasks[task].template
 
 
 def _tasks(value: object) -> dict[Task, TaskConfig]:

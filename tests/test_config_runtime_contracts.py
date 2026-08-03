@@ -2,12 +2,36 @@ from __future__ import annotations
 
 # ruff: noqa: F403,F405
 
+import subprocess
+import sys
 import unittest
 
 from _contracts_helpers import *
+from speech_to_speech.model import Config as ModelConfig
 
 
 class ConfigRuntimeContractTest(unittest.TestCase):
+    def test_acoustic_config_import_does_not_load_runtime_models(self):
+        code = "\n".join(
+            (
+                "import sys",
+                "sys.modules['flow_matching'] = None",
+                "from speech_to_speech.model.acoustic import AcousticType",
+                "assert AcousticType.NONE.value == 'none'",
+                "assert 'speech_to_speech.model.acoustic.flow' not in sys.modules",
+                "assert 'speech_to_speech.model.acoustic.rvq' not in sys.modules",
+            )
+        )
+
+        completed = subprocess.run(
+            [sys.executable, "-c", code],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_dataloader_config_validates_loader_values(self):
         invalid = (
             ({"batch_size": 0, "num_workers": 0}, ValueError, "positive"),
@@ -221,10 +245,12 @@ class ConfigRuntimeContractTest(unittest.TestCase):
 
     def test_public_configs_support_omegaconf_structured(self):
         runtime_config = OmegaConf.structured(Config)
+        base_model_config = OmegaConf.structured(ModelConfig)
         model_config = OmegaConf.structured(TokenModelConfig)
 
         self.assertIsNone(runtime_config.audio_tokenizer)
         self.assertIsNone(runtime_config.device)
+        self.assertNotIn("acoustic", base_model_config)
         self.assertEqual(model_config.semantic_audio_adapter, "linear")
         self.assertEqual(model_config.audio_input_adapter.type, "mlp")
         self.assertEqual(model_config.audio_output_adapter.type, "none")

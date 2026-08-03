@@ -30,9 +30,21 @@ _UNITS = {
 _OBJECTIVES = tuple(_UNITS)
 
 
-def combine_outputs(outputs: Sequence[Outputs]) -> Outputs:
+def combine_outputs(
+    outputs: Sequence[Outputs],
+    *,
+    total_loss: Tensor | None = None,
+) -> Outputs:
     generic_outputs = cast(Sequence[dict[str, Any]], outputs)
-    return cast(Outputs, combine_loss_outputs(generic_outputs, _UNITS))
+    return cast(
+        Outputs,
+        combine_loss_outputs(
+            generic_outputs,
+            _UNITS,
+            validate_item_weights=False,
+            total_loss=total_loss,
+        ),
+    )
 
 
 def loss_items(outputs: Mapping[str, Any]) -> Iterator[tuple[str, LossItem]]:

@@ -31,7 +31,9 @@ from speech_to_speech.model import (
     Model,
     ToyConfig,
 )
-from speech_to_speech.model.acoustic import DecoderConfig, FlowModel, RVQModel
+from speech_to_speech.model.acoustic import DecoderConfig
+from speech_to_speech.model.acoustic.flow import FlowModel
+from speech_to_speech.model.acoustic.rvq import RVQModel
 from speech_to_speech.performance import TrainingFlops
 from speech_to_speech.pl_module import Config as ModuleConfig, SpeechToSpeechModule
 from speech_to_speech.prediction import PredictionModality
@@ -204,6 +206,13 @@ class TrainingFlopsTest(unittest.TestCase):
         ) + 3 * linear(model.acoustic_condition.projection, sparse.acoustic_target_mask.numel())
         self.assertEqual(_flops(module, sparse), expected)
         self.assertEqual(_flops(module, dense), _flops(module, sparse))
+
+    def test_flow_rejects_non_sequential_feed_forward(self):
+        model = _flow_model()
+        model.acoustic_decoder.decoder.blocks[0].ffn = nn.Identity()
+
+        with self.assertRaisesRegex(TypeError, "standard DiT feed-forward"):
+            flow_decoder(model.acoustic_decoder, batch=1, frames=1)
 
     def test_rvq_uses_valid_target_frames(self):
         model = _rvq_model()

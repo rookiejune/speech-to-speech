@@ -12,7 +12,8 @@ from torch import Tensor
 
 from ...datamodule.types import ModelBatch
 from ...generation.eval.acoustic import evaluate
-from ...model.acoustic import FlowModel, RVQModel
+from ...model.acoustic.flow import FlowModel
+from ...model.acoustic.rvq import RVQModel
 from ...runtime.types import AcousticCodec
 from .._oom import batch_report, report_oom
 from ..interval import TrainInterval

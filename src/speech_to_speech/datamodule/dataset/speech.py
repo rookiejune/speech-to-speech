@@ -4,7 +4,7 @@ import json
 from collections.abc import Iterator, Sequence, Sized
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, cast
+from typing import Any, Callable, Optional, cast
 
 from anydataset.dataset import MapStyleABC
 from anydataset.dataset.speaker import SpeakerAudioGrid
@@ -126,6 +126,13 @@ class SplitManifestDataset(MapStyleABC):
         if index < 0 or index >= len(self.indices):
             raise IndexError(index)
         return self.indices[index]
+
+    def cost_row(self, index: int) -> Any:
+        global_index = self.global_index(index)
+        cost_row = getattr(self.dataset, "cost_row", None)
+        if callable(cost_row):
+            return cast(Callable[[int], Any], cost_row)(global_index)
+        return self.dataset[global_index]
 
     def _shuffle(
         self,

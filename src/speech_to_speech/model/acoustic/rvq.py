@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 
 import torch
+from anytrain.loss import PackedCodebookLogits
 from semantic_acoustic_codec.model import AcousticRVQDecoder, RVQCodeGenerator
 from semantic_acoustic_codec.runtime.artifact import AcousticGeneratorArtifact
 from torch import Tensor
@@ -92,6 +93,25 @@ class RVQModel(Model):
             condition,
             target_acoustic_codes,
             mask=target_positions.ge(0),
+        )
+
+    def acoustic_packed_logits(
+        self,
+        hidden_states: Tensor,
+        target_positions: Tensor,
+        target_acoustic_codes: Tensor,
+        *,
+        mask: Tensor | None = None,
+        validate: bool = True,
+    ) -> PackedCodebookLogits:
+        condition = self._decoder_input(
+            self.target_frame_condition(hidden_states, target_positions)
+        )
+        return self.acoustic_decoder.forward_packed(
+            condition,
+            target_acoustic_codes,
+            mask=target_positions.ge(0) if mask is None else mask,
+            validate=validate,
         )
 
     @torch.no_grad()

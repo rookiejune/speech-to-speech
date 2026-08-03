@@ -166,7 +166,13 @@ class FlowModel(Model):
         if target_acoustic_codes.dim() != 3:
             raise ValueError("target acoustic codes must have shape [B, F, N].")
         safe_codes = target_acoustic_codes.clamp_min(0)
-        features = self._decoder_input(code_features(self.acoustic_codec, self.backbone, safe_codes))
+        decoder_parameter = next(self.acoustic_decoder.parameters())
+        features = code_features(
+            self.acoustic_codec,
+            self.backbone,
+            safe_codes,
+            like=decoder_parameter,
+        )
         features = (
             features - self.acoustic_flow.feature_mean
         ) / self.acoustic_flow.feature_std

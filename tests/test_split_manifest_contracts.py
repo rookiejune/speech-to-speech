@@ -163,6 +163,27 @@ class SplitManifestContractTest(unittest.TestCase):
 
         self.assertEqual(groups, [(1,), (0,)])
 
+    def test_split_manifest_delegates_lightweight_cost_rows(self):
+        class CostDataset(MapStyleABC):
+            def __len__(self):
+                return 3
+
+            def __getitem__(self, index):
+                raise AssertionError(f"full sample {index} must not be loaded")
+
+            def cost_row(self, index):
+                return {"index": index}
+
+        dataset = SplitManifestDataset(
+            CostDataset(),
+            [2, 0],
+            manifest=Path("/stable/split.json"),
+            label="train",
+        )
+
+        self.assertEqual(dataset.cost_row(0), {"index": 2})
+        self.assertEqual(dataset.cost_row(1), {"index": 0})
+
 
 if __name__ == "__main__":
     unittest.main()

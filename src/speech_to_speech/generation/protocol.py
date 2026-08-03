@@ -31,6 +31,7 @@ class TokenGenerator(Protocol):
         attention_mask: Tensor,
         output_hidden_states: bool,
         token_ids: Tensor | None,
+        token_kind: str | None = None,
         modality: Modality | None,
         past_key_values: Cache | None,
         use_cache: bool,
@@ -71,6 +72,9 @@ class TextEvaluationModel(TokenGenerator, Protocol):
         *,
         attention_mask: Tensor | None = None,
         audio_input_positions: Tensor | None = None,
+        embedding_blocks: frozenset[str] | None = None,
+        validate_input: bool = True,
+        validate_audio_input_positions: bool = True,
     ) -> Tensor: ...
 
     def token_logits(

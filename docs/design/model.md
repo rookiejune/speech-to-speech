@@ -12,13 +12,13 @@
   input path，不参与 semantic-audio output head 或 acoustic generation。
 - `audio_output.AudioOutputAdapter`：把 backbone hidden states 投影到 semantic-audio feature
   space；`none` / `linear` / `mlp` 为无序列混合特例，`transformer` 为带独立 KV cache 的因果栈。
-- `acoustic.FlowModel`：在基础模型上组合 SAC `FMFeatureGenerator`（`DiTDecoder` core），提供
+- `acoustic.flow.FlowModel`：在基础模型上组合 SAC `FMFeatureGenerator`（`DiTDecoder` core），提供
   flow target、sampling 和 `generate_audio_features()`；S2S 不再平行维护 DiT 实现。
-- `acoustic.RVQModel`：组合 SAC `AcousticRVQDecoder`，提供 teacher-forced
+- `acoustic.rvq.RVQModel`：组合 SAC `AcousticRVQDecoder`，提供 teacher-forced
   codebook logits、sampling 和 `generate_audio_features()`；类型从 SAC 导入，不经 S2S 再导出。
-- `acoustic.HiddenConditionAdapter`：以 `LayerNorm + Linear` 把对齐后的 backbone hidden state 映射到
+- `acoustic.condition.HiddenConditionAdapter`：以 `LayerNorm + Linear` 把对齐后的 backbone hidden state 映射到
   SAC generator 的 condition space；训练和 generation 共用该入口。
-- `acoustic.AcousticFlow`：薄包装，持有 `FMFeatureGenerator` 与 S2S `flow_matching` runtime
+- `acoustic.flow.AcousticFlow`：薄包装，持有 `FMFeatureGenerator` 与 S2S `flow_matching` runtime
   做 ODE sampling，并保留 feature mean/std 归一化缓冲。
 - `loss.protocol.TokenObjectiveModel` / `FlowObjectiveModel` / `RVQObjectiveModel`：objective
   所依赖的训练能力。
@@ -109,12 +109,13 @@ def generate_tokens(...) -> Tensor: ...
 identity/`none`，不再额外投影。`toy=None` 时模型使用 `runtime.backbone`；非空时由
 `ToyConfig` 构造随机 tiny Qwen，runtime 仍负责 tokenizer、codec、layout、special IDs 与 flow
 sampler。完整 Qwen 架构的随机初始化属于 `runtime.backbone_initialization=random`，不通过 toy
-参数近似。Hydra `model` preset 与这些字段一一对应，overfit/train root schema 直接复用
-`model.Config`。
+参数近似。Hydra `model` preset 与这些共享字段一一对应；overfit/train root schema 继承
+`model.Config`，再按 `model/acoustic=none|flow|rvq` 增加对应的精确 acoustic 字段。
 
 `audio_output_adapter` 是因果族 semantic-audio output adapter：`none` / `linear` / `mlp` 是无序列
 混合的特例；`transformer` 是带独立 KV cache 的因果 self-attention。teacher-forcing 对完整
-backbone hidden 一次前向；generation 增量喂入新 token hidden 并与 backbone cache 同步收缩。
+backbone hidden 一次前向；generation 增量喂入新 token hidden，audio adapter 与 backbone cache
+始终保留相同的完整 batch 轴，结束行由 generation mask 屏蔽。
 pointwise 特例忽略 cache。训练 CE 在 adapter 之后对 audio 行做 tied linear；frame condition 仍取
 adapter 前的 backbone hidden。
 

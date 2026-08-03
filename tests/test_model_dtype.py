@@ -3,13 +3,16 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import patch
 
 import torch
 from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 
 from speech_to_speech.model import Config
-from speech_to_speech.model.acoustic import DecoderConfig, FlowModel, RVQModel
+from speech_to_speech.model.acoustic import DecoderConfig
+from speech_to_speech.model.acoustic.flow import FlowModel
+from speech_to_speech.model.acoustic.rvq import RVQModel
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
 from speech_to_speech.parameter_policy import (
     PARAMETER_POLICY_SPECS,
@@ -105,7 +108,12 @@ class ModelDtypeTest(unittest.TestCase):
         codes = torch.zeros(1, 2, 1, dtype=torch.long)
 
         condition = model.target_frame_condition(hidden, positions)
-        target = model.acoustic_target_latent(codes)
+        with patch.object(
+            model,
+            "_decoder_input",
+            wraps=model._decoder_input,
+        ) as decoder_input:
+            target = model.acoustic_target_latent(codes)
 
         self.assertTrue(
             all(
@@ -115,6 +123,7 @@ class ModelDtypeTest(unittest.TestCase):
         )
         self.assertEqual(condition.dtype, torch.float32)
         self.assertEqual(target.dtype, torch.float32)
+        decoder_input.assert_not_called()
 
     def test_audio_embeddings_merge_into_bf16_backbone_input(self):
         model = _flow_model()

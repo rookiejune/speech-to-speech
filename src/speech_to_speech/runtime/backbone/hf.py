@@ -59,6 +59,7 @@ class HuggingFaceBackboneAdapter:
             if self.config.initialization is BackboneInitialization.PRETRAINED
             else self._random(**kwargs)
         )
+        _remove_output_head(model)
         if self.config.gradient_checkpointing:
             _enable_gradient_checkpointing(model)
         if self.config.device is not None:
@@ -156,6 +157,36 @@ def _omni_model_factory() -> _OmniModelFactory:
             "Qwen2_5OmniThinkerForConditionalGeneration."
         ) from error
     return cast(_OmniModelFactory, Qwen2_5OmniThinkerForConditionalGeneration)
+
+
+def _remove_output_head(model: object) -> None:
+    owner = _output_head_owner(model)
+    if owner is None:
+        return
+    setter = getattr(owner, "set_output_embeddings")
+    if not isinstance(owner, nn.Module):
+        setter(None)
+        return
+
+    input_getter = getattr(owner, "get_input_embeddings", None)
+    input_embeddings = input_getter() if callable(input_getter) else None
+    setter(None)
+    if getattr(owner, "get_output_embeddings")() is not None:
+        raise RuntimeError("Hugging Face backbone did not release its output head.")
+    if callable(input_getter) and input_getter() is not input_embeddings:
+        raise RuntimeError("removing the output head replaced the input embeddings.")
+
+
+def _output_head_owner(model: object) -> object | None:
+    candidates = tuple(model.modules()) if isinstance(model, nn.Module) else (model,)
+    for candidate in candidates:
+        getter = getattr(candidate, "get_output_embeddings", None)
+        setter = getattr(candidate, "set_output_embeddings", None)
+        if not callable(getter) or not callable(setter):
+            continue
+        if getter() is not None:
+            return candidate
+    return None
 
 
 def _path(root: object, path: str) -> object:
@@ -265,7 +296,7 @@ def _enable_layer_gradient_checkpointing(model: nn.Module) -> None:
         )
     gradient_checkpointing_func = partial(checkpoint, use_reentrant=False)
     for module in modules:
-        module._gradient_checkpointing_func = gradient_checkpointing_func
+        setattr(module, "_gradient_checkpointing_func", gradient_checkpointing_func)
         module.gradient_checkpointing = True
 
 
@@ -286,7 +317,7 @@ def _enable_input_require_grads(model: nn.Module) -> None:
 def _disable_cache(model: nn.Module) -> None:
     for module in model.modules():
         config = getattr(module, "config", None)
-        if hasattr(config, "use_cache"):
+        if config is not None and hasattr(config, "use_cache"):
             config.use_cache = False
 
 

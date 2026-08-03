@@ -142,10 +142,10 @@ def _data_tasks(value: object) -> None:
     if isinstance(tasks, DictConfig):
         renamed: dict[str, Any] = {}
         for key in list(tasks.keys()):
-            # Keep Task.value keys so LoaderConfig / Task() accept them.
             raw = str(key)
             task = Task[raw] if raw in Task.__members__ else Task(raw)
-            renamed[task.value] = tasks[key]
+            # OmegaConf enum-key dictionaries accept member names at the schema boundary.
+            renamed[task.name] = tasks[key]
         value.tasks = renamed
 
 

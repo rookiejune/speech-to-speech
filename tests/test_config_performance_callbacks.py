@@ -96,9 +96,7 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
 
         self.assertIs(partial_gradient, grad_logger.return_value)
         grad_logger.assert_called_once_with(
-            (
-                rvq_comparison,
-            ),
+            (rvq_comparison,),
             (GradientProbe("backbone_norm", ("model.backbone.model.norm.weight",)),),
             every_n_steps=1,
         )
@@ -132,9 +130,7 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
 
         self.assertIsInstance(callbacks[0], ParameterPolicyCallback)
         checkpoint = next(
-            callback
-            for callback in callbacks
-            if isinstance(callback, ModelCheckpoint)
+            callback for callback in callbacks if isinstance(callback, ModelCheckpoint)
         )
         self.assertTrue(checkpoint.async_save)
         self.assertFalse(checkpoint._enable_version_counter)
@@ -168,6 +164,7 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
         self.assertEqual(callback.clock.log_every_n_units, 25.0)
         self.assertEqual(callback.clock.measure_window_batches, 3)
         self.assertFalse(callback.clock.sync_cuda)
+        self.assertFalse(callback.clock.sync_distributed)
         self.assertEqual(
             callback.schedule.milestones(),
             (("warmup", 100.0), ("main", 1000.0)),
@@ -195,6 +192,32 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
         self.assertEqual(units.unit, "tokens")
         self.assertEqual(units.valid, 10.0)
         self.assertEqual(units.padded, 12.0)
+
+    def test_batch_units_do_not_materialize_device_tensors(self):
+        batch = ModelBatch(
+            input_ids=torch.tensor([[1, 2, 0], [3, 4, 5]]),
+            token_labels=torch.tensor([[-100, 2, -100], [-100, -100, 5]]),
+            acoustic_target=None,
+            tasks=[Task.MT, Task.MT],
+            predictions=[PredictionModality.TEXT, PredictionModality.TEXT],
+            pad_token_id=0,
+        )
+
+        with patch.object(
+            torch.Tensor,
+            "item",
+            side_effect=AssertionError("unit callback must use batch metadata"),
+        ):
+            units = BatchUnits("tokens")(
+                trainer=object(),
+                pl_module=object(),
+                outputs=None,
+                batch=batch,
+                batch_idx=0,
+            )
+
+        self.assertEqual(units.valid, 5.0)
+        self.assertEqual(units.padded, 6.0)
 
     def test_module_configure_optimizers_uses_schedule_runtime(self):
         runtime = Mock()

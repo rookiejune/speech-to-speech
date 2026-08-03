@@ -21,7 +21,7 @@ from speech_to_speech.task import Task
 
 
 class LoggingTest(unittest.TestCase):
-    def test_total_loss_is_synchronized_across_ranks(self):
+    def test_total_loss_avoids_per_batch_distributed_synchronization(self):
         objective = Mock()
         outputs = Outputs(loss=torch.tensor(2.0))
         objective.forward.return_value = outputs
@@ -38,7 +38,7 @@ class LoggingTest(unittest.TestCase):
             outputs["loss"],
             prog_bar=True,
             on_step=True,
-            sync_dist=True,
+            sync_dist=False,
         )
 
     def test_grad_logger_runs_once_for_an_accumulated_global_step(self):
@@ -210,16 +210,14 @@ class LoggingTest(unittest.TestCase):
     def test_outputs_logger_uses_distributed_weighted_means(self):
         module = SimpleNamespace(log=Mock())
         strategy = Mock()
-        strategy.reduce.side_effect = [
-            torch.tensor(4.0),
-            torch.tensor(2.0),
-            torch.tensor(40.0),
-            torch.tensor(2.0),
-            torch.tensor(5.0),
-            torch.tensor(1.0),
-            torch.tensor(7.0),
-            torch.tensor(1.0),
-        ]
+        strategy.reduce.return_value = torch.tensor(
+            [
+                [4.0, 2.0],
+                [40.0, 2.0],
+                [5.0, 1.0],
+                [7.0, 1.0],
+            ]
+        )
         trainer = SimpleNamespace(world_size=2, strategy=strategy)
         callback = OutputsLogger()
         batch = _batch(Task.ASR)
@@ -232,8 +230,13 @@ class LoggingTest(unittest.TestCase):
         )
 
         def gather(output: list[object], value: object) -> None:
-            del value
-            output[:] = [[Task.ASR], [Task.MT]]
+            output[:] = [
+                value,
+                [
+                    ("token/loss/mt", False),
+                    ("token/quality/mt", False),
+                ],
+            ]
 
         with (
             patch("torch.distributed.is_available", return_value=True),
@@ -244,8 +247,7 @@ class LoggingTest(unittest.TestCase):
             callback.on_train_batch_end(trainer, module, outputs, batch, 0)
 
         values = {
-            call.args[0]: float(call.args[1])
-            for call in module.log.call_args_list
+            call.args[0]: float(call.args[1]) for call in module.log.call_args_list
         }
         self.assertEqual(
             values,
@@ -259,6 +261,95 @@ class LoggingTest(unittest.TestCase):
         self.assertTrue(
             all(call.kwargs["sync_dist"] is False for call in module.log.call_args_list)
         )
+        strategy.reduce.assert_called_once()
+
+    def test_outputs_logger_reduces_once_at_trainer_log_cadence(self):
+        module = SimpleNamespace(log=Mock())
+        trainer = SimpleNamespace(
+            world_size=1,
+            global_step=1,
+            log_every_n_steps=2,
+        )
+        callback = OutputsLogger()
+        batch = _batch(Task.MT)
+
+        callback.on_train_batch_end(
+            trainer,
+            module,
+            Outputs(
+                loss=torch.tensor(1.0),
+                token=LossItem(
+                    torch.tensor([1.0]),
+                    details={"tokens": torch.tensor([2.0])},
+                ),
+            ),
+            batch,
+            0,
+        )
+        module.log.assert_not_called()
+
+        trainer.global_step = 2
+        callback.on_train_batch_end(
+            trainer,
+            module,
+            Outputs(
+                loss=torch.tensor(3.0),
+                token=LossItem(
+                    torch.tensor([3.0]),
+                    details={"tokens": torch.tensor([4.0])},
+                ),
+            ),
+            batch,
+            1,
+        )
+
+        values = {call.args[0]: call.args[1] for call in module.log.call_args_list}
+        self.assertEqual(values["token/loss/mt"], 2.0)
+        self.assertEqual(values["token/tokens/mt"], 6.0)
+
+    def test_outputs_logger_restores_pending_cadence_window(self):
+        trainer = SimpleNamespace(
+            world_size=1,
+            global_step=1,
+            log_every_n_steps=2,
+        )
+        batch = _batch(Task.MT)
+        first = OutputsLogger()
+        first.on_train_batch_end(
+            trainer,
+            SimpleNamespace(log=Mock()),
+            Outputs(
+                loss=torch.tensor(1.0),
+                token=LossItem(
+                    torch.tensor([1.0]),
+                    details={"tokens": torch.tensor([2.0])},
+                ),
+            ),
+            batch,
+            0,
+        )
+
+        restored = OutputsLogger()
+        restored.load_state_dict(first.state_dict())
+        module = SimpleNamespace(log=Mock())
+        trainer.global_step = 2
+        restored.on_train_batch_end(
+            trainer,
+            module,
+            Outputs(
+                loss=torch.tensor(3.0),
+                token=LossItem(
+                    torch.tensor([3.0]),
+                    details={"tokens": torch.tensor([4.0])},
+                ),
+            ),
+            batch,
+            1,
+        )
+
+        values = {call.args[0]: call.args[1] for call in module.log.call_args_list}
+        self.assertEqual(values["token/loss/mt"], 2.0)
+        self.assertEqual(values["token/tokens/mt"], 6.0)
 
     def test_outputs_logger_accumulates_token_counts(self):
         module = SimpleNamespace(log=Mock())

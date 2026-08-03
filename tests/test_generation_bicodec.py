@@ -21,6 +21,7 @@ from speech_to_speech.generation.bicodec import (
     prepare_bicodec_tts_request,
 )
 from speech_to_speech.generation._request import validate
+from speech_to_speech.model._generation import GenerationStepResult
 from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.runtime.protocol import GenerationRuntime
@@ -196,6 +197,48 @@ class BiCodecRequestInputTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "text generation"):
             validate(text_request, _RouteModel(runtime, _codes()))
 
+    def test_interleaved_generation_rejects_structured_bicodec(self) -> None:
+        runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
+        model = _MixedRouteModel(runtime, _codes())
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "INTERLEAVED generation does not support structured BiCodec",
+        ):
+            generate_responses(
+                [
+                    Request(
+                        prompt_ids=torch.tensor([1]),
+                        task=Task.INTERLEAVED_AR,
+                    )
+                ],
+                model,
+                max_new_tokens=16,
+                do_sample=False,
+            )
+
+    def test_parallel_generation_decodes_one_structured_bicodec_span(self) -> None:
+        runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
+        output = SemanticAcousticCodes(
+            semantic=torch.tensor([[4], [5]], dtype=torch.long),
+            acoustic=torch.tensor([[2], [1]], dtype=torch.long),
+        )
+        codec = _StructuredCodec()
+        cast(SimpleNamespace, cast(object, runtime)).codec = codec
+
+        result = generate_responses(
+            [Request(prompt_ids=torch.tensor([1]), task=Task.PARALLEL_AR)],
+            _MixedRouteModel(runtime, output),
+            max_new_tokens=16,
+            do_sample=False,
+        )[0]
+
+        audio = result["audio"]
+        if audio is None or audio["codes"] is None:
+            self.fail("parallel BiCodec generation did not decode its audio span")
+        torch.testing.assert_close(audio["codes"].semantic, output.semantic)
+        torch.testing.assert_close(audio["codes"].acoustic, output.acoustic)
+
     def test_reference_request_generates_semantic_and_reuses_prompt_acoustic(self) -> None:
         runtime = _runtime()
         context = _codes()
@@ -316,7 +359,7 @@ class _RouteModel:
             dtype=torch.long,
         )
 
-    def generation_step(self, *args, **kwargs):
+    def generation_step(self, *args, **kwargs) -> GenerationStepResult:
         del args, kwargs
         raise AssertionError("structured route should use generate_tokens")
 
@@ -356,6 +399,61 @@ class _RouteModel:
             -1,
         )
         return torch.cat((prompt_ids, response), dim=1)
+
+
+class _MixedRouteModel(_RouteModel):
+    def __init__(
+        self,
+        runtime: GenerationRuntime,
+        output: SemanticAcousticCodes,
+    ) -> None:
+        super().__init__(runtime, output)
+        runtime_object = cast(SimpleNamespace, cast(object, runtime))
+        start, end = runtime.codec_audio_range
+        runtime_object.audio_generation_allowed_ids = (
+            *range(start, end),
+            runtime.eoa_token_id,
+        )
+        runtime_object.generation_allowed_ids = lambda modality: (
+            tuple(range(8))
+            if modality is Modality.TEXT
+            else runtime_object.audio_generation_allowed_ids
+        )
+        self._script = [2, runtime.eos_token_id, 2, *self.response.tolist()]
+        self._step = 0
+
+    def generation_step(
+        self,
+        input_ids: Tensor,
+        *,
+        token_ids: Tensor | None,
+        use_cache: bool,
+        **kwargs,
+    ) -> GenerationStepResult:
+        del kwargs
+        next_id = self._script[self._step]
+        self._step += 1
+        if token_ids is None:
+            raise AssertionError("mixed generation must provide its token union")
+        match = token_ids.eq(next_id).nonzero()
+        if match.numel() == 0:
+            raise AssertionError("scripted mixed token is outside the token union")
+        logits = torch.full(
+            (input_ids.size(0), input_ids.size(1), token_ids.numel()),
+            float("-inf"),
+            device=input_ids.device,
+        )
+        logits[:, -1, int(match[0, 0])] = 0.0
+        cache = (
+            SimpleNamespace(batch_select_indices=lambda indices: None)
+            if use_cache
+            else None
+        )
+        return GenerationStepResult(
+            logits=logits,
+            past_key_values=cache,
+            audio_output_past=None,
+        )
 
 
 if __name__ == "__main__":

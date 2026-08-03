@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from anytrain.framework.rl import GRPOLoss, gather_token_logps
+from typing import Any
+
+from anytrain.framework.rl import GRPOLoss
 from anytrain.loss import LossItem
 from torch import Tensor
 
 from ..datamodule.rollout import GRPOBatch
 from ..datamodule.types import ModelBatch
 from ..model.base import Model
+from .logprob import target_token_logps
 from .module import Objective
 from .types import Outputs
 
@@ -35,6 +38,7 @@ class GRPOObjective(Objective[Model]):
             response_mask=response_mask,
             ref_token_logps=batch.ref_token_logps,
             group_mask=batch.group_mask,
+            validate=False,
         )
         item_details = {"preferences": loss.detach().new_ones(())}
         item_details.update(details)
@@ -42,14 +46,32 @@ class GRPOObjective(Objective[Model]):
 
 
 def _token_logps(batch: ModelBatch, model: Model) -> Tensor:
+    response_mask = _response_mask(batch)
     hidden_states = model.token_hidden_states(
         batch.input_ids,
         attention_mask=batch.attention_mask,
         audio_input_positions=batch.audio_input_positions,
+        **_embedding_kwargs(batch),
     )
-    logits = model.token_logits(hidden_states)
-    return gather_token_logps(logits[:, :-1], batch.input_ids[:, 1:])
+    return target_token_logps(
+        model,
+        hidden_states,
+        batch.input_ids[:, 1:],
+        response_mask,
+        batch.prediction_modality.supervised_modalities(),
+        attention_mask=batch.attention_mask,
+    )
 
 
 def _response_mask(batch: ModelBatch) -> Tensor:
     return batch.token_labels[:, 1:].ne(-100)
+
+
+def _embedding_kwargs(batch: ModelBatch) -> dict[str, Any]:
+    if batch.embedding_blocks is None:
+        return {}
+    return {
+        "embedding_blocks": batch.embedding_blocks,
+        "validate_input": False,
+        "validate_audio_input_positions": not batch.audio_input_positions_validated,
+    }

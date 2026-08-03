@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -32,6 +33,31 @@ class AudioInputTowerTest(unittest.TestCase):
         )
         self.assertTrue(torch.equal(output[~mask], torch.zeros_like(output[~mask])))
         self.assertTrue(torch.isfinite(output).all())
+
+    def test_mlp_projects_only_valid_source_rows(self) -> None:
+        tower = create_audio_input_adapter(
+            AudioInputAdapterConfig(type=AudioInputAdapterType.MLP),
+            in_features=3,
+            out_features=6,
+        )
+        features = torch.randn(2, 4, 3)
+        mask = torch.tensor([[True, False, False, True], [False, True, False, False]])
+        input_shapes: list[torch.Size] = []
+        handle = tower.adapter.register_forward_pre_hook(
+            lambda _module, args: input_shapes.append(args[0].shape)
+        )
+
+        try:
+            output = tower(features, mask)
+        finally:
+            handle.remove()
+        expected = tower.adapter(
+            features.to(dtype=torch.float32).masked_fill(~mask[..., None], 0)
+        ).masked_fill(~mask[..., None], 0)
+
+        self.assertEqual(input_shapes, [torch.Size((3, 3))])
+        self.assertEqual(output.shape, (2, 4, 6))
+        torch.testing.assert_close(output, expected)
 
     def test_transformer_does_not_use_padding_as_context(self) -> None:
         torch.manual_seed(0)
@@ -92,10 +118,17 @@ class AudioInputTowerTest(unittest.TestCase):
             in_features=4,
             out_features=8,
         )
-        output = tower(
-            torch.randn(2, 3, 4),
-            torch.zeros(2, 3, dtype=torch.bool),
-        )
+        with patch.object(
+            torch.Tensor,
+            "__bool__",
+            side_effect=AssertionError(
+                "transformer mask preparation must stay on device"
+            ),
+        ):
+            output = tower(
+                torch.randn(2, 3, 4),
+                torch.zeros(2, 3, dtype=torch.bool),
+            )
 
         self.assertTrue(torch.isfinite(output).all())
         self.assertTrue(torch.equal(output, torch.zeros_like(output)))

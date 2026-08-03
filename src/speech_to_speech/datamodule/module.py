@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from anydataset.dataset import MapStyleABC
 from anydataset.types import AudioMeta, Modality, Sample as RawSample
 from lightning.pytorch import LightningDataModule
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 from .._compat import StrEnum, auto
 from ..prediction import PredictionModality
@@ -159,10 +159,16 @@ class _SpeechLoader:
             tasks=config.tasks,
         )
         self.sample_index = sample_index
-        self._dataset = None
+        self.num_workers = config.dataloader.num_workers
+        self._dataset: Dataset[RawSample] | None = None
         self._subset: Subset[RawSample] | None = None
 
-    def setup(self, stage: str | None = None) -> None:
+    def setup(
+        self,
+        stage: str | None = None,
+        *,
+        dataset: Dataset[RawSample] | None = None,
+    ) -> None:
         del stage
         if self._dataset is not None:
             return
@@ -175,7 +181,11 @@ class _SpeechLoader:
                 "datamodule and runtime must use the same codec: "
                 f"{self.config.codec!r} != {runtime_codec!r}."
             )
-        self._dataset = load_dataset(self.config.dataset, self.runtime)
+        self._dataset = (
+            load_dataset(self.config.dataset, self.runtime)
+            if dataset is None
+            else dataset
+        )
         if self.sample_index is not None:
             if self.sample_index >= len(cast(Sized, self._dataset)):
                 raise IndexError(
@@ -227,13 +237,14 @@ class _SpeechLoader:
                 collate_fn=self.collator,
             )
         loader = self.config.dataloader
-        num_workers = loader.num_workers
+        num_workers = self.num_workers
         if not isinstance(self.collator.runtime, DataRuntimeSnapshot):
             snapshot = DataRuntimeSnapshot.from_runtime(self.runtime)
             self.collator.runtime = cast(DataRuntime, cast(object, snapshot))
         source_loader = _source_loader(
             self._dataset,
             loader=loader,
+            num_workers=num_workers,
             collate_fn=self.collator,
             shuffle=shuffle,
             frame_rate=self.runtime.codec_frame_rate,
@@ -294,10 +305,27 @@ class DataModule(LightningDataModule):
             {name: 1.0 for name in self.loader_specs}
         )
         _validate_loader_names(self.loader_specs, self.schedule.weights)
+        _assign_worker_budgets(self._loaders, self.loader_specs, self.schedule.weights)
 
     def setup(self, stage: str | None = None) -> None:
+        speech_datasets: list[tuple[object, Dataset[RawSample]]] = []
         for loader in self._loaders.values():
-            loader.setup(stage)
+            if not isinstance(loader, _SpeechLoader):
+                loader.setup(stage)
+                continue
+            shared = next(
+                (
+                    dataset
+                    for config, dataset in speech_datasets
+                    if config == loader.config.dataset
+                ),
+                None,
+            )
+            loader.setup(stage, dataset=shared)
+            if shared is None:
+                if loader._dataset is None:
+                    raise RuntimeError("speech loader setup did not load a dataset.")
+                speech_datasets.append((loader.config.dataset, loader._dataset))
         if self._validation_loader is not None:
             self._validation_loader.setup(stage)
 
@@ -440,10 +468,63 @@ def _validate_loader_names(
         raise ValueError("loader weights are missing: " + ", ".join(sorted(extra)))
 
 
+def _assign_worker_budgets(
+    loaders: Mapping[str, _TrainLoader],
+    specs: Mapping[str, LoaderSpec],
+    weights: Mapping[str, float],
+) -> None:
+    groups: dict[int, list[str]] = {}
+    configs: dict[int, DataLoaderConfig] = {}
+    for name, spec in specs.items():
+        config = (
+            spec.speech_config.dataloader
+            if spec.speech_config is not None
+            else spec.text_config.dataloader
+            if spec.text_config is not None
+            else None
+        )
+        if config is None:
+            continue
+        key = id(config)
+        groups.setdefault(key, []).append(name)
+        configs[key] = config
+
+    for key, names in groups.items():
+        allocations = _worker_allocations(
+            {name: weights[name] for name in names},
+            configs[key].num_workers,
+        )
+        for name, count in allocations.items():
+            loader = loaders[name]
+            if isinstance(loader, (_SpeechLoader, TextLoader)):
+                loader.num_workers = count
+
+
+def _worker_allocations(
+    weights: Mapping[str, float],
+    budget: int,
+) -> dict[str, int]:
+    if budget == 0:
+        return {name: 0 for name in weights}
+    total = sum(weights.values())
+    quotas = {name: budget * weight / total for name, weight in weights.items()}
+    result = {name: math.floor(quota) for name, quota in quotas.items()}
+    remaining = budget - sum(result.values())
+    ranked = sorted(
+        weights,
+        key=lambda name: (quotas[name] - result[name], weights[name]),
+        reverse=True,
+    )
+    for name in ranked[:remaining]:
+        result[name] += 1
+    return result
+
+
 def _source_loader(
     dataset: object,
     *,
     loader: DataLoaderConfig,
+    num_workers: int,
     collate_fn: Any,
     shuffle: bool,
     frame_rate: float,
@@ -459,10 +540,10 @@ def _source_loader(
             max_batch_samples=batch_size,
             planning_window=256,
             shuffle=shuffle,
-            num_workers=loader.num_workers,
+            num_workers=num_workers,
             pin_memory=loader.pin_memory,
             persistent_workers=(
-                loader.persistent_workers and loader.num_workers > 0
+                loader.persistent_workers and num_workers > 0
             ),
             collate_fn=collate_fn,
         )
@@ -474,10 +555,10 @@ def _source_loader(
         max_batch_samples=batch_size,
         planning_window=loader.costs.planning_window,
         shuffle=shuffle,
-        num_workers=loader.num_workers,
+        num_workers=num_workers,
         pin_memory=loader.pin_memory,
         persistent_workers=(
-            loader.persistent_workers and loader.num_workers > 0
+            loader.persistent_workers and num_workers > 0
         ),
         collate_fn=collate_fn,
     )
