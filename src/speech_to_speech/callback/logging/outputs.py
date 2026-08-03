@@ -10,7 +10,13 @@ from anytrain.loss import LossItem
 from lightning import pytorch as pl
 from torch import Tensor
 
-from ...datamodule.types import FusedBatch, ModelBatch, RawSpeechBatch, TrainInput
+from ...datamodule.types import (
+    FusedBatch,
+    LoaderBatch,
+    ModelBatch,
+    RawSpeechBatch,
+    TrainInput,
+)
 from ...loss.types import loss_items
 
 _OBJECTIVE_PREFIX = {
@@ -133,6 +139,8 @@ class OutputsLogger(LossItemLoggerCallback):
 
 
 def _tasks(objective: str, batch: Any) -> list[object]:
+    if isinstance(batch, LoaderBatch):
+        return _tasks(objective, batch.batch)
     if isinstance(batch, FusedBatch):
         labels: list[object] = []
         for child in batch.batches:

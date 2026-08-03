@@ -17,7 +17,12 @@ from anytrain.lightning.schedule import (
 )
 from torch import Tensor
 
-from speech_to_speech.datamodule.types import FusedBatch, ModelBatch, RawSpeechBatch
+from speech_to_speech.datamodule.types import (
+    FusedBatch,
+    LoaderBatch,
+    ModelBatch,
+    RawSpeechBatch,
+)
 
 SUPPORTED_UNIT_NAMES = frozenset({"tokens", "frames", "audio_seconds"})
 
@@ -123,6 +128,8 @@ def build_unit_schedule(config: ScheduleConfig) -> ScheduleRuntime:
 
 
 def _batch_units(batch: object, unit: str) -> UnitBatch:
+    if isinstance(batch, LoaderBatch):
+        return _batch_units(batch.batch, unit)
     if isinstance(batch, FusedBatch):
         return _fused_units(batch, unit)
     if isinstance(batch, RawSpeechBatch):

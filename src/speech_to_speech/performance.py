@@ -21,7 +21,7 @@ from ._flops import (
     qwen_backbone,
     rvq_decoder,
 )
-from .datamodule.types import ModelBatch
+from .datamodule.types import LoaderBatch, ModelBatch
 from .loss.module import FlowObjective, RVQObjective, TokenObjective
 from .loss.types import LossItem
 from .model import Model
@@ -57,6 +57,8 @@ class TrainingFlops:
         del batch_idx
         if type(pl_module) is not SpeechToSpeechModule:
             raise TypeError("training FLOPs require SpeechToSpeechModule.")
+        if isinstance(batch, LoaderBatch):
+            batch = batch.batch
         if not isinstance(batch, ModelBatch):
             raise TypeError("training FLOPs require a ModelBatch.")
         callbacks = cast(_Trainer, cast(object, trainer)).callbacks

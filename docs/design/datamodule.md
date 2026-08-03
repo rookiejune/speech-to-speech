@@ -57,7 +57,8 @@
 - `LoaderSchedule` / `ScheduledDataLoader`：为唯一 `DataModule` 组织多个 homogeneous loader。
   未指定 `step_mode` 时保留历史 weighted accumulation window 行为。`fused_joint` 返回覆盖所有非零
   loader 的 `FusedBatch`，用于 static DDP；`serial_joint` 每个 optimizer step 串行消费每个非零 loader
-  一次，用于 find-unused DDP。每个子 loader 自己保持单一 execution signature。
+  一次，用于 find-unused DDP。weighted mode 的 loader weight 表示采样频率；joint mode 的 loader
+  weight 表示归一化 task loss 权重。每个子 loader 自己保持单一 execution signature。
 - `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts`、`qwen_tts_speaker` prepared data
   或确定性的内存 `toy` data。`qwen_tts_speaker` 通过 workspace 加载
   `SpeakerAudioGrid`，再由 `SpeakerGridCellsDataset` 暴露 `Role.DEFAULT` flat cells；默认覆盖
@@ -273,10 +274,11 @@ response、generated token 以及 BiCodec route 的 reference `audio_context` �
   构造时必须提供 task weights，collator 构造后不可修改；切换任务组合必须构造新的 loader。
 - 未指定 `step_mode` 的 `LoaderSchedule.accumulate_grad_batches=1` 保留逐 batch 轮转；大于 1 时，
   每个 accumulation window 按 loader 权重分配并交错排列 microbatch，任一非 0 权重 loader 拿不到至少
-  1 个 microbatch 会报错。`fused_joint` 复用该 weighted window 并把完整 window 作为一个
-  `FusedBatch` 返回；`serial_joint` 要求 `accumulate_grad_batches` 等于非零 loader 数量，并按 loader
-  声明顺序每个 step 取一次。loss 不额外乘 loader 权重；每次 serial `training_step()` 只消费一个
-  `ModelBatch`，梯度缩放与 optimizer-step cadence 由 Lightning 的 `accumulate_grad_batches` 负责。
+  1 个 microbatch 会报错。`fused_joint` 不按权重重复采样，而是按声明顺序从每个正权重 loader 取一次，
+  返回带归一化 loss weights 的 `FusedBatch`；`serial_joint` 同样每个 loader 取一次，并要求
+  `accumulate_grad_batches` 等于正权重 loader 数量。serial 返回的 `LoaderBatch.loss_scale` 等于
+  `loader_count * normalized_weight`，抵消 Lightning automatic accumulation 对 loss 除以 loader
+  count 的缩放，使其 optimizer-step gradient 与 fused weighted loss 一致。
   每个子 loader 独立维护从 0 开始的 cycle；耗尽后
   先推进到下一 cycle，再通过 loader 的 `set_epoch()` 或其 `batch_sampler.set_epoch()` 更新
   deterministic shuffle，然后重建 iterator。同一 schedule 和 per-rank batch count 下，各 rank

@@ -1,5 +1,4 @@
 from __future__ import annotations
-import math
 from dataclasses import dataclass, field
 from typing import Optional, Type, Union
 
@@ -386,8 +385,6 @@ def _validate_loader_schedule(config: StagedTrainConfig) -> None:
             "detection; select trainer=staged_ddp / "
             "ddp_find_unused_parameters_true."
         )
-    if config.loader_plan.mode is not LoaderStepMode.WEIGHTED_WINDOW:
-        _validate_joint_loader_weights(config)
     LoaderSchedule(
         config.loader_plan.loader_weights(),
         accumulate_grad_batches=config.loader_plan.accumulate_grad_batches,
@@ -414,20 +411,6 @@ def _uses_static_ddp(config: StagedTrainConfig) -> bool:
 
 def _uses_unused_parameter_detection(config: StagedTrainConfig) -> bool:
     return config.trainer.strategy == "ddp_find_unused_parameters_true"
-
-
-def _validate_joint_loader_weights(config: StagedTrainConfig) -> None:
-    weights = list(config.loader_plan.loader_weights().values())
-    if not weights:
-        return
-    first = weights[0]
-    if all(math.isclose(weight, first, rel_tol=1e-9, abs_tol=1e-12) for weight in weights):
-        return
-    raise ValueError(
-        "joint loader step modes run each loader once per optimizer step; "
-        "loader_plan loader weights must be equal until task loss weights are "
-        "configured separately."
-    )
 
 
 def _validate_validation(config: StagedTrainConfig) -> None:

@@ -17,6 +17,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from speech_to_speech.datamodule.types import (
     FusedBatch,
     Language,
+    LoaderBatch,
     ModelBatch,
     RawSpeech,
     RawSpeechBatch,
@@ -712,12 +713,16 @@ class ModelLossContractTest(unittest.TestCase):
 
         with patch.object(module, "log"):
             outputs = module.training_step(
-                FusedBatch((asr, mt), loader_names=("asr", "mt")),
+                FusedBatch(
+                    (asr, mt),
+                    loader_names=("asr", "mt"),
+                    loss_weights=(0.9, 0.1),
+                ),
                 0,
             )
 
         self.assertEqual(objective.tasks, [Task.ASR, Task.MT])
-        torch.testing.assert_close(outputs["loss"], torch.tensor(2.0))
+        torch.testing.assert_close(outputs["loss"], torch.tensor(1.2))
         torch.testing.assert_close(outputs["token"].loss, torch.tensor([1.0, 3.0]))
         details = _require_details(self, outputs["token"], "fused token loss")
         torch.testing.assert_close(
@@ -726,9 +731,26 @@ class ModelLossContractTest(unittest.TestCase):
         )
         groups = module.current_gradient_loss_groups()
         self.assertEqual(tuple(groups), ("batch", "asr", "mt"))
-        torch.testing.assert_close(groups["batch"]["loss"], torch.tensor(2.0))
+        torch.testing.assert_close(groups["batch"]["loss"], torch.tensor(1.2))
         torch.testing.assert_close(groups["asr"]["loss"], torch.tensor(1.0))
         torch.testing.assert_close(groups["mt"]["loss"], torch.tensor(3.0))
+
+    def test_serial_joint_scales_each_accumulation_microbatch(self):
+        objective = _BatchObjective()
+        module = _module(objective=objective)
+        asr = _batch(Task.ASR, token_labels=torch.tensor([[-100, 1]]))
+        mt = _batch(Task.MT, token_labels=torch.tensor([[-100, 1]]))
+
+        with patch.object(module, "log"):
+            first = module.training_step(LoaderBatch(asr, "asr", 1.8), 0)
+            second = module.training_step(LoaderBatch(mt, "mt", 0.2), 1)
+
+        torch.testing.assert_close(first["loss"], torch.tensor(1.8))
+        torch.testing.assert_close(second["loss"], torch.tensor(0.6))
+        torch.testing.assert_close(
+            (first["loss"] + second["loss"]) / 2,
+            torch.tensor(1.2),
+        )
 
     def test_validation_step_logs_effective_unit_weighted_metrics(self):
         module = _module(objective=_BatchObjective())

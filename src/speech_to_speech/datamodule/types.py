@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from functools import cached_property
 from collections.abc import Iterator, Mapping
@@ -707,9 +708,40 @@ TrainInput = Union[ModelBatch, RawSpeechBatch]
 
 
 @dataclass(frozen=True)
+class LoaderBatch:
+    batch: TrainInput
+    loader_name: str
+    loss_scale: float | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.batch, (ModelBatch, RawSpeechBatch)):
+            raise TypeError("LoaderBatch batch must be ModelBatch or RawSpeechBatch.")
+        if not isinstance(self.loader_name, str) or not self.loader_name:
+            raise TypeError("LoaderBatch loader_name must be a non-empty string.")
+        if self.loss_scale is not None:
+            if isinstance(self.loss_scale, bool) or not isinstance(
+                self.loss_scale,
+                (float, int),
+            ):
+                raise TypeError("LoaderBatch loss_scale must be a number or None.")
+            if not math.isfinite(self.loss_scale) or self.loss_scale < 0:
+                raise ValueError(
+                    "LoaderBatch loss_scale must be finite and non-negative."
+                )
+
+    def pin_memory(self) -> LoaderBatch:
+        return LoaderBatch(
+            self.batch.pin_memory(),
+            self.loader_name,
+            self.loss_scale,
+        )
+
+
+@dataclass(frozen=True)
 class FusedBatch:
     batches: tuple[TrainInput, ...]
     loader_names: tuple[str, ...] | None = None
+    loss_weights: tuple[float, ...] | None = None
 
     def __post_init__(self) -> None:
         if not self.batches:
@@ -730,15 +762,30 @@ class FusedBatch:
                 raise TypeError(
                     "FusedBatch loader_names must be non-empty strings."
                 )
+        if self.loss_weights is not None:
+            if len(self.loss_weights) != len(self.batches):
+                raise ValueError(
+                    "FusedBatch loss_weights must align with microbatches."
+                )
+            if any(
+                isinstance(weight, bool) or not isinstance(weight, (float, int))
+                for weight in self.loss_weights
+            ):
+                raise TypeError("FusedBatch loss_weights must contain numbers.")
+            if any(not math.isfinite(weight) or weight < 0 for weight in self.loss_weights):
+                raise ValueError(
+                    "FusedBatch loss_weights must be finite and non-negative."
+                )
 
     def pin_memory(self) -> FusedBatch:
         return FusedBatch(
             tuple(batch.pin_memory() for batch in self.batches),
             self.loader_names,
+            self.loss_weights,
         )
 
 
-TrainBatch = Union[TrainInput, FusedBatch]
+TrainBatch = Union[TrainInput, LoaderBatch, FusedBatch]
 
 
 def _validate_batch_tensors(

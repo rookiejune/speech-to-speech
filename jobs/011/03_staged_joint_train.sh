@@ -20,7 +20,20 @@ step_mode="${SPEECH_TO_SPEECH_STEP_MODE:-fused_joint}"
 case "$step_mode" in
   fused_joint)
     trainer="staged_static_ddp"
-    accumulate_grad_batches=""
+    case "$experiment" in
+      train/staged_joint/stage_1)
+        accumulate_grad_batches="2"
+        ;;
+      train/staged_joint/stage_2)
+        accumulate_grad_batches="3"
+        ;;
+      train/staged_joint/stage_3)
+        accumulate_grad_batches="5"
+        ;;
+      train/staged_joint/stage_4)
+        accumulate_grad_batches="6"
+        ;;
+    esac
     ;;
   serial_joint)
     trainer="staged_ddp"

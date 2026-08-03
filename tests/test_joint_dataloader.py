@@ -14,7 +14,7 @@ from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.module import DataModule, LoaderSpec
 from speech_to_speech.datamodule.diagnostic import SampleSplit
 from speech_to_speech.datamodule.dataset.text import TextConfig
-from speech_to_speech.datamodule.types import FusedBatch, ModelBatch
+from speech_to_speech.datamodule.types import FusedBatch, LoaderBatch, ModelBatch
 from speech_to_speech.task import Task
 
 
@@ -348,6 +348,32 @@ class ScheduledDataLoaderTest(unittest.TestCase):
             ],
         )
 
+    def test_fused_joint_uses_loader_weights_as_loss_weights(self) -> None:
+        loader = ScheduledDataLoader(
+            {
+                "tts": [_batch(Task.TTS)],
+                "mt": [_batch(Task.MT)],
+            },
+            LoaderSchedule(
+                {"tts": 0.9, "mt": 0.1},
+                accumulate_grad_batches=2,
+                fuse_loaders_per_step=True,
+                step_mode="fused_joint",
+            ),
+        )
+
+        fused = next(iter(loader))
+
+        self.assertIsInstance(fused, FusedBatch)
+        if not isinstance(fused, FusedBatch):
+            self.fail("fused_joint did not return a FusedBatch")
+        self.assertEqual(fused.loader_names, ("tts", "mt"))
+        self.assertEqual(fused.loss_weights, (0.9, 0.1))
+        self.assertEqual(
+            [batch.tasks[0] for batch in fused.batches],
+            [Task.TTS, Task.MT],
+        )
+
     def test_serial_joint_returns_each_loader_once_per_step_window(self) -> None:
         loader = ScheduledDataLoader(
             {
@@ -364,10 +390,24 @@ class ScheduledDataLoaderTest(unittest.TestCase):
 
         batches = list(islice(loader, 6))
 
+        self.assertTrue(all(isinstance(batch, LoaderBatch) for batch in batches))
+        loader_batches = [
+            batch for batch in batches if isinstance(batch, LoaderBatch)
+        ]
         self.assertEqual(
-            [batch.tasks[0] for batch in batches],
+            [batch.batch.tasks[0] for batch in loader_batches],
             [Task.ASR, Task.TTS, Task.MT, Task.ASR, Task.TTS, Task.MT],
         )
+        self.assertEqual(
+            [batch.loader_name for batch in loader_batches],
+            ["asr", "tts", "mt", "asr", "tts", "mt"],
+        )
+        for actual, expected in zip(
+            [batch.loss_scale for batch in loader_batches],
+            [1.35, 1.35, 0.3, 1.35, 1.35, 0.3],
+        ):
+            self.assertIsNotNone(actual)
+            self.assertAlmostEqual(float(actual), expected)
 
     def test_serial_joint_requires_loader_count_accumulation(self) -> None:
         with self.assertRaisesRegex(ValueError, "serial_joint.*positive loaders"):

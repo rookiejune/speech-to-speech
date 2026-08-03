@@ -364,10 +364,13 @@ collate 时读取；worker 侧 runtime 是不含 backbone/codec 的数据快照�
 同一组 task weights 只能包含相同 `(source_layout, prediction)` 执行签名的任务，权重必须有限、非负且总和为
 正，以保证每个子 batch 的执行签名稳定。正式 joint loader 以 task 为最小调度单元：
 `fused_joint` 与 `serial_joint` 下每个 loader 必须且只能包含一个非零 task，避免 TTS/ASR
-这类输入输出 head 相反的任务在单个 microbatch 内隐式混合。task 与 loader 权重只控制进入训练 step
-的数据频率，不额外乘到 loss 上；每个 microbatch 独立按有效 token/frame 归约 token、flow、RVQ 与
-REPA loss。fused loss 保持原 Lightning accumulation 语义：各 microbatch scalar loss 等权平均，
-分项 loss 和 token/frame count 只用于日志与 summary 拼接统计。
+这类输入输出 head 相反的任务在单个 microbatch 内隐式混合。`weighted_window` 下 loader weight 控制
+进入 accumulation window 的数据频率；`fused_joint` 与 `serial_joint` 下每个 loader 每个 optimizer
+step 固定执行一次，因此 loader weight 改为 task loss weight。joint weight 先按所有正权重 loader
+归一化；fused loss 直接计算加权和，serial microbatch 额外乘 loader 数量，以抵消 Lightning 对
+`accumulate_grad_batches` 的平均缩放，二者得到相同的 optimizer-step gradient。每个 microbatch
+内部仍按有效 token/frame 归约 token、flow、RVQ 与 REPA loss，分项 loss 和 count 保持原始值用于
+日志与 summary 拼接统计。
 
 `scripts/overfit.py` 只用于 fixed-sample overfit、smoke 和参数冻结合同验收；正式训练入口是
 `scripts/train.py`。train experiment 内联的 `loader_plan` 显式声明 loader、`step_mode` 和

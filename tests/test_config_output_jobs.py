@@ -162,6 +162,10 @@ class ConfigOutputJobTest(ConfigTestCase):
         self.assertIn('trainer="staged_static_ddp"', source)
         self.assertIn('trainer="staged_ddp"', source)
         self.assertIn('"loader_plan.step_mode=${step_mode}"', source)
+        self.assertIn(
+            '"loader_plan.accumulate_grad_batches=${accumulate_grad_batches}"',
+            source,
+        )
         self.assertIn("fdu_stage_data_args datamodule.dataset.root", source)
         self.assertIn("SPEECH_TO_SPEECH_EXPERIMENT:-train/staged_joint/stage_1", source)
         self.assertIn('"experiment=${experiment}"', source)

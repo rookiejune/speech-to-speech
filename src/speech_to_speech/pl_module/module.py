@@ -16,6 +16,7 @@ from torch import nn
 
 from ..datamodule.types import (
     FusedBatch,
+    LoaderBatch,
     ModelBatch,
     RawSpeechBatch,
     TrainBatch,
@@ -175,6 +176,17 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
                     for child in batch.batches
                 ),
                 batch.loader_names,
+                batch.loss_weights,
+            )
+        if isinstance(batch, LoaderBatch):
+            return LoaderBatch(
+                self.transfer_batch_to_device(
+                    batch.batch,
+                    device,
+                    dataloader_idx,
+                ),
+                batch.loader_name,
+                batch.loss_scale,
             )
         return super().transfer_batch_to_device(batch, device, dataloader_idx)
 
@@ -184,7 +196,10 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
                 self._loss_outputs(self.materialize_batch(child))
                 for child in batch.batches
             ]
-            combined = _combine_training_outputs(outputs)
+            combined = _combine_training_outputs(
+                outputs,
+                loss_weights=batch.loss_weights,
+            )
             if batch.loader_names is not None:
                 grouped: dict[str, list[Outputs]] = {}
                 for name, output in zip(batch.loader_names, outputs):
@@ -197,6 +212,14 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
                     },
                 }
             return combined
+        if isinstance(batch, LoaderBatch):
+            output = self._loss_outputs(self.materialize_batch(batch.batch))
+            weighted = _scale_training_output(output, batch.loss_scale)
+            self._current_gradient_loss_groups = {
+                "batch": weighted,
+                batch.loader_name: output,
+            }
+            return weighted
         return self._loss_outputs(self.materialize_batch(batch))
 
     def _loss_outputs(self, batch: ModelBatch) -> Outputs:
@@ -311,12 +334,36 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         return self.schedule_runtime.configure_optimizers(optimizer)
 
 
-def _combine_training_outputs(outputs: Sequence[Outputs]) -> Outputs:
+def _combine_training_outputs(
+    outputs: Sequence[Outputs],
+    *,
+    loss_weights: Sequence[float] | None = None,
+) -> Outputs:
     if not outputs:
         raise ValueError("cannot combine an empty fused training step.")
+    if loss_weights is not None and len(loss_weights) != len(outputs):
+        raise ValueError("loss weights must align with fused training outputs.")
     combined = combine_outputs(outputs)
-    combined["loss"] = torch.stack([output["loss"] for output in outputs]).mean()
+    losses = torch.stack([output["loss"] for output in outputs])
+    if loss_weights is None:
+        combined["loss"] = losses.mean()
+        return combined
+    weights = losses.new_tensor(tuple(float(weight) for weight in loss_weights))
+    if bool((weights < 0).any()) or not bool(torch.isfinite(weights).all()):
+        raise ValueError("loss weights must be finite and non-negative.")
+    total = weights.sum()
+    if bool(total.le(0)):
+        raise ValueError("loss weights must have a positive total.")
+    combined["loss"] = (losses * weights).sum() / total
     return combined
+
+
+def _scale_training_output(output: Outputs, scale: float | None) -> Outputs:
+    if scale is None:
+        return output
+    result = cast(Outputs, dict(output))
+    result["loss"] = output["loss"] * float(scale)
+    return result
 
 
 def _is_mt_validation_batch(batch: ModelBatch) -> bool:

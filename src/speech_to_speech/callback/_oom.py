@@ -13,6 +13,8 @@ from torch import Tensor
 from .._oom import context as exception_context
 from .._oom import is_oom, tensor_report
 from ..datamodule.types import (
+    FusedBatch,
+    LoaderBatch,
     ModelBatch,
     RawSpeech,
     RawSpeechBatch,
@@ -184,6 +186,20 @@ def report_oom(
 
 
 def batch_report(batch: object) -> dict[str, object]:
+    if isinstance(batch, LoaderBatch):
+        return {
+            "type": type(batch).__name__,
+            "loader_name": batch.loader_name,
+            "loss_scale": batch.loss_scale,
+            "batch": batch_report(batch.batch),
+        }
+    if isinstance(batch, FusedBatch):
+        return {
+            "type": type(batch).__name__,
+            "loader_names": batch.loader_names,
+            "loss_weights": batch.loss_weights,
+            "batches": [batch_report(child) for child in batch.batches],
+        }
     if isinstance(batch, ModelBatch):
         target = batch.acoustic_target
         return {

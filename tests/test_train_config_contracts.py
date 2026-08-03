@@ -162,9 +162,6 @@ class TrainConfigContractTest(ConfigTestCase):
             "experiment=train/staged_joint/stage_2",
             "trainer=staged_ddp",
             "loader_plan.step_mode=serial_joint",
-            "loader_plan.loaders.asr.weight=1.0",
-            "loader_plan.loaders.tts.weight=1.0",
-            "loader_plan.loaders.mt.weight=1.0",
             "loader_plan.accumulate_grad_batches=3",
         )
 
@@ -174,6 +171,10 @@ class TrainConfigContractTest(ConfigTestCase):
         self.assertEqual(
             config.trainer.strategy,
             "ddp_find_unused_parameters_true",
+        )
+        self.assertEqual(
+            config.loader_plan.loader_weights(),
+            {"asr": 0.45, "tts": 0.45, "mt": 0.1},
         )
 
         with self.assertRaisesRegex(ValueError, "serial_joint.*positive loaders"):
@@ -187,13 +188,18 @@ class TrainConfigContractTest(ConfigTestCase):
                 "loader_plan.accumulate_grad_batches=10",
             )
 
-        with self.assertRaisesRegex(ValueError, "loader weights must be equal"):
-            _train(
-                "experiment=train/staged_joint/stage_2",
-                "trainer=staged_ddp",
-                "loader_plan.step_mode=serial_joint",
-                "loader_plan.accumulate_grad_batches=3",
-            )
+    def test_fused_joint_accepts_non_equal_task_loss_weights(self):
+        config = _train(
+            "experiment=train/staged_joint/stage_2",
+            "loader_plan.step_mode=fused_joint",
+            "loader_plan.accumulate_grad_batches=3",
+        )
+
+        self.assertIs(config.loader_plan.mode, LoaderStepMode.FUSED_JOINT)
+        self.assertEqual(
+            config.loader_plan.loader_weights(),
+            {"asr": 0.45, "tts": 0.45, "mt": 0.1},
+        )
 
     def test_joint_step_modes_require_single_task_loaders(self):
         with self.assertRaisesRegex(ValueError, "exactly one positive task"):
