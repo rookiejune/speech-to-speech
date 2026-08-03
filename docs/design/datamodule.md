@@ -56,8 +56,9 @@
   tokenizer。
 - `LoaderSchedule` / `ScheduledDataLoader`：为唯一 `DataModule` 组织多个 homogeneous loader。
   未指定 `step_mode` 时保留历史 weighted accumulation window 行为。`fused_joint` 返回覆盖所有非零
-  loader 的 `FusedBatch`，用于 static DDP；`serial_joint` 每个 optimizer step 串行消费每个非零 loader
-  一次，用于 find-unused DDP。weighted mode 的 loader weight 表示采样频率；joint mode 的 loader
+  loader 的 `FusedBatch`，task coverage 完整时可用于 static DDP，存在未使用参数时也可使用
+  find-unused DDP；`serial_joint` 每个 optimizer step 串行消费每个非零 loader 一次，必须使用
+  find-unused DDP。weighted mode 的 loader weight 表示采样频率；joint mode 的 loader
   weight 表示归一化 task loss 权重。每个子 loader 自己保持单一 execution signature。
 - `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts`、`qwen_tts_speaker` prepared data
   或确定性的内存 `toy` data。`qwen_tts_speaker` 通过 workspace 加载

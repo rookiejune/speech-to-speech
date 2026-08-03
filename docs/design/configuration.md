@@ -114,12 +114,12 @@ Hydra metadata 与 `metrics.json` 写入 `output_dir`；TensorBoard/CSV logger �
 `MapStyleABC.dataloader()` 暴露 deterministic shuffle 与 batch planning；UniCodec DDP smoke
 同样要求每个 rank 重复读取同一个固定样本，因此其 experiment 也显式设置
 `use_distributed_sampler: false`。
-正式 staged train 的 DDP 策略由 `loader_plan.step_mode` 决定。`fused_joint` 使用
-`trainer=staged_static_ddp`，关闭 distributed sampler，并要求
-`ddp_find_unused_parameters_false`；入口构造 fused joint batch，使一次 backward 覆盖所有非零
-loader/task branch。`serial_joint` 使用 `trainer=staged_ddp`，要求
+正式 staged train 的 DDP 策略由 `loader_plan.step_mode` 与 task coverage 共同决定。`fused_joint`
+构造一次 backward 覆盖所有非零 loader/task branch；覆盖全部可训练参数时使用
+`trainer=staged_static_ddp`，仍有未使用 adapter/head 时使用 `trainer=staged_ddp`。`serial_joint` 使用
+`trainer=staged_ddp`，要求
 `ddp_find_unused_parameters_true`，并约束 `loader_plan.accumulate_grad_batches == 非零 loader 数量`。
-入口拒绝 mode 与 DDP unused-parameter 策略不一致的组合。`weighted_window` 中
+入口拒绝 serial mode 与 DDP unused-parameter 策略不一致的组合。`weighted_window` 中
 `loader_plan.loaders.<name>.weight` 是 sampling weight；两个 joint mode 中每个 loader 固定执行一次，
 同一字段改为归一化 task loss weight。
 

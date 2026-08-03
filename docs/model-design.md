@@ -376,8 +376,9 @@ step 固定执行一次，因此 loader weight 改为 task loss weight。joint w
 `scripts/train.py`。train experiment 内联的 `loader_plan` 显式声明 loader、`step_mode` 和
 mode-specific accumulation 约束。`loader_plan.step_mode=fused_joint` 表示 DataLoader 返回 fused
 window batch，module 在一次 `training_step()` 内按 loader 顺序 forward，合并各 task loss 后执行
-一次 backward；该模式要求每个 fused window 覆盖所有非零 loader，并使用
-`trainer=staged_static_ddp` / `ddp_find_unused_parameters_false`。`loader_plan.step_mode=serial_joint`
+一次 backward；该模式要求每个 fused window 覆盖所有非零 loader。若这些 task 覆盖全部可训练参数，
+可使用 `trainer=staged_static_ddp`；仍存在未使用 adapter/head 时使用 `trainer=staged_ddp`。
+`loader_plan.step_mode=serial_joint`
 表示每个 Lightning microbatch 只来自一个 task loader，通过串行 accumulation 组成一个 optimizer step；
 该模式要求 `loader_plan.accumulate_grad_batches == 非零 loader 数量`，并使用
 `trainer=staged_ddp` / `ddp_find_unused_parameters_true`。独立的

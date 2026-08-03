@@ -374,11 +374,6 @@ def _validate_loader_schedule(config: StagedTrainConfig) -> None:
             "multi-loader staged training requires trainer.use_distributed_sampler=false; "
             "select trainer=staged_static_ddp or trainer=staged_ddp."
         )
-    if config.loader_plan.mode is LoaderStepMode.FUSED_JOINT and not _uses_static_ddp(config):
-        raise ValueError(
-            "loader_plan.step_mode=fused_joint requires static DDP; select "
-            "trainer=staged_static_ddp / ddp_find_unused_parameters_false."
-        )
     if config.loader_plan.mode is LoaderStepMode.SERIAL_JOINT and not _uses_unused_parameter_detection(config):
         raise ValueError(
             "loader_plan.step_mode=serial_joint requires DDP unused-parameter "
@@ -400,13 +395,6 @@ def _validate_loader_schedule(config: StagedTrainConfig) -> None:
             "datamodule.tasks must declare every positive-weight loader_plan task; "
             "missing: " + ", ".join(missing)
         )
-
-
-def _uses_static_ddp(config: StagedTrainConfig) -> bool:
-    return config.trainer.strategy in {
-        "ddp",
-        "ddp_find_unused_parameters_false",
-    }
 
 
 def _uses_unused_parameter_detection(config: StagedTrainConfig) -> bool:

@@ -149,13 +149,19 @@ class TrainConfigContractTest(ConfigTestCase):
                 "trainer.strategy=ddp_find_unused_parameters_false",
             )
 
-    def test_fused_joint_rejects_find_unused_ddp(self):
-        with self.assertRaisesRegex(ValueError, "fused_joint.*static DDP"):
-            _train(
-                "experiment=train/staged_joint/stage_2",
-                "loader_plan.step_mode=fused_joint",
-                "trainer.strategy=ddp_find_unused_parameters_true",
-            )
+    def test_fused_joint_allows_find_unused_ddp(self):
+        config = _train(
+            "experiment=train/staged_joint/stage_2",
+            "loader_plan.step_mode=fused_joint",
+            "loader_plan.accumulate_grad_batches=3",
+            "trainer.strategy=ddp_find_unused_parameters_true",
+        )
+
+        self.assertIs(config.loader_plan.mode, LoaderStepMode.FUSED_JOINT)
+        self.assertEqual(
+            config.trainer.strategy,
+            "ddp_find_unused_parameters_true",
+        )
 
     def test_serial_joint_uses_loader_count_accumulation_and_find_unused_ddp(self):
         config = _train(
