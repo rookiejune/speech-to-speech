@@ -37,6 +37,22 @@
 - ready_gate: 默认已是 per-task `index=0`；本项通常可跳过。
 - task: 不做 `null` vs fixed 消融；不做指令语言或次要 AR/MASKED 文案消融。
 
+## 018 BiCodec task loss weight probe
+
+- id: s2s-018-bicodec-task-loss-weight
+- state: blocked
+- entry: direct `scripts/train.py` serial-joint probe
+- num_gpus: 6（两组 3-GPU DDP）
+- gpu: 6x3090-24GB
+- min_vram_gb_per_gpu: probe
+- preferred_hosts: 125
+- estimated_hours: <1
+- monitor: debug logs + `nvidia-smi`
+- ready_gate: `ac20efb` 已推送并同步到共享 checkout；本地测试通过；重新提交前确认目标 GPU 空闲。
+- output_root: `$DYNAMIC_HOME/debug/s2s_probe/<run>`
+- task: 当前未检测到匹配的训练进程；先在本地审计已有运行状态，再决定是否重新提交 30
+  optimizer steps 的 stage -1 TTS-only 与 stage 0 TTS+MT 对照。
+
 ## 其他工程欠账
 
 - Interleave 方案暂缓，不作为当前 active todo；先用 PEFT LoRA 加固定 `TextRetentionLogger`
