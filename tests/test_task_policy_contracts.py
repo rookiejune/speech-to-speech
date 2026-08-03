@@ -40,7 +40,7 @@ class TaskPolicyContractTest(unittest.TestCase):
         )
 
         self.assertGreater(counts[ParameterGroup.BACKBONE], 0)
-        self.assertFalse(model.backbone.model.layers[0].weight.requires_grad)
+        self.assertFalse(model.backbone.layers[0].weight.requires_grad)
         self.assertTrue(
             model.token_embedding.embeddings["audio"].weight.requires_grad
         )
@@ -57,12 +57,12 @@ class TaskPolicyContractTest(unittest.TestCase):
 
         callback.setup(Mock(), cast(Any, SimpleNamespace(model=model)), "validate")
         self.assertIsNone(callback.summary)
-        self.assertTrue(model.backbone.model.layers[0].weight.requires_grad)
+        self.assertTrue(model.backbone.layers[0].weight.requires_grad)
 
         callback.on_fit_start(Mock(), cast(Any, SimpleNamespace(model=model)))
 
         self.assertIsNotNone(callback.summary)
-        self.assertFalse(model.backbone.model.layers[0].weight.requires_grad)
+        self.assertFalse(model.backbone.layers[0].weight.requires_grad)
         self.assertTrue(model.token_embedding.embeddings["audio"].weight.requires_grad)
 
     def test_partial_qwen_policy_unfreezes_top_layers_and_final_norm(self):
@@ -75,10 +75,10 @@ class TaskPolicyContractTest(unittest.TestCase):
             ],
         )
 
-        self.assertFalse(model.backbone.model.layers[0].weight.requires_grad)
-        self.assertFalse(model.backbone.model.layers[1].weight.requires_grad)
-        self.assertTrue(model.backbone.model.layers[2].weight.requires_grad)
-        self.assertTrue(model.backbone.model.norm.weight.requires_grad)
+        self.assertFalse(model.backbone.layers[0].weight.requires_grad)
+        self.assertFalse(model.backbone.layers[1].weight.requires_grad)
+        self.assertTrue(model.backbone.layers[2].weight.requires_grad)
+        self.assertTrue(model.backbone.norm.weight.requires_grad)
 
 
 

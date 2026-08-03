@@ -96,12 +96,12 @@ callbacks:
         match: regex
         trainable_only: true
         parameters:
-          - model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.lora_[AB]\..*\.weight$
+          - model\.backbone\.(?:layers|mimo_layers)\.0\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.lora_[AB]\..*\.weight$
       backbone_l0_ffn_lora:
         match: regex
         trainable_only: true
         parameters:
-          - model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.mlp\.(gate_proj|up_proj|down_proj)\.lora_[AB]\..*\.weight$
+          - model\.backbone\.(?:layers|mimo_layers)\.0\.mlp\.(gate_proj|up_proj|down_proj)\.lora_[AB]\..*\.weight$
   checkpoint:
     filename: step-{step:08d}
     save_last: true

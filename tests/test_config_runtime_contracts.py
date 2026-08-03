@@ -385,7 +385,7 @@ class ConfigRuntimeContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported codec audio view"):
             _parse_audio_item(item, AudioView.WAVEFORM)
 
-    @patch("speech_to_speech.runtime.backbone.hf.AutoModelForCausalLM.from_pretrained")
+    @patch("speech_to_speech.runtime.backbone.hf.AutoModel.from_pretrained")
     def test_backbone_loading_forwards_runtime_configuration(self, from_pretrained):
         backbone = GradientCheckpointingBackbone()
         from_pretrained.return_value = backbone

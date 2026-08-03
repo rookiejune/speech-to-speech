@@ -169,7 +169,6 @@ class KimiHuggingFaceBackboneTest(unittest.TestCase):
                 return_value=body,
             ) as load,
             patch.object(hf.AutoModel, "from_config") as load_random,
-            patch.object(hf.AutoModelForCausalLM, "from_pretrained") as load_causal,
         ):
             loaded = adapter.model
 
@@ -180,7 +179,6 @@ class KimiHuggingFaceBackboneTest(unittest.TestCase):
             attn_implementation="flash_attention_2",
         )
         load_random.assert_not_called()
-        load_causal.assert_not_called()
         self.assertIs(adapter.root_model, body)
         self.assertIs(loaded, body)
         self.assertIsNone(body.vq_adaptor)
@@ -211,7 +209,6 @@ class KimiHuggingFaceBackboneTest(unittest.TestCase):
                 "from_config",
                 return_value=body,
             ) as load,
-            patch.object(hf.AutoModelForCausalLM, "from_config") as load_causal,
         ):
             loaded = adapter.model
 
@@ -223,7 +220,6 @@ class KimiHuggingFaceBackboneTest(unittest.TestCase):
             remote_config,
             trust_remote_code=True,
         )
-        load_causal.assert_not_called()
         self.assertIs(loaded, body)
         self.assertIsNone(body.vq_adaptor)
 

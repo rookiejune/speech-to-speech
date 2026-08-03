@@ -738,8 +738,8 @@ def _backbone_adapter(
         BackboneEncoder,
         BackboneBodyAdapter(
             cast(Callable[..., BackboneOutput], body),
-            readout=BackboneReadout.from_path(
-                getattr(runtime, "backbone_readout", "last_hidden_state")
+            readout=BackboneReadout(
+                cast(str, getattr(runtime, "backbone_readout", "last_hidden_state"))
             ),
             supports_cache_position=bool(
                 getattr(runtime, "backbone_supports_cache_position", True)

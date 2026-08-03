@@ -100,10 +100,7 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
             (
                 GradientProbe(
                     "backbone_norm",
-                    (
-                        r"model\.backbone\.(?:model\.)?(?:norm|final_layernorm)\.weight$",
-                    ),
-                    match="regex",
+                    ("model.backbone.norm.weight",),
                 ),
             ),
             every_n_steps=1,
@@ -266,14 +263,14 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
                 GradientProbe(
                     "backbone_l0_attn_lora",
                     (
-                        r"model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.lora_[AB]\..*\.weight$",
+                        r"model\.backbone\.(?:layers|mimo_layers)\.0\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.lora_[AB]\..*\.weight$",
                     ),
                     match="regex",
                 ),
                 GradientProbe(
                     "backbone_l0_ffn_lora",
                     (
-                        r"model\.backbone\.(?:model\.)?(?:layers|mimo_layers)\.0\.mlp\.(gate_proj|up_proj|down_proj)\.lora_[AB]\..*\.weight$",
+                        r"model\.backbone\.(?:layers|mimo_layers)\.0\.mlp\.(gate_proj|up_proj|down_proj)\.lora_[AB]\..*\.weight$",
                     ),
                     match="regex",
                 ),

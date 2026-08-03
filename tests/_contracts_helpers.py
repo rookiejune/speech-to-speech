@@ -159,9 +159,8 @@ class _StageBackbone(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.config = SimpleNamespace(num_hidden_layers=3)
-        self.model = nn.Module()
-        self.model.layers = nn.ModuleList(nn.Linear(1, 1) for _ in range(3))
-        self.model.norm = nn.LayerNorm(1)
+        self.layers = nn.ModuleList(nn.Linear(1, 1) for _ in range(3))
+        self.norm = nn.LayerNorm(1)
 
 
 class _StageAcousticDecoder(nn.Module):

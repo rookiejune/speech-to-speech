@@ -14,7 +14,6 @@ from torch.utils.checkpoint import checkpoint
 from transformers import (
     AutoConfig,
     AutoModel,
-    AutoModelForCausalLM,
     AutoProcessor,
     AutoTokenizer,
     PretrainedConfig,
@@ -40,10 +39,7 @@ class HuggingFaceBackboneAdapter:
 
     @cached_property
     def text_tokenizer(self) -> TextTokenizer:
-        if self.config.type in {
-            BackboneType.QWEN2_5_OMNI_TEXT,
-            BackboneType.QWEN2_5_OMNI_THINKER,
-        }:
+        if self.config.type is BackboneType.QWEN2_5_OMNI_TEXT:
             processor = AutoProcessor.from_pretrained(
                 self.config.path,
                 trust_remote_code=self.config.trust_remote_code,
@@ -87,8 +83,6 @@ class HuggingFaceBackboneAdapter:
         )
         if self.config.type is BackboneType.KIMI_AUDIO:
             model = _prepare_kimi_body(model)
-        else:
-            _remove_output_head(model)
         if self.config.gradient_checkpointing:
             if self.config.type is BackboneType.KIMI_AUDIO:
                 _disable_cache(cast(nn.Module, model))
@@ -158,12 +152,6 @@ class HuggingFaceBackboneAdapter:
         )
 
     def _pretrained(self, **kwargs: object) -> object:
-        if self.config.type is BackboneType.KIMI_AUDIO:
-            return AutoModel.from_pretrained(
-                self.config.path,
-                trust_remote_code=self.config.trust_remote_code,
-                **kwargs,
-            )
         if self.config.type is BackboneType.QWEN2_5_OMNI_TEXT:
             config = AutoConfig.from_pretrained(
                 self.config.path,
@@ -176,13 +164,7 @@ class HuggingFaceBackboneAdapter:
                 trust_remote_code=self.config.trust_remote_code,
                 **kwargs,
             )
-        if self.config.type is BackboneType.QWEN2_5_OMNI_THINKER:
-            return _omni_model_factory().from_pretrained(
-                self.config.path,
-                trust_remote_code=self.config.trust_remote_code,
-                **kwargs,
-            )
-        return AutoModelForCausalLM.from_pretrained(
+        return AutoModel.from_pretrained(
             self.config.path,
             trust_remote_code=self.config.trust_remote_code,
             **kwargs,
@@ -198,18 +180,11 @@ class HuggingFaceBackboneAdapter:
                 _omni_text_config(config),
                 **kwargs,
             )
-        if self.config.type is BackboneType.QWEN2_5_OMNI_THINKER:
-            return _omni_model_factory()._from_config(
-                _omni_thinker_config(config),
-                **kwargs,
-            )
-        if self.config.type is BackboneType.KIMI_AUDIO:
-            return AutoModel.from_config(
-                config,
-                trust_remote_code=self.config.trust_remote_code,
-                **kwargs,
-            )
-        return AutoModelForCausalLM.from_config(config, **kwargs)
+        return AutoModel.from_config(
+            config,
+            trust_remote_code=self.config.trust_remote_code,
+            **kwargs,
+        )
 
 
 def create(config: AdapterConfig) -> HuggingFaceBackboneAdapter:
@@ -224,17 +199,6 @@ class _OmniModelFactory(Protocol):
     ) -> object: ...
 
     def _from_config(self, config: object, **kwargs: object) -> object: ...
-
-
-def _omni_model_factory() -> _OmniModelFactory:
-    try:
-        from transformers import Qwen2_5OmniThinkerForConditionalGeneration
-    except ImportError as error:
-        raise RuntimeError(
-            "Qwen2.5-Omni backbone requires a transformers build that exposes "
-            "Qwen2_5OmniThinkerForConditionalGeneration."
-        ) from error
-    return cast(_OmniModelFactory, Qwen2_5OmniThinkerForConditionalGeneration)
 
 
 def _omni_text_model_factory() -> _OmniModelFactory:
@@ -256,16 +220,6 @@ def _omni_text_config(config: object) -> PretrainedConfig:
             "Qwen2.5-Omni config must expose thinker_config.text_config."
         )
     return text
-
-
-def _omni_thinker_config(config: object) -> PretrainedConfig:
-    thinker = getattr(config, "thinker_config", None)
-    if not isinstance(thinker, PretrainedConfig):
-        raise TypeError(
-            "Qwen2.5-Omni config must expose a thinker_config for the Thinker "
-            "backbone."
-        )
-    return thinker
 
 
 def _prepare_kimi_body(model: object) -> nn.Module:
@@ -313,36 +267,6 @@ def _kimi_body_callable(
         return cast(BackboneOutput, output)
 
     return call
-
-
-def _remove_output_head(model: object) -> None:
-    owner = _output_head_owner(model)
-    if owner is None:
-        return
-    setter = getattr(owner, "set_output_embeddings")
-    if not isinstance(owner, nn.Module):
-        setter(None)
-        return
-
-    input_getter = getattr(owner, "get_input_embeddings", None)
-    input_embeddings = input_getter() if callable(input_getter) else None
-    setter(None)
-    if getattr(owner, "get_output_embeddings")() is not None:
-        raise RuntimeError("Hugging Face backbone did not release its output head.")
-    if callable(input_getter) and input_getter() is not input_embeddings:
-        raise RuntimeError("removing the output head replaced the input embeddings.")
-
-
-def _output_head_owner(model: object) -> object | None:
-    candidates = tuple(model.modules()) if isinstance(model, nn.Module) else (model,)
-    for candidate in candidates:
-        getter = getattr(candidate, "get_output_embeddings", None)
-        setter = getattr(candidate, "set_output_embeddings", None)
-        if not callable(getter) or not callable(setter):
-            continue
-        if getter() is not None:
-            return candidate
-    return None
 
 
 def _path(root: object, path: str) -> object:

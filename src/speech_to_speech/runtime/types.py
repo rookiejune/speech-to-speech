@@ -443,10 +443,6 @@ class BackboneReadout:
 
     path: str = "last_hidden_state"
 
-    @classmethod
-    def from_path(cls, path: object) -> BackboneReadout:
-        return cls(cast(str, path))
-
     def __post_init__(self) -> None:
         if not isinstance(self.path, str):
             raise TypeError("backbone_readout must be a string.")
@@ -489,24 +485,7 @@ class BackboneReadout:
 
 
 def validate_backbone_readout(path: object) -> str:
-    return BackboneReadout.from_path(path).path
-
-
-def select_backbone_readout(
-    output: BackboneOutput,
-    readout: BackboneReadout | str,
-) -> Tensor:
-    """Select a tensor from a backbone output.
-
-    The string form remains accepted for callers that validate configuration
-    at the boundary; adapters should retain the typed ``BackboneReadout``.
-    """
-    selected = (
-        readout
-        if isinstance(readout, BackboneReadout)
-        else BackboneReadout.from_path(readout)
-    )
-    return selected.select(output)
+    return BackboneReadout(cast(str, path)).path
 
 
 def _backbone_readout_path(path: object) -> tuple[str, int | None]:
@@ -554,8 +533,6 @@ class Backbone(Protocol):
     def config(self) -> BackboneConfig: ...
 
     def get_input_embeddings(self) -> nn.Embedding: ...
-
-    def get_output_embeddings(self) -> nn.Module | None: ...
 
     @property
     def base_model(self) -> BackboneBody: ...

@@ -35,11 +35,15 @@ acoustic-first / semantic-last。ODE method、NFE 与 step 数直接使用 `flow
 `model/acoustic` 选择。
 
 `backbone_initialization` 显式选择 backbone 权重来源：`pretrained` 使用
-`AutoModelForCausalLM.from_pretrained()`；`random` 仍从 `backbone` snapshot 读取 tokenizer 与完整
-HF config，但通过 `AutoModelForCausalLM.from_config()` 随机构造同架构模型，不读取 checkpoint
-权重。随机初始化由训练入口的 `train.seed` 控制，并要求
+`AutoModel.from_pretrained()` 直接加载不含 LM head 的 backbone body；`random` 仍从 `backbone`
+snapshot 读取 tokenizer 与完整 HF config，但通过 `AutoModel.from_config()` 随机构造同架构
+body，不读取 checkpoint 权重。随机初始化由训练入口的 `train.seed` 控制，并要求
 `callback/parameter_policy=full`，避免随机 backbone
 被全部或部分冻结。`model.toy` 自己构造 tiny Qwen，不能与 `random` 同时启用。
+可训练 body 直接注册在 `model.backbone`，canonical state path 是
+`model.backbone.layers.*`、Kimi `model.backbone.mimo_layers.*` 与
+`model.backbone.norm.*`。旧的 `model.backbone.model.*` checkpoint 不做 key remap，strict load
+会显式失败。
 
 非标准 HF backbone 通过三个 runtime 字段显式声明边界：`backbone_trust_remote_code` 同时传给
 tokenizer、pretrained backbone 与 random-init config 加载；`backbone_readout` 选择 model 消费的

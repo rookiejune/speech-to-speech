@@ -9,7 +9,7 @@ from torch import nn
 from transformers import PretrainedConfig, PreTrainedModel
 from transformers.modeling_layers import GradientCheckpointingLayer
 
-from speech_to_speech.runtime import BackboneInitialization, BackboneType, Config, Runtime
+from speech_to_speech.runtime import BackboneInitialization, Config, Runtime
 
 
 class GradientCheckpointingBackbone(PreTrainedModel):
@@ -54,41 +54,34 @@ class LayerCheckpointingBackbone(nn.Module):
         self.config = SimpleNamespace(use_cache=True)
 
 
-class OutputHeadBackbone(nn.Module):
+class BodyBackbone(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.embed_tokens = nn.Embedding(8, 4)
-        self.lm_head: nn.Module | None = nn.Linear(4, 8, bias=False)
+        self.layers = nn.ModuleList([nn.Linear(4, 4, bias=False)])
         self.config = SimpleNamespace(hidden_size=4)
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.embed_tokens
 
-    def get_output_embeddings(self) -> nn.Module | None:
-        return self.lm_head
-
-    def set_output_embeddings(self, output: nn.Module | None) -> None:
-        self.lm_head = output
-
 
 class RuntimeBackboneTest(unittest.TestCase):
-    def test_loading_releases_output_head(self):
-        backbone = OutputHeadBackbone()
-        input_embeddings = backbone.get_input_embeddings()
+    def test_loading_uses_the_base_model_body_directly(self):
+        backbone = BodyBackbone()
 
         with patch(
-            "speech_to_speech.runtime.backbone.hf.AutoModelForCausalLM.from_pretrained",
+            "speech_to_speech.runtime.backbone.hf.AutoModel.from_pretrained",
             return_value=backbone,
-        ):
+        ) as load:
             loaded = Runtime(Config(backbone="fake/backbone")).backbone
 
-        self.assertIs(loaded, backbone)
-        self.assertIsNone(backbone.get_output_embeddings())
-        self.assertIs(backbone.get_input_embeddings(), input_embeddings)
-        self.assertNotIn("lm_head.weight", backbone.state_dict())
-        self.assertFalse(
-            any(name.startswith("lm_head.") for name, _ in backbone.named_parameters())
+        load.assert_called_once_with(
+            "fake/backbone",
+            trust_remote_code=False,
         )
+        self.assertIs(loaded, backbone)
+        self.assertIn("layers.0.weight", backbone.state_dict())
+        self.assertFalse(any(name.startswith("model.") for name in backbone.state_dict()))
 
     def test_random_initialization_loads_config_without_pretrained_weights(self):
         hf_config = Mock()
@@ -102,11 +95,11 @@ class RuntimeBackboneTest(unittest.TestCase):
                 return_value=hf_config,
             ) as config_from_pretrained,
             patch(
-                "speech_to_speech.runtime.backbone.hf.AutoModelForCausalLM.from_config",
+                "speech_to_speech.runtime.backbone.hf.AutoModel.from_config",
                 return_value=backbone,
             ) as from_config,
             patch(
-                "speech_to_speech.runtime.backbone.hf.AutoModelForCausalLM.from_pretrained"
+                "speech_to_speech.runtime.backbone.hf.AutoModel.from_pretrained"
             ) as from_pretrained,
         ):
             runtime = Runtime(
@@ -127,6 +120,7 @@ class RuntimeBackboneTest(unittest.TestCase):
         )
         from_config.assert_called_once_with(
             hf_config,
+            trust_remote_code=False,
             dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
         )
@@ -139,11 +133,11 @@ class RuntimeBackboneTest(unittest.TestCase):
 
         with (
             patch(
-                "speech_to_speech.runtime.backbone.hf.AutoModelForCausalLM.from_pretrained",
+                "speech_to_speech.runtime.backbone.hf.AutoModel.from_pretrained",
                 return_value=backbone,
             ) as from_pretrained,
             patch(
-                "speech_to_speech.runtime.backbone.hf.AutoModelForCausalLM.from_config"
+                "speech_to_speech.runtime.backbone.hf.AutoModel.from_config"
             ) as from_config,
             patch(
                 "speech_to_speech.runtime.backbone.hf.AutoConfig.from_pretrained"
@@ -170,7 +164,7 @@ class RuntimeBackboneTest(unittest.TestCase):
         backbone = GradientCheckpointingBackbone()
 
         with patch(
-            "speech_to_speech.runtime.backbone.hf.AutoModelForCausalLM.from_pretrained",
+            "speech_to_speech.runtime.backbone.hf.AutoModel.from_pretrained",
             return_value=backbone,
         ):
             runtime = Runtime(
@@ -196,7 +190,7 @@ class RuntimeBackboneTest(unittest.TestCase):
         adapter = ExternalAdapter(backbone)
 
         with patch(
-            "speech_to_speech.runtime.backbone.hf.AutoModelForCausalLM.from_pretrained",
+            "speech_to_speech.runtime.backbone.hf.AutoModel.from_pretrained",
             return_value=adapter,
         ):
             runtime = Runtime(
@@ -228,7 +222,7 @@ class RuntimeBackboneTest(unittest.TestCase):
         backbone = LegacyGradientCheckpointingBackbone()
 
         with patch(
-            "speech_to_speech.runtime.backbone.hf.AutoModelForCausalLM.from_pretrained",
+            "speech_to_speech.runtime.backbone.hf.AutoModel.from_pretrained",
             return_value=backbone,
         ):
             runtime = Runtime(
@@ -247,7 +241,7 @@ class RuntimeBackboneTest(unittest.TestCase):
         backbone = LayerCheckpointingBackbone()
 
         with patch(
-            "speech_to_speech.runtime.backbone.hf.AutoModelForCausalLM.from_pretrained",
+            "speech_to_speech.runtime.backbone.hf.AutoModel.from_pretrained",
             return_value=backbone,
         ):
             runtime = Runtime(
@@ -263,95 +257,6 @@ class RuntimeBackboneTest(unittest.TestCase):
         self.assertTrue(callable(backbone.block._gradient_checkpointing_func))
         self.assertFalse(backbone.config.use_cache)
         self.assertIs(loaded, backbone)
-
-    def test_qwen_omni_uses_processor_tokenizer_and_thinker_model(self):
-        tokenizer = Mock()
-        tokenizer.bos_token_id = 1
-        processor = Mock(tokenizer=tokenizer)
-        backbone = Mock()
-        body = Mock()
-        backbone.config = SimpleNamespace(
-            text_config=SimpleNamespace(hidden_size=3584),
-        )
-        backbone.model = body
-        model_class = Mock()
-        model_class.from_pretrained.return_value = backbone
-
-        with (
-            patch(
-                "speech_to_speech.runtime.backbone.hf.AutoProcessor.from_pretrained",
-                return_value=processor,
-            ) as processor_from_pretrained,
-            patch(
-                "speech_to_speech.runtime.backbone.hf._omni_model_factory",
-                return_value=model_class,
-            ),
-        ):
-            runtime = Runtime(
-                Config(
-                    backbone_type=BackboneType.QWEN2_5_OMNI_THINKER,
-                    backbone="Qwen/Qwen2.5-Omni-7B",
-                    backbone_body="model",
-                    dtype="bfloat16",
-                )
-            )
-
-            loaded_tokenizer = runtime.text_tokenizer
-            loaded_backbone = runtime.backbone
-            hidden_size = runtime.backbone_adapter.hidden_size
-
-        processor_from_pretrained.assert_called_once_with(
-            "Qwen/Qwen2.5-Omni-7B",
-            trust_remote_code=False,
-        )
-        model_class.from_pretrained.assert_called_once_with(
-            "Qwen/Qwen2.5-Omni-7B",
-            trust_remote_code=False,
-            dtype=torch.bfloat16,
-        )
-        self.assertIs(loaded_tokenizer, tokenizer)
-        self.assertIs(loaded_backbone, backbone)
-        self.assertEqual(hidden_size, 3584)
-
-    def test_qwen_omni_random_initialization_uses_thinker_config_factory(self):
-        thinker_config = PretrainedConfig()
-        hf_config = SimpleNamespace(thinker_config=thinker_config)
-        backbone = Mock()
-        model_class = Mock()
-        model_class._from_config.return_value = backbone
-
-        with (
-            patch(
-                "speech_to_speech.runtime.backbone.hf.AutoConfig.from_pretrained",
-                return_value=hf_config,
-            ) as config_from_pretrained,
-            patch(
-                "speech_to_speech.runtime.backbone.hf._omni_model_factory",
-                return_value=model_class,
-            ),
-        ):
-            runtime = Runtime(
-                Config(
-                    backbone_type=BackboneType.QWEN2_5_OMNI_THINKER,
-                    backbone="Qwen/Qwen2.5-Omni-7B",
-                    backbone_initialization=BackboneInitialization.RANDOM,
-                    dtype="bfloat16",
-                )
-            )
-
-            loaded = runtime.backbone
-
-        config_from_pretrained.assert_called_once_with(
-            "Qwen/Qwen2.5-Omni-7B",
-            trust_remote_code=False,
-        )
-        model_class._from_config.assert_called_once_with(
-            thinker_config,
-            dtype=torch.bfloat16,
-        )
-        model_class.from_pretrained.assert_not_called()
-        self.assertIs(loaded, backbone)
-
 
 if __name__ == "__main__":
     unittest.main()

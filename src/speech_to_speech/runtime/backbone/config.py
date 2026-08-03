@@ -17,8 +17,6 @@ class BackboneType(StrEnum):
     HF_CAUSAL_LM = auto()
     KIMI_AUDIO = auto()
     QWEN2_5_OMNI_TEXT = auto()
-    QWEN2_5_OMNI_THINKER = auto()
-    QWEN2_5_OMNI = "qwen2_5_omni_thinker"
 
 
 @dataclass(frozen=True)

@@ -62,6 +62,15 @@ class SelectiveBackboneParameterPolicyTest(unittest.TestCase):
         self.assertFalse(parameters["backbone.layers.0.self_attn.q_proj.weight"].requires_grad)
         self.assertFalse(parameters["backbone.layers.1.self_attn.q_proj.weight"].requires_grad)
         self.assertTrue(parameters["backbone.layers.2.self_attn.q_proj.weight"].requires_grad)
+        self.assertFalse(
+            parameters["backbone.mimo_layers.0.self_attn.q_proj.weight"].requires_grad
+        )
+        self.assertFalse(
+            parameters["backbone.mimo_layers.1.self_attn.q_proj.weight"].requires_grad
+        )
+        self.assertTrue(
+            parameters["backbone.mimo_layers.2.self_attn.q_proj.weight"].requires_grad
+        )
         self.assertTrue(parameters["backbone.norm.weight"].requires_grad)
         self.assertFalse(parameters["backbone.encoder.layers.2.weight"].requires_grad)
 

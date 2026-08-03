@@ -173,14 +173,10 @@ def default_parameter_policy_config(
     )
 
 
-# HF bodies are exposed either directly (``backbone.layers``) or through the
-# conventional ``base_model`` wrapper (``backbone.model.layers``). Keep the
-# optional segment narrow so unrelated nested modules are not classified as
-# transformer layers by the top-fraction policy.
-_LAYER_PATTERN = re.compile(r"^backbone\.(?:model\.)?layers\.(\d+)\.")
-_FINAL_NORM_PATTERN = re.compile(
-    r"^backbone\.(?:model\.)?(?:norm|final_layernorm)\."
-)
+# Backbone bodies are registered directly under ``model.backbone``. Kimi's
+# MIMO branch follows the same layer-index contract as the main branch.
+_LAYER_PATTERN = re.compile(r"^backbone\.(?:layers|mimo_layers)\.(\d+)\.")
+_FINAL_NORM_PATTERN = re.compile(r"^backbone\.norm\.")
 
 
 def apply_parameter_policy(

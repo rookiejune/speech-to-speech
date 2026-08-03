@@ -25,10 +25,9 @@ class _LoraStageModel(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.backbone = nn.Module()
-        self.backbone.model = nn.Module()
         layer = nn.Module()
         layer.projection = nn.Linear(2, 2, bias=False)
-        self.backbone.model.layers = nn.ModuleList([layer])
+        self.backbone.layers = nn.ModuleList([layer])
         inject_adapter_in_model(
             LoraConfig(r=1, target_modules=["projection"]),
             self.backbone,
@@ -49,9 +48,9 @@ class LoraTest(unittest.TestCase):
         )
         parameters = dict(model.named_parameters())
 
-        base = "backbone.model.layers.0.projection.base_layer.weight"
-        adapter_a = "backbone.model.layers.0.projection.lora_A.speech.weight"
-        adapter_b = "backbone.model.layers.0.projection.lora_B.speech.weight"
+        base = "backbone.layers.0.projection.base_layer.weight"
+        adapter_a = "backbone.layers.0.projection.lora_A.speech.weight"
+        adapter_b = "backbone.layers.0.projection.lora_B.speech.weight"
         self.assertIs(parameter_group(base), ParameterGroup.BACKBONE)
         self.assertIs(parameter_group(adapter_a), ParameterGroup.BACKBONE_ADAPTER)
         self.assertIs(parameter_group(adapter_b), ParameterGroup.BACKBONE_ADAPTER)
