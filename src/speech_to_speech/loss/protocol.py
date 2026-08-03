@@ -37,18 +37,6 @@ class TokenObjectiveModel(Protocol):
         use_cache: bool = False,
     ) -> tuple[Tensor, object | None]: ...
 
-    def selected_logits(
-        self,
-        hidden_state: Tensor,
-        token_ids: Tensor,
-        *,
-        attention_mask: Tensor | None = None,
-        audio_hidden_state: Tensor | None = None,
-        past_key_values: object | None = None,
-        use_cache: bool = False,
-    ) -> tuple[Tensor, object | None] | Tensor: ...
-
-
 class AcousticDecoder(Protocol):
     def __call__(
         self,

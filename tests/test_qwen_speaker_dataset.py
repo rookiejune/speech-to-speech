@@ -249,9 +249,6 @@ class BiCodecSpeakerCellTest(unittest.TestCase):
                 self.assertIsNone(batch.acoustic_target)
                 prompt_length = int(batch.generation_prompt_lengths[0].item())
                 response = batch.input_ids[0, prompt_length:]
-                self.assertIsNotNone(batch.token_groups)
-                assert batch.token_groups is not None
-                response_groups = batch.token_groups[0, prompt_length:]
                 semantic_marker = runtime.layout.to_global(
                     "audio",
                     torch.tensor(runtime.audio_tokenizer.semantic_token_id),
@@ -277,10 +274,6 @@ class BiCodecSpeakerCellTest(unittest.TestCase):
                         batch.input_ids[0] == runtime.boa_token_id
                     ).nonzero(as_tuple=False)
                     self.assertGreaterEqual(boa_positions.numel(), 2)
-                self.assertIn(
-                    runtime.audio_tokenizer.semantic_group,
-                    response_groups.tolist(),
-                )
 
 
 class _Cells(MapStyleABC):

@@ -71,14 +71,14 @@ class PlModuleCompositionTest(unittest.TestCase):
     @patch("speech_to_speech.pl_module.composition.TokenObjective")
     @patch("speech_to_speech.pl_module.composition.Model")
     def test_token_closes_model_and_objective(self, model, objective, module):
-        runtime = SimpleNamespace(layout=Mock(), audio_tokenizer=None)
+        runtime = SimpleNamespace(layout=Mock())
         model_config = ModelConfig()
 
         built_module, built_model = token(runtime, ModuleConfig(), model_config)
 
         self.assertIs(built_model, model.return_value)
         model.assert_called_once_with(model_config, runtime=runtime)
-        objective.assert_called_once_with(runtime.layout, runtime.audio_tokenizer)
+        objective.assert_called_once_with(runtime.layout)
         module.assert_called_once_with(
             ANY,
             model=model.return_value,

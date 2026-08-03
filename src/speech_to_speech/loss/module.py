@@ -15,7 +15,6 @@ from semantic_acoustic_codec.loss.repa import Teacher
 from torch import Tensor, nn
 
 from ..datamodule.types import ModelBatch
-from ..runtime.types import AudioTokenizer
 from .protocol import (
     FlowObjectiveModel,
     RVQObjectiveModel,
@@ -48,18 +47,6 @@ class RepaConfig(TypedDict):
     teacher: Teacher
 
 
-def _selected_logits(model: TokenObjectiveModel):
-    def selected(hidden_state: Tensor, token_ids: Tensor) -> Tensor:
-        result = model.selected_logits(
-            hidden_state,
-            token_ids,
-            audio_hidden_state=hidden_state,
-        )
-        return result[0] if isinstance(result, tuple) else result
-
-    return selected
-
-
 def _token_forward(
     batch: ModelBatch,
     model: TokenObjectiveModel,
@@ -81,10 +68,6 @@ def _token_forward(
         batch.token_labels,
         batch.prediction_modality,
         model.token_logits,
-        token_groups=batch.token_groups,
-        selected_logits=(
-            _selected_logits(model) if batch.token_groups is not None else None
-        ),
         audio_hidden_states=audio_hidden,
         attention_mask=batch.attention_mask,
     )
@@ -94,11 +77,10 @@ class TokenObjective(Objective[TokenObjectiveModel]):
     def __init__(
         self,
         layout: Layout,
-        audio_tokenizer: AudioTokenizer | None = None,
     ) -> None:
         super().__init__()
         self.layout = layout
-        self.token = TokenLoss(layout, audio_tokenizer)
+        self.token = TokenLoss(layout)
 
     def forward(self, batch: ModelBatch, model: TokenObjectiveModel) -> Outputs:
         if model.layout.blocks != self.layout.blocks:
@@ -113,14 +95,13 @@ class FlowObjective(Objective[FlowObjectiveModel]):
         layout: Layout,
         flow_runtime: FlowRuntime,
         *,
-        audio_tokenizer: AudioTokenizer | None = None,
         repa: RepaConfig | None = None,
     ) -> None:
         super().__init__()
         if repa is not None and repa["weight"] <= 0:
             raise ValueError("REPA weight must be positive")
         self.layout = layout
-        self.token = TokenLoss(layout, audio_tokenizer)
+        self.token = TokenLoss(layout)
         self.flow_matching = FlowLoss()
         self.repa_loss = MaskedCosineAlignmentLoss()
         self.repa_teacher = None if repa is None else repa["teacher"]
@@ -154,10 +135,6 @@ class FlowObjective(Objective[FlowObjectiveModel]):
             batch.token_labels,
             batch.prediction_modality,
             model.token_logits,
-            token_groups=batch.token_groups,
-            selected_logits=(
-                _selected_logits(model) if batch.token_groups is not None else None
-            ),
             audio_hidden_states=audio_hidden,
             attention_mask=batch.attention_mask,
         )
@@ -216,11 +193,10 @@ class RVQObjective(Objective[RVQObjectiveModel]):
     def __init__(
         self,
         layout: Layout,
-        audio_tokenizer: AudioTokenizer | None = None,
     ) -> None:
         super().__init__()
         self.layout = layout
-        self.token = TokenLoss(layout, audio_tokenizer)
+        self.token = TokenLoss(layout)
         self.rvq = MaskedCodebookCrossEntropyLoss()
 
     def forward(self, batch: ModelBatch, model: RVQObjectiveModel) -> Outputs:
@@ -262,10 +238,6 @@ class RVQObjective(Objective[RVQObjectiveModel]):
             batch.token_labels,
             batch.prediction_modality,
             model.token_logits,
-            token_groups=batch.token_groups,
-            selected_logits=(
-                _selected_logits(model) if batch.token_groups is not None else None
-            ),
             audio_hidden_states=audio_hidden,
             attention_mask=batch.attention_mask,
         )

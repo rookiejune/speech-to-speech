@@ -192,7 +192,6 @@ def batch_report(batch: object) -> dict[str, object]:
             "predictions": [prediction.value for prediction in batch.predictions],
             "input_ids": tensor_report(batch.input_ids),
             "token_labels": tensor_report(batch.token_labels),
-            "token_groups": tensor_report(batch.token_groups),
             "audio_seconds": tensor_report(batch.audio_seconds),
             "generation_prompt_lengths": tensor_report(batch.generation_prompt_lengths),
             "audio_input_positions": tensor_report(batch.audio_input_positions),

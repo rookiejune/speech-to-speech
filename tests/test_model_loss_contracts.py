@@ -208,7 +208,6 @@ class _TokenForwardModel:
         self.layout = layout
         self.token_hidden_calls = 0
         self.project_audio_calls = 0
-        self.selected_calls: list[Tensor] = []
         self.logit_rows = 0
         self.logit_modalities: list[Modality] = []
 
@@ -252,21 +251,6 @@ class _TokenForwardModel:
         self.project_audio_calls += 1
         return hidden_state, None
 
-    def selected_logits(
-        self,
-        hidden_state: Tensor,
-        token_ids: Tensor,
-        *,
-        attention_mask: Tensor | None = None,
-        audio_hidden_state: Tensor | None = None,
-        past_key_values: object | None = None,
-        use_cache: bool = False,
-    ) -> tuple[Tensor, object | None]:
-        del attention_mask, audio_hidden_state, past_key_values, use_cache
-        self.selected_calls.append(token_ids.detach().clone())
-        return torch.zeros(hidden_state.size(0), token_ids.numel()), None
-
-
 class _RVQModel(_FlowModel):
     def acoustic_logits(
         self,
@@ -299,35 +283,27 @@ class _BatchObjective(Objective[Any]):
 
 
 class ModelLossContractTest(unittest.TestCase):
-    def test_bicodec_grouped_loss_restricts_each_prediction_head(self):
-        case = _bicodec_group_case()
-        calls: list[Tensor] = []
+    def test_bicodec_audio_loss_uses_full_audio_vocab(self):
+        case = _bicodec_full_vocab_case()
+        calls: list[tuple[Modality | None, int]] = []
 
-        def selected(hidden: Tensor, allowed: Tensor) -> Tensor:
-            calls.append(allowed.detach().clone())
-            return torch.zeros(hidden.size(0), allowed.numel())
+        def token_logits(hidden: Tensor, modality: Modality | None) -> Tensor:
+            calls.append((modality, hidden.size(0)))
+            start, end = case.layout.blocks[Modality.AUDIO.value]
+            return torch.zeros(hidden.size(0), end - start)
 
-        item = TokenLoss(case.layout, case.tokenizer)(
+        item = TokenLoss(case.layout)(
             torch.zeros(1, case.input_ids.size(1), 3),
             case.labels,
             Modality.AUDIO,
-            lambda hidden, modality: torch.empty(0),
-            token_groups=case.groups,
-            selected_logits=selected,
+            token_logits,
         )
 
         self.assertTrue(torch.isfinite(item.loss).all())
-        self.assertEqual(len(calls), 3)
-        expected = {
-            tuple(
-                case.layout.to_global(
-                    Modality.AUDIO.value,
-                    case.tokenizer.prediction_ids(group, device=torch.device("cpu")),
-                ).tolist()
-            )
-            for group in (0, 1, 2)
-        }
-        self.assertEqual({tuple(call.tolist()) for call in calls}, expected)
+        self.assertEqual(
+            calls,
+            [(Modality.AUDIO, int(case.labels.ne(-100).sum()))],
+        )
 
     def test_token_objective_supervises_parallel_text_and_audio_heads(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
@@ -370,45 +346,25 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertEqual(float(details["text_tokens"].sum()), 1.0)
         self.assertEqual(float(details["audio_tokens"].sum()), 2.0)
 
-    def test_token_objective_uses_selected_logits_for_bicodec_groups(self):
-        case = _bicodec_group_case()
+    def test_token_objective_uses_full_audio_logits_for_bicodec_tokens(self):
+        case = _bicodec_full_vocab_case()
         model = _TokenForwardModel(case.layout)
         batch = ModelBatch(
             input_ids=case.input_ids,
             token_labels=case.labels,
-            token_groups=case.groups,
             acoustic_target=None,
             tasks=[Task.TTS],
             predictions=[PredictionModality.AUDIO],
             pad_token_id=99,
         )
 
-        outputs = TokenObjective(case.layout, case.tokenizer)(batch, model)
+        outputs = TokenObjective(case.layout)(batch, model)
 
         self.assertIn("token", outputs)
         self.assertEqual(model.token_hidden_calls, 1)
         self.assertEqual(model.project_audio_calls, 1)
-        self.assertEqual(model.logit_rows, 0)
-        self.assertEqual(len(model.selected_calls), 3)
-
-    def test_token_groups_reject_mixed_prediction(self):
-        layout = Layout(text=(0, 4), audio=(4, 7))
-        labels = torch.tensor([[-100, 4]])
-        groups = torch.tensor([[-1, 0]])
-        with self.assertRaisesRegex(
-            ValueError,
-            "token prediction groups are supported only for audio-only targets",
-        ):
-            TokenLoss(layout)(
-                torch.zeros(1, 2, 3),
-                labels,
-                PredictionModality.PARALLEL,
-                lambda hidden, modality: torch.empty(0),
-                token_groups=groups,
-                selected_logits=lambda hidden, allowed: torch.zeros(
-                    hidden.size(0), allowed.numel()
-                ),
-            )
+        self.assertEqual(model.logit_rows, int(case.labels.ne(-100).sum()))
+        self.assertEqual(model.logit_modalities, [Modality.AUDIO])
 
     def test_validation_metrics_maps_outputs_and_rvq_top1(self):
         token = LossItem(
@@ -1198,7 +1154,7 @@ def _require_details(
     return details
 
 
-def _bicodec_group_case() -> SimpleNamespace:
+def _bicodec_full_vocab_case() -> SimpleNamespace:
     tokenizer = BiCodecAudioTokenizer(
         semantic_vocab_size=4,
         acoustic_codebook_sizes=(2,),
@@ -1209,23 +1165,19 @@ def _bicodec_group_case() -> SimpleNamespace:
         semantic=torch.tensor([[1]]),
         acoustic=torch.tensor([[0]]),
     )
-    local_ids, local_groups = tokenizer.encode_streams_with_groups(
+    local_ids = tokenizer.encode_streams(
         codes,
         (AudioStream.ACOUSTIC, AudioStream.SEMANTIC),
     )
     global_ids = layout.to_global(Modality.AUDIO.value, local_ids)
     input_ids = torch.cat((torch.tensor([1]), global_ids)).unsqueeze(0)
     labels = torch.full_like(input_ids, -100)
-    groups = torch.full_like(input_ids, -1)
-    supervised = local_groups.ge(0)
-    labels[0, 1:][supervised] = global_ids[supervised]
-    groups[0, 1:][supervised] = local_groups[supervised]
+    labels[0, 1:] = global_ids
     return SimpleNamespace(
         tokenizer=tokenizer,
         layout=layout,
         input_ids=input_ids,
         labels=labels,
-        groups=groups,
     )
 
 
@@ -1287,7 +1239,6 @@ def _batch(
     target_acoustic_codes: Tensor | None = None,
     target_audio_token_positions: Tensor | None = None,
     prediction: PredictionModality | None = None,
-    token_groups: Tensor | None = None,
 ) -> ModelBatch:
     resolved = (
         task.prediction_modality if prediction is None else prediction
@@ -1295,7 +1246,6 @@ def _batch(
     batch = ModelBatch(
         input_ids=token_labels.masked_fill(token_labels.eq(-100), 0),
         token_labels=token_labels,
-        token_groups=token_groups,
         acoustic_target=(
             None
             if target_acoustic_codes is None or target_audio_token_positions is None

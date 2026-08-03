@@ -370,7 +370,6 @@ class Labels:
 
     response_ids: Tensor
     token_labels: Tensor
-    token_groups: Tensor | None = None
     acoustic_target: AcousticTarget | None = None
     audio_seconds: float = 0.0
 
@@ -397,12 +396,6 @@ class ModelSample:
             raise ValueError(
                 "token_labels must align with cat(prompt_ids, response_ids)."
             )
-        if self.labels.token_groups is not None and (
-            self.labels.token_groups.shape != full.shape
-        ):
-            raise ValueError(
-                "token_groups must align with cat(prompt_ids, response_ids)."
-            )
 
     @classmethod
     def pack(
@@ -413,7 +406,6 @@ class ModelSample:
         token_labels: Tensor,
         task: Task,
         prediction: PredictionModality,
-        token_groups: Tensor | None = None,
         acoustic_target: AcousticTarget | None = None,
         audio_seconds: float = 0.0,
         audio_input_positions: Tensor | None = None,
@@ -430,7 +422,6 @@ class ModelSample:
             labels=Labels(
                 response_ids=response_ids,
                 token_labels=token_labels,
-                token_groups=token_groups,
                 acoustic_target=acoustic_target,
                 audio_seconds=audio_seconds,
             ),
@@ -445,7 +436,6 @@ class ModelSample:
         task: Task,
         prediction: PredictionModality,
         generation_prompt_length: int | None = None,
-        token_groups: Tensor | None = None,
         acoustic_target: AcousticTarget | None = None,
         audio_seconds: float = 0.0,
         audio_input_positions: Tensor | None = None,
@@ -472,7 +462,6 @@ class ModelSample:
             token_labels=token_labels,
             task=task,
             prediction=prediction,
-            token_groups=token_groups,
             acoustic_target=acoustic_target,
             audio_seconds=audio_seconds,
             audio_input_positions=audio_input_positions,
@@ -486,10 +475,6 @@ class ModelSample:
     @property
     def token_labels(self) -> Tensor:
         return self.labels.token_labels
-
-    @property
-    def token_groups(self) -> Tensor | None:
-        return self.labels.token_groups
 
     @property
     def acoustic_target(self) -> AcousticTarget | None:
@@ -530,7 +515,6 @@ class _PaddedSamples:
     acoustic_target: AcousticTarget | None
     tasks: list[Task]
     predictions: list[PredictionModality]
-    token_groups: Tensor | None
     audio_seconds: Tensor
     generation_prompt_lengths: Tensor
     audio_input_positions: Tensor | None
@@ -553,7 +537,6 @@ class ModelBatch:
     tasks: list[Task]
     predictions: list[PredictionModality]
     pad_token_id: int
-    token_groups: Tensor | None = None
     audio_seconds: Tensor | None = None
     generation_prompt_lengths: Tensor | None = None
     audio_input_positions: Tensor | None = None
@@ -563,7 +546,6 @@ class ModelBatch:
         batch_size = _validate_batch_tensors(
             self.input_ids,
             self.token_labels,
-            self.token_groups,
         )
         prediction = _validate_batch_tasks(
             self.tasks,
@@ -609,7 +591,6 @@ class ModelBatch:
         return cls(
             input_ids=padded.input_ids,
             token_labels=padded.token_labels,
-            token_groups=padded.token_groups,
             acoustic_target=padded.acoustic_target,
             tasks=padded.tasks,
             predictions=padded.predictions,
@@ -636,7 +617,6 @@ class ModelBatch:
         return self._replace(
             input_ids=self.input_ids.pin_memory(),
             token_labels=self.token_labels.pin_memory(),
-            token_groups=_pin_optional(self.token_groups),
             acoustic_target=_pin_target(self.acoustic_target),
             fields=_BatchGenerationFields(
                 audio_seconds=fields.audio_seconds.pin_memory(),
@@ -653,7 +633,6 @@ class ModelBatch:
         return self._replace(
             input_ids=self.input_ids.to(device=device),
             token_labels=self.token_labels.to(device=device),
-            token_groups=_to_optional(self.token_groups, device),
             acoustic_target=_to_target(self.acoustic_target, device),
             fields=_BatchGenerationFields(
                 audio_seconds=fields.audio_seconds.to(device=device),
@@ -676,7 +655,6 @@ class ModelBatch:
         return self._replace(
             input_ids=self.input_ids[index : index + 1],
             token_labels=self.token_labels[index : index + 1],
-            token_groups=_optional_row(self.token_groups, index),
             acoustic_target=_target_row(self.acoustic_target, index),
             tasks=[self.tasks[index]],
             predictions=[self.predictions[index]],
@@ -706,7 +684,6 @@ class ModelBatch:
         *,
         input_ids: Tensor,
         token_labels: Tensor,
-        token_groups: Tensor | None,
         acoustic_target: AcousticTarget | None,
         fields: _BatchGenerationFields,
         tasks: list[Task] | None = None,
@@ -715,7 +692,6 @@ class ModelBatch:
         return ModelBatch(
             input_ids=input_ids,
             token_labels=token_labels,
-            token_groups=token_groups,
             acoustic_target=acoustic_target,
             tasks=list(self.tasks) if tasks is None else tasks,
             predictions=list(self.predictions) if predictions is None else predictions,
@@ -768,7 +744,6 @@ TrainBatch = Union[TrainInput, FusedBatch]
 def _validate_batch_tensors(
     input_ids: Tensor,
     token_labels: Tensor,
-    token_groups: Tensor | None,
 ) -> int:
     if input_ids.dim() != 2 or token_labels.shape != input_ids.shape:
         raise ValueError("batch input ids and token labels must be aligned 2D tensors.")
@@ -778,17 +753,6 @@ def _validate_batch_tensors(
         raise TypeError(
             "batch input ids and token labels must use signed integer dtypes."
         )
-    if token_groups is not None:
-        if token_groups.shape != input_ids.shape:
-            raise ValueError(
-                "batch token groups must align with input ids and token labels."
-            )
-        if not is_signed_integer_dtype(token_groups.dtype):
-            raise TypeError("batch token groups must use a signed integer dtype.")
-        if bool((token_labels.eq(-100) & token_groups.ne(-1)).any()):
-            raise ValueError("ignored token labels must use the forced token group.")
-        if bool((token_labels.ne(-100) & token_groups.lt(0)).any()):
-            raise ValueError("supervised token labels require prediction groups.")
     batch_size = input_ids.size(0)
     if batch_size < 1:
         raise ValueError("ModelBatch requires at least one row.")
@@ -874,10 +838,6 @@ def _padded_samples(samples: list[ModelSample], pad_token_id: int) -> _PaddedSam
     return _PaddedSamples(
         input_ids=_pad([sample.input_ids for sample in samples], pad_token_id),
         token_labels=_pad([sample.labels.token_labels for sample in samples], -100),
-        token_groups=_optional_tensor(
-            [sample.labels.token_groups for sample in samples],
-            padding_value=-1,
-        ),
         acoustic_target=_target([sample.labels.acoustic_target for sample in samples]),
         tasks=[sample.request["task"] for sample in samples],
         predictions=[sample.prediction for sample in samples],
@@ -1121,17 +1081,6 @@ def _validate_sample(sample: ModelSample, pad_token_id: int) -> None:
         raise ValueError(
             "sample input ids and token labels must be aligned 1D tensors."
         )
-    token_groups = sample.labels.token_groups
-    if token_groups is not None:
-        if token_groups.shape != input_ids.shape:
-            raise ValueError("sample token groups must align with input ids.")
-        if not is_signed_integer_dtype(token_groups.dtype):
-            raise TypeError("sample token groups must use a signed integer dtype.")
-        if bool((token_labels.eq(-100) & token_groups.ne(-1)).any()):
-            raise ValueError("ignored sample labels must use the forced token group.")
-        if bool((token_labels.ne(-100) & token_groups.lt(0)).any()):
-            raise ValueError("supervised sample labels require prediction groups.")
-
     positions = sample.request["audio_input_positions"]
     if positions is not None:
         if positions.dim() != 1:
