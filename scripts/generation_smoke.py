@@ -17,7 +17,7 @@ from speech_to_speech.datamodule.types import ModelBatch, TrainInput
 from speech_to_speech.generation.batch import requests_from_batch
 from speech_to_speech.generation.eval.reporting import compare, summary
 from speech_to_speech.model.acoustic import FlowModel
-from speech_to_speech.runtime import runtime_for_sequence_layout
+from speech_to_speech.runtime import Runtime, runtime_for_sequence_layout
 from speech_to_speech.task import Task
 
 if __package__:
