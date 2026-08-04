@@ -140,6 +140,13 @@ class StableCodec:
         sizes = tuple(int(size) for size in codec.codebook_sizes)
         self._codebook_sizes = sizes
         self._fsq_levels = _fsq_levels(sizes, codec)
+        self._fsq_level_values = getattr(codec, "fsq_level_values", None)
+        radix_order = getattr(codec, "fsq_radix_order", "first_fastest")
+        if radix_order != "first_fastest":
+            raise ValueError(
+                "stable codec FSQ tokens must use first_fastest mixed radix."
+            )
+        self._fsq_radix_order = radix_order
 
     @property
     def name(self) -> str:
@@ -165,6 +172,16 @@ class StableCodec:
     @property
     def fsq_levels(self) -> tuple[tuple[int, ...], ...]:
         return self._fsq_levels
+
+    @property
+    def fsq_level_values(
+        self,
+    ) -> tuple[tuple[tuple[float, ...], ...], ...] | None:
+        return self._fsq_level_values
+
+    @property
+    def fsq_radix_order(self) -> str:
+        return self._fsq_radix_order
 
     def encode(self, audio: Tensor, sample_rate: int) -> Tensor:
         return self.codec.encode(audio, sample_rate)

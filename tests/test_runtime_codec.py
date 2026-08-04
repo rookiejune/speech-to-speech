@@ -97,6 +97,49 @@ class RuntimeCodecTest(unittest.TestCase):
         self.assertTrue(runtime.structured_full_sequence)
         self.assertIsInstance(runtime.audio_tokenizer, BiCodecAudioTokenizer)
 
+    def test_bicodec_runtime_nests_explicit_semantic_tokenizer(self) -> None:
+        for layout in (
+            AudioSequenceLayout.SEMANTIC,
+            AudioSequenceLayout.FLATTENED,
+        ):
+            config = Config(
+                codec="bicodec",
+                audio_tokenizer="/tmp/bicodec-semantic-bpe",
+                semantic_codec_artifact=(
+                    "/tmp/bicodec-semantic"
+                    if layout is AudioSequenceLayout.SEMANTIC
+                    else None
+                ),
+            )
+            runtime = Runtime(config, audio_sequence_layout=layout)
+            runtime.__dict__["codec"] = _codec(AcousticLayout.FIXED_LENGTH)
+            semantic_tokenizer = Mock()
+            outer_tokenizer = Mock()
+
+            with (
+                patch(
+                    "speech_to_speech.runtime.runtime.audio_tokenizer",
+                    return_value=semantic_tokenizer,
+                ) as load_tokenizer,
+                patch(
+                    "speech_to_speech.runtime.runtime.BiCodecAudioTokenizer",
+                    return_value=outer_tokenizer,
+                ) as build_tokenizer,
+            ):
+                loaded = runtime.audio_tokenizer
+
+            with self.subTest(layout=layout):
+                self.assertIs(loaded, outer_tokenizer)
+                load_tokenizer.assert_called_once_with(
+                    "/tmp/bicodec-semantic-bpe"
+                )
+                build_tokenizer.assert_called_once_with(
+                    semantic_codebook_size=8,
+                    acoustic_codebook_sizes=(5, 7),
+                    acoustic_unit_length=3,
+                    semantic_tokenizer=semantic_tokenizer,
+                )
+
     def test_frame_codec_rejects_invalid_codebook_sizes(self) -> None:
         cases = (
             ([], TypeError, "tuple"),

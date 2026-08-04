@@ -129,9 +129,7 @@ class TrainConfigContractTest(ConfigTestCase):
                 )
                 self.assertGreater(config.loader_plan.accumulate_grad_batches, 1)
                 expected_mode = (
-                    LoaderStepMode.SERIAL_JOINT
-                    if index == 0
-                    else LoaderStepMode.FUSED_JOINT
+                    LoaderStepMode.SERIAL_JOINT if index == 0 else LoaderStepMode.FUSED_JOINT
                 )
                 self.assertIs(config.loader_plan.mode, expected_mode)
                 self.assertEqual(
@@ -140,6 +138,22 @@ class TrainConfigContractTest(ConfigTestCase):
                 )
                 self.assertEqual(config.loader_plan.fuse_loaders_per_step, index != 0)
                 self.assertEqual(config.loader_plan.loader_weights(), expected_weights)
+                expected_ctc = (
+                    (0.0, 0.0) if index == 0 else ((1.0, 0.0) if index == 1 else (1.0, 1.0))
+                )
+                self.assertEqual(
+                    (
+                        config.pl_module.ctc.source_weight,
+                        config.pl_module.ctc.target_weight,
+                    ),
+                    expected_ctc,
+                )
+                if index > 0:
+                    self.assertIs(
+                        config.model.audio_input_adapter.type,
+                        AudioInputAdapterType.TRANSFORMER,
+                    )
+                    self.assertFalse(config.model.audio_input_adapter.causal)
                 self.assertEqual(
                     {
                         name: loader.task_weights
@@ -151,8 +165,7 @@ class TrainConfigContractTest(ConfigTestCase):
                 self.assertEqual(config.callbacks.task_sample.every_n_steps, 10_000)
                 self.assertEqual(
                     tuple(
-                        (panel.loader, panel.task)
-                        for panel in config.callbacks.task_sample.panels
+                        (panel.loader, panel.task) for panel in config.callbacks.task_sample.panels
                     ),
                     expected_panels,
                 )
@@ -257,6 +270,13 @@ class TrainConfigContractTest(ConfigTestCase):
         self.assertEqual(config.runtime.codec, "stable_codec")
         self.assertIs(config.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
         self.assertIsNone(config.runtime.audio_tokenizer)
+        self.assertEqual(config.pl_module.ctc.source_weight, 1.0)
+        self.assertEqual(config.pl_module.ctc.target_weight, 0.0)
+        self.assertIs(
+            config.model.audio_input_adapter.type,
+            AudioInputAdapterType.TRANSFORMER,
+        )
+        self.assertFalse(config.model.audio_input_adapter.causal)
         self.assertTrue(config.callbacks.task_sample.enabled)
         self.assertTrue(config.validation.enabled)
         self.assertEqual(config.validation.every_n_steps, 10_000)

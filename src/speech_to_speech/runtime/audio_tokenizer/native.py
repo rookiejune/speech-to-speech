@@ -25,6 +25,13 @@ class NativeAudioTokenizer:
     def vocab_size(self) -> int:
         return self._vocab_size
 
+    def contract_state(self) -> dict[str, object]:
+        """Return the effective token-ID grammar used by checkpoints."""
+        return {
+            "grammar": "native-v1",
+            "vocab_size": self.vocab_size,
+        }
+
     def encode(self, frames: Sequence[Sequence[int]] | Tensor) -> Tensor:
         if isinstance(frames, Tensor):
             validate_ids(frames, "frames")

@@ -11,5 +11,8 @@ audio_input_adapter:
   heads: 8
   ffn_ratio: 4.0
   dropout: 0.0
+  causal: false
+fsq_embedding:
+  feature: digit_onehot
 toy:
 lora:

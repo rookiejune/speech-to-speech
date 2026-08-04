@@ -19,15 +19,29 @@ from ...datamodule.types import (
     TrainInput,
 )
 from ...loss.types import loss_items
+from ...task_spec import uses_source_ctc, uses_target_ctc
 
 _OBJECTIVE_PREFIX = {
     "token": "token",
+    "ctc": "alignment/ctc",
     "rvq": "acoustic/rvq",
     "flow_matching": "acoustic/flow_matching",
     "repa": "acoustic/repa",
     "mimo": "mimo",
 }
-_COUNT_KEYS = frozenset({"tokens", "text_tokens", "audio_tokens", "frames"})
+_COUNT_KEYS = frozenset(
+    {
+        "tokens",
+        "text_tokens",
+        "audio_tokens",
+        "frames",
+        "sequences",
+        "source_tokens",
+        "target_tokens",
+        "source_steps",
+        "target_steps",
+    }
+)
 
 
 @dataclass
@@ -85,19 +99,26 @@ class OutputsLogger(LossItemLoggerCallback):
         item: LossItem,
         labels: list[object],
     ) -> None:
+        details = item.details
         for label in _ordered(labels):
-            mask = torch.tensor(
+            task_mask = torch.tensor(
                 [value == label for value in labels],
                 device=item.loss.device,
                 dtype=torch.bool,
             )
-            self._accumulate(
-                self._tag(objective=objective, key="loss", label=label),
-                item.loss,
-                mask,
-                count=False,
+            loss_mask = _observation_mask(
+                objective,
+                "loss",
+                details,
+                task_mask,
             )
-            details = item.details
+            if bool(loss_mask.any()):
+                self._accumulate(
+                    self._tag(objective=objective, key="loss", label=label),
+                    item.loss,
+                    loss_mask,
+                    count=False,
+                )
             if details is None:
                 continue
             for key, values in details.items():
@@ -105,6 +126,14 @@ class OutputsLogger(LossItemLoggerCallback):
                     raise ValueError(
                         f"{objective} detail {key!r} rows must align with loss rows."
                     )
+                mask = _observation_mask(
+                    objective,
+                    key,
+                    details,
+                    task_mask,
+                )
+                if not bool(mask.any()):
+                    continue
                 self._accumulate(
                     self._tag(objective=objective, key=key, label=label),
                     values,
@@ -281,6 +310,8 @@ def _tasks(objective: str, batch: Any) -> list[object]:
 def _batch_tasks(batch: TrainInput, objective: str) -> list[object]:
     if objective == "token":
         return list(batch.tasks)
+    if objective == "ctc":
+        return list(batch.tasks) if _has_ctc_target(batch) else []
     if objective in {"flow_matching", "repa", "rvq"}:
         if _has_acoustic_target(batch):
             return list(batch.tasks)
@@ -301,6 +332,40 @@ def _has_acoustic_target(batch: TrainInput) -> bool:
     if isinstance(batch, RawSpeechBatch):
         return any(sample.prediction.supervises_audio for sample in batch.samples)
     raise TypeError("training batch must be ModelBatch or RawSpeechBatch.")
+
+
+def _has_ctc_target(batch: TrainInput) -> bool:
+    if isinstance(batch, ModelBatch):
+        return batch.source_ctc is not None or batch.target_ctc is not None
+    if isinstance(batch, RawSpeechBatch):
+        return any(
+            uses_source_ctc(sample.task)
+            or uses_target_ctc(sample.task, sample.prediction)
+            for sample in batch.samples
+        )
+    raise TypeError("training batch must be ModelBatch or RawSpeechBatch.")
+
+
+def _observation_mask(
+    objective: str,
+    key: str,
+    details: Mapping[str, Tensor] | None,
+    task_mask: Tensor,
+) -> Tensor:
+    if objective != "ctc":
+        return task_mask
+    if details is None:
+        raise TypeError("CTC logging requires loss details.")
+    if key.startswith("source_"):
+        unit = "source_tokens"
+    elif key.startswith("target_"):
+        unit = "target_tokens"
+    else:
+        unit = "sequences"
+    counts = details.get(unit)
+    if counts is None or counts.shape != task_mask.shape:
+        raise ValueError(f"CTC logging requires row-aligned {unit!r} details.")
+    return task_mask & counts.gt(0)
 
 
 def _reduce_sum(trainer: pl.Trainer, value: Tensor) -> Tensor:

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
+import hashlib
 import unittest
+from types import SimpleNamespace
 
 import torch
 from anytrain.codec import AcousticLayout, SemanticAcousticCodes
-from types import SimpleNamespace
+from anytrain.tokenizer import CodecBPE
+from anytrain.module.idspace import Layout
 
 from speech_to_speech.audio_stream import AudioStream
 from speech_to_speech.generation.decode import (
@@ -14,9 +18,11 @@ from speech_to_speech.generation.decode import (
 )
 from speech_to_speech.generation._request import validate
 from speech_to_speech.task import Task
-from anytrain.module.idspace import Layout
 from speech_to_speech.runtime import AudioSequenceLayout, Config, Runtime
-from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
+from speech_to_speech.runtime.audio_tokenizer import (
+    BiCodecAudioTokenizer,
+    TorchCodecBPE,
+)
 
 from _constrained_codec_generation import (
     generate_marker_stream_bicodec_sequence_for_test,
@@ -26,7 +32,7 @@ from _constrained_codec_generation import (
 class BiCodecTokenizerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tokenizer = BiCodecAudioTokenizer(
-            semantic_vocab_size=16,
+            semantic_codebook_size=16,
             acoustic_codebook_sizes=(5, 7),
             acoustic_unit_length=3,
         )
@@ -38,6 +44,92 @@ class BiCodecTokenizerTest(unittest.TestCase):
         torch.testing.assert_close(tokens, torch.tensor([2, 4, 6]))
         torch.testing.assert_close(self.tokenizer.decode(tokens), semantic)
         self.assertEqual(self.tokenizer.frame_spans(tokens).tolist(), [1, 1, 1])
+
+    def test_contract_state_is_json_safe_and_structural(self):
+        state = self.tokenizer.contract_state()
+
+        self.assertEqual(
+            state,
+            {
+                "grammar": "bicodec-v1",
+                "semantic_codebook_size": 16,
+                "semantic_vocab_size": 16,
+                "semantic_tokenizer": {
+                    "grammar": "native-v1",
+                    "vocab_size": 16,
+                },
+                "semantic_token_range": [0, 16],
+                "acoustic_codebook_sizes": [5, 7],
+                "acoustic_offsets": [16, 21],
+                "acoustic_token_ranges": [[16, 21], [21, 28]],
+                "acoustic_unit_length": 3,
+                "semantic_token_id": 28,
+                "acoustic_token_id": 29,
+                "end_token_id": 30,
+                "vocab_size": 31,
+            },
+        )
+        json.dumps(state)
+        self.assertIsNot(
+            state["acoustic_token_ranges"],
+            self.tokenizer.contract_state()["acoustic_token_ranges"],
+        )
+
+    def test_semantic_bpe_roundtrip_moves_structured_offsets_after_bpe_vocab(self):
+        semantic_tokenizer = semantic_bpe()
+        tokenizer = BiCodecAudioTokenizer(
+            semantic_codebook_size=16,
+            acoustic_codebook_sizes=(5, 7),
+            acoustic_unit_length=3,
+            semantic_tokenizer=semantic_tokenizer,
+        )
+        codes = SemanticAcousticCodes(
+            semantic=torch.tensor([[1], [2], [3]]),
+            acoustic=torch.tensor([[0, 1], [2, 3], [4, 5]]),
+        )
+
+        tokens = tokenizer.encode_full(codes)
+
+        self.assertEqual(tokenizer.semantic_codebook_size, 16)
+        self.assertEqual(tokenizer.semantic_vocab_size, 18)
+        self.assertIs(tokenizer.semantic_tokenizer, semantic_tokenizer)
+        torch.testing.assert_close(
+            tokens,
+            torch.tensor([31, 18, 24, 20, 26, 22, 28, 30, 17, 32]),
+        )
+        decoded = tokenizer.decode_full(tokens)
+        torch.testing.assert_close(decoded.semantic, codes.semantic)
+        torch.testing.assert_close(decoded.acoustic, codes.acoustic)
+        torch.testing.assert_close(
+            tokenizer.frame_spans(tokens),
+            torch.tensor([0, 0, 0, 0, 0, 0, 0, 0, 3, 0]),
+        )
+        state = tokenizer.contract_state()
+        self.assertEqual(state["grammar"], "bicodec-v1")
+        nested = state["semantic_tokenizer"]
+        self.assertIsInstance(nested, dict)
+        assert isinstance(nested, dict)
+        self.assertEqual(nested["grammar"], "codec-bpe-v1")
+        self.assertNotEqual(
+            contract_hash(self.tokenizer.contract_state()),
+            contract_hash(state),
+        )
+
+    def test_semantic_bpe_must_match_raw_codebook(self):
+        base = CodecBPE.train(
+            lambda: [[[1], [2], [1], [2]]],
+            codebook_sizes=(8,),
+            vocab_size=3,
+            show_progress=False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "codebook sizes"):
+            BiCodecAudioTokenizer(
+                semantic_codebook_size=16,
+                acoustic_codebook_sizes=(5,),
+                acoustic_unit_length=1,
+                semantic_tokenizer=TorchCodecBPE.wrap(base),
+            )
 
     def test_full_sequence_roundtrip_is_slot_major(self):
         codes = SemanticAcousticCodes(
@@ -139,7 +231,7 @@ class BiCodecTokenizerTest(unittest.TestCase):
 class BiCodecDecodeTest(unittest.TestCase):
     def test_reference_route_requires_prompt_context(self):
         tokenizer = BiCodecAudioTokenizer(
-            semantic_vocab_size=8,
+            semantic_codebook_size=8,
             acoustic_codebook_sizes=(3,),
             acoustic_unit_length=2,
         )
@@ -160,7 +252,7 @@ class BiCodecDecodeTest(unittest.TestCase):
 
     def test_full_decode_passes_structured_codes_to_backend(self):
         tokenizer = BiCodecAudioTokenizer(
-            semantic_vocab_size=8,
+            semantic_codebook_size=8,
             acoustic_codebook_sizes=(3,),
             acoustic_unit_length=2,
         )
@@ -185,7 +277,7 @@ class BiCodecDecodeTest(unittest.TestCase):
 
     def test_route_decode_uses_both_output_streams(self):
         tokenizer = BiCodecAudioTokenizer(
-            semantic_vocab_size=8,
+            semantic_codebook_size=8,
             acoustic_codebook_sizes=(3,),
             acoustic_unit_length=2,
         )
@@ -209,7 +301,7 @@ class BiCodecDecodeTest(unittest.TestCase):
 
     def test_reference_route_decodes_prompt_acoustic_and_output_semantic(self):
         tokenizer = BiCodecAudioTokenizer(
-            semantic_vocab_size=8,
+            semantic_codebook_size=8,
             acoustic_codebook_sizes=(3,),
             acoustic_unit_length=2,
         )
@@ -239,7 +331,7 @@ class BiCodecDecodeTest(unittest.TestCase):
 
     def test_state_machine_emits_a_complete_structured_sequence(self):
         tokenizer = BiCodecAudioTokenizer(
-            semantic_vocab_size=8,
+            semantic_codebook_size=8,
             acoustic_codebook_sizes=(3,),
             acoustic_unit_length=2,
         )
@@ -263,7 +355,7 @@ class BiCodecDecodeTest(unittest.TestCase):
 
     def test_state_machine_can_generate_semantic_only_output(self):
         tokenizer = BiCodecAudioTokenizer(
-            semantic_vocab_size=8,
+            semantic_codebook_size=8,
             acoustic_codebook_sizes=(3,),
             acoustic_unit_length=2,
         )
@@ -290,7 +382,7 @@ class BiCodecDecodeTest(unittest.TestCase):
 
     def test_state_machine_generates_acoustic_and_semantic_output(self):
         tokenizer = BiCodecAudioTokenizer(
-            semantic_vocab_size=8,
+            semantic_codebook_size=8,
             acoustic_codebook_sizes=(3,),
             acoustic_unit_length=2,
         )
@@ -327,12 +419,55 @@ class BiCodecConfigTest(unittest.TestCase):
         runtime = Runtime(config, audio_sequence_layout=AudioSequenceLayout.SEMANTIC)
         self.assertEqual(runtime.codec_name, "bicodec")
 
+        bpe_runtime = Runtime(
+            Config(
+                codec="bicodec",
+                audio_tokenizer="/tmp/bicodec-semantic-bpe",
+                semantic_codec_artifact="/tmp/bicodec-semantic",
+            ),
+            audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
+        )
+        self.assertEqual(
+            bpe_runtime.config.audio_tokenizer,
+            "/tmp/bicodec-semantic-bpe",
+        )
+
     def test_flattened_layout_does_not_require_artifact(self):
         runtime = Runtime(
-            Config(codec="bicodec"),
+            Config(codec="bicodec", audio_tokenizer="/tmp/bicodec-semantic-bpe"),
             audio_sequence_layout=AudioSequenceLayout.FLATTENED,
         )
         self.assertIsNone(runtime.semantic_codec_artifact)
+
+    def test_frame_codec_flattened_layout_still_rejects_bpe(self):
+        with self.assertRaisesRegex(ValueError, "frame-code codecs"):
+            Runtime(
+                Config(codec="longcat", audio_tokenizer="/tmp/longcat-bpe"),
+                audio_sequence_layout=AudioSequenceLayout.FLATTENED,
+            )
+
+
+def semantic_bpe() -> TorchCodecBPE:
+    base = CodecBPE.train(
+        lambda: [
+            [[1], [2], [1], [2], [3]],
+            [[1], [2], [3]],
+        ],
+        codebook_sizes=(16,),
+        vocab_size=18,
+        show_progress=False,
+    )
+    return TorchCodecBPE.wrap(base)
+
+
+def contract_hash(state: dict[str, object]) -> str:
+    payload = json.dumps(
+        state,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class _StructuredCodec:

@@ -9,9 +9,10 @@ from torch import Tensor
 from ...prediction import PredictionModality
 from ...runtime import AudioSequenceLayout
 from ...task import Task
+from .._helper.ctc import ctc_target
 from .._helper.tokenization import token_ids
 from ..protocol import DataRuntime, TextRuntime
-from ..types import AcousticTarget, ModelSample, Speech, Text
+from ..types import AcousticTarget, CTCTarget, ModelSample, Speech, Text
 
 
 _AR_TASKS = frozenset(
@@ -96,6 +97,16 @@ def build_pretraining_ar_sample(
         prediction=prediction,
         supervise_from=0,
         acoustic_target=acoustic,
+        target_ctc=ctc_target(
+            torch.arange(
+                prompt.numel(),
+                prompt.numel() + target.audio_token_ids.numel(),
+                dtype=torch.long,
+                device=target.audio_token_ids.device,
+            ),
+            target,
+            data_runtime,
+        ),
         audio_seconds=_duration(target),
     )
 
@@ -157,6 +168,16 @@ def build_ar_sample(
             prediction=prediction,
             supervise_from=0,
             acoustic_target=acoustic,
+            target_ctc=ctc_target(
+                torch.arange(
+                    prompt_ids.numel(),
+                    prompt_ids.numel() + target.audio_token_ids.numel(),
+                    dtype=torch.long,
+                    device=target.audio_token_ids.device,
+                ),
+                target,
+                runtime,
+            ),
             audio_seconds=_duration(target),
         )
 
@@ -330,6 +351,7 @@ def _pack(
     supervise_from: int,
     acoustic_target: AcousticTarget | None,
     audio_seconds: float,
+    target_ctc: CTCTarget | None = None,
 ) -> ModelSample:
     full = torch.cat([marker, response])
     labels = torch.full_like(full, -100)
@@ -339,6 +361,7 @@ def _pack(
         response_ids=response,
         token_labels=labels,
         acoustic_target=acoustic_target,
+        target_ctc=target_ctc,
         task=task,
         prediction=prediction,
         audio_seconds=audio_seconds,

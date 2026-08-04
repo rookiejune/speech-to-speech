@@ -17,6 +17,7 @@ from .generation import (
     GenerationRequest,
     GenerationStepResult,
 )
+from .embedding.fsq import FsqEmbeddingConfig, FsqFeature
 from .mimo import MimoModel, MimoModelConfig, TiedEmbeddingHead
 from .mimo_factory import (
     MimoFactoryConfig,
@@ -41,6 +42,8 @@ __all__ = [
     "GenerationOutput",
     "GenerationRequest",
     "GenerationStepResult",
+    "FsqEmbeddingConfig",
+    "FsqFeature",
     "Model",
     "MimoModel",
     "MimoModelConfig",

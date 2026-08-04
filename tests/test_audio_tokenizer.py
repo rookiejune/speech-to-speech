@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 import torch
@@ -53,6 +54,18 @@ class NativeAudioTokenizerTest(unittest.TestCase):
         )
         self.assertEqual(self.tokenizer.decode([1, 2]), [(1,), (2,)])
         self.assertEqual(self.tokenizer.frame_spans([1, 2]), [1, 1])
+
+    def test_contract_state_is_json_safe_and_structural(self):
+        state = self.tokenizer.contract_state()
+
+        self.assertEqual(
+            state,
+            {
+                "grammar": "native-v1",
+                "vocab_size": 4,
+            },
+        )
+        json.dumps(state)
 
     def test_rejects_non_integer_ids(self):
         for value in (True, 1.5, 1 + 0j):
@@ -136,6 +149,26 @@ class FlattenedAudioTokenizerTest(unittest.TestCase):
         )
         self.assertEqual(self.tokenizer.codebook_ranges, ((0, 4), (4, 14)))
 
+    def test_contract_state_is_json_safe_and_structural(self):
+        state = self.tokenizer.contract_state()
+
+        self.assertEqual(
+            state,
+            {
+                "grammar": "flattened-v1",
+                "codec_name": "longcat",
+                "codebook_sizes": [4, 10],
+                "codebook_ranges": [[0, 4], [4, 14]],
+                "codebook_token_ids": [14, 15],
+                "vocab_size": 16,
+            },
+        )
+        json.dumps(state)
+        self.assertIsNot(
+            state["codebook_sizes"],
+            self.tokenizer.contract_state()["codebook_sizes"],
+        )
+
     def test_round_trip_preserves_full_codec_frames(self):
         frames = torch.tensor([[1, 5], [2, 6]], dtype=torch.int32)
 
@@ -207,6 +240,49 @@ class TorchCodecBPETest(unittest.TestCase):
             tokenizer.frame_spans(token_ids),
             [len(base.decode([token_id])) for token_id in token_ids],
         )
+
+    def test_contract_state_captures_effective_token_and_merge_mapping(self):
+        base = CodecBPE.train(
+            replay(
+                [
+                    [[1, 4], [2, 7], [1, 4], [2, 7], [3, 8]],
+                    [[1, 4], [2, 7], [3, 8]],
+                ]
+            ),
+            codebook_sizes=(4, 16),
+            vocab_size=5,
+            show_progress=False,
+        )
+        tokenizer = TorchCodecBPE.wrap(base)
+
+        state = tokenizer.contract_state()
+
+        self.assertEqual(
+            state,
+            {
+                "grammar": "codec-bpe-v1",
+                "codebook_sizes": [4, 16],
+                "vocab_size": 5,
+                "tokens": [
+                    {"token_id": 0, "frames": [[1, 4]]},
+                    {"token_id": 1, "frames": [[2, 7]]},
+                    {"token_id": 2, "frames": [[3, 8]]},
+                    {"token_id": 3, "frames": [[1, 4], [2, 7]]},
+                    {
+                        "token_id": 4,
+                        "frames": [[1, 4], [2, 7], [3, 8]],
+                    },
+                ],
+                "merges": [
+                    {"left": 0, "right": 1, "token_id": 3},
+                    {"left": 3, "right": 2, "token_id": 4},
+                ],
+            },
+        )
+        json.dumps(state)
+        next_state = tokenizer.contract_state()
+        self.assertIsNot(state["tokens"], next_state["tokens"])
+        self.assertIsNot(state["merges"], next_state["merges"])
 
 
 if __name__ == "__main__":

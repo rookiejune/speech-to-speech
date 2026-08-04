@@ -108,7 +108,7 @@ def _runtime(
     codec: object | None = None,
 ) -> GenerationRuntime:
     tokenizer = BiCodecAudioTokenizer(
-        semantic_vocab_size=8,
+        semantic_codebook_size=8,
         acoustic_codebook_sizes=(3,),
         acoustic_unit_length=2,
     )

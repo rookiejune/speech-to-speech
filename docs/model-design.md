@@ -104,6 +104,8 @@ class ModelBatch:
     input_ids: Tensor          # cat(prompt, response) 的 teacher-forcing 视图
     token_labels: Tensor
     acoustic_target: AcousticTarget | None
+    source_ctc: CTCTarget | None
+    target_ctc: CTCTarget | None
     audio_input_positions: Tensor | None
     tasks: list[Task]
     predictions: list[PredictionModality]
@@ -118,11 +120,14 @@ class ModelBatch:
   codec/REPA 输入和逐帧全局 audio token 位置（相对完整 `input_ids`）。
 - `audio_input_positions`：`[batch, frames]` 的 source audio payload 位置；右侧 `-1` 是 batch
   padding，不包含 BOA/EOA、target/generated audio 或 route reference context。
+- `source_ctc` / `target_ctc`：分别绑定 source / target audio span 的完整序列位置和同语言
+  transcript local text IDs；只有 transcript 对该 audio span 的 hidden states 不可见时才存在。
 
 padding 与 mask：
 
 - `input_ids` 使用 batch 自带的 `pad_token_id`；`token_labels` 使用 `-100`，shift 由 token loss 完成。
 - codec codes 与 frame positions 使用 `ACOUSTIC_PAD_ID=-1`。
+- CTC position 与 transcript 使用 `CTC_PAD_ID=-1`，并分别右 padding。
 - `attention_mask` 和 `acoustic_target_mask` 由 padding 值派生并缓存。
 - codec 接口只接收合法 code；调用前把 padding 替换为安全值，得到 feature 后重新应用 mask。
 
@@ -159,22 +164,34 @@ generation 每采样出一个 codec-decodable audio token，就收集预测该 t
 prompt 中的位置，只供 `AudioInputTower` 做输入 embedding overlay；不能与 target 的
 `acoustic_target.token_positions` 混用。
 
+CTC 也始终保存 audio token 自身位置 `p`，但读取 hidden 的规则由 route 决定：
+
+- source CTC 读取 `hidden[p]`；source `AudioInputTower` 默认双向，因此该位置可汇聚完整 source span。
+- target CTC 读取预测当前 audio token 的 causal state `hidden[p - 1]`，不能读取已经 teacher-forced
+  的当前 target audio token。
+
+统一判定语言是：**对每个 audio span，只要它自身的同语言 transcript 对该 span hidden 不可见，就通过
+冻结的文本头施加 CTC。** TTS 是关键反例：虽然输出 audio，但 target transcript 就是已经可见的输入
+text，因此没有 target CTC；T2ST 的 source text 不是 target transcript，因此 target CTC 仍然存在。
+
 ## 3. 任务定义
 
-| Task | source | prediction | acoustic target |
-| --- | --- | --- | --- |
-| ASR | audio | text | no |
-| MT | text | text | no |
-| S2TT | audio | text | no |
-| S2ST | audio | audio (optional parallel) | codec-dependent |
-| TTS | text | audio | codec-dependent |
-| T2ST | text | audio (optional parallel) | codec-dependent |
-| T2TT | text | text | no |
-| TEXT_AR | none | text | no |
-| AUDIO_AR | none | audio | codec-dependent |
-| PARALLEL_AR | none | parallel | codec-dependent |
-| INTERLEAVED_AR | none | interleaved | codec-dependent |
-| MASKED_AR | text+audio (masked) | parallel (optional interleaved) | codec-dependent |
+| Task | source | prediction | source CTC | target CTC | acoustic target |
+| --- | --- | --- | --- | --- | --- |
+| ASR | audio | text | yes | no | no |
+| MT | text | text | no | no | no |
+| S2TT | audio | text | yes | no | no |
+| S2ST | audio | audio | yes | yes | codec-dependent |
+| S2ST | audio | parallel override | yes | no | codec-dependent |
+| TTS | text | audio | no | no | codec-dependent |
+| T2ST | text | audio | no | yes | codec-dependent |
+| T2ST | text | parallel override | no | no | codec-dependent |
+| T2TT | text | text | no | no | no |
+| TEXT_AR | none | text | no | no | no |
+| AUDIO_AR | none | audio | no | yes | codec-dependent |
+| PARALLEL_AR | none | parallel | no | no | codec-dependent |
+| INTERLEAVED_AR | none | interleaved | no | no | codec-dependent |
+| MASKED_AR | text+audio (masked) | parallel (optional interleaved) | no | no | codec-dependent |
 
 `PredictionModality`（`speech_to_speech.prediction`）是 token 监督与 generation 路径的事实来源：
 
@@ -217,7 +234,8 @@ Runtime 聚合互相兼容的 backbone、text/audio tokenizer、codec、layout�
 ## 5. Model 与 Objective
 
 `model.Config` 配置 token backbone 周边的 semantic-audio input/output adapter，以及可选的
-source-audio input tower。backbone 独占完整 text `nn.Embedding`；`Model.tokens` 是 S2S-local
+source-audio input tower。backbone 独占完整且结构性冻结的 text `nn.Embedding`，它同时作为冻结的
+文本输出头；`Model.tokens` 是 S2S-local
 `TokenInterface`，注册 `audio_embedding`、`audio_projection` 和 `audio_head`，lookup 与 logits 时
 显式接收 backbone text embedding。`Model.source_audio_encoder` 独立注册，不属于 token interface。
 semantic-audio output adapter 是因果族：`none` / `linear` / `mlp` 为无序列混合特例，
@@ -277,7 +295,8 @@ global input_ids
     -> Model.tokens / TokenInterface
          text -> backbone.get_input_embeddings()
          audio -> tokens.audio_embedding -> tokens.audio_projection
-    -> source_audio_encoder overlay at audio_input_positions (none | mlp | causal transformer)
+    -> source_audio_encoder overlay at audio_input_positions
+       (none | mlp | transformer, bidirectional by default and optionally causal)
     -> Qwen backbone
     -> backbone text embedding tied logits
        or tokens.audio_head (none | linear | mlp | causal transformer) -> tied audio logits
@@ -295,8 +314,8 @@ fallback。tokenizer 不展开 per-dim tokens；`semantic_feature_dim == 1` 只�
 FSQ state dict 持久化 stage/codebook/levels topology；strict load 拒绝缺失 topology，或参数 shape
 相同但 topology 不同的 checkpoint。
 
-`mlp` input tower 是逐帧 gated projection；`transformer` input tower 是保持帧数的 causal
-encoder。tower 只服务输入表示，不能读取或修改生成中的新 token，也不参与 output adapter、
+`mlp` input tower 是逐帧 gated projection；`transformer` input tower 是保持帧数、默认双向的
+encoder，只有显式 `causal=true` 才限制为前缀建模。tower 只服务输入表示，不能读取或修改生成中的新 token，也不参与 output adapter、
 Flow/RVQ decoder 或 audio response grammar。显式位置由 datamodule/sample builder 和 generation
 request 传递；没有 source audio 时为 `None`。overlay 位置先完成 shape、范围、重复项与 codec
 payload 校验，再生成 override mask；这些位置跳过普通 `audio_projection`，直接取稀疏 raw audio
@@ -318,6 +337,11 @@ model 的训练能力是：
 `TokenObjective`、`FlowObjective`、`RVQObjective` 只依赖结构化 Protocol。所有 batch 计算 token CE；存在 acoustic target 时，组合对应的 flow 或 RVQ objective。REPA 只属于 flow，通过显式 teacher 与正数 weight 加入。
 token CE 的 softmax 只覆盖 `prediction_modality` 监督的模态，不让 text/audio head 跨模态竞争；flow、RVQ
 与 REPA 只对 boolean mask 选中的有效 frame 计算非线性 loss，padding NaN/Inf 不参与梯度。
+
+三个 objective 还可共享 `CTCAlignmentLoss`。它只读取 batch 已编译的 source/target CTC route，复用
+`model.text_logits()` 将 audio-slot hidden 投影到 tokenizer-local text vocabulary；blank 使用 runtime
+text block 内的 PAD local ID。文本 embedding/readout 不参与训练，因此 CTC 只能推动 audio path 与
+backbone hidden 进入既有文本语义空间，不能靠文本头共同漂移降低对齐损失。
 
 ## 6. Generation
 

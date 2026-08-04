@@ -14,13 +14,15 @@ from ...prediction import PredictionModality
 from ...runtime import AudioSequenceLayout
 from ...runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ...task import Task
-from ...task_spec import resolve_prediction
+from ...task_spec import resolve_prediction, uses_source_ctc, uses_target_ctc
 from ..config import TaskConfig, task_template_index
+from .._helper.ctc import ctc_target
 from .._helper.tokenization import token_ids
 from .ar import build_ar_sample, build_pretraining_ar_sample, is_ar_task
 from ..protocol import DataRuntime, TextRuntime
 from ..types import (
     AcousticTarget,
+    CTCTarget,
     Language,
     ModelSample,
     RawSpeech,
@@ -166,6 +168,12 @@ def _build_modal_sample(
         prompt,
         runtime,
     )
+    source_ctc = _source_ctc(
+        source,
+        audio_input_positions,
+        task,
+        runtime,
+    )
     if prediction is PredictionModality.PARALLEL:
         return _parallel_response(
             input_ids,
@@ -176,6 +184,7 @@ def _build_modal_sample(
             audio_input_positions=audio_input_positions,
             audio_context=audio_context,
             source=source,
+            source_ctc=source_ctc,
         )
 
     target_modality = _target_modality(prediction)
@@ -198,6 +207,14 @@ def _build_modal_sample(
         response_ids,
         target_modality,
     )
+    target_ctc = _target_ctc(
+        target,
+        task,
+        prediction,
+        runtime,
+        input_length=input_ids.numel(),
+        response_length=response_ids.numel(),
+    )
     audio_target, target_semantic_codes, target_acoustic_codes = _acoustic_codes(
         target,
         target_modality,
@@ -218,6 +235,8 @@ def _build_modal_sample(
         response_ids=full_ids[prompt_length:],
         token_labels=token_labels,
         acoustic_target=acoustic_target,
+        source_ctc=source_ctc,
+        target_ctc=target_ctc,
         task=task,
         prediction=prediction,
         audio_seconds=_audio_seconds(
@@ -407,6 +426,7 @@ def _parallel_response(
     audio_input_positions: Tensor | None,
     audio_context: Speech | None,
     source: Speech | Text | None,
+    source_ctc: CTCTarget | None,
 ) -> ModelSample:
     if not isinstance(target, Speech):
         raise TypeError("PARALLEL prediction requires a Speech target.")
@@ -446,6 +466,8 @@ def _parallel_response(
         response_ids=response,
         token_labels=labels,
         acoustic_target=acoustic,
+        source_ctc=source_ctc,
+        target_ctc=None,
         task=task,
         prediction=prediction,
         audio_seconds=_audio_seconds(
@@ -458,6 +480,43 @@ def _parallel_response(
         audio_input_positions=audio_input_positions,
         audio_context=None,
     )
+
+
+def _source_ctc(
+    source: Speech | Text | None,
+    positions: Tensor | None,
+    task: Task,
+    runtime: DataRuntime,
+) -> CTCTarget | None:
+    if not uses_source_ctc(task):
+        return None
+    if not isinstance(source, Speech) or positions is None:
+        raise TypeError("source CTC requires source speech and audio positions.")
+    return ctc_target(positions, source, runtime)
+
+
+def _target_ctc(
+    target: Speech | Text,
+    task: Task,
+    prediction: PredictionModality,
+    runtime: DataRuntime,
+    *,
+    input_length: int,
+    response_length: int,
+) -> CTCTarget | None:
+    if not uses_target_ctc(task, prediction):
+        return None
+    if not isinstance(target, Speech):
+        raise TypeError("target CTC requires target speech.")
+    if response_length < 3:
+        raise ValueError("target audio response must contain BOA, payload, and EOA.")
+    positions = torch.arange(
+        input_length + 1,
+        input_length + response_length - 1,
+        dtype=torch.long,
+        device=target.audio_token_ids.device,
+    )
+    return ctc_target(positions, target, runtime)
 
 
 def build_text_sample(

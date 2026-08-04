@@ -14,6 +14,11 @@ audio_sequence_layout: flattened
 
 output_subdir: stable-codec/stage_1/${run_name}
 
+pl_module:
+  ctc:
+    source_weight: 1.0
+    target_weight: 0.0
+
 loader_plan:
   loaders:
     asr:
@@ -28,6 +33,9 @@ loader_plan:
   step_mode: fused_joint
 
 model:
+  audio_input_adapter:
+    type: transformer
+    causal: false
   lora: null
 
 train:

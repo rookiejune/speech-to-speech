@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+
 import torch
 from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
@@ -14,6 +15,8 @@ from ._common import (
     validate_ids,
     validate_range,
 )
+from .bpe import TorchCodecBPE
+from .native import NativeAudioTokenizer
 
 
 @dataclass(frozen=True)
@@ -30,11 +33,22 @@ class BiCodecAudioTokenizer:
     def __init__(
         self,
         *,
-        semantic_vocab_size: int,
+        semantic_codebook_size: int,
         acoustic_codebook_sizes: Sequence[int],
         acoustic_unit_length: int | None,
+        semantic_tokenizer: NativeAudioTokenizer | TorchCodecBPE | None = None,
     ) -> None:
-        self._semantic_vocab_size = codebook_size(semantic_vocab_size)
+        self._semantic_codebook_size = codebook_size(semantic_codebook_size)
+        self._semantic_tokenizer = (
+            NativeAudioTokenizer(vocab_size=self._semantic_codebook_size)
+            if semantic_tokenizer is None
+            else semantic_tokenizer
+        )
+        _validate_semantic_tokenizer(
+            self._semantic_tokenizer,
+            self._semantic_codebook_size,
+        )
+        self._semantic_vocab_size = codebook_size(self._semantic_tokenizer.vocab_size)
         self._acoustic_codebook_sizes = tuple(
             codebook_size(size) for size in acoustic_codebook_sizes
         )
@@ -60,6 +74,14 @@ class BiCodecAudioTokenizer:
     @property
     def semantic_vocab_size(self) -> int:
         return self._semantic_vocab_size
+
+    @property
+    def semantic_codebook_size(self) -> int:
+        return self._semantic_codebook_size
+
+    @property
+    def semantic_tokenizer(self) -> NativeAudioTokenizer | TorchCodecBPE:
+        return self._semantic_tokenizer
 
     @property
     def acoustic_codebook_sizes(self) -> tuple[int, ...]:
@@ -103,10 +125,32 @@ class BiCodecAudioTokenizer:
     def prediction_token_ranges(self) -> tuple[tuple[int, int], ...]:
         return (self.semantic_token_range, *self.acoustic_token_ranges)
 
+    def contract_state(self) -> dict[str, object]:
+        """Return the effective structured token-ID grammar used by checkpoints."""
+        return {
+            "grammar": "bicodec-v1",
+            "semantic_codebook_size": self.semantic_codebook_size,
+            "semantic_vocab_size": self.semantic_vocab_size,
+            "semantic_tokenizer": dict(self.semantic_tokenizer.contract_state()),
+            "semantic_token_range": list(self.semantic_token_range),
+            "acoustic_codebook_sizes": list(self.acoustic_codebook_sizes),
+            "acoustic_offsets": list(self.acoustic_offsets),
+            "acoustic_token_ranges": [
+                list(bounds) for bounds in self.acoustic_token_ranges
+            ],
+            "acoustic_unit_length": self.acoustic_unit_length,
+            "semantic_token_id": self.semantic_token_id,
+            "acoustic_token_id": self.acoustic_token_id,
+            "end_token_id": self.end_token_id,
+            "vocab_size": self.vocab_size,
+        }
+
     def encode(self, frames: Sequence[Sequence[int]] | Tensor) -> Tensor:
         """Encode semantic codes for the semantic-only route."""
-        tensor = _semantic_tensor(frames, self._semantic_vocab_size)
-        return tensor[:, 0].to(dtype=torch.long)
+        token_ids = self._semantic_tokenizer.encode(frames)
+        if isinstance(token_ids, Tensor):
+            return token_ids.to(dtype=torch.long)
+        return torch.tensor(token_ids, dtype=torch.long)
 
     def encode_full(self, value: SemanticAcousticCodes) -> Tensor:
         return self.encode_streams(
@@ -126,7 +170,7 @@ class BiCodecAudioTokenizer:
         streams = _bicodec_streams(streams)
         semantic_value, acoustic_value = _bicodec_units(value, streams)
         semantic = (
-            _semantic_tensor(semantic_value, self._semantic_vocab_size)
+            self.encode(semantic_value)
             if semantic_value is not None
             else None
         )
@@ -164,7 +208,7 @@ class BiCodecAudioTokenizer:
             values.extend(
                 (
                     anchor.new_tensor([self._semantic_token_id]),
-                    semantic[:, 0].to(dtype=torch.long),
+                    semantic.to(dtype=torch.long),
                 )
             )
         values.append(anchor.new_tensor([self._end_token_id]))
@@ -177,11 +221,7 @@ class BiCodecAudioTokenizer:
         tensor = token_tensor(token_ids)
         if bool((tensor >= self._semantic_vocab_size).any()):
             raise ValueError("BiCodec full sequences must use decode_full().")
-        return (
-            tensor[:, None]
-            if isinstance(token_ids, Tensor)
-            else [(int(value),) for value in tensor]
-        )
+        return self._semantic_tokenizer.decode(token_ids)
 
     def decode_full(self, token_ids: Sequence[int] | Tensor) -> SemanticAcousticCodes:
         decoded = self.decode_streams(
@@ -252,7 +292,10 @@ class BiCodecAudioTokenizer:
                 (semantic >= self._semantic_vocab_size).any()
             ):
                 raise ValueError("BiCodec semantic tokens are out of range.")
-            semantic = semantic[:, None]
+            decoded = self._semantic_tokenizer.decode(semantic)
+            if not isinstance(decoded, Tensor):
+                raise AssertionError("Tensor semantic tokens must decode to a Tensor.")
+            semantic = _semantic_tensor(decoded, self._semantic_codebook_size)
             cursor = tensor.numel() - 1
 
         if cursor != tensor.numel() - 1:
@@ -264,10 +307,39 @@ class BiCodecAudioTokenizer:
         token_ids: Sequence[int] | Tensor,
     ) -> list[int] | Tensor:
         tensor = token_tensor(token_ids)
-        spans = ((tensor >= 0) & (tensor < self._semantic_vocab_size)).to(dtype=torch.long)
+        semantic = (tensor >= 0) & (tensor < self._semantic_vocab_size)
+        spans = torch.zeros_like(tensor, dtype=torch.long)
+        if bool(semantic.any()):
+            semantic_spans = self._semantic_tokenizer.frame_spans(tensor[semantic])
+            if not isinstance(semantic_spans, Tensor):
+                raise AssertionError("Tensor semantic tokens must produce Tensor spans.")
+            spans[semantic] = semantic_spans
         if isinstance(token_ids, Tensor):
             return spans.to(device=token_ids.device)
         return [int(value) for value in spans.tolist()]
+
+
+def _validate_semantic_tokenizer(
+    tokenizer: NativeAudioTokenizer | TorchCodecBPE,
+    codebook_size: int,
+) -> None:
+    if isinstance(tokenizer, NativeAudioTokenizer):
+        if tokenizer.vocab_size != codebook_size:
+            raise ValueError(
+                "BiCodec native semantic tokenizer vocabulary must match the "
+                "semantic codebook size."
+            )
+        return
+    if isinstance(tokenizer, TorchCodecBPE):
+        if tuple(tokenizer.codebook_sizes) != (codebook_size,):
+            raise ValueError(
+                "BiCodec semantic BPE codebook sizes must match the raw semantic "
+                "codebook."
+            )
+        return
+    raise TypeError(
+        "BiCodec semantic tokenizer must be NativeAudioTokenizer or TorchCodecBPE."
+    )
 
 
 def _bicodec_streams(

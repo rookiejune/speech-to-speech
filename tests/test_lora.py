@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from anytrain.lightning import apply_parameter_trainability
 from peft import LoraConfig, inject_adapter_in_model
 from torch import nn
 
@@ -9,7 +10,7 @@ from speech_to_speech.parameter_policy import (
     PARAMETER_POLICY_SPECS,
     ParameterGroup,
     ParameterPolicyName,
-    apply_parameter_policy,
+    ParameterPolicyTrainability,
     parameter_group,
 )
 
@@ -43,9 +44,11 @@ class LoraTest(unittest.TestCase):
     def test_lora_policy_trains_only_backbone_adapters_and_speech_modules(self):
         model = _LoraStageModel()
 
-        counts = apply_parameter_policy(
+        apply_parameter_trainability(
             model,
-            PARAMETER_POLICY_SPECS[ParameterPolicyName.LORA],
+            ParameterPolicyTrainability(
+                PARAMETER_POLICY_SPECS[ParameterPolicyName.LORA]
+            ),
         )
         parameters = dict(model.named_parameters())
 
@@ -62,7 +65,12 @@ class LoraTest(unittest.TestCase):
         self.assertTrue(model.tokens.audio_head.weight.requires_grad)
         self.assertTrue(model.source_audio_encoder.weight.requires_grad)
         self.assertTrue(model.acoustic_decoder.weight.requires_grad)
-        self.assertEqual(counts[ParameterGroup.BACKBONE_ADAPTER], 4)
+        adapter_parameters = sum(
+            parameter.numel()
+            for name, parameter in model.named_parameters()
+            if parameter_group(name) is ParameterGroup.BACKBONE_ADAPTER
+        )
+        self.assertEqual(adapter_parameters, 4)
 
 
 if __name__ == "__main__":

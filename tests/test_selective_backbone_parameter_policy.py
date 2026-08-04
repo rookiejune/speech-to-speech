@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+from anytrain.lightning import apply_parameter_trainability
 from peft import LoraConfig, inject_adapter_in_model
 from torch import nn
 
@@ -10,7 +11,7 @@ from speech_to_speech.parameter_policy import (
     PARAMETER_POLICY_SPECS,
     ParameterGroup,
     ParameterPolicyName,
-    apply_parameter_policy,
+    ParameterPolicyTrainability,
     parameter_group,
 )
 
@@ -35,11 +36,15 @@ class _SelectiveBackbone(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.config = _BackboneConfig(num_hidden_layers=3)
+        self.embed_tokens = nn.Embedding(4, 2)
         self.layers = nn.ModuleList(_ProjectionBlock() for _ in range(3))
         self.mimo_layers = nn.ModuleList(_ProjectionBlock() for _ in range(3))
         self.norm = nn.LayerNorm(2)
         self.encoder = nn.Module()
         self.encoder.layers = nn.ModuleList(nn.Linear(2, 2) for _ in range(3))
+
+    def get_input_embeddings(self) -> nn.Embedding:
+        return self.embed_tokens
 
 
 class _SelectiveModel(nn.Module):
@@ -100,14 +105,17 @@ class SelectiveBackboneParameterPolicyTest(unittest.TestCase):
     def test_top_third_accepts_direct_body_paths_without_broadening_matching(self):
         model = _SelectiveModel()
 
-        apply_parameter_policy(
+        apply_parameter_trainability(
             model,
-            PARAMETER_POLICY_SPECS[
-                ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD
-            ],
+            ParameterPolicyTrainability(
+                PARAMETER_POLICY_SPECS[
+                    ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD
+                ]
+            ),
         )
         parameters = dict(model.named_parameters())
 
+        self.assertFalse(parameters["backbone.embed_tokens.weight"].requires_grad)
         self.assertFalse(parameters["backbone.layers.0.self_attn.q_proj.weight"].requires_grad)
         self.assertFalse(parameters["backbone.layers.1.self_attn.q_proj.weight"].requires_grad)
         self.assertTrue(parameters["backbone.layers.2.self_attn.q_proj.weight"].requires_grad)
@@ -122,6 +130,20 @@ class SelectiveBackboneParameterPolicyTest(unittest.TestCase):
         )
         self.assertTrue(parameters["backbone.norm.weight"].requires_grad)
         self.assertFalse(parameters["backbone.encoder.layers.2.weight"].requires_grad)
+
+    def test_full_keeps_text_embedding_structurally_frozen(self) -> None:
+        model = _SelectiveModel()
+        self.assertTrue(model.backbone.embed_tokens.weight.requires_grad)
+
+        apply_parameter_trainability(
+            model,
+            ParameterPolicyTrainability(
+                PARAMETER_POLICY_SPECS[ParameterPolicyName.FULL]
+            ),
+        )
+
+        self.assertFalse(model.backbone.embed_tokens.weight.requires_grad)
+        self.assertTrue(model.backbone.layers[0].self_attn.q_proj.weight.requires_grad)
 
     def test_lora_targets_main_and_mimo_layers(self):
         model = _SelectiveModel()
@@ -142,9 +164,11 @@ class SelectiveBackboneParameterPolicyTest(unittest.TestCase):
             adapter_name="speech",
         )
 
-        counts = apply_parameter_policy(
+        apply_parameter_trainability(
             model,
-            PARAMETER_POLICY_SPECS[ParameterPolicyName.LORA],
+            ParameterPolicyTrainability(
+                PARAMETER_POLICY_SPECS[ParameterPolicyName.LORA]
+            ),
         )
         parameters = dict(model.named_parameters())
 
@@ -165,7 +189,12 @@ class SelectiveBackboneParameterPolicyTest(unittest.TestCase):
                         parameters[f"{prefix}.lora_B.speech.weight"].requires_grad
                     )
 
-        self.assertEqual(counts[ParameterGroup.BACKBONE_ADAPTER], 168)
+        adapter_parameters = sum(
+            parameter.numel()
+            for name, parameter in model.named_parameters()
+            if parameter_group(name) is ParameterGroup.BACKBONE_ADAPTER
+        )
+        self.assertEqual(adapter_parameters, 168)
 
 
 if __name__ == "__main__":

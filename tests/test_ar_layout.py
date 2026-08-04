@@ -116,6 +116,14 @@ class AutoregressiveLayoutTest(unittest.TestCase):
                 expected_audio,
             )
         )
+        self.assertIsNotNone(sample.target_ctc)
+        assert sample.target_ctc is not None
+        self.assertTrue(
+            torch.equal(sample.target_ctc["token_positions"], expected_positions)
+        )
+        self.assertTrue(
+            torch.equal(sample.target_ctc["text_token_ids"], speech.text_token_ids)
+        )
 
     def test_pretraining_text_ar_uses_bos_prompt(self):
         sample = build_pretraining_ar_sample(
@@ -173,6 +181,14 @@ class AutoregressiveLayoutTest(unittest.TestCase):
                 torch.arange(1, 4, dtype=torch.long),
             )
         )
+        self.assertIsNotNone(sample.target_ctc)
+        assert sample.target_ctc is not None
+        self.assertTrue(
+            torch.equal(
+                sample.target_ctc["token_positions"],
+                torch.arange(1, 4, dtype=torch.long),
+            )
+        )
 
     def test_parallel_ar_supervises_text_then_audio(self):
         sample = build_ar_sample(
@@ -188,6 +204,7 @@ class AutoregressiveLayoutTest(unittest.TestCase):
         self.assertTrue(((supervised >= text_start) & (supervised < text_end)).any())
         self.assertTrue(((supervised >= audio_start) & (supervised < audio_end)).any())
         self.assertIsNotNone(sample.acoustic_target)
+        self.assertIsNone(sample.target_ctc)
 
     def test_interleaved_ar_splits_by_frame_chunks(self):
         sample = build_ar_sample(
@@ -200,6 +217,7 @@ class AutoregressiveLayoutTest(unittest.TestCase):
         self.assertEqual(int(sample.input_ids[-1]), self.runtime.eos_token_id)
         self.assertEqual(int(sample.input_ids.eq(self.runtime.boa_token_id).sum()), 2)
         self.assertEqual(int(sample.input_ids.eq(self.runtime.eoa_token_id).sum()), 2)
+        self.assertIsNone(sample.target_ctc)
 
     def test_token_loss_accepts_parallel_prediction(self):
         sample = build_ar_sample(

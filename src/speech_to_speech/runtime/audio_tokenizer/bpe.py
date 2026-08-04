@@ -21,6 +21,34 @@ class TorchCodecBPE(CodecBPE):
             return tokenizer
         return cls(tokenizer._core, tokenizer._codec)
 
+    def contract_state(self) -> dict[str, object]:
+        """Return the effective CodecBPE token and merge grammar."""
+        tokens = [
+            {
+                "token_id": int(token_id),
+                "frames": [
+                    [int(value) for value in self._codec.decode(int(base_id))]
+                    for base_id in base_ids
+                ],
+            }
+            for token_id, base_ids in sorted(self._core.tokens.items())
+        ]
+        merges = [
+            {
+                "left": int(left),
+                "right": int(right),
+                "token_id": int(token_id),
+            }
+            for left, right, token_id in self._core.merges
+        ]
+        return {
+            "grammar": "codec-bpe-v1",
+            "codebook_sizes": [int(size) for size in self.codebook_sizes],
+            "vocab_size": int(self.vocab_size),
+            "tokens": tokens,
+            "merges": merges,
+        }
+
     @overload
     def encode(self, frames: Sequence[Sequence[int]]) -> list[int]: ...
 

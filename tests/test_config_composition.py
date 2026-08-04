@@ -133,9 +133,7 @@ class ConfigCompositionTest(ConfigTestCase):
         )
 
     def test_full_codec_sequence_smoke_is_token_only_comparison(self):
-        config = overfit(
-            _compose("overfit", "experiment=overfit/longcat_flattened_smoke")
-        )
+        config = overfit(_compose("overfit", "experiment=overfit/longcat_flattened_smoke"))
 
         self.assertIsInstance(config, OverfitTokenConfig)
         self.assertEqual(config.runtime.codec, "longcat")
@@ -172,12 +170,8 @@ class ConfigCompositionTest(ConfigTestCase):
         self.assertIs(config.datamodule.dataset.name, DatasetName.TOY)
 
     def test_bicodec_smokes_use_qwen_single_speaker_cells(self):
-        semantic = overfit(
-            _compose("overfit", "experiment=overfit/bicodec_semantic_only_smoke")
-        )
-        full = overfit(
-            _compose("overfit", "experiment=overfit/bicodec_flattened_smoke")
-        )
+        semantic = overfit(_compose("overfit", "experiment=overfit/bicodec_semantic_only_smoke"))
+        full = overfit(_compose("overfit", "experiment=overfit/bicodec_flattened_smoke"))
 
         for config in (semantic, full):
             self.assertIsInstance(config, OverfitTokenConfig)
@@ -224,9 +218,7 @@ class ConfigCompositionTest(ConfigTestCase):
 
         for parser, raw, key in cases:
             with self.subTest(key=key):
-                with self.assertRaises(
-                    (ConfigKeyError, ConfigAttributeError)
-                ) as raised:
+                with self.assertRaises((ConfigKeyError, ConfigAttributeError)) as raised:
                     parser(raw)
                 self.assertIn(key, str(raised.exception))
 
@@ -330,6 +322,7 @@ class ConfigCompositionTest(ConfigTestCase):
         config = _overfit(
             "model.semantic_audio_adapter=mlp",
             "model.audio_output_adapter.type=none",
+            "model.fsq_embedding.feature=digit_value",
         )
 
         self.assertIs(config.model.semantic_audio_adapter, AdapterType.MLP)
@@ -337,9 +330,33 @@ class ConfigCompositionTest(ConfigTestCase):
             config.model.audio_output_adapter.type,
             AudioOutputAdapterType.NONE,
         )
+        self.assertIs(config.model.fsq_embedding.feature, FsqFeature.DIGIT_VALUE)
 
         with self.assertRaises(ValueError):
             _overfit("model.semantic_audio_adapter=invalid")
+
+    def test_audio_neighbor_smoothing_is_explicit_and_validated(self):
+        default = _overfit()
+        configured = _overfit("pl_module.audio_neighbor_smoothing=0.05")
+
+        self.assertEqual(default.pl_module.audio_neighbor_smoothing, 0.0)
+        self.assertEqual(configured.pl_module.audio_neighbor_smoothing, 0.05)
+        with self.assertRaises(ValueError):
+            _overfit("pl_module.audio_neighbor_smoothing=1.0")
+
+    def test_ctc_weights_are_structured_and_validated(self):
+        default = _overfit()
+        configured = _overfit(
+            "pl_module.ctc.source_weight=0.25",
+            "pl_module.ctc.target_weight=0.5",
+        )
+
+        self.assertEqual(default.pl_module.ctc.source_weight, 0.0)
+        self.assertEqual(default.pl_module.ctc.target_weight, 0.0)
+        self.assertEqual(configured.pl_module.ctc.source_weight, 0.25)
+        self.assertEqual(configured.pl_module.ctc.target_weight, 0.5)
+        with self.assertRaises(ValueError):
+            _overfit("pl_module.ctc.source_weight=-1")
 
     def test_audio_input_adapter_is_structured_and_mlp_by_default(self):
         default = _overfit()

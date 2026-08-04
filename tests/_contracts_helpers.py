@@ -31,6 +31,7 @@ from anydataset.types import (
 )
 from hydra import compose, initialize_config_dir
 from anytrain.codec import AcousticLayout, SemanticAcousticCodes
+from anytrain.lightning import apply_parameter_trainability
 from anytrain.module.idspace import Layout
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig, OmegaConf
@@ -96,7 +97,7 @@ from speech_to_speech.parameter_policy import (
     PARAMETER_POLICY_SPECS,
     ParameterGroup,
     ParameterPolicyName,
-    apply_parameter_policy,
+    ParameterPolicyTrainability,
     default_parameter_policy_config,
 )
 from speech_to_speech.task import Task
@@ -345,7 +346,7 @@ def _data_runtime():
 
 def _bicodec_data_runtime():
     tokenizer = BiCodecAudioTokenizer(
-        semantic_vocab_size=8,
+        semantic_codebook_size=8,
         acoustic_codebook_sizes=(3,),
         acoustic_unit_length=2,
     )

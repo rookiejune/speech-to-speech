@@ -7,6 +7,7 @@ from .types import LossItem, Outputs, loss_items, loss_unit
 
 _OBJECTIVE_NAME = {
     "token": "token/loss",
+    "ctc": "alignment/ctc/loss",
     "flow_matching": "acoustic/flow_matching/loss",
     "repa": "acoustic/repa/loss",
     "rvq": "acoustic/rvq/loss",

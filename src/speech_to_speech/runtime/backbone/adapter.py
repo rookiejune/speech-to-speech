@@ -46,6 +46,8 @@ class BackboneAdapter(Protocol):
 
     def input_embeddings(self) -> nn.Embedding: ...
 
+    def contract_state(self) -> Mapping[str, object]: ...
+
     @property
     def has_modality_readouts(self) -> bool: ...
 
@@ -67,6 +69,8 @@ class BackboneAdapter(Protocol):
 class BackboneEncoder(Protocol):
     @property
     def has_modality_readouts(self) -> bool: ...
+
+    def contract_state(self) -> Mapping[str, object]: ...
 
     def encode(
         self,
@@ -115,6 +119,20 @@ class BackboneBodyAdapter:
         if modality is None:
             return self.readout
         return self.modality_readouts.get(modality, self.readout)
+
+    def contract_state(self) -> Mapping[str, object]:
+        return {
+            "grammar": "backbone-body-v1",
+            "readout": self.readout.path,
+            "readouts": {
+                modality.value: readout.path
+                for modality, readout in sorted(
+                    self.modality_readouts.items(),
+                    key=lambda item: item[0].value,
+                )
+            },
+            "supports_cache_position": self.supports_cache_position,
+        }
 
     def encode(
         self,

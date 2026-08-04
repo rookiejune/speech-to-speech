@@ -67,6 +67,17 @@ class FlattenedAudioTokenizer:
             for index, token_id in enumerate(self.codebook_token_ids)
         }
 
+    def contract_state(self) -> dict[str, object]:
+        """Return the effective flattened token-ID grammar used by checkpoints."""
+        return {
+            "grammar": "flattened-v1",
+            "codec_name": self.codec_name,
+            "codebook_sizes": list(self.codebook_sizes),
+            "codebook_ranges": [list(bounds) for bounds in self.codebook_ranges],
+            "codebook_token_ids": list(self.codebook_token_ids),
+            "vocab_size": self.vocab_size,
+        }
+
     def encode(self, frames: Sequence[Sequence[int]] | Tensor) -> Tensor:
         tensor = frame_tensor(frames, self.codebook_sizes)
         validate_frame_ranges(tensor, self.codebook_sizes)

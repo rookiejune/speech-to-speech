@@ -17,6 +17,11 @@ audio_sequence_layout: flattened
 run_name: kimi-audio-ar-pretrain
 output_subdir: kimi-audio/ar-pretrain/${run_name}
 
+pl_module:
+  ctc:
+    source_weight: 1.0
+    target_weight: 1.0
+
 # The 7x text route is a document corpus, not the target side of WMT19.  Point
 # SPEECH_TO_SPEECH_TEXT_CORPUS at a JSONL file containing strings or
 # {"text": ..., "lang": ...} objects before starting a production run.
@@ -61,6 +66,9 @@ loader_plan:
   fuse_loaders_per_step: false
 
 model:
+  audio_input_adapter:
+    type: transformer
+    causal: false
   lora: null
 
 train:

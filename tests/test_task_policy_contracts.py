@@ -5,9 +5,27 @@ from __future__ import annotations
 import unittest
 
 from _contracts_helpers import *
+from speech_to_speech.prediction import PredictionModality
+from speech_to_speech.task_spec import uses_source_ctc, uses_target_ctc
 
 
 class TaskPolicyContractTest(unittest.TestCase):
+    def test_ctc_routes_follow_audio_transcript_visibility(self):
+        source_tasks = {Task.ASR, Task.S2TT, Task.S2ST}
+        target_tasks = {Task.AUDIO_AR, Task.T2ST, Task.S2ST}
+
+        for task in Task:
+            with self.subTest(task=task, route="source"):
+                self.assertEqual(uses_source_ctc(task), task in source_tasks)
+            with self.subTest(task=task, route="target"):
+                self.assertEqual(uses_target_ctc(task), task in target_tasks)
+
+        self.assertTrue(
+            uses_source_ctc(Task.S2ST)
+            and not uses_target_ctc(Task.S2ST, PredictionModality.PARALLEL)
+        )
+        self.assertFalse(uses_target_ctc(Task.TTS))
+
     def test_task_allocation_tracks_weights_across_tiny_batches(self):
         allocation = allocate_tasks([Task.T2ST, Task.TTS], [1.0, 2.0], 6)
         self.assertEqual(allocation.count(Task.T2ST), 2)
@@ -34,12 +52,13 @@ class TaskPolicyContractTest(unittest.TestCase):
     def test_parameter_policy_freezes_explicit_parameter_groups(self):
         model = _StageModel()
 
-        counts = apply_parameter_policy(
+        apply_parameter_trainability(
             model,
-            PARAMETER_POLICY_SPECS[ParameterPolicyName.SPEECH_INTERFACE],
+            ParameterPolicyTrainability(
+                PARAMETER_POLICY_SPECS[ParameterPolicyName.SPEECH_INTERFACE]
+            ),
         )
 
-        self.assertGreater(counts[ParameterGroup.BACKBONE], 0)
         self.assertFalse(model.backbone.layers[0].weight.requires_grad)
         self.assertTrue(model.tokens.audio_embedding.weight.requires_grad)
         self.assertTrue(model.tokens.audio_head.weight.requires_grad)
@@ -68,11 +87,13 @@ class TaskPolicyContractTest(unittest.TestCase):
     def test_partial_qwen_policy_unfreezes_top_layers_and_final_norm(self):
         model = _StageModel()
 
-        apply_parameter_policy(
+        apply_parameter_trainability(
             model,
-            PARAMETER_POLICY_SPECS[
-                ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD
-            ],
+            ParameterPolicyTrainability(
+                PARAMETER_POLICY_SPECS[
+                    ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD
+                ]
+            ),
         )
 
         self.assertFalse(model.backbone.layers[0].weight.requires_grad)

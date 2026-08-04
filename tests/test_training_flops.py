@@ -37,7 +37,7 @@ from speech_to_speech.model.acoustic import DecoderConfig
 from speech_to_speech.model.acoustic.flow import FlowModel
 from speech_to_speech.model.acoustic.rvq import RVQModel
 from speech_to_speech.model.embedding.audio import SemanticAudioEmbedding
-from speech_to_speech.model.embedding.fsq import FsqAffineEmbedding
+from speech_to_speech.model.embedding.fsq import FsqEmbedding, FsqFeature
 from speech_to_speech.performance import TrainingFlops
 from speech_to_speech.pl_module import Config as ModuleConfig, SpeechToSpeechModule
 from speech_to_speech.prediction import PredictionModality
@@ -90,6 +90,7 @@ class TrainingFlopsTest(unittest.TestCase):
     def test_text_head_counts_only_the_layout_slice_without_lm_head(self):
         model = _token_model()
         self.assertFalse(hasattr(model.backbone, "lm_head"))
+        self.assertFalse(model.text_embedding.weight.requires_grad)
         module = _module(model, TokenObjective(_layout()))
         batch = _batch(
             input_ids=torch.tensor([[1, 2, 3, 4], [1, 2, 0, 0]]),
@@ -196,7 +197,7 @@ class TrainingFlopsTest(unittest.TestCase):
             frames=positions.size(1),
         )
         expected = _token_expected(model, batch) + tower_flops
-        embedding = cast(FsqAffineEmbedding, model.tokens.audio_embedding)
+        embedding = cast(FsqEmbedding, model.tokens.audio_embedding)
 
         with patch.object(
             embedding,
@@ -255,11 +256,11 @@ class TrainingFlopsTest(unittest.TestCase):
                     SemanticAudioEmbedding,
                     model.tokens.audio_embedding,
                 )
-                self.assertIs(type(embedding), FsqAffineEmbedding)
+                self.assertIs(type(embedding), FsqEmbedding)
                 expected = _token_expected(model, batch)
 
                 with patch.object(
-                    cast(FsqAffineEmbedding, embedding),
+                    cast(FsqEmbedding, embedding),
                     "_materialize",
                     side_effect=AssertionError("FSQ table must remain factorized"),
                 ):
@@ -608,7 +609,7 @@ def _token_expected(model: Model, batch: ModelBatch) -> int:
     start, end = model.layout.blocks[modality.value]
     if modality.value == "audio":
         if model.tokens.audio_head.config.type is AudioOutputAdapterType.NONE:
-            if type(embedding) is FsqAffineEmbedding and type(audio_projection) is nn.Identity:
+            if type(embedding) is FsqEmbedding and type(audio_projection) is nn.Identity:
                 forward += _expected_fsq_logits(embedding, rows=count)
             else:
                 forward += _expected_audio_table(embedding)
@@ -628,7 +629,7 @@ def _token_expected(model: Model, batch: ModelBatch) -> int:
                 out_features=embedding.embedding_dim,
                 name="test output",
             )
-            if type(embedding) is FsqAffineEmbedding:
+            if type(embedding) is FsqEmbedding:
                 forward += _expected_fsq_logits(embedding, rows=count)
             else:
                 forward += (
@@ -643,33 +644,45 @@ def _expected_audio_rows(
     embedding: SemanticAudioEmbedding,
     local_ids: Tensor,
 ) -> int:
-    if type(embedding) is not FsqAffineEmbedding:
+    if type(embedding) is not FsqEmbedding:
         return 0
     total = 0
     start = 0
     for size, levels in zip(embedding.codebook_sizes, embedding.fsq_levels):
         rows = int((local_ids.ge(start) & local_ids.lt(start + size)).sum())
-        total += 2 * rows * len(levels) * embedding.embedding_dim
+        factor = 1 if embedding.config.feature is FsqFeature.DIGIT_ONEHOT else 2
+        total += factor * rows * len(levels) * embedding.embedding_dim
         start += size
     return total
 
 
 def _expected_audio_table(embedding: SemanticAudioEmbedding) -> int:
-    if type(embedding) is not FsqAffineEmbedding:
+    if type(embedding) is not FsqEmbedding:
         return 0
     return sum(
-        2 * size * len(levels) * embedding.embedding_dim
+        (1 if embedding.config.feature is FsqFeature.DIGIT_ONEHOT else 2)
+        * size
+        * len(levels)
+        * embedding.embedding_dim
         for size, levels in zip(embedding.codebook_sizes, embedding.fsq_levels)
     )
 
 
-def _expected_fsq_logits(embedding: FsqAffineEmbedding, *, rows: int) -> int:
+def _expected_fsq_logits(embedding: FsqEmbedding, *, rows: int) -> int:
     features = embedding.embedding_dim
     total = 0
     for size, levels in zip(embedding.codebook_sizes, embedding.fsq_levels):
-        width = len(levels)
-        total += 2 * rows * features * (width + 1)
-        total += 2 * rows * width * size
+        if embedding.config.feature is FsqFeature.DIGIT_ONEHOT:
+            total += 2 * rows * features * sum(levels)
+        else:
+            total += 2 * rows * features * len(levels)
+            total += rows * sum(levels)
+        prefix = levels[0]
+        for level in levels[1:]:
+            prefix *= level
+            total += rows * prefix
+        total += 2 * rows * features
+        total += rows * size
     free = embedding.num_embeddings - sum(embedding.codebook_sizes)
     return total + 2 * rows * features * free
 

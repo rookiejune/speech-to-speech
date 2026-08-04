@@ -11,10 +11,12 @@ from ...runtime.types import (
     AudioTokenizer,
     CodebookCodec,
     codebook_codec,
+    fsq_level_values,
     fsq_levels,
+    fsq_radix_order,
     semantic_feature_dim,
 )
-from .fsq import FsqAffineEmbedding
+from .fsq import FsqEmbedding, FsqEmbeddingConfig, reference_rms
 
 _MISSING = object()
 
@@ -61,21 +63,30 @@ def create_semantic_audio_embedding(
     *,
     reference: Tensor,
     embedding_dim: int | None = None,
+    fsq: FsqEmbeddingConfig | None = None,
 ) -> SemanticAudioEmbedding:
     levels = fsq_levels(runtime.codec)
     if levels is not None:
         if embedding_dim is None:
-            raise ValueError("FSQ affine audio embedding requires embedding_dim.")
+            raise ValueError("FSQ audio embedding requires embedding_dim.")
         tokenizer = runtime.audio_tokenizer
         if not isinstance(tokenizer, _CodebookTokenizer):
             raise TypeError(
-                "FSQ affine embedding requires a flattened codebook tokenizer."
+                "FSQ embedding requires a flattened codebook tokenizer."
             )
-        return FsqAffineEmbedding(
+        radix_order = fsq_radix_order(runtime.codec)
+        if radix_order not in {None, FsqEmbedding.radix_order}:
+            raise ValueError(
+                "FSQ embedding only supports first_fastest mixed-radix IDs."
+            )
+        return FsqEmbedding(
             codebook_sizes=tuple(int(size) for size in tokenizer.codebook_sizes),
             fsq_levels=levels,
             num_embeddings=tokenizer.vocab_size + 3,
             embedding_dim=embedding_dim,
+            target_rms=reference_rms(reference),
+            config=fsq,
+            level_values=fsq_level_values(runtime.codec),
         )
     return embedding(
         runtime.codec,

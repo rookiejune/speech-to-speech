@@ -9,7 +9,7 @@ from torch import Tensor, nn
 from ._helper import CastOutput
 from .audio_output import AudioOutputAdapter, AudioOutputAdapterType
 from .embedding.audio import SemanticAudioEmbedding, require_semantic_audio_embedding
-from .embedding.fsq import FsqAffineEmbedding
+from .embedding.fsq import FsqEmbedding, FsqNeighbors
 from .generation import TokenKind
 
 
@@ -137,9 +137,15 @@ class TokenInterface(nn.Module):
 
     def audio_rows(self, local_ids: Tensor) -> Tensor:
         embedding = self.semantic_audio_embedding
-        if isinstance(embedding, FsqAffineEmbedding):
+        if isinstance(embedding, FsqEmbedding):
             return embedding.rows(local_ids)
         return embedding(local_ids)
+
+    def audio_neighbor_targets(self, local_ids: Tensor) -> FsqNeighbors | None:
+        embedding = self.semantic_audio_embedding
+        if not isinstance(embedding, FsqEmbedding):
+            return None
+        return embedding.neighbors(local_ids)
 
     def text_logits(
         self,
@@ -165,7 +171,7 @@ class TokenInterface(nn.Module):
             return _raw_audio_logits(embedding, hidden_state, local_ids)
         if (
             local_ids is None
-            and isinstance(embedding, FsqAffineEmbedding)
+            and isinstance(embedding, FsqEmbedding)
             and isinstance(self.audio_projection.module, nn.Identity)
         ):
             return embedding.logits(hidden_state)
@@ -381,7 +387,7 @@ def _raw_audio_logits(
     hidden_state: Tensor,
     local_ids: Tensor | None,
 ) -> Tensor:
-    if isinstance(embedding, FsqAffineEmbedding):
+    if isinstance(embedding, FsqEmbedding):
         return embedding.logits(hidden_state, local_ids)
     weight = embedding.weight
     if local_ids is not None:

@@ -177,13 +177,16 @@ response_ids: Tensor
 token_labels: Tensor          # 与 cat(prompt_ids, response_ids) 等长；prompt 段为 -100
 token_groups: Tensor | None
 acoustic_target: AcousticTarget | None
+source_ctc: CTCTarget | None
+target_ctc: CTCTarget | None
 audio_seconds: float
 ```
 
 `ModelBatch.from_samples` 分别 pad request / labels，再令
 `input_ids = cat(prompt_ids, response_ids)`，并令 `generation_prompt_lengths = len(prompt_ids)`。
 batch 仍暴露对齐的 `input_ids` / `token_labels` / `token_groups` / `acoustic_target` /
-`audio_input_positions` / `audio_contexts` / `predictions`，供现有 loss 与 bridge 使用。
+`source_ctc` / `target_ctc` / `audio_input_positions` / `audio_contexts` / `predictions`，供现有 loss
+与 bridge 使用。
 
 `AcousticTarget` 包含 `semantic_codes`、`codes`、`token_positions`。分组使必须共同存在的 tensor
 不能形成半完整状态。
@@ -210,6 +213,12 @@ padding 后为 `[batch, frames]`，右侧填充 `-1`。sample builder 只为
 `task.source_modality == Modality.AUDIO` 的 source payload 记录位置；source BOA/EOA、target audio
 response、generated token 以及 BiCodec route 的 reference `audio_context` 不进入该字段。它与
 `audio_context` 是两条独立契约：前者服务 backbone 输入 tower，后者服务 route-aware decode。
+
+`source_ctc` / `target_ctc` 各自包含 audio span 的完整序列 `token_positions` 与 tokenizer-local
+`text_token_ids`。sample builder 不按“任务输出是否为 audio”这一条粗规则决定 CTC，而是按 transcript
+visibility 编译：ASR/S2TT/S2ST 有 source CTC；T2ST/S2ST 的纯 audio prediction 与 AUDIO_AR 有
+target CTC；TTS、MT、parallel/interleaved output 没有 target CTC。source positions 交给 non-causal
+route 读取 `h[p]`，target positions 保留 token 自身位置并由 loss 读取 `h[p-1]`。
 
 ## 边界
 
@@ -259,6 +268,8 @@ response、generated token 以及 BiCodec route 的 reference `audio_context` �
   负责。
 - `ACOUSTIC_PAD_ID=-1` 只由 batch padding 引入，不能出现在未 padding 的 `ModelSample`
   中；因此派生的 frame mask 只包含右侧 padding，不会形成内部空洞。
+- `CTC_PAD_ID=-1` 分别 pad position 与 transcript；有效 position 必须严格递增，target position
+  必须至少为 1。batch 校验 CTC 的必要时间步，包括连续重复 transcript token 所需的额外 blank。
 - `ModelBatch` 只表达训练或 teacher-forcing evaluation，不表达缺少 target 的真实推理请求。
 - `audio_input_positions` 只表达可见 source audio payload 的 overlay 位置；其值必须唯一、落在
   当前序列内并指向 runtime codec audio range。没有 source audio 时必须为 `None`。

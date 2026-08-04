@@ -53,6 +53,52 @@ class SpeechSampleContractTest(unittest.TestCase):
         self.assertEqual(tts.audio_seconds, 0.04)
         self.assertEqual(s2st.audio_seconds, 0.08)
 
+    def test_audio_spans_emit_ctc_only_when_their_transcript_is_not_visible(self):
+        runtime = _data_runtime()
+        runtime.text_tokenizer = _ChatTokenizer(10)
+        pair = parse_sample(_raw_sample(), runtime)
+
+        expected = {
+            Task.ASR: (True, False),
+            Task.S2TT: (True, False),
+            Task.T2ST: (False, True),
+            Task.S2ST: (True, True),
+            Task.TTS: (False, False),
+            Task.MT: (False, False),
+        }
+        for task, (source_expected, target_expected) in expected.items():
+            with self.subTest(task=task):
+                sample = build_sample(pair, task, runtime)
+                self.assertEqual(sample.source_ctc is not None, source_expected)
+                self.assertEqual(sample.target_ctc is not None, target_expected)
+                if sample.source_ctc is not None:
+                    self.assertIsNotNone(sample.audio_input_positions)
+                    source_speech = pair.source if task.uses_source_role else pair.target
+                    self.assertTrue(
+                        torch.equal(
+                            sample.source_ctc["token_positions"],
+                            sample.audio_input_positions,
+                        )
+                    )
+                    self.assertTrue(
+                        torch.equal(
+                            sample.source_ctc["text_token_ids"],
+                            source_speech.text_token_ids,
+                        )
+                    )
+                if sample.target_ctc is not None:
+                    positions = sample.target_ctc["token_positions"]
+                    audio_start, audio_end = runtime.layout.blocks[Modality.AUDIO.value]
+                    audio_ids = sample.input_ids.index_select(0, positions)
+                    self.assertTrue(audio_ids.ge(audio_start).all())
+                    self.assertTrue(audio_ids.lt(audio_end).all())
+                    self.assertTrue(
+                        torch.equal(
+                            sample.target_ctc["text_token_ids"],
+                            pair.target.text_token_ids,
+                        )
+                    )
+
     def test_single_collator_builds_tts_from_default_utterance(self):
         runtime = _data_runtime()
         runtime.text_tokenizer = _ChatTokenizer(10)

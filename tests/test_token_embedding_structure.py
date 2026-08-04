@@ -12,7 +12,7 @@ from speech_to_speech.model.audio_output import (
     AudioOutputAdapterType,
 )
 from speech_to_speech.model.base import Config, Model
-from speech_to_speech.model.embedding.fsq import FsqAffineEmbedding
+from speech_to_speech.model.embedding.fsq import FsqEmbedding
 from speech_to_speech.model.generation import TokenKind
 from speech_to_speech.model.token import TokenInterface
 from speech_to_speech.model.toy import ToyConfig, create_toy_backbone
@@ -106,6 +106,7 @@ class TokenInterfaceStructureTest(unittest.TestCase):
             model.backbone.get_input_embeddings(),
             text_embedding,
         )
+        self.assertFalse(text_embedding.weight.requires_grad)
         audio_table = model.tokens.audio_embedding
         audio_projection = model.tokens.audio_projection
         audio_adapter = audio_projection.module
@@ -321,7 +322,7 @@ class TokenInterfaceStructureTest(unittest.TestCase):
         ).eval()
 
         audio_table = model.tokens.audio_embedding
-        self.assertIsInstance(audio_table, FsqAffineEmbedding)
+        self.assertIsInstance(audio_table, FsqEmbedding)
         self.assertEqual(audio_table.num_embeddings, tokenizer.vocab_size + 3)
 
         hidden = torch.randn(1, 3, 8)

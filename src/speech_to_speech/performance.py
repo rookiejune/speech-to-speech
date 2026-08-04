@@ -30,7 +30,7 @@ from .model.acoustic.flow import FlowModel
 from .model.acoustic.rvq import RVQModel
 from .model.audio_output import AudioOutputAdapterType
 from .model.embedding.audio import SemanticAudioEmbedding
-from .model.embedding.fsq import FsqAffineEmbedding
+from .model.embedding.fsq import FsqEmbedding, FsqFeature
 from .pl_module import SpeechToSpeechModule
 
 
@@ -206,21 +206,30 @@ def _trainable(model: nn.Module) -> None:
             f"{replaced_linear}."
         )
     allowed_frozen: set[str] = set()
+    if isinstance(model, Model):
+        text_weight = model.text_embedding.weight
+        allowed_frozen.update(
+            name
+            for name, parameter in model.named_parameters()
+            if parameter is text_weight
+        )
     if isinstance(model, RVQModel):
         last = model.acoustic_decoder.codebooks - 1
-        allowed_frozen = {
-            "acoustic_decoder.decoder.embed_tokens.weight",
-            *(
-                name
-                for name, _ in model.named_parameters()
-                if name.startswith(
-                    (
-                        f"acoustic_decoder.codebook_embeddings.{last}.",
-                        f"acoustic_decoder.embedding_projections.{last}.",
+        allowed_frozen.update(
+            {
+                "acoustic_decoder.decoder.embed_tokens.weight",
+                *(
+                    name
+                    for name, _ in model.named_parameters()
+                    if name.startswith(
+                        (
+                            f"acoustic_decoder.codebook_embeddings.{last}.",
+                            f"acoustic_decoder.embedding_projections.{last}.",
+                        )
                     )
-                )
-            ),
-        }
+                ),
+            }
+        )
     frozen = sorted(
         name
         for name, parameter in model.named_parameters()
@@ -355,7 +364,7 @@ def _token_head(model: Model, batch: ModelBatch) -> int:
             )
             if model.tokens.audio_head.config.type is AudioOutputAdapterType.NONE:
                 projection = model.tokens.audio_projection.module
-                if type(embedding) is FsqAffineEmbedding and type(projection) is nn.Identity:
+                if type(embedding) is FsqEmbedding and type(projection) is nn.Identity:
                     total += _fsq_logit_flops(embedding, rows=rows, features=hidden)
                 else:
                     forward = _audio_table_flops(embedding)
@@ -389,7 +398,7 @@ def _audio_row_flops(
     embedding: SemanticAudioEmbedding,
     local_ids: Tensor,
 ) -> int:
-    if type(embedding) is not FsqAffineEmbedding:
+    if type(embedding) is not FsqEmbedding:
         return 0
     if local_ids.dim() != 1:
         raise ValueError("semantic audio row ids must be one-dimensional.")
@@ -404,16 +413,20 @@ def _audio_row_flops(
         rows = int(
             (local_ids.ge(start) & local_ids.lt(start + size)).sum().item()
         )
-        total += 2 * rows * len(levels) * embedding.embedding_dim
+        factor = 1 if embedding.config.feature is FsqFeature.DIGIT_ONEHOT else 2
+        total += factor * rows * len(levels) * embedding.embedding_dim
         start += size
     return total
 
 
 def _audio_table_flops(embedding: SemanticAudioEmbedding) -> int:
-    if type(embedding) is not FsqAffineEmbedding:
+    if type(embedding) is not FsqEmbedding:
         return 0
     return sum(
-        2 * size * len(levels) * embedding.embedding_dim
+        (1 if embedding.config.feature is FsqFeature.DIGIT_ONEHOT else 2)
+        * size
+        * len(levels)
+        * embedding.embedding_dim
         for size, levels in zip(embedding.codebook_sizes, embedding.fsq_levels)
     )
 
@@ -424,13 +437,13 @@ def _audio_logit_flops(
     rows: int,
     features: int,
 ) -> int:
-    if type(embedding) is FsqAffineEmbedding:
+    if type(embedding) is FsqEmbedding:
         return _fsq_logit_flops(embedding, rows=rows, features=features)
     return 2 * rows * features * embedding.num_embeddings
 
 
 def _fsq_logit_flops(
-    embedding: FsqAffineEmbedding,
+    embedding: FsqEmbedding,
     *,
     rows: int,
     features: int,
@@ -439,10 +452,17 @@ def _fsq_logit_flops(
         raise ValueError("FSQ logits require the unadapted audio embedding dimension.")
     total = 0
     for size, levels in zip(embedding.codebook_sizes, embedding.fsq_levels):
-        width = len(levels)
-        total += 2 * rows * features * width
+        if embedding.config.feature is FsqFeature.DIGIT_ONEHOT:
+            total += 2 * rows * features * sum(levels)
+        else:
+            total += 2 * rows * features * len(levels)
+            total += rows * sum(levels)
+        prefix = 1
+        for level in levels[1:]:
+            prefix *= level
+            total += rows * prefix * levels[0]
         total += 2 * rows * features
-        total += 2 * rows * width * size
+        total += rows * size
     free = embedding.num_embeddings - sum(embedding.codebook_sizes)
     total += 2 * rows * features * free
     return total

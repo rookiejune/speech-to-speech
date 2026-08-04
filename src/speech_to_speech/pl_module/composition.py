@@ -109,10 +109,16 @@ def token(
     model_config: ModelConfig,
 ) -> tuple[SpeechToSpeechModule[Model], Model]:
     model = Model(model_config, runtime=runtime)
+    ctc_blank_token_id = _ctc_blank_token_id(runtime)
     module = SpeechToSpeechModule(
         config,
         model=model,
-        objective=TokenObjective(runtime.layout),
+        objective=TokenObjective(
+            runtime.layout,
+            audio_neighbor_smoothing=config.audio_neighbor_smoothing,
+            ctc=config.ctc,
+            ctc_blank_token_id=ctc_blank_token_id,
+        ),
     )
     return module, model
 
@@ -159,10 +165,11 @@ def flow(
         runtime.layout,
         runtime.flow_matching,
         repa=(
-            None
-            if weight is None or teacher is None
-            else {"weight": weight, "teacher": teacher}
+            None if weight is None or teacher is None else {"weight": weight, "teacher": teacher}
         ),
+        audio_neighbor_smoothing=config.audio_neighbor_smoothing,
+        ctc=config.ctc,
+        ctc_blank_token_id=_ctc_blank_token_id(runtime),
     )
     return SpeechToSpeechModule(config, model=model, objective=objective), model
 
@@ -183,7 +190,12 @@ def rvq(
     module = SpeechToSpeechModule[RVQCompositionModel](
         config,
         model=model,
-        objective=RVQObjective(runtime.layout),
+        objective=RVQObjective(
+            runtime.layout,
+            audio_neighbor_smoothing=config.audio_neighbor_smoothing,
+            ctc=config.ctc,
+            ctc_blank_token_id=_ctc_blank_token_id(runtime),
+        ),
     )
     return module, model
 
@@ -201,3 +213,11 @@ def _initialization(
         route=route,
         device=runtime.backbone.get_input_embeddings().weight.device,
     )
+
+
+def _ctc_blank_token_id(runtime: Runtime) -> int:
+    text_start, text_end = runtime.layout.blocks["text"]
+    blank = runtime.pad_token_id - text_start
+    if not 0 <= blank < text_end - text_start:
+        raise ValueError("runtime pad token must belong to the text vocabulary for CTC.")
+    return blank

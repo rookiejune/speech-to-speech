@@ -19,9 +19,11 @@ from ..loader_plan import ARFraming, validate_ar_framing
 from ..prediction import PredictionModality
 from ..source import SourceLayout
 from ..task import Task
+from ..task_spec import uses_source_ctc, uses_target_ctc
 from ._helper.duration import seconds
 
 ACOUSTIC_PAD_ID = -1
+CTC_PAD_ID = -1
 
 
 @dataclass(frozen=True)
@@ -375,6 +377,18 @@ class AcousticTarget(TypedDict):
     token_positions: Tensor
 
 
+class CTCTarget(TypedDict):
+    """Transcript supervision attached to one audio span.
+
+    ``token_positions`` uses the full teacher-forcing sequence axis. Source
+    CTC reads the hidden state at each position; target CTC reads its causal
+    predecessor. ``text_token_ids`` stays in the tokenizer-local text space.
+    """
+
+    token_positions: Tensor
+    text_token_ids: Tensor
+
+
 @dataclass(frozen=True)
 class Labels:
     """Training-only supervision for the response side of a sample."""
@@ -382,6 +396,8 @@ class Labels:
     response_ids: Tensor
     token_labels: Tensor
     acoustic_target: AcousticTarget | None = None
+    source_ctc: CTCTarget | None = None
+    target_ctc: CTCTarget | None = None
     audio_seconds: float = 0.0
 
 
@@ -418,6 +434,8 @@ class ModelSample:
         task: Task,
         prediction: PredictionModality,
         acoustic_target: AcousticTarget | None = None,
+        source_ctc: CTCTarget | None = None,
+        target_ctc: CTCTarget | None = None,
         audio_seconds: float = 0.0,
         audio_input_positions: Tensor | None = None,
         audio_context: SemanticAcousticCodes | None = None,
@@ -434,6 +452,8 @@ class ModelSample:
                 response_ids=response_ids,
                 token_labels=token_labels,
                 acoustic_target=acoustic_target,
+                source_ctc=source_ctc,
+                target_ctc=target_ctc,
                 audio_seconds=audio_seconds,
             ),
         )
@@ -448,6 +468,8 @@ class ModelSample:
         prediction: PredictionModality,
         generation_prompt_length: int | None = None,
         acoustic_target: AcousticTarget | None = None,
+        source_ctc: CTCTarget | None = None,
+        target_ctc: CTCTarget | None = None,
         audio_seconds: float = 0.0,
         audio_input_positions: Tensor | None = None,
         audio_context: SemanticAcousticCodes | None = None,
@@ -476,6 +498,8 @@ class ModelSample:
             task=task,
             prediction=prediction,
             acoustic_target=acoustic_target,
+            source_ctc=source_ctc,
+            target_ctc=target_ctc,
             audio_seconds=audio_seconds,
             audio_input_positions=audio_input_positions,
             audio_context=audio_context,
@@ -492,6 +516,14 @@ class ModelSample:
     @property
     def acoustic_target(self) -> AcousticTarget | None:
         return self.labels.acoustic_target
+
+    @property
+    def source_ctc(self) -> CTCTarget | None:
+        return self.labels.source_ctc
+
+    @property
+    def target_ctc(self) -> CTCTarget | None:
+        return self.labels.target_ctc
 
     @property
     def task(self) -> Task:
@@ -526,6 +558,8 @@ class _PaddedSamples:
     input_ids: Tensor
     token_labels: Tensor
     acoustic_target: AcousticTarget | None
+    source_ctc: CTCTarget | None
+    target_ctc: CTCTarget | None
     tasks: list[Task]
     predictions: list[PredictionModality]
     audio_seconds: Tensor
@@ -559,6 +593,8 @@ class ModelBatch:
     tasks: list[Task]
     predictions: list[PredictionModality]
     pad_token_id: int
+    source_ctc: CTCTarget | None = None
+    target_ctc: CTCTarget | None = None
     audio_seconds: Tensor | None = None
     generation_prompt_lengths: Tensor | None = None
     audio_input_positions: Tensor | None = None
@@ -608,6 +644,23 @@ class ModelBatch:
             minimum_position=1,
         )
         _validate_batch_target_labels(self.token_labels, self.acoustic_target)
+        _validate_batch_ctc(
+            self.input_ids,
+            self.source_ctc,
+            name="source CTC target",
+            causal=False,
+            allowed=[uses_source_ctc(task) for task in self.tasks],
+        )
+        _validate_batch_ctc(
+            self.input_ids,
+            self.target_ctc,
+            name="target CTC target",
+            causal=True,
+            allowed=[
+                uses_target_ctc(task, prediction)
+                for task, prediction in zip(self.tasks, self.predictions)
+            ],
+        )
         self._unit_counts = _batch_unit_counts(
             self.input_ids,
             self.pad_token_id,
@@ -634,6 +687,8 @@ class ModelBatch:
             tasks=padded.tasks,
             predictions=padded.predictions,
             pad_token_id=pad_token_id,
+            source_ctc=padded.source_ctc,
+            target_ctc=padded.target_ctc,
             audio_seconds=padded.audio_seconds,
             generation_prompt_lengths=padded.generation_prompt_lengths,
             audio_input_positions=padded.audio_input_positions,
@@ -654,6 +709,8 @@ class ModelBatch:
             input_ids=self.input_ids.pin_memory(),
             token_labels=self.token_labels.pin_memory(),
             acoustic_target=_pin_target(self.acoustic_target),
+            source_ctc=_pin_ctc_target(self.source_ctc),
+            target_ctc=_pin_ctc_target(self.target_ctc),
             fields=_BatchGenerationFields(
                 audio_seconds=fields.audio_seconds.pin_memory(),
                 generation_prompt_lengths=fields.generation_prompt_lengths.pin_memory(),
@@ -679,6 +736,16 @@ class ModelBatch:
             ),
             acoustic_target=_to_target(
                 self.acoustic_target,
+                device,
+                non_blocking=non_blocking,
+            ),
+            source_ctc=_to_ctc_target(
+                self.source_ctc,
+                device,
+                non_blocking=non_blocking,
+            ),
+            target_ctc=_to_ctc_target(
+                self.target_ctc,
                 device,
                 non_blocking=non_blocking,
             ),
@@ -756,6 +823,8 @@ class ModelBatch:
             input_ids=self.input_ids[index : index + 1],
             token_labels=self.token_labels[index : index + 1],
             acoustic_target=_target_row(self.acoustic_target, index),
+            source_ctc=_ctc_target_row(self.source_ctc, index),
+            target_ctc=_ctc_target_row(self.target_ctc, index),
             tasks=[self.tasks[index]],
             predictions=[self.predictions[index]],
             fields=_BatchGenerationFields(
@@ -785,6 +854,8 @@ class ModelBatch:
         input_ids: Tensor,
         token_labels: Tensor,
         acoustic_target: AcousticTarget | None,
+        source_ctc: CTCTarget | None,
+        target_ctc: CTCTarget | None,
         fields: _BatchGenerationFields,
         tasks: list[Task] | None = None,
         predictions: list[PredictionModality] | None = None,
@@ -793,6 +864,8 @@ class ModelBatch:
         result.input_ids = input_ids
         result.token_labels = token_labels
         result.acoustic_target = acoustic_target
+        result.source_ctc = source_ctc
+        result.target_ctc = target_ctc
         result.tasks = list(self.tasks) if tasks is None else tasks
         result.predictions = (
             list(self.predictions) if predictions is None else predictions
@@ -1012,6 +1085,14 @@ def _padded_samples(samples: list[ModelSample], pad_token_id: int) -> _PaddedSam
         input_ids=_pad([sample.input_ids for sample in samples], pad_token_id),
         token_labels=_pad([sample.labels.token_labels for sample in samples], -100),
         acoustic_target=_target([sample.labels.acoustic_target for sample in samples]),
+        source_ctc=_ctc_target(
+            [sample.labels.source_ctc for sample in samples],
+            samples,
+        ),
+        target_ctc=_ctc_target(
+            [sample.labels.target_ctc for sample in samples],
+            samples,
+        ),
         tasks=[sample.request["task"] for sample in samples],
         predictions=[sample.prediction for sample in samples],
         audio_seconds=_audio_seconds(samples),
@@ -1064,6 +1145,27 @@ def _target(values: list[AcousticTarget | None]) -> AcousticTarget | None:
     )
 
 
+def _ctc_target(
+    values: list[CTCTarget | None],
+    samples: list[ModelSample],
+) -> CTCTarget | None:
+    if not any(value is not None for value in values):
+        return None
+    positions: list[Tensor] = []
+    labels: list[Tensor] = []
+    for value, sample in zip(values, samples):
+        if value is None:
+            positions.append(sample.input_ids.new_empty((0,), dtype=torch.long))
+            labels.append(sample.input_ids.new_empty((0,), dtype=torch.long))
+        else:
+            positions.append(value["token_positions"])
+            labels.append(value["text_token_ids"])
+    return CTCTarget(
+        token_positions=_pad(positions, CTC_PAD_ID),
+        text_token_ids=_pad(labels, CTC_PAD_ID),
+    )
+
+
 def _acoustic_target_mask(value: AcousticTarget | None) -> Tensor | None:
     if value is None:
         return None
@@ -1109,6 +1211,15 @@ def _pin_target(value: AcousticTarget | None) -> AcousticTarget | None:
     )
 
 
+def _pin_ctc_target(value: CTCTarget | None) -> CTCTarget | None:
+    if value is None:
+        return None
+    return CTCTarget(
+        token_positions=value["token_positions"].pin_memory(),
+        text_token_ids=value["text_token_ids"].pin_memory(),
+    )
+
+
 def _to_target(
     value: AcousticTarget | None,
     device: torch.device,
@@ -1130,6 +1241,26 @@ def _to_target(
     )
 
 
+def _to_ctc_target(
+    value: CTCTarget | None,
+    device: torch.device,
+    *,
+    non_blocking: bool,
+) -> CTCTarget | None:
+    if value is None:
+        return None
+    return CTCTarget(
+        token_positions=value["token_positions"].to(
+            device=device,
+            non_blocking=non_blocking,
+        ),
+        text_token_ids=value["text_token_ids"].to(
+            device=device,
+            non_blocking=non_blocking,
+        ),
+    )
+
+
 def _target_row(value: AcousticTarget | None, index: int) -> AcousticTarget | None:
     if value is None:
         return None
@@ -1137,6 +1268,15 @@ def _target_row(value: AcousticTarget | None, index: int) -> AcousticTarget | No
         semantic_codes=value["semantic_codes"][index : index + 1],
         codes=value["codes"][index : index + 1],
         token_positions=value["token_positions"][index : index + 1],
+    )
+
+
+def _ctc_target_row(value: CTCTarget | None, index: int) -> CTCTarget | None:
+    if value is None:
+        return None
+    return CTCTarget(
+        token_positions=value["token_positions"][index : index + 1],
+        text_token_ids=value["text_token_ids"][index : index + 1],
     )
 
 
@@ -1355,6 +1495,20 @@ def _validate_sample(sample: ModelSample, pad_token_id: int) -> None:
         labels = token_labels[positions]
         if bool(labels.eq(-100).any()):
             raise ValueError("acoustic target positions must point to semantic labels.")
+    _validate_sample_ctc(
+        input_ids,
+        sample.labels.source_ctc,
+        name="source CTC target",
+        causal=False,
+        allowed=uses_source_ctc(sample.task),
+    )
+    _validate_sample_ctc(
+        input_ids,
+        sample.labels.target_ctc,
+        name="target CTC target",
+        causal=True,
+        allowed=uses_target_ctc(sample.task, sample.prediction),
+    )
 
 
 def _validate_batch_acoustic(
@@ -1425,6 +1579,117 @@ def _validate_batch_acoustic(
             raise ValueError(
                 "acoustic target semantic codes must share the frame padding mask."
             )
+
+
+def _validate_sample_ctc(
+    input_ids: Tensor,
+    value: CTCTarget | None,
+    *,
+    name: str,
+    causal: bool,
+    allowed: bool,
+) -> None:
+    if value is None:
+        return
+    if not allowed:
+        raise ValueError(f"{name} is not allowed by the task transcript visibility route.")
+    positions = value["token_positions"]
+    labels = value["text_token_ids"]
+    if positions.dim() != 1 or labels.dim() != 1:
+        raise ValueError(f"{name} fields must be one-dimensional tensors.")
+    if positions.numel() == 0 or labels.numel() == 0:
+        raise ValueError(f"{name} must contain audio positions and transcript tokens.")
+    if not is_signed_integer_dtype(positions.dtype) or not is_signed_integer_dtype(
+        labels.dtype
+    ):
+        raise TypeError(f"{name} fields must use signed integer dtypes.")
+    if positions.device != input_ids.device or labels.device != input_ids.device:
+        raise ValueError(f"{name} fields must use the input tensor device.")
+    minimum = 1 if causal else 0
+    if bool((positions < minimum).any()) or bool((positions >= input_ids.numel()).any()):
+        relation = "positive" if causal else "non-negative"
+        raise ValueError(
+            f"{name} positions must be {relation} valid sequence positions."
+        )
+    if not bool((positions[1:] > positions[:-1]).all()):
+        raise ValueError(f"{name} positions must be strictly increasing.")
+    if bool((labels < 0).any()):
+        raise ValueError(f"{name} transcript ids must be non-negative.")
+    _validate_ctc_length(positions.numel(), labels, name=name)
+
+
+def _validate_batch_ctc(
+    input_ids: Tensor,
+    value: CTCTarget | None,
+    *,
+    name: str,
+    causal: bool,
+    allowed: list[bool],
+) -> None:
+    if value is None:
+        return
+    positions = value["token_positions"]
+    labels = value["text_token_ids"]
+    if positions.dim() != 2 or labels.dim() != 2:
+        raise ValueError(f"{name} fields must have shapes [B, A] and [B, U].")
+    if positions.size(0) != input_ids.size(0) or labels.size(0) != input_ids.size(0):
+        raise ValueError(f"{name} fields must align with the input batch.")
+    if not is_signed_integer_dtype(positions.dtype) or not is_signed_integer_dtype(
+        labels.dtype
+    ):
+        raise TypeError(f"{name} fields must use signed integer dtypes.")
+    if positions.device != input_ids.device or labels.device != input_ids.device:
+        raise ValueError(f"{name} fields must use the input tensor device.")
+    position_mask = positions.ne(CTC_PAD_ID)
+    label_mask = labels.ne(CTC_PAD_ID)
+    if bool((positions < CTC_PAD_ID).any()) or bool((labels < CTC_PAD_ID).any()):
+        raise ValueError(f"{name} may only use -1 for padding.")
+    if not _right_padded(position_mask) or not _right_padded(label_mask):
+        raise ValueError(f"{name} fields must use right padding.")
+    active_positions = position_mask.sum(dim=1)
+    active_labels = label_mask.sum(dim=1)
+    allowed_rows = torch.tensor(allowed, device=positions.device, dtype=torch.bool)
+    if allowed_rows.shape != active_positions.shape:
+        raise ValueError(f"{name} route flags must align with the input batch.")
+    if bool((active_positions.gt(0) & ~allowed_rows).any()):
+        raise ValueError(f"{name} is not allowed by the task transcript visibility route.")
+    if not torch.equal(active_positions.gt(0), active_labels.gt(0)):
+        raise ValueError(
+            f"{name} rows must provide both audio positions and transcript tokens."
+        )
+    minimum = 1 if causal else 0
+    active = position_mask & positions.lt(minimum)
+    if bool(active.any()):
+        relation = "positive" if causal else "non-negative"
+        raise ValueError(f"{name} positions must be {relation}.")
+    if bool((position_mask & positions.ge(input_ids.size(1))).any()):
+        raise ValueError(f"{name} position exceeds the token sequence length.")
+    for row, (position_count, label_count) in enumerate(
+        zip(active_positions.tolist(), active_labels.tolist())
+    ):
+        if position_count == 0:
+            continue
+        row_positions = positions[row, :position_count]
+        if not bool((row_positions[1:] > row_positions[:-1]).all()):
+            raise ValueError(f"{name} positions must be strictly increasing.")
+        row_labels = labels[row, :label_count]
+        _validate_ctc_length(position_count, row_labels, name=name)
+
+
+def _right_padded(mask: Tensor) -> bool:
+    if mask.size(1) < 2:
+        return True
+    return not bool((~mask[:, :-1] & mask[:, 1:]).any())
+
+
+def _validate_ctc_length(input_length: int, labels: Tensor, *, name: str) -> None:
+    repeats = int(labels[1:].eq(labels[:-1]).sum().item())
+    minimum = labels.numel() + repeats
+    if input_length < minimum:
+        raise ValueError(
+            f"{name} requires at least {minimum} audio positions for "
+            f"{labels.numel()} transcript tokens, got {input_length}."
+        )
 
 
 def _validate_batch_target_labels(

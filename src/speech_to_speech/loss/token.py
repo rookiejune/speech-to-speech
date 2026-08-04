@@ -8,6 +8,7 @@ from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 
 from .._tensor import is_signed_integer_dtype
+from ..model.embedding.fsq import FsqNeighbors
 from ..prediction import PredictionModality
 from .types import LossItem
 
@@ -16,9 +17,18 @@ class TokenLoss(nn.Module):
     def __init__(
         self,
         layout: Layout,
+        *,
+        audio_neighbor_smoothing: float = 0.0,
     ) -> None:
         super().__init__()
+        if (
+            isinstance(audio_neighbor_smoothing, bool)
+            or not isinstance(audio_neighbor_smoothing, (int, float))
+            or not 0 <= audio_neighbor_smoothing < 1
+        ):
+            raise ValueError("audio neighbor smoothing must be in [0, 1).")
         self.layout = layout
+        self.audio_neighbor_smoothing = float(audio_neighbor_smoothing)
 
     def forward(
         self,
@@ -29,6 +39,7 @@ class TokenLoss(nn.Module):
         *,
         audio_hidden_states: Tensor | None = None,
         attention_mask: Tensor | None = None,
+        audio_neighbors: Callable[[Tensor], FsqNeighbors | None] | None = None,
         validate: bool = True,
     ) -> LossItem:
         if hidden_states.dim() != 3 or token_labels.dim() != 2:
@@ -76,6 +87,7 @@ class TokenLoss(nn.Module):
                 None if audio_hidden_states is None else audio_hidden_states[:, :-1]
             ),
             attention_mask=(None if attention_mask is None else attention_mask[:, :-1]),
+            audio_neighbors=audio_neighbors,
         )
         text_start, text_end = self.layout.blocks[Modality.TEXT.value]
         audio_start, audio_end = self.layout.blocks[Modality.AUDIO.value]
@@ -108,6 +120,7 @@ class TokenLoss(nn.Module):
         *,
         audio_hidden_states: Tensor | None,
         attention_mask: Tensor | None,
+        audio_neighbors: Callable[[Tensor], FsqNeighbors | None] | None,
     ) -> Tensor:
         losses = prediction_states.new_zeros(target.shape)
         for modality in sorted(modalities, key=lambda value: value.value):
@@ -126,13 +139,53 @@ class TokenLoss(nn.Module):
                 raise ValueError(
                     "token logits do not match selected targets and modality vocabulary."
                 )
-            group_loss = nn.functional.cross_entropy(
+            group_loss = self._group_loss(
                 logits,
                 selected_target,
-                reduction="none",
+                modality,
+                audio_neighbors,
             )
             losses[mask] = group_loss.to(dtype=losses.dtype)
         return losses
+
+    def _group_loss(
+        self,
+        logits: Tensor,
+        target: Tensor,
+        modality: Modality,
+        audio_neighbors: Callable[[Tensor], FsqNeighbors | None] | None,
+    ) -> Tensor:
+        if modality is not Modality.AUDIO or self.audio_neighbor_smoothing == 0:
+            return nn.functional.cross_entropy(logits, target, reduction="none")
+        if audio_neighbors is None:
+            raise ValueError(
+                "audio neighbor smoothing requires an FSQ neighbor target provider."
+            )
+        neighbors = audio_neighbors(target)
+        if neighbors is None:
+            raise ValueError(
+                "audio neighbor smoothing requires a factorized FSQ embedding."
+            )
+        expected = (target.numel(), neighbors.token_ids.size(-1))
+        if (
+            neighbors.token_ids.shape != expected
+            or neighbors.weights.shape != expected
+            or neighbors.valid.shape != expected
+        ):
+            raise ValueError("FSQ neighbor targets do not align with audio targets.")
+
+        log_probabilities = nn.functional.log_softmax(logits, dim=-1)
+        hard = -log_probabilities.gather(-1, target[:, None]).squeeze(-1)
+        safe_ids = neighbors.token_ids.masked_fill(~neighbors.valid, 0)
+        neighbor_nll = -log_probabilities.gather(-1, safe_ids)
+        weights = neighbors.weights.to(
+            device=neighbor_nll.device,
+            dtype=neighbor_nll.dtype,
+        )
+        smooth = (neighbor_nll * weights).sum(dim=-1)
+        mixed = (1 - self.audio_neighbor_smoothing) * hard
+        mixed = mixed + self.audio_neighbor_smoothing * smooth
+        return torch.where(neighbors.valid.any(dim=-1), mixed, hard)
 
 
 def _modalities(prediction: PredictionModality | Modality) -> frozenset[Modality]:

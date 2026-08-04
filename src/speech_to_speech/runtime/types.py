@@ -256,6 +256,61 @@ def fsq_levels(codec: object) -> tuple[tuple[int, ...], ...] | None:
     return levels
 
 
+@runtime_checkable
+class _FsqLevelValuesCapability(Protocol):
+    @property
+    def fsq_level_values(
+        self,
+    ) -> tuple[tuple[tuple[float, ...], ...], ...] | None: ...
+
+
+def fsq_level_values(
+    codec: object,
+) -> tuple[tuple[tuple[float, ...], ...], ...] | None:
+    """Return codec-canonical FSQ values when the backend exposes them."""
+    levels = fsq_levels(codec)
+    if levels is None or not isinstance(codec, _FsqLevelValuesCapability):
+        return None
+    raw = codec.fsq_level_values
+    if raw is None:
+        return None
+    if len(raw) != len(levels):
+        raise ValueError("fsq_level_values must align with FSQ stages.")
+
+    result: list[tuple[tuple[float, ...], ...]] = []
+    for stage_levels, stage_values in zip(levels, raw):
+        if len(stage_values) != len(stage_levels):
+            raise ValueError("fsq_level_values must align with FSQ digits.")
+        digits: list[tuple[float, ...]] = []
+        for level, values in zip(stage_levels, stage_values):
+            digit = tuple(float(value) for value in values)
+            if len(digit) != level:
+                raise ValueError("FSQ digit values must match their level count.")
+            if any(not math.isfinite(value) for value in digit):
+                raise ValueError("FSQ digit values must be finite.")
+            if any(left >= right for left, right in zip(digit, digit[1:])):
+                raise ValueError("FSQ digit values must be strictly increasing.")
+            digits.append(digit)
+        result.append(tuple(digits))
+    return tuple(result)
+
+
+@runtime_checkable
+class _FsqRadixCapability(Protocol):
+    @property
+    def fsq_radix_order(self) -> str: ...
+
+
+def fsq_radix_order(codec: object) -> str | None:
+    """Return the codec's packed-product digit order when declared."""
+    if fsq_levels(codec) is None or not isinstance(codec, _FsqRadixCapability):
+        return None
+    value = codec.fsq_radix_order
+    if not isinstance(value, str) or not value:
+        raise TypeError("FSQ radix order must be a non-empty string.")
+    return value
+
+
 def frame_codec(codec: object) -> Codec:
     if not isinstance(codec, _FrameCapability):
         raise TypeError("full frame-code encoding and decoding require a frame codec capability.")
@@ -384,6 +439,8 @@ class AudioTokenizer(Protocol):
         self,
         token_ids: Sequence[int] | Tensor,
     ) -> list[int] | Tensor: ...
+
+    def contract_state(self) -> Mapping[str, object]: ...
 
 
 class TextTokenizer(Protocol):

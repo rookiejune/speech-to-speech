@@ -32,8 +32,8 @@ class AudioInputAdapterConfig:
     """Configuration for a same-length source-audio input adapter.
 
     ``mask`` passed to :class:`AudioInputTower` uses ``True`` for active
-    frames. The transformer variant is causal so a prompt embedding at a given
-    frame cannot depend on future codec frames.
+    frames. ``causal`` controls whether the transformer variant can use future
+    codec frames; it is ignored by pointwise adapters.
     """
 
     type: AudioInputAdapterType = AudioInputAdapterType.MLP
@@ -41,10 +41,13 @@ class AudioInputAdapterConfig:
     heads: int = 8
     ffn_ratio: float = 4.0
     dropout: float = 0.0
+    causal: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.type, AudioInputAdapterType):
             raise TypeError("audio input adapter type must be AudioInputAdapterType.")
+        if not isinstance(self.causal, bool):
+            raise TypeError("audio input adapter causal must be a bool.")
         validate_tower_fields(
             "audio input adapter",
             layers=self.layers,
@@ -68,6 +71,7 @@ def audio_input_options(
     adapter_type = config.get("type", AudioInputAdapterType.MLP)
     return AudioInputAdapterConfig(
         type=AudioInputAdapterType(cast(str, adapter_type)),
+        causal=cast(bool, config.get("causal", False)),
         **tower_fields(config),
     )
 
@@ -151,17 +155,21 @@ class AudioInputTower(GradientCheckpointingLayer):
             values = values.masked_fill(~valid[..., None], 0)
             values = self.input_projection(values)
             key_padding_mask = ~safe_transformer_mask(valid)
-            causal_mask = torch.ones(
-                values.size(1),
-                values.size(1),
-                device=values.device,
-                dtype=torch.bool,
-            ).triu(1)
+            causal_mask = (
+                torch.ones(
+                    values.size(1),
+                    values.size(1),
+                    device=values.device,
+                    dtype=torch.bool,
+                ).triu(1)
+                if self.config.causal
+                else None
+            )
             values = self.adapter(
                 values,
                 mask=causal_mask,
                 src_key_padding_mask=key_padding_mask,
-                is_causal=True,
+                is_causal=self.config.causal,
             )
             return values.masked_fill(~valid[..., None], 0)
 

@@ -126,6 +126,16 @@ class HuggingFaceBackboneAdapter:
     def input_embeddings(self) -> nn.Embedding:
         return self.model.get_input_embeddings()
 
+    def contract_state(self) -> Mapping[str, object]:
+        return {
+            "grammar": "huggingface-backbone-v1",
+            "type": self.config.type.value,
+            "source": self.config.path,
+            "module": self.config.module,
+            "body": self.config.body,
+            "execution": self.body.contract_state(),
+        }
+
     def encode(
         self,
         *,

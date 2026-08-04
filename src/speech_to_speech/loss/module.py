@@ -15,6 +15,7 @@ from semantic_acoustic_codec.loss.repa import Teacher
 from torch import Tensor, nn
 
 from ..datamodule.types import ModelBatch
+from .ctc import CTCAlignmentLoss, CTCConfig
 from .protocol import (
     FlowObjectiveModel,
     RVQObjectiveModel,
@@ -45,6 +46,17 @@ def _weighted_mean(item: LossItem, key: str) -> Tensor:
         fallback_to_mean=False,
         validate=False,
     )
+
+
+def _zero_safe_weighted_mean(item: LossItem, key: str) -> Tensor:
+    details = item.details
+    if details is None or key not in details:
+        raise ValueError(f"loss item details must contain unit {key!r}.")
+    weight = details[key].to(device=item.loss.device, dtype=item.loss.dtype)
+    if weight.shape != item.loss.shape:
+        raise ValueError("loss weights must align with loss rows.")
+    safe_loss = item.loss.masked_fill(weight == 0, 0)
+    return (safe_loss * weight).sum() / weight.sum().clamp_min(1)
 
 
 def _audio_hidden(
@@ -82,11 +94,11 @@ def _token_forward(
     batch: ModelBatch,
     model: TokenObjectiveModel,
     token: TokenLoss,
+    *,
+    hidden_states: Tensor | None = None,
 ) -> LossItem:
-    hidden_states = _token_hidden_states(
-        batch,
-        model,
-    )
+    if hidden_states is None:
+        hidden_states = _token_hidden_states(batch, model)
     audio_hidden = _audio_hidden(batch, model, hidden_states)
     return token(
         hidden_states,
@@ -95,6 +107,11 @@ def _token_forward(
         model.token_logits,
         audio_hidden_states=audio_hidden,
         attention_mask=batch.attention_mask,
+        audio_neighbors=(
+            model.audio_neighbor_targets
+            if token.audio_neighbor_smoothing > 0
+            else None
+        ),
         validate=False,
     )
 
@@ -119,20 +136,74 @@ def _token_hidden_states(
     )
 
 
+def _ctc_loss(
+    config: CTCConfig | None,
+    blank_token_id: int | None,
+) -> CTCAlignmentLoss | None:
+    resolved = CTCConfig() if config is None else config
+    if not isinstance(resolved, CTCConfig):
+        raise TypeError("CTC objective config must be a CTCConfig.")
+    if not resolved.enabled:
+        return None
+    if blank_token_id is None:
+        raise ValueError("enabled CTC objective requires a blank token id.")
+    return CTCAlignmentLoss(blank_token_id, resolved)
+
+
+def _add_ctc(
+    outputs: Outputs,
+    batch: ModelBatch,
+    model: TokenObjectiveModel,
+    hidden_states: Tensor,
+    alignment: CTCAlignmentLoss | None,
+) -> None:
+    if alignment is None:
+        return
+    config = alignment.config
+    source = batch.source_ctc if config.source_weight > 0 else None
+    target = batch.target_ctc if config.target_weight > 0 else None
+    if source is None and target is None:
+        return
+    ctc = alignment(
+        hidden_states,
+        source=source,
+        target=target,
+        text_readout=model.text_logits,
+    )
+    outputs["ctc"] = ctc
+    outputs["loss"] = outputs["loss"] + _zero_safe_weighted_mean(ctc, "sequences")
+
+
 class TokenObjective(Objective[TokenObjectiveModel]):
     def __init__(
         self,
         layout: Layout,
+        *,
+        ctc: CTCConfig | None = None,
+        ctc_blank_token_id: int | None = None,
+        audio_neighbor_smoothing: float = 0.0,
     ) -> None:
         super().__init__()
         self.layout = layout
-        self.token = TokenLoss(layout)
+        self.token = TokenLoss(
+            layout,
+            audio_neighbor_smoothing=audio_neighbor_smoothing,
+        )
+        self.ctc = _ctc_loss(ctc, ctc_blank_token_id)
 
     def forward(self, batch: ModelBatch, model: TokenObjectiveModel) -> Outputs:
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
-        token = _token_forward(batch, model, self.token)
-        return {"loss": _weighted_mean(token, "tokens"), "token": token}
+        hidden_states = _token_hidden_states(batch, model)
+        token = _token_forward(
+            batch,
+            model,
+            self.token,
+            hidden_states=hidden_states,
+        )
+        result: Outputs = {"loss": _weighted_mean(token, "tokens"), "token": token}
+        _add_ctc(result, batch, model, hidden_states, self.ctc)
+        return result
 
 
 class FlowObjective(Objective[FlowObjectiveModel]):
@@ -142,12 +213,19 @@ class FlowObjective(Objective[FlowObjectiveModel]):
         flow_runtime: FlowRuntime,
         *,
         repa: RepaConfig | None = None,
+        ctc: CTCConfig | None = None,
+        ctc_blank_token_id: int | None = None,
+        audio_neighbor_smoothing: float = 0.0,
     ) -> None:
         super().__init__()
         if repa is not None and repa["weight"] <= 0:
             raise ValueError("REPA weight must be positive")
         self.layout = layout
-        self.token = TokenLoss(layout)
+        self.token = TokenLoss(
+            layout,
+            audio_neighbor_smoothing=audio_neighbor_smoothing,
+        )
+        self.ctc = _ctc_loss(ctc, ctc_blank_token_id)
         self.flow_matching = FlowLoss()
         self.repa_loss = MaskedCosineAlignmentLoss()
         self.repa_teacher = None if repa is None else repa["teacher"]
@@ -166,17 +244,14 @@ class FlowObjective(Objective[FlowObjectiveModel]):
                 "FlowObjective requires acoustic target data for audio-supervised batches."
             )
         hidden_states = _token_hidden_states(batch, model)
-        audio_hidden = _audio_hidden(batch, model, hidden_states)
-        token = self.token(
-            hidden_states,
-            batch.token_labels,
-            batch.prediction_modality,
-            model.token_logits,
-            audio_hidden_states=audio_hidden,
-            attention_mask=batch.attention_mask,
-            validate=False,
+        token = _token_forward(
+            batch,
+            model,
+            self.token,
+            hidden_states=hidden_states,
         )
         result: Outputs = {"loss": _weighted_mean(token, "tokens"), "token": token}
+        _add_ctc(result, batch, model, hidden_states, self.ctc)
 
         if target_data is not None:
             target_mask = batch.acoustic_target_mask
@@ -232,10 +307,18 @@ class RVQObjective(Objective[RVQObjectiveModel]):
     def __init__(
         self,
         layout: Layout,
+        *,
+        ctc: CTCConfig | None = None,
+        ctc_blank_token_id: int | None = None,
+        audio_neighbor_smoothing: float = 0.0,
     ) -> None:
         super().__init__()
         self.layout = layout
-        self.token = TokenLoss(layout)
+        self.token = TokenLoss(
+            layout,
+            audio_neighbor_smoothing=audio_neighbor_smoothing,
+        )
+        self.ctc = _ctc_loss(ctc, ctc_blank_token_id)
         self.rvq = MaskedCodebookCrossEntropyLoss()
 
     def forward(self, batch: ModelBatch, model: RVQObjectiveModel) -> Outputs:
@@ -262,17 +345,14 @@ class RVQObjective(Objective[RVQObjectiveModel]):
                 "RVQObjective requires acoustic target data for audio-supervised batches."
             )
         hidden_states = _token_hidden_states(batch, model)
-        audio_hidden = _audio_hidden(batch, model, hidden_states)
-        token = self.token(
-            hidden_states,
-            batch.token_labels,
-            batch.prediction_modality,
-            model.token_logits,
-            audio_hidden_states=audio_hidden,
-            attention_mask=batch.attention_mask,
-            validate=False,
+        token = _token_forward(
+            batch,
+            model,
+            self.token,
+            hidden_states=hidden_states,
         )
         result: Outputs = {"loss": _weighted_mean(token, "tokens"), "token": token}
+        _add_ctc(result, batch, model, hidden_states, self.ctc)
 
         if target_data is not None:
             target_mask = batch.acoustic_target_mask

@@ -6,7 +6,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import torch
-from anydataset.types import AudioView, Modality
+from anydataset.types import Modality
 from anytrain.codec import SemanticAcousticCodes
 from anytrain.loss import PackedCodebookLogits
 from anytrain.module.idspace import Layout
@@ -41,7 +41,6 @@ from speech_to_speech.model.audio_output import (
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.pl_module import SpeechToSpeechModule
 from speech_to_speech.prediction import PredictionModality
-from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.runtime.audio_tokenizer import (
     BiCodecAudioTokenizer,
     NativeAudioTokenizer,
@@ -458,140 +457,6 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertEqual(float(metrics["token/loss"].values.sum()), 1.0)
         self.assertEqual(float(metrics["token/loss"].weights.sum()), 2.0)
         self.assertEqual(float(metrics["acoustic/rvq/codebook_0_top1"].values.sum()), 1.0)
-
-    def test_checkpoint_audio_sequence_layout_is_immutable(self):
-        model = SimpleNamespace(
-            runtime=SimpleNamespace(
-                audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
-                audio_view=AudioView.BICODEC,
-            ),
-            lora_config=None,
-        )
-        module = SpeechToSpeechModule(
-            ModuleConfig(),
-            model=cast(Any, model),
-            objective=cast(Any, SimpleNamespace()),
-        )
-        checkpoint: dict[str, object] = {}
-
-        module.on_save_checkpoint(checkpoint)
-        self.assertEqual(checkpoint["speech_to_speech_model_schema"], "v3")
-        module.on_load_checkpoint(checkpoint)
-
-        model.runtime.audio_sequence_layout = AudioSequenceLayout.FLATTENED
-        with self.assertRaisesRegex(ValueError, "does not match"):
-            module.on_load_checkpoint(checkpoint)
-
-    def test_checkpoint_requires_audio_sequence_layout_contract(self):
-        module = _checkpoint_module(None)
-        schema = {"speech_to_speech_model_schema": "v3"}
-
-        with self.assertRaisesRegex(ValueError, "audio sequence layout contract"):
-            module.on_load_checkpoint(dict(schema))
-        with self.assertRaisesRegex(ValueError, "audio sequence layout contract"):
-            module.on_load_checkpoint(
-                {**schema, "speech_to_speech_audio_grammar": None}
-            )
-
-    def test_checkpoint_requires_model_v3_schema(self):
-        module = _checkpoint_module(None)
-
-        for schema in (None, "v2", 3):
-            with self.subTest(schema=schema):
-                checkpoint = {
-                    "speech_to_speech_audio_sequence_layout": "semantic",
-                }
-                if schema is not None:
-                    checkpoint["speech_to_speech_model_schema"] = schema
-                with self.assertRaisesRegex(ValueError, "model schema is incompatible"):
-                    module.on_load_checkpoint(checkpoint)
-
-    def test_checkpoint_lora_contract_roundtrips_complete_config(self):
-        config = LoraConfig(
-            r=8,
-            lora_alpha=16,
-            lora_dropout=0.1,
-            target_modules=["v_proj", "q_proj"],
-            exclude_modules=["down_proj", "k_proj"],
-            use_rslora=True,
-        )
-        module = _checkpoint_module(config)
-        checkpoint: dict[str, object] = {}
-
-        module.on_save_checkpoint(checkpoint)
-        module.on_load_checkpoint(checkpoint)
-
-        self.assertEqual(
-            checkpoint["speech_to_speech_peft"]["grammar"],
-            "peft-lora-v2",
-        )
-        payload = checkpoint["speech_to_speech_peft"]["config"]
-        self.assertEqual(payload["r"], 8)
-        self.assertEqual(payload["lora_alpha"], 16)
-        self.assertEqual(payload["lora_dropout"], 0.1)
-        self.assertEqual(payload["target_modules"], ["q_proj", "v_proj"])
-        self.assertEqual(payload["exclude_modules"], ["down_proj", "k_proj"])
-        self.assertEqual(payload["peft_type"], "LORA")
-        self.assertTrue(payload["use_rslora"])
-        self.assertNotIn("peft_version", payload)
-        self.assertNotIn(
-            "peft_version",
-            checkpoint["speech_to_speech_peft"]["defaults"],
-        )
-
-    def test_checkpoint_accepts_only_default_peft_schema_additions(self):
-        config = LoraConfig(r=16, target_modules=["q_proj"])
-        module = _checkpoint_module(config)
-        checkpoint: dict[str, object] = {}
-        module.on_save_checkpoint(checkpoint)
-        payload = checkpoint["speech_to_speech_peft"]
-
-        payload["config"]["future_option"] = False
-        payload["defaults"]["future_option"] = False
-        module.on_load_checkpoint(checkpoint)
-
-        payload["config"]["future_option"] = True
-        with self.assertRaisesRegex(ValueError, "LoRA contract does not match"):
-            module.on_load_checkpoint(checkpoint)
-
-    def test_checkpoint_accepts_missing_default_peft_schema_fields(self):
-        config = LoraConfig(r=16, target_modules=["q_proj"])
-        module = _checkpoint_module(config)
-        checkpoint: dict[str, object] = {}
-        module.on_save_checkpoint(checkpoint)
-        payload = checkpoint["speech_to_speech_peft"]
-
-        payload["config"].pop("qalora_group_size")
-        payload["defaults"].pop("qalora_group_size")
-        module.on_load_checkpoint(checkpoint)
-
-        payload["config"].pop("r")
-        payload["defaults"].pop("r")
-        with self.assertRaisesRegex(ValueError, "LoRA contract does not match"):
-            module.on_load_checkpoint(checkpoint)
-
-    def test_checkpoint_requires_lora_contract_only_when_enabled(self):
-        checkpoint = {
-            "speech_to_speech_model_schema": "v3",
-            "speech_to_speech_audio_sequence_layout": "semantic",
-        }
-
-        _checkpoint_module(None).on_load_checkpoint(checkpoint)
-        with self.assertRaisesRegex(ValueError, "missing the PEFT LoRA contract"):
-            _checkpoint_module(
-                LoraConfig(),
-            ).on_load_checkpoint(checkpoint)
-
-    def test_checkpoint_rejects_lora_config_mismatch(self):
-        checkpoint: dict[str, object] = {}
-        _checkpoint_module(
-            LoraConfig(lora_alpha=16),
-        ).on_save_checkpoint(checkpoint)
-
-        with self.assertRaisesRegex(ValueError, "LoRA contract does not match"):
-            _checkpoint_module(
-                LoraConfig(lora_alpha=32),
-            ).on_load_checkpoint(checkpoint)
 
     def test_transfer_batch_rebuilds_frozen_audio_context(self):
         context = SemanticAcousticCodes(
@@ -1389,17 +1254,6 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(outputs["loss"]))
 
 
-def _checkpoint_module(config: LoraConfig | None) -> SpeechToSpeechModule[Any]:
-    model = SimpleNamespace(
-        runtime=SimpleNamespace(
-            audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
-            audio_view=AudioView.BICODEC,
-        ),
-        lora_config=config,
-    )
-    return _module(model=model)
-
-
 def _module(
     config: ModuleConfig | None = None,
     *,
@@ -1426,7 +1280,7 @@ def _require_details(
 
 def _bicodec_full_vocab_case() -> SimpleNamespace:
     tokenizer = BiCodecAudioTokenizer(
-        semantic_vocab_size=4,
+        semantic_codebook_size=4,
         acoustic_codebook_sizes=(2,),
         acoustic_unit_length=1,
     )

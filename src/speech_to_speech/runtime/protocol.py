@@ -96,6 +96,9 @@ class GenerationRuntime(DataRuntime, Protocol):
 
 
 class TokenModelRuntime(GenerationRuntime, Protocol):
+    @property
+    def semantic_codebook_sizes(self) -> tuple[int, ...]: ...
+
     @cached_property
     def backbone_adapter(self) -> BackboneAdapter: ...
 

@@ -290,28 +290,30 @@ class Runtime:
 
     @cached_property
     def audio_tokenizer(self) -> AudioTokenizer:
+        if self.audio_view is AudioView.BICODEC:
+            codec = structured_codec(self.codec)
+            semantic_tokenizer = (
+                None
+                if self.config.audio_tokenizer is None
+                else audio_tokenizer(self.config.audio_tokenizer)
+            )
+            return BiCodecAudioTokenizer(
+                semantic_codebook_size=self.semantic_codebook_sizes[0],
+                acoustic_codebook_sizes=codec.acoustic_codebook_sizes,
+                acoustic_unit_length=codec.acoustic_unit_length,
+                semantic_tokenizer=semantic_tokenizer,
+            )
         if self.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
-            if self.structured_full_sequence:
-                codec = structured_codec(self.codec)
-                return BiCodecAudioTokenizer(
-                    semantic_vocab_size=self.semantic_codebook_sizes[0],
-                    acoustic_codebook_sizes=codec.acoustic_codebook_sizes,
-                    acoustic_unit_length=codec.acoustic_unit_length,
-                )
             return FlattenedAudioTokenizer(
                 codebook_sizes=frame_codec(self.codec).codebook_sizes,
                 codec_name=self.codec_name,
             )
-        if self.audio_view is AudioView.BICODEC:
-            codec = structured_codec(self.codec)
-            return BiCodecAudioTokenizer(
-                semantic_vocab_size=self.semantic_codebook_sizes[0],
-                acoustic_codebook_sizes=codec.acoustic_codebook_sizes,
-                acoustic_unit_length=codec.acoustic_unit_length,
-            )
         if self.config.audio_tokenizer is None:
             return NativeAudioTokenizer(vocab_size=int(self.semantic_codebook_sizes[0]))
-        return audio_tokenizer(self.config.audio_tokenizer)
+        return cast(
+            AudioTokenizer,
+            cast(object, audio_tokenizer(self.config.audio_tokenizer)),
+        )
 
     @cached_property
     def layout(self) -> Layout:
@@ -402,9 +404,10 @@ def _validate_sequence_layout_config(config: Config, layout: AudioSequenceLayout
     if not isinstance(layout, AudioSequenceLayout):
         raise TypeError("audio_sequence_layout must be an AudioSequenceLayout.")
     if layout is AudioSequenceLayout.FLATTENED:
-        if config.audio_tokenizer is not None:
+        if config.audio_tokenizer is not None and config.audio_view is not AudioView.BICODEC:
             raise ValueError(
-                "audio_sequence_layout=flattened cannot use a BPE audio tokenizer."
+                "audio_sequence_layout=flattened cannot use a BPE audio tokenizer "
+                "for frame-code codecs."
             )
         if config.semantic_codec_artifact is not None:
             raise ValueError(
@@ -416,18 +419,13 @@ def _validate_sequence_layout_config(config: Config, layout: AudioSequenceLayout
                 "BiCodec semantic audio_sequence_layout requires "
                 "runtime.semantic_codec_artifact."
             )
-        if config.audio_tokenizer is not None:
-            raise ValueError(
-                "BiCodec semantic audio_sequence_layout uses structured audio tokens "
-                "and cannot use a BPE audio tokenizer."
-            )
 
 
-def audio_tokenizer(path: str | Path) -> AudioTokenizer:
+def audio_tokenizer(path: str | Path) -> TorchCodecBPE:
     from zhuyin.tokenizers.codec_bpe import codec_bpe
 
     tokenizer = codec_bpe(Path(path).expanduser())
-    return cast(AudioTokenizer, cast(object, TorchCodecBPE.wrap(tokenizer)))
+    return TorchCodecBPE.wrap(tokenizer)
 
 
 def text_tokenizer_vocab_size(tokenizer: object) -> int:

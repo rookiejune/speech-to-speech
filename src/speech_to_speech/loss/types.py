@@ -13,6 +13,7 @@ class Outputs(TypedDict):
     dpo: NotRequired[LossItem]
     grpo: NotRequired[LossItem]
     token: NotRequired[LossItem]
+    ctc: NotRequired[LossItem]
     flow_matching: NotRequired[LossItem]
     repa: NotRequired[LossItem]
     rvq: NotRequired[LossItem]
@@ -24,6 +25,7 @@ _UNITS = {
     "dpo": "preferences",
     "grpo": "preferences",
     "token": "tokens",
+    "ctc": "sequences",
     "flow_matching": "frames",
     "repa": "frames",
     "rvq": "frames",

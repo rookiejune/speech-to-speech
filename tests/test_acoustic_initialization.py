@@ -6,7 +6,11 @@ from pathlib import Path
 from typing import cast
 
 import torch
-from anytrain.codec import AcousticLayout, SemanticAcousticCodec
+from anytrain.codec import (
+    AcousticLayout,
+    SemanticAcousticCodec,
+    semantic_acoustic_spec,
+)
 from semantic_acoustic_codec.config import DecoderConfig, Route
 from semantic_acoustic_codec.runtime import (
     SemanticSupportConfig,
@@ -23,6 +27,7 @@ class _Backend:
     frame_rate = 50.0
     semantic_frame_rate = 50.0
     semantic_codebook = torch.randn(8, 4)
+    semantic_codebook_sizes = (8,)
     acoustic_feature_dim = 4
     acoustic_codebook_sizes = (5, 7)
     acoustic_layout = AcousticLayout.FRAME_ALIGNED
@@ -96,10 +101,9 @@ def _save(path: Path) -> None:
     support = build_support(
         config,
         semantic_codebook=backend.semantic_codebook,
-        acoustic_feature_dim=backend.acoustic_feature_dim,
-        acoustic_codebook_sizes=backend.acoustic_codebook_sizes,
-        acoustic_layout=backend.acoustic_layout,
-        acoustic_unit_length=backend.acoustic_unit_length,
+        codec_spec=semantic_acoustic_spec(
+            cast(SemanticAcousticCodec, backend)
+        ),
     )
     save_artifact(path, support, backend=cast(SemanticAcousticCodec, backend))
 

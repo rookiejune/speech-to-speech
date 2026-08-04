@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Generic, Protocol, TypeVar, cast
 
@@ -33,14 +33,15 @@ from ..generation.eval.text import (
 )
 from ..generation.text import decode_text_ids
 from ..generation.types import Request, Result
+from ..loss.ctc import CTCConfig
 from ..loss.module import Objective
 from ..loss.protocol import TokenObjectiveModel
 from ..loss.types import Outputs, combine_outputs
 from ..loss.validation import validation_metrics
+from ..model._contract import ModelCheckpointContract, validate_checkpoint_contract
 from ..model.base import Model
 from ..generation.protocol import TextEvaluationModel
 from ..prediction import PredictionModality
-from ..runtime import AudioSequenceLayout
 from ..task import Task
 from ..optim import Config as OptimConfig
 
@@ -48,14 +49,29 @@ from ..optim import Config as OptimConfig
 @dataclass(frozen=True)
 class Config:
     mt_validation_max_new_tokens: int = 256
+    audio_neighbor_smoothing: float = 0.0
+    ctc: CTCConfig = field(default_factory=CTCConfig)
 
     def __post_init__(self) -> None:
         value = self.mt_validation_max_new_tokens
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError("mt_validation_max_new_tokens must be positive.")
+        smoothing = self.audio_neighbor_smoothing
+        if (
+            isinstance(smoothing, bool)
+            or not isinstance(smoothing, (int, float))
+            or not math.isfinite(smoothing)
+            or not 0 <= smoothing < 1
+        ):
+            raise ValueError("audio_neighbor_smoothing must be in [0, 1).")
+        if not isinstance(self.ctc, CTCConfig):
+            raise TypeError("ctc must be a CTCConfig.")
 
 
 class ModuleModel(TextEvaluationModel, TokenObjectiveModel, Protocol):
+    @property
+    def checkpoint_contract(self) -> ModelCheckpointContract: ...
+
     @property
     def lora_config(self) -> LoraConfig | None: ...
 
@@ -63,7 +79,7 @@ class ModuleModel(TextEvaluationModel, TokenObjectiveModel, Protocol):
 ModelT = TypeVar("ModelT", bound=ModuleModel)
 _MODEL_SCHEMA_KEY = "speech_to_speech_model_schema"
 _MODEL_SCHEMA = "v3"
-_AUDIO_SEQUENCE_LAYOUT_KEY = "speech_to_speech_audio_sequence_layout"
+_MODEL_CONTRACT_KEY = "speech_to_speech_model_contract"
 _PEFT_KEY = "speech_to_speech_peft"
 
 
@@ -98,9 +114,7 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         self.schedule_runtime = schedule_runtime
         self._current_loss_outputs: Outputs | None = None
         self._current_gradient_loss_groups: dict[str, Outputs] | None = None
-        self._current_gradient_loader_outputs: (
-            tuple[tuple[str, Outputs], ...] | None
-        ) = None
+        self._current_gradient_loader_outputs: tuple[tuple[str, Outputs], ...] | None = None
         self.mt_validation_evaluator = TextComparisonEvaluator()
         self._mt_validation_seen = False
 
@@ -153,8 +167,7 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
             do_sample=False,
         )
         predictions = [
-            decode_text_ids(self.model.runtime, result["response_ids"])
-            for result in generations
+            decode_text_ids(self.model.runtime, result["response_ids"]) for result in generations
         ]
         references = _reference_texts(batch, self.model.runtime)
         self.mt_validation_evaluator.update(predictions, references)
@@ -209,18 +222,13 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
 
     def _training_outputs(self, batch: TrainBatch) -> Outputs:
         if isinstance(batch, FusedBatch):
-            outputs = [
-                self._loss_outputs(self.materialize_batch(child))
-                for child in batch.batches
-            ]
+            outputs = [self._loss_outputs(self.materialize_batch(child)) for child in batch.batches]
             combined = _combine_training_outputs(
                 outputs,
                 loss_weights=batch.loss_weights,
             )
             if batch.loader_names is not None:
-                self._current_gradient_loader_outputs = tuple(
-                    zip(batch.loader_names, outputs)
-                )
+                self._current_gradient_loader_outputs = tuple(zip(batch.loader_names, outputs))
             return combined
         if isinstance(batch, LoaderBatch):
             output = self._loss_outputs(self.materialize_batch(batch.batch))
@@ -250,13 +258,9 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
     def materialize_batch(self, batch: TrainInput) -> ModelBatch:
         if self.batch_materializer is None:
             if isinstance(batch, RawSpeechBatch):
-                raise TypeError(
-                    "raw waveform batches require a batch materializer before loss."
-                )
+                raise TypeError("raw waveform batches require a batch materializer before loss.")
             return self._with_training_input_hints(batch)
-        return self._with_training_input_hints(
-            self.batch_materializer(batch, device=self.device)
-        )
+        return self._with_training_input_hints(self.batch_materializer(batch, device=self.device))
 
     def _with_training_input_hints(self, batch: ModelBatch) -> ModelBatch:
         hints = self._training_input_hints(batch)
@@ -298,9 +302,7 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         groups = {
             "batch": self.current_loss_outputs(),
             **{
-                name: (
-                    values[0] if len(values) == 1 else _combine_training_outputs(values)
-                )
+                name: (values[0] if len(values) == 1 else _combine_training_outputs(values))
                 for name, values in grouped.items()
             },
         }
@@ -314,20 +316,12 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
 
     def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         checkpoint[_MODEL_SCHEMA_KEY] = _MODEL_SCHEMA
-        checkpoint[_AUDIO_SEQUENCE_LAYOUT_KEY] = _audio_sequence_layout_payload(
-            self.model.runtime.audio_sequence_layout
-        )
+        checkpoint[_MODEL_CONTRACT_KEY] = self.model.checkpoint_contract.checkpoint_payload()
         checkpoint[_PEFT_KEY] = _peft_payload(self.model.lora_config)
 
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         _validate_model_schema_checkpoint(checkpoint)
-        expected = _audio_sequence_layout_payload(
-            self.model.runtime.audio_sequence_layout
-        )
-        _validate_audio_sequence_layout_checkpoint(
-            checkpoint,
-            expected,
-        )
+        _validate_model_contract_checkpoint(checkpoint, self.model.checkpoint_contract)
         _validate_peft_checkpoint(checkpoint, self.model.lora_config)
 
     @torch.no_grad()
@@ -445,25 +439,20 @@ def _reference_texts(batch: ModelBatch, runtime: Any) -> list[str]:
     return references
 
 
-def _validate_audio_sequence_layout_checkpoint(
+def _validate_model_contract_checkpoint(
     checkpoint: dict[str, Any],
-    expected: str,
+    expected: ModelCheckpointContract,
 ) -> None:
-    if _AUDIO_SEQUENCE_LAYOUT_KEY not in checkpoint:
-        raise ValueError("checkpoint is missing the audio sequence layout contract.")
-    actual = checkpoint[_AUDIO_SEQUENCE_LAYOUT_KEY]
-    if actual != expected:
-        raise ValueError(
-            f"checkpoint audio sequence layout does not match runtime: {actual!r} != {expected!r}."
-        )
+    if _MODEL_CONTRACT_KEY not in checkpoint:
+        raise ValueError("checkpoint is missing the model contract.")
+    validate_checkpoint_contract(checkpoint[_MODEL_CONTRACT_KEY], expected)
 
 
 def _validate_model_schema_checkpoint(checkpoint: dict[str, Any]) -> None:
     actual = checkpoint.get(_MODEL_SCHEMA_KEY)
     if actual != _MODEL_SCHEMA:
         raise ValueError(
-            "checkpoint model schema is incompatible: "
-            f"expected {_MODEL_SCHEMA!r}, got {actual!r}."
+            f"checkpoint model schema is incompatible: expected {_MODEL_SCHEMA!r}, got {actual!r}."
         )
 
 
@@ -549,19 +538,9 @@ def _checkpoint_value(value: Any) -> Any:
         try:
             return sorted(items)
         except TypeError as error:
-            raise TypeError(
-                "PEFT checkpoint config sets must contain sortable values."
-            ) from error
+            raise TypeError("PEFT checkpoint config sets must contain sortable values.") from error
     if isinstance(value, (list, tuple)):
         return [_checkpoint_value(item) for item in value]
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
-    raise TypeError(
-        f"unsupported PEFT checkpoint config value: {type(value).__name__}."
-    )
-
-
-def _audio_sequence_layout_payload(layout: AudioSequenceLayout) -> str:
-    if not isinstance(layout, AudioSequenceLayout):
-        raise TypeError("runtime audio_sequence_layout must be an AudioSequenceLayout.")
-    return layout.value
+    raise TypeError(f"unsupported PEFT checkpoint config value: {type(value).__name__}.")

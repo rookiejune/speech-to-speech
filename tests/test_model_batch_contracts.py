@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from _contracts_helpers import *
+from speech_to_speech.prediction import PredictionModality
 
 
 class ModelBatchContractTest(unittest.TestCase):
@@ -116,6 +117,126 @@ class ModelBatchContractTest(unittest.TestCase):
         batch = ModelBatch.from_samples([_sample(Task.TTS)], pad_token_id=99)
 
         self.assertIsNone(batch.acoustic_target)
+
+    def test_model_batch_preserves_source_and_target_ctc_contracts(self):
+        samples = [
+            ModelSample.from_sequence(
+                torch.tensor([10, 11, 12, 13, 14]),
+                torch.tensor([-100, -100, -100, 13, 14]),
+                source_ctc={
+                    "token_positions": torch.tensor([0, 1]),
+                    "text_token_ids": torch.tensor([1]),
+                },
+                target_ctc={
+                    "token_positions": torch.tensor([3, 4]),
+                    "text_token_ids": torch.tensor([2]),
+                },
+                task=Task.S2ST,
+                prediction=PredictionModality.AUDIO,
+            ),
+            ModelSample.from_sequence(
+                torch.tensor([10, 11, 12, 13, 14, 15, 16]),
+                torch.tensor([-100, -100, -100, -100, 14, 15, 16]),
+                source_ctc={
+                    "token_positions": torch.tensor([0, 1, 2]),
+                    "text_token_ids": torch.tensor([1, 2]),
+                },
+                target_ctc={
+                    "token_positions": torch.tensor([4, 5, 6]),
+                    "text_token_ids": torch.tensor([2, 3]),
+                },
+                task=Task.S2ST,
+                prediction=PredictionModality.AUDIO,
+            ),
+        ]
+
+        batch = ModelBatch.from_samples(samples, pad_token_id=99)
+
+        self.assertIsNotNone(batch.source_ctc)
+        self.assertIsNotNone(batch.target_ctc)
+        assert batch.source_ctc is not None and batch.target_ctc is not None
+        self.assertTrue(
+            torch.equal(batch.source_ctc["token_positions"][0], torch.tensor([0, 1, -1]))
+        )
+        self.assertTrue(
+            torch.equal(batch.target_ctc["text_token_ids"][0], torch.tensor([2, -1]))
+        )
+        row = batch.row(1)
+        self.assertIsNotNone(row.source_ctc)
+        assert row.source_ctc is not None
+        self.assertTrue(
+            torch.equal(
+                row.source_ctc["token_positions"],
+                batch.source_ctc["token_positions"][1:2],
+            )
+        )
+        moved = batch.to(torch.device("cpu"))
+        self.assertIsNotNone(moved.target_ctc)
+        assert moved.target_ctc is not None
+        self.assertTrue(
+            torch.equal(
+                moved.target_ctc["text_token_ids"],
+                batch.target_ctc["text_token_ids"],
+            )
+        )
+
+    def test_model_batch_rejects_invalid_ctc_positions_and_lengths(self):
+        def sample(*, positions: list[int], labels: list[int]) -> ModelSample:
+            return ModelSample.from_sequence(
+                torch.tensor([10, 11, 12]),
+                torch.tensor([-100, 11, 12]),
+                target_ctc={
+                    "token_positions": torch.tensor(positions),
+                    "text_token_ids": torch.tensor(labels),
+                },
+                task=Task.T2ST,
+                prediction=PredictionModality.AUDIO,
+            )
+
+        with self.assertRaisesRegex(ValueError, "positive valid sequence positions"):
+            ModelBatch.from_samples(
+                [sample(positions=[0, 1], labels=[1])],
+                pad_token_id=99,
+            )
+        with self.assertRaisesRegex(ValueError, "requires at least 3 audio positions"):
+            ModelBatch.from_samples(
+                [sample(positions=[1, 2], labels=[1, 1])],
+                pad_token_id=99,
+            )
+
+        with self.assertRaisesRegex(ValueError, "transcript visibility route"):
+            ModelBatch.from_samples(
+                [
+                    ModelSample.from_sequence(
+                        torch.tensor([0, 3, 4]),
+                        torch.tensor([-100, 3, 4]),
+                        target_ctc={
+                            "token_positions": torch.tensor([1, 2]),
+                            "text_token_ids": torch.tensor([1]),
+                        },
+                        task=Task.TTS,
+                        prediction=PredictionModality.AUDIO,
+                    )
+                ],
+                pad_token_id=99,
+            )
+
+        with self.assertRaisesRegex(ValueError, "transcript visibility route"):
+            ModelBatch.from_samples(
+                [
+                    ModelSample.from_sequence(
+                        torch.tensor([0, 3, 4]),
+                        torch.tensor([-100, 3, 4]),
+                        source_ctc={
+                            "token_positions": torch.tensor([0, 1]),
+                            "text_token_ids": torch.tensor([1]),
+                        },
+                        task=Task.T2ST,
+                        prediction=PredictionModality.AUDIO,
+                    )
+                ],
+                pad_token_id=99,
+            )
 
     def test_model_batch_row_preserves_one_acoustic_target(self):
         batch = ModelBatch.from_samples(

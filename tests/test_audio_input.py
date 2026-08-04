@@ -84,7 +84,31 @@ class AudioInputTowerTest(unittest.TestCase):
         self.assertTrue(torch.allclose(padded_output[:, :2], valid_output, atol=1e-6))
         self.assertTrue(torch.equal(padded_output[:, 2:], torch.zeros(1, 2, 8)))
 
-    def test_transformer_is_causal(self) -> None:
+    def test_transformer_is_causal_when_configured(self) -> None:
+        torch.manual_seed(0)
+        tower = create_audio_input_adapter(
+            AudioInputAdapterConfig(
+                type=AudioInputAdapterType.TRANSFORMER,
+                layers=2,
+                heads=2,
+                ffn_ratio=2,
+                causal=True,
+            ),
+            in_features=3,
+            out_features=8,
+        )
+        tower.eval()
+        prefix = torch.randn(1, 2, 3)
+        future = torch.randn(1, 2, 3)
+        changed_future = torch.randn(1, 2, 3) + 100
+
+        original = tower(torch.cat((prefix, future), dim=1))
+        changed = tower(torch.cat((prefix, changed_future), dim=1))
+
+        torch.testing.assert_close(original[:, :2], changed[:, :2], atol=1e-6, rtol=1e-6)
+        self.assertFalse(torch.allclose(original[:, 2:], changed[:, 2:]))
+
+    def test_transformer_is_non_causal_by_default(self) -> None:
         torch.manual_seed(0)
         tower = create_audio_input_adapter(
             AudioInputAdapterConfig(
@@ -104,8 +128,7 @@ class AudioInputTowerTest(unittest.TestCase):
         original = tower(torch.cat((prefix, future), dim=1))
         changed = tower(torch.cat((prefix, changed_future), dim=1))
 
-        torch.testing.assert_close(original[:, :2], changed[:, :2], atol=1e-6, rtol=1e-6)
-        self.assertFalse(torch.allclose(original[:, 2:], changed[:, 2:]))
+        self.assertFalse(torch.allclose(original[:, :2], changed[:, :2]))
 
     def test_transformer_all_padding_is_finite_and_zero(self) -> None:
         tower = create_audio_input_adapter(
@@ -141,6 +164,7 @@ class AudioInputTowerTest(unittest.TestCase):
                 "heads": 4,
                 "ffn_ratio": 3,
                 "dropout": 0.1,
+                "causal": False,
             }
         )
 
@@ -149,6 +173,7 @@ class AudioInputTowerTest(unittest.TestCase):
         self.assertEqual(config.heads, 4)
         self.assertEqual(config.ffn_ratio, 3)
         self.assertEqual(config.dropout, 0.1)
+        self.assertFalse(config.causal)
 
     def test_invalid_shapes_and_transformer_width_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "shape"):
@@ -163,6 +188,8 @@ class AudioInputTowerTest(unittest.TestCase):
                 in_features=3,
                 out_features=7,
             )
+        with self.assertRaisesRegex(TypeError, "causal must be a bool"):
+            AudioInputAdapterConfig(causal=0)  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

@@ -20,6 +20,10 @@ position 语义见 [总览 §2.4](../model-design.md)。
   softmax 竞争。`target_modality` 只是单模态 prediction 的便捷属性，mixed 时为 `None`，不作为
   loss 入口。BiCodec route 额外消费逐位置 `token_groups` 与 `model.selected_logits()`，只在当前
   semantic、semantic-or-end 或 acoustic codebook candidate group 上计算 restricted CE。
+- `CTCAlignmentLoss`：对 transcript-latent audio span 做冻结文本头监督。source route 在 audio
+  自身位置读取 `h[p]`，target route 在 causal predecessor 读取 `h[p-1]`；两侧 transcript 都使用
+  tokenizer-local text IDs，blank 是 runtime PAD 在 text block 内的 local ID。每条 route 的 CTC
+  先按 transcript token 数归一，组合项按有效 `sequences` 聚合。
 - `FlowLoss`：直接从 `semantic-acoustic-codec.loss` 包级导出；S2S 只保留 joint
   token/acoustic objective 的组合，不再维护独立 loss 子模块或重命名 alias。
 - `MaskedCodebookCrossEntropyLoss`：直接从 `anytrain.loss` 包级导出；训练 forward
@@ -60,6 +64,20 @@ result = {
     "loss": loss_item_mean(token, unit="tokens", fallback_to_mean=False),
     "token": token,
 }
+
+if self.ctc is not None:
+    ctc = self.ctc(
+        hidden_states,
+        source=batch.source_ctc,
+        target=batch.target_ctc,
+        text_readout=model.text_logits,
+    )
+    result["ctc"] = ctc
+    result["loss"] += loss_item_mean(
+        ctc,
+        unit="sequences",
+        fallback_to_mean=False,
+    )
 ```
 
 存在独立 acoustic target codes 时，flow 与 RVQ 入口再执行各自分支：
@@ -125,6 +143,9 @@ teacher features。acoustic-only codec screening 与 oracle artifact 导出由
   `acoustic_decoder` 等公开能力，不依赖具体模型类。
 - target position 表示 token 自身位置 `p`；causal predictor shift `p - 1` 由 model 的
   `target_frame_condition()` 统一处理，objective 不重复偏移。
+- CTC position 同样表示 audio token 自身位置 `p`，但 source/target shift 由 CTC route 自身拥有：
+  source 不偏移，target 偏移一次。CTC 不从 task 名动态推断 route；datamodule 已按 transcript
+  visibility 编译 `source_ctc` / `target_ctc`。
 - `SpeechToSpeechModule` 通过泛型 `Objective` 保留 model/objective 的配对类型，不在训练循环中
   cast。
 - validation 指标名、RVQ codebook detail 解释和有效单位由 loss 模块唯一负责；名称与训练
@@ -138,6 +159,9 @@ teacher features。acoustic-only codec screening 与 oracle artifact 导出由
   boolean mask 选中的 frame；padding 位置的 NaN/Inf 不参与 forward，也不产生梯度。
 - token、flow matching、RVQ 与 REPA `LossItem` 必须分别携带 `tokens` 或 `frames` 有效单位；
   objective 不在单位缺失时静默退回逐行平均。
+- CTC `LossItem` 携带 `sequences`，inactive/padded row 的 count 为 0；日志和 validation 不把这些
+  row 纳入 task mean。稳定路径为 `alignment/ctc/loss`，route detail 分为 source/target loss、
+  transcript tokens 与 audio steps。
 - token 行损失是有效 token 的加权平均；`details` 中的 `text_loss` / `audio_loss` 仅供观测，不改变
   训练标量。validation 暴露聚合 `token/loss`（经 `val/` 前缀写入 logger），暂不拆
   `token/text_loss` / `token/audio_loss`。

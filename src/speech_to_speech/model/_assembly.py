@@ -81,6 +81,7 @@ def tokens(
         runtime,
         reference=text_embedding.weight,
         embedding_dim=hidden_size,
+        fsq=config.fsq_embedding,
     ).to(device=text_embedding.weight.device, dtype=torch.float32)
     audio_feature_dim = audio_embedding.embedding_dim
     audio_projection = CastOutput(

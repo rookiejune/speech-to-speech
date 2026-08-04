@@ -7,13 +7,21 @@ pull optional audio-training dependencies.  Keep the latter lazy so importing
 
 from typing import TYPE_CHECKING
 
+from .ctc import CTCAlignmentLoss, CTCConfig
 from .mimo import MimoLoss, MimoObjective
 
 if TYPE_CHECKING:
     from .preference import DPOObjective
     from .rollout import GRPOObjective
 
-__all__ = ["DPOObjective", "GRPOObjective", "MimoLoss", "MimoObjective"]
+__all__ = [
+    "CTCAlignmentLoss",
+    "CTCConfig",
+    "DPOObjective",
+    "GRPOObjective",
+    "MimoLoss",
+    "MimoObjective",
+]
 
 
 def __getattr__(name: str) -> object:

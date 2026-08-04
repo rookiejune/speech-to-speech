@@ -28,7 +28,8 @@
 `runtime.Config.codec` 是 codec identity 的唯一配置源；`audio_view` 由字符串枚举转换，未知 codec
 显式报错。Hydra runtime preset 直接映射完整 `runtime.Config`，同时选择相互兼容的 codec、FrameCodec
 audio sequence layout、audio tokenizer 与 backbone snapshot。`flattened` 直接把完整
-FrameCodec codebooks 编入 token 序列，因此不能同时配置 BPE audio tokenizer；其顺序固定为
+FrameCodec codebooks 编入 token 序列，因此 frame-code codec 不能同时配置 BPE audio tokenizer；
+BiCodec 是例外，它只把 semantic 子流交给 BPE，再与原始 acoustic slots 组合。structured 顺序固定为
 acoustic-first / semantic-last。ODE method、NFE 与 step 数直接使用 `flow_method`、`flow_nfe` 与
 `flow_num_steps`，不再通过独立 sampler 组转换；`Config` 在构造时校验 method、正 NFE 和至少
 2 个 steps，因此 token/RVQ composition 也不会静默携带无效 runtime。model composition 由
@@ -91,6 +92,11 @@ payload 使用 slot-major 布局，并固定排在 semantic payload 之前。`se
 LongCat 等 semantic-only 路径则交给 side module 或 semantic-acoustic codec。markers 与 end marker
 属于内部 route，强制位置不作为可训练 payload。
 
+BiCodec 配置 `audio_tokenizer` 时，该 artifact 只作为 semantic 子 tokenizer：raw semantic IDs 先经
+`CodecBPE`，然后再进入 `BiCodecAudioTokenizer` 的 structured packing；acoustic IDs 不做 BPE。
+外层 stream order、markers 和终止规则没有变化，所以 grammar 仍是 `bicodec-v1`。native/BPE 差异
+记录在嵌套的 `semantic_tokenizer` contract（`native-v1` 或 `codec-bpe-v1`）及 checkpoint hash 中。
+
 无 reference 的 generate 路由把 speaker/style latent 交给语言模型从 text 条件中自回归预测；在多
 speaker 数据上如果没有额外 speaker/style 条件或 latent sampling，模型可能收敛到主导 speaker。
 这是建模条件的限制，不由 BiCodec tokenizer 隐式解决；需要在 experiment/checkpoint 设计中显式
@@ -113,9 +119,9 @@ frame-aligned Flow/RVQ side channel。
   codec marker（Runtime 已固定单一 codec）。marker 的 frame span 为 0，首个 codebook token 的
   frame span 为 1，用于 generation 统计输出帧数。
 - `TorchCodecBPE`：为 CodecBPE 增加 tensor API。
-- `BiCodecAudioTokenizer`：支持 semantic-only token，以及按 `audio_route` 选择 stream 的
-  fixed-length structured sequence；full sequence 的 acoustic payload 使用 slot-major 顺序，
-  并公开 route grammar 所需的 prediction groups/ranges。
+- `BiCodecAudioTokenizer`：组合一个 native 或 CodecBPE semantic tokenizer，并支持 semantic-only
+  token 以及按 `audio_route` 选择 stream 的 fixed-length structured sequence；full sequence 的
+  acoustic payload 使用 slot-major 顺序，并公开 route grammar 所需的 prediction groups/ranges。
 - `semantic_codes_from_audio_tokens()`：把 audio token IDs 解码为
   `[frames, semantic_codebooks]`。
 
@@ -132,10 +138,13 @@ DataModule 与 generation service。runtime 不保存进程级 singleton；同�
 每套配置各自拥有一个 `Runtime`，其惰性资源缓存互不共享。
 
 `Runtime` 在入口解析时一次确定 `audio_sequence_layout`，并派生内部 route；`DataRuntimeSnapshot`
-携带该派生结果。checkpoint 严格匹配派生 route metadata，由 `SpeechToSpeechModule` 负责。
-校验按结构能力而非 preset 身份：`semantic` layout 要求 semantic-only decode provider 或 acoustic
-side module；`flattened` layout 要求 codec 能消费完整 full codes；BiCodec 的 fixed-length 语义由
-codec layout 提供，reference acoustic 来自输入 full codes/context 而不是额外配置轴。
+携带该派生结果。model 把实际消费的 runtime-derived token/audio 结构纳入完整
+`checkpoint_contract`，由 `SpeechToSpeechModule` 保存和校验；checkpoint 不再单独保存一个
+`audio_sequence_layout` 字符串作为兼容性判断，因为相同 layout 名下的 vocabulary、grammar 或
+composition 仍可能不兼容。校验按结构能力而非 preset 身份：`semantic` layout 要求 semantic-only
+decode provider 或 acoustic side module；`flattened` layout 要求 codec 能消费完整 full codes；
+BiCodec 的 fixed-length 语义由 codec layout 提供，reference acoustic 来自输入 full codes/context
+而不是额外配置轴。
 
 文件职责保持分离：`runtime/runtime.py` 实现配置与资源聚合，`runtime/codec.py` 隔离 codec
 adapter 和加载，`runtime/audio_tokenizer/` 按实现拆分 Native / Flattened / BiCodec / CodecBPE。

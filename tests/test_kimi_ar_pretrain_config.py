@@ -13,6 +13,7 @@ from speech_to_speech.datamodule.collate.joint import (
 from speech_to_speech.datamodule.dataset.text import TextDatasetName
 from speech_to_speech.loader_plan import ARFraming
 from speech_to_speech.loader_step import LoaderStepMode
+from speech_to_speech.model.audio_input import AudioInputAdapterType
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.parameter_policy import ParameterPolicyName
 from speech_to_speech.runtime import AudioSequenceLayout, BackboneType
@@ -36,6 +37,13 @@ class KimiARPretrainConfigTest(unittest.TestCase):
         self.assertEqual(config.model.acoustic.type, AcousticType.NONE.value)
         self.assertIs(config.callbacks.parameter_policy.name, ParameterPolicyName.FULL)
         self.assertIsNone(config.model.lora)
+        self.assertEqual(config.pl_module.ctc.source_weight, 1.0)
+        self.assertEqual(config.pl_module.ctc.target_weight, 1.0)
+        self.assertIs(
+            config.model.audio_input_adapter.type,
+            AudioInputAdapterType.TRANSFORMER,
+        )
+        self.assertFalse(config.model.audio_input_adapter.causal)
         self.assertEqual(
             config.loader_plan.loader_weights(),
             {"text_ar": 7.0, "audio_ar": 1.0, "asr": 1.0, "tts": 1.0},

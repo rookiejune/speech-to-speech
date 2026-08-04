@@ -29,11 +29,18 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
   `pl_module.Config.optimizer` 选择 `adamw` 或 `muon`；有 PEFT LoRA 时 `muon` 由 anytrain
   自动路由到 LoRA-Muon + AdamW。
 - `generate()` / `evaluate_text()` 只负责切换 eval mode、调用 generation 包并恢复原 mode。
+- checkpoint hook 保存固定的 model schema、model 暴露的完整结构契约和独立 PEFT 契约；加载时严格按
+  schema -> model contract -> PEFT 的顺序校验，避免后续错误遮蔽更基础的模型不兼容。
 
 `pl_module.composition.build()` 根据 `model.acoustic.type` 统一分发，校验 runtime 是否提供所选
 acoustic composition 需要的独立 side channel，并组装
 `model + objective + SpeechToSpeechModule` 的 token/Flow/RVQ 组合；`token()`、`flow()`、`rvq()`
 分别封闭具体构造；返回值同时携带实际 `AcousticType`，入口不再重复解析或校验 composition。
+composition 还把 `pl_module.ctc` 传给三个 objective，并把 runtime PAD 从 global layout ID 转为
+text-block local blank ID；blank 不在 text vocabulary 时构造即失败。
+`pl_module.Config.audio_neighbor_smoothing`（默认 `0`）由 composition 原样传给三种 objective；非零时只对
+FSQ code target 混合 immediate +/-1 digit 邻居 NLL，邻居在各 residual stage 内归一化，marker 和其他
+free/special audio row 仍使用 hard CE。该设置属于 loss，不改变 embedding、output head 或 MIMO objective。
 该模块通过窄 Protocol 消费 acoustic config，不反向依赖 scripts 入口 schema。当
 `model.acoustic.init_artifact` 非空时，composition 负责加载 SAC
 `AcousticGeneratorArtifact`，校验 route、frame layout 与 backend metadata，并把已加载对象传给 model；
@@ -59,9 +66,11 @@ model 构造器不接收路径或执行文件 I/O。
   自身固定 `ModelBatch` 的摘要；text retention 在实际 autoregressive generation 与 reference-NLL forward
   边界分别附加 token shape。batch 正常结束后清空摘要，避免后续 fetch 或 transfer 错误误报上一批输入。
   Lightning 在 batch-start hook 前完成 device transfer，因此 transfer 自身的 OOM 不属于该 callback 的覆盖范围。
-- `OutputsLogger`：把 S2S objective 映射到 `token/...` 与 `acoustic/{rvq|flow_matching|repa}/...`
-  tag；loss 与观测 detail 按 task 做 microbatch mean，`tokens` / `text_tokens` / `audio_tokens` /
-  `frames` 则跨 step 做 DDP-sum 后累计（可 checkpoint resume）。通用遍历顺序来自
+- `OutputsLogger`：把 S2S objective 映射到 `token/...`、`alignment/ctc/...` 与
+  `acoustic/{rvq|flow_matching|repa}/...` tag；loss 与观测 detail 按 task 做 microbatch mean，
+  `tokens` / `text_tokens` / `audio_tokens` / `frames` / `sequences` 及 CTC route token/step counts
+  则跨 step 做 DDP-sum 后累计（可 checkpoint resume）。CTC 的 zero-count row 不进入 task mean，
+  source/target detail 也分别按对应 transcript count 过滤。通用遍历顺序来自
   `anytrain.lightning.LossItemLoggerCallback` 的契约，计数累计由本项目实现。
 - `GradLogger`：只接入 S2S `TrainInterval`；对称 comparison、probe 参数解析、per-target norm、
   log-ratio 与 cosine 逻辑来自 `anytrain.lightning`。
@@ -165,13 +174,18 @@ FlashAttention 或其他 custom op 也可能不在通用算子计数覆盖范围
   配置显式关闭，后者由入口自动省略。
 - total loss 只由 LightningModule 以 `sync_dist=True` 记录一次（tag `loss`），分项 logger 不重复记录。
 - `OutputsLogger` 的 TensorBoard tag 按通道归组：`token/{key}/{task}` 与
-  `acoustic/{rvq|flow_matching|repa}/{key}/{task}`；`repa` 与 `rvq` / `flow_matching` 平级，
+  `alignment/ctc/{key}/{task}`、`acoustic/{rvq|flow_matching|repa}/{key}/{task}`；`repa` 与 `rvq` / `flow_matching` 平级，
   不嵌套在 flow 下。验证指标使用同一路径并加 `val/` 前缀。
 - validation 是 teacher-forcing loss/accuracy 口径，不调用 autoregressive generation；真实生成质量
   仍由 generation callback 与独立结果文档验收。
 - 正式 `scripts/train.py` 使用 `anytrain.lightning.ModelCheckpoint` 的默认异步保存；checkpoint
   目录、命名、保留数量和触发步数仍由本项目配置拥有。
-- `SpeechToSpeechModule` 负责保存并校验固定 audio route 和 `peft-lora-v2` 配置 metadata。PEFT
-  payload 来自完整 `LoraConfig.to_dict()` 与同版本官方默认值，不绑定 `peft_version`。共同字段
-  严格比较；版本间新增或缺失字段只有保持官方默认值时才兼容。只有当前未启用 LoRA 时，才允许
-  加载缺少 PEFT metadata 的旧 checkpoint。
+- `SpeechToSpeechModule` 把 `model.checkpoint_contract` 保存为必需的
+  `speech_to_speech_model_contract`。payload 使用固定 grammar，包含 canonical components 与其
+  SHA-256；加载时先校验 payload 结构和摘要完整性，再逐路径比较当前 model contract。v3 checkpoint
+  缺少该字段时直接失败；旧的独立 `speech_to_speech_audio_sequence_layout` 字段不能替代完整契约，
+  也不做迁移。
+- PEFT 继续使用独立的 `speech_to_speech_peft` / `peft-lora-v2` metadata，不并入 model contract。
+  payload 来自完整 `LoraConfig.to_dict()` 与同版本官方默认值，不绑定 `peft_version`。共同字段严格
+  比较；版本间新增或缺失字段只有保持官方默认值时才兼容。只有当前未启用 LoRA 时，才允许加载缺少
+  PEFT metadata 的 checkpoint。

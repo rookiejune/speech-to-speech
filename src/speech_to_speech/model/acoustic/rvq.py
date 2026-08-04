@@ -11,6 +11,7 @@ from torch import Tensor
 
 from ...generation.types import AcousticGeneration
 from ...runtime.types import acoustic_codec
+from .._contract_state import rvq_acoustic_contract
 from ..base import Config
 from ..protocol import TokenModelRuntime
 from ._config import DecoderConfig, decoder_options
@@ -56,6 +57,12 @@ class RVQModel(AcousticModel):
         ).to(device=backbone_weight.device, dtype=torch.float32)
         if generator is not None:
             self.acoustic_decoder.load_state_dict(generator.core.state_dict())
+
+    def _acoustic_checkpoint_components(self) -> Mapping[str, object]:
+        return rvq_acoustic_contract(
+            self.acoustic_condition,
+            self.acoustic_decoder,
+        )
 
     def _decoder_module(self) -> AcousticRVQDecoder:
         return self.acoustic_decoder

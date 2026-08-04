@@ -138,7 +138,7 @@ def _audio(offset: int) -> AudioItem:
 
 def _bicodec_runtime(audio_sequence_layout: AudioSequenceLayout):
     tokenizer = BiCodecAudioTokenizer(
-        semantic_vocab_size=8,
+        semantic_codebook_size=8,
         acoustic_codebook_sizes=(3, 3),
         acoustic_unit_length=2,
     )

@@ -11,6 +11,7 @@ from torch import Tensor, nn
 
 from ...generation.types import AcousticGeneration
 from ...runtime.types import acoustic_codec
+from .._contract_state import flow_acoustic_contract
 from .._helper import register
 from ..base import Config
 from ..protocol import FlowModelRuntime, FlowSamplingRuntime
@@ -151,6 +152,12 @@ class FlowModel(AcousticModel):
     @property
     def acoustic_decoder(self) -> DiTDecoder:
         return self.acoustic_flow.decoder
+
+    def _acoustic_checkpoint_components(self) -> Mapping[str, object]:
+        return flow_acoustic_contract(
+            self.acoustic_condition,
+            self.acoustic_flow,
+        )
 
     def _decoder_module(self) -> nn.Module:
         return self.acoustic_decoder

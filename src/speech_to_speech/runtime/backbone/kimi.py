@@ -133,6 +133,17 @@ class KimiTokenizerAdapter:
         # contract or accidentally mutate the remote tokenizer's mapping.
         return dict(self._special_tokens_map)
 
+    def contract_state(self) -> Mapping[str, object]:
+        return {
+            "grammar": "kimi-text-tokenizer-v1",
+            "raw_implementation": (
+                f"{type(self._raw).__module__}.{type(self._raw).__qualname__}"
+            ),
+            "vocab_size": self._vocab_size,
+            "special_tokens": dict(self._special_tokens),
+            "chat_template": self._configured_chat_template,
+        }
+
     def encode(self, text: str, *, add_special_tokens: bool = False) -> list[int]:
         if not isinstance(text, str):
             raise TypeError("Kimi tokenizer text must be a string.")

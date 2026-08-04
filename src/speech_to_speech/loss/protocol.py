@@ -7,6 +7,7 @@ from anytrain.loss import PackedCodebookLogits
 from anytrain.module.idspace import Layout
 from torch import Tensor
 
+from ..model.embedding.fsq import FsqNeighbors
 from ..prediction import PredictionModality
 
 
@@ -35,6 +36,12 @@ class TokenObjectiveModel(Protocol):
         audio_hidden_state: Tensor | None = None,
     ) -> Tensor: ...
 
+    def text_logits(
+        self,
+        hidden_state: Tensor,
+        local_ids: Tensor | None = None,
+    ) -> Tensor: ...
+
     def project_audio_hidden(
         self,
         hidden_state: Tensor,
@@ -44,6 +51,8 @@ class TokenObjectiveModel(Protocol):
         past_key_values: object | None = None,
         use_cache: bool = False,
     ) -> tuple[Tensor, object | None]: ...
+
+    def audio_neighbor_targets(self, local_ids: Tensor) -> FsqNeighbors | None: ...
 
 class AcousticDecoder(Protocol):
     def __call__(

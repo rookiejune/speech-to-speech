@@ -15,6 +15,11 @@ audio_sequence_layout: semantic
 
 output_subdir: staged-joint/s2st/stage_0/${run_name}
 
+pl_module:
+  ctc:
+    source_weight: 0.0
+    target_weight: 0.0
+
 loader_plan:
   loaders:
     tts:

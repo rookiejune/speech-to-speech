@@ -60,6 +60,7 @@ from speech_to_speech.model import (
     AudioInputAdapterType,
     AudioOutputAdapterType,
     Config as ModelConfig,
+    FsqFeature,
     ToyConfig,
 )
 from speech_to_speech.model.acoustic import AcousticType, DecoderConfig

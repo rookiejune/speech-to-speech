@@ -7,6 +7,7 @@ from unittest.mock import ANY, Mock, patch
 import torch
 from semantic_acoustic_codec.config import Route
 
+from speech_to_speech.loss.ctc import CTCConfig
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model.acoustic import AcousticType, DecoderConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
@@ -71,14 +72,27 @@ class PlModuleCompositionTest(unittest.TestCase):
     @patch("speech_to_speech.pl_module.composition.TokenObjective")
     @patch("speech_to_speech.pl_module.composition.Model")
     def test_token_closes_model_and_objective(self, model, objective, module):
-        runtime = SimpleNamespace(layout=Mock())
+        runtime = SimpleNamespace(
+            layout=SimpleNamespace(blocks={"text": (17, 117)}),
+            pad_token_id=23,
+        )
         model_config = ModelConfig()
 
-        built_module, built_model = token(runtime, ModuleConfig(), model_config)
+        ctc = CTCConfig(source_weight=0.25, target_weight=0.5)
+        module_config = ModuleConfig(
+            audio_neighbor_smoothing=0.05,
+            ctc=ctc,
+        )
+        built_module, built_model = token(runtime, module_config, model_config)
 
         self.assertIs(built_model, model.return_value)
         model.assert_called_once_with(model_config, runtime=runtime)
-        objective.assert_called_once_with(runtime.layout)
+        objective.assert_called_once_with(
+            runtime.layout,
+            audio_neighbor_smoothing=0.05,
+            ctc=ctc,
+            ctc_blank_token_id=6,
+        )
         module.assert_called_once_with(
             ANY,
             model=model.return_value,
@@ -107,13 +121,12 @@ class PlModuleCompositionTest(unittest.TestCase):
                 decode=Mock(),
             ),
             semantic_codec=Mock(),
-            layout=Mock(),
+            layout=SimpleNamespace(blocks={"text": (11, 111)}),
+            pad_token_id=18,
             audio_tokenizer=None,
             flow_matching=Mock(),
             backbone=SimpleNamespace(
-                get_input_embeddings=lambda: SimpleNamespace(
-                    weight=SimpleNamespace(device="cpu")
-                )
+                get_input_embeddings=lambda: SimpleNamespace(weight=SimpleNamespace(device="cpu"))
             ),
         )
         acoustic = SimpleNamespace(
@@ -145,12 +158,19 @@ class PlModuleCompositionTest(unittest.TestCase):
             objective.call_args.kwargs["repa"],
             {"weight": 0.2, "teacher": teacher.return_value},
         )
+        self.assertEqual(objective.call_args.kwargs["audio_neighbor_smoothing"], 0.0)
+        self.assertEqual(objective.call_args.kwargs["ctc"], CTCConfig())
+        self.assertEqual(objective.call_args.kwargs["ctc_blank_token_id"], 7)
 
     @patch("speech_to_speech.pl_module.composition.SpeechToSpeechModule")
     @patch("speech_to_speech.pl_module.composition.RVQObjective")
     @patch("speech_to_speech.pl_module.composition.RVQModel")
     def test_rvq_model_receives_only_decoder_options(self, model, objective, module):
-        runtime = SimpleNamespace(layout=Mock(), audio_tokenizer=None)
+        runtime = SimpleNamespace(
+            layout=SimpleNamespace(blocks={"text": (5, 105)}),
+            pad_token_id=14,
+            audio_tokenizer=None,
+        )
         acoustic = SimpleNamespace(
             init_artifact=None,
             decoder=DecoderConfig(hidden_dim=None, layers=2, heads=1, ffn_ratio=3),
@@ -164,6 +184,9 @@ class PlModuleCompositionTest(unittest.TestCase):
             set(model.call_args.kwargs),
             {"runtime", "decoder", "initialization"},
         )
+        self.assertEqual(objective.call_args.kwargs["audio_neighbor_smoothing"], 0.0)
+        self.assertEqual(objective.call_args.kwargs["ctc"], CTCConfig())
+        self.assertEqual(objective.call_args.kwargs["ctc_blank_token_id"], 9)
 
     @patch("speech_to_speech.pl_module.composition.SpeechToSpeechModule")
     @patch("speech_to_speech.pl_module.composition.RVQObjective")
@@ -178,7 +201,8 @@ class PlModuleCompositionTest(unittest.TestCase):
     ):
         runtime = SimpleNamespace(
             codec=Mock(),
-            layout=Mock(),
+            layout=SimpleNamespace(blocks={"text": (0, 100)}),
+            pad_token_id=0,
             audio_tokenizer=None,
             backbone=SimpleNamespace(
                 get_input_embeddings=lambda: SimpleNamespace(

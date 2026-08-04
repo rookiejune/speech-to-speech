@@ -18,74 +18,82 @@ from speech_to_speech.model.audio_output import (
     AudioOutputAdapterConfig,
     AudioOutputAdapterType,
 )
-from speech_to_speech.model.embedding.fsq import (
-    FsqAffineEmbedding,
-    _level_scalars,
-    _product_level_indices,
-)
 from speech_to_speech.model.embedding.audio import create_semantic_audio_embedding
+from speech_to_speech.model.embedding.fsq import (
+    FsqEmbedding,
+    FsqEmbeddingConfig,
+    FsqFeature,
+    _product_level_indices,
+    reference_rms,
+)
 from speech_to_speech.runtime.audio_tokenizer import FlattenedAudioTokenizer
 from speech_to_speech.runtime.codec import StableCodec
-from speech_to_speech.runtime.types import fsq_levels
+from speech_to_speech.runtime.types import (
+    fsq_level_values,
+    fsq_levels,
+    fsq_radix_order,
+)
 
 
-class FsqAffineEmbeddingTest(unittest.TestCase):
-    def test_product_level_indices_match_fsq_basis(self):
-        levels = (3, 3, 3)
-        indices = _product_level_indices(27, levels)
-        basis = torch.tensor([1, 3, 9], dtype=torch.int64)
-        level_tensor = torch.tensor(levels, dtype=torch.int64)
+class FsqEmbeddingTest(unittest.TestCase):
+    def test_product_level_indices_match_first_fastest_basis(self) -> None:
+        levels = (2, 3, 4)
+        indices = _product_level_indices(math.prod(levels), levels)
+        basis = torch.tensor([1, 2, 6], dtype=torch.int64)
         expected = (
-            torch.arange(27, dtype=torch.int64)[:, None] // basis
-        ) % level_tensor
+            torch.arange(math.prod(levels), dtype=torch.int64)[:, None] // basis
+        ) % torch.tensor(levels, dtype=torch.int64)
         torch.testing.assert_close(indices, expected)
 
-    def test_affine_preserves_scalar_distance_along_one_dim(self):
-        embed = FsqAffineEmbedding(
-            codebook_sizes=(4,),
-            fsq_levels=((2, 2),),
-            num_embeddings=4 + 2,
-            embedding_dim=8,
+    def test_onehot_digit_levels_are_unrestricted(self) -> None:
+        embed = _embedding(levels=((2, 2),), embedding_dim=4)
+        with torch.no_grad():
+            embed.offsets[0].zero_()
+            embed._tables(0)[0].copy_(torch.tensor([[1.0, 0, 0, 0], [0, 2.0, 0, 0]]))
+            embed._tables(0)[1].copy_(torch.tensor([[0.0, 0, 3.0, 0], [0, 0, 0, 4.0]]))
+
+        rows = embed.code_embedding(torch.arange(4), stage=0)
+        first_delta = rows[1] - rows[0]
+        second_delta = rows[2] - rows[0]
+        self.assertFalse(
+            torch.linalg.vector_norm(first_delta).isclose(torch.linalg.vector_norm(second_delta))
+        )
+        self.assertEqual(int(torch.linalg.matrix_rank(rows - rows.mean(0))), 2)
+
+    def test_digit_value_requires_codec_values_and_preserves_them(self) -> None:
+        config = FsqEmbeddingConfig(feature=FsqFeature.DIGIT_VALUE)
+        with self.assertRaisesRegex(ValueError, "canonical level values"):
+            _embedding(levels=((3,),), config=config)
+
+        embed = _embedding(
+            levels=((3,),),
+            config=config,
+            level_values=(((-2.0, 0.5, 3.0),),),
+            embedding_dim=2,
         )
         with torch.no_grad():
             embed.offsets[0].zero_()
-            embed.slopes[0].zero_()
-            embed.slopes[0][0] = torch.arange(8, dtype=torch.float32)
-            embed.slopes[0][1] = torch.arange(8, 16, dtype=torch.float32)
-
-        # product ids 0=(0,0) and 1=(1,0) differ only on dim 0
-        left = embed.code_embedding(torch.tensor([0]), stage=0)
-        right = embed.code_embedding(torch.tensor([1]), stage=0)
-        scalars = _level_scalars(_product_level_indices(4, (2, 2)), (2, 2))
-        delta = abs(float(scalars[1, 0] - scalars[0, 0]))
-        expected = delta * float(embed.slopes[0][0].detach().norm())
-        self.assertAlmostEqual(float((left - right).detach().norm()), expected, places=5)
-
-    def test_markers_use_free_rows(self):
-        embed = FsqAffineEmbedding(
-            codebook_sizes=(4,),
-            fsq_levels=((2, 2),),
-            num_embeddings=4 + 3,
-            embedding_dim=4,
+            embed._slopes(0)[0].copy_(torch.tensor([1.0, -2.0]))
+        expected = torch.tensor([[-2.0, 4.0], [0.5, -1.0], [3.0, -6.0]])
+        torch.testing.assert_close(
+            embed.code_embedding(torch.arange(3), stage=0),
+            expected,
         )
+
+    def test_markers_use_free_rows(self) -> None:
+        embed = _embedding(levels=((2, 2),), free=3, embedding_dim=4)
         with torch.no_grad():
             embed.free.weight.copy_(torch.arange(12, dtype=torch.float32).reshape(3, 4))
-            embed.offsets[0].zero_()
-            embed.slopes[0].zero_()
 
-        markers = embed(torch.tensor([4, 5, 6]))
-        torch.testing.assert_close(markers, embed.free.weight)
-        codes = embed(torch.tensor([0, 1, 2, 3]))
-        torch.testing.assert_close(codes, torch.zeros(4, 4))
+        torch.testing.assert_close(embed(torch.tensor([4, 5, 6])), embed.free.weight)
 
-    def test_rows_and_forward_match_weight_without_materializing(self):
+    def test_rows_and_forward_match_weight_without_materializing(self) -> None:
         embed = _multi_stage_embedding()
         input_ids = torch.tensor([[0, 3, 4], [9, 10, 12]])
-        weight = embed.weight
-        expected = F.embedding(input_ids, weight)
+        expected = F.embedding(input_ids, embed.weight)
 
         with patch.object(
-            FsqAffineEmbedding,
+            FsqEmbedding,
             "_materialize",
             side_effect=AssertionError("lookup materialized the table"),
         ):
@@ -97,26 +105,28 @@ class FsqAffineEmbeddingTest(unittest.TestCase):
                 (2, 0, embed.embedding_dim),
             )
 
-    def test_full_and_selected_logits_match_weight_without_materializing(self):
-        embed = _multi_stage_embedding()
-        hidden = torch.randn(2, 3, embed.embedding_dim, dtype=torch.float64)
-        local_ids = torch.tensor([0, 4, 9, 10, 12])
-        weight = embed.weight
-        expected = F.linear(hidden.to(dtype=weight.dtype), weight)
-        selected = F.linear(
-            hidden.to(dtype=weight.dtype),
-            weight.index_select(0, local_ids),
-        )
+    def test_full_and_selected_logits_match_weight_without_materializing(self) -> None:
+        for feature in (FsqFeature.DIGIT_ONEHOT, FsqFeature.DIGIT_VALUE):
+            with self.subTest(feature=feature):
+                embed = _multi_stage_embedding(feature=feature)
+                hidden = torch.randn(2, 3, embed.embedding_dim, dtype=torch.float64)
+                local_ids = torch.tensor([0, 4, 9, 10, 12])
+                weight = embed.weight
+                expected = F.linear(hidden.to(dtype=weight.dtype), weight)
+                selected = F.linear(
+                    hidden.to(dtype=weight.dtype),
+                    weight.index_select(0, local_ids),
+                )
 
-        with patch.object(
-            FsqAffineEmbedding,
-            "_materialize",
-            side_effect=AssertionError("logits materialized the table"),
-        ):
-            torch.testing.assert_close(embed.logits(hidden), expected)
-            torch.testing.assert_close(embed.logits(hidden, local_ids), selected)
+                with patch.object(
+                    FsqEmbedding,
+                    "_materialize",
+                    side_effect=AssertionError("logits materialized the table"),
+                ):
+                    torch.testing.assert_close(embed.logits(hidden), expected)
+                    torch.testing.assert_close(embed.logits(hidden, local_ids), selected)
 
-    def test_factorized_paths_match_materialized_gradients(self):
+    def test_factorized_paths_match_materialized_gradients(self) -> None:
         torch.manual_seed(10)
         embed = _multi_stage_embedding()
         reference = deepcopy(embed)
@@ -136,75 +146,109 @@ class FsqAffineEmbeddingTest(unittest.TestCase):
         expected_loss.backward()
 
         torch.testing.assert_close(hidden.grad, reference_hidden.grad)
-        actual_parameters = dict(embed.named_parameters())
-        expected_parameters = dict(reference.named_parameters())
-        self.assertEqual(actual_parameters.keys(), expected_parameters.keys())
-        for name, parameter in actual_parameters.items():
+        for name, parameter in embed.named_parameters():
+            expected_parameter = dict(reference.named_parameters())[name]
             self.assertIsNotNone(parameter.grad, name)
-            self.assertIsNotNone(expected_parameters[name].grad, name)
+            self.assertIsNotNone(expected_parameter.grad, name)
             torch.testing.assert_close(
                 parameter.grad,
-                expected_parameters[name].grad,
+                expected_parameter.grad,
                 atol=1e-5,
                 rtol=1e-5,
                 msg=lambda message, name=name: f"{name}: {message}",
             )
 
-    def test_offsets_and_free_rows_use_embedding_scale(self):
+    def test_initialization_matches_reference_rms(self) -> None:
         torch.manual_seed(11)
-        embedding_dim = 256
-        embed = FsqAffineEmbedding(
-            codebook_sizes=(4,),
-            fsq_levels=((2, 2),),
-            num_embeddings=4 + 1024,
-            embedding_dim=embedding_dim,
+        reference = torch.arange(1, 129, dtype=torch.float32).reshape(16, 8) / 100
+        target = reference_rms(reference, chunk_rows=3)
+        embed = FsqEmbedding(
+            codebook_sizes=(6,),
+            fsq_levels=((2, 3),),
+            num_embeddings=9,
+            embedding_dim=64,
+            target_rms=target,
         )
 
-        self.assertEqual(embed.offsets[0].shape, (embedding_dim,))
-        expected = embedding_dim**-0.5
-        actual = float(embed.free.weight.detach().std(unbiased=False))
-        self.assertAlmostEqual(actual, expected, delta=expected * 0.03)
-
-    def test_strict_load_rejects_legacy_bias_keys(self):
-        embed = _multi_stage_embedding()
-        state = embed.state_dict()
-        del state["offsets.0"]
-        state["biases.0"] = torch.randn(1, embed.embedding_dim)
-
-        with self.assertRaises(RuntimeError) as error:
-            embed.load_state_dict(state, strict=True)
-        self.assertIn("offsets.0", str(error.exception))
-        self.assertIn("biases.0", str(error.exception))
-
-    def test_topology_is_persistent_and_strictly_checked(self):
-        source = FsqAffineEmbedding(
-            codebook_sizes=(36,),
-            fsq_levels=((6, 6),),
-            num_embeddings=39,
-            embedding_dim=4,
+        code_rms = float(
+            embed.code_embedding(torch.arange(6), stage=0).detach().square().mean().sqrt()
         )
-        target = FsqAffineEmbedding(
-            codebook_sizes=(36,),
-            fsq_levels=((4, 9),),
-            num_embeddings=39,
-            embedding_dim=4,
-        )
-        state = source.state_dict()
+        free_rms = float(embed.free.weight.detach().square().mean().sqrt())
+        self.assertAlmostEqual(code_rms, target, places=6)
+        self.assertAlmostEqual(free_rms, target, places=6)
 
-        self.assertIn("topology", state)
-        self.assertEqual(state["topology"].dtype, torch.int64)
+        value = _embedding(
+            levels=((3,),),
+            free=0,
+            embedding_dim=64,
+            config=FsqEmbeddingConfig(feature=FsqFeature.DIGIT_VALUE),
+            level_values=(((-2.0, 0.5, 3.0),),),
+        )
+        value_rms = float(
+            value.code_embedding(torch.arange(3), stage=0).detach().square().mean().sqrt()
+        )
+        self.assertAlmostEqual(value_rms, 0.1, places=6)
+        self.assertEqual(value.weight.shape, (3, 64))
+
+    def test_neighbors_are_stage_local_normalized_and_exclude_free_rows(self) -> None:
+        embed = _embedding(levels=((2, 3), (2, 2)), free=2, embedding_dim=4)
+        neighbors = embed.neighbors(torch.tensor([0, 1, 4, 6, 9, 10, 11]))
+
+        self.assertEqual(neighbors.token_ids.shape, (7, 4))
+        self.assertEqual(neighbors.valid[0].nonzero().flatten().tolist(), [1, 3])
+        self.assertEqual(neighbors.token_ids[0, [1, 3]].tolist(), [1, 2])
+        self.assertEqual(neighbors.token_ids[3, neighbors.valid[3]].tolist(), [7, 8])
+        self.assertEqual(neighbors.token_ids[4, neighbors.valid[4]].tolist(), [8, 7])
+        torch.testing.assert_close(
+            neighbors.weights.sum(dim=-1),
+            torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0]),
+        )
+        self.assertFalse(bool(neighbors.valid[-2:].any()))
+
+    def test_topology_and_value_facts_are_strictly_checked(self) -> None:
+        source = _embedding(levels=((6, 6),), embedding_dim=4)
+        target = _embedding(levels=((4, 9),), embedding_dim=4)
         with self.assertRaisesRegex(RuntimeError, "FSQ topology"):
-            target.load_state_dict(state, strict=True)
+            target.load_state_dict(source.state_dict(), strict=True)
 
-    def test_strict_load_rejects_missing_topology(self):
-        embed = _multi_stage_embedding()
-        state = embed.state_dict()
+        value_config = FsqEmbeddingConfig(feature=FsqFeature.DIGIT_VALUE)
+        source_value = _embedding(
+            levels=((3,),),
+            config=value_config,
+            level_values=(((-1.0, 0.0, 1.0),),),
+        )
+        target_value = _embedding(
+            levels=((3,),),
+            config=value_config,
+            level_values=(((-2.0, 0.0, 2.0),),),
+        )
+        with self.assertRaisesRegex(RuntimeError, "FSQ level values"):
+            target_value.load_state_dict(source_value.state_dict(), strict=True)
+
+        state = source.state_dict()
         del state["topology"]
-
         with self.assertRaisesRegex(RuntimeError, 'Missing key.*"topology"'):
-            embed.load_state_dict(state, strict=True)
+            source.load_state_dict(state, strict=True)
 
-    def test_invalid_ids_preserve_embedding_contract(self):
+    def test_state_roundtrip_preserves_factorized_rows_and_logits(self) -> None:
+        ids = torch.tensor([0, 3, 4, 9, 12])
+        hidden = torch.randn(2, 7)
+        for feature in (FsqFeature.DIGIT_ONEHOT, FsqFeature.DIGIT_VALUE):
+            with self.subTest(feature=feature):
+                source = _multi_stage_embedding(feature=feature)
+                target = _multi_stage_embedding(feature=feature)
+
+                incompatible = target.load_state_dict(
+                    source.state_dict(),
+                    strict=True,
+                )
+
+                self.assertEqual(incompatible.missing_keys, [])
+                self.assertEqual(incompatible.unexpected_keys, [])
+                torch.testing.assert_close(target.rows(ids), source.rows(ids))
+                torch.testing.assert_close(target.logits(hidden), source.logits(hidden))
+
+    def test_invalid_ids_preserve_embedding_contract(self) -> None:
         embed = _multi_stage_embedding()
         hidden = torch.randn(2, embed.embedding_dim)
 
@@ -213,8 +257,6 @@ class FsqAffineEmbeddingTest(unittest.TestCase):
                 with self.assertRaisesRegex(IndexError, "index out of range"):
                     embed.rows(input_ids)
                 with self.assertRaisesRegex(IndexError, "index out of range"):
-                    embed(input_ids)
-                with self.assertRaisesRegex(IndexError, "index out of range"):
                     embed.logits(hidden, input_ids)
         with self.assertRaisesRegex(RuntimeError, "Long, Int"):
             embed.rows(torch.tensor([0.0]))
@@ -222,56 +264,61 @@ class FsqAffineEmbeddingTest(unittest.TestCase):
             embed.logits(hidden, torch.tensor([[0]]))
         with self.assertRaisesRegex(ValueError, "stage 2 is out of range"):
             embed.code_embedding(torch.tensor([0]), stage=2)
-        with self.assertRaisesRegex(ValueError, "outside the FSQ codebook"):
-            embed.code_embedding(torch.tensor([4]), stage=0)
 
-    def test_stable_codec_exposes_fsq_levels(self):
-        codec = StableCodec(_StableSource())
-        self.assertEqual(codec.semantic_feature_dim, 1)
-        self.assertEqual(codec.fsq_levels, ((6, 6, 6, 6, 6, 6),))
-        self.assertEqual(fsq_levels(codec), ((6, 6, 6, 6, 6, 6),))
+    def test_stable_codec_exposes_optional_canonical_values(self) -> None:
+        values = tuple(
+            tuple(tuple(float(index) for index in range(3)) for _ in range(2)) for _ in range(1)
+        )
+        codec = StableCodec(
+            _StableSource(
+                codebook_sizes=(9,),
+                fsq_levels=((3, 3),),
+                fsq_level_values=values,
+            )
+        )
+        self.assertEqual(fsq_levels(codec), ((3, 3),))
+        self.assertEqual(fsq_level_values(codec), values)
+        self.assertEqual(fsq_radix_order(codec), "first_fastest")
 
-    def test_create_semantic_audio_embedding_uses_fsq_affine(self):
+    def test_create_semantic_audio_embedding_uses_default_onehot(self) -> None:
         codec = StableCodec(_StableSource(codebook_sizes=(9,), fsq_levels=((3, 3),)))
         tokenizer = FlattenedAudioTokenizer(
             codebook_sizes=(9,),
             codec_name="stable_codec",
         )
-        runtime = _Runtime(codec, tokenizer)
+        reference = torch.full((5, 16), 0.25)
         embed = create_semantic_audio_embedding(
-            cast(Any, runtime),
-            reference=torch.empty(1),
+            cast(Any, _Runtime(codec, tokenizer)),
+            reference=reference,
             embedding_dim=16,
         )
-        self.assertIsInstance(embed, FsqAffineEmbedding)
-        self.assertEqual(embed.embedding_dim, 16)
-        self.assertEqual(embed.num_embeddings, tokenizer.vocab_size + 3)
-        self.assertEqual(embed.weight.shape, (tokenizer.vocab_size + 3, 16))
+        self.assertIsInstance(embed, FsqEmbedding)
+        fsq = cast(FsqEmbedding, embed)
+        self.assertIs(fsq.config.feature, FsqFeature.DIGIT_ONEHOT)
+        self.assertEqual(fsq.num_embeddings, tokenizer.vocab_size + 3)
+        self.assertAlmostEqual(
+            float(fsq.weight.detach().square().mean().sqrt()),
+            0.25,
+            places=5,
+        )
 
-    def test_fsq_embedding_requires_backbone_aligned_dim(self):
+    def test_create_digit_value_requires_runtime_alignment_capability(self) -> None:
         codec = StableCodec(_StableSource(codebook_sizes=(9,), fsq_levels=((3, 3),)))
         tokenizer = FlattenedAudioTokenizer(
             codebook_sizes=(9,),
             codec_name="stable_codec",
         )
-        with self.assertRaisesRegex(ValueError, "embedding_dim"):
+        with self.assertRaisesRegex(ValueError, "canonical level values"):
             create_semantic_audio_embedding(
                 cast(Any, _Runtime(codec, tokenizer)),
-                reference=torch.empty(1),
+                reference=torch.ones(2, 4),
+                embedding_dim=4,
+                fsq=FsqEmbeddingConfig(feature=FsqFeature.DIGIT_VALUE),
             )
 
-    def test_matched_dims_collapse_default_linear_adapters(self):
-        self.assertIsNone(
-            aligned_audio_adapter(AdapterType.LINEAR, 64, 64)
-        )
-        self.assertIs(
-            aligned_audio_adapter(AdapterType.MLP, 64, 64),
-            AdapterType.MLP,
-        )
-        self.assertIs(
-            aligned_audio_adapter(AdapterType.LINEAR, 4, 64),
-            AdapterType.LINEAR,
-        )
+    def test_matched_dims_collapse_default_linear_adapters(self) -> None:
+        self.assertIsNone(aligned_audio_adapter(AdapterType.LINEAR, 64, 64))
+        self.assertIs(aligned_audio_adapter(AdapterType.MLP, 64, 64), AdapterType.MLP)
         output = aligned_audio_output_adapter(
             AudioOutputAdapterConfig(type=AudioOutputAdapterType.LINEAR),
             64,
@@ -279,11 +326,10 @@ class FsqAffineEmbeddingTest(unittest.TestCase):
         )
         self.assertIs(output.type, AudioOutputAdapterType.NONE)
 
-    def test_fsq_levels_requires_dim_one(self):
-        codec = _DimCodec(4, ((2, 2),))
-        self.assertIsNone(fsq_levels(codec))
+    def test_fsq_levels_requires_dim_one(self) -> None:
+        self.assertIsNone(fsq_levels(_DimCodec(4, ((2, 2),))))
 
-    def test_unknown_stable_sizes_fail(self):
+    def test_unknown_stable_sizes_fail(self) -> None:
         with self.assertRaisesRegex(ValueError, "known FSQ level layout"):
             StableCodec(_StableSource(codebook_sizes=(10,)))
 
@@ -296,10 +342,13 @@ class _StableSource:
         self,
         codebook_sizes: tuple[int, ...] = (46_656,),
         fsq_levels: tuple[tuple[int, ...], ...] | None = None,
+        fsq_level_values: tuple[tuple[tuple[float, ...], ...], ...] | None = None,
     ) -> None:
         self.codebook_sizes = codebook_sizes
         if fsq_levels is not None:
             self.fsq_levels = fsq_levels
+        if fsq_level_values is not None:
+            self.fsq_level_values = fsq_level_values
         self.codes = torch.tensor([[[0]]], dtype=torch.long)
         self.waveform = torch.zeros(1, 1, 8)
 
@@ -329,18 +378,39 @@ class _Runtime:
         self.audio_tokenizer = tokenizer
 
 
-def _multi_stage_levels() -> tuple[tuple[int, ...], ...]:
-    return ((2, 2), (3, 2))
-
-
-def _multi_stage_embedding() -> FsqAffineEmbedding:
-    levels = _multi_stage_levels()
-    codebook_sizes = tuple(math.prod(stage) for stage in levels)
-    return FsqAffineEmbedding(
-        codebook_sizes=codebook_sizes,
+def _embedding(
+    *,
+    levels: tuple[tuple[int, ...], ...],
+    free: int = 3,
+    embedding_dim: int = 7,
+    config: FsqEmbeddingConfig | None = None,
+    level_values: tuple[tuple[tuple[float, ...], ...], ...] | None = None,
+) -> FsqEmbedding:
+    sizes = tuple(math.prod(stage) for stage in levels)
+    return FsqEmbedding(
+        codebook_sizes=sizes,
         fsq_levels=levels,
-        num_embeddings=sum(codebook_sizes) + 3,
-        embedding_dim=7,
+        num_embeddings=sum(sizes) + free,
+        embedding_dim=embedding_dim,
+        target_rms=0.1,
+        config=config,
+        level_values=level_values,
+    )
+
+
+def _multi_stage_embedding(
+    *,
+    feature: FsqFeature = FsqFeature.DIGIT_ONEHOT,
+) -> FsqEmbedding:
+    levels = ((2, 2), (3, 2))
+    values = (
+        ((-1.0, 1.0), (-2.0, 2.0)),
+        ((-1.0, 0.0, 1.0), (-0.5, 0.5)),
+    )
+    return _embedding(
+        levels=levels,
+        config=FsqEmbeddingConfig(feature=feature),
+        level_values=values if feature is FsqFeature.DIGIT_VALUE else None,
     )
 
 

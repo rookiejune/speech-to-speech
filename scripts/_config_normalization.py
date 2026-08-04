@@ -14,6 +14,7 @@ from speech_to_speech.model import (
     AdapterType,
     AudioInputAdapterType,
     AudioOutputAdapterType,
+    FsqFeature,
 )
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.runtime import (
@@ -51,6 +52,11 @@ def prepare(config: DictConfig) -> DictConfig:
             value = audio_output.get("type")
             if value is not None:
                 audio_output.type = _enum_name(AudioOutputAdapterType, value)
+        fsq_embedding = model.get("fsq_embedding")
+        if isinstance(fsq_embedding, DictConfig):
+            value = fsq_embedding.get("feature")
+            if value is not None:
+                fsq_embedding.feature = _enum_name(FsqFeature, value)
     acoustic = model.get("acoustic") if isinstance(model, DictConfig) else None
     if isinstance(acoustic, DictConfig):
         acoustic_type = acoustic.get("type")

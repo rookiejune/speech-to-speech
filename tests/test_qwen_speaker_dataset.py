@@ -164,7 +164,7 @@ class SpeakerGridDatasetTest(unittest.TestCase):
                     audio_view=AudioView.BICODEC,
                     audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
                     audio_tokenizer=BiCodecAudioTokenizer(
-                        semantic_vocab_size=16,
+                        semantic_codebook_size=16,
                         acoustic_codebook_sizes=(5, 7),
                         acoustic_unit_length=3,
                     ),
@@ -363,7 +363,7 @@ def _cells() -> tuple[Sample, ...]:
 
 def _runtime(audio_sequence_layout: AudioSequenceLayout):
     tokenizer = BiCodecAudioTokenizer(
-        semantic_vocab_size=16,
+        semantic_codebook_size=16,
         acoustic_codebook_sizes=(5, 7),
         acoustic_unit_length=3,
     )

@@ -4,7 +4,7 @@ import math
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Optional, Protocol, cast
+from typing import Optional, Protocol, runtime_checkable
 
 from torch import nn
 
@@ -34,6 +34,11 @@ class ParameterPolicyModel(Protocol):
     def named_parameters(
         self, prefix: str = "", recurse: bool = True
     ) -> Iterable[tuple[str, nn.Parameter]]: ...
+
+
+@runtime_checkable
+class _InputEmbeddingOwner(Protocol):
+    def get_input_embeddings(self) -> nn.Module: ...
 
 
 @dataclass(frozen=True)
@@ -179,19 +184,6 @@ _LAYER_PATTERN = re.compile(r"^backbone\.(?:layers|mimo_layers)\.(\d+)\.")
 _FINAL_NORM_PATTERN = re.compile(r"^backbone\.norm\.")
 
 
-def apply_parameter_policy(
-    model: ParameterPolicyModel,
-    spec: ParameterPolicySpec,
-) -> dict[ParameterGroup, int]:
-    counts = {group: 0 for group in ParameterGroup}
-    trainability = ParameterPolicyTrainability(spec)
-    for name, parameter in model.named_parameters():
-        group = _policy_group(name, parameter, spec)
-        counts[group] += parameter.numel()
-        parameter.requires_grad_(trainability(cast(nn.Module, model), name, parameter))
-    return counts
-
-
 @dataclass(frozen=True)
 class ParameterPolicyTrainability:
     spec: ParameterPolicySpec
@@ -207,7 +199,7 @@ class ParameterPolicyTrainability:
         parameter: nn.Parameter,
     ) -> bool:
         group = _policy_group(name, parameter, self.spec)
-        if _structurally_frozen(name, module):
+        if _structurally_frozen(name, module, parameter):
             return False
         trainable = (
             _peft_trainable(name, parameter, self.spec)
@@ -313,7 +305,13 @@ def _num_layers(model: ParameterPolicyModel, minimum: int) -> int:
     return value
 
 
-def _structurally_frozen(name: str, model: ParameterPolicyModel) -> bool:
+def _structurally_frozen(
+    name: str,
+    model: ParameterPolicyModel,
+    parameter: nn.Parameter,
+) -> bool:
+    if _is_text_embedding(model, parameter):
+        return True
     if name.startswith("acoustic_decoder.decoder.embed_tokens."):
         return True
     decoder = getattr(model, "acoustic_decoder", None)
@@ -327,6 +325,17 @@ def _structurally_frozen(name: str, model: ParameterPolicyModel) -> bool:
     ):
         return True
     return False
+
+
+def _is_text_embedding(
+    model: ParameterPolicyModel,
+    parameter: nn.Parameter,
+) -> bool:
+    backbone = getattr(model, "backbone", None)
+    if not isinstance(backbone, _InputEmbeddingOwner):
+        return False
+    embedding = backbone.get_input_embeddings()
+    return isinstance(embedding, nn.Embedding) and parameter is embedding.weight
 
 
 def _last_module_index(value: object) -> int | None:
@@ -347,7 +356,6 @@ __all__ = [
     "ParameterPolicyName",
     "ParameterPolicySpec",
     "ParameterPolicyTrainability",
-    "apply_parameter_policy",
     "default_parameter_policy_config",
     "parameter_group",
 ]

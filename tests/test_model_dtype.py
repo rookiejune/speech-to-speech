@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import torch
 from anydataset.types import Modality
+from anytrain.lightning import apply_parameter_trainability
 from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 
@@ -27,7 +28,7 @@ from speech_to_speech.parameter_policy import (
     PARAMETER_POLICY_SPECS,
     ParameterGroup,
     ParameterPolicyName,
-    apply_parameter_policy,
+    ParameterPolicyTrainability,
     parameter_group,
 )
 
@@ -35,9 +36,11 @@ from speech_to_speech.parameter_policy import (
 class ModelDtypeTest(unittest.TestCase):
     def test_speech_interface_uses_fp32_storage_with_bf16_backbone(self):
         model = _rvq_model()
-        apply_parameter_policy(
+        apply_parameter_trainability(
             model,
-            PARAMETER_POLICY_SPECS[ParameterPolicyName.SPEECH_INTERFACE],
+            ParameterPolicyTrainability(
+                PARAMETER_POLICY_SPECS[ParameterPolicyName.SPEECH_INTERFACE]
+            ),
         )
 
         backbone = [
@@ -60,9 +63,11 @@ class ModelDtypeTest(unittest.TestCase):
 
     def test_rvq_boundaries_and_optimizer_state_remain_fp32(self):
         model = _rvq_model()
-        apply_parameter_policy(
+        apply_parameter_trainability(
             model,
-            PARAMETER_POLICY_SPECS[ParameterPolicyName.SPEECH_INTERFACE],
+            ParameterPolicyTrainability(
+                PARAMETER_POLICY_SPECS[ParameterPolicyName.SPEECH_INTERFACE]
+            ),
         )
         hidden = torch.randn(1, 2, 4, dtype=torch.bfloat16)
         positions = torch.tensor([[1, 2]])

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -15,6 +15,8 @@ from .._tensor import is_signed_integer_dtype
 from ..prediction import PredictionModality
 from ..runtime.backbone import BackboneOutputView
 from . import _assembly
+from ._contract import ModelCheckpointContract
+from ._contract_state import build_model_contract
 from .generation import (
     GenerationEngine,
     GenerationOptions,
@@ -26,6 +28,7 @@ from .generation import (
 from ._helper import AdapterType, register
 from .audio_input import AudioInputAdapterConfig, AudioInputTower
 from .audio_output import AudioOutputAdapterConfig
+from .embedding.fsq import FsqEmbeddingConfig, FsqNeighbors
 from .protocol import TokenModelRuntime
 from .token import TokenInterface
 from .toy import ToyConfig
@@ -40,6 +43,7 @@ class Config:
     audio_input_adapter: AudioInputAdapterConfig = field(
         default_factory=AudioInputAdapterConfig
     )
+    fsq_embedding: FsqEmbeddingConfig = field(default_factory=FsqEmbeddingConfig)
     toy: Optional[ToyConfig] = None
     lora: Optional[LoraConfig] = None
 
@@ -54,6 +58,16 @@ class Model(nn.Module):
     @property
     def lora_config(self) -> Optional[LoraConfig]:
         return self.config.lora
+
+    @property
+    def checkpoint_contract(self) -> ModelCheckpointContract:
+        return build_model_contract(
+            self,
+            self._acoustic_checkpoint_components(),
+        )
+
+    def _acoustic_checkpoint_components(self) -> Mapping[str, object]:
+        return {"type": "none"}
 
     def __init__(
         self,
@@ -70,6 +84,7 @@ class Model(nn.Module):
         text_vocab_size = text_end - text_start
         self.backbone = _assembly.backbone(self.runtime, self.config, text_vocab_size)
         text_embedding = _assembly.text_embedding(self.backbone, text_vocab_size)
+        text_embedding.requires_grad_(False)
         self._encoder = _assembly.backbone_adapter(
             self.runtime,
             self.backbone,
@@ -131,6 +146,9 @@ class Model(nn.Module):
         local_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.tokens.semantic_audio_logits(hidden_state, local_ids)
+
+    def audio_neighbor_targets(self, local_ids: torch.Tensor) -> FsqNeighbors | None:
+        return self.tokens.audio_neighbor_targets(local_ids)
 
     def project_audio_hidden(
         self,
