@@ -926,11 +926,19 @@ class GenerationTest(unittest.TestCase):
             with self.subTest(use_cache=use_cache):
                 model = Model(_model_config(), runtime=_TinyRuntime()).eval()
                 selected_modalities = model.tokens.selected_modalities
-                with patch.object(
-                    model.tokens,
-                    "selected_modalities",
-                    wraps=selected_modalities,
-                ) as selected:
+                selected_logits = model.tokens.selected_logits
+                with (
+                    patch.object(
+                        model.tokens,
+                        "selected_modalities",
+                        wraps=selected_modalities,
+                    ) as selected,
+                    patch.object(
+                        model.tokens,
+                        "selected_logits",
+                        wraps=selected_logits,
+                    ) as logits,
+                ):
                     generated = model.generate_tokens(
                         prompt_ids,
                         max_new_tokens=3,
@@ -942,6 +950,10 @@ class GenerationTest(unittest.TestCase):
                 self.assertEqual(tuple(generated.shape), (1, 5))
                 self.assertEqual(selected.call_count, 1)
                 torch.testing.assert_close(selected.call_args.args[0], prompt_ids)
+                self.assertEqual(
+                    [call.kwargs["validate"] for call in logits.call_args_list],
+                    [True, False, False],
+                )
 
     def test_mixed_generation_reuses_preclassified_routing(self):
         prompt_ids = torch.tensor([[1, 2]])

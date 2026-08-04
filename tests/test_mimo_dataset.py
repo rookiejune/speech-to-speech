@@ -7,6 +7,8 @@ from tempfile import TemporaryDirectory
 
 import torch
 
+from speech_to_speech.datamodule.config import DataLoaderConfig
+from speech_to_speech.datamodule.mimo_loader import MimoDataModule
 from speech_to_speech.datamodule.mimo_dataset import (
     JsonlMimoSegmentDataset,
     MimoDatasetConfig,
@@ -124,6 +126,33 @@ class MimoTaskDatasetContractTest(unittest.TestCase):
         )
         sample = dataset[0]
         self.assertEqual(sample.recording_id, "r")
+
+    def test_epoch_aware_dataset_rejects_persistent_workers(self) -> None:
+        segments = [
+            MimoSegment(
+                torch.tensor([index + 1]),
+                torch.tensor([index + 2]),
+                recording_id="r",
+                segment_index=index,
+            )
+            for index in range(2)
+        ]
+        dataset = MimoTaskDataset(
+            segments,
+            MimoSpecialTokens(1, 2, 0, 5, 6, 7),
+        )
+
+        with self.assertRaisesRegex(ValueError, "persistent_workers is incompatible"):
+            MimoDataModule(
+                dataset,
+                dataloader=DataLoaderConfig(
+                    batch_size=1,
+                    num_workers=1,
+                    persistent_workers=True,
+                ),
+                text_pad_token_id=0,
+                audio_pad_token_id=7,
+            )
 
 
 if __name__ == "__main__":

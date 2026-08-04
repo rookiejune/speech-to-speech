@@ -20,7 +20,7 @@ from ._helper import (
 
 
 class AudioOutputAdapterType(StrEnum):
-    """Legacy audio pre-head adapter family.
+    """Causal semantic-audio head adapter family.
 
     ``none`` / ``linear`` / ``mlp`` are pointwise special cases with no sequence
     mixing. ``transformer`` is a causal self-attention stack with its own KV cache.
@@ -36,7 +36,7 @@ class AudioOutputAdapterType(StrEnum):
 
 @dataclass(frozen=True)
 class AudioOutputAdapterConfig:
-    """Configuration for the legacy semantic-audio pre-head adapter."""
+    """Configuration for the semantic-audio head adapter."""
 
     type: AudioOutputAdapterType = AudioOutputAdapterType.NONE
     layers: int = 2
@@ -80,7 +80,7 @@ def audio_output_options(
 
 
 class AudioOutputAdapter(GradientCheckpointingLayer):
-    """Optional legacy projection before the semantic-audio tied head.
+    """Project backbone states before semantic-audio tied logits.
 
     Pointwise variants ignore cache arguments. The transformer variant is causal
     and returns an independent past for autoregressive generation.

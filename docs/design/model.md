@@ -299,7 +299,8 @@ route 的 prompt 属于调用前已序列化的 token context，model 只生成�
 规范化 route metadata 和 PEFT config metadata 到 checkpoint，并在恢复时严格比较当前 runtime/model
 配置；启用相应能力时缺失 metadata 或配置不匹配都会直接失败。
 
-具体模型不跨文件调用 `_generate()` 或 `_acoustic_features()`。KV cache 只属于一次调用；
+token 自回归状态机只由 `GenerationEngine` 持有；`AcousticModel._generate_audio_features()` 在其上组合
+frame condition 与具体 sampler，Flow/RVQ 不再各自维护 token generation loop。KV cache 只属于一次调用；
 首步编码完整 semantic-token prompt，并在有 `audio_input_positions` 时只对 source audio payload
 运行 input tower；后续只输入新 token，不再次处理 source audio。frame span lookup 是非持久 buffer，
 token-only audio decode 和 acoustic feature generation 都复用该 buffer 统计帧数，避免在

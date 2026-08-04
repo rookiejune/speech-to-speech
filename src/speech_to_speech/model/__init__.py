@@ -10,6 +10,13 @@ from .audio_output import (
     AudioOutputAdapterType,
 )
 from .base import Config, Model
+from .generation import (
+    GenerationEngine,
+    GenerationOptions,
+    GenerationOutput,
+    GenerationRequest,
+    GenerationStepResult,
+)
 from .mimo import MimoModel, MimoModelConfig, TiedEmbeddingHead
 from .mimo_factory import (
     MimoFactoryConfig,
@@ -18,6 +25,7 @@ from .mimo_factory import (
     derive_mimo_vocab,
 )
 from .toy import ToyConfig, create_toy_backbone
+from .token import TokenInterface
 
 __all__ = [
     "AdapterType",
@@ -28,6 +36,11 @@ __all__ = [
     "AudioOutputAdapterConfig",
     "AudioOutputAdapterType",
     "Config",
+    "GenerationEngine",
+    "GenerationOptions",
+    "GenerationOutput",
+    "GenerationRequest",
+    "GenerationStepResult",
     "Model",
     "MimoModel",
     "MimoModelConfig",
@@ -37,5 +50,6 @@ __all__ = [
     "build_mimo_model",
     "derive_mimo_vocab",
     "ToyConfig",
+    "TokenInterface",
     "create_toy_backbone",
 ]

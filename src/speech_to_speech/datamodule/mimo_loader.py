@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
+from typing import cast
 
 from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader, Dataset
@@ -74,18 +75,21 @@ class MimoDataModule(LightningDataModule):
         shuffle: bool,
     ) -> DataLoader[MimoBatch]:
         workers = self.config.num_workers
-        return DataLoader(
-            dataset,
-            batch_size=self.config.batch_size,
-            shuffle=shuffle,
-            num_workers=workers,
-            pin_memory=self.config.pin_memory,
-            persistent_workers=self.config.persistent_workers and workers > 0,
-            collate_fn=partial(
-                collate_mimo,
-                text_pad_token_id=self.text_pad_token_id,
-                audio_pad_token_id=self.audio_pad_token_id,
-                ignore_index=self.ignore_index,
+        return cast(
+            DataLoader[MimoBatch],
+            DataLoader(
+                dataset,
+                batch_size=self.config.batch_size,
+                shuffle=shuffle,
+                num_workers=workers,
+                pin_memory=self.config.pin_memory,
+                persistent_workers=self.config.persistent_workers and workers > 0,
+                collate_fn=partial(
+                    collate_mimo,
+                    text_pad_token_id=self.text_pad_token_id,
+                    audio_pad_token_id=self.audio_pad_token_id,
+                    ignore_index=self.ignore_index,
+                ),
             ),
         )
 

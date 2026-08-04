@@ -201,6 +201,7 @@ class Model(nn.Module):
         audio_hidden_state: torch.Tensor | None = None,
         past_key_values: object | None = None,
         use_cache: bool = False,
+        validate: bool = True,
     ) -> tuple[torch.Tensor, object | None]:
         return self.tokens.selected_logits(
             self.text_embedding,
@@ -211,6 +212,7 @@ class Model(nn.Module):
             audio_hidden_state=audio_hidden_state,
             past_key_values=past_key_values,
             use_cache=use_cache,
+            validate=validate,
         )
 
     def forward(
@@ -308,6 +310,7 @@ class Model(nn.Module):
                 attention_mask=head_attention_mask,
                 past_key_values=audio_head_past,
                 use_cache=use_cache,
+                validate=validate_input,
             )
         else:
             adapted, audio_past = self.project_audio_hidden(

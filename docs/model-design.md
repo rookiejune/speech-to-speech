@@ -344,14 +344,15 @@ decode 与 text evaluation；`pl_module` 只负责 Lightning 集成。
 
 model 对外提供：
 
-- `generation_step()`：供私有自回归循环使用的单步、目标 head 前向契约。
+- `generation_step()`：供 `GenerationEngine` 与 mixed generation strategy 调用的单步、目标
+  head 前向契约。
 - `generate_tokens()`：text 或 semantic-audio token generation。
 - `generate_audio_condition()`：生成 audio tokens 及 frame-aligned condition。
 - `generate_audio_features()`：flow/RVQ 组合返回 sequence、padded codec acoustic features 与
   每行有效 frame count。
 
-通用自回归循环由 `model/generation.py` 的 `GenerationEngine` 持有，具体模型不跨文件调用
-基类私有方法。循环首步编码完整多模态 prompt，后续复用 KV cache；输入与 cache 保留完整 batch 轴，
+通用自回归循环由 `model/generation.py` 的 `GenerationEngine` 持有，`Model` 只实现有类型的单步
+契约，不持有另一套循环。循环首步编码完整多模态 prompt，后续复用 KV cache；输入与 cache 保留完整 batch 轴，
 已结束行通过 device mask 屏蔽，只有 active rows 参与随机 sampling。transformer audio head 首步用
 完整 hidden 建立独立 KV cache，后续只接收当前 token hidden；该 cache 同时累计 boolean attention
 mask，保留左 padding 语义。cache 只属于单次调用。

@@ -168,10 +168,7 @@ def build_mimo_model(
         and options.audio_embedding_dim != hidden_size
     ):
         raise ValueError("audio_embedding_dim must match the runtime hidden size.")
-    audio_vocab = options.audio_vocab_size
-    if audio_vocab is None:
-        audio_vocab = int(getattr(cast(Any, runtime.audio_tokenizer), "vocab_size")) + 3
-    _positive_int(audio_vocab, "audio vocabulary size")
+    _, audio_vocab = _mimo_audio_vocab(runtime, options.audio_vocab_size)
     local_audio = audio_embedding or _audio_embedding(
         runtime,
         audio_vocab,
@@ -395,6 +392,53 @@ def _positive_int(value: object, name: str) -> None:
         raise ValueError(f"{name} must be a positive integer.")
 
 
+def _mimo_audio_payload_vocab(runtime: MimoRuntime) -> int:
+    """Return the local semantic-audio payload vocabulary for MIMO.
+
+    Structured tokenizers such as BiCodec expose a complete serialization
+    vocabulary through ``vocab_size``.  MIMO's semantic route consumes only
+    the semantic payload, so prefer its explicit ``semantic_vocab_size`` when
+    available and fall back to the tokenizer's ordinary vocabulary otherwise.
+    """
+
+    tokenizer = cast(Any, runtime.audio_tokenizer)
+    semantic_size = getattr(tokenizer, "semantic_vocab_size", None)
+    if semantic_size is not None:
+        if (
+            isinstance(semantic_size, bool)
+            or not isinstance(semantic_size, int)
+            or semantic_size <= 0
+        ):
+            raise ValueError(
+                "semantic audio payload vocabulary size must be a positive integer."
+            )
+        return semantic_size
+    payload_size = getattr(tokenizer, "vocab_size", None)
+    if (
+        isinstance(payload_size, bool)
+        or not isinstance(payload_size, int)
+        or payload_size <= 0
+    ):
+        raise ValueError("audio tokenizer vocabulary size must be a positive integer.")
+    return payload_size
+
+
+def _mimo_audio_vocab(
+    runtime: MimoRuntime,
+    configured_size: int | None,
+) -> tuple[int, int]:
+    payload_size = _mimo_audio_payload_vocab(runtime)
+    minimum_size = payload_size + 3
+    audio_size = minimum_size if configured_size is None else configured_size
+    _positive_int(audio_size, "audio vocabulary size")
+    if audio_size < minimum_size:
+        raise ValueError(
+            "audio vocabulary size must cover the semantic audio payload and "
+            "three MIMO special tokens."
+        )
+    return payload_size, audio_size
+
+
 @dataclass(frozen=True)
 class MimoVocab:
     """Local vocabulary and structural ids used by a MIMO data composer."""
@@ -430,8 +474,10 @@ def derive_mimo_vocab(
     if not isinstance(options, MimoFactoryConfig):
         raise TypeError("config must be a MimoFactoryConfig or None.")
     text_size = options.text_vocab_size or _text_vocab(runtime)
-    audio_payload = int(getattr(cast(Any, runtime.audio_tokenizer), "vocab_size"))
-    audio_size = options.audio_vocab_size or audio_payload + 3
+    audio_payload, audio_size = _mimo_audio_vocab(
+        runtime,
+        options.audio_vocab_size,
+    )
     _positive_int(text_size, "text vocabulary size")
     _positive_int(audio_size, "audio vocabulary size")
     text_blank = (

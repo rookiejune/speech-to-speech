@@ -17,6 +17,10 @@ one position and counts only targets whose predecessor is attended.  Text and
 audio ids are local to their own vocabularies.  Do not offset audio ids by the
 text vocabulary size.
 
+For structured codecs such as BiCodec, the MIMO audio vocabulary contains the
+semantic payload only, followed by local BOA, EOA, and blank rows.  Acoustic
+serializer rows and internal stream markers are not MIMO prediction ids.
+
 Continuous audio features are optional.  `audio_feature_mask` must be true
 only for observed source audio positions.  Target audio positions are always
 masked, so teacher-forcing cannot leak the answer through a continuous side
@@ -36,7 +40,7 @@ the paper use different defaults.
 
 ## Runtime and training entry
 
-The standalone entry is deliberately separate from the legacy single-stream
+The standalone entry is deliberately separate from the existing single-stream
 callbacks:
 
 ```text
@@ -64,7 +68,8 @@ For a CPU smoke run:
 env PYTHONPATH=src:../semantic-acoustic-codec/src:../third_party/anydataset/src:../third_party/anytrain/src:../workspace/src \
   /Users/zhuyin/miniconda3/envs/py39/bin/python scripts/mimo_train.py \
   model.toy=true trainer.accelerator=cpu trainer.devices=1 \
-  trainer.precision=32-true trainer.enable_checkpointing=false train.max_steps=1
+  trainer.precision=32-true trainer.enable_checkpointing=false train.max_steps=1 \
+  dataloader.num_workers=0 dataloader.pin_memory=false
 ```
 
 Replace the toy segment factory with a prepared workspace factory for a real

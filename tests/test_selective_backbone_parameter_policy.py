@@ -84,12 +84,18 @@ class SelectiveBackboneParameterPolicyTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "legacy model ownership"):
                     parameter_group(legacy)
 
-        self.assertIs(
-            parameter_group("text_embedding.weight"),
-            ParameterGroup.BACKBONE,
-        )
-        with self.assertRaisesRegex(ValueError, "does not belong"):
-            parameter_group("tokens.text_embedding.weight")
+        for nonstandard in (
+            "body.layers.0.weight",
+            "text_embedding.weight",
+            "text_head.weight",
+            "audio_embedding.weight",
+            "audio_feature_projection.weight",
+            "audio_head.weight",
+            "tokens.text_embedding.weight",
+        ):
+            with self.subTest(nonstandard=nonstandard):
+                with self.assertRaisesRegex(ValueError, "does not belong"):
+                    parameter_group(nonstandard)
 
     def test_top_third_accepts_direct_body_paths_without_broadening_matching(self):
         model = _SelectiveModel()

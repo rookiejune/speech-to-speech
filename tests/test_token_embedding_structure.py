@@ -13,6 +13,7 @@ from speech_to_speech.model.audio_output import (
 )
 from speech_to_speech.model.base import Config, Model
 from speech_to_speech.model.embedding.fsq import FsqAffineEmbedding
+from speech_to_speech.model.generation import TokenKind
 from speech_to_speech.model.token import TokenInterface
 from speech_to_speech.model.toy import ToyConfig, create_toy_backbone
 from speech_to_speech.runtime import AudioSequenceLayout
@@ -210,6 +211,86 @@ class TokenInterfaceStructureTest(unittest.TestCase):
         self.assertIn('"token_embedding.embeddings.audio.weight"', message)
         self.assertIn('"backbone.model.layers.0.self_attn.q_proj.weight"', message)
 
+    def test_strict_load_rejects_legacy_adapter_ownership(self) -> None:
+        model = _checkpoint_model(audio_output_type=AudioOutputAdapterType.MLP)
+        checkpoint = dict(model.state_dict())
+        renamed = (
+            (
+                "source_audio_encoder.adapter.gate_proj.weight",
+                "audio_input_adapter.adapter.gate_proj.weight",
+            ),
+            (
+                "tokens.audio_head.adapter.gate_proj.weight",
+                "audio_output_adapter.adapter.gate_proj.weight",
+            ),
+        )
+        for current, legacy in renamed:
+            checkpoint[legacy] = checkpoint.pop(current)
+
+        with self.assertRaises(RuntimeError) as raised:
+            model.load_state_dict(checkpoint, strict=True)
+
+        message = str(raised.exception)
+        for current, legacy in renamed:
+            self.assertIn(f'"{current}"', message)
+            self.assertIn(f'"{legacy}"', message)
+
+    def test_selected_logits_rejects_invalid_ids_for_every_routing_hint(self) -> None:
+        model = _checkpoint_model()
+        hidden = torch.randn(1, 1, 8)
+
+        token_kinds: tuple[TokenKind | None, ...] = (
+            None,
+            "text",
+            "audio",
+            "mixed",
+        )
+        for token_kind in token_kinds:
+            with self.subTest(token_kind=token_kind):
+                with self.assertRaisesRegex(ValueError, "invalid vocabulary id"):
+                    model.selected_logits(
+                        hidden,
+                        torch.tensor([1, model.layout.vocab_size]),
+                        token_kind=token_kind,
+                    )
+
+    def test_selected_logits_rejects_inaccurate_routing_hints(self) -> None:
+        model = _checkpoint_model()
+        hidden = torch.randn(1, 1, 8)
+        cases: tuple[tuple[torch.Tensor, TokenKind, TokenKind], ...] = (
+            (torch.tensor([1]), "audio", "text"),
+            (torch.tensor([8]), "text", "audio"),
+            (torch.tensor([1, 2]), "mixed", "text"),
+            (torch.tensor([8, 9]), "mixed", "audio"),
+            (torch.tensor([1, 8]), "text", "mixed"),
+        )
+
+        for token_ids, hinted, actual in cases:
+            with self.subTest(hinted=hinted, actual=actual):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"{hinted!r} does not match the actual kind {actual!r}",
+                ):
+                    model.selected_logits(
+                        hidden,
+                        token_ids,
+                        token_kind=hinted,
+                    )
+
+    def test_selected_logits_requires_a_valid_id_vector(self) -> None:
+        model = _checkpoint_model()
+        hidden = torch.randn(1, 1, 8)
+
+        for token_ids in (torch.empty(0, dtype=torch.long), torch.tensor([[1, 8]])):
+            with self.subTest(shape=tuple(token_ids.shape)):
+                with self.assertRaisesRegex(ValueError, "non-empty 1D tensor"):
+                    model.selected_logits(hidden, token_ids)
+
+        for dtype in (torch.bool, torch.int16, torch.float32):
+            with self.subTest(dtype=dtype):
+                with self.assertRaisesRegex(TypeError, "int32 or int64"):
+                    model.selected_logits(hidden, torch.ones(1, dtype=dtype))
+
     def test_fsq_audio_embedding_builds_model_and_ties_logits(self) -> None:
         tokenizer = FlattenedAudioTokenizer(
             codebook_sizes=_FsqCodec.codebook_sizes,
@@ -255,12 +336,15 @@ class TokenInterfaceStructureTest(unittest.TestCase):
         )
 
 
-def _checkpoint_model() -> Model:
+def _checkpoint_model(
+    *,
+    audio_output_type: AudioOutputAdapterType = AudioOutputAdapterType.NONE,
+) -> Model:
     return Model(
         Config(
             semantic_audio_adapter=AdapterType.LINEAR,
             audio_output_adapter=AudioOutputAdapterConfig(
-                type=AudioOutputAdapterType.NONE,
+                type=audio_output_type,
             ),
             toy=ToyConfig(
                 hidden_size=8,

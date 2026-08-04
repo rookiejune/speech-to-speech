@@ -267,17 +267,6 @@ def parameter_group(name: str) -> ParameterGroup:
         if ".lora_A." in name or ".lora_B." in name:
             return ParameterGroup.BACKBONE_ADAPTER
         return ParameterGroup.BACKBONE
-    # MIMO owns a complete body plus local text/audio routes.  Keep these
-    # names explicit so the existing policy callback can validate coverage
-    # instead of silently falling back to an optimizer-wide parameter list.
-    if name.startswith(("body.", "text_embedding.", "text_head.")):
-        return ParameterGroup.BACKBONE
-    if name.startswith("audio_embedding."):
-        return ParameterGroup.SEMANTIC_AUDIO_EMBEDDING
-    if name.startswith(("audio_feature_projection.",)):
-        return ParameterGroup.SEMANTIC_AUDIO_ADAPTER
-    if name.startswith("audio_head."):
-        return ParameterGroup.AUDIO_OUTPUT
     if name.startswith("tokens.audio_embedding."):
         return ParameterGroup.SEMANTIC_AUDIO_EMBEDDING
     if name.startswith("tokens.audio_projection."):

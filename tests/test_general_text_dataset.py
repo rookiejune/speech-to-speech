@@ -43,13 +43,11 @@ class GeneralTextDatasetTest(unittest.TestCase):
         {
             "DYNAMIC_HOME": "/tmp/dynamic",
             "SPEECH_TO_SPEECH_AUDIO_TOKENIZER": "/tmp/audio-tokenizer",
+            "SPEECH_TO_SPEECH_TEXT_CORPUS": "/tmp/corpus.jsonl",
         },
     )
     def test_train_config_exposes_general_corpus_and_packing_fields(self) -> None:
-        config = _train(
-            "experiment=train/kimi_audio/ar_pretrain_general",
-            "text_datamodule.dataset.path=/tmp/corpus.jsonl",
-        )
+        config = _train("experiment=train/kimi_audio/ar_pretrain")
 
         self.assertIs(config.text_datamodule.dataset.name, TextDatasetName.GENERAL)
         self.assertEqual(config.text_datamodule.dataset.path, "/tmp/corpus.jsonl")

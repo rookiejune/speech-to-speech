@@ -5,7 +5,9 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, TypedDict
+
+from typing_extensions import NotRequired
 
 import torch
 from torch import Tensor
@@ -44,6 +46,16 @@ class MimoGenerationModel(Protocol):
         audio_features: Tensor | None = None,
         audio_feature_mask: Tensor | None = None,
     ) -> MimoGenerationStep: ...
+
+
+class _MimoGenerationStepKwargs(TypedDict):
+    text_input_ids: Tensor
+    audio_input_ids: Tensor
+    attention_mask: Tensor
+    past_key_values: object | None
+    use_cache: bool
+    audio_features: NotRequired[Tensor | None]
+    audio_feature_mask: NotRequired[Tensor | None]
 
 
 @dataclass(frozen=True)
@@ -147,7 +159,7 @@ def generate_mimo(
     step_audio = audio
 
     for step in range(options.max_new_tokens):
-        step_kwargs: dict[str, object] = {
+        step_kwargs: _MimoGenerationStepKwargs = {
             "text_input_ids": step_text,
             "audio_input_ids": step_audio,
             "attention_mask": attention,

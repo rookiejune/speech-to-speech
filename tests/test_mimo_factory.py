@@ -14,6 +14,7 @@ from speech_to_speech.model.mimo_factory import (
     build_mimo_model,
     derive_mimo_vocab,
 )
+from speech_to_speech.model.mimo import TiedEmbeddingHead
 from speech_to_speech.runtime.backbone.adapter import BackboneBodyAdapter
 from speech_to_speech.runtime.types import BackboneOutput, BackboneReadout
 
@@ -70,12 +71,21 @@ class _Root(nn.Module):
 
 
 class _Runtime:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        text_vocab_size: int = 12,
+        audio_tokenizer: object | None = None,
+    ) -> None:
         self.backbone = _Root()
         self.backbone_adapter = _Adapter(self.backbone.base_model)
         self.backbone_body = "base_model"
-        self.layout = SimpleNamespace(blocks={"text": (0, 12)})
-        self.audio_tokenizer = SimpleNamespace(vocab_size=7)
+        self.layout = SimpleNamespace(blocks={"text": (0, text_vocab_size)})
+        self.audio_tokenizer = (
+            SimpleNamespace(vocab_size=7)
+            if audio_tokenizer is None
+            else audio_tokenizer
+        )
         self.backbone_readouts = {
             "text": "last_hidden_state[0]",
             "audio": "last_hidden_state[1]",
@@ -126,6 +136,44 @@ class MimoFactoryTest(unittest.TestCase):
         special = vocab.special_tokens(audio_delay_tokens=2)
         self.assertEqual(special.audio_delay_tokens, 2)
 
+    def test_bicodec_like_tokenizer_uses_semantic_payload_vocab(self) -> None:
+        runtime = _Runtime(
+            audio_tokenizer=SimpleNamespace(
+                semantic_vocab_size=4,
+                # The complete structured serializer has extra acoustic and
+                # marker rows; MIMO's semantic route must not allocate them.
+                vocab_size=99,
+            )
+        )
+
+        vocab = derive_mimo_vocab(runtime)
+        self.assertEqual(vocab.audio_size, 7)
+        self.assertEqual(vocab.audio_bos, 4)
+        self.assertEqual(vocab.audio_eos, 5)
+        self.assertEqual(vocab.audio_blank, 6)
+
+        model = build_mimo_model(runtime, MimoFactoryConfig(audio_embedding_dim=4))
+        self.assertEqual(model(_batch()).audio.shape[-1], 7)
+
+    def test_explicit_audio_vocab_must_cover_payload_and_specials(self) -> None:
+        runtime = _Runtime(
+            audio_tokenizer=SimpleNamespace(
+                semantic_vocab_size=4,
+                vocab_size=99,
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "cover the semantic audio payload"):
+            derive_mimo_vocab(
+                runtime,
+                MimoFactoryConfig(audio_vocab_size=6),
+            )
+        with self.assertRaisesRegex(ValueError, "cover the semantic audio payload"):
+            build_mimo_model(
+                runtime,
+                MimoFactoryConfig(audio_embedding_dim=4, audio_vocab_size=6),
+            )
+
     def test_factory_projects_configured_continuous_audio_features(self) -> None:
         runtime = _Runtime()
         model = build_mimo_model(
@@ -140,6 +188,26 @@ class MimoFactoryTest(unittest.TestCase):
 
         self.assertEqual(logits.audio.shape, (1, 3, 10))
         self.assertIsInstance(model.audio_feature_projection, nn.Linear)
+
+    def test_local_text_head_ties_prefix_without_duplicate_embedding_owner(self) -> None:
+        runtime = _Runtime(text_vocab_size=9)
+        model = build_mimo_model(runtime, MimoFactoryConfig(audio_embedding_dim=4))
+
+        logits = model(_batch())
+        names = list(dict(model.named_parameters()))
+        state_names = list(model.state_dict())
+
+        self.assertEqual(logits.text.shape[-1], 9)
+        self.assertIsInstance(model.text_head, TiedEmbeddingHead)
+        self.assertEqual(
+            names.count("backbone.base_model.embedding.weight"),
+            1,
+        )
+        self.assertNotIn("text_head.embedding.weight", names)
+        self.assertEqual(
+            state_names.count("backbone.base_model.embedding.weight"),
+            1,
+        )
 
 
 if __name__ == "__main__":

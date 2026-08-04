@@ -17,6 +17,7 @@ from .mimo_dataset import (
 )
 
 if TYPE_CHECKING:
+    from .mimo_loader import MimoDataModule
     from .module import DataModule
 
 __all__ = [

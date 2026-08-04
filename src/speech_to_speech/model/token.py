@@ -290,10 +290,20 @@ class TokenInterface(nn.Module):
         audio_hidden_state: Tensor | None = None,
         past_key_values: object | None = None,
         use_cache: bool = False,
+        validate: bool = True,
     ) -> tuple[Tensor, object | None]:
         text_start, text_end = self.layout.blocks[Modality.TEXT.value]
         audio_start, audio_end = self.layout.blocks[Modality.AUDIO.value]
-        if token_kind == Modality.TEXT.value:
+        actual_kind, text_mask, audio_mask = (
+            _selected_token_routing(self.layout, token_ids, token_kind)
+            if validate
+            else (
+                _trusted_selected_token_kind(token_ids, token_kind),
+                None,
+                None,
+            )
+        )
+        if actual_kind == Modality.TEXT.value:
             return (
                 self.text_logits(
                     text_embedding,
@@ -302,7 +312,7 @@ class TokenInterface(nn.Module):
                 ),
                 None,
             )
-        if token_kind == Modality.AUDIO.value:
+        if actual_kind == Modality.AUDIO.value:
             return self._selected_audio_logits(
                 hidden_state,
                 token_ids - audio_start,
@@ -312,32 +322,8 @@ class TokenInterface(nn.Module):
                 use_cache=use_cache,
             )
 
-        text_mask = token_ids.ge(text_start) & token_ids.lt(text_end)
-        audio_mask = token_ids.ge(audio_start) & token_ids.lt(audio_end)
-        if token_kind is None:
-            if not bool((text_mask | audio_mask).all()):
-                raise ValueError("selected token ids contain an invalid vocabulary id.")
-            if bool(text_mask.all()):
-                return (
-                    self.text_logits(
-                        text_embedding,
-                        hidden_state,
-                        token_ids - text_start,
-                    ),
-                    None,
-                )
-            if bool(audio_mask.all()):
-                return self._selected_audio_logits(
-                    hidden_state,
-                    token_ids - audio_start,
-                    attention_mask=attention_mask,
-                    audio_hidden_state=audio_hidden_state,
-                    past_key_values=past_key_values,
-                    use_cache=use_cache,
-                )
-        elif token_kind != "mixed":
-            raise ValueError(f"unsupported selected token kind: {token_kind!r}")
-
+        if text_mask is None or audio_mask is None:
+            text_mask, audio_mask = _selected_token_masks(self.layout, token_ids)
         text = self.text_logits(
             text_embedding,
             hidden_state,
@@ -352,8 +338,9 @@ class TokenInterface(nn.Module):
             use_cache=use_cache,
         )
         dtype = torch.promote_types(text.dtype, audio.dtype)
-        logits = torch.empty(
+        logits = torch.full(
             (*hidden_state.shape[:-1], token_ids.numel()),
+            float("-inf"),
             dtype=dtype,
             device=hidden_state.device,
         )
@@ -418,6 +405,74 @@ def _text_rows(layout: Layout, embedding: nn.Embedding) -> Tensor:
     _validate_text_embedding(layout, embedding)
     start, end = layout.blocks[Modality.TEXT.value]
     return embedding.weight[: end - start]
+
+
+def _selected_token_routing(
+    layout: Layout,
+    token_ids: Tensor,
+    hinted_kind: TokenKind | None,
+) -> tuple[TokenKind, Tensor, Tensor]:
+    _validate_selected_token_ids(token_ids)
+    text_mask, audio_mask = _selected_token_masks(layout, token_ids)
+    text_only, audio_only, all_covered = (
+        torch.stack(
+            (
+                text_mask.all(),
+                audio_mask.all(),
+                (text_mask | audio_mask).all(),
+            )
+        )
+        .detach()
+        .cpu()
+        .tolist()
+    )
+    if not all_covered:
+        raise ValueError("selected token ids contain an invalid vocabulary id.")
+
+    actual_kind: TokenKind
+    if text_only:
+        actual_kind = "text"
+    elif audio_only:
+        actual_kind = "audio"
+    else:
+        actual_kind = "mixed"
+    if hinted_kind not in {None, "text", "audio", "mixed"}:
+        raise ValueError(f"unsupported selected token kind: {hinted_kind!r}")
+    if hinted_kind is not None and hinted_kind != actual_kind:
+        raise ValueError(
+            f"selected token kind {hinted_kind!r} does not match "
+            f"the actual kind {actual_kind!r}."
+        )
+    return actual_kind, text_mask, audio_mask
+
+
+def _trusted_selected_token_kind(
+    token_ids: Tensor,
+    hinted_kind: TokenKind | None,
+) -> TokenKind:
+    _validate_selected_token_ids(token_ids)
+    if hinted_kind is None:
+        raise ValueError(
+            "selected token kind is required when token id validation is disabled."
+        )
+    if hinted_kind not in {"text", "audio", "mixed"}:
+        raise ValueError(f"unsupported selected token kind: {hinted_kind!r}")
+    return hinted_kind
+
+
+def _validate_selected_token_ids(token_ids: Tensor) -> None:
+    if token_ids.dim() != 1 or token_ids.numel() == 0:
+        raise ValueError("selected token ids must be a non-empty 1D tensor.")
+    if token_ids.dtype not in {torch.int32, torch.int64}:
+        raise TypeError("selected token ids must use an int32 or int64 dtype.")
+
+
+def _selected_token_masks(layout: Layout, token_ids: Tensor) -> tuple[Tensor, Tensor]:
+    text_start, text_end = layout.blocks[Modality.TEXT.value]
+    audio_start, audio_end = layout.blocks[Modality.AUDIO.value]
+    text_mask = token_ids.ge(text_start) & token_ids.lt(text_end)
+    audio_mask = token_ids.ge(audio_start) & token_ids.lt(audio_end)
+    return text_mask, audio_mask
 
 
 def _checked_modalities(

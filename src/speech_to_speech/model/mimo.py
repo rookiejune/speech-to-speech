@@ -139,10 +139,13 @@ class MimoModel(nn.Module):
     def dual_hidden_states(self, batch: MimoBatch) -> DualStreamHiddenStates:
         if not isinstance(batch, MimoBatch):
             raise TypeError("MimoModel.dual_hidden_states expects a MimoBatch.")
+        attention_mask = batch.attention_mask
+        if attention_mask is None:
+            raise RuntimeError("MimoBatch masks were not normalized.")
         output = self._encode(
             batch.text_input_ids,
             batch.audio_input_ids,
-            attention_mask=batch.attention_mask,
+            attention_mask=attention_mask,
             audio_features=batch.audio_features,
             audio_feature_mask=batch.audio_feature_mask,
             use_cache=False,
