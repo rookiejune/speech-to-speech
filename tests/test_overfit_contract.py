@@ -61,8 +61,8 @@ class OverfitContractTest(unittest.TestCase):
         self.assertEqual(
             {path.stem for path in experiments},
             {
-                "bicodec_flattened_smoke",
-                "bicodec_semantic_only_smoke",
+                "bicodec_generate_global_smoke",
+                "bicodec_input_global_smoke",
                 "longcat_semantic_only_smoke",
                 "longcat_flattened_smoke",
                 "default",

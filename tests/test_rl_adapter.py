@@ -72,7 +72,6 @@ def test_s2s_score_requires_external_rewards() -> None:
             "prompt_ids": torch.tensor([1, 2], dtype=torch.long),
             "task": Task.TTS,
             "audio_input_positions": None,
-            "audio_context": None,
         },
         response_ids=torch.tensor([3], dtype=torch.long),
     )

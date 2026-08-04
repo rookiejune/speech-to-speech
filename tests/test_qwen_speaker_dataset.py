@@ -35,7 +35,6 @@ from speech_to_speech.datamodule.dataset.speech import (
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.build.single import SingleCollator
 from speech_to_speech.datamodule.types import ModelBatch
-from speech_to_speech.audio_stream import AudioStream
 from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.task import Task
@@ -153,7 +152,7 @@ class SpeakerGridDatasetTest(unittest.TestCase):
             split="train",
         )
 
-    def test_loader_enables_reference_context_for_reference_route(self):
+    def test_loader_does_not_infer_reference_context_from_runtime(self):
         load = Mock()
         load.return_value = SimpleNamespace(load=lambda: _grid())
         with _qwen_tts_loader(load):
@@ -162,7 +161,7 @@ class SpeakerGridDatasetTest(unittest.TestCase):
                 SimpleNamespace(
                     codec_name="bicodec",
                     audio_view=AudioView.BICODEC,
-                    audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
+                    audio_sequence_layout=AudioSequenceLayout.FLATTENED,
                     audio_tokenizer=BiCodecAudioTokenizer(
                         semantic_codebook_size=16,
                         acoustic_codebook_sizes=(5, 7),
@@ -172,7 +171,7 @@ class SpeakerGridDatasetTest(unittest.TestCase):
             )
 
         self.assertIsInstance(dataset, SpeakerGridCellsDataset)
-        self.assertTrue(dataset.with_audio_context)
+        self.assertFalse(dataset.with_audio_context)
 
     def test_loader_rejects_unsupported_codec(self):
         config = DatasetConfig(name=DatasetName.QWEN_TTS_SPEAKER)
@@ -193,8 +192,8 @@ class SpeakerGridDatasetTest(unittest.TestCase):
 
 
 class BiCodecSpeakerCellTest(unittest.TestCase):
-    def test_reference_route_keeps_target_semantic_out_of_prompt(self):
-        runtime = _runtime(AudioSequenceLayout.SEMANTIC)
+    def test_explicit_reference_serializes_global_without_batch_side_channel(self):
+        runtime = _runtime(AudioSequenceLayout.FLATTENED)
         sample = SpeakerGridCellsDataset(
             _grid(),
             with_audio_context=True,
@@ -203,12 +202,6 @@ class BiCodecSpeakerCellTest(unittest.TestCase):
         batch = SingleCollator(runtime, {Task.TTS: 1.0})([sample])
 
         self.assertIsInstance(batch, ModelBatch)
-        if batch.audio_contexts is None or batch.audio_contexts[0] is None:
-            self.fail("reference audio context was dropped from the model batch")
-        torch.testing.assert_close(
-            batch.audio_contexts[0].semantic,
-            torch.tensor([[2], [3]]),
-        )
         row = batch.input_ids[0]
         boa_positions = (row == runtime.boa_token_id).nonzero(as_tuple=False).flatten()
         self.assertGreaterEqual(boa_positions.numel(), 2)
@@ -221,7 +214,6 @@ class BiCodecSpeakerCellTest(unittest.TestCase):
         local_prompt = row[prompt_boa + 1 : prompt_eoa] - 10
         decoded = runtime.audio_tokenizer.decode_streams(
             local_prompt,
-            (AudioStream.ACOUSTIC,),
         )
         self.assertIsNone(decoded.semantic)
         torch.testing.assert_close(
@@ -229,18 +221,13 @@ class BiCodecSpeakerCellTest(unittest.TestCase):
             torch.tensor([[0, 1], [2, 3], [4, 5]]),
         )
 
-    def test_semantic_only_and_full_sequence_build_tts_batches(self):
-        for audio_sequence_layout in (
-            AudioSequenceLayout.SEMANTIC,
-            AudioSequenceLayout.FLATTENED,
-        ):
-            with self.subTest(audio_sequence_layout=audio_sequence_layout.value):
-                runtime = _runtime(audio_sequence_layout)
+    def test_input_presence_selects_tts_response_opening_marker(self):
+        for with_audio_context in (False, True):
+            with self.subTest(with_audio_context=with_audio_context):
+                runtime = _runtime(AudioSequenceLayout.FLATTENED)
                 cell = SpeakerGridCellsDataset(
                     _grid(),
-                    with_audio_context=(
-                        runtime.audio_sequence_layout is AudioSequenceLayout.SEMANTIC
-                    ),
+                    with_audio_context=with_audio_context,
                 )[0]
                 batch = SingleCollator(runtime, {Task.TTS: 1.0})([cell])
 
@@ -257,8 +244,7 @@ class BiCodecSpeakerCellTest(unittest.TestCase):
                     "audio",
                     torch.tensor(runtime.audio_tokenizer.acoustic_token_id),
                 )
-                if runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
-                    self.assertIsNone(batch.audio_contexts[0])
+                if not with_audio_context:
                     self.assertEqual(int(response[0]), int(acoustic_marker))
                     acoustic_index = (response == acoustic_marker).nonzero(
                         as_tuple=False,
@@ -268,7 +254,6 @@ class BiCodecSpeakerCellTest(unittest.TestCase):
                     )[0].item()
                     self.assertLess(acoustic_index, semantic_index)
                 else:
-                    self.assertIsNotNone(batch.audio_contexts[0])
                     self.assertEqual(int(response[0]), int(semantic_marker))
                     boa_positions = (
                         batch.input_ids[0] == runtime.boa_token_id

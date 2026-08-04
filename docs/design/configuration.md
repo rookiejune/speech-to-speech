@@ -14,7 +14,7 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
   `semantic-acoustic-codec` artifact 补齐。`longcat`、`longcat_native`、`bicodec`、
   `unicodec` 表示相互兼容的资源 snapshot；不再拆分 `codec` 和 `sampler` 组。
 - `model`：完整映射 `model.Config` 的 semantic adapter、可选 source-audio input adapter、
-  `ToyConfig`、`AudioOutputAdapterConfig` 与 `peft.LoraConfig | None`。
+  route-local CTC decoder、`ToyConfig`、`AudioOutputAdapterConfig` 与 `peft.LoraConfig | None`。
   `model=toy` 只替换 backbone；`+model/lora@model.lora=qwen` 直接组合 Hugging Face PEFT 的官方字段并向现有
   backbone 注入 adapter，不维护项目内 LoRA config 或 layer；`model/acoustic` 选择 flow/RVQ composition，preset
   package 写入 `model.acoustic`，避免把 subtype 字段混入基础 `model.Config`。
@@ -70,6 +70,14 @@ Flow/RVQ acoustic decoder。启用 transformer 时要求 backbone hidden size �
 pointwise 特例；`transformer` 启用因果 self-attention，并携带独立 KV cache（与 backbone cache
 同步 compact）。可配置 `layers`、`heads`、`ffn_ratio`、`dropout`（仅 transformer 使用）。该模块
 同时服务 teacher forcing、候选 logits 和 autoregressive generation。
+
+`model.ctc.source` / `model.ctc.target` 各自包含 `weight` 与 `decoder`。decoder 可配置
+`type=identity|linear|transformer`、`backbone_readout`、`pool_factor`、`layers`、`heads`、
+`ffn_ratio` 和 `dropout`；`backbone_readout=null` 表示复用当前 prediction modality 的主 readout。
+source 的时序 decoder 固定 non-causal，target 固定 causal，不能通过 Hydra 反转；两侧最终都复用冻结
+text head。标准 HF backbone 可用 `hidden_states[N]` 挂中间层；remote-code/multibranch backend 只有在
+实际 output 暴露兼容 history 时才支持该路径，默认 null/final 路径不作此假设。默认 weight 为 `0`、
+decoder 为 identity，训练 experiment 只覆写需要启用的 route weight。
 
 ## 生产默认与完整链路测试
 
@@ -204,7 +212,7 @@ schema，不重复声明字段；`scripts/overfit.py` 与 `scripts/train.py` 都
 `audio_sequence_layout` 是 root/runtime schema 的公开结构，入口解析后由同一 `Runtime` 派生内部
 route，再传给 DataModule、model 和 generation。Hydra 的字符串表示在入口归一化，再由公开
 dataclass 校验。reference 不是独立 config 轴；需要 prompt-owned acoustic 的路径从输入 full
-codes/context 中取得 reference acoustic。
+codes/reference 中取得 acoustic 并直接序列化进 prompt。
 
 两个入口分别解析为：
 
@@ -225,8 +233,10 @@ codes/context 中取得 reference acoustic。
 - `audio_sequence_layout=semantic` 保持逻辑输入输出为 full codes，但模型 token sequence
   只预测 semantic。需要 waveform 时，acoustic 由 Flow/RVQ side module 或
   `runtime.semantic_codec_artifact` 提供。
-- reference 不是公开 config 轴。BiCodec 的 semantic layout 从输入 full codes/context 取得
-  reference acoustic；没有 reference 的路径只能依赖输出 full codes 或后置 acoustic provider。
+- BiCodec 只允许 `audio_sequence_layout=flattened` 的 self-describing structured sequence。
+  输入 global 直接序列化进 prompt，response 以 `<begin_of_semantic>` 开局；没有输入 global 时
+  response 以 `<begin_of_global>` 开局，由 LLM 生成 global 后继续生成 semantic。global ownership
+  由数据装配产生的 marker labels 学习，不是公开 config 或 runtime route 轴。
 - 非 semantic 单元的存储始终是 `SemanticAcousticCodes.acoustic`；frame-aligned 还是 fixed-length
   由 codec 的 `AcousticLayout` 决定，不由 grammar/prompt 再造第三种 stream。
 - `runtime.backbone_initialization=random` 从 `runtime.backbone` 读取 tokenizer 与完整 HF config，
@@ -239,12 +249,13 @@ codes/context 中取得 reference acoustic。
   双分支 readout，并显式配置本项目的单流 Jinja instruction template；这不是 Kimi 官方双流
   PromptManager 格式，后者需要独立的结构化 prompt adapter。
 - `runtime.semantic_codec_artifact` 为 `semantic-acoustic-codec` 的 semantic-only waveform
-  support artifact；LongCat 的 `semantic` token-only 路径可使用它。BiCodec 的 `semantic`
-  layout 从 full-code input/context 复用 reference acoustic，并调用 backend `detokenize()`；它不接入
-  Flow/RVQ composition。两份 BiCodec smoke 都选择
+  support artifact；LongCat 的 `semantic` token-only 路径可使用它。BiCodec 不接受该 artifact，
+  unified structured sequence 始终恢复完整 `SemanticAcousticCodes` 后调用 backend `detokenize()`，
+  也不接入 Flow/RVQ composition。两份 BiCodec smoke 都选择
   `datamodule/dataset=qwen_tts_speaker` 和 `datamodule.shape=single`；可用
-  `datamodule.dataset.speaker=<id>` 限制到一个 speaker。FrameCodec 的 token-only full-code
-  baseline 使用 `audio_sequence_layout=flattened`。
+  `datamodule.dataset.speaker=<id>` 限制到一个 speaker；`bicodec_input_global_smoke` 使用 prompt
+  global stream，`bicodec_generate_global_smoke` 从 text 生成 global stream。FrameCodec 的
+  token-only full-code baseline 使用 `audio_sequence_layout=flattened`。
 - `model.acoustic.init_artifact` 是 Flow/RVQ 联合训练的 generator 初始化路径，与
   `runtime.semantic_codec_artifact` 不同。composition 加载 artifact 后校验 frame-aligned layout、
   decoder/REPA 配置和 acoustic backend metadata，再把已加载对象交给 model；semantic conditioner 不进入

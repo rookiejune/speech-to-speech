@@ -34,7 +34,7 @@ Raw Sample
 
 1. 全局 token 序列同时容纳 text token 与 semantic-audio token。
 2. source audio 的可配置 input tower 只 overlay 已显式标记的 payload 位置；BOA/EOA、target/generated
-   audio 和 route reference context 不进入该 tower。
+   audio 和额外序列化的 BiCodec reference global span 不进入该 tower。
 3. acoustic stream 只为已经可见的 speech token span 提供 side channel；response acoustic target 不注入 backbone。
 4. backbone 和 acoustic decoder 通过 frame-aligned hidden-state contract 连接；adapter 显式隔离
    backbone hidden dimension 与 acoustic generator condition dimension。
@@ -119,7 +119,7 @@ class ModelBatch:
 - `acoustic_target`：`semantic_codes`、`codes` 与 `token_positions` 共同表示 decoder target、
   codec/REPA 输入和逐帧全局 audio token 位置（相对完整 `input_ids`）。
 - `audio_input_positions`：`[batch, frames]` 的 source audio payload 位置；右侧 `-1` 是 batch
-  padding，不包含 BOA/EOA、target/generated audio 或 route reference context。
+  padding，不包含 BOA/EOA、target/generated audio 或额外的 BiCodec reference global span。
 - `source_ctc` / `target_ctc`：分别绑定 source / target audio span 的完整序列位置和同语言
   transcript local text IDs；只有 transcript 对该 audio span 的 hidden states 不可见时才存在。
 
@@ -173,6 +173,11 @@ CTC 也始终保存 audio token 自身位置 `p`，但读取 hidden 的规则由
 统一判定语言是：**对每个 audio span，只要它自身的同语言 transcript 对该 span hidden 不可见，就通过
 冻结的文本头施加 CTC。** TTS 是关键反例：虽然输出 audio，但 target transcript 就是已经可见的输入
 text，因此没有 target CTC；T2ST 的 source text 不是 target transcript，因此 target CTC 仍然存在。
+
+CTC 的 `sequences` 单位表示“至少有一条 active CTC route 的 batch row”，不是 span 数；S2ST 同一行的
+source/target route 分别乘各自权重后相加，再作为一个样本级 alignment regularizer 聚合。BiCodec 的
+audio span 使用 tokenizer 序列化后的完整 payload：内部 acoustic/semantic/end marker 保留为 CTC 可输出
+blank 的时间步，只有外层 BOA/EOA 不进入 CTC positions。
 
 ## 3. 任务定义
 
@@ -233,8 +238,8 @@ Runtime 聚合互相兼容的 backbone、text/audio tokenizer、codec、layout�
 
 ## 5. Model 与 Objective
 
-`model.Config` 配置 token backbone 周边的 semantic-audio input/output adapter，以及可选的
-source-audio input tower。backbone 独占完整且结构性冻结的 text `nn.Embedding`，它同时作为冻结的
+`model.Config` 配置 token backbone 周边的 semantic-audio input/output adapter、可选的
+source-audio input tower，以及 source/target 两条 CTC decoder。backbone 独占完整且结构性冻结的 text `nn.Embedding`，它同时作为冻结的
 文本输出头；`Model.tokens` 是 S2S-local
 `TokenInterface`，注册 `audio_embedding`、`audio_projection` 和 `audio_head`，lookup 与 logits 时
 显式接收 backbone text embedding。`Model.source_audio_encoder` 独立注册，不属于 token interface。
@@ -323,12 +328,20 @@ rows，经 `source_audio_encoder` 后写回。
 
 Lightning checkpoint 必须声明 `speech_to_speech_model_schema: v3`。v3 只接受当前 ownership
 路径：`backbone.*`、`tokens.audio_embedding.*`、`tokens.audio_projection.*`、
-`tokens.audio_head.*`、`source_audio_encoder.*` 与 Flow/RVQ 自身参数。text table 只出现在
+`tokens.audio_head.*`、`source_audio_encoder.*`、`ctc_decoders.source.*`、
+`ctc_decoders.target.*` 与 Flow/RVQ 自身参数。text table 只出现在
 backbone 原生路径；model 与 FSQ 层均不做旧 key remap，旧 checkpoint 直接失败。
+
+v3 同时保存完整 model contract：runtime codec/tokenizer/layout、backbone 与 adapter 的有效 topology、
+semantic codec artifact 内容摘要，以及 state dict 的 key/shape/parameter-buffer schema 都必须一致。
+state schema 不记录 dtype；HF generation/init-only config 也不参与 architecture identity。
 
 model 的训练能力是：
 
 - `token_hidden_states()`：返回完整 backbone 表示，不构造 vocabulary logits。
+- `objective_hidden_output()`：在一次 backbone forward 内返回 token 主 readout，以及当前 batch
+  激活的 source/target CTC readout。
+- `ctc_logits(route, hidden, mask)`：执行该 route 的 pooling/decoder，再通过冻结 text head 输出 logits。
 - `token_logits(hidden, modality)`：在有效 predictor rows 上只构造对应 `Modality` 的局部
   vocabulary logits；省略 modality 时为通用 forward 构造 global text+audio logits。
 - `target_frame_condition()`：把 target token position 对齐到 acoustic frame。
@@ -338,10 +351,11 @@ model 的训练能力是：
 token CE 的 softmax 只覆盖 `prediction_modality` 监督的模态，不让 text/audio head 跨模态竞争；flow、RVQ
 与 REPA 只对 boolean mask 选中的有效 frame 计算非线性 loss，padding NaN/Inf 不参与梯度。
 
-三个 objective 还可共享 `CTCAlignmentLoss`。它只读取 batch 已编译的 source/target CTC route，复用
-`model.text_logits()` 将 audio-slot hidden 投影到 tokenizer-local text vocabulary；blank 使用 runtime
-text block 内的 PAD local ID。文本 embedding/readout 不参与训练，因此 CTC 只能推动 audio path 与
-backbone hidden 进入既有文本语义空间，不能靠文本头共同漂移降低对齐损失。
+三个 objective 还可共享 `CTCAlignmentLoss`。它只读取 batch 已编译的 source/target CTC route，并由
+`model.ctc_logits()` 先执行 `model.ctc.{source,target}.decoder` 声明的 route-local pooling/decoder，
+再通过冻结 tied text readout 投影到 tokenizer-local text vocabulary；blank 使用 runtime text block
+内的 PAD local ID。文本 embedding/readout 不参与训练，因此 CTC 只能推动 audio path、route decoder
+与 backbone hidden 进入既有文本语义空间，不能靠文本头共同漂移降低对齐损失。
 
 ## 6. Generation
 

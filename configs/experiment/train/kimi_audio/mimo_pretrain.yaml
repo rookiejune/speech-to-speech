@@ -6,8 +6,7 @@ defaults:
 run_name: kimi-audio-mimo-pretrain
 output_subdir: kimi-audio/mimo-pretrain/${run_name}
 
-runtime:
-  semantic_codec_artifact: ${oc.env:SPEECH_TO_SPEECH_SAC_ARTIFACT,storage/semantic-acoustic-codec/artifact}
+audio_sequence_layout: flattened
 
 model:
   toy: false

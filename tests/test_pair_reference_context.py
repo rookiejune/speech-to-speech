@@ -18,7 +18,6 @@ from anydataset.types import AudioItem, TextItem
 from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 
-from speech_to_speech.audio_stream import AudioStream
 from speech_to_speech.datamodule.build.sample import build_task_sample
 from speech_to_speech.datamodule.parse.parser import parse_task_sample
 from speech_to_speech.datamodule.types import AudioContextSample, Speech
@@ -28,50 +27,36 @@ from speech_to_speech.task import Task
 
 
 class PairReferenceContextTest(unittest.TestCase):
-    def test_tts_reuse_route_uses_source_audio_as_context(self) -> None:
-        runtime = _bicodec_runtime(AudioSequenceLayout.SEMANTIC)
-        sample = _pair_sample()
-
-        parsed = parse_task_sample(sample, Task.TTS, cast(object, runtime))
-        self.assertIsInstance(parsed.audio_context, Speech)
-        assert isinstance(parsed.audio_context, Speech)
-        torch.testing.assert_close(
-            parsed.audio_context.acoustic_codes,
-            sample[(Role.SOURCE, Modality.AUDIO)].views[AudioView.BICODEC]["acoustic"],
-        )
-
-        built = build_task_sample(parsed, cast(object, runtime))
-        self.assertIsNotNone(built.request["audio_context"])
-        assert built.request["audio_context"] is not None
-        torch.testing.assert_close(
-            built.request["audio_context"].acoustic,
-            parsed.audio_context.acoustic_codes,
-        )
-        local_prompt = _prompt_acoustic_ids(built.input_ids, runtime)
-        decoded = runtime.audio_tokenizer.decode_streams(
-            local_prompt,
-            (AudioStream.ACOUSTIC,),
-        )
-        self.assertIsNone(decoded.semantic)
-        torch.testing.assert_close(
-            decoded.acoustic,
-            parsed.audio_context.acoustic_codes,
-        )
-
-    def test_generate_route_does_not_bind_pair_source_context(self) -> None:
+    def test_tts_generates_global_when_audio_is_not_a_task_input(self) -> None:
         runtime = _bicodec_runtime(AudioSequenceLayout.FLATTENED)
         parsed = parse_task_sample(_pair_sample(), Task.TTS, cast(object, runtime))
         self.assertIsNone(parsed.audio_context)
-
-    def test_asr_with_reuse_route_does_not_put_context_in_batch(self) -> None:
-        runtime = _bicodec_runtime(AudioSequenceLayout.SEMANTIC)
-        parsed = parse_task_sample(_pair_sample(), Task.ASR, cast(object, runtime))
-        self.assertIsInstance(parsed.audio_context, Speech)
         built = build_task_sample(parsed, cast(object, runtime))
-        self.assertIsNone(built.request["audio_context"])
+        response = built.labels.response_ids
+        local = response[:-1] - runtime.layout.blocks["audio"][0]
+        self.assertEqual(int(local[0]), runtime.audio_tokenizer.acoustic_token_id)
+        self.assertNotIn("audio_context", built.request)
 
-    def test_audio_context_sample_wins_over_pair_source(self) -> None:
-        runtime = _bicodec_runtime(AudioSequenceLayout.SEMANTIC)
+    def test_asr_does_not_materialize_decode_context(self) -> None:
+        runtime = _bicodec_runtime(AudioSequenceLayout.FLATTENED)
+        parsed = parse_task_sample(_pair_sample(), Task.ASR, cast(object, runtime))
+        self.assertIsNone(parsed.audio_context)
+        built = build_task_sample(parsed, cast(object, runtime))
+        self.assertNotIn("audio_context", built.request)
+
+    def test_s2st_reuses_visible_source_global(self) -> None:
+        runtime = _bicodec_runtime(AudioSequenceLayout.FLATTENED)
+        parsed = parse_task_sample(_pair_sample(), Task.S2ST, cast(object, runtime))
+        built = build_task_sample(parsed, cast(object, runtime))
+        response = built.labels.response_ids
+        local = response[:-1] - runtime.layout.blocks["audio"][0]
+        self.assertEqual(int(local[0]), runtime.audio_tokenizer.semantic_token_id)
+        prompt_global = _prompt_acoustic_ids(built.request["prompt_ids"], runtime)
+        decoded = runtime.audio_tokenizer.decode_streams(prompt_global)
+        self.assertIsNotNone(decoded.acoustic)
+
+    def test_explicit_audio_context_is_serialized_into_prompt(self) -> None:
+        runtime = _bicodec_runtime(AudioSequenceLayout.FLATTENED)
         pair = _pair_sample()
         context_cell = {
             (Role.DEFAULT, Modality.AUDIO): _audio(99),
@@ -90,18 +75,11 @@ class PairReferenceContextTest(unittest.TestCase):
                 "acoustic"
             ],
         )
-
-    def test_reuse_route_fails_without_source_audio(self) -> None:
-        runtime = _bicodec_runtime(AudioSequenceLayout.SEMANTIC)
-        sample = {
-            (Role.TARGET, Modality.AUDIO): _audio(1),
-            (Role.TARGET, Modality.TEXT): TextItem(
-                views={TextView.TEXT: "target"},
-                meta={TextMeta.LANG: Lang.EN},
-            ),
-        }
-        with self.assertRaisesRegex(ValueError, "missing source/audio"):
-            parse_task_sample(sample, Task.TTS, cast(object, runtime))
+        built = build_task_sample(parsed, cast(object, runtime))
+        self.assertNotIn("audio_context", built.request)
+        response = built.labels.response_ids
+        local = response[:-1] - runtime.layout.blocks["audio"][0]
+        self.assertEqual(int(local[0]), runtime.audio_tokenizer.semantic_token_id)
 
 
 def _pair_sample() -> dict:

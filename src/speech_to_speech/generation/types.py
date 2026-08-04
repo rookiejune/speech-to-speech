@@ -14,7 +14,6 @@ class Request(TypedDict):
     prompt_ids: Tensor
     task: Task
     audio_input_positions: Tensor | None
-    audio_context: SemanticAcousticCodes | None
     prediction: NotRequired[PredictionModality | None]
     semantic_reference_features: NotRequired[Tensor | None]
     semantic_reference_mask: NotRequired[Tensor | None]

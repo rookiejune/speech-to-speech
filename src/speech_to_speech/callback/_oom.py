@@ -220,17 +220,6 @@ def batch_report(batch: object) -> dict[str, object]:
                     "token_positions": tensor_report(target["token_positions"]),
                 }
             ),
-            "audio_contexts": [
-                (
-                    None
-                    if context is None
-                    else {
-                        "semantic": tensor_report(context.semantic),
-                        "acoustic": tensor_report(context.acoustic),
-                    }
-                )
-                for context in batch.audio_contexts or ()
-            ],
         }
     if isinstance(batch, RawSpeechBatch):
         return {
@@ -274,17 +263,6 @@ def generation_report(
         ),
         "audio_input_positions": [
             tensor_report(request.get("audio_input_positions")) for request in requests
-        ],
-        "audio_contexts": [
-            (
-                None
-                if (context := request.get("audio_context")) is None
-                else {
-                    "semantic": tensor_report(context.semantic),
-                    "acoustic": tensor_report(context.acoustic),
-                }
-            )
-            for request in requests
         ],
         "max_new_tokens": max_new_tokens,
         "do_sample": do_sample,

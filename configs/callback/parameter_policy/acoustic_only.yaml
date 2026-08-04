@@ -8,4 +8,5 @@ frozen_groups:
   - semantic_audio_adapter
   - audio_input_adapter
   - audio_output
+  - alignment_decoder
 backbone_top_fraction: 0.0

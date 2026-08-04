@@ -237,7 +237,6 @@ def pack_parallel(
         prediction=prediction,
         audio_seconds=_duration(speech),
         audio_input_positions=None,
-        audio_context=None,
     )
 
 
@@ -324,7 +323,6 @@ def pack_interleaved(
         prediction=prediction,
         audio_seconds=_duration(speech),
         audio_input_positions=None,
-        audio_context=None,
     )
 
 
@@ -366,7 +364,6 @@ def _pack(
         prediction=prediction,
         audio_seconds=audio_seconds,
         audio_input_positions=None,
-        audio_context=None,
     )
 
 

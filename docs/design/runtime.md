@@ -14,6 +14,9 @@
 - `semantic_codec`：semantic token generation 的 waveform decoder。配置
   `semantic_codec_artifact` 时惰性加载 `semantic-acoustic-codec` artifact，并复用同一个
   structured backend；FrameCodec 不把 semantic-only codes 传给自身 `decode()`。
+- `semantic_codec_artifact_sha256`：semantic codec artifact 的内容身份。单文件按字节计算
+  SHA-256；目录按排序后的相对文件路径和内容计算，不包含机器相关的 artifact 根路径或文件元数据。
+  该值在单个 Runtime 内缓存；artifact 内容更新后必须新建 Runtime，避免一次训练期间身份漂移。
 - `audio_sequence_layout`：公开音频序列格式，当前为 `flattened` 或 `semantic`。`flattened`
   表示完整 codec codes 被序列化为 acoustic-first / semantic-last 的 token 序列；`semantic`
   表示逻辑输入输出仍是 full codes，但 token sequence 只处理 semantic，acoustic 由 side module 或
@@ -84,13 +87,14 @@ semantic-only decoder。
 
 BiCodec 使用同一个 structured backend。非 semantic 单元存放在 `SemanticAcousticCodes.acoustic`；
 `AcousticLayout.FIXED_LENGTH` 表示这些单元是固定长度 speaker/style slots（口语里的 global），
-`FRAME_ALIGNED` 则与 semantic 时间对齐。`audio_route` 只声明有没有 `acoustic` stream 以及谁提供它，
-不把 layout 再抬成第三种 stream 名。
-`flattened` layout 下，完整 codec codes 进入同一 token 序列；BiCodec 的 fixed-length acoustic
-payload 使用 slot-major 布局，并固定排在 semantic payload 之前。`semantic` layout 下，输出 token
-只含 semantic；如果 decode 需要 acoustic，BiCodec 从输入 full codes/context 复用 reference acoustic，
-LongCat 等 semantic-only 路径则交给 side module 或 semantic-acoustic codec。markers 与 end marker
-属于内部 route，强制位置不作为可训练 payload。
+`FRAME_ALIGNED` 则与 semantic 时间对齐。BiCodec 只使用一套 `flattened` self-describing sequence：
+fixed-length global payload 采用 slot-major 布局并排在 semantic payload 之前。response 以
+`<begin_of_global>` 开局时 LLM 生成 global 与 semantic；以 `<begin_of_semantic>` 开局时只生成
+semantic 并复用 prompt global。decode 从 prompt/response marker 解析唯一的 global owner，并要求
+两侧恰好一方拥有 global；不再使用独立 `semantic` route、`audio_context` side channel 或可切换的
+`audio_route`。markers 与 end marker 属于
+内部 grammar，强制位置不作为可训练 payload。LongCat 等非 BiCodec semantic-only 路径仍交给 side
+module 或 semantic-acoustic codec。
 
 BiCodec 配置 `audio_tokenizer` 时，该 artifact 只作为 semantic 子 tokenizer：raw semantic IDs 先经
 `CodecBPE`，然后再进入 `BiCodecAudioTokenizer` 的 structured packing；acoustic IDs 不做 BPE。
@@ -119,9 +123,9 @@ frame-aligned Flow/RVQ side channel。
   codec marker（Runtime 已固定单一 codec）。marker 的 frame span 为 0，首个 codebook token 的
   frame span 为 1，用于 generation 统计输出帧数。
 - `TorchCodecBPE`：为 CodecBPE 增加 tensor API。
-- `BiCodecAudioTokenizer`：组合一个 native 或 CodecBPE semantic tokenizer，并支持 semantic-only
-  token 以及按 `audio_route` 选择 stream 的 fixed-length structured sequence；full sequence 的
-  acoustic payload 使用 slot-major 顺序，并公开 route grammar 所需的 prediction groups/ranges。
+- `BiCodecAudioTokenizer`：组合一个 native 或 CodecBPE semantic tokenizer，并序列化 acoustic-only、
+  semantic-only 或 global-first / semantic-last 的 self-describing structured sequence；full
+  sequence 的 acoustic payload 使用 slot-major 顺序。
 - `semantic_codes_from_audio_tokens()`：把 audio token IDs 解码为
   `[frames, semantic_codebooks]`。
 
@@ -143,8 +147,8 @@ DataModule 与 generation service。runtime 不保存进程级 singleton；同�
 `audio_sequence_layout` 字符串作为兼容性判断，因为相同 layout 名下的 vocabulary、grammar 或
 composition 仍可能不兼容。校验按结构能力而非 preset 身份：`semantic` layout 要求 semantic-only
 decode provider 或 acoustic side module；`flattened` layout 要求 codec 能消费完整 full codes；
-BiCodec 的 fixed-length 语义由 codec layout 提供，reference acoustic 来自输入 full codes/context
-而不是额外配置轴。
+BiCodec 固定使用 `flattened`，其 fixed-length 语义由 codec layout 提供，reference acoustic 直接来自
+prompt 中的 structured stream，而不是额外配置轴或 side channel。
 
 文件职责保持分离：`runtime/runtime.py` 实现配置与资源聚合，`runtime/codec.py` 隔离 codec
 adapter 和加载，`runtime/audio_tokenizer/` 按实现拆分 Native / Flattened / BiCodec / CodecBPE。

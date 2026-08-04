@@ -96,6 +96,9 @@ class GenerationRuntime(DataRuntime, Protocol):
 
 
 class TokenModelRuntime(GenerationRuntime, Protocol):
+    @cached_property
+    def semantic_codec_artifact_sha256(self) -> str | None: ...
+
     @property
     def semantic_codebook_sizes(self) -> tuple[int, ...]: ...
 

@@ -23,6 +23,11 @@ def prediction_of(request: Request) -> PredictionModality:
 
 
 def validate(request: Request, model: TokenGenerator) -> None:
+    if "audio_context" in request:
+        raise ValueError(
+            "generation request audio_context is not supported; encode BiCodec "
+            "global ownership in prompt/response markers."
+        )
     task = request["task"]
     if not isinstance(task, Task):
         raise TypeError("generation request task must be a Task.")
@@ -65,16 +70,12 @@ def validate(request: Request, model: TokenGenerator) -> None:
                 "audio input positions must point to visible codec audio payload tokens."
             )
     if prediction is PredictionModality.TEXT:
-        if request.get("audio_context") is not None:
-            raise ValueError("text generation requests cannot include audio context.")
         if has_semantic_decode_options(request):
             raise ValueError(
                 "text generation requests cannot include semantic decode options."
             )
         return
     if prediction.is_mixed:
-        if request.get("audio_context") is not None:
-            raise ValueError("mixed AR generation requests cannot include audio context.")
         if has_semantic_decode_options(request):
             raise ValueError(
                 "mixed AR generation requests cannot include semantic decode options."

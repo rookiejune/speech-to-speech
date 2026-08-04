@@ -11,95 +11,56 @@ from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
 from ..prediction import PredictionModality
-from ..runtime import AudioSequenceLayout
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..runtime.protocol import GenerationRuntime
 from ..task import Task
 from ..templates import format_instruction, select_template
 from .types import Request
 
+
 def prepare_bicodec_tts_request(
     text: str,
-    reference_codes: SemanticAcousticCodes,
     runtime: GenerationRuntime,
     *,
+    reference_codes: SemanticAcousticCodes | None = None,
     language: str = "English",
     messages: Sequence[Mapping[str, str]] | None = None,
     task: Task = Task.TTS,
 ) -> Request:
-    """Build a reference-conditioned text-to-speech generation request.
+    """Build a BiCodec request whose token sequence owns global generation.
 
-    ``reference_codes`` must be one unbatched BiCodec sample with semantic codes
-    shaped ``[units, 1]`` and fixed-length acoustic codes shaped
-    ``[slots, codebooks]``.  The returned request keeps those codes as its
-    ``audio_context`` while serializing the reference acoustic stream into
-    layout-global ``prompt_ids``.
+    When ``reference_codes`` is present, its global stream is serialized into
+    the prompt and generation starts from the semantic marker. Without a
+    reference, generation starts after BOA and the model produces both global
+    and semantic streams.
 
     The helper intentionally accepts pre-encoded codes only.  Waveform encoding
     belongs to the runtime/codec boundary and should happen before this API.
     """
     _validate_tts_arguments(text, language, task)
-    if runtime.audio_sequence_layout is not AudioSequenceLayout.SEMANTIC:
-        raise ValueError(
-            "BiCodec reference requests require semantic audio_sequence_layout."
-        )
-
     tokenizer = _validate_bicodec_tokenizer(runtime)
-    _validate_reference_codes(reference_codes)
-
-    local_audio_ids = tokenizer.encode_acoustic(reference_codes)
     text_ids = _text_prompt_ids(text, language, task, runtime, messages=messages)
-    global_audio_ids = runtime.layout.to_global(
-        Modality.AUDIO.value,
-        local_audio_ids,
-    ).to(device=text_ids.device)
-    prompt_ids = torch.cat(
-        (
-            text_ids,
-            text_ids.new_tensor([runtime.boa_token_id]),
-            global_audio_ids,
-            text_ids.new_tensor([runtime.eoa_token_id]),
-            text_ids.new_tensor([runtime.boa_token_id]),
+    values = [text_ids]
+    if reference_codes is not None:
+        _validate_reference_codes(reference_codes)
+        local_audio_ids = tokenizer.encode_acoustic(reference_codes)
+        global_audio_ids = runtime.layout.to_global(
+            Modality.AUDIO.value,
+            local_audio_ids,
+        ).to(device=text_ids.device)
+        values.extend(
+            (
+                text_ids.new_tensor([runtime.boa_token_id]),
+                global_audio_ids,
+                text_ids.new_tensor([runtime.eoa_token_id]),
+            )
         )
-    )
+    values.append(text_ids.new_tensor([runtime.boa_token_id]))
+    prompt_ids = torch.cat(values)
     return Request(
         prompt_ids=prompt_ids,
         task=task,
         audio_input_positions=None,
-        audio_context=reference_codes,
-    )
-
-
-def prepare_bicodec_acoustic_tts_request(
-    text: str,
-    runtime: GenerationRuntime,
-    *,
-    language: str = "English",
-    messages: Sequence[Mapping[str, str]] | None = None,
-    task: Task = Task.TTS,
-) -> Request:
-    """Build an unconditioned BiCodec acoustic-plus-semantic AR request.
-
-    The flattened sequence layout owns both acoustic and semantic output
-    streams. Fixed-length vs frame-aligned meaning of acoustic units is owned
-    by the codec ``AcousticLayout``.
-    """
-    _validate_tts_arguments(text, language, task)
-    _validate_bicodec_tokenizer(runtime)
-    if runtime.audio_sequence_layout is not AudioSequenceLayout.FLATTENED:
-        raise ValueError(
-            "BiCodec unconditioned requests require flattened audio_sequence_layout."
-        )
-
-    text_ids = _text_prompt_ids(text, language, task, runtime, messages=messages)
-    prompt_ids = torch.cat(
-        (text_ids, text_ids.new_tensor([runtime.boa_token_id]))
-    )
-    return Request(
-        prompt_ids=prompt_ids,
-        task=task,
-        audio_input_positions=None,
-        audio_context=None,
     )
 
 
@@ -205,6 +166,5 @@ def _token_ids(text: str, runtime: GenerationRuntime) -> Tensor:
 
 
 __all__ = [
-    "prepare_bicodec_acoustic_tts_request",
     "prepare_bicodec_tts_request",
 ]

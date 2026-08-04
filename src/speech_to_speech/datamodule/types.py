@@ -7,7 +7,7 @@ from collections.abc import Iterator, Mapping
 from typing import TypeVar, TypedDict, Union
 
 import torch
-from anytrain.codec import AcousticLayout, SemanticAcousticCodes
+from anytrain.codec import AcousticLayout
 from anydataset.types import Item, Modality, Reference, Sample
 from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
@@ -438,7 +438,6 @@ class ModelSample:
         target_ctc: CTCTarget | None = None,
         audio_seconds: float = 0.0,
         audio_input_positions: Tensor | None = None,
-        audio_context: SemanticAcousticCodes | None = None,
     ) -> ModelSample:
         return cls(
             request=Request(
@@ -446,7 +445,6 @@ class ModelSample:
                 task=task,
                 prediction=prediction,
                 audio_input_positions=audio_input_positions,
-                audio_context=audio_context,
             ),
             labels=Labels(
                 response_ids=response_ids,
@@ -472,7 +470,6 @@ class ModelSample:
         target_ctc: CTCTarget | None = None,
         audio_seconds: float = 0.0,
         audio_input_positions: Tensor | None = None,
-        audio_context: SemanticAcousticCodes | None = None,
     ) -> ModelSample:
         """Split a teacher-forcing sequence into Request prompt and Labels response."""
         if generation_prompt_length is None:
@@ -502,7 +499,6 @@ class ModelSample:
             target_ctc=target_ctc,
             audio_seconds=audio_seconds,
             audio_input_positions=audio_input_positions,
-            audio_context=audio_context,
         )
 
     @property
@@ -548,11 +544,6 @@ class ModelSample:
     def audio_input_positions(self) -> Tensor | None:
         return self.request["audio_input_positions"]
 
-    @property
-    def audio_context(self) -> SemanticAcousticCodes | None:
-        return self.request["audio_context"]
-
-
 @dataclass(frozen=True)
 class _PaddedSamples:
     input_ids: Tensor
@@ -565,7 +556,6 @@ class _PaddedSamples:
     audio_seconds: Tensor
     generation_prompt_lengths: Tensor
     audio_input_positions: Tensor | None
-    audio_contexts: tuple[SemanticAcousticCodes | None, ...]
 
 
 @dataclass(frozen=True)
@@ -573,7 +563,6 @@ class _BatchGenerationFields:
     audio_seconds: Tensor
     generation_prompt_lengths: Tensor
     audio_input_positions: Tensor | None
-    audio_contexts: tuple[SemanticAcousticCodes | None, ...]
 
 
 @dataclass(frozen=True)
@@ -598,7 +587,6 @@ class ModelBatch:
     audio_seconds: Tensor | None = None
     generation_prompt_lengths: Tensor | None = None
     audio_input_positions: Tensor | None = None
-    audio_contexts: tuple[SemanticAcousticCodes | None, ...] | None = None
     _unit_counts: _BatchUnitCounts = field(init=False, repr=False)
     _input_modalities: frozenset[Modality] | None = field(
         init=False,
@@ -627,12 +615,10 @@ class ModelBatch:
             audio_seconds=self.audio_seconds,
             generation_prompt_lengths=self.generation_prompt_lengths,
             audio_input_positions=self.audio_input_positions,
-            audio_contexts=self.audio_contexts,
         )
         self.audio_seconds = fields.audio_seconds
         self.generation_prompt_lengths = fields.generation_prompt_lengths
         self.audio_input_positions = fields.audio_input_positions
-        self.audio_contexts = fields.audio_contexts
         if not prediction.supervises_audio and self.acoustic_target is not None:
             raise ValueError(
                 "text-only prediction batches must not provide acoustic target fields."
@@ -692,7 +678,6 @@ class ModelBatch:
             audio_seconds=padded.audio_seconds,
             generation_prompt_lengths=padded.generation_prompt_lengths,
             audio_input_positions=padded.audio_input_positions,
-            audio_contexts=padded.audio_contexts,
         )
 
     @cached_property
@@ -715,9 +700,6 @@ class ModelBatch:
                 audio_seconds=fields.audio_seconds.pin_memory(),
                 generation_prompt_lengths=fields.generation_prompt_lengths.pin_memory(),
                 audio_input_positions=_pin_optional(fields.audio_input_positions),
-                audio_contexts=tuple(
-                    _pin_audio_context(value) for value in fields.audio_contexts
-                ),
             ),
         )
 
@@ -762,14 +744,6 @@ class ModelBatch:
                     fields.audio_input_positions,
                     device,
                     non_blocking=non_blocking,
-                ),
-                audio_contexts=tuple(
-                    _to_audio_context(
-                        value,
-                        device,
-                        non_blocking=non_blocking,
-                    )
-                    for value in fields.audio_contexts
                 ),
             ),
         )
@@ -836,7 +810,6 @@ class ModelBatch:
                     fields.audio_input_positions,
                     index,
                 ),
-                audio_contexts=(fields.audio_contexts[index],),
             ),
         )
 
@@ -845,7 +818,6 @@ class ModelBatch:
             self.audio_seconds,
             self.generation_prompt_lengths,
             self.audio_input_positions,
-            self.audio_contexts,
         )
 
     def _replace(
@@ -874,7 +846,6 @@ class ModelBatch:
         result.audio_seconds = fields.audio_seconds
         result.generation_prompt_lengths = fields.generation_prompt_lengths
         result.audio_input_positions = fields.audio_input_positions
-        result.audio_contexts = fields.audio_contexts
         if tasks is None and predictions is None:
             result._unit_counts = self._unit_counts
             result._input_modalities = self._input_modalities
@@ -1035,7 +1006,6 @@ def _complete_batch_generation_fields(
     audio_seconds: Tensor | None,
     generation_prompt_lengths: Tensor | None,
     audio_input_positions: Tensor | None,
-    audio_contexts: tuple[SemanticAcousticCodes | None, ...] | None,
 ) -> _BatchGenerationFields:
     batch_size = input_ids.size(0)
     if audio_seconds is None:
@@ -1045,14 +1015,10 @@ def _complete_batch_generation_fields(
         generation_prompt_lengths = _generation_prompt_lengths(token_labels)
     _validate_generation_prompt_lengths(generation_prompt_lengths, input_ids)
     _validate_batch_audio_input_positions(audio_input_positions, input_ids)
-    if audio_contexts is None:
-        audio_contexts = (None,) * batch_size
-    _validate_audio_contexts(audio_contexts, batch_size)
     return _BatchGenerationFields(
         audio_seconds=audio_seconds,
         generation_prompt_lengths=generation_prompt_lengths,
         audio_input_positions=audio_input_positions,
-        audio_contexts=audio_contexts,
     )
 
 
@@ -1060,11 +1026,10 @@ def _checked_batch_generation_fields(
     audio_seconds: Tensor | None,
     generation_prompt_lengths: Tensor | None,
     audio_input_positions: Tensor | None,
-    audio_contexts: tuple[SemanticAcousticCodes | None, ...] | None,
 ) -> _BatchGenerationFields:
     if audio_seconds is None:
         raise RuntimeError("ModelBatch audio_seconds is unavailable after validation.")
-    if generation_prompt_lengths is None or audio_contexts is None:
+    if generation_prompt_lengths is None:
         raise RuntimeError(
             "ModelBatch generation fields are unavailable after validation."
         )
@@ -1072,7 +1037,6 @@ def _checked_batch_generation_fields(
         audio_seconds=audio_seconds,
         generation_prompt_lengths=generation_prompt_lengths,
         audio_input_positions=audio_input_positions,
-        audio_contexts=audio_contexts,
     )
 
 
@@ -1101,7 +1065,6 @@ def _padded_samples(samples: list[ModelSample], pad_token_id: int) -> _PaddedSam
             [sample.request["audio_input_positions"] for sample in samples],
             padding_value=-1,
         ),
-        audio_contexts=tuple(sample.request["audio_context"] for sample in samples),
     )
 
 
@@ -1357,58 +1320,6 @@ def _validate_batch_audio_input_positions(
             )
 
 
-def _validate_audio_context(value: SemanticAcousticCodes | None) -> None:
-    if value is None:
-        return
-    for name, codes in (
-        ("semantic", value.semantic),
-        ("acoustic", value.acoustic),
-    ):
-        if codes.dim() != 2:
-            raise ValueError(
-                f"audio context {name} codes must have shape [units, codebooks]."
-            )
-        if not is_signed_integer_dtype(codes.dtype):
-            raise TypeError(
-                f"audio context {name} codes must use a signed integer dtype."
-            )
-
-
-def _validate_audio_contexts(
-    values: tuple[SemanticAcousticCodes | None, ...],
-    batch_size: int,
-) -> None:
-    if len(values) != batch_size:
-        raise ValueError("ModelBatch audio_contexts must provide one value per row.")
-    for context in values:
-        _validate_audio_context(context)
-
-
-def _pin_audio_context(
-    value: SemanticAcousticCodes | None,
-) -> SemanticAcousticCodes | None:
-    if value is None:
-        return None
-    return SemanticAcousticCodes(
-        semantic=value.semantic.pin_memory(),
-        acoustic=value.acoustic.pin_memory(),
-    )
-
-
-def _to_audio_context(
-    value: SemanticAcousticCodes | None,
-    device: torch.device,
-    *,
-    non_blocking: bool,
-) -> SemanticAcousticCodes | None:
-    if value is None:
-        return None
-    return SemanticAcousticCodes(
-        semantic=value.semantic.to(device=device, non_blocking=non_blocking),
-        acoustic=value.acoustic.to(device=device, non_blocking=non_blocking),
-    )
-
-
 def _validate_audio_seconds(value: Tensor, batch_size: int) -> None:
     if not isinstance(value, Tensor):
         raise TypeError("ModelBatch audio_seconds must be a Tensor.")
@@ -1461,8 +1372,6 @@ def _validate_sample(sample: ModelSample, pad_token_id: int) -> None:
             )
         if positions.numel() != torch.unique(positions).numel():
             raise ValueError("sample audio_input_positions must not repeat positions.")
-    _validate_audio_context(sample.request["audio_context"])
-
     target = sample.labels.acoustic_target
     if target is not None:
         _validate_acoustic_pair(

@@ -27,8 +27,7 @@ from ..runtime.types import (
 from .decode import (
     decode_generated_audio,
     decode_generated_bicodec_full,
-    decode_generated_bicodec_full_row,
-    decode_generated_bicodec_semantic_with_reference,
+    decode_generated_bicodec_row,
     decode_generated_frame_codes,
     decode_generated_semantic,
 )
@@ -97,7 +96,7 @@ def generate_audio_responses(
 
 
 def validate_audio_request(request: Request, model: TokenGenerator) -> None:
-    """Validate audio context against the runtime-owned sequence layout."""
+    """Validate audio generation inputs and self-describing codec prompts."""
     prediction = request.get("prediction")
     if prediction is None:
         prediction = request["task"].prediction_modality
@@ -107,46 +106,7 @@ def validate_audio_request(request: Request, model: TokenGenerator) -> None:
         raise ValueError(
             "generation request audio_route is internal; use runtime audio_sequence_layout."
         )
-    context = request.get("audio_context")
-    if context is not None and not isinstance(context, SemanticAcousticCodes):
-        raise TypeError("generation audio context must be SemanticAcousticCodes.")
     _validate_semantic_decode_options(request, model)
-    runtime = model.runtime
-    layout = runtime.audio_sequence_layout
-    if layout is AudioSequenceLayout.FLATTENED:
-        if context is not None:
-            raise ValueError("flattened audio_sequence_layout cannot include audio context.")
-        return
-    tokenizer = runtime.audio_tokenizer
-    if not isinstance(tokenizer, BiCodecAudioTokenizer):
-        if context is not None:
-            raise ValueError("audio context is supported only for BiCodec semantic layout.")
-        return
-    if layout is not AudioSequenceLayout.SEMANTIC:
-        if context is not None:
-            raise ValueError(f"unsupported audio_sequence_layout: {layout}")
-        return
-    if context is None:
-        raise ValueError("BiCodec semantic audio_sequence_layout requires audio context.")
-
-    local_ids = tokenizer.encode_acoustic(context)
-    prompt = request["prompt_ids"]
-    global_ids = runtime.layout.to_global(
-        Modality.AUDIO.value,
-        local_ids,
-    ).to(device=prompt.device)
-    expected = torch.cat(
-        (
-            prompt.new_tensor([runtime.boa_token_id]),
-            global_ids,
-            prompt.new_tensor([runtime.eoa_token_id, runtime.boa_token_id]),
-        )
-    )
-    if prompt.numel() < expected.numel() or not torch.equal(
-        prompt[-expected.numel() :],
-        expected,
-    ):
-        raise ValueError("generation audio context does not serialize to the prompt suffix.")
 
 
 def _strategy(model: TokenGenerator) -> _Strategy:
@@ -300,7 +260,7 @@ class _Structured:
     def __init__(self, model: TokenGenerator) -> None:
         tokenizer = model.runtime.audio_tokenizer
         if not isinstance(tokenizer, BiCodecAudioTokenizer):
-            raise TypeError("structured full sequence requires BiCodecAudioTokenizer.")
+            raise TypeError("structured audio generation requires BiCodecAudioTokenizer.")
         self.model = model
         self.tokenizer = tokenizer
         self.codec: StructuredCodec = structured_codec(model.runtime.codec)
@@ -331,24 +291,19 @@ class _Structured:
         token_ids: Tensor,
         request: Request | None,
     ) -> tuple[Tensor, SemanticAcousticCodes]:
-        if self.model.runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
-            return decode_generated_bicodec_full_row(
-                token_ids,
-                codec=self.codec,
-                audio_tokenizer=self.tokenizer,
-                audio_token_range=self.model.runtime.codec_audio_range,
-            )
-        return decode_generated_bicodec_semantic_with_reference(
+        return decode_generated_bicodec_row(
             token_ids,
-            None if request is None else request.get("audio_context"),
+            None if request is None else request["prompt_ids"],
             codec=self.codec,
             audio_tokenizer=self.tokenizer,
             audio_token_range=self.model.runtime.codec_audio_range,
+            boa_token_id=self.model.runtime.boa_token_id,
+            eoa_token_id=self.model.runtime.eoa_token_id,
         )
 
     def decode(self, token_ids: Tensor, features: Tensor | None) -> Tensor:
         if features is not None:
-            raise ValueError("structured full sequence must not provide features.")
+            raise ValueError("structured audio generation must not provide features.")
         return decode_generated_bicodec_full(
             token_ids,
             codec=self.codec,

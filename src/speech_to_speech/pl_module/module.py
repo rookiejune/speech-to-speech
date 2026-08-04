@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Generic, Protocol, TypeVar, cast
 
@@ -33,7 +33,6 @@ from ..generation.eval.text import (
 )
 from ..generation.text import decode_text_ids
 from ..generation.types import Request, Result
-from ..loss.ctc import CTCConfig
 from ..loss.module import Objective
 from ..loss.protocol import TokenObjectiveModel
 from ..loss.types import Outputs, combine_outputs
@@ -50,7 +49,6 @@ from ..optim import Config as OptimConfig
 class Config:
     mt_validation_max_new_tokens: int = 256
     audio_neighbor_smoothing: float = 0.0
-    ctc: CTCConfig = field(default_factory=CTCConfig)
 
     def __post_init__(self) -> None:
         value = self.mt_validation_max_new_tokens
@@ -64,8 +62,6 @@ class Config:
             or not 0 <= smoothing < 1
         ):
             raise ValueError("audio_neighbor_smoothing must be in [0, 1).")
-        if not isinstance(self.ctc, CTCConfig):
-            raise TypeError("ctc must be a CTCConfig.")
 
 
 class ModuleModel(TextEvaluationModel, TokenObjectiveModel, Protocol):

@@ -18,8 +18,8 @@
   `AudioView` 与 runtime `audio_sequence_layout`：逻辑 audio 输入/输出始终保留完整
   semantic/acoustic codes；`flattened` 把完整 codes 投影为 audio token sequence（acoustic-first、
   semantic-last），`semantic` 只把 semantic 放进 sequence，并保留 acoustic codes 给 side module、
-  SAC 或 BiCodec reference context。prompt/output/decode ownership 由 sample builder 根据 task 和
-  内部固定 route 处理，不由 parser 从 sequence layout 推断。
+  SAC。BiCodec 固定使用 self-describing `flattened` sequence，prompt/output ownership 由 sample
+  builder 根据 source/reference 是否提供 global stream 处理，不由 parser 另造 semantic route。
 - `parse.parser.parse_task_sample()`：按 `Task` 只解析实际消费的 source/target modality。pair/single
   只决定 role 映射；codec view 缺失时是否使用 waveform fallback 与数据 shape 无关。
 - `build.single.SingleCollator` / `build.single.parse_single_sample()`：处理 single utterance 数据形态，
@@ -76,16 +76,16 @@ grouped rows，因此不会把 speaker 轴或 semantic padding 带入模型 batc
 把底层 flat store 的局部分组映射回 text-row 索引，再在过滤后执行 rank 分片，避免 speaker-minor
 排列把某一列集中到单个 distributed rank。该接入只确认 prepared-data 与模型输入契约；真实
 checkpoint 的收敛和生成音质仍需单独验收。
-当内部固定 route 要求 reference-owned prompt streams 时：
+显式 reference 的数据表示与 task source 分开处理：
 
 - speaker-grid（`qwen_tts_speaker` / `shape=single`）：adapter 为每个 target cell 绑定同
   speaker 的下一 text row 作为 `AudioContextSample.audio_context`，最后一行循环到第一行；
   reference 与 target 必须是不同 row。它仍通过 flat-cell 索引读取，不把 grouped `rows` 或
   另一 speaker 混入训练样本。
-- pair（例如 WMT19 TTS）：parser 在样本不是 `AudioContextSample` 时，把同样本
-  `Role.SOURCE` audio 解析为 `audio_context`（合成同说话人 enrollment）。已有
-  `AudioContextSample` 优先，不覆盖 grid 行为。缺 SOURCE audio 时显式失败。ASR 等非
-  audio-target 任务即使带上 context，build 也不会把它写进 model batch。
+- pair（例如 WMT19）：parser 只解析显式 `AudioContextSample`，不会把 pair 的
+  `Role.SOURCE` audio 自动改写成 reference。builder 只把 task source layout 实际可见的 audio
+  当作输入 global；因此 S2ST 可复用 source global，而 TTS/T2ST 即使底层 pair 携带 source audio，
+  仍从 `<begin_of_global>` 生成 global。显式 reference 则序列化进 prompt。
 - split manifest 的生成属于审计/部署入口，不属于 dataset loader：
   `scripts/create_split_manifest.py` 只消费 candidate、root audit 和 data-root 路径，输出带
   source artifact 与 root fingerprint 的 JSON；训练前必须先在 stable root 上完成该产物的独立
@@ -170,7 +170,6 @@ prompt_ids: Tensor
 task: Task
 prediction: PredictionModality | None   # 训练必填；推理可空=用 task 默认
 audio_input_positions: Tensor | None
-audio_context: SemanticAcousticCodes | None
 
 # Labels（仅训练）
 response_ids: Tensor
@@ -185,40 +184,43 @@ audio_seconds: float
 `ModelBatch.from_samples` 分别 pad request / labels，再令
 `input_ids = cat(prompt_ids, response_ids)`，并令 `generation_prompt_lengths = len(prompt_ids)`。
 batch 仍暴露对齐的 `input_ids` / `token_labels` / `token_groups` / `acoustic_target` /
-`source_ctc` / `target_ctc` / `audio_input_positions` / `audio_contexts` / `predictions`，供现有 loss
+`source_ctc` / `target_ctc` / `audio_input_positions` / `predictions`，供现有 loss
 与 bridge 使用。
 
 `AcousticTarget` 包含 `semantic_codes`、`codes`、`token_positions`。分组使必须共同存在的 tensor
 不能形成半完整状态。
 
-BiCodec route 的 sample builder 先按 `prompt.source` 选择 source/reference，再只序列化
-`prompt.streams`；target 只按 `output.streams` 产生 response。route 的 `acoustic` stream 对应
-structured codes 的 `acoustic` 字段；在 BiCodec（`FIXED_LENGTH`）上它是 fixed-length
-speaker/style slots，在 frame-aligned codec 上它与 semantic 时间对齐。reference 的
-semantic/acoustic codes 作为 `audio_context` 独立保存供 route-aware decode 使用，target
-semantic 不会被放进 prompt。`token_groups` 只标记实际预测的 semantic、semantic-or-end 或各
-acoustic codebook payload；forced codec/stream marker 与外层 EOA 不进入监督。
+BiCodec sample builder 先按“task 实际可见的 audio source 或显式 reference”是否提供 global stream
+决定序列开局。prompt 已有 global 时，response 以 `<begin_of_semantic>` 开局；prompt 没有 global
+时，response 以 `<begin_of_global>` 开局并按 global-first / semantic-last 生成两者。`acoustic`
+对应 structured codes 的 fixed-length speaker/style slots；装配完成后不再另存一份 context codes
+给 model batch 或 decode，target semantic 也不会被放进 prompt。
+`token_groups` 只标记实际预测的 semantic、semantic-or-end 或各 acoustic codebook payload；forced
+codec/stream marker 与外层 EOA 不进入监督。
 
 `ModelBatch` 额外保存 `tasks: list[Task]`、`predictions: list[PredictionModality]` 和
 `pad_token_id`，并公开 `attention_mask` 与 `acoustic_target_mask`。speech batch 还保存
 `audio_seconds: Tensor[B]`，表示每条训练样本按当前 task 实际消费的 source/target 音频秒数之和；
-纯文本样本为 0。batch padding 同时把单条 prompt 边界和 `audio_context` 聚合为
-`generation_prompt_lengths` 与逐行 `audio_contexts`；teacher-forcing generation bridge
-（`requests_from_batch`）切出 `prompt_ids` 并带上同批 `prediction`，不从第一个非 `-100`
-label 反推。audio-target 路径把结构 BOA 写入 `prompt_ids`，因此即使后续 codec marker
+纯文本样本为 0。batch padding 把单条 prompt 边界聚合为 `generation_prompt_lengths`；raw sample
+的显式 `audio_context` 已在装配阶段消费，不进入 batch。
+teacher-forcing generation bridge（`requests_from_batch`）切出 `prompt_ids` 并带上同批
+`prediction`，不从第一个非 `-100` label 反推。BiCodec reference global stream 已在该 prompt
+边界内；audio-target 路径把结构 BOA 写入 `prompt_ids`，因此即使后续 codec marker
 不受监督，真实生成仍从相同状态开始。
 
 `audio_input_positions` 是每条序列中 source audio payload token 的位置，按 `[frames]` 保存，batch
 padding 后为 `[batch, frames]`，右侧填充 `-1`。sample builder 只为
 `task.source_modality == Modality.AUDIO` 的 source payload 记录位置；source BOA/EOA、target audio
-response、generated token 以及 BiCodec route 的 reference `audio_context` 不进入该字段。它与
-`audio_context` 是两条独立契约：前者服务 backbone 输入 tower，后者服务 route-aware decode。
+response、generated token 以及额外序列化的 BiCodec reference global span 不进入该字段。它只服务
+backbone input tower；BiCodec decode ownership 完全由 prompt/response token marker 表达。
 
 `source_ctc` / `target_ctc` 各自包含 audio span 的完整序列 `token_positions` 与 tokenizer-local
 `text_token_ids`。sample builder 不按“任务输出是否为 audio”这一条粗规则决定 CTC，而是按 transcript
 visibility 编译：ASR/S2TT/S2ST 有 source CTC；T2ST/S2ST 的纯 audio prediction 与 AUDIO_AR 有
 target CTC；TTS、MT、parallel/interleaved output 没有 target CTC。source positions 交给 non-causal
-route 读取 `h[p]`，target positions 保留 token 自身位置并由 loss 读取 `h[p-1]`。
+route 读取 `h[p]`，target positions 保留 token 自身位置并由 loss 读取 `h[p-1]`。audio span 指
+tokenizer 序列化 payload：BiCodec 内部 stream/end marker 也保留为可预测 blank 的 CTC step，外层
+BOA/EOA 则排除。
 
 ## 边界
 
@@ -247,7 +249,7 @@ route 读取 `h[p]`，target positions 保留 token 自身位置并由 loss 读�
   `flattened` sequence layout 不拆 semantic/acoustic side channel，而是把完整 codec codes 放入
   `semantic_codes` 并设置 `acoustic_codes=None`；Stable Codec 与 UniCodec 的完整 frame codes
   也使用相同表示。fixed-length structured codec 不属于这条 frame-code parser 路径，其 prompt、
-  output 和 decode 所有权由内部固定 route 按 task 处理，不作为 datamodule 公共配置轴。
+  output 和 decode ownership 由序列 marker 自描述，不作为 datamodule 公共配置轴。
 - audio tokenizer 的输出统一称为 `audio_token_ids`；codec codebook index 统一称为
   `semantic_codes` / `acoustic_codes`。只有 layout global IDs 使用 `input_ids` 和
   `token_labels`。
@@ -273,8 +275,9 @@ route 读取 `h[p]`，target positions 保留 token 自身位置并由 loss 读�
 - `ModelBatch` 只表达训练或 teacher-forcing evaluation，不表达缺少 target 的真实推理请求。
 - `audio_input_positions` 只表达可见 source audio payload 的 overlay 位置；其值必须唯一、落在
   当前序列内并指向 runtime codec audio range。没有 source audio 时必须为 `None`。
-- `ModelBatch.generation_prompt_lengths` 与 `audio_contexts` 是 teacher-forcing 到真实推理的显式桥接
-  字段；route 需要 prompt stream 时缺少对应 structured context 必须失败，不能回退到 target codes。
+- `ModelBatch.generation_prompt_lengths` 是 teacher-forcing 到真实推理的显式 prompt 桥接字段；
+  BiCodec reference global stream 必须已位于该边界内，decode 不从 batch side channel 或 target codes
+  回填缺失 ownership。
 - `AudioMeta.DURATION` 的单位是秒，不是 codec frame 或 waveform sample。parser 优先读取并校验
   该元数据；缺失时用当前 codec view 的 frame count 除以 `runtime.codec_frame_rate` 推导
   `Speech.duration_seconds`。task sample builder 按 source/target modality 决定哪些角色计入

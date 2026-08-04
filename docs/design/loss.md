@@ -18,12 +18,14 @@ position 语义见 [总览 §2.4](../model-design.md)。
   局部词表上计算 CE，每行必须至少包含一个非 `-100` target；causal shift 在此完成，只把有效
   predictor hidden states 交给 `model.token_logits(hidden, modality)`，text/audio head 不做跨模态
   softmax 竞争。`target_modality` 只是单模态 prediction 的便捷属性，mixed 时为 `None`，不作为
-  loss 入口。BiCodec route 额外消费逐位置 `token_groups` 与 `model.selected_logits()`，只在当前
+  loss 入口。BiCodec grammar 额外消费逐位置 `token_groups` 与 `model.selected_logits()`，只在当前
   semantic、semantic-or-end 或 acoustic codebook candidate group 上计算 restricted CE。
 - `CTCAlignmentLoss`：对 transcript-latent audio span 做冻结文本头监督。source route 在 audio
-  自身位置读取 `h[p]`，target route 在 causal predecessor 读取 `h[p-1]`；两侧 transcript 都使用
-  tokenizer-local text IDs，blank 是 runtime PAD 在 text block 内的 local ID。每条 route 的 CTC
-  先按 transcript token 数归一，组合项按有效 `sequences` 聚合。
+  自身位置读取 `h[p]` 并使用非因果 decoder，target route 在 causal predecessor 读取 `h[p-1]` 并使用
+  因果 decoder；两侧可分别选择 backbone readout、pooling 和 identity/linear/transformer topology，
+  最终都通过冻结 tied text readout 得到 tokenizer-local text logits。blank 是 runtime PAD 在 text
+  block 内的 local ID。每条 route 的 CTC 先按 transcript token 数归一；source/target 权重项在同一
+  row 内相加，组合项再按有效 `sequences`（有任一 active route 的样本行数，而不是 audio span 数）聚合。
 - `FlowLoss`：直接从 `semantic-acoustic-codec.loss` 包级导出；S2S 只保留 joint
   token/acoustic objective 的组合，不再维护独立 loss 子模块或重命名 alias。
 - `MaskedCodebookCrossEntropyLoss`：直接从 `anytrain.loss` 包级导出；训练 forward
@@ -46,16 +48,17 @@ position 语义见 [总览 §2.4](../model-design.md)。
 
 ## Objective 组合
 
-三个组合入口共享 token forward；route 不在 objective 内动态切换，sample builder 已经把固定
-`audio_route.output.streams` 编译成 labels 和 prediction groups：
+三个组合入口共享 token forward；ownership 不在 objective 内动态切换，sample builder 已经把
+self-describing prompt/response streams 编译成 labels 和 prediction groups：
 
 ```python
-hidden_states = model.token_hidden_states(
+hidden = model.objective_hidden_output(
     batch.input_ids,
+    ctc_routes=active_ctc_routes,
     attention_mask=batch.attention_mask,
 )
 token = self.token(
-    hidden_states,
+    hidden.token,
     batch.token_labels,
     batch.prediction_modality,
     model.token_logits,
@@ -67,10 +70,12 @@ result = {
 
 if self.ctc is not None:
     ctc = self.ctc(
-        hidden_states,
+        hidden.token,
+        source_hidden_states=hidden.source_ctc,
+        target_hidden_states=hidden.target_ctc,
         source=batch.source_ctc,
         target=batch.target_ctc,
-        text_readout=model.text_logits,
+        decode=model.ctc_logits,
     )
     result["ctc"] = ctc
     result["loss"] += loss_item_mean(
@@ -87,7 +92,7 @@ target_data = batch.acoustic_target
 
 # FlowObjective
 condition = model.target_frame_condition(
-    hidden_states,
+    hidden.token,
     target_data["token_positions"],
 )
 target = model.acoustic_target_latent(target_data["codes"])
@@ -105,7 +110,7 @@ teacher_forced_codes = target_data["codes"].masked_fill(
     0,
 )
 logits = model.acoustic_logits(
-    hidden_states,
+    hidden.token,
     target_data["token_positions"],
     teacher_forced_codes,
 )
@@ -114,7 +119,7 @@ rvq = self.rvq(logits, target_data["codes"], batch.acoustic_target_mask)
 
 所有 batch 都计算 token CE。是否增加 acoustic objective 只由
 `batch.acoustic_target is not None` 决定，不通过 task modality 猜测 codec
-representation，也不通过模式布尔开关表达组合。BiCodec route 的 structured acoustic payload 是
+representation，也不通过模式布尔开关表达组合。BiCodec grammar 的 structured acoustic payload 是
 token objective 的 grouped CE，不是 frame-aligned `acoustic_target`；结构化 target fields 或
 prediction groups 不完整时直接报错。
 
@@ -139,8 +144,9 @@ teacher features。acoustic-only codec screening 与 oracle artifact 导出由
   为准；`Task.prediction_modality` 只是 loader 未覆写时的默认值。loss、FLOPs、sample/batch 校验都消费
   有效 prediction，不回退到 task 默认。
 - `TokenObjective`、`FlowObjective` 和 `RVQObjective` 只依赖结构化 Protocol 的
-  `layout`、`token_hidden_states()`、`token_logits(hidden, modality)`、`target_frame_condition()`、
-  `acoustic_decoder` 等公开能力，不依赖具体模型类。
+  `layout`、`token_hidden_states()`、`objective_hidden_output()`、`ctc_logits()`、
+  `token_logits(hidden, modality)`、`target_frame_condition()`、`acoustic_decoder` 等公开能力，
+  不依赖具体模型类。
 - target position 表示 token 自身位置 `p`；causal predictor shift `p - 1` 由 model 的
   `target_frame_condition()` 统一处理，objective 不重复偏移。
 - CTC position 同样表示 audio token 自身位置 `p`，但 source/target shift 由 CTC route 自身拥有：
@@ -159,17 +165,17 @@ teacher features。acoustic-only codec screening 与 oracle artifact 导出由
   boolean mask 选中的 frame；padding 位置的 NaN/Inf 不参与 forward，也不产生梯度。
 - token、flow matching、RVQ 与 REPA `LossItem` 必须分别携带 `tokens` 或 `frames` 有效单位；
   objective 不在单位缺失时静默退回逐行平均。
-- CTC `LossItem` 携带 `sequences`，inactive/padded row 的 count 为 0；日志和 validation 不把这些
-  row 纳入 task mean。稳定路径为 `alignment/ctc/loss`，route detail 分为 source/target loss、
-  transcript tokens 与 audio steps。
+- CTC `LossItem` 携带 `sequences`，inactive/padded row 的 count 为 0；全 padding CTC row 的 loss
+  精确为 0，总损失使用 zero-safe sequence mean，不产生 `0 * NaN`。日志和 validation 不把这些 row
+  纳入 task mean。稳定路径为 `alignment/ctc/loss`，route detail 分为 source/target loss、transcript
+  tokens 与 audio steps。
 - token 行损失是有效 token 的加权平均；`details` 中的 `text_loss` / `audio_loss` 仅供观测，不改变
   训练标量。validation 暴露聚合 `token/loss`（经 `val/` 前缀写入 logger），暂不拆
   `token/text_loss` / `token/audio_loss`。
 - generation 按有效 `Request.prediction`（缺省则 `task.prediction_modality`）分组；训练 bridge
   会把 `ModelBatch.predictions` 写入 Request。
-- `audio_route` 不改变 Flow/RVQ acoustic objective 的 frame-aligned contract；它只约束 structured
-  token route 的 prompt/output/decode ownership。BiCodec reuse/predict 路线都不会把 target acoustic
-  stream 静默泄漏到 prompt，prompt/reference codes 也不作为 token labels。
+- BiCodec prompt/output ownership 不改变 Flow/RVQ acoustic objective 的 frame-aligned contract；
+  target acoustic stream 不会静默泄漏到 reference prompt，prompt codes 也不作为 token labels。
 - `causal_lm.py` 只实现离散 acoustic RVQ objective，不读取 model/runtime 或重复 condition
   对齐；其稳定输出键是 `rvq`。
 - REPA teacher 始终保持 eval/frozen；teacher features detach，梯度只进入 DiT 与 student

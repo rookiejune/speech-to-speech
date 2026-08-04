@@ -17,6 +17,7 @@ from speech_to_speech.model import (
     FsqFeature,
 )
 from speech_to_speech.model.acoustic import AcousticType
+from speech_to_speech.model.ctc import CTCDecoderType
 from speech_to_speech.runtime import (
     AudioSequenceLayout,
     BackboneInitialization,
@@ -57,6 +58,7 @@ def prepare(config: DictConfig) -> DictConfig:
             value = fsq_embedding.get("feature")
             if value is not None:
                 fsq_embedding.feature = _enum_name(FsqFeature, value)
+        _ctc(model.get("ctc"))
     acoustic = model.get("acoustic") if isinstance(model, DictConfig) else None
     if isinstance(acoustic, DictConfig):
         acoustic_type = acoustic.get("type")
@@ -118,9 +120,7 @@ def peft_lora(config: DictConfig) -> LoraConfig | None:
     if not isinstance(value, DictConfig):
         raise TypeError("model.lora must be a mapping or null.")
     kwargs = OmegaConf.to_container(value, resolve=True)
-    if not isinstance(kwargs, dict) or any(
-        not isinstance(key, str) for key in kwargs
-    ):
+    if not isinstance(kwargs, dict) or any(not isinstance(key, str) for key in kwargs):
         raise TypeError("model.lora must contain string keys.")
     return LoraConfig(**cast(dict[str, Any], kwargs))
 
@@ -163,6 +163,21 @@ def _text_dataset(value: object) -> None:
         value.name = _enum_name(TextDatasetName, dataset)
 
 
+def _ctc(value: object) -> None:
+    if not isinstance(value, DictConfig):
+        return
+    for route_name in ("source", "target"):
+        route = value.get(route_name)
+        if not isinstance(route, DictConfig):
+            continue
+        decoder = route.get("decoder")
+        if not isinstance(decoder, DictConfig):
+            continue
+        decoder_type = decoder.get("type")
+        if decoder_type is not None:
+            decoder.type = _enum_name(CTCDecoderType, decoder_type)
+
+
 def _audio_sequence_layout(config: DictConfig) -> None:
     layout = config.get("audio_sequence_layout")
     if layout is not None:
@@ -177,9 +192,7 @@ def _reject_audio_representation(config: DictConfig) -> None:
         return
     if OmegaConf.is_missing(runtime, "audio_representation"):
         return
-    raise ValueError(
-        "runtime.audio_representation is internal; use audio_sequence_layout."
-    )
+    raise ValueError("runtime.audio_representation is internal; use audio_sequence_layout.")
 
 
 def _enum_name(enum: Type[EnumT], value: object) -> str:

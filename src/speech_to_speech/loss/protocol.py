@@ -8,6 +8,7 @@ from anytrain.module.idspace import Layout
 from torch import Tensor
 
 from ..model.embedding.fsq import FsqNeighbors
+from ..model.ctc import CTCRoute, ObjectiveHiddenOutput
 from ..prediction import PredictionModality
 
 
@@ -26,6 +27,26 @@ class TokenObjectiveModel(Protocol):
         validate_audio_input_positions: bool = True,
         prediction: PredictionModality | None = None,
     ) -> Tensor: ...
+
+    def objective_hidden_output(
+        self,
+        input_ids: Tensor,
+        *,
+        ctc_routes: frozenset[CTCRoute],
+        attention_mask: Tensor | None = None,
+        audio_input_positions: Tensor | None = None,
+        input_modalities: frozenset[Modality] | None = None,
+        validate_input: bool = True,
+        validate_audio_input_positions: bool = True,
+        prediction: PredictionModality | None = None,
+    ) -> ObjectiveHiddenOutput: ...
+
+    def ctc_logits(
+        self,
+        route: CTCRoute,
+        hidden_states: Tensor,
+        mask: Tensor,
+    ) -> tuple[Tensor, Tensor]: ...
 
     def token_logits(
         self,

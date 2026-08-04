@@ -13,16 +13,12 @@ from typing_extensions import NotRequired
 
 from .._tensor import is_signed_integer_dtype
 from ..prediction import PredictionModality
-from ..runtime import AudioSequenceLayout
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..runtime.protocol import GenerationRuntime
 from ..runtime.types import frame_codec, structured_codec, supports_structured
 from ..task import Task
 from ..templates import format_instruction, select_template
-from .bicodec import (
-    prepare_bicodec_acoustic_tts_request,
-    prepare_bicodec_tts_request,
-)
+from .bicodec import prepare_bicodec_tts_request
 from .protocol import TokenGenerator
 from .service import generate_responses
 from .text import decode_response_text
@@ -170,42 +166,20 @@ def _build_request(
             prompt_ids=_prompt_ids(prompt_messages, runtime),
             task=task,
             audio_input_positions=None,
-            audio_context=None,
         )
 
     tokenizer = runtime.audio_tokenizer
     if isinstance(tokenizer, BiCodecAudioTokenizer):
-        if runtime.audio_sequence_layout is AudioSequenceLayout.SEMANTIC:
-            if codes is None:
-                raise ValueError(
-                    "reference BiCodec chat requests require audio or codec_codes."
-                )
-            if not isinstance(codes, SemanticAcousticCodes):
-                raise TypeError(
-                    "BiCodec reference chat requests require SemanticAcousticCodes."
-                )
-            return prepare_bicodec_tts_request(
-                source_text,
-                codes,
-                runtime,
-                language=language,
-                messages=prompt_messages,
-                task=task,
-            )
-        if runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
-            if codes is not None:
-                raise ValueError(
-                    "unconditioned BiCodec chat requests do not accept prompt "
-                    "audio or codes."
-                )
-            return prepare_bicodec_acoustic_tts_request(
-                source_text,
-                runtime,
-                language=language,
-                messages=prompt_messages,
-                task=task,
-            )
-        raise ValueError("unsupported BiCodec audio_sequence_layout.")
+        if codes is not None and not isinstance(codes, SemanticAcousticCodes):
+            raise TypeError("BiCodec chat requests require SemanticAcousticCodes.")
+        return prepare_bicodec_tts_request(
+            source_text,
+            runtime,
+            reference_codes=codes,
+            language=language,
+            messages=prompt_messages,
+            task=task,
+        )
 
     if codes is not None:
         raise ValueError(
@@ -221,7 +195,6 @@ def _build_request(
         prompt_ids=prompt_ids,
         task=task,
         audio_input_positions=None,
-        audio_context=None,
     )
 
 

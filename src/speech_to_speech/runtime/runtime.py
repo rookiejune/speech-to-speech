@@ -41,6 +41,7 @@ from .types import (
     validate_backbone_readout,
 )
 from .._compat import StrEnum, auto
+from ._artifact import content_sha256
 
 if TYPE_CHECKING:
     from anytrain.codec import SemanticAcousticCodec
@@ -166,6 +167,13 @@ class Runtime:
     def semantic_codec_artifact(self) -> str | None:
         return self.config.semantic_codec_artifact
 
+    @cached_property
+    def semantic_codec_artifact_sha256(self) -> str | None:
+        artifact = self.config.semantic_codec_artifact
+        if artifact is None:
+            return None
+        return content_sha256(Path(artifact).expanduser())
+
     @property
     def acoustic_side_channel(self) -> bool:
         return (
@@ -275,6 +283,8 @@ class Runtime:
                 "semantic-only waveform decoding requires runtime.semantic_codec_artifact; "
                 "use audio_sequence_layout=flattened for token-only generation."
             )
+        if self.semantic_codec_artifact_sha256 is None:
+            raise RuntimeError("semantic codec artifact identity was not resolved.")
         from semantic_acoustic_codec.runtime import SemanticCodecRuntime
         from semantic_acoustic_codec.runtime.artifact import load_artifact
 
@@ -403,8 +413,20 @@ def runtime_for_sequence_layout(config: Config, layout: AudioSequenceLayout) -> 
 def _validate_sequence_layout_config(config: Config, layout: AudioSequenceLayout) -> None:
     if not isinstance(layout, AudioSequenceLayout):
         raise TypeError("audio_sequence_layout must be an AudioSequenceLayout.")
+    if config.audio_view is AudioView.BICODEC:
+        if layout is not AudioSequenceLayout.FLATTENED:
+            raise ValueError(
+                "BiCodec uses one self-describing structured sequence layout; "
+                "set audio_sequence_layout=flattened."
+            )
+        if config.semantic_codec_artifact is not None:
+            raise ValueError(
+                "BiCodec global tokens are generated or reused in the token sequence "
+                "and cannot use runtime.semantic_codec_artifact."
+            )
+        return
     if layout is AudioSequenceLayout.FLATTENED:
-        if config.audio_tokenizer is not None and config.audio_view is not AudioView.BICODEC:
+        if config.audio_tokenizer is not None:
             raise ValueError(
                 "audio_sequence_layout=flattened cannot use a BPE audio tokenizer "
                 "for frame-code codecs."
@@ -412,12 +434,6 @@ def _validate_sequence_layout_config(config: Config, layout: AudioSequenceLayout
         if config.semantic_codec_artifact is not None:
             raise ValueError(
                 "runtime.semantic_codec_artifact requires audio_sequence_layout=semantic."
-            )
-    if layout is AudioSequenceLayout.SEMANTIC and config.audio_view is AudioView.BICODEC:
-        if config.semantic_codec_artifact is None:
-            raise ValueError(
-                "BiCodec semantic audio_sequence_layout requires "
-                "runtime.semantic_codec_artifact."
             )
 
 

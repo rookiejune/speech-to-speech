@@ -216,10 +216,12 @@ def runtime_gradient_checkpointing(runtime: object) -> bool:
 def enable_interface_gradient_checkpointing(
     tokens: TokenInterface,
     source_audio_encoder: AudioInputTower | None,
+    ctc_decoders: nn.Module,
 ) -> None:
     count = enable_gradient_checkpointing(tokens)
     if source_audio_encoder is not None:
         count += enable_gradient_checkpointing(source_audio_encoder)
+    count += enable_gradient_checkpointing(ctc_decoders)
     if count == 0:
         raise RuntimeError(
             "runtime.gradient_checkpointing requested custom adapter checkpointing, "

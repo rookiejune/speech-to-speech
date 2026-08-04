@@ -11,11 +11,11 @@ from typing import Any, TypedDict
 import torch
 
 
-MODEL_CONTRACT_GRAMMAR = "s2s-model-v3-contract-v1"
+MODEL_CONTRACT_GRAMMAR = "s2s-model-v3-contract-v2"
 _MODEL_CONTRACT_FIELDS = frozenset({"grammar", "components", "sha256"})
 _MISSING = "<missing>"
 _DIFFERENCE_KEY_ORDER = {
-    "components": ("runtime", "interface", "acoustic"),
+    "components": ("runtime", "interface", "acoustic", "state_dict"),
     "components.runtime": ("token_space", "codec", "backbone"),
     "components.runtime.token_space": (
         "audio_sequence_layout",
@@ -23,6 +23,21 @@ _DIFFERENCE_KEY_ORDER = {
         "special_ids",
         "text_tokenizer",
         "audio_tokenizer",
+    ),
+    "components.interface": (
+        "audio_embedding",
+        "audio_projection",
+        "audio_head",
+        "source_audio_encoder",
+        "ctc_decoders",
+    ),
+    "components.interface.ctc_decoders": ("source", "target"),
+    "components.state_dict": (
+        "grammar",
+        "schema_sha256",
+        "entry_count",
+        "parameter_entries",
+        "buffer_entries",
     ),
 }
 

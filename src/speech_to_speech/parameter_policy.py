@@ -9,6 +9,7 @@ from typing import Optional, Protocol, runtime_checkable
 from torch import nn
 
 from ._compat import StrEnum, auto
+from .model.ctc import CTCConfig, CTCRoute
 
 
 class ParameterGroup(StrEnum):
@@ -18,6 +19,7 @@ class ParameterGroup(StrEnum):
     SEMANTIC_AUDIO_ADAPTER = auto()
     AUDIO_INPUT_ADAPTER = auto()
     AUDIO_OUTPUT = auto()
+    ALIGNMENT_DECODER = auto()
     ACOUSTIC_DECODER = auto()
 
 
@@ -105,6 +107,7 @@ SPEECH_INTERFACE_GROUPS = frozenset(
         ParameterGroup.SEMANTIC_AUDIO_ADAPTER,
         ParameterGroup.AUDIO_INPUT_ADAPTER,
         ParameterGroup.AUDIO_OUTPUT,
+        ParameterGroup.ALIGNMENT_DECODER,
         ParameterGroup.ACOUSTIC_DECODER,
     }
 )
@@ -115,6 +118,7 @@ SEMANTIC_GROUPS = frozenset(
         ParameterGroup.SEMANTIC_AUDIO_ADAPTER,
         ParameterGroup.AUDIO_INPUT_ADAPTER,
         ParameterGroup.AUDIO_OUTPUT,
+        ParameterGroup.ALIGNMENT_DECODER,
     }
 )
 
@@ -267,6 +271,8 @@ def parameter_group(name: str) -> ParameterGroup:
         return ParameterGroup.AUDIO_INPUT_ADAPTER
     if name.startswith("tokens.audio_head."):
         return ParameterGroup.AUDIO_OUTPUT
+    if name.startswith(("ctc_decoders.source.", "ctc_decoders.target.")):
+        return ParameterGroup.ALIGNMENT_DECODER
     if (
         name.startswith("acoustic_condition.")
         or name.startswith("acoustic_decoder.")
@@ -312,6 +318,8 @@ def _structurally_frozen(
 ) -> bool:
     if _is_text_embedding(model, parameter):
         return True
+    if _inactive_ctc_decoder(name, model):
+        return True
     if name.startswith("acoustic_decoder.decoder.embed_tokens."):
         return True
     decoder = getattr(model, "acoustic_decoder", None)
@@ -325,6 +333,19 @@ def _structurally_frozen(
     ):
         return True
     return False
+
+
+def _inactive_ctc_decoder(name: str, model: ParameterPolicyModel) -> bool:
+    route: CTCRoute | None = None
+    if name.startswith("ctc_decoders.source."):
+        route = CTCRoute.SOURCE
+    elif name.startswith("ctc_decoders.target."):
+        route = CTCRoute.TARGET
+    if route is None:
+        return False
+    model_config = getattr(model, "config", None)
+    config = getattr(model_config, "ctc", None)
+    return isinstance(config, CTCConfig) and not config.route(route).enabled
 
 
 def _is_text_embedding(

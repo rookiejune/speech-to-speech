@@ -268,7 +268,6 @@ def _kimi_body_callable(
         raise TypeError("Kimi-Audio model body must be a torch.nn.Module.")
 
     def call(**kwargs: object) -> BackboneOutput:
-        kwargs["return_dict"] = True
         output = call_kimi_body(
             body,
             checkpointed=should_checkpoint_kimi_body(model, enabled),

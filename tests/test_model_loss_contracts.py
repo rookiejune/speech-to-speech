@@ -458,39 +458,6 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertEqual(float(metrics["token/loss"].weights.sum()), 2.0)
         self.assertEqual(float(metrics["acoustic/rvq/codebook_0_top1"].values.sum()), 1.0)
 
-    def test_transfer_batch_rebuilds_frozen_audio_context(self):
-        context = SemanticAcousticCodes(
-            semantic=torch.tensor([[1]]),
-            acoustic=torch.tensor([[2, 3]]),
-        )
-        batch = ModelBatch(
-            input_ids=torch.tensor([[0, 1]]),
-            token_labels=torch.tensor([[-100, 1]]),
-            acoustic_target=None,
-            tasks=[Task.TTS],
-            predictions=[Task.TTS.prediction_modality],
-            pad_token_id=99,
-            audio_contexts=(context,),
-        )
-        module = _module()
-
-        with patch.object(
-            LightningModule,
-            "transfer_batch_to_device",
-            autospec=True,
-        ) as transfer:
-            moved = module.transfer_batch_to_device(batch, torch.device("cpu"), 0)
-
-        self.assertIsInstance(moved, ModelBatch)
-        self.assertIsNot(moved, batch)
-        transfer.assert_not_called()
-        moved_context = moved.audio_contexts
-        if moved_context is None or moved_context[0] is None:
-            self.fail("transferred batch lost its audio context")
-        self.assertIsNot(moved_context[0], context)
-        torch.testing.assert_close(moved_context[0].semantic, context.semantic)
-        torch.testing.assert_close(moved_context[0].acoustic, context.acoustic)
-
     def test_transfer_batch_requests_nonblocking_model_batch_copy(self):
         batch = _batch(Task.MT, token_labels=torch.tensor([[-100, 1]]))
         module = _module()

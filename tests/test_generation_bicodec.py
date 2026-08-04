@@ -16,10 +16,7 @@ from speech_to_speech.generation import (
     Request,
     generate_responses,
 )
-from speech_to_speech.generation.bicodec import (
-    prepare_bicodec_acoustic_tts_request,
-    prepare_bicodec_tts_request,
-)
+from speech_to_speech.generation.bicodec import prepare_bicodec_tts_request
 from speech_to_speech.generation._request import validate
 from speech_to_speech.model.generation import GenerationStepResult
 from speech_to_speech.runtime import AudioSequenceLayout
@@ -51,16 +48,14 @@ class _TextTokenizer:
             return [2, 3]
         return [1]
 
-def _runtime(
-    *, audio_sequence_layout: AudioSequenceLayout = AudioSequenceLayout.SEMANTIC
-) -> GenerationRuntime:
+def _runtime() -> GenerationRuntime:
     tokenizer = BiCodecAudioTokenizer(
         semantic_codebook_size=8,
         acoustic_codebook_sizes=(3,),
         acoustic_unit_length=2,
     )
     runtime = SimpleNamespace(
-        audio_sequence_layout=audio_sequence_layout,
+        audio_sequence_layout=AudioSequenceLayout.FLATTENED,
         audio_tokenizer=tokenizer,
         text_tokenizer=_TextTokenizer(),
         layout=Layout(
@@ -87,18 +82,18 @@ def _codes() -> SemanticAcousticCodes:
 
 
 class BiCodecRequestInputTest(unittest.TestCase):
-    def test_reference_request_serializes_text_and_context(self) -> None:
+    def test_reference_request_serializes_text_and_global_stream(self) -> None:
         runtime = _runtime()
         codes = _codes()
 
         request = prepare_bicodec_tts_request(
             "hello world",
-            codes,
             runtime,
+            reference_codes=codes,
             language="Chinese",
         )
 
-        self.assertIs(request["audio_context"], codes)
+        self.assertNotIn("audio_context", request)
         self.assertIs(request["task"], Task.TTS)
         self.assertEqual(len(runtime.text_tokenizer.encoded), 1)
         self.assertIn("hello world", runtime.text_tokenizer.encoded[0])
@@ -119,11 +114,11 @@ class BiCodecRequestInputTest(unittest.TestCase):
         )
         validate(request, _RouteModel(runtime, _codes()))
 
-    def test_acoustic_request_starts_output_without_audio_context(self) -> None:
-        runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
-        request = prepare_bicodec_acoustic_tts_request("hello world", runtime)
+    def test_unconditioned_request_starts_full_output(self) -> None:
+        runtime = _runtime()
+        request = prepare_bicodec_tts_request("hello world", runtime)
 
-        self.assertIsNone(request["audio_context"])
+        self.assertNotIn("audio_context", request)
         self.assertIs(request["task"], Task.TTS)
         torch.testing.assert_close(
             request["prompt_ids"],
@@ -131,22 +126,12 @@ class BiCodecRequestInputTest(unittest.TestCase):
         )
         self.assertEqual(len(runtime.text_tokenizer.encoded), 1)
 
-    def test_builders_require_their_exact_route(self) -> None:
-        with self.assertRaisesRegex(ValueError, "flattened audio_sequence_layout"):
-            prepare_bicodec_acoustic_tts_request("hello", _runtime())
-        with self.assertRaisesRegex(ValueError, "semantic audio_sequence_layout"):
-            prepare_bicodec_tts_request(
-                "hello",
-                _codes(),
-                _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED),
-            )
-
     def test_reference_request_rejects_non_audio_task(self) -> None:
         with self.assertRaisesRegex(ValueError, "text-to-audio"):
             prepare_bicodec_tts_request(
                 "hello",
-                _codes(),
                 _runtime(),
+                reference_codes=_codes(),
                 task=Task.T2TT,
             )
 
@@ -158,47 +143,40 @@ class BiCodecRequestInputTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "acoustic reference codes"):
-            prepare_bicodec_tts_request("hello", malformed, _runtime())
+            prepare_bicodec_tts_request(
+                "hello",
+                _runtime(),
+                reference_codes=malformed,
+            )
 
-    def test_service_rejects_context_that_does_not_match_prompt(self) -> None:
+    def test_service_rejects_out_of_band_audio_context(self) -> None:
         runtime = _runtime()
-        request = prepare_bicodec_tts_request("hello", _codes(), runtime)
-        request["audio_context"] = SemanticAcousticCodes(
+        request = prepare_bicodec_tts_request(
+            "hello",
+            runtime,
+            reference_codes=_codes(),
+        )
+        cast(dict[str, object], request)["audio_context"] = SemanticAcousticCodes(
             semantic=torch.tensor([[1], [2], [3]], dtype=torch.long),
             acoustic=torch.tensor([[2], [2]], dtype=torch.long),
         )
 
-        with self.assertRaisesRegex(ValueError, "does not serialize"):
+        with self.assertRaisesRegex(ValueError, "audio_context is not supported"):
             validate(request, _RouteModel(runtime, _codes()))
 
-    def test_service_rejects_invalid_or_unexpected_context(self) -> None:
+    def test_text_service_rejects_audio_context(self) -> None:
         runtime = _runtime()
-        request = prepare_bicodec_tts_request("hello", _codes(), runtime)
-        request["audio_context"] = cast(SemanticAcousticCodes, {"acoustic": []})
-        with self.assertRaisesRegex(TypeError, "SemanticAcousticCodes"):
-            validate(request, _RouteModel(runtime, _codes()))
-
-        acoustic_runtime = _runtime(
-            audio_sequence_layout=AudioSequenceLayout.FLATTENED
-        )
-        acoustic_request = prepare_bicodec_acoustic_tts_request("hello", acoustic_runtime)
-        acoustic_request["audio_context"] = _codes()
-        with self.assertRaisesRegex(ValueError, "flattened audio_sequence_layout"):
-            validate(
-                acoustic_request,
-                _RouteModel(acoustic_runtime, _codes()),
-            )
-
         text_request = Request(
             prompt_ids=torch.tensor([1]),
             task=Task.T2TT,
-            audio_context=_codes(),
+            audio_input_positions=None,
         )
-        with self.assertRaisesRegex(ValueError, "text generation"):
+        cast(dict[str, object], text_request)["audio_context"] = _codes()
+        with self.assertRaisesRegex(ValueError, "audio_context is not supported"):
             validate(text_request, _RouteModel(runtime, _codes()))
 
     def test_interleaved_generation_rejects_structured_bicodec(self) -> None:
-        runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
+        runtime = _runtime()
         model = _MixedRouteModel(runtime, _codes())
 
         with self.assertRaisesRegex(
@@ -218,7 +196,7 @@ class BiCodecRequestInputTest(unittest.TestCase):
             )
 
     def test_parallel_generation_decodes_one_structured_bicodec_span(self) -> None:
-        runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
+        runtime = _runtime()
         output = SemanticAcousticCodes(
             semantic=torch.tensor([[4], [5]], dtype=torch.long),
             acoustic=torch.tensor([[2], [1]], dtype=torch.long),
@@ -250,8 +228,14 @@ class BiCodecRequestInputTest(unittest.TestCase):
         cast(SimpleNamespace, cast(object, runtime)).codec = codec
 
         result = generate_responses(
-            [prepare_bicodec_tts_request("hello", context, runtime)],
-            _RouteModel(runtime, output),
+            [
+                prepare_bicodec_tts_request(
+                    "hello",
+                    runtime,
+                    reference_codes=context,
+                )
+            ],
+            _RouteModel(runtime, output, streams=(AudioStream.SEMANTIC,)),
             max_new_tokens=4,
             do_sample=False,
         )[0]
@@ -266,8 +250,8 @@ class BiCodecRequestInputTest(unittest.TestCase):
         torch.testing.assert_close(codec.codes.semantic, output.semantic.unsqueeze(0))
         torch.testing.assert_close(codec.codes.acoustic, context.acoustic.unsqueeze(0))
 
-    def test_acoustic_request_generates_acoustic_and_semantic(self) -> None:
-        runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
+    def test_unconditioned_request_generates_acoustic_and_semantic(self) -> None:
+        runtime = _runtime()
         output = SemanticAcousticCodes(
             semantic=torch.tensor([[4], [5]], dtype=torch.long),
             acoustic=torch.tensor([[2], [1]], dtype=torch.long),
@@ -276,7 +260,7 @@ class BiCodecRequestInputTest(unittest.TestCase):
         cast(SimpleNamespace, cast(object, runtime)).codec = codec
 
         result = generate_responses(
-            [prepare_bicodec_acoustic_tts_request("hello", runtime)],
+            [prepare_bicodec_tts_request("hello", runtime)],
             _RouteModel(runtime, output),
             max_new_tokens=8,
             do_sample=False,
@@ -284,7 +268,7 @@ class BiCodecRequestInputTest(unittest.TestCase):
 
         audio = result["audio"]
         if audio is None or audio["codes"] is None:
-            self.fail("acoustic route generation did not return structured audio codes")
+            self.fail("unconditioned generation did not return structured audio codes")
         torch.testing.assert_close(audio["codes"].semantic, output.semantic)
         torch.testing.assert_close(audio["codes"].acoustic, output.acoustic)
 
@@ -329,6 +313,11 @@ class _RouteModel:
         self,
         runtime: GenerationRuntime,
         output: SemanticAcousticCodes,
+        *,
+        streams: Sequence[AudioStream] = (
+            AudioStream.ACOUSTIC,
+            AudioStream.SEMANTIC,
+        ),
     ) -> None:
         self.runtime = runtime
         embedding = nn.Embedding(1, 1)
@@ -338,11 +327,6 @@ class _RouteModel:
                 object,
                 SimpleNamespace(get_input_embeddings=lambda: embedding),
             ),
-        )
-        streams = (
-            (AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
-            if runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED
-            else (AudioStream.SEMANTIC,)
         )
         local_ids = runtime.audio_tokenizer.encode_streams(
             output,

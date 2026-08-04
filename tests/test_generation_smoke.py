@@ -258,7 +258,6 @@ def _request() -> Request:
         prompt_ids=torch.tensor([1]),
         task=Task.S2ST,
         audio_input_positions=None,
-        audio_context=None,
     )
 
 

@@ -28,6 +28,7 @@ from .generation import (
 from ._helper import AdapterType, register
 from .audio_input import AudioInputAdapterConfig, AudioInputTower
 from .audio_output import AudioOutputAdapterConfig
+from .ctc import CTCConfig, CTCDecoderRoutes, CTCRoute, ObjectiveHiddenOutput
 from .embedding.fsq import FsqEmbeddingConfig, FsqNeighbors
 from .protocol import TokenModelRuntime
 from .token import TokenInterface
@@ -44,6 +45,7 @@ class Config:
         default_factory=AudioInputAdapterConfig
     )
     fsq_embedding: FsqEmbeddingConfig = field(default_factory=FsqEmbeddingConfig)
+    ctc: CTCConfig = field(default_factory=CTCConfig)
     toy: Optional[ToyConfig] = None
     lora: Optional[LoraConfig] = None
 
@@ -115,10 +117,15 @@ class Model(nn.Module):
             hidden_size,
             device=backbone_weight.device,
         )
+        self.ctc_decoders = CTCDecoderRoutes(
+            self.config.ctc,
+            hidden_size,
+        ).to(device=backbone_weight.device, dtype=torch.float32)
         if _assembly.runtime_gradient_checkpointing(self.runtime):
             _assembly.enable_interface_gradient_checkpointing(
                 self.tokens,
                 self.source_audio_encoder,
+                self.ctc_decoders,
             )
 
     @property
@@ -395,6 +402,64 @@ class Model(nn.Module):
             modality=modality,
         ).last_hidden_state
 
+    def objective_hidden_output(
+        self,
+        input_ids: torch.Tensor,
+        *,
+        ctc_routes: frozenset[CTCRoute],
+        attention_mask: torch.Tensor | None = None,
+        audio_input_positions: torch.Tensor | None = None,
+        input_modalities: frozenset[Modality] | None = None,
+        validate_input: bool = True,
+        validate_audio_input_positions: bool = True,
+        prediction: PredictionModality | None = None,
+    ) -> ObjectiveHiddenOutput:
+        """Encode token and route-specific CTC readouts in one backbone call."""
+        if not isinstance(ctc_routes, frozenset) or any(
+            not isinstance(route, CTCRoute) for route in ctc_routes
+        ):
+            raise TypeError("ctc_routes must be a frozenset of CTCRoute values.")
+        modality = _prediction_readout_modality(
+            prediction,
+            has_modality_readouts=self._encoder.has_modality_readouts,
+        )
+        output = self._backbone_output(
+            input_ids,
+            attention_mask=attention_mask,
+            audio_input_positions=audio_input_positions,
+            input_modalities=input_modalities,
+            validate_input=validate_input,
+            validate_audio_input_positions=validate_audio_input_positions,
+            output_hidden_states=self.ctc_decoders.requires_hidden_states(ctc_routes),
+            use_cache=False,
+            modality=modality,
+        )
+        source = (
+            self.ctc_decoders.hidden_states(output, CTCRoute.SOURCE)
+            if CTCRoute.SOURCE in ctc_routes
+            else None
+        )
+        target = (
+            self.ctc_decoders.hidden_states(output, CTCRoute.TARGET)
+            if CTCRoute.TARGET in ctc_routes
+            else None
+        )
+        return ObjectiveHiddenOutput(
+            token=output.last_hidden_state,
+            source_ctc=source,
+            target_ctc=target,
+        )
+
+    def ctc_logits(
+        self,
+        route: CTCRoute,
+        hidden_states: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Decode one CTC route, then apply the frozen tied text readout."""
+        decoded, pooled_mask = self.ctc_decoders(route, hidden_states, mask)
+        return self.text_logits(decoded), pooled_mask
+
     def training_input_hints(
         self,
         input_ids: torch.Tensor,
@@ -427,6 +492,7 @@ class Model(nn.Module):
         validate_input: bool = True,
         validate_audio_input_positions: bool = True,
         modality: Modality | None = None,
+        output_hidden_states: bool = False,
     ) -> BackboneOutputView:
         if input_ids.dim() != 2:
             raise ValueError("input_ids must have shape [batch, sequence].")
@@ -441,7 +507,7 @@ class Model(nn.Module):
         return self._encoder.encode(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
-            output_hidden_states=False,
+            output_hidden_states=output_hidden_states,
             past_key_values=past_key_values,
             use_cache=use_cache,
             position_ids=position_ids,

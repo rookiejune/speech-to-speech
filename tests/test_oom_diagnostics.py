@@ -9,8 +9,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-from anytrain.codec import SemanticAcousticCodes
-
 from speech_to_speech.callback import OOMDiagnostics
 from speech_to_speech.callback._oom import generation_report, report_oom
 from speech_to_speech.callback.logging.acoustic import AcousticEvaluation
@@ -57,11 +55,6 @@ class OOMDiagnosticsTest(unittest.TestCase):
             inputs["acoustic_target"]["codes"]["shape"],
             [1, 2, 2],
         )
-        self.assertEqual(
-            inputs["audio_contexts"][0]["acoustic"]["shape"],
-            [3, 2],
-        )
-
     def test_raw_batch_report_contains_role_specific_waveform_shape(self) -> None:
         callback = OOMDiagnostics()
         trainer = _trainer(callback)
@@ -105,13 +98,11 @@ class OOMDiagnosticsTest(unittest.TestCase):
                 prompt_ids=torch.tensor([10, 101, 102, 198]),
                 task=Task.S2ST,
                 audio_input_positions=torch.tensor([1, 2]),
-                audio_context=None,
             ),
             Request(
                 prompt_ids=torch.tensor([20, 103, 198]),
                 task=Task.S2ST,
                 audio_input_positions=torch.tensor([1]),
-                audio_context=None,
             ),
         ]
         error = torch.OutOfMemoryError("generation allocation failed")
@@ -146,13 +137,11 @@ class OOMDiagnosticsTest(unittest.TestCase):
                 prompt_ids=torch.tensor([1, 2]),
                 task=Task.T2TT,
                 audio_input_positions=None,
-                audio_context=None,
             ),
             Request(
                 prompt_ids=torch.tensor([3]),
                 task=Task.T2TT,
                 audio_input_positions=None,
-                audio_context=None,
             ),
         ]
 
@@ -318,12 +307,6 @@ def _model_batch() -> ModelBatch:
         predictions=[Task.S2ST.prediction_modality],
         pad_token_id=0,
         audio_input_positions=torch.tensor([[1, 2]]),
-        audio_contexts=(
-            SemanticAcousticCodes(
-                semantic=torch.zeros(2, 1, dtype=torch.long),
-                acoustic=torch.zeros(3, 2, dtype=torch.long),
-            ),
-        ),
     )
 
 

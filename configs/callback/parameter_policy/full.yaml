@@ -6,6 +6,7 @@ trainable_groups:
   - semantic_audio_adapter
   - audio_input_adapter
   - audio_output
+  - alignment_decoder
   - acoustic_decoder
 frozen_groups: []
 backbone_top_fraction: 1.0

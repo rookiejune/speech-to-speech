@@ -11,9 +11,11 @@ template for this repository's single-stream prompt protocol.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable, Collection, Mapping, Sequence
 from numbers import Integral
-from typing import Literal, Protocol, TypeVar, cast
+from typing import Any, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 import torch
 from torch import Tensor, nn
@@ -50,6 +52,16 @@ class KimiRawTokenizer(Protocol):
     ) -> Sequence[int]: ...
 
     def decode(self, token_ids: Sequence[int]) -> str: ...
+
+
+@runtime_checkable
+class _ContractStateProvider(Protocol):
+    def contract_state(self) -> Mapping[str, object]: ...
+
+
+@runtime_checkable
+class _BackendSerializer(Protocol):
+    def to_str(self) -> str: ...
 
 
 class KimiTokenizerAdapter:
@@ -134,14 +146,24 @@ class KimiTokenizerAdapter:
         return dict(self._special_tokens_map)
 
     def contract_state(self) -> Mapping[str, object]:
+        """Describe the remote tokenizer content without relying on its path.
+
+        An explicit remote ``contract_state()`` is authoritative.  Otherwise
+        known serialized or tiktoken-style backend state is captured together
+        with deterministic encode probes.  The probes detect ordinary-token
+        behavior changes but cannot prove that an opaque external asset is
+        identical outside the sampled text when no content state is exposed.
+        """
         return {
-            "grammar": "kimi-text-tokenizer-v1",
+            "grammar": "kimi-text-tokenizer-v2",
             "raw_implementation": (
                 f"{type(self._raw).__module__}.{type(self._raw).__qualname__}"
             ),
             "vocab_size": self._vocab_size,
             "special_tokens": dict(self._special_tokens),
-            "chat_template": self._configured_chat_template,
+            "raw_state": _raw_tokenizer_state(self._raw, self._vocab_size),
+            "raw_chat_template": _raw_chat_template_state(self._raw),
+            "configured_chat_template": self._configured_chat_template,
         }
 
     def encode(self, text: str, *, add_special_tokens: bool = False) -> list[int]:
@@ -385,6 +407,186 @@ def _token_ids(value: object, vocab_size: int, name: str) -> list[int]:
         _token_id(token_id, f"{name} item", vocab_size=vocab_size)
         for token_id in values
     ]
+
+
+def _raw_tokenizer_state(raw: KimiRawTokenizer, vocab_size: int) -> dict[str, object]:
+    if isinstance(raw, _ContractStateProvider):
+        state = raw.contract_state()
+        if not isinstance(state, Mapping):
+            raise TypeError("Kimi raw tokenizer contract_state() must return a mapping.")
+        grammar = state.get("grammar")
+        if not isinstance(grammar, str) or not grammar:
+            raise ValueError(
+                "Kimi raw tokenizer contract_state() requires a non-empty grammar."
+            )
+        return {
+            "grammar": "explicit-contract-state-v1",
+            "state": dict(state),
+        }
+
+    return {
+        "grammar": "backend-behavior-v1",
+        "backend": _raw_backend_state(raw),
+        "encode_probes": [
+            {
+                "text": text,
+                "token_ids": _token_ids(
+                    raw.encode(
+                        text,
+                        bos=False,
+                        eos=False,
+                        allowed_special="all",
+                        disallowed_special=(),
+                    ),
+                    vocab_size,
+                    "Kimi tokenizer contract probe",
+                ),
+            }
+            for text in (
+                "Hello, world!",
+                "UPPER lower  spaces\tand\nlines",
+                "中文标点，café e\u0301 — 🙂",
+            )
+        ],
+    }
+
+
+def _raw_backend_state(raw: object) -> dict[str, object] | None:
+    candidates: list[tuple[str, object]] = [("raw", raw)]
+    for name in (
+        "backend_tokenizer",
+        "tokenizer",
+        "encoding",
+        "_tokenizer",
+        "_encoding",
+    ):
+        candidate = getattr(raw, name, None)
+        if candidate is not None:
+            candidates.append((name, candidate))
+
+    seen: set[int] = set()
+    for source, candidate in candidates:
+        identity = id(candidate)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        serialized = _serialized_backend_state(candidate)
+        if serialized is not None:
+            return {
+                "source": source,
+                "state": serialized,
+            }
+        tiktoken = _tiktoken_backend_state(candidate)
+        if tiktoken is not None:
+            return {
+                "source": source,
+                "state": tiktoken,
+            }
+    return None
+
+
+def _serialized_backend_state(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, _BackendSerializer):
+        return None
+    serialized = value.to_str()
+    if not isinstance(serialized, str):
+        raise TypeError("Kimi tokenizer backend to_str() must return a string.")
+    if not serialized:
+        raise ValueError("Kimi tokenizer backend to_str() must not return empty text.")
+    try:
+        content = json.loads(serialized)
+    except json.JSONDecodeError:
+        return {
+            "grammar": "serialized-text-v1",
+            "content_sha256": _json_sha256(serialized),
+        }
+    return {
+        "grammar": "serialized-json-v1",
+        "content_sha256": _json_sha256(content),
+    }
+
+
+def _tiktoken_backend_state(value: object) -> dict[str, object] | None:
+    mergeable_ranks = getattr(value, "_mergeable_ranks", None)
+    pattern = getattr(value, "_pat_str", None)
+    special_tokens = getattr(value, "_special_tokens", None)
+    if not (
+        isinstance(mergeable_ranks, Mapping)
+        and isinstance(pattern, str)
+        and isinstance(special_tokens, Mapping)
+    ):
+        return None
+
+    ranks: list[dict[str, object]] = []
+    for token, rank in mergeable_ranks.items():
+        rank_id = _token_id(rank, "backend mergeable rank")
+        if isinstance(token, bytes):
+            token_state = {
+                "token_type": "bytes",
+                "token": token.hex(),
+            }
+        elif isinstance(token, str):
+            token_state = {
+                "token_type": "text",
+                "token": token,
+            }
+        else:
+            raise TypeError(
+                "Kimi tokenizer backend mergeable-rank tokens must be bytes or strings."
+            )
+        ranks.append({**token_state, "rank": rank_id})
+    ranks.sort(
+        key=lambda item: (
+            cast(int, item["rank"]),
+            cast(str, item["token_type"]),
+            cast(str, item["token"]),
+        )
+    )
+
+    specials: dict[str, int] = {}
+    for token, token_id in special_tokens.items():
+        if not isinstance(token, str):
+            raise TypeError("Kimi tokenizer backend special tokens must be strings.")
+        specials[token] = _token_id(token_id, f"backend special token {token!r}")
+    backend_state = {
+        "grammar": "tiktoken-ranks-v1",
+        "pattern": pattern,
+        "mergeable_ranks": ranks,
+        "special_tokens": specials,
+    }
+    return {
+        "grammar": "tiktoken-ranks-v1",
+        "mergeable_rank_count": len(ranks),
+        "special_token_count": len(specials),
+        "content_sha256": _json_sha256(backend_state),
+    }
+
+
+def _json_sha256(value: object) -> str:
+    serialized = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _raw_chat_template_state(raw: object) -> str | dict[str, str] | None:
+    template = getattr(raw, "chat_template", None)
+    if template is None or isinstance(template, str):
+        return template
+    if not isinstance(template, Mapping):
+        raise TypeError("Kimi raw tokenizer chat_template must be text or a mapping.")
+    result: dict[str, str] = {}
+    for name, value in template.items():
+        if not isinstance(name, str) or not isinstance(value, str):
+            raise TypeError(
+                "Kimi raw tokenizer chat-template mappings must contain strings."
+            )
+        result[name] = value
+    return result
 
 
 def _input_embeddings(model: nn.Module) -> nn.Module | None:

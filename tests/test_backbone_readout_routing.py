@@ -12,6 +12,13 @@ from transformers.cache_utils import Cache
 
 from speech_to_speech.loss.module import TokenObjective
 from speech_to_speech.model.base import Model
+from speech_to_speech.model.ctc import (
+    CTCConfig,
+    CTCDecoderConfig,
+    CTCDecoderRoutes,
+    CTCRoute,
+    CTCRouteConfig,
+)
 from speech_to_speech.prediction import PredictionModality
 from speech_to_speech.runtime.backbone import BackboneBodyAdapter, BackboneReadout
 
@@ -31,11 +38,15 @@ class _Output:
 
 class _Body:
     def __init__(self) -> None:
+        self.config = SimpleNamespace(return_dict=False)
         self.calls: list[dict[str, object]] = []
         self.text = torch.full((1, 2, 3), 1.0)
         self.audio = torch.full((1, 2, 3), 2.0)
 
-    def __call__(self, **kwargs: object) -> _Output:
+    def __call__(self, *, return_dict: bool | None = None, **kwargs: object) -> _Output:
+        if return_dict is not True:
+            raise AssertionError("backbone body must return an attribute output")
+        kwargs["return_dict"] = return_dict
         self.calls.append(kwargs)
         return _Output(self.text, self.audio)
 
@@ -127,6 +138,24 @@ class _ObjectiveModel:
 
 
 class BackboneReadoutRoutingTest(unittest.TestCase):
+    def test_body_forces_attribute_output_despite_config_default(self) -> None:
+        body = _Body()
+        adapter = BackboneBodyAdapter(
+            body,
+            readout=BackboneReadout("last_hidden_state[0]"),
+        )
+
+        selected = adapter.encode(
+            inputs_embeds=torch.zeros(1, 2, 3),
+            attention_mask=torch.ones(1, 2, dtype=torch.bool),
+            output_hidden_states=False,
+            extra={"return_dict": False},
+        ).last_hidden_state
+
+        self.assertFalse(body.config.return_dict)
+        self.assertTrue(torch.equal(selected, body.text))
+        self.assertIs(body.calls[-1]["return_dict"], True)
+
     def test_readout_parses_attribute_index_and_history_requirement(self) -> None:
         indexed = BackboneReadout("last_hidden_state[1]")
         self.assertEqual(indexed.attribute, "last_hidden_state")
@@ -221,6 +250,47 @@ class BackboneReadoutRoutingTest(unittest.TestCase):
         )
 
         self.assertTrue(torch.equal(hidden, body.text))
+
+    def test_ctc_routes_select_two_readouts_from_one_backbone_forward(self) -> None:
+        body = _Body()
+        model = _RoutingModel(
+            BackboneBodyAdapter(
+                body,
+                modality_readouts={
+                    Modality.TEXT: BackboneReadout("last_hidden_state[0]"),
+                    Modality.AUDIO: BackboneReadout("last_hidden_state[1]"),
+                },
+            )
+        )
+        model.ctc_decoders = CTCDecoderRoutes(
+            CTCConfig(
+                source=CTCRouteConfig(
+                    weight=1.0,
+                    decoder=CTCDecoderConfig(
+                        backbone_readout="hidden_states[0]"
+                    ),
+                ),
+                target=CTCRouteConfig(
+                    weight=1.0,
+                    decoder=CTCDecoderConfig(
+                        backbone_readout="last_hidden_state[1]"
+                    ),
+                ),
+            ),
+            hidden_size=3,
+        )
+
+        output = model.objective_hidden_output(
+            torch.zeros(1, 2, dtype=torch.long),
+            ctc_routes=frozenset({CTCRoute.SOURCE, CTCRoute.TARGET}),
+            prediction=PredictionModality.TEXT,
+        )
+
+        self.assertEqual(len(body.calls), 1)
+        self.assertIs(body.calls[0]["output_hidden_states"], True)
+        self.assertTrue(torch.equal(output.token, body.text))
+        self.assertTrue(torch.equal(output.source_ctc, body.text + 10))
+        self.assertTrue(torch.equal(output.target_ctc, body.audio))
 
     def test_generation_step_uses_the_existing_modality(self) -> None:
         body = _Body()

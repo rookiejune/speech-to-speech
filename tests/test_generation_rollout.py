@@ -63,8 +63,8 @@ class GenerationRolloutTest(unittest.TestCase):
         model = _RolloutModel()
         rows = generate_rollouts(
             [
-                {"prompt_ids": torch.tensor([1]), "task": Task.T2TT, "audio_input_positions": None, "audio_context": None},
-                {"prompt_ids": torch.tensor([1, 2]), "task": Task.T2TT, "audio_input_positions": None, "audio_context": None},
+                {"prompt_ids": torch.tensor([1]), "task": Task.T2TT, "audio_input_positions": None},
+                {"prompt_ids": torch.tensor([1, 2]), "task": Task.T2TT, "audio_input_positions": None},
             ],
             model,
             max_new_tokens=2,
@@ -120,7 +120,6 @@ class GenerationRolloutTest(unittest.TestCase):
                         "prompt_ids": torch.tensor([1]),
                         "task": Task.T2TT,
                         "audio_input_positions": None,
-                        "audio_context": None,
                         "prediction": PredictionModality.AUDIO,
                     }
                 ],

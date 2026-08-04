@@ -31,6 +31,7 @@ class ConfigCompositionTest(ConfigTestCase):
         self.assertIsInstance(flow.runtime, RuntimeConfig)
         self.assertIsInstance(flow.model, ModelConfig)
         self.assertIsInstance(flow.pl_module, ModuleConfig)
+        self.assertIsInstance(flow.model.ctc, CTCConfig)
         self.assertIsInstance(flow.model.acoustic.decoder, DecoderConfig)
         self.assertEqual(flow.runtime.codec, "longcat")
         self.assertEqual(token.runtime.codec, "unicodec")
@@ -169,11 +170,11 @@ class ConfigCompositionTest(ConfigTestCase):
         self.assertIsInstance(config.model.toy, ToyConfig)
         self.assertIs(config.datamodule.dataset.name, DatasetName.TOY)
 
-    def test_bicodec_smokes_use_qwen_single_speaker_cells(self):
-        semantic = overfit(_compose("overfit", "experiment=overfit/bicodec_semantic_only_smoke"))
-        full = overfit(_compose("overfit", "experiment=overfit/bicodec_flattened_smoke"))
+    def test_bicodec_smokes_learn_input_and_output_global_ownership(self):
+        reuse = overfit(_compose("overfit", "experiment=overfit/bicodec_input_global_smoke"))
+        generate = overfit(_compose("overfit", "experiment=overfit/bicodec_generate_global_smoke"))
 
-        for config in (semantic, full):
+        for config in (reuse, generate):
             self.assertIsInstance(config, OverfitTokenConfig)
             self.assertEqual(config.runtime.codec, "bicodec")
             self.assertIs(
@@ -183,14 +184,16 @@ class ConfigCompositionTest(ConfigTestCase):
             self.assertIs(config.datamodule.shape, DataShape.SINGLE)
             self.assertIsNone(config.datamodule.dataset.speaker)
 
-        self.assertIs(semantic.audio_sequence_layout, AudioSequenceLayout.SEMANTIC)
-        self.assertIs(full.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
-        self.assertEqual(semantic.run_name, "bicodec-reuse-prompt-acoustic")
-        self.assertEqual(full.run_name, "bicodec-flattened-token")
-        self.assertIn("bicodec-reuse-prompt-acoustic-smoke", semantic.output_dir)
-        self.assertIn("bicodec-flattened-smoke", full.output_dir)
-        self.assertIsNone(semantic.runtime.semantic_codec_artifact)
-        self.assertIsNone(full.runtime.semantic_codec_artifact)
+        self.assertIs(reuse.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
+        self.assertIs(generate.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
+        self.assertEqual(reuse.task, Task.S2ST.value)
+        self.assertEqual(generate.task, Task.TTS.value)
+        self.assertEqual(reuse.run_name, "bicodec-reuse-input-global")
+        self.assertEqual(generate.run_name, "bicodec-generate-global")
+        self.assertIn("bicodec-input-global-smoke", reuse.output_dir)
+        self.assertIn("bicodec-generate-global-smoke", generate.output_dir)
+        self.assertIsNone(reuse.runtime.semantic_codec_artifact)
+        self.assertIsNone(generate.runtime.semantic_codec_artifact)
 
     def test_root_schema_rejects_unknown_and_foreign_fields(self):
         cases = [
@@ -286,6 +289,16 @@ class ConfigCompositionTest(ConfigTestCase):
                 self.assertEqual(config.train.max_steps, 2)
                 self.assertEqual(config.trainer.accelerator, "cpu")
                 self.assertIn(policy.value, config.output_subdir)
+                if policy is ParameterPolicyName.ACOUSTIC_ONLY:
+                    self.assertIn(
+                        ParameterGroup.ALIGNMENT_DECODER,
+                        config.callbacks.parameter_policy.frozen_groups,
+                    )
+                else:
+                    self.assertIn(
+                        ParameterGroup.ALIGNMENT_DECODER,
+                        config.callbacks.parameter_policy.trainable_groups,
+                    )
 
     def test_text_ar_uses_the_text_loader(self):
         loader = LoaderConfig(
@@ -344,19 +357,44 @@ class ConfigCompositionTest(ConfigTestCase):
         with self.assertRaises(ValueError):
             _overfit("pl_module.audio_neighbor_smoothing=1.0")
 
-    def test_ctc_weights_are_structured_and_validated(self):
+    def test_ctc_routes_and_decoders_are_structured_and_validated(self):
         default = _overfit()
         configured = _overfit(
-            "pl_module.ctc.source_weight=0.25",
-            "pl_module.ctc.target_weight=0.5",
+            "model.ctc.source.weight=0.25",
+            "model.ctc.target.weight=0.5",
+            "model.ctc.source.decoder.type=linear",
+            "model.ctc.source.decoder.pool_factor=2",
+            "model.ctc.target.decoder.type=transformer",
+            "model.ctc.target.decoder.pool_factor=4",
         )
 
-        self.assertEqual(default.pl_module.ctc.source_weight, 0.0)
-        self.assertEqual(default.pl_module.ctc.target_weight, 0.0)
-        self.assertEqual(configured.pl_module.ctc.source_weight, 0.25)
-        self.assertEqual(configured.pl_module.ctc.target_weight, 0.5)
+        for route in (default.model.ctc.source, default.model.ctc.target):
+            self.assertIsInstance(route, CTCRouteConfig)
+            self.assertIsInstance(route.decoder, CTCDecoderConfig)
+            self.assertEqual(route.weight, 0.0)
+            self.assertIs(route.decoder.type, CTCDecoderType.IDENTITY)
+            self.assertIsNone(route.decoder.backbone_readout)
+            self.assertEqual(route.decoder.pool_factor, 1)
+            self.assertEqual(route.decoder.layers, 2)
+            self.assertEqual(route.decoder.heads, 8)
+            self.assertEqual(route.decoder.ffn_ratio, 4.0)
+            self.assertEqual(route.decoder.dropout, 0.0)
+        self.assertEqual(configured.model.ctc.source.weight, 0.25)
+        self.assertEqual(configured.model.ctc.target.weight, 0.5)
+        self.assertIs(
+            configured.model.ctc.source.decoder.type,
+            CTCDecoderType.LINEAR,
+        )
+        self.assertEqual(configured.model.ctc.source.decoder.pool_factor, 2)
+        self.assertIs(
+            configured.model.ctc.target.decoder.type,
+            CTCDecoderType.TRANSFORMER,
+        )
+        self.assertEqual(configured.model.ctc.target.decoder.pool_factor, 4)
         with self.assertRaises(ValueError):
-            _overfit("pl_module.ctc.source_weight=-1")
+            _overfit("model.ctc.source.weight=-1")
+        with self.assertRaises(ValueError):
+            _overfit("model.ctc.target.decoder.type=invalid")
 
     def test_audio_input_adapter_is_structured_and_mlp_by_default(self):
         default = _overfit()
@@ -400,6 +438,7 @@ class ConfigCompositionTest(ConfigTestCase):
                 ParameterGroup.SEMANTIC_AUDIO_ADAPTER,
                 ParameterGroup.AUDIO_INPUT_ADAPTER,
                 ParameterGroup.AUDIO_OUTPUT,
+                ParameterGroup.ALIGNMENT_DECODER,
                 ParameterGroup.ACOUSTIC_DECODER,
             ],
         )

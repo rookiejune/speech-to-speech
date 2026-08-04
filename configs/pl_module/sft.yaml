@@ -1,5 +1,2 @@
 mt_validation_max_new_tokens: 256
 audio_neighbor_smoothing: 0.0
-ctc:
-  source_weight: 0.0
-  target_weight: 0.0

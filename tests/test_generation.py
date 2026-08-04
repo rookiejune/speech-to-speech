@@ -778,6 +778,8 @@ class GenerationTest(unittest.TestCase):
         self.assertTrue(audio_projection.gradient_checkpointing)
         self.assertTrue(model.source_audio_encoder.gradient_checkpointing)
         self.assertTrue(model.tokens.audio_head.gradient_checkpointing)
+        self.assertTrue(model.ctc_decoders.source.gradient_checkpointing)
+        self.assertTrue(model.ctc_decoders.target.gradient_checkpointing)
 
     def test_runtime_gradient_checkpointing_keeps_external_adapter_gradients(self):
         runtime = _TinyRuntime()
@@ -2299,7 +2301,6 @@ def _mixed_request(task: Task) -> Request:
         prompt_ids=torch.tensor([1, 2]),
         task=task,
         audio_input_positions=None,
-        audio_context=None,
     )
 
 

@@ -14,11 +14,6 @@ audio_sequence_layout: semantic
 
 output_subdir: staged-joint/s2st/stage_2/${run_name}
 
-pl_module:
-  ctc:
-    source_weight: 1.0
-    target_weight: 1.0
-
 loader_plan:
   loaders:
     asr:
@@ -45,6 +40,11 @@ loader_plan:
   step_mode: fused_joint
 
 model:
+  ctc:
+    source:
+      weight: 1.0
+    target:
+      weight: 1.0
   audio_input_adapter:
     type: transformer
     causal: false

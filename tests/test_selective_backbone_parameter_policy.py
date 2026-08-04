@@ -7,6 +7,7 @@ from anytrain.lightning import apply_parameter_trainability
 from peft import LoraConfig, inject_adapter_in_model
 from torch import nn
 
+from speech_to_speech.model.ctc import CTCConfig, CTCRouteConfig
 from speech_to_speech.parameter_policy import (
     PARAMETER_POLICY_SPECS,
     ParameterGroup,
@@ -48,9 +49,22 @@ class _SelectiveBackbone(nn.Module):
 
 
 class _SelectiveModel(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, ctc: CTCConfig | None = None) -> None:
         super().__init__()
+        self.config = SimpleNamespace(
+            ctc=ctc
+            or CTCConfig(
+                source=CTCRouteConfig(weight=1.0),
+                target=CTCRouteConfig(weight=1.0),
+            )
+        )
         self.backbone = _SelectiveBackbone()
+        self.ctc_decoders = nn.ModuleDict(
+            {
+                "source": nn.Linear(2, 2, bias=False),
+                "target": nn.Linear(2, 2, bias=False),
+            }
+        )
 
 
 class SelectiveBackboneParameterPolicyTest(unittest.TestCase):
@@ -75,6 +89,12 @@ class SelectiveBackboneParameterPolicyTest(unittest.TestCase):
             parameter_group("source_audio_encoder.projection.weight"),
             ParameterGroup.AUDIO_INPUT_ADAPTER,
         )
+        for route in ("source", "target"):
+            with self.subTest(route=route):
+                self.assertIs(
+                    parameter_group(f"ctc_decoders.{route}.projection.weight"),
+                    ParameterGroup.ALIGNMENT_DECODER,
+                )
 
         for legacy in (
             "token_embedding.audio_embedding.weight",
@@ -97,6 +117,7 @@ class SelectiveBackboneParameterPolicyTest(unittest.TestCase):
             "audio_feature_projection.weight",
             "audio_head.weight",
             "tokens.text_embedding.weight",
+            "ctc_decoders.other.projection.weight",
         ):
             with self.subTest(nonstandard=nonstandard):
                 with self.assertRaisesRegex(ValueError, "does not belong"):
@@ -130,6 +151,51 @@ class SelectiveBackboneParameterPolicyTest(unittest.TestCase):
         )
         self.assertTrue(parameters["backbone.norm.weight"].requires_grad)
         self.assertFalse(parameters["backbone.encoder.layers.2.weight"].requires_grad)
+        self.assertTrue(parameters["ctc_decoders.source.weight"].requires_grad)
+        self.assertTrue(parameters["ctc_decoders.target.weight"].requires_grad)
+
+    def test_alignment_decoders_follow_semantic_not_acoustic_policy(self):
+        for policy, expected in (
+            (ParameterPolicyName.FULL, True),
+            (ParameterPolicyName.LORA, True),
+            (ParameterPolicyName.SPEECH_INTERFACE, True),
+            (ParameterPolicyName.SEMANTIC_ONLY, True),
+            (ParameterPolicyName.ACOUSTIC_ONLY, False),
+            (ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD, True),
+        ):
+            with self.subTest(policy=policy):
+                model = _SelectiveModel()
+                apply_parameter_trainability(
+                    model,
+                    ParameterPolicyTrainability(PARAMETER_POLICY_SPECS[policy]),
+                )
+
+                self.assertIs(
+                    model.ctc_decoders["source"].weight.requires_grad,
+                    expected,
+                )
+                self.assertIs(
+                    model.ctc_decoders["target"].weight.requires_grad,
+                    expected,
+                )
+
+    def test_inactive_alignment_route_is_structurally_frozen(self):
+        model = _SelectiveModel(
+            CTCConfig(
+                source=CTCRouteConfig(weight=1.0),
+                target=CTCRouteConfig(weight=0.0),
+            )
+        )
+
+        apply_parameter_trainability(
+            model,
+            ParameterPolicyTrainability(
+                PARAMETER_POLICY_SPECS[ParameterPolicyName.FULL]
+            ),
+        )
+
+        self.assertTrue(model.ctc_decoders["source"].weight.requires_grad)
+        self.assertFalse(model.ctc_decoders["target"].weight.requires_grad)
 
     def test_full_keeps_text_embedding_structurally_frozen(self) -> None:
         model = _SelectiveModel()

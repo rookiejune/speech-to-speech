@@ -161,6 +161,7 @@ class BackboneBodyAdapter:
             kwargs["cache_position"] = cache_position
         if extra:
             kwargs.update(extra)
+        kwargs["return_dict"] = True
         output = self.body(**kwargs)
         return BackboneOutputView(
             output=output,

@@ -8,16 +8,12 @@ from types import SimpleNamespace
 import torch
 from anytrain.codec import AcousticLayout, SemanticAcousticCodes
 from anytrain.tokenizer import CodecBPE
-from anytrain.module.idspace import Layout
 
 from speech_to_speech.audio_stream import AudioStream
 from speech_to_speech.generation.decode import (
     decode_generated_bicodec_full,
-    decode_generated_bicodec_full_row,
-    decode_generated_bicodec_semantic_with_reference,
+    decode_generated_bicodec_row,
 )
-from speech_to_speech.generation._request import validate
-from speech_to_speech.task import Task
 from speech_to_speech.runtime import AudioSequenceLayout, Config, Runtime
 from speech_to_speech.runtime.audio_tokenizer import (
     BiCodecAudioTokenizer,
@@ -228,28 +224,8 @@ class BiCodecTokenizerTest(unittest.TestCase):
         self.assertIsNone(decoded.semantic)
         torch.testing.assert_close(decoded.acoustic, codes.acoustic)
 
+
 class BiCodecDecodeTest(unittest.TestCase):
-    def test_reference_route_requires_prompt_context(self):
-        tokenizer = BiCodecAudioTokenizer(
-            semantic_codebook_size=8,
-            acoustic_codebook_sizes=(3,),
-            acoustic_unit_length=2,
-        )
-        runtime = SimpleNamespace(
-            audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
-            audio_tokenizer=tokenizer,
-            layout=Layout(text=(0, 4), audio=(4, 30)),
-            boa_token_id=4 + tokenizer.vocab_size,
-            eoa_token_id=4 + tokenizer.vocab_size + 1,
-        )
-        model = SimpleNamespace(runtime=runtime)
-
-        with self.assertRaisesRegex(ValueError, "requires audio context"):
-            validate(
-                {"prompt_ids": torch.tensor([1]), "task": Task.TTS},
-                model,
-            )
-
     def test_full_decode_passes_structured_codes_to_backend(self):
         tokenizer = BiCodecAudioTokenizer(
             semantic_codebook_size=8,
@@ -289,11 +265,15 @@ class BiCodecDecodeTest(unittest.TestCase):
             output,
             (AudioStream.ACOUSTIC, AudioStream.SEMANTIC),
         )
-        _, resolved = decode_generated_bicodec_full_row(
+        boa = 10 + tokenizer.vocab_size
+        _, resolved = decode_generated_bicodec_row(
             tokens + 10,
+            torch.tensor([1, boa]),
             codec=_StructuredCodec(),
             audio_tokenizer=tokenizer,
             audio_token_range=(10, 10 + tokenizer.vocab_size),
+            boa_token_id=boa,
+            eoa_token_id=boa + 1,
         )
 
         torch.testing.assert_close(resolved.semantic, output.semantic)
@@ -318,16 +298,70 @@ class BiCodecDecodeTest(unittest.TestCase):
             (AudioStream.SEMANTIC,),
         )
 
-        _, resolved = decode_generated_bicodec_semantic_with_reference(
+        boa = 10 + tokenizer.vocab_size
+        eoa = boa + 1
+        prompt_global = tokenizer.encode_acoustic(context) + 10
+        prompt = torch.cat(
+            (
+                torch.tensor([1, boa]),
+                prompt_global,
+                torch.tensor([eoa, boa]),
+            )
+        )
+        _, resolved = decode_generated_bicodec_row(
             tokens + 10,
-            context,
+            prompt,
             codec=_StructuredCodec(),
             audio_tokenizer=tokenizer,
             audio_token_range=(10, 10 + tokenizer.vocab_size),
+            boa_token_id=boa,
+            eoa_token_id=eoa,
         )
 
         torch.testing.assert_close(resolved.semantic, output.semantic)
         torch.testing.assert_close(resolved.acoustic, context.acoustic)
+
+    def test_route_decode_requires_exactly_one_global_owner(self):
+        tokenizer = BiCodecAudioTokenizer(
+            semantic_codebook_size=8,
+            acoustic_codebook_sizes=(3,),
+            acoustic_unit_length=2,
+        )
+        codes = SemanticAcousticCodes(
+            semantic=torch.tensor([[1], [2]]),
+            acoustic=torch.tensor([[0], [1]]),
+        )
+        boa = 10 + tokenizer.vocab_size
+        eoa = boa + 1
+        prompt = torch.cat(
+            (
+                torch.tensor([1, boa]),
+                tokenizer.encode_acoustic(codes) + 10,
+                torch.tensor([eoa, boa]),
+            )
+        )
+        cases = (
+            (tokenizer.encode_full(codes) + 10, prompt),
+            (
+                tokenizer.encode_streams(codes, (AudioStream.SEMANTIC,)) + 10,
+                None,
+            ),
+        )
+
+        for response, prompt_ids in cases:
+            with self.subTest(prompt=prompt_ids is not None), self.assertRaisesRegex(
+                ValueError,
+                "exactly one global stream owner",
+            ):
+                decode_generated_bicodec_row(
+                    response,
+                    prompt_ids,
+                    codec=_StructuredCodec(),
+                    audio_tokenizer=tokenizer,
+                    audio_token_range=(10, 10 + tokenizer.vocab_size),
+                    boa_token_id=boa,
+                    eoa_token_id=eoa,
+                )
 
     def test_state_machine_emits_a_complete_structured_sequence(self):
         tokenizer = BiCodecAudioTokenizer(
@@ -406,31 +440,21 @@ class BiCodecDecodeTest(unittest.TestCase):
 
 
 class BiCodecConfigTest(unittest.TestCase):
-    def test_semantic_layout_requires_artifact(self):
-        with self.assertRaisesRegex(ValueError, "semantic_codec_artifact"):
+    def test_bicodec_requires_one_structured_layout(self):
+        with self.assertRaisesRegex(ValueError, "self-describing structured"):
             Runtime(
                 Config(codec="bicodec"),
                 audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
             )
-        config = Config(
-            codec="bicodec",
-            semantic_codec_artifact="/tmp/bicodec-semantic",
-        )
-        runtime = Runtime(config, audio_sequence_layout=AudioSequenceLayout.SEMANTIC)
-        self.assertEqual(runtime.codec_name, "bicodec")
 
-        bpe_runtime = Runtime(
-            Config(
-                codec="bicodec",
-                audio_tokenizer="/tmp/bicodec-semantic-bpe",
-                semantic_codec_artifact="/tmp/bicodec-semantic",
-            ),
-            audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
-        )
-        self.assertEqual(
-            bpe_runtime.config.audio_tokenizer,
-            "/tmp/bicodec-semantic-bpe",
-        )
+        with self.assertRaisesRegex(ValueError, "cannot use"):
+            Runtime(
+                Config(
+                    codec="bicodec",
+                    semantic_codec_artifact="/tmp/bicodec-semantic",
+                ),
+                audio_sequence_layout=AudioSequenceLayout.FLATTENED,
+            )
 
     def test_flattened_layout_does_not_require_artifact(self):
         runtime = Runtime(

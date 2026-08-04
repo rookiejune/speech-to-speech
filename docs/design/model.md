@@ -6,7 +6,8 @@
 ## 对外能力
 
 - `base.Model`：接收显式 runtime，提供 text/semantic-audio embedding、token
-  logits、route-aware structured token generation 与 frame condition 对齐原语。
+  logits、structured token generation 与 frame condition 对齐原语；BiCodec global ownership
+  由序列 marker 表达，不进入 model route。
 - `token.TokenInterface`：注册 semantic-audio embedding、audio-to-hidden projection 与
   causal audio output head；text embedding 由 backbone 独占，调用时显式传入。它同时维护
   text/audio layout 路由、稀疏候选 logits 和 tied-logit 契约。
@@ -76,7 +77,7 @@ def generate_tokens(...) -> Tensor: ...
   参数不进入该通用接口。
 - `audio_input_positions` 是 `[batch, frames]` 的完整序列位置，`-1` 只用于 batch padding。它只
   指向 source audio payload token；BOA/EOA、target audio token、generated token 和 BiCodec
-  reference `audio_context` 都不经过 `AudioInputTower`。
+  额外序列化的 reference global span 都不经过 `AudioInputTower`。
 - 输入路由提示使用严格类型 `frozenset[Modality]`。默认路径校验 global IDs 并推导精确模态集合；
   `validate_input=False` 时必须传入已验证的 `input_modalities`。训练可在 CPU batch 上预校验一次，
   generation 首步校验完整 prompt，后续步复用可信提示，避免逐 token 的 device-to-host 同步。
@@ -106,7 +107,7 @@ def generate_tokens(...) -> Tensor: ...
   在 model 构造后结构性冻结；parameter policy（包括 `FULL`）不会重新启用它。
 - `selected_logits()` 只计算调用方给出的候选 global IDs；默认要求 non-empty 1D signed-integer
   tensor、完整 vocabulary coverage，并校验 `text` / `audio` / `mixed` kind hint 与候选集合一致。
-  BiCodec route 的 grouped CE 用它避免为每个 marker/codebook 位置计算完整 audio vocabulary。
+  BiCodec grammar 的 grouped CE 用它避免为每个 marker/codebook 位置计算完整 audio vocabulary。
   generation 首步完成候选分类和校验，后续增量步复用可信 kind 并以 `validate=False` 调用，避免
   每步为同一 token set 做 device-to-host 同步。mixed 结果的非目标槽以 `-inf` 初始化，不暴露
   未初始化 logits。
@@ -114,7 +115,8 @@ def generate_tokens(...) -> Tensor: ...
   更新独立 cache，再统一只返回最后位置 logits。text 屏蔽 PAD/BOS，audio 屏蔽 BOA/MASK。
 - token lookup 与 vocabulary head 都由 `TokenInterface` 的有类型方法提供。注册参数路径是
   `tokens.audio_embedding.*`、`tokens.audio_projection.*`、`tokens.audio_head.*` 与 backbone 的
-  text embedding ownership path；source tower 独立注册为 `source_audio_encoder.*`。
+  text embedding ownership path；source tower 独立注册为 `source_audio_encoder.*`，两条 CTC
+  decoder 注册为 `ctc_decoders.source.*` / `ctc_decoders.target.*`。
 - `target_frame_condition()` 与 `target_frame_label_condition()` 都接收 token 自身位置 `p`；
   causal shift `p - 1` 只在 model 内部发生。
 
@@ -126,6 +128,7 @@ def generate_tokens(...) -> Tensor: ...
 - `audio_output_adapter`
 - `audio_input_adapter`
 - `fsq_embedding`
+- `ctc`
 - `toy`
 - `lora`
 
@@ -155,10 +158,15 @@ adapter 前的 backbone hidden。
 该配置不会改变 token generation 契约，也不会替换 Flow/RVQ
 `HiddenConditionAdapter`。
 
-source CTC 读取 backbone 的当前 audio-slot state `h[p]`；当 input tower 是 transformer 时，默认双向
-上下文已经在 overlay embedding 中汇聚完整 source span。target CTC 不经过 source tower，并读取
-causal predictor `h[p-1]`。两者都调用 `Model.text_logits()`，因此共享同一冻结文本 readout，而不
-注册额外 alignment head。
+`ctc.source` 与 `ctc.target` 分别配置 loss weight 和 route-local decoder。两侧 decoder 可独立选择
+prediction 主 readout 或显式 `BackboneReadout`、masked-mean pooling factor，以及
+`identity|linear|transformer` topology；source transformer 固定 non-causal，target transformer 固定
+causal，shift 仍固定为 source `h[p]` / target `h[p-1]`。decoder 只做 hidden-to-hidden 变换，最终
+vocabulary projection 始终调用冻结的 `Model.text_logits()`；默认 `identity + pool_factor=1` 保留直接
+对齐基线。任一路由需要中间层 history 时，`objective_hidden_output()` 只开启同一次 backbone forward
+的 `output_hidden_states`，不会为 CTC 重跑 backbone。decoder 参数归入独立
+`ALIGNMENT_DECODER` 参数组；weight 为 0 的 route 在参数策略入口结构性冻结，避免 static DDP 永久
+unused 参数。
 
 `lora` 直接持有 `peft.LoraConfig | None`，项目不再维护本地 LoRA config、layer 或注入 facade。
 正式 train 默认组合 LoRA preset（`init_lora_weights=pissa`）与
@@ -184,13 +192,12 @@ codebook 的 `codebook_embeddings`，但没有 REPA 参数。Hydra 使用
 codebooks 的 unified-token codec 必须使用 `model/acoustic=none`；有独立 acoustic codebook 的
 codec 也可以显式选择 `none` 作为 token-only baseline。入口不根据 codec 静默覆盖用户选择。
 fixed-length structured codec（例如 BiCodec）使用独立的 model-facing token layout。它只支持
-按 `audio_route` 固定的 structured sequence 路线，不接入当前 frame-aligned Flow/RVQ acoustic
-side channel。route 只声明 `acoustic` / `semantic`；fixed-length speaker/style 含义来自
-`AcousticLayout.FIXED_LENGTH`，不是单独的 stream 枚举。`reuse_prompt_acoustic` 只输出
-semantic 并复用 prompt acoustic；`generate_acoustic` 同时输出 acoustic 与 semantic。两条
-route 使用同一套稳定 vocabulary，route 只改变训练时的 output groups 与推理解码时的
-decode stream ownership，不按 request 动态改变模型 head 或 token generation 规则。
-无 reference 的 `generate_acoustic` 不自带 speaker ID；多 speaker 训练若没有额外条件或
+一套 self-describing structured sequence，不接入当前 frame-aligned Flow/RVQ acoustic side channel。
+fixed-length speaker/style 含义来自 `AcousticLayout.FIXED_LENGTH`，不是单独的 stream 枚举。
+有 prompt-owned acoustic 时 response 只输出 semantic；否则 response 同时输出 acoustic 与 semantic。
+两种 ownership 使用同一套稳定 vocabulary，由 marker 和 prompt 内容决定，不按 request 动态改变
+模型 head 或 token generation 规则。无 reference 的 global generation 不自带 speaker ID；多 speaker
+训练若没有额外条件或
 latent sampling，acoustic（speaker）预测可能偏向数据中的主导 speaker，这属于模型条件设计而
 不是 codec 序列化问题。
 
@@ -231,7 +238,7 @@ Native/BPE semantic tokenizers 使用 codec codebook 初始化；完整 codec se
 通常使用随机初始化，因为它的 vocab 同时包含多 codebook offset tokens、BiCodec
 semantic/acoustic ranges 与 codec/stream/end markers。BiCodec 的 semantic payload、各
 fixed-length acoustic slot 和 marker 共用这一稳定 layout vocabulary；训练 objective
-根据 route 解释各位置的监督 groups，普通 generation 仍统一建模，不把这些 group 下推为
+根据 self-describing marker 解释各位置的监督 groups，普通 generation 仍统一建模，不把这些 group 下推为
 隐式结构约束。
 随机初始化只读取 codec 声明的 semantic feature dimension，并使用 backbone embedding 作为
 device reference，不要求 backend 暴露虚构的 codebook tensor。
@@ -262,17 +269,22 @@ ownership key 由 checkpoint gate/strict load 明确拒绝。
 
 v3 checkpoint 还必须包含 `speech_to_speech_model_contract`。该 contract 从已解析 runtime 与实际
 module topology 构造，而不是直接序列化一份可能含无效字段的原始 Hydra config；它覆盖 codec
-shape/capability、token layout 与 special IDs、text/audio tokenizer state digest、backbone
-architecture/readout、semantic audio embedding、input/output tower，以及 none/Flow/RVQ 的有效
-decoder topology。payload 采用固定 grammar、canonical JSON components 和 SHA-256；加载时先验证
-payload 完整性，再报告第一个不匹配路径。原始配置中不影响实际 module 的字段变化不会制造伪
-不兼容，而相同 parameter shape 下的 tokenizer、head count、readout、layout 或 codec topology
-变化仍会明确失败。
+shape/capability、semantic codec artifact 内容摘要、token layout 与 special IDs、text/audio
+tokenizer state digest、backbone architecture/readout、semantic audio embedding、input/output tower，
+source/target CTC decoder 的 readout、pooling 与有效 topology，以及 none/Flow/RVQ 的有效 decoder
+topology；CTC loss weight 不属于模型身份。contract 还记录 state dict 的 key、shape 与
+parameter/buffer kind 摘要，但刻意忽略 dtype；因此 ownership 漂移会在 strict load 前失败，而整模
+精度转换不会制造伪不兼容。payload 采用固定 grammar、canonical JSON components 和 SHA-256；加载
+时先验证 payload 完整性，再报告第一个不匹配路径。原始配置中不影响实际 module 的生成参数、初始化
+参数或执行 metadata 变化不会制造伪不兼容，而相同 parameter shape 下的 tokenizer、head count、
+readout、layout 或 codec topology 变化仍会明确失败。
 
-contract 不声称能证明外部资产内容从未被替换：如果 Hugging Face / remote-code backbone 或 codec
-只提供同名路径而没有不可变 revision/content digest，contract 只能记录该路径、实际实现类型、
-解析后的配置与可见结构。需要供应链级复现时，训练 manifest 仍必须固定外部 artifact revision 或
-内容摘要。
+fast tokenizer 使用完整 backend 序列化状态；Kimi 优先使用 raw tokenizer 的显式 contract，随后才
+退到已知 serialized/tiktoken backend 和固定行为探针。行为探针能发现常见编码变化，但在 opaque
+tokenizer 不暴露内容状态时，不能证明所有输入上的资产身份。`runtime.semantic_codec_artifact` 是
+本地文件或目录时会按内容摘要，不包含机器相关根路径。其他 Hugging Face / remote-code backbone 或
+codec 若只提供同名路径而没有不可变 revision/content digest，contract 仍只能记录实际实现类型、
+解析后的配置与可见结构；需要供应链级复现时，训练 manifest 仍必须固定外部 revision 或内容摘要。
 
 新建的 semantic embedding、input/output adapter 和 acoustic decoder 默认以 FP32 初始化；frozen
 backbone 可以保持 BF16，forward 计算精度由 trainer autocast 控制。显式 model-wide dtype 转换遵守
@@ -318,7 +330,7 @@ frame condition 循环由 `model/generation.py` 的 `GenerationEngine` 持有，
 `generation_step()` 驱动模型。训练和 ordinary AUDIO
 token generation 统一建模，推理原语只调用
 `generate_tokens(generation_modality=AUDIO, stop=EOA)`，不在 token generation 阶段根据
-flattened frame codec 或 BiCodec route 强制 marker/range/block-length 结构。
+flattened frame codec 或 BiCodec grammar 强制 marker/range/block-length 结构。
 codec-specific 的 marker、range、block-length 与 route stream ownership 只由推理层解析和
 decode 使用；非法 generated codec span 按行 warning 并跳过 audio decode，model 不重试或
 补齐结构。产品推理可以在 model 外显式使用 codec-specific 策略，但不能改变训练或普通

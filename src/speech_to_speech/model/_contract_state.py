@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
+from numbers import Integral
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from anydataset.types import Modality
 from anytrain.codec import AcousticLayout
-from torch import nn
+from torch import Tensor, nn
 
 if TYPE_CHECKING:
     from semantic_acoustic_codec.model import AcousticRVQDecoder
     from semantic_acoustic_codec.model.dit import DiTDecoder
+
+    from .ctc import CTCDecoderRoutes
 
 from ..runtime import AudioSequenceLayout
 from ..runtime.backbone import BackboneEncoder
@@ -40,7 +44,7 @@ from .embedding.fsq import FsqEmbedding, FsqFeature
 from .token import TokenInterface
 
 
-_HF_EXECUTION_CONFIG_FIELDS = frozenset(
+_HF_NON_ARCHITECTURE_CONFIG_FIELDS = frozenset(
     {
         "_attn_implementation",
         "_attn_implementation_internal",
@@ -49,20 +53,45 @@ _HF_EXECUTION_CONFIG_FIELDS = frozenset(
         "architectures",
         "attn_implementation",
         "auto_map",
+        "bad_words_ids",
+        "begin_suppress_tokens",
+        "diversity_penalty",
+        "do_sample",
         "dtype",
+        "early_stopping",
+        "encoder_no_repeat_ngram_size",
+        "exponential_decay_length_penalty",
         "finetuning_task",
+        "forced_bos_token_id",
+        "forced_eos_token_id",
         "gradient_checkpointing",
         "id2label",
+        "initializer_range",
         "label2id",
+        "length_penalty",
+        "max_length",
+        "min_length",
+        "no_repeat_ngram_size",
+        "num_beam_groups",
+        "num_beams",
+        "num_return_sequences",
         "output_attentions",
         "output_hidden_states",
+        "output_scores",
         "problem_type",
+        "remove_invalid_values",
+        "repetition_penalty",
         "return_dict",
         "return_dict_in_generate",
+        "suppress_tokens",
         "task_specific_params",
+        "temperature",
         "tokenizer_class",
+        "top_k",
+        "top_p",
         "torch_dtype",
         "transformers_version",
+        "typical_p",
         "use_cache",
     }
 )
@@ -82,6 +111,9 @@ class _ContractModel(Protocol):
     def source_audio_encoder(self) -> AudioInputTower | None: ...
 
     @property
+    def ctc_decoders(self) -> CTCDecoderRoutes: ...
+
+    @property
     def _encoder(self) -> BackboneEncoder: ...
 
 
@@ -98,6 +130,17 @@ class _ContractStateProvider(Protocol):
 @runtime_checkable
 class _VocabularyProvider(Protocol):
     def get_vocab(self) -> Mapping[str, int]: ...
+
+
+@runtime_checkable
+class _BackendTokenizerProvider(Protocol):
+    @property
+    def backend_tokenizer(self) -> object: ...
+
+
+@runtime_checkable
+class _TokenizerBackendSerializer(Protocol):
+    def to_str(self) -> str: ...
 
 
 @runtime_checkable
@@ -122,11 +165,14 @@ def build_model_contract(
     acoustic: Mapping[str, object],
 ) -> ModelCheckpointContract:
     """Build a contract from resolved runtime resources and realized modules."""
+    if not isinstance(model, nn.Module):
+        raise TypeError("checkpoint contract models must be torch modules.")
     return ModelCheckpointContract.from_components(
         {
             "runtime": _runtime_contract(model),
             "interface": _interface_contract(model),
             "acoustic": canonical_value(acoustic),
+            "state_dict": _state_dict_contract(model),
         }
     )
 
@@ -287,6 +333,7 @@ def _codec_contract(runtime: TokenModelRuntime) -> dict[str, object]:
     return {
         "name": name,
         "implementation": _qualified_name(codec),
+        "semantic_artifact_sha256": _semantic_artifact_sha256(runtime),
         "sample_rate": codec_sample_rate(codec),
         "frame_rate": codec_frame_rate(codec),
         "semantic_codebook_sizes": list(semantic_sizes),
@@ -359,19 +406,84 @@ def _text_tokenizer_contract(
 def _text_tokenizer_state(tokenizer: TextTokenizer) -> dict[str, Any]:
     if isinstance(tokenizer, _ContractStateProvider):
         return _contract_state(tokenizer)
+    backend = _tokenizer_backend_state(tokenizer)
+    if backend is not None:
+        return {
+            "grammar": "serialized-tokenizer-backend-v1",
+            "backend": backend,
+        }
+    behavior = _text_tokenizer_behavior(tokenizer)
     if isinstance(tokenizer, _VocabularyProvider):
         vocab = tokenizer.get_vocab()
         if not isinstance(vocab, Mapping):
             raise TypeError("tokenizer get_vocab() must return a mapping.")
         return {
-            "grammar": "get-vocab-v1",
+            "grammar": "get-vocab-behavior-v1",
             "vocab": vocab,
+            "behavior": behavior,
         }
     return {
-        "grammar": "text-tokenizer-interface-v1",
+        "grammar": "text-tokenizer-interface-v2",
         "implementation": _qualified_name(tokenizer),
         "special_tokens": tokenizer.special_tokens_map,
+        "behavior": behavior,
     }
+
+
+def _tokenizer_backend_state(tokenizer: TextTokenizer) -> dict[str, Any] | None:
+    if not isinstance(tokenizer, _BackendTokenizerProvider):
+        return None
+    backend = tokenizer.backend_tokenizer
+    if not isinstance(backend, _TokenizerBackendSerializer):
+        return None
+    serialized = backend.to_str()
+    if not isinstance(serialized, str):
+        raise TypeError("tokenizer backend to_str() must return a string.")
+    if not serialized:
+        raise ValueError("tokenizer backend to_str() must not return an empty string.")
+    try:
+        state = json.loads(serialized)
+    except json.JSONDecodeError:
+        return {
+            "format": "text-v1",
+            "content_sha256": contract_sha256(serialized),
+        }
+    return {
+        "format": "json-v1",
+        "content_sha256": contract_sha256(state),
+    }
+
+
+def _text_tokenizer_behavior(tokenizer: TextTokenizer) -> list[dict[str, object]]:
+    return [
+        {
+            "text": text,
+            "plain_ids": _tokenizer_probe_ids(
+                tokenizer.encode(text, add_special_tokens=False)
+            ),
+            "special_ids": _tokenizer_probe_ids(
+                tokenizer.encode(text, add_special_tokens=True)
+            ),
+        }
+        for text in (
+            "Hello, world!",
+            "UPPER lower  spaces\tand\nlines",
+            "中文标点，café e\u0301 — 🙂",
+        )
+    ]
+
+
+def _tokenizer_probe_ids(values: object) -> list[int]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        raise TypeError("tokenizer encode() contract probe must return a sequence.")
+    result: list[int] = []
+    for value in values:
+        if not isinstance(value, Integral):
+            raise TypeError(
+                "tokenizer encode() contract probe must return integer token ids."
+            )
+        result.append(int(value))
+    return result
 
 
 def _audio_tokenizer_contract(
@@ -451,16 +563,69 @@ def _backbone_config_state(config: object) -> dict[str, Any]:
 
 def _semantic_config_value(value: Any) -> Any:
     if isinstance(value, Mapping):
-        if not all(isinstance(key, str) for key in value):
-            raise TypeError("backbone config mapping keys must be strings.")
-        return {
-            key: _semantic_config_value(item)
-            for key, item in sorted(value.items())
-            if key not in _HF_EXECUTION_CONFIG_FIELDS
+        result = {
+            _semantic_config_key(key): _semantic_config_value(item)
+            for key, item in value.items()
+            if not (
+                isinstance(key, str)
+                and key in _HF_NON_ARCHITECTURE_CONFIG_FIELDS
+            )
         }
+        return {key: result[key] for key in sorted(result)}
     if isinstance(value, (list, tuple)):
         return [_semantic_config_value(item) for item in value]
     return canonical_value(value)
+
+
+def _semantic_config_key(value: object) -> str:
+    if isinstance(value, str):
+        if value.startswith(("int:", "str:")):
+            return f"str:{value}"
+        return value
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("backbone config mapping keys must be strings or integers.")
+    return f"int:{value}"
+
+
+def _state_dict_contract(model: nn.Module) -> dict[str, object]:
+    state = model.state_dict(keep_vars=True)
+    parameter_names = {
+        name for name, _ in model.named_parameters(remove_duplicate=False)
+    }
+    buffer_names = {
+        name for name, _ in model.named_buffers(remove_duplicate=False)
+    }
+    entries: list[dict[str, object]] = []
+    parameter_entries = 0
+    for name in sorted(state):
+        value = state[name]
+        if not isinstance(value, Tensor):
+            raise TypeError(
+                f"model state entry {name!r} must be a tensor for checkpoint contracts."
+            )
+        is_parameter = name in parameter_names
+        is_buffer = name in buffer_names
+        if is_parameter == is_buffer:
+            raise TypeError(
+                f"model state entry {name!r} must resolve to one parameter or buffer."
+            )
+        kind = "parameter" if is_parameter else "buffer"
+        if is_parameter:
+            parameter_entries += 1
+        entries.append(
+            {
+                "name": name,
+                "kind": kind,
+                "shape": list(value.shape),
+            }
+        )
+    return {
+        "grammar": "torch-state-dict-schema-v1",
+        "entry_count": len(entries),
+        "parameter_entries": parameter_entries,
+        "buffer_entries": len(entries) - parameter_entries,
+        "schema_sha256": contract_sha256(entries),
+    }
 
 
 def _interface_contract(model: _ContractModel) -> dict[str, object]:
@@ -470,6 +635,14 @@ def _interface_contract(model: _ContractModel) -> dict[str, object]:
         "audio_projection": _adapter_contract(tokens.audio_projection),
         "audio_head": _audio_head_contract(tokens.audio_head),
         "source_audio_encoder": _source_audio_contract(model.source_audio_encoder),
+        "ctc_decoders": _ctc_decoders_contract(model.ctc_decoders),
+    }
+
+
+def _ctc_decoders_contract(value: CTCDecoderRoutes) -> dict[str, object]:
+    return {
+        "source": _contract_state(value.source),
+        "target": _contract_state(value.target),
     }
 
 
@@ -636,6 +809,33 @@ def _non_negative_int(value: object, name: str) -> int:
     if value < 0:
         raise ValueError(f"{name} must be non-negative.")
     return value
+
+
+def _optional_sha256(value: object, name: str) -> str | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{name} must be a lowercase SHA-256 digest.")
+    return value
+
+
+def _semantic_artifact_sha256(runtime: TokenModelRuntime) -> str | None:
+    artifact = runtime.semantic_codec_artifact
+    if artifact is not None and (not isinstance(artifact, str) or not artifact):
+        raise TypeError("semantic codec artifact must be a non-empty string or None.")
+    digest = _optional_sha256(
+        runtime.semantic_codec_artifact_sha256,
+        "semantic codec artifact digest",
+    )
+    if (artifact is None) != (digest is None):
+        raise ValueError(
+            "semantic codec artifact path and content digest must be configured together."
+        )
+    return digest
 
 
 def _qualified_name(value: object) -> str:

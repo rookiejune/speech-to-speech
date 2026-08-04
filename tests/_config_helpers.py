@@ -64,6 +64,12 @@ from speech_to_speech.model import (
     ToyConfig,
 )
 from speech_to_speech.model.acoustic import AcousticType, DecoderConfig
+from speech_to_speech.model.ctc import (
+    CTCConfig,
+    CTCDecoderConfig,
+    CTCDecoderType,
+    CTCRouteConfig,
+)
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.pl_module import SpeechToSpeechModule
 from speech_to_speech.optim import Config as OptimConfig
@@ -166,7 +172,6 @@ class ConfigTestCase(unittest.TestCase):
         return comparison
 
 
-
 def _default_gradient_probes() -> tuple[GradientProbe, ...]:
     return (
         GradientProbe(
@@ -219,7 +224,6 @@ def _lora_overfit(*overrides: str):
 
 def _train(*overrides: str):
     return parse_train(_compose("train", *overrides))
-
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

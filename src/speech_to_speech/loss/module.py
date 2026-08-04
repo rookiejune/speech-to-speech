@@ -15,7 +15,8 @@ from semantic_acoustic_codec.loss.repa import Teacher
 from torch import Tensor, nn
 
 from ..datamodule.types import ModelBatch
-from .ctc import CTCAlignmentLoss, CTCConfig
+from ..model.ctc import CTCConfig, CTCRoute, ObjectiveHiddenOutput
+from .ctc import CTCAlignmentLoss
 from .protocol import (
     FlowObjectiveModel,
     RVQObjectiveModel,
@@ -136,6 +137,54 @@ def _token_hidden_states(
     )
 
 
+def _objective_hidden_output(
+    batch: ModelBatch,
+    model: TokenObjectiveModel,
+    alignment: CTCAlignmentLoss | None,
+) -> ObjectiveHiddenOutput:
+    routes = _active_ctc_routes(batch, alignment)
+    if not routes:
+        return ObjectiveHiddenOutput(token=_token_hidden_states(batch, model))
+    kwargs: dict[str, Any] = {}
+    if batch.input_modalities is not None:
+        kwargs["input_modalities"] = batch.input_modalities
+        kwargs["validate_input"] = False
+        kwargs["validate_audio_input_positions"] = (
+            not batch.audio_input_positions_validated
+        )
+    return model.objective_hidden_output(
+        batch.input_ids,
+        ctc_routes=routes,
+        attention_mask=batch.attention_mask,
+        audio_input_positions=batch.audio_input_positions,
+        prediction=batch.prediction_modality,
+        **kwargs,
+    )
+
+
+def _active_ctc_routes(
+    batch: ModelBatch,
+    alignment: CTCAlignmentLoss | None,
+) -> frozenset[CTCRoute]:
+    if alignment is None:
+        return frozenset()
+    config = alignment.config
+    return frozenset(
+        route
+        for route, enabled in (
+            (
+                CTCRoute.SOURCE,
+                config.source.enabled and batch.source_ctc is not None,
+            ),
+            (
+                CTCRoute.TARGET,
+                config.target.enabled and batch.target_ctc is not None,
+            ),
+        )
+        if enabled
+    )
+
+
 def _ctc_loss(
     config: CTCConfig | None,
     blank_token_id: int | None,
@@ -154,21 +203,23 @@ def _add_ctc(
     outputs: Outputs,
     batch: ModelBatch,
     model: TokenObjectiveModel,
-    hidden_states: Tensor,
+    hidden_states: ObjectiveHiddenOutput,
     alignment: CTCAlignmentLoss | None,
 ) -> None:
     if alignment is None:
         return
     config = alignment.config
-    source = batch.source_ctc if config.source_weight > 0 else None
-    target = batch.target_ctc if config.target_weight > 0 else None
+    source = batch.source_ctc if config.source.enabled else None
+    target = batch.target_ctc if config.target.enabled else None
     if source is None and target is None:
         return
     ctc = alignment(
-        hidden_states,
+        hidden_states.token,
+        source_hidden_states=hidden_states.source_ctc,
+        target_hidden_states=hidden_states.target_ctc,
         source=source,
         target=target,
-        text_readout=model.text_logits,
+        decode=model.ctc_logits,
     )
     outputs["ctc"] = ctc
     outputs["loss"] = outputs["loss"] + _zero_safe_weighted_mean(ctc, "sequences")
@@ -194,15 +245,15 @@ class TokenObjective(Objective[TokenObjectiveModel]):
     def forward(self, batch: ModelBatch, model: TokenObjectiveModel) -> Outputs:
         if model.layout.blocks != self.layout.blocks:
             raise ValueError("model and loss must use the same runtime layout.")
-        hidden_states = _token_hidden_states(batch, model)
+        hidden = _objective_hidden_output(batch, model, self.ctc)
         token = _token_forward(
             batch,
             model,
             self.token,
-            hidden_states=hidden_states,
+            hidden_states=hidden.token,
         )
         result: Outputs = {"loss": _weighted_mean(token, "tokens"), "token": token}
-        _add_ctc(result, batch, model, hidden_states, self.ctc)
+        _add_ctc(result, batch, model, hidden, self.ctc)
         return result
 
 
@@ -243,15 +294,15 @@ class FlowObjective(Objective[FlowObjectiveModel]):
             raise ValueError(
                 "FlowObjective requires acoustic target data for audio-supervised batches."
             )
-        hidden_states = _token_hidden_states(batch, model)
+        hidden = _objective_hidden_output(batch, model, self.ctc)
         token = _token_forward(
             batch,
             model,
             self.token,
-            hidden_states=hidden_states,
+            hidden_states=hidden.token,
         )
         result: Outputs = {"loss": _weighted_mean(token, "tokens"), "token": token}
-        _add_ctc(result, batch, model, hidden_states, self.ctc)
+        _add_ctc(result, batch, model, hidden, self.ctc)
 
         if target_data is not None:
             target_mask = batch.acoustic_target_mask
@@ -260,7 +311,7 @@ class FlowObjective(Objective[FlowObjectiveModel]):
                     "model batch did not produce an acoustic target mask."
                 )
             condition = model.target_frame_condition(
-                hidden_states, target_data["token_positions"]
+                hidden.token, target_data["token_positions"]
             )
             target = model.acoustic_target_latent(target_data["codes"])
             if self.repa_weight is None:
@@ -344,15 +395,15 @@ class RVQObjective(Objective[RVQObjectiveModel]):
             raise ValueError(
                 "RVQObjective requires acoustic target data for audio-supervised batches."
             )
-        hidden_states = _token_hidden_states(batch, model)
+        hidden = _objective_hidden_output(batch, model, self.ctc)
         token = _token_forward(
             batch,
             model,
             self.token,
-            hidden_states=hidden_states,
+            hidden_states=hidden.token,
         )
         result: Outputs = {"loss": _weighted_mean(token, "tokens"), "token": token}
-        _add_ctc(result, batch, model, hidden_states, self.ctc)
+        _add_ctc(result, batch, model, hidden, self.ctc)
 
         if target_data is not None:
             target_mask = batch.acoustic_target_mask
@@ -362,7 +413,7 @@ class RVQObjective(Objective[RVQObjectiveModel]):
                 )
             labels = target_data["codes"]
             packed = model.acoustic_packed_logits(
-                hidden_states,
+                hidden.token,
                 target_data["token_positions"],
                 labels,
                 mask=target_mask,

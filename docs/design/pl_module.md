@@ -36,8 +36,10 @@ Lightning 训练集成和日志边界。独立推理契约见 [generation](gener
 acoustic composition 需要的独立 side channel，并组装
 `model + objective + SpeechToSpeechModule` 的 token/Flow/RVQ 组合；`token()`、`flow()`、`rvq()`
 分别封闭具体构造；返回值同时携带实际 `AcousticType`，入口不再重复解析或校验 composition。
-composition 还把 `pl_module.ctc` 传给三个 objective，并把 runtime PAD 从 global layout ID 转为
-text-block local blank ID；blank 不在 text vocabulary 时构造即失败。
+composition 还把 model 与 objective 共享的 `model.ctc` 传给三个 objective，并把 runtime PAD 从
+global layout ID 转为 text-block local blank ID；blank 不在 text vocabulary 时构造即失败。CTC
+配置归 model 所有，因为每条 route 同时声明 loss weight、backbone readout、pooling 和可训练 decoder
+topology；`pl_module.Config` 不再持有另一份仅含权重的 CTC 配置。
 `pl_module.Config.audio_neighbor_smoothing`（默认 `0`）由 composition 原样传给三种 objective；非零时只对
 FSQ code target 混合 immediate +/-1 digit 邻居 NLL，邻居在各 residual stage 内归一化，marker 和其他
 free/special audio row 仍使用 hard CE。该设置属于 loss，不改变 embedding、output head 或 MIMO objective。

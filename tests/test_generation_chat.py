@@ -103,7 +103,7 @@ def _codes() -> SemanticAcousticCodes:
 
 def _runtime(
     *,
-    audio_sequence_layout: AudioSequenceLayout = AudioSequenceLayout.SEMANTIC,
+    audio_sequence_layout: AudioSequenceLayout = AudioSequenceLayout.FLATTENED,
     codec_name: str = "bicodec",
     codec: object | None = None,
 ) -> GenerationRuntime:
@@ -277,7 +277,7 @@ class ChatAdapterTest(unittest.TestCase):
         }
         private = to_request(request, runtime)
         self.assertIs(private["task"], Task.T2TT)
-        self.assertIsNone(private["audio_context"])
+        self.assertNotIn("audio_context", private)
         self.assertGreater(private["prompt_ids"].numel(), 0)
 
     def test_messages_history_is_preserved_and_encoded_once(self) -> None:
@@ -335,8 +335,20 @@ class ChatAdapterTest(unittest.TestCase):
             "language": "Chinese",
         }
         private = to_request(request, runtime)
-        self.assertIs(private["audio_context"], codes)
+        self.assertNotIn("audio_context", private)
         self.assertIs(private["task"], Task.TTS)
+        local_acoustic = runtime.audio_tokenizer.encode_acoustic(codes)
+        expected_suffix = torch.cat(
+            (
+                torch.tensor([runtime.boa_token_id]),
+                runtime.layout.to_global(Modality.AUDIO.value, local_acoustic),
+                torch.tensor([runtime.eoa_token_id, runtime.boa_token_id]),
+            )
+        )
+        torch.testing.assert_close(
+            private["prompt_ids"][-expected_suffix.numel() :],
+            expected_suffix,
+        )
 
     def test_codec_name_mismatch_is_explicit(self) -> None:
         runtime = _runtime()

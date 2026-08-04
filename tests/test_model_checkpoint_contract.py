@@ -14,7 +14,10 @@ from anydataset.types import AudioView, Modality
 from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 from peft import LoraConfig
+from tokenizers import Tokenizer, normalizers, pre_tokenizers
+from tokenizers.models import WordLevel
 from torch import Tensor, nn
+from transformers import PreTrainedTokenizerFast
 from transformers.cache_utils import Cache
 
 from speech_to_speech.model import (
@@ -33,6 +36,12 @@ from speech_to_speech.model.acoustic import DecoderConfig
 from speech_to_speech.model.acoustic.flow import FlowModel
 from speech_to_speech.model.acoustic.rvq import RVQModel
 from speech_to_speech.model.base import Config as ModelConfig
+from speech_to_speech.model.ctc import (
+    CTCConfig,
+    CTCDecoderConfig,
+    CTCDecoderType,
+    CTCRouteConfig,
+)
 from speech_to_speech.model.protocol import (
     FlowModelRuntime,
     FlowSample,
@@ -109,7 +118,7 @@ class ModelCheckpointContractTest(unittest.TestCase):
         module = _module(_contract(1))
         checkpoint = _saved_checkpoint(module)
         payload = _model_payload(checkpoint)
-        payload["grammar"] = "s2s-model-v3-contract-v0"
+        payload["grammar"] = "s2s-model-v3-contract-v1"
 
         with self.assertRaisesRegex(
             ValueError,
@@ -253,6 +262,62 @@ class ModelCheckpointContractTest(unittest.TestCase):
                     path,
                 )
 
+    def test_fast_tokenizer_contract_tracks_backend_normalizer(self) -> None:
+        lowercase = _fast_text_tokenizer(lowercase=True)
+        normalized = _fast_text_tokenizer(lowercase=False)
+
+        self.assertEqual(lowercase.get_vocab(), normalized.get_vocab())
+        checkpoint_model = _token_model(
+            runtime=_contract_runtime_with_text_tokenizer(lowercase)
+        )
+        current_model = _token_model(
+            runtime=_contract_runtime_with_text_tokenizer(normalized)
+        )
+
+        self.assertEqual(
+            _component(
+                checkpoint_model,
+                "runtime",
+                "token_space",
+                "text_tokenizer",
+                "state_grammar",
+            ),
+            "serialized-tokenizer-backend-v1",
+        )
+        _assert_contract_mismatch(
+            self,
+            checkpoint_model,
+            current_model,
+            "components.runtime.token_space.text_tokenizer.state_sha256",
+        )
+
+    def test_real_model_contract_rejects_semantic_artifact_mismatch(self) -> None:
+        checkpoint_model = _token_model(
+            runtime=_contract_runtime(
+                semantic_artifact_sha256="1" * 64,
+            )
+        )
+        current_model = _token_model(
+            runtime=_contract_runtime(
+                semantic_artifact_sha256="2" * 64,
+            )
+        )
+
+        _assert_contract_mismatch(
+            self,
+            checkpoint_model,
+            current_model,
+            "components.runtime.codec.semantic_artifact_sha256",
+        )
+
+    def test_real_model_contract_rejects_invalid_semantic_artifact_digest(self) -> None:
+        model = _token_model(
+            runtime=_contract_runtime(semantic_artifact_sha256="invalid")
+        )
+
+        with self.assertRaisesRegex(ValueError, "lowercase SHA-256"):
+            _ = model.checkpoint_contract
+
     def test_real_model_contract_rejects_backbone_readout_mismatch(self) -> None:
         checkpoint_model = _token_model(
             runtime=_contract_runtime(backbone_readout="last_hidden_state")
@@ -266,6 +331,21 @@ class ModelCheckpointContractTest(unittest.TestCase):
             checkpoint_model,
             current_model,
             "components.runtime.backbone.encoder.readout",
+        )
+
+    def test_real_model_contract_rejects_cache_position_protocol_mismatch(self) -> None:
+        checkpoint_model = _token_model(
+            runtime=_contract_runtime(backbone_supports_cache_position=True)
+        )
+        current_model = _token_model(
+            runtime=_contract_runtime(backbone_supports_cache_position=False)
+        )
+
+        _assert_contract_mismatch(
+            self,
+            checkpoint_model,
+            current_model,
+            "components.runtime.backbone.encoder.supports_cache_position",
         )
 
     def test_real_model_contract_rejects_audio_head_mismatch(self) -> None:
@@ -335,6 +415,129 @@ class ModelCheckpointContractTest(unittest.TestCase):
             "components.interface.source_audio_encoder.causal",
         )
 
+    def test_real_model_contract_records_route_local_ctc_decoders(self) -> None:
+        model = _token_model(
+            config=_model_config(
+                ctc=CTCConfig(
+                    source=CTCRouteConfig(
+                        weight=0.25,
+                        decoder=CTCDecoderConfig(
+                            type=CTCDecoderType.TRANSFORMER,
+                            backbone_readout="hidden_states[0]",
+                            pool_factor=3,
+                            layers=3,
+                            heads=2,
+                            ffn_ratio=6.0,
+                            dropout=0.125,
+                        ),
+                    ),
+                    target=CTCRouteConfig(
+                        weight=0.75,
+                        decoder=CTCDecoderConfig(
+                            type=CTCDecoderType.LINEAR,
+                            backbone_readout="last_hidden_state",
+                            pool_factor=2,
+                            layers=5,
+                            heads=4,
+                            ffn_ratio=3.0,
+                            dropout=0.25,
+                        ),
+                    ),
+                )
+            )
+        )
+
+        decoders = _component(model, "interface", "ctc_decoders")
+
+        self.assertEqual(
+            decoders,
+            {
+                "source": {
+                    "grammar": "ctc-decoder-v1",
+                    "type": "transformer",
+                    "causal": False,
+                    "backbone_readout": "hidden_states[0]",
+                    "pool_factor": 3,
+                    "hidden_size": 8,
+                    "layers": 3,
+                    "heads": 2,
+                    "ffn_ratio": 6.0,
+                    "dropout": 0.125,
+                },
+                "target": {
+                    "grammar": "ctc-decoder-v1",
+                    "type": "linear",
+                    "causal": True,
+                    "backbone_readout": "last_hidden_state",
+                    "pool_factor": 2,
+                    "hidden_size": 8,
+                    "layers": 5,
+                    "heads": 4,
+                    "ffn_ratio": 3.0,
+                    "dropout": 0.25,
+                },
+            },
+        )
+
+    def test_ctc_loss_weights_do_not_affect_model_contract(self) -> None:
+        decoder = CTCDecoderConfig(
+            type=CTCDecoderType.LINEAR,
+            pool_factor=2,
+        )
+        first = _token_model(
+            config=_model_config(
+                ctc=CTCConfig(
+                    source=CTCRouteConfig(weight=0.0, decoder=decoder),
+                    target=CTCRouteConfig(weight=0.25, decoder=decoder),
+                )
+            )
+        )
+        second = _token_model(
+            config=_model_config(
+                ctc=CTCConfig(
+                    source=CTCRouteConfig(weight=1.0, decoder=decoder),
+                    target=CTCRouteConfig(weight=2.0, decoder=decoder),
+                )
+            )
+        )
+
+        self.assertEqual(first.checkpoint_contract, second.checkpoint_contract)
+
+    def test_real_model_contract_rejects_route_local_ctc_decoder_mismatch(
+        self,
+    ) -> None:
+        cases = (
+            (
+                CTCConfig(),
+                CTCConfig(
+                    source=CTCRouteConfig(
+                        decoder=CTCDecoderConfig(
+                            type=CTCDecoderType.LINEAR,
+                        )
+                    )
+                ),
+                "components.interface.ctc_decoders.source.type",
+            ),
+            (
+                CTCConfig(),
+                CTCConfig(
+                    target=CTCRouteConfig(
+                        decoder=CTCDecoderConfig(pool_factor=2)
+                    )
+                ),
+                "components.interface.ctc_decoders.target.pool_factor",
+            ),
+        )
+
+        for checkpoint_ctc, current_ctc, path in cases:
+            with self.subTest(path=path):
+                _assert_contract_mismatch(
+                    self,
+                    _token_model(config=_model_config(ctc=checkpoint_ctc)),
+                    _token_model(config=_model_config(ctc=current_ctc)),
+                    path,
+                )
+
     def test_realized_contract_ignores_inactive_adapter_config_fields(self) -> None:
         first = _token_model(config=_inactive_adapter_config(variant=1))
         second = _token_model(config=_inactive_adapter_config(variant=2))
@@ -356,6 +559,53 @@ class ModelCheckpointContractTest(unittest.TestCase):
         second_config.architectures = ["SecondWrapper"]
         first_config.use_cache = True
         second_config.use_cache = False
+        first_config.return_dict = False
+        second_config.return_dict = True
+
+        self.assertEqual(first.checkpoint_contract, second.checkpoint_contract)
+
+    def test_realized_contract_ignores_generation_and_initializer_config(self) -> None:
+        first = _token_model()
+        second = _token_model()
+        first_config = cast(Any, first.backbone.config)
+        second_config = cast(Any, second.backbone.config)
+        first_config.temperature = 0.2
+        second_config.temperature = 1.4
+        first_config.max_length = 16
+        second_config.max_length = 512
+        first_config.initializer_range = 0.01
+        second_config.initializer_range = 0.2
+
+        self.assertEqual(first.checkpoint_contract, second.checkpoint_contract)
+
+    def test_realized_contract_canonicalizes_integer_config_keys(self) -> None:
+        checkpoint_model = _token_model()
+        current_model = _token_model()
+        cast(Any, checkpoint_model.backbone.config).pruned_heads = {0: [1]}
+        cast(Any, current_model.backbone.config).pruned_heads = {1: [0]}
+
+        _assert_contract_mismatch(
+            self,
+            checkpoint_model,
+            current_model,
+            "components.runtime.backbone.architecture_sha256",
+        )
+
+    def test_state_dict_schema_rejects_new_persistent_ownership(self) -> None:
+        checkpoint_model = _token_model()
+        current_model = _token_model()
+        cast(Any, current_model).contract_probe = nn.Buffer(torch.zeros(2))
+
+        _assert_contract_mismatch(
+            self,
+            checkpoint_model,
+            current_model,
+            "components.state_dict.schema_sha256",
+        )
+
+    def test_state_dict_schema_ignores_tensor_dtype(self) -> None:
+        first = _token_model()
+        second = _token_model().to(dtype=torch.float64)
 
         self.assertEqual(first.checkpoint_contract, second.checkpoint_contract)
 
@@ -693,12 +943,16 @@ class _ContractRuntime:
         text_tokenizer_state: str,
         audio_tokenizer_state: str,
         backbone_readout: str,
+        backbone_supports_cache_position: bool,
+        semantic_artifact_sha256: str | None,
     ) -> None:
         self._audio_sequence_layout = audio_sequence_layout
         self._backbone_readout = backbone_readout
+        self._backbone_supports_cache_position = backbone_supports_cache_position
+        self._semantic_artifact_sha256 = semantic_artifact_sha256
         self._codec = _Codec()
         self._semantic_codec = _SemanticCodec()
-        self._text_tokenizer = _TextTokenizer(text_tokenizer_state)
+        self._text_tokenizer: TextTokenizer = _TextTokenizer(text_tokenizer_state)
         self._audio_tokenizer: AudioTokenizer = (
             _StatefulNativeAudioTokenizer(
                 vocab_size=3,
@@ -739,7 +993,13 @@ class _ContractRuntime:
 
     @property
     def semantic_codec_artifact(self) -> str | None:
-        return None
+        if self._semantic_artifact_sha256 is None:
+            return None
+        return "/fixture/semantic-codec"
+
+    @cached_property
+    def semantic_codec_artifact_sha256(self) -> str | None:
+        return self._semantic_artifact_sha256
 
     @property
     def acoustic_layout(self) -> AcousticLayout:
@@ -823,7 +1083,7 @@ class _ContractRuntime:
 
     @property
     def backbone_supports_cache_position(self) -> bool:
-        return True
+        return self._backbone_supports_cache_position
 
     @property
     def gradient_checkpointing(self) -> bool:
@@ -890,16 +1150,61 @@ def _contract_runtime(
     text_tokenizer_state: str = "text-v1",
     audio_tokenizer_state: str = "audio-v1",
     backbone_readout: str = "last_hidden_state",
+    backbone_supports_cache_position: bool = True,
+    semantic_artifact_sha256: str | None = None,
 ) -> _ContractRuntime:
     runtime = _ContractRuntime(
         audio_sequence_layout=audio_sequence_layout,
         text_tokenizer_state=text_tokenizer_state,
         audio_tokenizer_state=audio_tokenizer_state,
         backbone_readout=backbone_readout,
+        backbone_supports_cache_position=backbone_supports_cache_position,
+        semantic_artifact_sha256=semantic_artifact_sha256,
     )
     _accept_token_runtime(runtime)
     _accept_flow_runtime(runtime)
     return runtime
+
+
+def _contract_runtime_with_text_tokenizer(
+    tokenizer: PreTrainedTokenizerFast,
+) -> _ContractRuntime:
+    runtime = _contract_runtime()
+    if len(tokenizer) != len(runtime._text_tokenizer):
+        raise AssertionError("fast tokenizer fixture must preserve the text token range.")
+    runtime._text_tokenizer = cast(TextTokenizer, cast(object, tokenizer))
+    return runtime
+
+
+def _fast_text_tokenizer(*, lowercase: bool) -> PreTrainedTokenizerFast:
+    backend = Tokenizer(
+        WordLevel(
+            {
+                "<pad>": 0,
+                "<bos>": 1,
+                "<eos>": 2,
+                "<unk>": 3,
+                "hello": 4,
+                "HELLO": 5,
+                "world": 6,
+                "!": 7,
+            },
+            unk_token="<unk>",
+        )
+    )
+    backend.normalizer = (
+        normalizers.Lowercase() if lowercase else normalizers.NFC()
+    )
+    backend.pre_tokenizer = pre_tokenizers.Whitespace()
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=backend,
+        pad_token="<pad>",
+        bos_token="<bos>",
+        eos_token="<eos>",
+        unk_token="<unk>",
+    )
+    tokenizer.chat_template = "fixture-chat-v1"
+    return tokenizer
 
 
 def _accept_token_runtime(runtime: TokenModelRuntime) -> None:
@@ -925,6 +1230,7 @@ def _model_config(
     audio_input: AudioInputAdapterType = AudioInputAdapterType.MLP,
     audio_input_causal: bool = False,
     audio_output: AudioOutputAdapterType = AudioOutputAdapterType.NONE,
+    ctc: CTCConfig | None = None,
 ) -> ModelConfig:
     return ModelConfig(
         semantic_audio_adapter=AdapterType.LINEAR,
@@ -941,6 +1247,7 @@ def _model_config(
             heads=2,
             ffn_ratio=2,
         ),
+        ctc=CTCConfig() if ctc is None else ctc,
         toy=_toy_config(),
     )
 

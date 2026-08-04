@@ -30,7 +30,6 @@ from ...runtime.types import (
     frame_codebook_sizes,
     structured_codec,
 )
-from .._helper.audio_context import needs_reference_audio_context
 from ..protocol import DatasetRuntime
 from ..types import AudioContextSample
 
@@ -422,7 +421,6 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
             SpeakerGridCellsDataset(
                 grid,
                 speaker=config.speaker,
-                with_audio_context=needs_reference_audio_context(runtime),
             ),
             config,
         )

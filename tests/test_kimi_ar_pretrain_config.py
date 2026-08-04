@@ -15,6 +15,7 @@ from speech_to_speech.loader_plan import ARFraming
 from speech_to_speech.loader_step import LoaderStepMode
 from speech_to_speech.model.audio_input import AudioInputAdapterType
 from speech_to_speech.model.acoustic import AcousticType
+from speech_to_speech.model.ctc import CTCDecoderType
 from speech_to_speech.parameter_policy import ParameterPolicyName
 from speech_to_speech.runtime import AudioSequenceLayout, BackboneType
 from speech_to_speech.task import Task
@@ -37,8 +38,16 @@ class KimiARPretrainConfigTest(unittest.TestCase):
         self.assertEqual(config.model.acoustic.type, AcousticType.NONE.value)
         self.assertIs(config.callbacks.parameter_policy.name, ParameterPolicyName.FULL)
         self.assertIsNone(config.model.lora)
-        self.assertEqual(config.pl_module.ctc.source_weight, 1.0)
-        self.assertEqual(config.pl_module.ctc.target_weight, 1.0)
+        self.assertEqual(config.model.ctc.source.weight, 1.0)
+        self.assertEqual(config.model.ctc.target.weight, 1.0)
+        self.assertIs(
+            config.model.ctc.source.decoder.type,
+            CTCDecoderType.IDENTITY,
+        )
+        self.assertIs(
+            config.model.ctc.target.decoder.type,
+            CTCDecoderType.IDENTITY,
+        )
         self.assertIs(
             config.model.audio_input_adapter.type,
             AudioInputAdapterType.TRANSFORMER,

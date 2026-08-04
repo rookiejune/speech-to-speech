@@ -9,7 +9,6 @@ from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
 from .._helper.duration import from_frames, from_samples
-from .._helper.audio_context import needs_reference_audio_context
 from .._helper.tokenization import token_ids
 from ..protocol import DataRuntime, TextRuntime
 from ..types import (
@@ -103,27 +102,12 @@ def _parse_audio_context(
     *,
     encode_missing_codes: bool,
 ) -> Speech | RawSpeech | None:
-    """Resolve layout-owned reference audio for the current sample.
-
-    AudioContextSample (speaker-grid) wins. Otherwise, BiCodec semantic
-    layout uses Role.SOURCE audio as same-speaker enrollment.
-    """
-    if not needs_reference_audio_context(runtime):
+    """Resolve an explicitly supplied reference audio sample."""
+    if not isinstance(sample, AudioContextSample):
         return None
-    if isinstance(sample, AudioContextSample):
-        context = _parse_task_item(
-            sample.audio_context,
-            types.Role.DEFAULT,
-            types.Modality.AUDIO,
-            runtime,
-            encode_missing_codes=encode_missing_codes,
-        )
-        if isinstance(context, Text):
-            raise AssertionError("audio context parser returned text.")
-        return context
     context = _parse_task_item(
-        sample,
-        types.Role.SOURCE,
+        sample.audio_context,
+        types.Role.DEFAULT,
         types.Modality.AUDIO,
         runtime,
         encode_missing_codes=encode_missing_codes,

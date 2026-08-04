@@ -9,8 +9,7 @@ def requests_from_batch(batch: ModelBatch) -> list[Request]:
     requests: list[Request] = []
     prompt_lengths = batch.generation_prompt_lengths
     audio_input_positions = batch.audio_input_positions
-    audio_contexts = batch.audio_contexts
-    if prompt_lengths is None or audio_contexts is None:
+    if prompt_lengths is None:
         raise RuntimeError("model batch generation fields are unavailable.")
     for index, (task, prediction) in enumerate(zip(batch.tasks, batch.predictions)):
         prompt_end = int(prompt_lengths[index].item())
@@ -26,7 +25,6 @@ def requests_from_batch(batch: ModelBatch) -> list[Request]:
                         audio_input_positions[index].ge(0)
                     ]
                 ),
-                audio_context=audio_contexts[index],
             )
         )
     return requests

@@ -7,7 +7,6 @@ from anytrain.codec import SemanticAcousticCodes
 from torch import Generator, Tensor
 
 from .._tensor import is_signed_integer_dtype
-from ..audio_stream import AudioStream
 from ..runtime.audio_tokenizer import (
     BiCodecAudioTokenizer,
     semantic_codes_from_audio_tokens,
@@ -123,58 +122,41 @@ def decode_generated_bicodec_full(
     return codec.detokenize(codes)
 
 
-def decode_generated_bicodec_full_row(
+def decode_generated_bicodec_row(
     audio_token_ids: Tensor,
+    prompt_ids: Tensor | None,
     *,
     codec: StructuredCodec,
     audio_tokenizer: BiCodecAudioTokenizer,
     audio_token_range: tuple[int, int],
+    boa_token_id: int,
+    eoa_token_id: int,
 ) -> tuple[Tensor, SemanticAcousticCodes]:
-    """Decode one acoustic-first / semantic-last BiCodec full-code row."""
+    """Resolve one self-describing BiCodec response against its prompt."""
     if audio_token_ids.dim() != 1:
-        raise ValueError("BiCodec full-code decode expects one generated token row.")
+        raise ValueError("BiCodec decode expects one generated token row.")
     local_ids = _local_ids(audio_token_ids[None], audio_token_range)[0]
-    resolved = audio_tokenizer.decode_full(local_ids)
-    resolved = SemanticAcousticCodes(
-        semantic=resolved.semantic.to(device=audio_token_ids.device, dtype=torch.long),
-        acoustic=resolved.acoustic.to(device=audio_token_ids.device, dtype=torch.long),
-    )
-    waveform = codec.detokenize(
-        SemanticAcousticCodes(
-            semantic=resolved.semantic.unsqueeze(0),
-            acoustic=resolved.acoustic.unsqueeze(0),
-        )
-    )
-    if waveform.dim() < 1 or waveform.size(0) != 1:
-        raise ValueError("BiCodec detokenize must preserve a batch size of one.")
-    return waveform[0], resolved
-
-
-def decode_generated_bicodec_semantic_with_reference(
-    audio_token_ids: Tensor,
-    audio_context: SemanticAcousticCodes | None,
-    *,
-    codec: StructuredCodec,
-    audio_tokenizer: BiCodecAudioTokenizer,
-    audio_token_range: tuple[int, int],
-) -> tuple[Tensor, SemanticAcousticCodes]:
-    """Decode generated semantic codes with reference-owned acoustic codes."""
-    if audio_token_ids.dim() != 1:
-        raise ValueError(
-            "BiCodec semantic-reference decode expects one generated token row."
-        )
-    if audio_context is None:
-        raise ValueError("BiCodec semantic-reference decode requires audio context.")
-    local_ids = _local_ids(audio_token_ids[None], audio_token_range)[0]
-    output = audio_tokenizer.decode_streams(local_ids, (AudioStream.SEMANTIC,))
+    output = audio_tokenizer.decode_streams(local_ids)
     if output.semantic is None:
-        raise ValueError("BiCodec semantic-reference output is missing semantic codes.")
+        raise ValueError("BiCodec generated output is missing semantic codes.")
+    prompt_acoustic = _prompt_bicodec_acoustic(
+        prompt_ids,
+        audio_tokenizer=audio_tokenizer,
+        audio_token_range=audio_token_range,
+        boa_token_id=boa_token_id,
+        eoa_token_id=eoa_token_id,
+    )
+    if (prompt_acoustic is None) == (output.acoustic is None):
+        raise ValueError(
+            "BiCodec decode requires exactly one global stream owner across "
+            "prompt and generated output."
+        )
+    acoustic = output.acoustic if output.acoustic is not None else prompt_acoustic
+    if acoustic is None:
+        raise AssertionError("BiCodec global stream ownership was not resolved.")
     resolved = SemanticAcousticCodes(
         semantic=output.semantic.to(device=audio_token_ids.device, dtype=torch.long),
-        acoustic=audio_context.acoustic.to(
-            device=audio_token_ids.device,
-            dtype=torch.long,
-        ),
+        acoustic=acoustic.to(device=audio_token_ids.device, dtype=torch.long),
     )
     waveform = codec.detokenize(
         SemanticAcousticCodes(
@@ -185,6 +167,44 @@ def decode_generated_bicodec_semantic_with_reference(
     if waveform.dim() < 1 or waveform.size(0) != 1:
         raise ValueError("BiCodec detokenize must preserve a batch size of one.")
     return waveform[0], resolved
+
+
+def _prompt_bicodec_acoustic(
+    prompt_ids: Tensor | None,
+    *,
+    audio_tokenizer: BiCodecAudioTokenizer,
+    audio_token_range: tuple[int, int],
+    boa_token_id: int,
+    eoa_token_id: int,
+) -> Tensor | None:
+    if prompt_ids is None:
+        return None
+    if prompt_ids.dim() != 1:
+        raise ValueError("BiCodec prompt ids must have shape [tokens].")
+    start, end = audio_token_range
+    acoustic: list[Tensor] = []
+    cursor = 0
+    while cursor < prompt_ids.numel():
+        starts = prompt_ids[cursor:].eq(boa_token_id).nonzero(as_tuple=False)
+        if starts.numel() == 0:
+            break
+        span_start = cursor + int(starts[0].item()) + 1
+        stops = prompt_ids[span_start:].eq(eoa_token_id).nonzero(as_tuple=False)
+        if stops.numel() == 0:
+            break
+        span_end = span_start + int(stops[0].item())
+        payload = prompt_ids[span_start:span_end]
+        if payload.numel() < 1:
+            raise ValueError("BiCodec prompt audio span must not be empty.")
+        if bool((payload < start).any()) or bool((payload >= end).any()):
+            raise ValueError("BiCodec prompt audio span contains non-codec tokens.")
+        decoded = audio_tokenizer.decode_streams(payload.to(dtype=torch.long) - start)
+        if decoded.acoustic is not None:
+            acoustic.append(decoded.acoustic)
+        cursor = span_end + 1
+    if len(acoustic) > 1:
+        raise ValueError("BiCodec prompt contains more than one global stream.")
+    return None if not acoustic else acoustic[0]
 
 
 def decode_generated_codes(

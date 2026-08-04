@@ -195,6 +195,7 @@ def _build_modal_sample(
         uses_bicodec,
     ) = _target_response(
         input_ids,
+        source if task.source_layout.includes_audio else None,
         target,
         target_modality,
         runtime,
@@ -247,7 +248,6 @@ def _build_modal_sample(
             audio_context=audio_context if reference_audio_codes is not None else None,
         ),
         audio_input_positions=audio_input_positions,
-        audio_context=reference_audio_codes,
     )
 
 
@@ -283,6 +283,7 @@ def _target_modality(prediction: PredictionModality) -> Modality:
 
 def _target_response(
     input_ids: Tensor,
+    source: Speech | Text | None,
     target: Speech | Text,
     target_modality: Modality,
     runtime: DataRuntime,
@@ -293,6 +294,7 @@ def _target_response(
     if tokenizer is not None:
         input_ids, response_ids, reference = _bicodec_response(
             input_ids,
+            source,
             target,
             runtime,
             tokenizer,
@@ -309,6 +311,7 @@ def _target_response(
 
 def _bicodec_response(
     input_ids: Tensor,
+    source: Speech | Text | None,
     target: Speech | Text,
     runtime: DataRuntime,
     tokenizer: BiCodecAudioTokenizer,
@@ -316,11 +319,12 @@ def _bicodec_response(
     audio_context: Speech | None,
 ) -> tuple[Tensor, Tensor, SemanticAcousticCodes | None]:
     reference_audio_codes = None
-    if runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
-        response_streams = (AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
-    elif runtime.audio_sequence_layout is AudioSequenceLayout.SEMANTIC:
-        if audio_context is None:
-            raise ValueError("BiCodec semantic layout requires reference audio context.")
+    source_has_global = isinstance(source, Speech) and source.acoustic_codes is not None
+    if source_has_global and audio_context is not None and audio_context is not source:
+        raise ValueError(
+            "BiCodec tasks cannot select both source and reference global streams."
+        )
+    if audio_context is not None:
         prompt_ids = _global_bicodec_ids(
             audio_context,
             (AudioStream.ACOUSTIC,),
@@ -329,11 +333,10 @@ def _bicodec_response(
         )
         input_ids = torch.cat((input_ids, _boa_eoa(prompt_ids, runtime)))
         reference_audio_codes = _structured_codes(audio_context)
+    if source_has_global or audio_context is not None:
         response_streams = (AudioStream.SEMANTIC,)
     else:
-        raise AssertionError(
-            f"unsupported audio_sequence_layout: {runtime.audio_sequence_layout}"
-        )
+        response_streams = (AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
     response_local = tokenizer.encode_streams(
         _structured_codes(_speech(target, role="target")),
         response_streams,
@@ -478,7 +481,6 @@ def _parallel_response(
             audio_context=audio_context,
         ),
         audio_input_positions=audio_input_positions,
-        audio_context=None,
     )
 
 

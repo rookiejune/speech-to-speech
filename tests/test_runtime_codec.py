@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -27,6 +30,69 @@ from speech_to_speech.runtime.types import (
 
 
 class RuntimeCodecTest(unittest.TestCase):
+    def test_semantic_codec_artifact_file_digest_is_cached_per_runtime(self) -> None:
+        with TemporaryDirectory() as directory:
+            artifact = Path(directory) / "semantic-codec.pt"
+            artifact.write_bytes(b"semantic-codec-v1")
+            runtime = Runtime(
+                Config(
+                    codec="longcat",
+                    semantic_codec_artifact=str(artifact),
+                )
+            )
+
+            first = runtime.semantic_codec_artifact_sha256
+            artifact.write_bytes(b"semantic-codec-v2")
+
+            self.assertEqual(
+                first,
+                hashlib.sha256(b"semantic-codec-v1").hexdigest(),
+            )
+            self.assertEqual(runtime.semantic_codec_artifact_sha256, first)
+            self.assertNotEqual(
+                Runtime(runtime.config).semantic_codec_artifact_sha256,
+                first,
+            )
+
+    def test_semantic_codec_artifact_directory_digest_uses_relative_content(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first" / "artifact"
+            second = root / "second" / "artifact"
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+            (first / "nested").mkdir()
+            (second / "nested").mkdir()
+            (first / "weights.bin").write_bytes(b"weights")
+            (first / "nested" / "config.json").write_text(
+                '{"version": 1}',
+                encoding="utf-8",
+            )
+            (second / "nested" / "config.json").write_text(
+                '{"version": 1}',
+                encoding="utf-8",
+            )
+            (second / "weights.bin").write_bytes(b"weights")
+
+            first_digest = Runtime(
+                Config(codec="longcat", semantic_codec_artifact=str(first))
+            ).semantic_codec_artifact_sha256
+            second_digest = Runtime(
+                Config(codec="longcat", semantic_codec_artifact=str(second))
+            ).semantic_codec_artifact_sha256
+
+            self.assertEqual(first_digest, second_digest)
+            (second / "nested" / "config.json").rename(second / "config.json")
+            self.assertNotEqual(
+                Runtime(
+                    Config(codec="longcat", semantic_codec_artifact=str(second))
+                ).semantic_codec_artifact_sha256,
+                first_digest,
+            )
+
+    def test_runtime_without_semantic_codec_artifact_has_no_digest(self) -> None:
+        self.assertIsNone(Runtime(Config(codec="longcat")).semantic_codec_artifact_sha256)
+
     def test_load_codec_longcat_uses_anytrain_backend(self) -> None:
         backend = SimpleNamespace(name="longcat")
 
@@ -98,47 +164,38 @@ class RuntimeCodecTest(unittest.TestCase):
         self.assertIsInstance(runtime.audio_tokenizer, BiCodecAudioTokenizer)
 
     def test_bicodec_runtime_nests_explicit_semantic_tokenizer(self) -> None:
-        for layout in (
-            AudioSequenceLayout.SEMANTIC,
-            AudioSequenceLayout.FLATTENED,
+        config = Config(
+            codec="bicodec",
+            audio_tokenizer="/tmp/bicodec-semantic-bpe",
+        )
+        runtime = Runtime(
+            config,
+            audio_sequence_layout=AudioSequenceLayout.FLATTENED,
+        )
+        runtime.__dict__["codec"] = _codec(AcousticLayout.FIXED_LENGTH)
+        semantic_tokenizer = Mock()
+        outer_tokenizer = Mock()
+
+        with (
+            patch(
+                "speech_to_speech.runtime.runtime.audio_tokenizer",
+                return_value=semantic_tokenizer,
+            ) as load_tokenizer,
+            patch(
+                "speech_to_speech.runtime.runtime.BiCodecAudioTokenizer",
+                return_value=outer_tokenizer,
+            ) as build_tokenizer,
         ):
-            config = Config(
-                codec="bicodec",
-                audio_tokenizer="/tmp/bicodec-semantic-bpe",
-                semantic_codec_artifact=(
-                    "/tmp/bicodec-semantic"
-                    if layout is AudioSequenceLayout.SEMANTIC
-                    else None
-                ),
-            )
-            runtime = Runtime(config, audio_sequence_layout=layout)
-            runtime.__dict__["codec"] = _codec(AcousticLayout.FIXED_LENGTH)
-            semantic_tokenizer = Mock()
-            outer_tokenizer = Mock()
+            loaded = runtime.audio_tokenizer
 
-            with (
-                patch(
-                    "speech_to_speech.runtime.runtime.audio_tokenizer",
-                    return_value=semantic_tokenizer,
-                ) as load_tokenizer,
-                patch(
-                    "speech_to_speech.runtime.runtime.BiCodecAudioTokenizer",
-                    return_value=outer_tokenizer,
-                ) as build_tokenizer,
-            ):
-                loaded = runtime.audio_tokenizer
-
-            with self.subTest(layout=layout):
-                self.assertIs(loaded, outer_tokenizer)
-                load_tokenizer.assert_called_once_with(
-                    "/tmp/bicodec-semantic-bpe"
-                )
-                build_tokenizer.assert_called_once_with(
-                    semantic_codebook_size=8,
-                    acoustic_codebook_sizes=(5, 7),
-                    acoustic_unit_length=3,
-                    semantic_tokenizer=semantic_tokenizer,
-                )
+        self.assertIs(loaded, outer_tokenizer)
+        load_tokenizer.assert_called_once_with("/tmp/bicodec-semantic-bpe")
+        build_tokenizer.assert_called_once_with(
+            semantic_codebook_size=8,
+            acoustic_codebook_sizes=(5, 7),
+            acoustic_unit_length=3,
+            semantic_tokenizer=semantic_tokenizer,
+        )
 
     def test_frame_codec_rejects_invalid_codebook_sizes(self) -> None:
         cases = (
@@ -230,6 +287,22 @@ class RuntimeAudioSequenceLayoutTest(unittest.TestCase):
 
         self.assertIs(runtime.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
         self.assertIs(runtime.audio_view, AudioView.BICODEC)
+
+    def test_bicodec_rejects_split_semantic_route(self) -> None:
+        with self.assertRaisesRegex(ValueError, "self-describing structured sequence"):
+            Runtime(
+                Config(codec="bicodec"),
+                audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
+            )
+
+        with self.assertRaisesRegex(ValueError, "cannot use.*semantic_codec_artifact"):
+            Runtime(
+                Config(
+                    codec="bicodec",
+                    semantic_codec_artifact="/tmp/bicodec-semantic",
+                ),
+                audio_sequence_layout=AudioSequenceLayout.FLATTENED,
+            )
 
     def test_runtime_for_sequence_layout_preserves_config(self) -> None:
         config = Config(codec="stable_codec")

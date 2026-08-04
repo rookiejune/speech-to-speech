@@ -92,6 +92,62 @@ class _ChatRawTokenizer(_RawTokenizer):
         return [4, 5] if kwargs["tokenize"] else "rendered"
 
 
+class _StatefulRawTokenizer(_RawTokenizer):
+    def __init__(
+        self,
+        token_id: int,
+        *,
+        chat_template: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.token_id = token_id
+        self.chat_template = chat_template
+
+    def encode(
+        self,
+        text: str,
+        *,
+        bos: bool,
+        eos: bool,
+        allowed_special: Literal["all"] | Collection[str] = (),
+        disallowed_special: Collection[str] = (),
+    ) -> list[int]:
+        super().encode(
+            text,
+            bos=bos,
+            eos=eos,
+            allowed_special=allowed_special,
+            disallowed_special=disallowed_special,
+        )
+        values = [4, self.token_id]
+        if bos:
+            values.insert(0, self.bos_id)
+        if eos:
+            values.append(self.eos_id)
+        return values
+
+
+class _ContractRawTokenizer(_StatefulRawTokenizer):
+    def contract_state(self) -> Mapping[str, object]:
+        return {
+            "grammar": "fixture-kimi-raw-v1",
+            "asset": "fixture-tokenizer-v1",
+        }
+
+
+class _RankedRawTokenizer(_RawTokenizer):
+    def __init__(self, *, first_rank: int) -> None:
+        super().__init__()
+        self.tokenizer = SimpleNamespace(
+            _mergeable_ranks={
+                b"first": first_rank,
+                b"second": 1 - first_rank,
+            },
+            _pat_str=r"\w+|[^\w\s]+",
+            _special_tokens={"<audio>": 3},
+        )
+
+
 class _BrokenTokenizerBase(_RawTokenizer):
     chat_template = None
 
@@ -224,6 +280,40 @@ class KimiTokenizerAdapterTest(unittest.TestCase):
             ),
             [4, 5],
         )
+
+    def test_contract_state_tracks_same_class_raw_encoding_behavior(self) -> None:
+        first = KimiTokenizerAdapter(_StatefulRawTokenizer(5))
+        second = KimiTokenizerAdapter(_StatefulRawTokenizer(6))
+
+        self.assertNotEqual(first.contract_state(), second.contract_state())
+
+    def test_contract_state_tracks_tiktoken_mergeable_ranks(self) -> None:
+        first = KimiTokenizerAdapter(_RankedRawTokenizer(first_rank=0))
+        second = KimiTokenizerAdapter(_RankedRawTokenizer(first_rank=1))
+
+        self.assertNotEqual(first.contract_state(), second.contract_state())
+
+    def test_contract_state_tracks_raw_chat_template(self) -> None:
+        first = KimiTokenizerAdapter(
+            _StatefulRawTokenizer(5, chat_template="first raw template")
+        )
+        second = KimiTokenizerAdapter(
+            _StatefulRawTokenizer(5, chat_template="second raw template")
+        )
+
+        self.assertNotEqual(first.contract_state(), second.contract_state())
+
+    def test_contract_state_prefers_explicit_raw_contract(self) -> None:
+        raw = _ContractRawTokenizer(5)
+        tokenizer = KimiTokenizerAdapter(raw)
+
+        state = tokenizer.contract_state()
+
+        raw_state = state["raw_state"]
+        self.assertIsInstance(raw_state, Mapping)
+        assert isinstance(raw_state, Mapping)
+        self.assertEqual(raw_state["grammar"], "explicit-contract-state-v1")
+        self.assertEqual(raw.encode_calls, [])
 
 
 class _KimiBody(nn.Module):

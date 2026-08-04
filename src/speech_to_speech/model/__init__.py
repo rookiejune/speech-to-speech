@@ -10,6 +10,13 @@ from .audio_output import (
     AudioOutputAdapterType,
 )
 from .base import Config, Model
+from .ctc import (
+    CTCConfig,
+    CTCDecoderConfig,
+    CTCDecoderType,
+    CTCRoute,
+    CTCRouteConfig,
+)
 from .generation import (
     GenerationEngine,
     GenerationOptions,
@@ -37,6 +44,11 @@ __all__ = [
     "AudioOutputAdapterConfig",
     "AudioOutputAdapterType",
     "Config",
+    "CTCConfig",
+    "CTCDecoderConfig",
+    "CTCDecoderType",
+    "CTCRoute",
+    "CTCRouteConfig",
     "GenerationEngine",
     "GenerationOptions",
     "GenerationOutput",

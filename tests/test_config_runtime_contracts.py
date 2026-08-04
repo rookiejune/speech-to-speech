@@ -97,35 +97,36 @@ class ConfigRuntimeContractTest(unittest.TestCase):
         backend = SimpleNamespace(name="longcat")
         support = SimpleNamespace()
         semantic_runtime = SimpleNamespace(sample_rate=24_000, frame_rate=50.0, decode=Mock())
-        runtime = Runtime(
-            Config(
-                codec="longcat",
-                semantic_codec_artifact="/tmp/semantic-codec",
+        with TemporaryDirectory() as directory:
+            artifact = Path(directory) / "semantic-codec"
+            artifact.mkdir()
+            (artifact / "support.json").write_text("{}", encoding="utf-8")
+            runtime = Runtime(
+                Config(
+                    codec="longcat",
+                    semantic_codec_artifact=str(artifact),
+                )
             )
-        )
 
-        with (
-            patch(
-                "speech_to_speech.runtime.runtime.load_codec",
-                return_value=backend,
-            ),
-            patch(
-                "semantic_acoustic_codec.runtime.artifact.load_artifact",
-                return_value=support,
-            ) as load,
-            patch(
-                "semantic_acoustic_codec.runtime.SemanticCodecRuntime",
-                return_value=semantic_runtime,
-            ) as bind,
-        ):
-            loaded = runtime.semantic_codec
+            with (
+                patch(
+                    "speech_to_speech.runtime.runtime.load_codec",
+                    return_value=backend,
+                ),
+                patch(
+                    "semantic_acoustic_codec.runtime.artifact.load_artifact",
+                    return_value=support,
+                ) as load,
+                patch(
+                    "semantic_acoustic_codec.runtime.SemanticCodecRuntime",
+                    return_value=semantic_runtime,
+                ) as bind,
+            ):
+                loaded = runtime.semantic_codec
 
-        self.assertIs(loaded, semantic_runtime)
-        load.assert_called_once_with(
-            Path("/tmp/semantic-codec"),
-            device=None,
-        )
-        bind.assert_called_once_with(support, backend)
+            self.assertIs(loaded, semantic_runtime)
+            load.assert_called_once_with(artifact, device=None)
+            bind.assert_called_once_with(support, backend)
 
     def test_runtime_rejects_semantic_codec_without_artifact(self):
         runtime = Runtime(Config(codec="longcat"))
@@ -372,8 +373,8 @@ class ConfigRuntimeContractTest(unittest.TestCase):
         self.assertIs(semantic, codes)
         self.assertIsNone(acoustic)
 
-    def test_bicodec_runtime_rejects_fixed_length_structured_codec(self):
-        with self.assertRaisesRegex(ValueError, "semantic_codec_artifact"):
+    def test_bicodec_runtime_requires_self_describing_sequence_layout(self):
+        with self.assertRaisesRegex(ValueError, "self-describing structured"):
             Runtime(Config(codec="bicodec"))
 
     def test_parser_rejects_non_codec_audio_views(self):
