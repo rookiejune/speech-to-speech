@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Any, Generic, Protocol, TypeVar, cast
 
 import torch
+from anydataset.types import Modality
 from anytrain.evaluator.text import TextComparisonEvaluator
 from anytrain.lightning import validation
 from anytrain.lightning.schedule import ScheduleRuntime
@@ -60,6 +61,8 @@ class ModuleModel(TextEvaluationModel, TokenObjectiveModel, Protocol):
 
 
 ModelT = TypeVar("ModelT", bound=ModuleModel)
+_MODEL_SCHEMA_KEY = "speech_to_speech_model_schema"
+_MODEL_SCHEMA = "v3"
 _AUDIO_SEQUENCE_LAYOUT_KEY = "speech_to_speech_audio_sequence_layout"
 _PEFT_KEY = "speech_to_speech_peft"
 
@@ -177,9 +180,9 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
             hints = self._training_input_hints(batch)
             moved = batch.to(device, non_blocking=True)
             if hints is not None:
-                blocks, positions_validated = hints
-                moved.set_embedding_hints(
-                    blocks,
+                modalities, positions_validated = hints
+                moved.set_input_hints(
+                    modalities,
                     audio_input_positions_validated=positions_validated,
                 )
             return moved
@@ -258,9 +261,9 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
     def _with_training_input_hints(self, batch: ModelBatch) -> ModelBatch:
         hints = self._training_input_hints(batch)
         if hints is not None:
-            blocks, positions_validated = hints
-            batch.set_embedding_hints(
-                blocks,
+            modalities, positions_validated = hints
+            batch.set_input_hints(
+                modalities,
                 audio_input_positions_validated=positions_validated,
             )
         return batch
@@ -268,7 +271,7 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
     def _training_input_hints(
         self,
         batch: ModelBatch,
-    ) -> tuple[frozenset[str], bool] | None:
+    ) -> tuple[frozenset[Modality], bool] | None:
         if not isinstance(self.model, Model):
             return None
         return self.model.training_input_hints(
@@ -310,12 +313,14 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         self._current_gradient_loader_outputs = None
 
     def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        checkpoint[_MODEL_SCHEMA_KEY] = _MODEL_SCHEMA
         checkpoint[_AUDIO_SEQUENCE_LAYOUT_KEY] = _audio_sequence_layout_payload(
             self.model.runtime.audio_sequence_layout
         )
         checkpoint[_PEFT_KEY] = _peft_payload(self.model.lora_config)
 
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        _validate_model_schema_checkpoint(checkpoint)
         expected = _audio_sequence_layout_payload(
             self.model.runtime.audio_sequence_layout
         )
@@ -450,6 +455,15 @@ def _validate_audio_sequence_layout_checkpoint(
     if actual != expected:
         raise ValueError(
             f"checkpoint audio sequence layout does not match runtime: {actual!r} != {expected!r}."
+        )
+
+
+def _validate_model_schema_checkpoint(checkpoint: dict[str, Any]) -> None:
+    actual = checkpoint.get(_MODEL_SCHEMA_KEY)
+    if actual != _MODEL_SCHEMA:
+        raise ValueError(
+            "checkpoint model schema is incompatible: "
+            f"expected {_MODEL_SCHEMA!r}, got {actual!r}."
         )
 
 

@@ -8,7 +8,7 @@ from anytrain.module.idspace import Layout
 from torch import Tensor
 from transformers.cache_utils import Cache
 
-from ..model._generation import GenerationStepResult
+from ..model.generation import GenerationStepResult, TokenKind
 from ..prediction import PredictionModality
 from ..runtime.protocol import GenerationRuntime
 from ..runtime.types import Backbone
@@ -32,15 +32,18 @@ class TokenGenerator(Protocol):
         attention_mask: Tensor,
         output_hidden_states: bool,
         token_ids: Tensor | None,
-        token_kind: str | None = None,
+        token_kind: TokenKind | None = None,
         modality: Modality | None,
         past_key_values: Cache | None,
         use_cache: bool,
         audio_input_positions: Tensor | None = None,
-        audio_output_past: object | None = None,
+        audio_head_past: object | None = None,
+        input_modalities: frozenset[Modality] | None = None,
+        validate_input: bool = True,
+        validate_audio_input_positions: bool = True,
     ) -> GenerationStepResult: ...
 
-    def audio_output_adapter_batch_select(
+    def select_audio_head_cache(
         self,
         past_key_values: object | None,
         indices: Tensor,
@@ -73,7 +76,7 @@ class TextEvaluationModel(TokenGenerator, Protocol):
         *,
         attention_mask: Tensor | None = None,
         audio_input_positions: Tensor | None = None,
-        embedding_blocks: frozenset[str] | None = None,
+        input_modalities: frozenset[Modality] | None = None,
         validate_input: bool = True,
         validate_audio_input_positions: bool = True,
         prediction: PredictionModality | None = None,

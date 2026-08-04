@@ -11,6 +11,7 @@ from speech_to_speech.parameter_policy import (
     ParameterGroup,
     ParameterPolicyName,
     apply_parameter_policy,
+    parameter_group,
 )
 
 
@@ -48,6 +49,48 @@ class _SelectiveModel(nn.Module):
 
 
 class SelectiveBackboneParameterPolicyTest(unittest.TestCase):
+    def test_model_parameters_use_v3_ownership_paths(self):
+        self.assertIs(
+            parameter_group("backbone.embed_tokens.weight"),
+            ParameterGroup.BACKBONE,
+        )
+        self.assertIs(
+            parameter_group("tokens.audio_embedding.weight"),
+            ParameterGroup.SEMANTIC_AUDIO_EMBEDDING,
+        )
+        self.assertIs(
+            parameter_group("tokens.audio_projection.module.weight"),
+            ParameterGroup.SEMANTIC_AUDIO_ADAPTER,
+        )
+        self.assertIs(
+            parameter_group("tokens.audio_head.projection.weight"),
+            ParameterGroup.AUDIO_OUTPUT,
+        )
+        self.assertIs(
+            parameter_group("source_audio_encoder.projection.weight"),
+            ParameterGroup.AUDIO_INPUT_ADAPTER,
+        )
+
+        for legacy in (
+            "token_embedding.audio_embedding.weight",
+            "token_embedding.audio_projection.module.weight",
+            "token_embedding.embeddings.text.weight",
+            "token_embedding.embeddings.audio.weight",
+            "token_embedding.adapters.audio.weight",
+            "audio_input_adapter.projection.weight",
+            "audio_output_adapter.projection.weight",
+        ):
+            with self.subTest(legacy=legacy):
+                with self.assertRaisesRegex(ValueError, "legacy model ownership"):
+                    parameter_group(legacy)
+
+        self.assertIs(
+            parameter_group("text_embedding.weight"),
+            ParameterGroup.BACKBONE,
+        )
+        with self.assertRaisesRegex(ValueError, "does not belong"):
+            parameter_group("tokens.text_embedding.weight")
+
     def test_top_third_accepts_direct_body_paths_without_broadening_matching(self):
         model = _SelectiveModel()
 

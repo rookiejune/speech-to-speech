@@ -8,7 +8,10 @@ from anydataset.types import Modality
 from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 
-from speech_to_speech.datamodule.build.ar import build_ar_sample
+from speech_to_speech.datamodule.build.ar import (
+    build_ar_sample,
+    build_pretraining_ar_sample,
+)
 from speech_to_speech.datamodule.types import Language, Speech, Text
 from speech_to_speech.loss.token import TokenLoss
 from speech_to_speech.prediction import PredictionModality
@@ -17,6 +20,8 @@ from speech_to_speech.task import Task
 
 
 class _Tokenizer:
+    bos_token_id = 6
+
     def apply_chat_template(self, *_args, **_kwargs) -> str:
         return "marker"
 
@@ -65,6 +70,109 @@ class AutoregressiveLayoutTest(unittest.TestCase):
         self.assertTrue(torch.equal(sample.token_labels[:1], torch.tensor([-100])))
         self.assertTrue(torch.equal(sample.token_labels[1:], sample.input_ids[1:]))
         self.assertIsNone(sample.acoustic_target)
+
+    def test_audio_ar_uses_boa_as_unsupervised_generation_prompt(self):
+        speech = _speech(frames=3, text_ids=[2, 3], acoustic=True)
+        sample = build_ar_sample(
+            speech,
+            Task.AUDIO_AR,
+            self.runtime,
+            prompt="marker",
+        )
+
+        prompt_length = int(sample.generation_prompt_length)
+        audio_start, _ = self.runtime.layout.blocks[Modality.AUDIO.value]
+        expected_audio = speech.audio_token_ids + audio_start
+        expected_response = torch.cat(
+            [expected_audio, torch.tensor([self.runtime.eoa_token_id])]
+        )
+
+        self.assertEqual(prompt_length, 2)
+        self.assertEqual(
+            int(sample.request["prompt_ids"][-1]),
+            self.runtime.boa_token_id,
+        )
+        self.assertTrue(sample.token_labels[:prompt_length].eq(-100).all())
+        self.assertTrue(torch.equal(sample.labels.response_ids, expected_response))
+        self.assertTrue(
+            torch.equal(sample.token_labels[prompt_length:], expected_response)
+        )
+        self.assertIsNotNone(sample.acoustic_target)
+        assert sample.acoustic_target is not None
+        expected_positions = torch.arange(
+            prompt_length,
+            prompt_length + speech.audio_token_ids.numel(),
+            dtype=torch.long,
+        )
+        self.assertTrue(
+            torch.equal(
+                sample.acoustic_target["token_positions"],
+                expected_positions,
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                sample.input_ids.index_select(0, expected_positions),
+                expected_audio,
+            )
+        )
+
+    def test_pretraining_text_ar_uses_bos_prompt(self):
+        sample = build_pretraining_ar_sample(
+            Text(text_token_ids=torch.tensor([2, 3]), language=Language.EN),
+            Task.TEXT_AR,
+            self.runtime,
+        )
+
+        text_start, _ = self.runtime.layout.blocks[Modality.TEXT.value]
+        expected_response = torch.tensor(
+            [text_start + 2, text_start + 3, self.runtime.eos_token_id]
+        )
+        self.assertTrue(torch.equal(sample.request["prompt_ids"], torch.tensor([6])))
+        self.assertTrue(torch.equal(sample.labels.response_ids, expected_response))
+        self.assertEqual(int(sample.generation_prompt_length), 1)
+        self.assertTrue(
+            torch.equal(
+                sample.token_labels,
+                torch.cat([torch.tensor([-100]), expected_response]),
+            )
+        )
+        self.assertIsNone(sample.acoustic_target)
+
+    def test_pretraining_audio_ar_uses_boa_prompt(self):
+        speech = _speech(frames=3, text_ids=[2, 3], acoustic=True)
+        sample = build_pretraining_ar_sample(
+            speech,
+            Task.AUDIO_AR,
+            self.runtime,
+        )
+
+        audio_start, _ = self.runtime.layout.blocks[Modality.AUDIO.value]
+        expected_audio = speech.audio_token_ids + audio_start
+        expected_response = torch.cat(
+            [expected_audio, torch.tensor([self.runtime.eoa_token_id])]
+        )
+        self.assertTrue(
+            torch.equal(
+                sample.request["prompt_ids"],
+                torch.tensor([self.runtime.boa_token_id]),
+            )
+        )
+        self.assertTrue(torch.equal(sample.labels.response_ids, expected_response))
+        self.assertTrue(
+            torch.equal(
+                sample.token_labels,
+                torch.cat([torch.tensor([-100]), expected_response]),
+            )
+        )
+        self.assertIsNotNone(sample.acoustic_target)
+        assert sample.acoustic_target is not None
+        self.assertTrue(
+            torch.equal(
+                sample.acoustic_target["token_positions"],
+                torch.arange(1, 4, dtype=torch.long),
+            )
+        )
 
     def test_parallel_ar_supervises_text_then_audio(self):
         sample = build_ar_sample(

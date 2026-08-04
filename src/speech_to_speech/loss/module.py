@@ -104,8 +104,8 @@ def _token_hidden_states(
     model: TokenObjectiveModel,
 ) -> Tensor:
     kwargs: dict[str, Any] = {}
-    if batch.embedding_blocks is not None:
-        kwargs["embedding_blocks"] = batch.embedding_blocks
+    if batch.input_modalities is not None:
+        kwargs["input_modalities"] = batch.input_modalities
         kwargs["validate_input"] = False
         kwargs["validate_audio_input_positions"] = (
             not batch.audio_input_positions_validated

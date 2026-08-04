@@ -173,7 +173,7 @@ class _RouteModel:
         del args, kwargs
         raise AssertionError("structured route should use generate_tokens")
 
-    def audio_output_adapter_batch_select(self, past_key_values, indices):
+    def select_audio_head_cache(self, past_key_values, indices):
         del past_key_values, indices
         return None
 
@@ -228,7 +228,7 @@ class _TextModel:
         del args, kwargs
         raise AssertionError("text model should use generate_tokens")
 
-    def audio_output_adapter_batch_select(self, past_key_values, indices):
+    def select_audio_head_cache(self, past_key_values, indices):
         del past_key_values, indices
         return None
 

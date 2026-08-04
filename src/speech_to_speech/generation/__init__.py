@@ -19,6 +19,13 @@ from .chat import (
     to_request,
 )
 from .service import generate_responses
+from .mimo import (
+    MimoGenerationModel,
+    MimoGenerationOptions,
+    MimoGenerationResult,
+    MimoGenerationStep,
+    generate_mimo,
+)
 from .rollout import RolloutRow, generate_rollouts, write_rollouts_jsonl
 from .eval.text import TextProbe, TextProbeResult, evaluate_text
 from .text import decode_response_text, decode_text_ids, response_text_ids
@@ -32,6 +39,10 @@ __all__ = [
     "ChatRequest",
     "CodecCodesPart",
     "Message",
+    "MimoGenerationModel",
+    "MimoGenerationOptions",
+    "MimoGenerationResult",
+    "MimoGenerationStep",
     "Request",
     "Result",
     "RolloutRow",
@@ -51,6 +62,7 @@ __all__ = [
     "decode_reference_codes",
     "evaluate_text",
     "generate_responses",
+    "generate_mimo",
     "generate_rollouts",
     "response_text_ids",
     "to_request",

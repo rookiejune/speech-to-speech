@@ -11,6 +11,7 @@ from .._compat import StrEnum, auto
 from ._checkpointing import GradientCheckpointingLayer
 from ._helper import (
     MLPAdapter,
+    register,
     safe_transformer_mask,
     tower_fields,
     valid_mask,
@@ -77,8 +78,9 @@ class AudioInputTower(GradientCheckpointingLayer):
     The tower accepts ``[B, F, D]`` features and returns ``[B, F, H]``. A
     valid-frame mask can be supplied as ``[B, F]``; inactive frames are never
     used as transformer keys and are always zero in the returned tensor.
-    Parameters are deliberately kept in FP32 so this module can sit at the
-    boundary of a lower-precision language-model backbone.
+    Parameters are initialized in FP32 so this module can sit at the boundary
+    of a lower-precision language-model backbone. Explicit model-wide dtype
+    conversions are honored by casting inputs to the tower's current dtype.
     """
 
     def __init__(
@@ -95,6 +97,13 @@ class AudioInputTower(GradientCheckpointingLayer):
         self.config = config
         self.in_features = in_features
         self.out_features = out_features
+        self._dtype_reference: Tensor
+        register(
+            self,
+            "_dtype_reference",
+            torch.empty(0, dtype=torch.float32),
+            persistent=False,
+        )
         self.input_projection: nn.Module = nn.Identity()
         self.adapter: nn.Module
 
@@ -136,8 +145,9 @@ class AudioInputTower(GradientCheckpointingLayer):
             raise ValueError("audio input must contain at least one frame.")
 
         valid = valid_mask(features, mask, name="audio input")
+        dtype = self._dtype_reference.dtype
         if self.config.type is AudioInputAdapterType.TRANSFORMER:
-            values = features.to(dtype=torch.float32)
+            values = features.to(dtype=dtype)
             values = values.masked_fill(~valid[..., None], 0)
             values = self.input_projection(values)
             key_padding_mask = ~safe_transformer_mask(valid)
@@ -155,7 +165,7 @@ class AudioInputTower(GradientCheckpointingLayer):
             )
             return values.masked_fill(~valid[..., None], 0)
 
-        selected = self.adapter(features[valid].to(dtype=torch.float32))
+        selected = self.adapter(features[valid].to(dtype=dtype))
         values = selected.new_zeros((*features.shape[:2], self.out_features))
         values[valid] = selected
         return values

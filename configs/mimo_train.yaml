@@ -1,0 +1,11 @@
+defaults:
+  - entry: mimo_train
+  - experiment: train/kimi_audio/mimo_pretrain
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${output_dir}/hydra
+  output_subdir: config

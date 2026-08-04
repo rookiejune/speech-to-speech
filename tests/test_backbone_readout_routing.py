@@ -56,7 +56,7 @@ def _encode(
 class _RoutingModel(Model):
     def __init__(self, encoder: BackboneBodyAdapter) -> None:
         nn.Module.__init__(self)
-        self._backbone_body = encoder
+        self._encoder = encoder
 
     def _input_embedding(
         self,
@@ -66,6 +66,9 @@ class _RoutingModel(Model):
     ) -> Tensor:
         del audio_input_positions, kwargs
         return input_ids[..., None].to(dtype=torch.float32)
+
+    def _audio_head_uses_sequence_context(self) -> bool:
+        return False
 
     def modality_logits(
         self,
@@ -305,7 +308,7 @@ class BackboneReadoutRoutingTest(unittest.TestCase):
             token_labels=torch.tensor([[-100, 1]], dtype=torch.long),
             attention_mask=torch.ones(1, 2, dtype=torch.bool),
             audio_input_positions=None,
-            embedding_blocks=None,
+            input_modalities=None,
             prediction_modality=PredictionModality.TEXT,
         )
 

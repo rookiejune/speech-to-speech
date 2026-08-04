@@ -1,0 +1,79 @@
+# @package _global_
+defaults:
+  - /runtime: kimi_audio
+  - /model: default
+  - /model/acoustic@model.acoustic: none
+  - /datamodule/dataset@datamodule.dataset: wmt19_tts
+  - /callback/parameter_policy@callbacks.parameter_policy: full
+  - /pl_module: sft
+  - /trainer: staged_ddp
+  - /logging: tensorboard
+  - _self_
+
+# The current train entry is single-stream. Flattened BiCodec tokens keep this
+# baseline runnable without a separately trained semantic-codec artifact.
+audio_sequence_layout: flattened
+
+run_name: kimi-audio-ar-pretrain
+output_subdir: kimi-audio/ar-pretrain/${run_name}
+
+# The 7x text route is a document corpus, not the target side of WMT19.  Point
+# SPEECH_TO_SPEECH_TEXT_CORPUS at a JSONL file containing strings or
+# {"text": ..., "lang": ...} objects before starting a production run.
+text_datamodule:
+  dataset:
+    name: general
+    path: ${oc.env:SPEECH_TO_SPEECH_TEXT_CORPUS,storage/text/pretrain.jsonl}
+    format: jsonl
+    language: en
+  max_tokens: 4096
+  pack_documents: true
+
+# token_weighted interprets weights as supervised-token proportions. The
+# scheduler accounts for variable text/audio target lengths instead of treating
+# every microbatch as one equivalent sample.
+loader_plan:
+  loaders:
+    text_ar:
+      weight: 7.0
+      task_weights:
+        text_ar: 1.0
+      prediction: text
+      ar_framing: pretraining
+    audio_ar:
+      weight: 1.0
+      task_weights:
+        audio_ar: 1.0
+      prediction: audio
+      ar_framing: pretraining
+    asr:
+      weight: 1.0
+      task_weights:
+        asr: 1.0
+      prediction: text
+    tts:
+      weight: 1.0
+      task_weights:
+        tts: 1.0
+      prediction: audio
+  accumulate_grad_batches: 10
+  step_mode: token_weighted
+  fuse_loaders_per_step: false
+
+model:
+  lora: null
+
+train:
+  max_steps: 1000000
+
+validation:
+  enabled: false
+
+callbacks:
+  task_sample:
+    enabled: false
+  checkpoint:
+    filename: step-{step:08d}
+    save_last: true
+    save_top_k: -1
+    every_n_train_steps: 10000

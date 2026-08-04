@@ -8,8 +8,13 @@ from torch import Tensor
 from transformers.cache_utils import Cache
 
 from speech_to_speech.audio_stream import AudioStream
-from speech_to_speech.model._generation import GenerationStepModel, generate_sequence
 from speech_to_speech.model._helper import top_p_filter
+from speech_to_speech.model.generation import (
+    GenerationEngine,
+    GenerationOptions,
+    GenerationRequest,
+    GenerationStepModel,
+)
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 
 
@@ -69,7 +74,7 @@ class _RowGenerator:
         self._use_cache = use_cache
         self._grammar = grammar
         self._past_key_values: Cache | None = None
-        self._audio_output_past: object | None = None
+        self._audio_head_past: object | None = None
         self._audio_input_positions = audio_input_positions
         self._emitted = 0
 
@@ -89,7 +94,7 @@ class _RowGenerator:
                 if not self._use_cache or self._past_key_values is None
                 else None
             ),
-            audio_output_past=self._audio_output_past,
+            audio_head_past=self._audio_head_past,
         )
         if output.logits is None:
             raise RuntimeError("model did not return generation logits.")
@@ -118,7 +123,7 @@ class _RowGenerator:
             self._past_key_values = output.past_key_values
             if self._past_key_values is None:
                 raise RuntimeError("backbone did not return a generation cache.")
-            self._audio_output_past = output.audio_output_past
+            self._audio_head_past = output.audio_head_past
             self._current = self.sequence[:, -1:]
         else:
             self._current = self.sequence
@@ -274,26 +279,27 @@ def _generate_single_codebook_flattened_sequence(
     attention = torch.cat((prompt_attention_mask, prefix_mask), dim=1)
     start, end = codebook_range
     allowed = (*range(audio_start + start, audio_start + end), model.runtime.eoa_token_id)
-    generated, _, _ = generate_sequence(
-        model,
-        prefixed,
-        max_new_tokens=max_new_tokens - prefix.numel(),
-        temperature=temperature,
-        top_p=top_p,
-        prompt_attention_mask=attention,
-        audio_input_positions=_with_prefix_audio_positions(
-            audio_input_positions,
-            prefix.numel(),
+    output = GenerationEngine(model).generate(
+        GenerationRequest(
+            prompt_ids=prefixed,
+            prompt_attention_mask=attention,
+            audio_input_positions=_with_prefix_audio_positions(
+                audio_input_positions,
+                prefix.numel(),
+            ),
+            stop_token_id=model.runtime.eoa_token_id,
+            allowed_token_ids=allowed,
         ),
-        stop_token_id=model.runtime.eoa_token_id,
-        generation_modality=None,
-        allowed_token_ids=allowed,
-        do_sample=do_sample,
-        use_cache=use_cache,
-        collect_audio_condition=False,
-        min_new_tokens=1,
+        GenerationOptions(
+            max_new_tokens=max_new_tokens - prefix.numel(),
+            temperature=temperature,
+            top_p=top_p,
+            do_sample=do_sample,
+            use_cache=use_cache,
+            min_new_tokens=1,
+        ),
     )
-    return generated
+    return output.sequences
 
 
 def _generate_flattened_row(

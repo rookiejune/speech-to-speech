@@ -25,6 +25,7 @@ _OBJECTIVE_PREFIX = {
     "rvq": "acoustic/rvq",
     "flow_matching": "acoustic/flow_matching",
     "repa": "acoustic/repa",
+    "mimo": "mimo",
 }
 _COUNT_KEYS = frozenset({"tokens", "text_tokens", "audio_tokens", "frames"})
 
@@ -284,6 +285,13 @@ def _batch_tasks(batch: TrainInput, objective: str) -> list[object]:
         if _has_acoustic_target(batch):
             return list(batch.tasks)
         return []
+    if objective == "mimo":
+        # MIMO batches carry their task labels directly and deliberately do
+        # not implement the single-stream TrainInput protocol.
+        task_ids = getattr(batch, "task_ids", None)
+        if task_ids is None:
+            raise TypeError("MIMO batches must expose task_ids for logging.")
+        return list(task_ids)
     raise ValueError(f"unsupported loss objective: {objective}")
 
 

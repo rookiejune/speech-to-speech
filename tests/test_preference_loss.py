@@ -23,6 +23,7 @@ class _DPOModel:
         self.logit_modalities: list[Modality] = []
         self.audio_input_positions: torch.Tensor | None = None
         self.predictions: list[PredictionModality | None] = []
+        self.input_hints: list[tuple[frozenset[Modality] | None, bool, bool]] = []
 
     def token_hidden_states(
         self,
@@ -30,6 +31,9 @@ class _DPOModel:
         *,
         attention_mask: torch.Tensor | None = None,
         audio_input_positions: torch.Tensor | None = None,
+        input_modalities: frozenset[Modality] | None = None,
+        validate_input: bool = True,
+        validate_audio_input_positions: bool = True,
         prediction: PredictionModality | None = None,
     ) -> torch.Tensor:
         del attention_mask
@@ -37,6 +41,9 @@ class _DPOModel:
         self.hidden_batch_sizes.append(input_ids.size(0))
         self.audio_input_positions = audio_input_positions
         self.predictions.append(prediction)
+        self.input_hints.append(
+            (input_modalities, validate_input, validate_audio_input_positions)
+        )
         return input_ids[..., None].to(dtype=torch.float32)
 
     def token_logits(
@@ -149,6 +156,29 @@ class PreferenceLossTest(unittest.TestCase):
         torch.testing.assert_close(
             model.audio_input_positions,
             torch.tensor([[0, 1], [1, -1]]),
+        )
+
+    def test_dpo_combines_validated_input_modality_hints(self):
+        chosen = _batch([0, 1, 2])
+        rejected = _batch([0, 1, 3])
+        chosen.set_input_hints(
+            frozenset({Modality.TEXT}),
+            audio_input_positions_validated=True,
+        )
+        rejected.set_input_hints(
+            frozenset({Modality.TEXT}),
+            audio_input_positions_validated=False,
+        )
+        model = _DPOModel()
+
+        DPOObjective(reference_free=True)(
+            PreferenceBatch(chosen=chosen, rejected=rejected),
+            model,
+        )
+
+        self.assertEqual(
+            model.input_hints,
+            [(frozenset({Modality.TEXT}), False, True)],
         )
 
     def test_preference_batch_validates_reference_logp_shape(self):

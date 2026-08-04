@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from anydataset import types
 
+from ...loader_plan import ARFraming, validate_ar_framing
 from ...prediction import PredictionModality
 from ...source import SourceLayout
 from ...task import Task
@@ -11,7 +12,7 @@ from ..config import TaskConfig
 from .._helper.duration import from_frames
 from .._helper.task import TaskWeights
 from .._helper.tokenization import token_ids
-from .ar import build_ar_sample, is_ar_task
+from .ar import build_ar_sample, build_pretraining_ar_sample, is_ar_task
 from ..parse.parser import parse_audio_codes, raw_speech, speech_from_codes
 from ..protocol import DataRuntime
 from .sample import build_speech_sample, build_task_sample, chat_prompt
@@ -50,6 +51,7 @@ class SingleCollator:
         mask_text_ratio: float = 0.5,
         mask_audio_ratio: float = 0.5,
         prediction: PredictionModality | None = None,
+        ar_framing: ARFraming = ARFraming.INSTRUCTION,
         tasks: Mapping[Task, TaskConfig] | None = None,
     ) -> None:
         self.runtime = runtime
@@ -57,8 +59,11 @@ class SingleCollator:
         self.interleave_audio_frames = interleave_audio_frames
         self.mask_text_ratio = mask_text_ratio
         self.mask_audio_ratio = mask_audio_ratio
+        self.ar_framing = ar_framing
         self.task_configs = tasks
-        _validate_single_tasks(_positive_tasks(task_weights))
+        active_tasks = _positive_tasks(task_weights)
+        _validate_single_tasks(active_tasks)
+        validate_ar_framing(ar_framing, active_tasks)
         self._task_weights = TaskWeights(task_weights, prediction=prediction)
 
     @property
@@ -91,6 +96,7 @@ class SingleCollator:
                 interleave_audio_frames=self.interleave_audio_frames,
                 mask_text_ratio=self.mask_text_ratio,
                 mask_audio_ratio=self.mask_audio_ratio,
+                ar_framing=self.ar_framing,
             )
         return ModelBatch.from_samples(
             [
@@ -100,6 +106,7 @@ class SingleCollator:
                     interleave_audio_frames=self.interleave_audio_frames,
                     mask_text_ratio=self.mask_text_ratio,
                     mask_audio_ratio=self.mask_audio_ratio,
+                    ar_framing=self.ar_framing,
                     tasks=self.task_configs,
                 )
                 for item in items
@@ -135,9 +142,11 @@ def build_single_sample(
     mask_text_ratio: float = 0.5,
     mask_audio_ratio: float = 0.5,
     prediction: PredictionModality | None = None,
+    ar_framing: ARFraming = ARFraming.INSTRUCTION,
     tasks: Mapping[Task, TaskConfig] | None = None,
 ) -> ModelSample:
     _validate_single_tasks([task])
+    validate_ar_framing(ar_framing, [task])
     prediction = resolve_prediction(task, prediction)
     if task is Task.MASKED_AR:
         from .masked import build_masked_sample
@@ -165,6 +174,13 @@ def build_single_sample(
             target = Text(
                 text_token_ids=utterance.text_token_ids,
                 language=utterance.language,
+            )
+        if ar_framing is ARFraming.PRETRAINING:
+            return build_pretraining_ar_sample(
+                target,
+                task,
+                runtime,
+                prediction=prediction,
             )
         return build_ar_sample(
             target,

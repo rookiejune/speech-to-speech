@@ -32,6 +32,7 @@ from speech_to_speech.loss.module import FlowObjective, Objective, RVQObjective,
 from speech_to_speech.loss.token import TokenLoss
 from speech_to_speech.loss.types import LossItem, Outputs, combine_outputs
 from speech_to_speech.loss.validation import validation_metrics
+from speech_to_speech.model._assembly import text_embedding
 from speech_to_speech.model.base import Config, Model
 from speech_to_speech.model.audio_output import (
     AudioOutputAdapterConfig,
@@ -51,6 +52,7 @@ from speech_to_speech.task import Task
 class _ConditionModel(Model):
     def __init__(self) -> None:
         nn.Module.__init__(self)
+        self.layout = Layout(text=(0, 4), audio=(4, 7))
 
     def _input_embedding(self, input_ids: Tensor) -> Tensor:
         return input_ids[..., None].to(dtype=torch.float32)
@@ -75,6 +77,17 @@ class _Backbone(nn.Module):
 
     def get_output_embeddings(self) -> nn.Module:
         return self.output_embeddings
+
+
+class _SettableBackbone(_Backbone):
+    def __init__(self, embedding: nn.Embedding) -> None:
+        super().__init__(embedding_rows=embedding.num_embeddings)
+        self.input_embeddings = embedding
+        self.set_input_embeddings_calls = 0
+
+    def set_input_embeddings(self, embedding: nn.Embedding) -> None:
+        self.set_input_embeddings_calls += 1
+        self.input_embeddings = embedding
 
 
 class _Codec:
@@ -462,6 +475,7 @@ class ModelLossContractTest(unittest.TestCase):
         checkpoint: dict[str, object] = {}
 
         module.on_save_checkpoint(checkpoint)
+        self.assertEqual(checkpoint["speech_to_speech_model_schema"], "v3")
         module.on_load_checkpoint(checkpoint)
 
         model.runtime.audio_sequence_layout = AudioSequenceLayout.FLATTENED
@@ -470,11 +484,27 @@ class ModelLossContractTest(unittest.TestCase):
 
     def test_checkpoint_requires_audio_sequence_layout_contract(self):
         module = _checkpoint_module(None)
+        schema = {"speech_to_speech_model_schema": "v3"}
 
         with self.assertRaisesRegex(ValueError, "audio sequence layout contract"):
-            module.on_load_checkpoint({})
+            module.on_load_checkpoint(dict(schema))
         with self.assertRaisesRegex(ValueError, "audio sequence layout contract"):
-            module.on_load_checkpoint({"speech_to_speech_audio_grammar": None})
+            module.on_load_checkpoint(
+                {**schema, "speech_to_speech_audio_grammar": None}
+            )
+
+    def test_checkpoint_requires_model_v3_schema(self):
+        module = _checkpoint_module(None)
+
+        for schema in (None, "v2", 3):
+            with self.subTest(schema=schema):
+                checkpoint = {
+                    "speech_to_speech_audio_sequence_layout": "semantic",
+                }
+                if schema is not None:
+                    checkpoint["speech_to_speech_model_schema"] = schema
+                with self.assertRaisesRegex(ValueError, "model schema is incompatible"):
+                    module.on_load_checkpoint(checkpoint)
 
     def test_checkpoint_lora_contract_roundtrips_complete_config(self):
         config = LoraConfig(
@@ -541,7 +571,10 @@ class ModelLossContractTest(unittest.TestCase):
             module.on_load_checkpoint(checkpoint)
 
     def test_checkpoint_requires_lora_contract_only_when_enabled(self):
-        checkpoint = {"speech_to_speech_audio_sequence_layout": "semantic"}
+        checkpoint = {
+            "speech_to_speech_model_schema": "v3",
+            "speech_to_speech_audio_sequence_layout": "semantic",
+        }
 
         _checkpoint_module(None).on_load_checkpoint(checkpoint)
         with self.assertRaisesRegex(ValueError, "missing the PEFT LoRA contract"):
@@ -604,7 +637,7 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertIs(moved, batch)
         move.assert_called_once_with(batch, device, non_blocking=True)
 
-    def test_transfer_carries_exact_cpu_embedding_block_hints(self):
+    def test_transfer_carries_exact_cpu_input_modality_hints(self):
         model = _model(_Backbone())
         module = _module(model=model)
         batch = ModelBatch(
@@ -618,7 +651,10 @@ class ModelLossContractTest(unittest.TestCase):
 
         moved = module.transfer_batch_to_device(batch, torch.device("cpu"), 0)
 
-        self.assertEqual(moved.embedding_blocks, frozenset({"text", "audio"}))
+        self.assertEqual(
+            moved.input_modalities,
+            frozenset({Modality.TEXT, Modality.AUDIO}),
+        )
         self.assertTrue(moved.audio_input_positions_validated)
 
     def test_transfer_batch_keeps_raw_fallback_on_cpu(self):
@@ -1016,17 +1052,84 @@ class ModelLossContractTest(unittest.TestCase):
     def test_backbone_text_embedding_has_one_registered_path(self):
         backbone = _Backbone()
         model = _model(backbone)
+        text_embedding = model.text_embedding
 
         paths = [
             name
             for name, module in model.named_modules(remove_duplicate=False)
-            if module is model.token_embedding.embeddings["text"]
+            if module is text_embedding
+        ]
+        state_paths = [
+            name
+            for name, value in model.state_dict(keep_vars=True).items()
+            if value is text_embedding.weight
         ]
 
-        text_embedding = cast(nn.Embedding, model.token_embedding.embeddings["text"])
-        backbone_view = cast(Any, backbone.get_input_embeddings())
-        self.assertEqual(paths, ["token_embedding.embeddings.text"])
-        self.assertIs(backbone_view.weight, text_embedding.weight)
+        self.assertIs(backbone.get_input_embeddings(), text_embedding)
+        self.assertEqual(paths, ["backbone.input_embeddings"])
+        self.assertEqual(state_paths, ["backbone.input_embeddings.weight"])
+
+    def test_text_embedding_prefix_keeps_the_backbone_table(self):
+        source = nn.Embedding(
+            6,
+            2,
+            padding_idx=1,
+            max_norm=1.25,
+            norm_type=1.5,
+            scale_grad_by_freq=True,
+            sparse=True,
+            dtype=torch.float64,
+        )
+        with torch.no_grad():
+            source.weight.copy_(torch.arange(12, dtype=torch.float64).reshape(6, 2))
+        source.weight.requires_grad_(False)
+        backbone = _SettableBackbone(source)
+
+        resolved = text_embedding(cast(Any, backbone), 4)
+
+        self.assertIs(resolved, source)
+        self.assertIs(backbone.get_input_embeddings(), source)
+        self.assertEqual(backbone.set_input_embeddings_calls, 0)
+        token_ids = torch.tensor([0, 1, 3])
+        torch.testing.assert_close(resolved(token_ids), source(token_ids))
+
+    def test_exact_text_vocabulary_does_not_replace_backbone_embedding(self):
+        source = nn.Embedding(4, 2)
+        backbone = _SettableBackbone(source)
+
+        resolved = text_embedding(cast(Any, backbone), 4)
+
+        self.assertIs(resolved, source)
+        self.assertIs(backbone.get_input_embeddings(), source)
+        self.assertEqual(backbone.set_input_embeddings_calls, 0)
+
+    def test_reusing_runtime_keeps_a_real_backbone_embedding(self):
+        backbone = _Backbone()
+        runtime = _runtime(backbone)
+
+        first = Model(
+            Config(
+                semantic_audio_adapter=None,
+                audio_output_adapter=AudioOutputAdapterConfig(
+                    type=AudioOutputAdapterType.NONE
+                ),
+            ),
+            runtime=runtime,
+        )
+        second = Model(
+            Config(
+                semantic_audio_adapter=None,
+                audio_output_adapter=AudioOutputAdapterConfig(
+                    type=AudioOutputAdapterType.NONE
+                ),
+            ),
+            runtime=runtime,
+        )
+
+        embedding = backbone.get_input_embeddings()
+        self.assertIsInstance(embedding, nn.Embedding)
+        self.assertIs(first.text_embedding, embedding)
+        self.assertIs(second.text_embedding, embedding)
 
     def test_token_model_injects_the_configured_peft_adapter(self):
         backbone = _Backbone()
@@ -1038,15 +1141,17 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertTrue(backbone.q_proj.lora_A["speech"].weight.requires_grad)
 
     def test_text_logits_only_cover_the_layout_vocabulary(self):
-        backbone = _Backbone(text_vocab_size=4, embedding_rows=4)
+        backbone = _Backbone(text_vocab_size=4, embedding_rows=6)
         model = _model(backbone, layout=Layout(text=(2, 6), audio=(6, 12)))
         with torch.no_grad():
             backbone.input_embeddings.weight.copy_(
-                torch.arange(8, dtype=torch.float32).reshape(4, 2)
+                torch.arange(12, dtype=torch.float32).reshape(6, 2)
             )
 
         logits = model.text_logits(torch.ones(1, 2))
 
+        self.assertIs(model.text_embedding, backbone.input_embeddings)
+        self.assertEqual(model.text_embedding.num_embeddings, 6)
         self.assertEqual(logits.shape, (1, 4))
         torch.testing.assert_close(logits, torch.tensor([[1.0, 5.0, 9.0, 13.0]]))
 
@@ -1067,6 +1172,20 @@ class ModelLossContractTest(unittest.TestCase):
 
         self.assertTrue(torch.equal(condition, torch.tensor([[[10.0], [20.0], [0.0]]])))
         self.assertTrue(torch.equal(oracle, torch.tensor([[[4.0], [5.0], [0.0]]])))
+
+    def test_label_condition_uses_a_valid_placeholder_for_offset_text_layout(self):
+        model = _model(
+            _Backbone(embedding_rows=6),
+            layout=Layout(text=(2, 6), audio=(6, 12)),
+        )
+
+        condition = model.target_frame_label_condition(
+            torch.tensor([[2, -100]]),
+            torch.tensor([[0, -1]]),
+        )
+
+        self.assertEqual(tuple(condition.shape), (1, 2, 2))
+        torch.testing.assert_close(condition[:, 1], torch.zeros(1, 2))
 
     def test_text_target_uses_token_objective_only(self):
         layout = Layout(text=(0, 4), audio=(4, 7))

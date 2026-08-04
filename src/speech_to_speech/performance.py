@@ -25,12 +25,12 @@ from .datamodule.types import LoaderBatch, ModelBatch
 from .loss.module import FlowObjective, RVQObjective, TokenObjective
 from .loss.types import LossItem
 from .model import Model
-from .model._helper import require_embedding
 from .model.acoustic.condition import HiddenConditionAdapter
 from .model.acoustic.flow import FlowModel
 from .model.acoustic.rvq import RVQModel
 from .model.audio_output import AudioOutputAdapterType
-from .model.embedding.audio import require_semantic_audio_embedding
+from .model.embedding.audio import SemanticAudioEmbedding
+from .model.embedding.fsq import FsqAffineEmbedding
 from .pl_module import SpeechToSpeechModule
 
 
@@ -177,10 +177,12 @@ def _outputs(outputs: Any, expected: set[str]) -> None:
 
 def _backbone(model: Model) -> Qwen3Model:
     backbone = cast(object, model.backbone)
-    if type(backbone) is not Qwen3ForCausalLM:
-        raise TypeError("training FLOPs require a standard Qwen3ForCausalLM backbone.")
-    backbone = cast(Qwen3ForCausalLM, backbone)
-    core = backbone.base_model
+    if type(backbone) is Qwen3Model:
+        core = cast(Qwen3Model, backbone)
+    elif type(backbone) is Qwen3ForCausalLM:
+        core = cast(Qwen3ForCausalLM, backbone).base_model
+    else:
+        raise TypeError("training FLOPs require a standard Qwen3 backbone.")
     if type(core) is not Qwen3Model:
         raise TypeError("training FLOPs require a standard Qwen3Model backbone body.")
     if core.config._attn_implementation != "flash_attention_2":
@@ -241,9 +243,9 @@ def _token_path(model: Model, core: Qwen3Model, batch: ModelBatch) -> int:
     if not bool(lengths.gt(0).all()):
         raise ValueError("each training FLOPs input row must contain a valid token.")
 
-    embedding = require_semantic_audio_embedding(
-        model.token_embedding.embeddings["audio"],
-        "semantic audio embedding",
+    embedding = cast(
+        SemanticAudioEmbedding,
+        model.tokens.audio_embedding,
     )
     hidden = core.config.hidden_size
     audio_start, audio_end = model.layout.blocks[Modality.AUDIO.value]
@@ -251,22 +253,48 @@ def _token_path(model: Model, core: Qwen3Model, batch: ModelBatch) -> int:
         raise ValueError(
             "semantic audio embedding rows do not match the audio layout block."
         )
-    audio_rows = int((input_ids.ge(audio_start) & input_ids.lt(audio_end)).sum().item())
-    audio_adapter = model.token_embedding.adapters["audio"]
-    forward = adapter(
-        getattr(audio_adapter, "module", audio_adapter),
-        rows=audio_rows,
-        in_features=embedding.embedding_dim,
-        out_features=hidden,
-        name="semantic audio adapter",
-    )
+    audio_mask = input_ids.ge(audio_start) & input_ids.lt(audio_end)
+    projected_audio_mask = audio_mask
+    local_audio_ids = input_ids[audio_mask] - audio_start
     audio_positions = batch.audio_input_positions
-    audio_tower = model.audio_input_adapter
+    audio_tower = model.source_audio_encoder
     if audio_tower is not None and audio_positions is not None:
         if audio_positions.dim() != 2 or audio_positions.size(0) != batch_size:
             raise ValueError(
                 "training FLOPs audio input positions must have shape [batch, frames]."
             )
+        if audio_positions.size(1) > 0:
+            valid_positions = audio_positions.ge(0)
+            safe_positions = audio_positions.clamp(0, sequence - 1)
+            override = torch.zeros_like(audio_mask)
+            batch_indices = torch.arange(batch_size, device=input_ids.device)[:, None]
+            batch_indices = batch_indices.expand_as(safe_positions)
+            override[
+                batch_indices[valid_positions],
+                safe_positions[valid_positions],
+            ] = True
+            projected_audio_mask = audio_mask & ~override
+            selected_ids = input_ids.gather(1, safe_positions)
+            overlay_ids = (selected_ids - audio_start).clamp(
+                0,
+                embedding.num_embeddings - 1,
+            )
+            local_audio_ids = torch.cat(
+                (
+                    input_ids[projected_audio_mask] - audio_start,
+                    overlay_ids.flatten(),
+                )
+            )
+    projected_audio_rows = int(projected_audio_mask.sum().item())
+    forward = _audio_row_flops(embedding, local_audio_ids)
+    forward += adapter(
+        model.tokens.audio_projection.module,
+        rows=projected_audio_rows,
+        in_features=embedding.embedding_dim,
+        out_features=hidden,
+        name="semantic audio adapter",
+    )
+    if audio_tower is not None and audio_positions is not None:
         if audio_positions.size(1) > 0:
             forward += audio_input_tower(
                 audio_tower,
@@ -310,45 +338,113 @@ def _token_head(model: Model, batch: ModelBatch) -> int:
             continue
         rows = int(mask.sum().item())
         if modality is Modality.TEXT:
-            weight = require_embedding(
-                model.token_embedding.embeddings["text"],
-                "text token embedding",
-            ).weight
-            if weight.size(0) < end - start or weight.size(1) != hidden:
+            embedding = model.text_embedding
+            if (
+                embedding.num_embeddings < end - start
+                or embedding.embedding_dim != hidden
+            ):
                 raise ValueError(
                     "text token embedding does not cover the text layout block."
                 )
             total += 2 * rows * hidden * (end - start)
             continue
         if modality is Modality.AUDIO:
-            embedding = require_semantic_audio_embedding(
-                model.token_embedding.embeddings["audio"],
-                "semantic audio embedding",
+            embedding = cast(
+                SemanticAudioEmbedding,
+                model.tokens.audio_embedding,
             )
-            if model.audio_output_adapter.config.type is AudioOutputAdapterType.NONE:
-                audio_adapter = model.token_embedding.adapters["audio"]
-                forward = adapter(
-                    getattr(audio_adapter, "module", audio_adapter),
-                    rows=embedding.num_embeddings,
-                    in_features=embedding.embedding_dim,
-                    out_features=hidden,
-                    name="semantic audio input adapter",
-                )
-                total += forward + 2 * rows * hidden * embedding.num_embeddings
+            if model.tokens.audio_head.config.type is AudioOutputAdapterType.NONE:
+                projection = model.tokens.audio_projection.module
+                if type(embedding) is FsqAffineEmbedding and type(projection) is nn.Identity:
+                    total += _fsq_logit_flops(embedding, rows=rows, features=hidden)
+                else:
+                    forward = _audio_table_flops(embedding)
+                    forward += adapter(
+                        projection,
+                        rows=embedding.num_embeddings,
+                        in_features=embedding.embedding_dim,
+                        out_features=hidden,
+                        name="semantic audio input adapter",
+                    )
+                    total += forward + 2 * rows * hidden * embedding.num_embeddings
             else:
                 forward = adapter(
-                    model.audio_output_adapter,
+                    model.tokens.audio_head,
                     rows=rows,
                     in_features=hidden,
                     out_features=embedding.embedding_dim,
                     name="semantic audio output adapter",
                 )
-                total += (
-                    forward
-                    + 2 * rows * embedding.embedding_dim * embedding.num_embeddings
+                total += forward + _audio_logit_flops(
+                    embedding,
+                    rows=rows,
+                    features=embedding.embedding_dim,
                 )
             continue
         raise ValueError(f"training FLOPs do not support modality {modality.value!r}.")
+    return total
+
+
+def _audio_row_flops(
+    embedding: SemanticAudioEmbedding,
+    local_ids: Tensor,
+) -> int:
+    if type(embedding) is not FsqAffineEmbedding:
+        return 0
+    if local_ids.dim() != 1:
+        raise ValueError("semantic audio row ids must be one-dimensional.")
+    if bool((local_ids < 0).any()) or bool(
+        (local_ids >= embedding.num_embeddings).any()
+    ):
+        raise ValueError("semantic audio row id is outside the embedding table.")
+
+    total = 0
+    start = 0
+    for size, levels in zip(embedding.codebook_sizes, embedding.fsq_levels):
+        rows = int(
+            (local_ids.ge(start) & local_ids.lt(start + size)).sum().item()
+        )
+        total += 2 * rows * len(levels) * embedding.embedding_dim
+        start += size
+    return total
+
+
+def _audio_table_flops(embedding: SemanticAudioEmbedding) -> int:
+    if type(embedding) is not FsqAffineEmbedding:
+        return 0
+    return sum(
+        2 * size * len(levels) * embedding.embedding_dim
+        for size, levels in zip(embedding.codebook_sizes, embedding.fsq_levels)
+    )
+
+
+def _audio_logit_flops(
+    embedding: SemanticAudioEmbedding,
+    *,
+    rows: int,
+    features: int,
+) -> int:
+    if type(embedding) is FsqAffineEmbedding:
+        return _fsq_logit_flops(embedding, rows=rows, features=features)
+    return 2 * rows * features * embedding.num_embeddings
+
+
+def _fsq_logit_flops(
+    embedding: FsqAffineEmbedding,
+    *,
+    rows: int,
+    features: int,
+) -> int:
+    if features != embedding.embedding_dim:
+        raise ValueError("FSQ logits require the unadapted audio embedding dimension.")
+    total = 0
+    for size, levels in zip(embedding.codebook_sizes, embedding.fsq_levels):
+        width = len(levels)
+        total += 2 * rows * features * width
+        total += 2 * rows * features
+        total += 2 * rows * width * size
+    free = embedding.num_embeddings - sum(embedding.codebook_sizes)
+    total += 2 * rows * features * free
     return total
 
 def _target(

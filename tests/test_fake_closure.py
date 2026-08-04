@@ -337,7 +337,11 @@ class FakeClosureTest(unittest.TestCase):
             logits[..., 0] = 0
             return logits
 
-        with patch.object(model, "semantic_audio_logits", side_effect=audio_logits):
+        with patch.object(
+            model.tokens,
+            "semantic_audio_logits",
+            side_effect=audio_logits,
+        ):
             generation = model.generate_audio_features(
                 torch.tensor([[1, 2]]),
                 max_new_tokens=2,

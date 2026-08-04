@@ -8,6 +8,7 @@ from anydataset import IterableAnyDataset
 from anydataset.types import Sample as RawSample
 from torch.utils.data import DataLoader, Dataset, IterableDataset, Subset
 
+from ...loader_plan import ARFraming
 from ...prediction import PredictionModality
 from ...task import Task
 from ..collate.collator import TextCollator
@@ -25,6 +26,7 @@ class TextLoader:
         task_weights: Mapping[Task, float],
         *,
         prediction: PredictionModality | None = None,
+        ar_framing: ARFraming = ARFraming.INSTRUCTION,
         max_samples: int | None = None,
         tasks: Mapping[Task, TaskConfig] | None = None,
     ) -> None:
@@ -35,7 +37,10 @@ class TextLoader:
             runtime,
             task_weights,
             prediction=prediction,
+            ar_framing=ar_framing,
             tasks=tasks,
+            max_tokens=config.max_tokens,
+            pack_documents=config.pack_documents,
         )
         self.max_samples = max_samples
         self.num_workers = config.dataloader.num_workers
@@ -57,16 +62,19 @@ class TextLoader:
             self.runtime,
             {task: 1.0},
             prediction=self.collator.prediction,
+            ar_framing=self.collator.ar_framing,
             tasks=self.task_configs,
+            max_tokens=self.config.max_tokens,
+            pack_documents=self.config.pack_documents,
         )
 
     def train_dataloader(self) -> Iterable[ModelBatch]:
-        return self._dataloader()
+        return self._dataloader(shuffle=True)
 
     def validation_dataloader(self) -> Iterable[ModelBatch]:
-        return self._dataloader()
+        return self._dataloader(shuffle=False)
 
-    def _dataloader(self) -> Iterable[ModelBatch]:
+    def _dataloader(self, *, shuffle: bool) -> Iterable[ModelBatch]:
         if self._train_dataset is None:
             raise RuntimeError(
                 "text loader setup() must run before building a dataloader."
@@ -79,9 +87,11 @@ class TextLoader:
                 cast(object, TextRuntimeSnapshot.from_runtime(self.runtime)),
             )
         dataset = _limit_dataset(self._train_dataset, self.max_samples)
+        map_style = not isinstance(dataset, (IterableAnyDataset, IterableDataset))
         return DataLoader(
             dataset,
             batch_size=loader.batch_size,
+            shuffle=(shuffle and map_style),
             num_workers=num_workers,
             pin_memory=loader.pin_memory,
             persistent_workers=(loader.persistent_workers and num_workers > 0),

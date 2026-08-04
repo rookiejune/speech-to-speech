@@ -20,7 +20,7 @@ class TokenObjectiveModel(Protocol):
         *,
         attention_mask: Tensor | None = None,
         audio_input_positions: Tensor | None = None,
-        embedding_blocks: frozenset[str] | None = None,
+        input_modalities: frozenset[Modality] | None = None,
         validate_input: bool = True,
         validate_audio_input_positions: bool = True,
         prediction: PredictionModality | None = None,

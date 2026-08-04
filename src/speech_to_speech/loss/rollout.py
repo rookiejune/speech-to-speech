@@ -52,7 +52,7 @@ def _token_logps(batch: ModelBatch, model: Model) -> Tensor:
         attention_mask=batch.attention_mask,
         audio_input_positions=batch.audio_input_positions,
         prediction=batch.prediction_modality,
-        **_embedding_kwargs(batch),
+        **_input_kwargs(batch),
     )
     return target_token_logps(
         model,
@@ -68,11 +68,11 @@ def _response_mask(batch: ModelBatch) -> Tensor:
     return batch.token_labels[:, 1:].ne(-100)
 
 
-def _embedding_kwargs(batch: ModelBatch) -> dict[str, Any]:
-    if batch.embedding_blocks is None:
+def _input_kwargs(batch: ModelBatch) -> dict[str, Any]:
+    if batch.input_modalities is None:
         return {}
     return {
-        "embedding_blocks": batch.embedding_blocks,
+        "input_modalities": batch.input_modalities,
         "validate_input": False,
         "validate_audio_input_positions": not batch.audio_input_positions_validated,
     }

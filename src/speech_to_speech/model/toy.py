@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import cast
 
-from transformers import Qwen3Config, Qwen3ForCausalLM
+from transformers import Qwen3Config, Qwen3Model
 
 from ..runtime.types import Backbone
 
@@ -38,7 +38,7 @@ class ToyConfig:
 def create_toy_backbone(config: ToyConfig, text_vocab_size: int) -> Backbone:
     if text_vocab_size <= 0:
         raise ValueError("toy model text vocabulary must be positive.")
-    backbone = Qwen3ForCausalLM(
+    backbone = Qwen3Model(
         Qwen3Config(
             vocab_size=text_vocab_size,
             hidden_size=config.hidden_size,
@@ -48,7 +48,6 @@ def create_toy_backbone(config: ToyConfig, text_vocab_size: int) -> Backbone:
             num_key_value_heads=config.heads,
             head_dim=config.hidden_size // config.heads,
             max_position_embeddings=config.max_position_embeddings,
-            tie_word_embeddings=True,
             use_cache=True,
         )
     )

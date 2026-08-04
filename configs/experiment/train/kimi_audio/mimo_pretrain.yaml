@@ -1,0 +1,72 @@
+# @package _global_
+defaults:
+  - /runtime: kimi_audio
+  - _self_
+
+run_name: kimi-audio-mimo-pretrain
+output_subdir: kimi-audio/mimo-pretrain/${run_name}
+
+runtime:
+  semantic_codec_artifact: ${oc.env:SPEECH_TO_SPEECH_SAC_ARTIFACT,storage/semantic-acoustic-codec/artifact}
+
+model:
+  toy: false
+  # Null means derive the width from the loaded Kimi backbone.  The entry's
+  # 32-wide value belongs only to the CPU toy model.
+  audio_embedding_dim: null
+  # Kimi-Audio's base branch is the audio head; the extra MIMO branch is text.
+  text_readout: last_hidden_state[1]
+  audio_readout: last_hidden_state[0]
+  supports_cache_position: false
+  initialize_audio_from_runtime: true
+
+# The prepared-segment factory is intentionally explicit.  Replace it with a
+# workspace dataset factory for a real corpus; no raw corpus loading happens
+# inside the training entry.
+data:
+  factory: speech_to_speech.datamodule.mimo_dataset:JsonlMimoSegmentDataset
+  kwargs:
+    path: ${oc.env:SPEECH_TO_SPEECH_MIMO_SEGMENTS,storage/mimo/segments.jsonl}
+  kind: segments
+  samples_per_epoch: 1000000
+  max_sequence_length: 4096
+  derive_special_tokens: true
+  # Kimi's released configuration uses five delayed audio positions.  Keep
+  # this explicit because the paper and model snapshots have differed.
+  audio_delay_tokens: 5
+  task_weights:
+    audio_only: 1.0
+    text_only: 7.0
+    audio_to_text: 1.0
+    text_to_audio: 1.0
+    audio_to_next_semantic: 1.0
+    audio_to_next_text: 1.0
+    audio_to_next_semantic_and_text: 2.0
+
+dataloader:
+  batch_size: 1
+  num_workers: 8
+  pin_memory: true
+  # Epoch-aware weighted task sampling is refreshed in the main process.
+  persistent_workers: false
+
+trainer:
+  accelerator: gpu
+  devices: auto
+  strategy: auto
+  use_distributed_sampler: true
+  precision: bf16-mixed
+  max_epochs: -1
+  log_every_n_steps: 10
+  enable_checkpointing: true
+
+train:
+  max_steps: 1000000
+
+logging:
+  name: tensorboard
+
+callbacks:
+  checkpoint:
+    enabled: true
+    every_n_train_steps: 10000

@@ -1,0 +1,102 @@
+# @package _global_
+defaults:
+  - /optim: sft
+  - _self_
+
+run_name: mimo-smoke
+repo_output_root: ${oc.env:SPEECH_TO_SPEECH_TRAIN_ROOT,${oc.env:DYNAMIC_HOME,outputs}/train/speech-to-speech}
+output_subdir: mimo/${run_name}
+output_dir: ${repo_output_root}/${output_subdir}
+
+runtime:
+  codec: longcat
+  backbone_type: hf_causal_lm
+  backbone: Qwen/Qwen3-0.6B
+  backbone_initialization: pretrained
+  backbone_trust_remote_code: false
+  backbone_readout: last_hidden_state
+  backbone_readouts: {}
+  backbone_supports_cache_position: true
+  backbone_module: ""
+  backbone_body: base_model
+  audio_tokenizer:
+  semantic_codec_artifact:
+  device:
+  dtype:
+  attn_implementation:
+  gradient_checkpointing: false
+
+audio_sequence_layout: semantic
+
+model:
+  toy: true
+  text_readout:
+  audio_readout:
+  audio_vocab_size:
+  audio_embedding_dim: 32
+  audio_feature_dim:
+  audio_feature_scale: 1.4142135623730951
+  supports_cache_position: false
+  initialize_audio_from_runtime: false
+
+data:
+  factory: speech_to_speech.datamodule.mimo_dataset:ToyMimoSegmentDataset
+  kwargs: {}
+  kind: segments
+  samples_per_epoch: 8
+  seed: 0
+  max_sequence_length: 64
+  task_weights: {}
+  special:
+    text_bos: 1
+    text_eos: 2
+    text_blank: 0
+    audio_bos: 1
+    audio_eos: 2
+    audio_blank: 0
+    audio_delay_tokens: 0
+  text_pad_token_id: 0
+  audio_pad_token_id: 0
+  derive_special_tokens: false
+  audio_delay_tokens: 0
+  validation_factory:
+  validation_kwargs: {}
+
+dataloader:
+  batch_size: 2
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+  costs:
+    enabled: false
+    max_batch_frames:
+    planning_window: 256
+
+train:
+  seed: 0
+  max_steps: 1
+  ckpt_path:
+
+trainer:
+  accelerator: cpu
+  devices: 1
+  strategy: auto
+  use_distributed_sampler: false
+  precision: 32-true
+  max_epochs: -1
+  log_every_n_steps: 1
+  enable_checkpointing: false
+  gradient_clip_val: 1.0
+
+logging:
+  name: csv
+  save_dir: ${output_dir}
+  run_name: ${run_name}
+
+callbacks:
+  checkpoint:
+    enabled: false
+    every_n_train_steps: 1000
+    save_last: true
+    save_top_k: -1
+    filename: step-{step:08d}

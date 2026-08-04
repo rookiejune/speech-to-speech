@@ -8,7 +8,6 @@ import torch
 from speech_to_speech.model.embedding.audio import (
     base_weight,
     embedding,
-    merge_by_positions,
 )
 
 
@@ -45,30 +44,6 @@ class AudioEmbeddingTest(unittest.TestCase):
             ]
         )
         torch.testing.assert_close(weight, expected)
-
-    def test_merge_by_positions_matches_grouped_rope_mean(self):
-        features = torch.arange(40, dtype=torch.float32).reshape(2, 5, 4)
-        features.requires_grad_()
-        positions = torch.tensor([[2, 1, 2, -1, 1], [0, 3, 0, 3, -1]])
-
-        output, occupied = merge_by_positions(features, positions, sequence_length=4)
-
-        expected = torch.zeros_like(output)
-        for row in range(features.size(0)):
-            for position in positions[row][positions[row] >= 0].unique():
-                selected = positions[row] == position
-                expected[row, position] = _reference_merge(features[row][selected])
-        self.assertTrue(torch.allclose(output, expected))
-        self.assertTrue(
-            torch.equal(
-                occupied,
-                torch.tensor([[False, True, True, False], [True, False, False, True]]),
-            )
-        )
-
-        output.sum().backward()
-        self.assertIsNotNone(features.grad)
-        self.assertTrue(torch.isfinite(features.grad).all())
 
     def test_random_embedding_initialization_uses_tokenizer_vocab(self):
         tokenizer = _Tokenizer([])

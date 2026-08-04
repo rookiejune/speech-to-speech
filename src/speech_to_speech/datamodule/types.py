@@ -15,6 +15,7 @@ from torch.nn.utils.rnn import pad_sequence
 from .._compat import StrEnum, auto
 from .._tensor import is_signed_integer_dtype
 from ..generation.types import Request
+from ..loader_plan import ARFraming, validate_ar_framing
 from ..prediction import PredictionModality
 from ..source import SourceLayout
 from ..task import Task
@@ -223,6 +224,7 @@ class RawSpeechBatch:
     interleave_audio_frames: int = 25
     mask_text_ratio: float = 0.5
     mask_audio_ratio: float = 0.5
+    ar_framing: ARFraming = ARFraming.INSTRUCTION
 
     def __post_init__(self) -> None:
         if not self.samples:
@@ -248,6 +250,7 @@ class RawSpeechBatch:
             raise ValueError(
                 "all raw speech samples in a batch must use the same execution signature."
             )
+        validate_ar_framing(self.ar_framing, self.tasks)
 
     @property
     def tasks(self) -> list[Task]:
@@ -260,6 +263,7 @@ class RawSpeechBatch:
             interleave_audio_frames=self.interleave_audio_frames,
             mask_text_ratio=self.mask_text_ratio,
             mask_audio_ratio=self.mask_audio_ratio,
+            ar_framing=self.ar_framing,
         )
 
 
@@ -560,7 +564,7 @@ class ModelBatch:
     audio_input_positions: Tensor | None = None
     audio_contexts: tuple[SemanticAcousticCodes | None, ...] | None = None
     _unit_counts: _BatchUnitCounts = field(init=False, repr=False)
-    _embedding_blocks: frozenset[str] | None = field(
+    _input_modalities: frozenset[Modality] | None = field(
         init=False,
         default=None,
         repr=False,
@@ -716,23 +720,30 @@ class ModelBatch:
         raise ValueError(f"unsupported training unit: {unit!r}.")
 
     @property
-    def embedding_blocks(self) -> frozenset[str] | None:
-        """Exact id-space blocks validated before this batch moved to a device."""
-        return self._embedding_blocks
+    def supervised_token_count(self) -> int:
+        """Number of non-ignore-index labels used by causal token loss."""
+        return int(self.token_labels.ne(-100).sum().item())
+
+    @property
+    def input_modalities(self) -> frozenset[Modality] | None:
+        """Exact input modalities validated before this batch moved to a device."""
+        return self._input_modalities
 
     @property
     def audio_input_positions_validated(self) -> bool:
         return self._audio_input_positions_validated
 
-    def set_embedding_hints(
+    def set_input_hints(
         self,
-        blocks: frozenset[str],
+        modalities: frozenset[Modality],
         *,
         audio_input_positions_validated: bool,
     ) -> None:
-        if not blocks:
-            raise ValueError("embedding block hints must not be empty.")
-        self._embedding_blocks = blocks
+        if not modalities:
+            raise ValueError("input modality hints must not be empty.")
+        if not all(isinstance(modality, Modality) for modality in modalities):
+            raise TypeError("input modality hints must contain Modality values.")
+        self._input_modalities = frozenset(modalities)
         self._audio_input_positions_validated = audio_input_positions_validated
 
     def row(self, index: int) -> ModelBatch:
@@ -793,7 +804,7 @@ class ModelBatch:
         result.audio_contexts = fields.audio_contexts
         if tasks is None and predictions is None:
             result._unit_counts = self._unit_counts
-            result._embedding_blocks = self._embedding_blocks
+            result._input_modalities = self._input_modalities
             result._audio_input_positions_validated = (
                 self._audio_input_positions_validated
             )
@@ -804,7 +815,7 @@ class ModelBatch:
                 acoustic_target,
                 fields.audio_seconds,
             )
-            result._embedding_blocks = None
+            result._input_modalities = None
             result._audio_input_positions_validated = False
         return result
 

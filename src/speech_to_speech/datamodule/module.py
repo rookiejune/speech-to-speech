@@ -12,6 +12,7 @@ from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader, Dataset, Subset
 
 from .._compat import StrEnum, auto
+from ..loader_plan import ARFraming, validate_ar_framing
 from ..prediction import PredictionModality
 from ..task import Task
 from ._helper.text import TextLoader
@@ -47,6 +48,7 @@ class LoaderSpec:
     text_config: TextConfig | None = None
     sample_index: int | None = None
     prediction: PredictionModality | None = None
+    ar_framing: ARFraming = ARFraming.INSTRUCTION
     max_samples: int | None = None
     task_configs: Mapping[Task, TaskConfig] | None = None
 
@@ -60,6 +62,10 @@ class LoaderSpec:
             PredictionModality,
         ):
             raise TypeError("loader prediction must be a PredictionModality or None.")
+        validate_ar_framing(
+            self.ar_framing,
+            [task for task, weight in self.task_weights.items() if weight > 0],
+        )
         _validate_max_samples(self.max_samples)
         if self.kind is LoaderKind.SPEECH:
             if self.speech_config is None or self.text_config is not None:
@@ -85,6 +91,7 @@ class LoaderSpec:
         *,
         sample_index: int | None = None,
         prediction: PredictionModality | None = None,
+        ar_framing: ARFraming = ARFraming.INSTRUCTION,
     ) -> LoaderSpec:
         return cls(
             kind=LoaderKind.SPEECH,
@@ -92,6 +99,7 @@ class LoaderSpec:
             speech_config=config,
             sample_index=sample_index,
             prediction=prediction,
+            ar_framing=ar_framing,
         )
 
     @classmethod
@@ -101,6 +109,7 @@ class LoaderSpec:
         task_weights: Mapping[Task, float],
         *,
         prediction: PredictionModality | None = None,
+        ar_framing: ARFraming = ARFraming.INSTRUCTION,
         max_samples: int | None = None,
         tasks: Mapping[Task, TaskConfig] | None = None,
     ) -> LoaderSpec:
@@ -110,6 +119,7 @@ class LoaderSpec:
             text_config=config,
             max_samples=max_samples,
             prediction=prediction,
+            ar_framing=ar_framing,
             task_configs=tasks,
         )
 
@@ -144,6 +154,7 @@ class _SpeechLoader:
         sample_index: int | None = None,
         *,
         prediction: PredictionModality | None = None,
+        ar_framing: ARFraming = ARFraming.INSTRUCTION,
     ) -> None:
         self.config = config
         self.runtime = runtime
@@ -156,6 +167,7 @@ class _SpeechLoader:
             mask_text_ratio=config.mask_text_ratio,
             mask_audio_ratio=config.mask_audio_ratio,
             prediction=prediction,
+            ar_framing=ar_framing,
             tasks=config.tasks,
         )
         self.sample_index = sample_index
@@ -211,6 +223,7 @@ class _SpeechLoader:
             mask_text_ratio=self.config.mask_text_ratio,
             mask_audio_ratio=self.config.mask_audio_ratio,
             prediction=self.collator.prediction,
+            ar_framing=self.collator.ar_framing,
             tasks=self.config.tasks,
         )
 
@@ -402,6 +415,7 @@ def _build_loader(
             spec.task_weights,
             sample_index=spec.sample_index,
             prediction=spec.prediction,
+            ar_framing=spec.ar_framing,
         )
     assert spec.text_config is not None
     return TextLoader(
@@ -409,6 +423,7 @@ def _build_loader(
         cast(TextRuntime, runtime),
         spec.task_weights,
         prediction=spec.prediction,
+        ar_framing=spec.ar_framing,
         max_samples=spec.max_samples,
         tasks=spec.task_configs,
     )
@@ -426,6 +441,7 @@ def _build_validation_loader(
             spec.task_weights,
             sample_index=spec.sample_index,
             prediction=spec.prediction,
+            ar_framing=spec.ar_framing,
         )
     assert spec.text_config is not None
     return TextLoader(
@@ -433,6 +449,7 @@ def _build_validation_loader(
         cast(TextRuntime, runtime),
         spec.task_weights,
         prediction=spec.prediction,
+        ar_framing=spec.ar_framing,
         max_samples=spec.max_samples,
         tasks=spec.task_configs,
     )
@@ -628,6 +645,7 @@ def _collator(
     mask_text_ratio: float = 0.5,
     mask_audio_ratio: float = 0.5,
     prediction: PredictionModality | None = None,
+    ar_framing: ARFraming = ARFraming.INSTRUCTION,
     tasks: Mapping[Task, TaskConfig] | None = None,
 ):
     if shape is DataShape.PAIR:
@@ -639,6 +657,7 @@ def _collator(
             mask_text_ratio=mask_text_ratio,
             mask_audio_ratio=mask_audio_ratio,
             prediction=prediction,
+            ar_framing=ar_framing,
             tasks=tasks,
         )
     if shape is DataShape.SINGLE:
@@ -650,6 +669,7 @@ def _collator(
             mask_text_ratio=mask_text_ratio,
             mask_audio_ratio=mask_audio_ratio,
             prediction=prediction,
+            ar_framing=ar_framing,
             tasks=tasks,
         )
     raise AssertionError(f"unsupported data shape: {shape}")

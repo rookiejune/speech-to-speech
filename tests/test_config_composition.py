@@ -304,6 +304,14 @@ class ConfigCompositionTest(ConfigTestCase):
         self.assertTrue(loader.is_text)
         self.assertEqual(loader.tasks, {Task.TEXT_AR: 1.0})
 
+    def test_pretraining_framing_rejects_non_ar_tasks(self):
+        with self.assertRaisesRegex(ValueError, "only supports AUDIO_AR and TEXT_AR"):
+            LoaderConfig(
+                weight=1.0,
+                task_weights={"asr": 1.0},
+                ar_framing="pretraining",
+            )
+
     def test_removed_parallel_groups_are_not_composable(self):
         cases = [
             ("overfit", "codec=unicodec"),

@@ -99,7 +99,7 @@ class AudioOutputAdapterTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not match"):
             adapter(torch.randn(2, 3, 5))
 
-    def test_transformer_cache_matches_full_recompute(self) -> None:
+    def test_transformer_left_padding_cache_matches_full_recompute(self) -> None:
         adapter = create_audio_output_adapter(
             AudioOutputAdapterConfig(
                 type=AudioOutputAdapterType.TRANSFORMER,
@@ -113,7 +113,7 @@ class AudioOutputAdapterTest(unittest.TestCase):
         adapter.eval()
         hidden = torch.randn(2, 4, 8)
         mask = torch.tensor(
-            [[True, True, True, False], [True, True, False, False]],
+            [[False, True, True, True], [False, False, True, True]],
             dtype=torch.bool,
         )
         full, _ = adapter(hidden, attention_mask=mask, use_cache=False)
@@ -170,11 +170,57 @@ class AudioOutputAdapterTest(unittest.TestCase):
             in_features=8,
             out_features=8,
         )
-        hidden = torch.randn(3, 2, 8)
-        _, past = adapter(hidden, use_cache=True)
-        selected = adapter.batch_select_past(past, torch.tensor([0, 2]))
+        adapter.eval()
+        hidden = torch.randn(3, 3, 8)
+        mask = torch.tensor(
+            [
+                [False, False, True],
+                [False, True, True],
+                [True, True, True],
+            ],
+            dtype=torch.bool,
+        )
+        _, past = adapter(hidden, attention_mask=mask, use_cache=True)
+        indices = torch.tensor([2, 0])
+        selected = adapter.batch_select_past(past, indices)
         assert selected is not None
-        self.assertEqual(selected[0][0].shape[0], 2)
+        next_hidden = torch.randn(2, 1, 8)
+        next_mask = torch.ones(2, 1, dtype=torch.bool)
+
+        cached, _ = adapter(
+            next_hidden,
+            attention_mask=next_mask,
+            past_key_values=selected,
+            use_cache=True,
+        )
+        selected_hidden = hidden.index_select(0, indices)
+        selected_mask = mask.index_select(0, indices)
+        full, _ = adapter(
+            torch.cat((selected_hidden, next_hidden), dim=1),
+            attention_mask=torch.cat((selected_mask, next_mask), dim=1),
+        )
+
+        torch.testing.assert_close(cached[:, 0], full[:, -1], atol=1e-5, rtol=1e-5)
+
+    def test_transformer_cached_continuation_requires_one_token(self) -> None:
+        adapter = create_audio_output_adapter(
+            AudioOutputAdapterConfig(
+                type=AudioOutputAdapterType.TRANSFORMER,
+                layers=1,
+                heads=2,
+                ffn_ratio=2.0,
+            ),
+            in_features=8,
+            out_features=8,
+        )
+        _, past = adapter(torch.randn(1, 2, 8), use_cache=True)
+
+        with self.assertRaisesRegex(ValueError, "requires one token"):
+            adapter(
+                torch.randn(1, 2, 8),
+                past_key_values=past,
+                use_cache=True,
+            )
 
 
 if __name__ == "__main__":

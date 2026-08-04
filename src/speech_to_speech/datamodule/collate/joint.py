@@ -1,12 +1,71 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Protocol, runtime_checkable
 
 from ...loader_step import LoaderStepMode
-from ..types import FusedBatch, LoaderBatch, TrainBatch, TrainInput
+from ..mimo import MimoBatch
+from ..types import (
+    FusedBatch,
+    LoaderBatch,
+    ModelBatch,
+    RawSpeechBatch,
+    TrainBatch,
+    TrainInput,
+)
+
+
+SupervisedTokenCounter = Callable[[object], int]
+
+
+@runtime_checkable
+class SupervisedTokenBatch(Protocol):
+    """Optional structural hook for batches with a custom token contract."""
+
+    @property
+    def supervised_token_count(self) -> int: ...
+
+
+def count_supervised_tokens(batch: object, *, ignore_index: int = -100) -> int:
+    """Return the number of causal target tokens in one training batch.
+
+    ``ModelBatch`` uses ``ignore_index`` (``-100`` by default).  MIMO keeps
+    independent text/audio masks; its shifted masks are the authoritative
+    count because a token at position ``t`` is supervised by the logit at
+    position ``t - 1``.  The recursive wrapper handling keeps this counter
+    useful for callers that inspect a scheduled child batch directly.
+    """
+    if isinstance(ignore_index, bool) or not isinstance(ignore_index, int):
+        raise TypeError("ignore_index must be an integer.")
+    if isinstance(batch, LoaderBatch):
+        return count_supervised_tokens(batch.batch, ignore_index=ignore_index)
+    if isinstance(batch, FusedBatch):
+        return sum(
+            count_supervised_tokens(child, ignore_index=ignore_index)
+            for child in batch.batches
+        )
+    if isinstance(batch, ModelBatch):
+        return int(batch.token_labels.ne(ignore_index).sum().item())
+    if isinstance(batch, MimoBatch):
+        return batch.supervised_token_count
+    if isinstance(batch, SupervisedTokenBatch):
+        return batch.supervised_token_count
+    if isinstance(batch, RawSpeechBatch):
+        raise TypeError(
+            "token-weighted scheduling requires materialized token batches; "
+            "raw waveform batches do not expose supervised token counts."
+        )
+    raise TypeError(
+        "supervised token counting expects ModelBatch or MimoBatch, "
+        f"got {type(batch)!r}."
+    )
+
+
+# Short public spelling for callers that treat the counter as a batch method.
+supervised_token_count = count_supervised_tokens
 
 
 @runtime_checkable
@@ -35,6 +94,12 @@ class LoaderSchedule:
         mode = self.mode
         if mode is LoaderStepMode.WEIGHTED_WINDOW:
             mode = None
+        if mode is LoaderStepMode.TOKEN_WEIGHTED:
+            if self.fuse_loaders_per_step:
+                raise ValueError(
+                    "token_weighted requires fuse_loaders_per_step=false."
+                )
+            return
         if mode is LoaderStepMode.FUSED_JOINT:
             if not self.fuse_loaders_per_step:
                 raise ValueError("fused_joint requires fuse_loaders_per_step=true.")
@@ -64,8 +129,8 @@ class LoaderSchedule:
             return LoaderStepMode(self.step_mode)
         except ValueError as error:
             raise ValueError(
-                "step_mode must be 'weighted_window', 'fused_joint', or "
-                "'serial_joint'."
+                "step_mode must be 'weighted_window', 'token_weighted', "
+                "'fused_joint', or 'serial_joint'."
             ) from error
 
 
@@ -74,6 +139,9 @@ class ScheduledDataLoader:
         self,
         loaders: Mapping[str, Iterable[TrainInput]],
         schedule: LoaderSchedule,
+        *,
+        token_counter: SupervisedTokenCounter = count_supervised_tokens,
+        synchronize_token_counts: bool = True,
     ) -> None:
         missing = set(schedule.weights) - set(loaders)
         if missing:
@@ -87,6 +155,12 @@ class ScheduledDataLoader:
             )
         self.loaders = dict(loaders)
         self.schedule = schedule
+        if not callable(token_counter):
+            raise TypeError("token_counter must be callable.")
+        if not isinstance(synchronize_token_counts, bool):
+            raise TypeError("synchronize_token_counts must be a boolean.")
+        self.token_counter = token_counter
+        self.synchronize_token_counts = synchronize_token_counts
 
     def __iter__(self) -> Iterator[TrainBatch]:
         keys = tuple(self.schedule.weights)
@@ -114,6 +188,30 @@ class ScheduledDataLoader:
                         key,
                         len(window) * loss_weight,
                     )
+        if self.schedule.mode is LoaderStepMode.TOKEN_WEIGHTED:
+            positive_keys = tuple(key for key in keys if weights[key] > 0)
+            token_weights = {
+                key: Fraction(str(weights[key])) for key in positive_keys
+            }
+            total_weight = sum(token_weights.values(), start=Fraction())
+            deficits = {key: Fraction() for key in positive_keys}
+            while True:
+                selected = max(
+                    positive_keys,
+                    key=lambda key: (deficits[key], -positive_keys.index(key)),
+                )
+                batch = _next_batch(selected, iterators, self.loaders, cycles)
+                local_token_count = self.token_counter(batch)
+                _validate_token_count(local_token_count, selected, batch)
+                token_count = (
+                    _synchronized_token_count(local_token_count)
+                    if self.synchronize_token_counts
+                    else local_token_count
+                )
+                for key in positive_keys:
+                    deficits[key] += token_count * token_weights[key]
+                deficits[selected] -= token_count * total_weight
+                yield batch
         if self.schedule.accumulate_grad_batches > 1:
             credits = [0.0 for _ in keys]
             while True:
@@ -148,7 +246,13 @@ def _validate_weights(weights: Mapping[str, float]) -> None:
     if not weights:
         raise ValueError("loader weights must contain at least one loader.")
     values = list(weights.values())
-    if any(not math.isfinite(weight) or weight < 0 for weight in values):
+    if any(
+        isinstance(weight, bool)
+        or not isinstance(weight, (float, int))
+        or not math.isfinite(weight)
+        or weight < 0
+        for weight in values
+    ):
         raise ValueError("loader weights must be finite and non-negative.")
     total = sum(values)
     if not math.isfinite(total) or total <= 0:
@@ -252,6 +356,41 @@ def _next_batch(
             raise RuntimeError(f"scheduled loader {key!r} produced no batches.") from error
 
 
+def _validate_token_count(value: int, loader_name: str, batch: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(
+            "token_counter must return an integer; "
+            f"loader {loader_name!r} returned {type(value)!r}."
+        )
+    if value <= 0:
+        raise ValueError(
+            "token-weighted scheduling requires every batch to contain at least "
+            f"one supervised token; loader {loader_name!r} produced {value} from "
+            f"{type(batch)!r}."
+        )
+
+
+def _synchronized_token_count(value: int) -> int | Fraction:
+    """Use one count on every DDP rank when a process group is active."""
+    import torch
+    import torch.distributed as dist
+
+    if not dist.is_available() or not dist.is_initialized():
+        return value
+    world_size = dist.get_world_size()
+    if world_size == 1:
+        return value
+    backend = str(dist.get_backend()).lower()
+    device = (
+        torch.device("cuda", torch.cuda.current_device())
+        if backend == "nccl"
+        else torch.device("cpu")
+    )
+    total = torch.tensor([value], dtype=torch.int64, device=device)
+    dist.all_reduce(total, op=dist.ReduceOp.SUM)
+    return Fraction(int(total.item()), world_size)
+
+
 def _set_epoch(loader: Iterable[TrainInput], epoch: int) -> None:
     if isinstance(loader, _EpochSetter):
         loader.set_epoch(epoch)
@@ -264,4 +403,8 @@ def _set_epoch(loader: Iterable[TrainInput], epoch: int) -> None:
 __all__ = [
     "LoaderSchedule",
     "ScheduledDataLoader",
+    "SupervisedTokenBatch",
+    "SupervisedTokenCounter",
+    "count_supervised_tokens",
+    "supervised_token_count",
 ]

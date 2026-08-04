@@ -6,10 +6,19 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import torch
+from anydataset.types import Modality
 from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 
-from speech_to_speech.model import Config
+from speech_to_speech.model import (
+    AdapterType,
+    AudioInputAdapterConfig,
+    AudioInputAdapterType,
+    AudioOutputAdapterConfig,
+    AudioOutputAdapterType,
+    Config,
+    Model,
+)
 from speech_to_speech.model.acoustic import DecoderConfig
 from speech_to_speech.model.acoustic.flow import FlowModel
 from speech_to_speech.model.acoustic.rvq import RVQModel
@@ -135,14 +144,80 @@ class ModelDtypeTest(unittest.TestCase):
         self.assertEqual(condition.dtype, torch.bfloat16)
         self.assertTrue(torch.isfinite(condition).all())
 
+    def test_model_bfloat16_runs_mlp_speech_interfaces(self) -> None:
+        model = _interface_model(
+            audio_input=AudioInputAdapterType.MLP,
+            audio_output=AudioOutputAdapterType.MLP,
+        ).bfloat16()
+        model.eval()
+
+        rows = model.tokens.audio_projection(model.tokens.audio_embedding.weight)
+        embedded = model._input_embedding(
+            torch.tensor([[0, 4, 5]]),
+            torch.tensor([[1]]),
+        )
+        logits = model.token_logits(
+            torch.randn(1, 3, 4, dtype=torch.bfloat16),
+            Modality.AUDIO,
+        )
+        tied_model = _interface_model(
+            audio_input=AudioInputAdapterType.MLP,
+            audio_output=AudioOutputAdapterType.NONE,
+        ).bfloat16()
+        tied_logits = tied_model.semantic_audio_logits(
+            torch.randn(1, 3, 4, dtype=torch.bfloat16)
+        )
+
+        self.assertEqual(rows.dtype, torch.bfloat16)
+        self.assertEqual(embedded.dtype, torch.bfloat16)
+        self.assertEqual(logits.dtype, torch.bfloat16)
+        self.assertEqual(tied_logits.dtype, torch.bfloat16)
+        self.assertTrue(torch.isfinite(embedded).all())
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertTrue(torch.isfinite(tied_logits).all())
+
+    def test_model_bfloat16_runs_transformer_speech_interfaces(self) -> None:
+        model = _interface_model(
+            audio_input=AudioInputAdapterType.TRANSFORMER,
+            audio_output=AudioOutputAdapterType.TRANSFORMER,
+        ).bfloat16()
+        model.eval()
+
+        embedded = model._input_embedding(
+            torch.tensor([[0, 4, 5]]),
+            torch.tensor([[-1, 1]]),
+        )
+        hidden = torch.randn(1, 3, 4, dtype=torch.bfloat16)
+        projected, past = model.project_audio_hidden(
+            hidden,
+            attention_mask=torch.tensor([[False, True, True]]),
+            use_cache=True,
+        )
+        continued, _ = model.project_audio_hidden(
+            torch.randn(1, 1, 4, dtype=torch.bfloat16),
+            attention_mask=torch.ones(1, 1, dtype=torch.bool),
+            past_key_values=past,
+            use_cache=True,
+        )
+        logits = model.semantic_audio_logits(projected)
+
+        self.assertEqual(embedded.dtype, torch.bfloat16)
+        self.assertEqual(projected.dtype, torch.bfloat16)
+        self.assertEqual(continued.dtype, torch.bfloat16)
+        self.assertEqual(logits.dtype, torch.bfloat16)
+        self.assertTrue(torch.isfinite(embedded).all())
+        self.assertTrue(torch.isfinite(projected).all())
+        self.assertTrue(torch.isfinite(continued).all())
+        self.assertTrue(torch.isfinite(logits).all())
+
 
 class _Backbone(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, dtype: torch.dtype = torch.bfloat16) -> None:
         super().__init__()
         self.config = SimpleNamespace(hidden_size=4)
         self.input_embeddings = nn.Embedding(4, 4)
         self.output_embeddings = nn.Linear(4, 4, bias=False)
-        self.to(dtype=torch.bfloat16)
+        self.to(dtype=dtype)
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.input_embeddings
@@ -188,13 +263,39 @@ class _FlowRuntime:
         return SimpleNamespace(final=torch.zeros(1))
 
 
-def _runtime() -> SimpleNamespace:
+def _runtime(*, backbone_dtype: torch.dtype = torch.bfloat16) -> SimpleNamespace:
     return SimpleNamespace(
-        backbone=_Backbone(),
+        backbone=_Backbone(backbone_dtype),
         codec=_Codec(),
         audio_tokenizer=NativeAudioTokenizer(vocab_size=3),
         layout=Layout(text=(0, 4), audio=(4, 10)),
         flow_matching=_FlowRuntime(),
+        codec_audio_range=(4, 7),
+    )
+
+
+def _interface_model(
+    *,
+    audio_input: AudioInputAdapterType,
+    audio_output: AudioOutputAdapterType,
+) -> Model:
+    return Model(
+        Config(
+            semantic_audio_adapter=AdapterType.MLP,
+            audio_input_adapter=AudioInputAdapterConfig(
+                type=audio_input,
+                layers=1,
+                heads=2,
+                ffn_ratio=2,
+            ),
+            audio_output_adapter=AudioOutputAdapterConfig(
+                type=audio_output,
+                layers=1,
+                heads=2,
+                ffn_ratio=2,
+            ),
+        ),
+        runtime=cast(Any, _runtime(backbone_dtype=torch.float32)),
     )
 
 

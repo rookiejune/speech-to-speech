@@ -284,6 +284,13 @@ response、generated token 以及 BiCodec route 的 reference `audio_context` �
   先推进到下一 cycle，再通过 loader 的 `set_epoch()` 或其 `batch_sampler.set_epoch()` 更新
   deterministic shuffle，然后重建 iterator。同一 schedule 和 per-rank batch count 下，各 rank
   会在相同 accumulation-window 位置推进相同子 loader 的 epoch。
+- `token_weighted` 把权重解释为长期监督 token 比例：调度器在每次取 batch 后，以
+  `ModelBatch.token_labels != -100` 或 MIMO 的 shifted text/audio target masks 计数，更新累计 deficit，
+  再确定性地选择最大 deficit 的 loader。它允许任意 `accumulate_grad_batches`，但不能与
+  `fuse_loaders_per_step` 同时开启；raw waveform batch 没有 token 计数契约，会在首次取样时报错。
+  已初始化 DDP process group 时，计数会先 all-reduce 为全局平均值，避免 rank-local 序列长度差异导致
+  各 rank 选择不同 loader；新 batch 类型可实现 `supervised_token_count` 属性，或通过
+  `ScheduledDataLoader(token_counter=...)` 注入计数器。
 - `DataModule` 在构造 loader 前把 collator 的完整 runtime 替换为 `DataRuntimeSnapshot`；主进程
   仍持有正式 runtime 供 dataset setup 使用。`persistent_workers` 只在 `num_workers > 0` 时启用，
   多个 train spec 复用同一个 `SpeechConfig` 时只加载一份 speech dataset；复用同一个

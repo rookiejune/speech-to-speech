@@ -21,6 +21,7 @@ class _GRPOModel:
         self.logit_modalities: list[Modality] = []
         self.logit_rows: list[int] = []
         self.predictions: list[PredictionModality | None] = []
+        self.input_hints: list[tuple[frozenset[Modality] | None, bool, bool]] = []
 
     def token_hidden_states(
         self,
@@ -28,11 +29,17 @@ class _GRPOModel:
         *,
         attention_mask: torch.Tensor | None = None,
         audio_input_positions: torch.Tensor | None = None,
+        input_modalities: frozenset[Modality] | None = None,
+        validate_input: bool = True,
+        validate_audio_input_positions: bool = True,
         prediction: PredictionModality | None = None,
     ) -> torch.Tensor:
         del attention_mask, audio_input_positions
         self.hidden_calls += 1
         self.predictions.append(prediction)
+        self.input_hints.append(
+            (input_modalities, validate_input, validate_audio_input_positions)
+        )
         return input_ids[..., None].to(dtype=torch.float32)
 
     def token_logits(
@@ -157,6 +164,28 @@ class GRPOLossTest(unittest.TestCase):
             [Modality.AUDIO, Modality.TEXT],
         )
         self.assertEqual(model.logit_rows, [2, 2])
+
+    def test_grpo_forwards_validated_input_modality_hints(self):
+        sequences = _batch()
+        sequences.set_input_hints(
+            frozenset({Modality.TEXT}),
+            audio_input_positions_validated=True,
+        )
+        model = _GRPOModel()
+
+        GRPOObjective()(
+            GRPOBatch(
+                sequences=sequences,
+                old_token_logps=torch.zeros(1, 2, 2),
+                rewards=torch.tensor([[1.0, 0.0]]),
+            ),
+            model,
+        )
+
+        self.assertEqual(
+            model.input_hints,
+            [(frozenset({Modality.TEXT}), False, False)],
+        )
 
     def test_grpo_batch_validates_rollout_shape(self):
         with self.assertRaisesRegex(ValueError, "batch times group"):

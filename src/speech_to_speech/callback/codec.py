@@ -60,6 +60,7 @@ class OnDeviceCodecMaterializer:
                 interleave_audio_frames=batch.interleave_audio_frames,
                 mask_text_ratio=batch.mask_text_ratio,
                 mask_audio_ratio=batch.mask_audio_ratio,
+                ar_framing=batch.ar_framing,
             )
             for sample in batch.samples
         ]

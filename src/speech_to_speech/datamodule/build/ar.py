@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 from anydataset.types import Modality
 from torch import Tensor
@@ -8,7 +10,7 @@ from ...prediction import PredictionModality
 from ...runtime import AudioSequenceLayout
 from ...task import Task
 from .._helper.tokenization import token_ids
-from ..protocol import DataRuntime
+from ..protocol import DataRuntime, TextRuntime
 from ..types import AcousticTarget, ModelSample, Speech, Text
 
 
@@ -24,6 +26,78 @@ _AR_TASKS = frozenset(
 
 def is_ar_task(task: Task) -> bool:
     return task in _AR_TASKS
+
+
+def build_pretraining_ar_sample(
+    target: Speech | Text,
+    task: Task,
+    runtime: DataRuntime | TextRuntime,
+    *,
+    prediction: PredictionModality | None = None,
+) -> ModelSample:
+    """Build an instruction-free causal-LM sample for a single modality.
+
+    Text examples use the tokenizer BOS as the generation prompt and audio
+    examples use BOA.  Both structural prefixes are kept in ``prompt_ids`` and
+    are therefore excluded from token supervision.
+    """
+    if task not in {Task.AUDIO_AR, Task.TEXT_AR}:
+        raise ValueError(
+            "pretraining AR samples only support AUDIO_AR and TEXT_AR tasks."
+        )
+    from ...task_spec import resolve_prediction
+
+    prediction = resolve_prediction(task, prediction)
+    if prediction is PredictionModality.TEXT:
+        if not isinstance(target, Text):
+            raise TypeError("TEXT_AR pretraining target must be Text.")
+        bos = runtime.text_tokenizer.bos_token_id
+        if bos is None:
+            raise ValueError(
+                "instruction-free text AR framing requires tokenizer bos_token_id."
+            )
+        if isinstance(bos, bool) or not isinstance(bos, int):
+            raise TypeError("tokenizer bos_token_id must be an integer.")
+        if bos < 0:
+            raise ValueError("tokenizer bos_token_id must be non-negative.")
+        prompt = target.text_token_ids.new_tensor([bos])
+        response = _append_eos(
+            runtime.layout.to_global(Modality.TEXT.value, target.text_token_ids),
+            runtime,
+        )
+        return _pack(
+            prompt,
+            response,
+            task=task,
+            prediction=prediction,
+            supervise_from=0,
+            acoustic_target=None,
+            audio_seconds=0.0,
+        )
+
+    if not isinstance(target, Speech):
+        raise TypeError("AUDIO_AR pretraining target must be Speech.")
+    data_runtime = cast(DataRuntime, runtime)
+    wrapped = _boa_eoa(
+        data_runtime.layout.to_global(Modality.AUDIO.value, target.audio_token_ids),
+        data_runtime,
+    )
+    prompt = wrapped[:1]
+    response = wrapped[1:]
+    acoustic = _acoustic_target(
+        target,
+        data_runtime,
+        audio_token_start=prompt.numel(),
+    )
+    return _pack(
+        prompt,
+        response,
+        task=task,
+        prediction=prediction,
+        supervise_from=0,
+        acoustic_target=acoustic,
+        audio_seconds=_duration(target),
+    )
 
 
 def build_ar_sample(
@@ -69,17 +143,19 @@ def build_ar_sample(
             runtime.layout.to_global(Modality.AUDIO.value, target.audio_token_ids),
             runtime,
         )
+        prompt_ids = torch.cat([marker, audio[:1]])
+        response_ids = audio[1:]
         acoustic = _acoustic_target(
             target,
             runtime,
-            audio_token_start=marker.numel() + 1,
+            audio_token_start=prompt_ids.numel(),
         )
         return _pack(
-            marker,
-            audio,
+            prompt_ids,
+            response_ids,
             task=task,
             prediction=prediction,
-            supervise_from=1,
+            supervise_from=0,
             acoustic_target=acoustic,
             audio_seconds=_duration(target),
         )
@@ -324,8 +400,12 @@ def _boa_eoa(ids: Tensor, runtime: DataRuntime) -> Tensor:
     )
 
 
-def _append_eos(ids: Tensor, runtime: DataRuntime) -> Tensor:
+def _append_eos(ids: Tensor, runtime: DataRuntime | TextRuntime) -> Tensor:
     return torch.cat([ids, ids.new_tensor([runtime.eos_token_id])])
 
 
-__all__ = ["build_ar_sample", "is_ar_task"]
+__all__ = [
+    "build_ar_sample",
+    "build_pretraining_ar_sample",
+    "is_ar_task",
+]

@@ -9,6 +9,7 @@ from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
 from ...audio_stream import AudioStream
+from ...loader_plan import ARFraming, validate_ar_framing
 from ...prediction import PredictionModality
 from ...runtime import AudioSequenceLayout
 from ...runtime.audio_tokenizer import BiCodecAudioTokenizer
@@ -16,7 +17,7 @@ from ...task import Task
 from ...task_spec import resolve_prediction
 from ..config import TaskConfig, task_template_index
 from .._helper.tokenization import token_ids
-from .ar import build_ar_sample, is_ar_task
+from .ar import build_ar_sample, build_pretraining_ar_sample, is_ar_task
 from ..protocol import DataRuntime, TextRuntime
 from ..types import (
     AcousticTarget,
@@ -65,6 +66,7 @@ def build_task_sample(
     interleave_audio_frames: int = 25,
     mask_text_ratio: float = 0.5,
     mask_audio_ratio: float = 0.5,
+    ar_framing: ARFraming = ARFraming.INSTRUCTION,
     tasks: Mapping[Task, TaskConfig] | None = None,
 ) -> ModelSample:
     if sample.needs_codec:
@@ -78,6 +80,14 @@ def build_task_sample(
         or isinstance(audio_context, RawSpeech)
     ):
         raise AssertionError("materialized task samples must not contain RawSpeech.")
+    validate_ar_framing(ar_framing, [sample.task])
+    if ar_framing is ARFraming.PRETRAINING:
+        return build_pretraining_ar_sample(
+            target,
+            sample.task,
+            runtime,
+            prediction=sample.prediction,
+        )
     prompt = chat_prompt(
         target.language,
         sample.task,
@@ -455,6 +465,7 @@ def build_text_sample(
     task: Task,
     runtime: TextRuntime,
     *,
+    ar_framing: ARFraming = ARFraming.INSTRUCTION,
     tasks: Mapping[Task, TaskConfig] | None = None,
 ) -> ModelSample:
     if (
@@ -462,6 +473,13 @@ def build_text_sample(
         or task.prediction_modality is not PredictionModality.TEXT
     ):
         raise ValueError(f"{task.value} is not supported by the text-only data path.")
+    validate_ar_framing(ar_framing, [task])
+    if ar_framing is ARFraming.PRETRAINING:
+        return build_pretraining_ar_sample(
+            text_pair.target,
+            task,
+            runtime,
+        )
 
     prompt = chat_prompt(
         text_pair.target.language,

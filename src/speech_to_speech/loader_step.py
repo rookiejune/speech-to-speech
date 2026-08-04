@@ -5,6 +5,7 @@ from ._compat import StrEnum, auto
 
 class LoaderStepMode(StrEnum):
     WEIGHTED_WINDOW = auto()
+    TOKEN_WEIGHTED = auto()
     FUSED_JOINT = auto()
     SERIAL_JOINT = auto()
 

@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Optional
 
 from anydataset.types import Modality
 
+from ._compat import StrEnum, auto
 from .prediction import PredictionModality
 from .task import Task
 from .loader_step import LoaderStepMode
+
+
+class ARFraming(StrEnum):
+    INSTRUCTION = auto()
+    PRETRAINING = auto()
 
 
 @dataclass
@@ -17,6 +23,7 @@ class LoaderConfig:
     weight: float
     task_weights: dict[str, float]
     prediction: Optional[str] = None
+    ar_framing: str = ARFraming.INSTRUCTION.value
 
     def __post_init__(self) -> None:
         if (
@@ -33,6 +40,16 @@ class LoaderConfig:
                     "loader plan prediction must be a string or None."
                 )
             PredictionModality(self.prediction)
+        if not isinstance(self.ar_framing, str):
+            raise TypeError("loader plan ar_framing must be a string.")
+        try:
+            framing = ARFraming(self.ar_framing)
+        except ValueError as error:
+            raise ValueError(
+                "loader plan ar_framing must be 'instruction' or 'pretraining'."
+            ) from error
+        self.ar_framing = framing.value
+        validate_ar_framing(framing, self.tasks)
         self.is_text
 
     @property
@@ -44,6 +61,10 @@ class LoaderConfig:
         if self.prediction is None:
             return None
         return PredictionModality(self.prediction)
+
+    @property
+    def framing(self) -> ARFraming:
+        return ARFraming(self.ar_framing)
 
     @property
     def is_text(self) -> bool:
@@ -90,7 +111,10 @@ class LoaderPlanConfig:
             for name in self.loaders:
                 if not name:
                     raise ValueError("loader plan loader names must not be empty.")
-            if self.mode is not LoaderStepMode.WEIGHTED_WINDOW:
+            if self.mode in {
+                LoaderStepMode.FUSED_JOINT,
+                LoaderStepMode.SERIAL_JOINT,
+            }:
                 _validate_single_task_loaders(self.loaders)
 
     def loader_weights(self) -> dict[str, float]:
@@ -106,7 +130,7 @@ class LoaderPlanConfig:
         except ValueError as error:
             raise ValueError(
                 "loader_plan.step_mode must be 'weighted_window', "
-                "'fused_joint', or 'serial_joint'."
+                "'token_weighted', 'fused_joint', or 'serial_joint'."
             ) from error
 
     def _resolved_fuse_loaders_per_step(self, mode: LoaderStepMode) -> bool:
@@ -117,6 +141,13 @@ class LoaderPlanConfig:
         if mode is LoaderStepMode.FUSED_JOINT:
             return True
         if mode is LoaderStepMode.SERIAL_JOINT:
+            return False
+        if mode is LoaderStepMode.TOKEN_WEIGHTED:
+            if self.fuse_loaders_per_step:
+                raise ValueError(
+                    "loader_plan.step_mode=token_weighted requires "
+                    "fuse_loaders_per_step=false."
+                )
             return False
         return self.fuse_loaders_per_step
 
@@ -152,8 +183,30 @@ def _validate_single_task_loaders(loaders: Mapping[str, LoaderConfig]) -> None:
             )
 
 
+def validate_ar_framing(
+    framing: ARFraming,
+    tasks: Iterable[Task],
+) -> None:
+    if not isinstance(framing, ARFraming):
+        raise TypeError("ar_framing must be an ARFraming.")
+    if framing is ARFraming.INSTRUCTION:
+        return
+    unsupported = sorted(
+        task.value
+        for task in tasks
+        if task not in {Task.AUDIO_AR, Task.TEXT_AR}
+    )
+    if unsupported:
+        raise ValueError(
+            "pretraining AR framing only supports AUDIO_AR and TEXT_AR; got: "
+            + ", ".join(unsupported)
+        )
+
+
 __all__ = [
+    "ARFraming",
     "LoaderConfig",
     "LoaderPlanConfig",
     "LoaderStepMode",
+    "validate_ar_framing",
 ]

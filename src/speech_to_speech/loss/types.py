@@ -16,6 +16,7 @@ class Outputs(TypedDict):
     flow_matching: NotRequired[LossItem]
     repa: NotRequired[LossItem]
     rvq: NotRequired[LossItem]
+    mimo: NotRequired[LossItem]
     loss_weights: NotRequired[dict[str, float]]
 
 
@@ -26,6 +27,7 @@ _UNITS = {
     "flow_matching": "frames",
     "repa": "frames",
     "rvq": "frames",
+    "mimo": "tokens",
 }
 _OBJECTIVES = tuple(_UNITS)
 

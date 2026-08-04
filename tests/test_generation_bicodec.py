@@ -21,7 +21,7 @@ from speech_to_speech.generation.bicodec import (
     prepare_bicodec_tts_request,
 )
 from speech_to_speech.generation._request import validate
-from speech_to_speech.model._generation import GenerationStepResult
+from speech_to_speech.model.generation import GenerationStepResult
 from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.runtime.protocol import GenerationRuntime
@@ -363,7 +363,7 @@ class _RouteModel:
         del args, kwargs
         raise AssertionError("structured route should use generate_tokens")
 
-    def audio_output_adapter_batch_select(self, past_key_values, indices):
+    def select_audio_head_cache(self, past_key_values, indices):
         del past_key_values, indices
         return None
 
@@ -452,7 +452,7 @@ class _MixedRouteModel(_RouteModel):
         return GenerationStepResult(
             logits=logits,
             past_key_values=cache,
-            audio_output_past=None,
+            audio_head_past=None,
         )
 
 

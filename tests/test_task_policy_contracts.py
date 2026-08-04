@@ -41,9 +41,9 @@ class TaskPolicyContractTest(unittest.TestCase):
 
         self.assertGreater(counts[ParameterGroup.BACKBONE], 0)
         self.assertFalse(model.backbone.layers[0].weight.requires_grad)
-        self.assertTrue(
-            model.token_embedding.embeddings["audio"].weight.requires_grad
-        )
+        self.assertTrue(model.tokens.audio_embedding.weight.requires_grad)
+        self.assertTrue(model.tokens.audio_head.weight.requires_grad)
+        self.assertTrue(model.source_audio_encoder.weight.requires_grad)
         self.assertTrue(model.acoustic_decoder.head.weight.requires_grad)
         self.assertFalse(model.acoustic_decoder.decoder.embed_tokens.weight.requires_grad)
         self.assertFalse(model.acoustic_decoder.codebook_embeddings[-1].weight.requires_grad)
@@ -63,7 +63,7 @@ class TaskPolicyContractTest(unittest.TestCase):
 
         self.assertIsNotNone(callback.summary)
         self.assertFalse(model.backbone.layers[0].weight.requires_grad)
-        self.assertTrue(model.token_embedding.embeddings["audio"].weight.requires_grad)
+        self.assertTrue(model.tokens.audio_embedding.weight.requires_grad)
 
     def test_partial_qwen_policy_unfreezes_top_layers_and_final_norm(self):
         model = _StageModel()

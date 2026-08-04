@@ -8,6 +8,33 @@ from _contracts_helpers import *
 
 
 class ModelBatchContractTest(unittest.TestCase):
+    def test_model_batch_preserves_typed_input_hints_across_transfer(self):
+        batch = ModelBatch.from_samples([_sample(Task.ASR)], pad_token_id=99)
+        modalities = frozenset({Modality.TEXT, Modality.AUDIO})
+        batch.set_input_hints(
+            modalities,
+            audio_input_positions_validated=True,
+        )
+
+        moved = batch.to(torch.device("cpu"))
+
+        self.assertEqual(moved.input_modalities, modalities)
+        self.assertTrue(moved.audio_input_positions_validated)
+
+    def test_model_batch_rejects_invalid_input_hints(self):
+        batch = ModelBatch.from_samples([_sample(Task.ASR)], pad_token_id=99)
+
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            batch.set_input_hints(
+                frozenset(),
+                audio_input_positions_validated=True,
+            )
+        with self.assertRaisesRegex(TypeError, "Modality values"):
+            batch.set_input_hints(
+                cast(Any, frozenset({"text"})),
+                audio_input_positions_validated=True,
+            )
+
     def test_model_batch_transfer_reuses_validated_unit_metadata(self):
         batch = ModelBatch.from_samples([_sample(Task.ASR)], pad_token_id=99)
         expected = batch.training_units("tokens")

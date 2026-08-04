@@ -1,23 +1,25 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from functools import partial
 
 import torch
 from anytrain.loss import PackedCodebookLogits
-from semantic_acoustic_codec.model import AcousticRVQDecoder, RVQCodeGenerator
+from semantic_acoustic_codec.model import AcousticRVQDecoder
 from semantic_acoustic_codec.runtime.artifact import AcousticGeneratorArtifact
 from torch import Tensor
 
 from ...generation.types import AcousticGeneration
-from ...runtime.types import AcousticCodec, acoustic_codec
-from ..base import Config, Model
+from ...runtime.types import acoustic_codec
+from ..base import Config
 from ..protocol import TokenModelRuntime
 from ._config import DecoderConfig, decoder_options
 from ._codec import code_features
-from .condition import HiddenConditionAdapter
+from .base import AcousticModel
+from .initialization import rvq_generator
 
 
-class RVQModel(Model):
+class RVQModel(AcousticModel):
     """Token model composition with a discrete RVQ acoustic decoder."""
 
     def __init__(
@@ -30,25 +32,18 @@ class RVQModel(Model):
         initialization: AcousticGeneratorArtifact | None = None,
     ) -> None:
         codec = acoustic_codec(runtime.codec)
-        super().__init__(config=config, runtime=runtime)
         options = decoder_options(decoder)
+        generator = rvq_generator(options, initialization)
+        super().__init__(
+            config=config,
+            runtime=runtime,
+            condition_dim=(
+                None if initialization is None else initialization.spec.condition_dim
+            ),
+        )
         sizes = codec.acoustic_codebook_sizes
         backbone_weight = self.backbone.get_input_embeddings().weight
-        condition_dim = self.backbone.config.hidden_size
-        if initialization is not None:
-            generator = initialization.generator
-            if not isinstance(generator, RVQCodeGenerator):
-                raise TypeError("RVQ initialization requires an RVQCodeGenerator artifact.")
-            if not isinstance(generator.core, AcousticRVQDecoder):
-                raise ValueError(
-                    "joint S2S RVQ initialization currently requires the codebook_ar predictor."
-                )
-            _validate_decoder_options(options, initialization)
-            condition_dim = initialization.spec.condition_dim
-        self.acoustic_condition = HiddenConditionAdapter(
-            self.backbone.config.hidden_size,
-            condition_dim,
-        ).to(device=backbone_weight.device, dtype=torch.float32)
+        condition_dim = self.acoustic_condition.condition_dim
         self.acoustic_decoder = AcousticRVQDecoder(
             condition_dim,
             len(sizes),
@@ -59,26 +54,11 @@ class RVQModel(Model):
             heads=options.heads,
             ffn_ratio=options.ffn_ratio,
         ).to(device=backbone_weight.device, dtype=torch.float32)
-        if initialization is not None:
-            generator = initialization.generator
-            if not isinstance(generator, RVQCodeGenerator) or not isinstance(
-                generator.core, AcousticRVQDecoder
-            ):
-                raise AssertionError("RVQ initialization type changed after validation.")
+        if generator is not None:
             self.acoustic_decoder.load_state_dict(generator.core.state_dict())
 
-    @property
-    def acoustic_codec(self) -> AcousticCodec:
-        return acoustic_codec(self.runtime.codec)
-
-    def target_frame_condition(
-        self,
-        hidden_states: Tensor,
-        target_positions: Tensor,
-    ) -> Tensor:
-        return self.acoustic_condition(
-            super().target_frame_condition(hidden_states, target_positions)
-        )
+    def _decoder_module(self) -> AcousticRVQDecoder:
+        return self.acoustic_decoder
 
     def acoustic_logits(
         self,
@@ -167,8 +147,14 @@ class RVQModel(Model):
         do_sample: bool = True,
         use_cache: bool = True,
     ) -> AcousticGeneration:
-        generated, condition, frame_mask = self.generate_audio_condition(
+        sample = partial(
+            self.sample_acoustic_features,
+            temperature=temperature,
+            top_p=top_p,
+        )
+        return self._generate_audio_features(
             prompt_ids,
+            sample=sample,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
@@ -176,34 +162,4 @@ class RVQModel(Model):
             audio_input_positions=audio_input_positions,
             do_sample=do_sample,
             use_cache=use_cache,
-        )
-        condition = self.acoustic_condition(condition)
-        features = self.sample_acoustic_features(
-            condition,
-            mask=frame_mask,
-            temperature=temperature,
-            top_p=top_p,
-        )
-        return AcousticGeneration(
-            sequence=generated,
-            features=features,
-            frame_counts=frame_mask.sum(dim=1),
-        )
-
-    def _decoder_input(self, value: Tensor) -> Tensor:
-        parameter = next(self.acoustic_decoder.parameters())
-        return value.to(dtype=parameter.dtype)
-
-
-def _validate_decoder_options(
-    options: DecoderConfig,
-    initialization: AcousticGeneratorArtifact,
-) -> None:
-    decoder = initialization.spec.decoder
-    expected = (options.hidden_dim, options.layers, options.heads, options.ffn_ratio)
-    actual = (decoder.hidden_dim, decoder.layers, decoder.heads, decoder.ffn_ratio)
-    if expected != actual:
-        raise ValueError(
-            "acoustic decoder config does not match initialization artifact: "
-            f"{expected!r} != {actual!r}."
         )

@@ -13,7 +13,7 @@ from speech_to_speech.generation.rollout import (
     generate_rollouts,
     write_rollouts_jsonl,
 )
-from speech_to_speech.model._generation import GenerationOutput
+from speech_to_speech.model.generation import GenerationOutput
 from speech_to_speech.prediction import PredictionModality
 from speech_to_speech.task import Task
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Optional, Union, cast
 
@@ -11,6 +11,7 @@ from .._compat import StrEnum, auto
 from ._checkpointing import GradientCheckpointingLayer
 from ._helper import (
     MLPAdapter,
+    register,
     safe_transformer_mask,
     tower_fields,
     valid_mask,
@@ -55,6 +56,12 @@ class AudioOutputAdapterConfig:
         )
 
 
+@dataclass(frozen=True)
+class _TransformerCache:
+    layers: tuple[tuple[Tensor, Tensor], ...]
+    attention_mask: Tensor
+
+
 def audio_output_options(
     config: Optional[Union[AudioOutputAdapterConfig, Mapping[str, object]]],
 ) -> AudioOutputAdapterConfig:
@@ -94,6 +101,13 @@ class AudioOutputAdapter(GradientCheckpointingLayer):
         self.config = config
         self.in_features = in_features
         self.out_features = out_features
+        self._dtype_reference: Tensor
+        register(
+            self,
+            "_dtype_reference",
+            torch.empty(0, dtype=torch.float32),
+            persistent=False,
+        )
         self.input_projection: nn.Module = nn.Identity()
         self.layers: nn.ModuleList | None = None
         if config.type is AudioOutputAdapterType.NONE:
@@ -142,6 +156,34 @@ class AudioOutputAdapter(GradientCheckpointingLayer):
         past_key_values: object | None = None,
         use_cache: bool = False,
     ) -> tuple[Tensor, object | None]:
+        self._validate_forward_input(hidden_state, selection_mask)
+        if self.is_pointwise:
+            return self._forward_pointwise(
+                hidden_state,
+                selection_mask=selection_mask,
+                past_key_values=past_key_values,
+            )
+
+        values = hidden_state.to(dtype=self._dtype_reference.dtype)
+        if values.dim() != 3:
+            raise ValueError(
+                "causal audio output transformer requires shape [batch, sequence, hidden]."
+            )
+        values, next_past = self._forward_transformer(
+            values,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+        )
+        if selection_mask is not None:
+            values = values[selection_mask]
+        return values, next_past
+
+    def _validate_forward_input(
+        self,
+        hidden_state: Tensor,
+        selection_mask: Tensor | None,
+    ) -> None:
         if hidden_state.dim() < 2:
             raise ValueError("audio output hidden state must have at least two dimensions.")
         if hidden_state.size(-1) != self.in_features:
@@ -159,30 +201,18 @@ class AudioOutputAdapter(GradientCheckpointingLayer):
                 raise ValueError(
                     "audio output selection mask must be on the hidden-state device."
                 )
-        if self.is_pointwise:
-            if past_key_values is not None:
-                raise ValueError("pointwise audio output adapter does not use cache.")
-            values = (
-                hidden_state
-                if selection_mask is None
-                else hidden_state[selection_mask]
-            ).to(dtype=torch.float32)
-            return self.adapter(values), None
 
-        values = hidden_state.to(dtype=torch.float32)
-        if values.dim() != 3:
-            raise ValueError(
-                "causal audio output transformer requires shape [batch, sequence, hidden]."
-            )
-        values, next_past = self._forward_transformer(
-            values,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-        )
-        if selection_mask is not None:
-            values = values[selection_mask]
-        return values, next_past
+    def _forward_pointwise(
+        self,
+        hidden_state: Tensor,
+        *,
+        selection_mask: Tensor | None,
+        past_key_values: object | None,
+    ) -> tuple[Tensor, None]:
+        if past_key_values is not None:
+            raise ValueError("pointwise audio output adapter does not use cache.")
+        values = hidden_state if selection_mask is None else hidden_state[selection_mask]
+        return self.adapter(values.to(dtype=self._dtype_reference.dtype)), None
 
     def batch_select_past(
         self,
@@ -193,10 +223,13 @@ class AudioOutputAdapter(GradientCheckpointingLayer):
             return None
         if self.is_pointwise:
             raise ValueError("pointwise audio output adapter does not use cache.")
-        layers = cast(Sequence[tuple[Tensor, Tensor]], past_key_values)
-        return tuple(
-            (key.index_select(0, indices), value.index_select(0, indices))
-            for key, value in layers
+        cache = _transformer_cache(past_key_values)
+        return _TransformerCache(
+            layers=tuple(
+                (key.index_select(0, indices), value.index_select(0, indices))
+                for key, value in cache.layers
+            ),
+            attention_mask=cache.attention_mask.index_select(0, indices),
         )
 
     def _forward_transformer(
@@ -210,18 +243,25 @@ class AudioOutputAdapter(GradientCheckpointingLayer):
         assert self.layers is not None
         values = self.input_projection(hidden_state)
         valid = valid_mask(values, attention_mask, name="audio output")
-        past_layers = cast(
-            Optional[Sequence[tuple[Tensor, Tensor]]],
-            past_key_values,
+        past = (
+            None
+            if past_key_values is None
+            else _transformer_cache(past_key_values)
         )
+        past_layers = None if past is None else past.layers
         if past_layers is not None and len(past_layers) != len(self.layers):
             raise ValueError("audio output cache depth does not match adapter layers.")
+        if past is not None and values.size(1) != 1:
+            raise ValueError(
+                "cached audio output transformer continuation requires one token."
+            )
+        full_mask = valid if past is None else _extend_cache_mask(past, valid)
         next_past: list[tuple[Tensor, Tensor]] = []
         for index, layer in enumerate(self.layers):
             layer_past = None if past_layers is None else past_layers[index]
             values, layer_cache = layer(
                 values,
-                attention_mask=valid,
+                attention_mask=full_mask,
                 past_key_value=layer_past,
                 use_cache=use_cache,
             )
@@ -230,7 +270,12 @@ class AudioOutputAdapter(GradientCheckpointingLayer):
                     raise RuntimeError("causal audio output layer did not return cache.")
                 next_past.append(layer_cache)
         values = values.masked_fill(~valid[..., None], 0)
-        return values, tuple(next_past) if use_cache else None
+        cache = (
+            _TransformerCache(tuple(next_past), full_mask)
+            if use_cache
+            else None
+        )
+        return values, cache
 
 
 class _CausalTransformerLayer(nn.Module):
@@ -273,7 +318,6 @@ class _CausalTransformerLayer(nn.Module):
         if past_key_value is None:
             key = query
             value = query
-            key_padding_mask = ~safe_transformer_mask(attention_mask)
             attn_mask = torch.ones(
                 query.size(1),
                 query.size(1),
@@ -284,16 +328,8 @@ class _CausalTransformerLayer(nn.Module):
             past_key, past_value = past_key_value
             key = torch.cat((past_key, query), dim=1)
             value = torch.cat((past_value, query), dim=1)
-            past_len = past_key.size(1)
-            full_mask = torch.cat(
-                (
-                    attention_mask.new_ones(attention_mask.size(0), past_len),
-                    attention_mask,
-                ),
-                dim=1,
-            )
-            key_padding_mask = ~safe_transformer_mask(full_mask)
             attn_mask = None
+        key_padding_mask = ~safe_transformer_mask(attention_mask)
         attended, _ = self.attention(
             query,
             key,
@@ -307,6 +343,26 @@ class _CausalTransformerLayer(nn.Module):
         hidden_state = hidden_state + self.ffn(self.norm2(hidden_state))
         cache = (key, value) if use_cache else None
         return hidden_state, cache
+
+
+def _transformer_cache(value: object) -> _TransformerCache:
+    if not isinstance(value, _TransformerCache):
+        raise TypeError("audio output transformer cache has an incompatible type.")
+    return value
+
+
+def _extend_cache_mask(cache: _TransformerCache, current: Tensor) -> Tensor:
+    previous = cache.attention_mask
+    if previous.dtype is not torch.bool:
+        raise TypeError("audio output transformer cache mask must be boolean.")
+    if previous.device != current.device:
+        raise ValueError("audio output transformer cache mask must be on the input device.")
+    past_length = cache.layers[0][0].size(1)
+    if previous.shape != (current.size(0), past_length):
+        raise ValueError(
+            "audio output transformer cache mask must align with cached keys."
+        )
+    return torch.cat((previous, current), dim=1)
 
 
 def create_audio_output_adapter(

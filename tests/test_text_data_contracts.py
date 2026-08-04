@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from _contracts_helpers import *
+from speech_to_speech.loader_plan import ARFraming
 
 
 class TextDataContractTest(unittest.TestCase):
@@ -46,6 +47,37 @@ class TextDataContractTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "text-only"):
             TextCollator(runtime, {Task.TTS: 1.0})
+
+    def test_text_ar_pretraining_collator_uses_bos_without_chat_template(self):
+        tokenizer = _ChatTokenizer(32)
+        tokenizer.bos_token_id = 3
+        tokenizer.apply_chat_template = Mock(
+            side_effect=AssertionError("pretraining must not render chat prompts")
+        )
+        runtime = SimpleNamespace(
+            text_tokenizer=tokenizer,
+            layout=Layout(text=(0, 32), audio=(32, 36)),
+            pad_token_id=0,
+            eos_token_id=31,
+        )
+
+        batch = TextCollator(
+            runtime,
+            {Task.TEXT_AR: 1.0},
+            ar_framing=ARFraming.PRETRAINING,
+        )([_raw_text_sample()])
+
+        self.assertEqual(batch.tasks, [Task.TEXT_AR])
+        self.assertEqual(int(batch.generation_prompt_lengths[0]), 1)
+        self.assertEqual(int(batch.input_ids[0, 0]), tokenizer.bos_token_id)
+        self.assertEqual(int(batch.token_labels[0, 0]), -100)
+        self.assertTrue(
+            torch.equal(
+                batch.token_labels[0, 1:],
+                torch.tensor([1, 2, runtime.eos_token_id]),
+            )
+        )
+        tokenizer.apply_chat_template.assert_not_called()
 
     @patch("anydataset.presets.WMT19")
     def test_text_dataset_config_loads_anydataset_wmt19(self, wmt19):

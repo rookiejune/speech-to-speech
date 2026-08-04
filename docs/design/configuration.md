@@ -120,8 +120,8 @@ Hydra metadata 与 `metrics.json` 写入 `output_dir`；TensorBoard/CSV logger �
 `trainer=staged_ddp`，要求
 `ddp_find_unused_parameters_true`，并约束 `loader_plan.accumulate_grad_batches == 非零 loader 数量`。
 入口拒绝 serial mode 与 DDP unused-parameter 策略不一致的组合。`weighted_window` 中
-`loader_plan.loaders.<name>.weight` 是 sampling weight；两个 joint mode 中每个 loader 固定执行一次，
-同一字段改为归一化 task loss weight。
+`loader_plan.loaders.<name>.weight` 是 sampling weight；`token_weighted` 把它解释为长期监督
+token 比例；两个 joint mode 中每个 loader 固定执行一次，同一字段改为归一化 task loss weight。
 
 完整链路实验分别负责其 composition、数据范围、trainer、callback 和 step budget：
 

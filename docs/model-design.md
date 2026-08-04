@@ -136,6 +136,10 @@ padding 与 mask：
   audio 时该字段为 `None`。
 - 同一 batch 的样本必须具有相同 `(source_layout, prediction)` 执行签名（有效 prediction，含 loader override）。
 
+训练入口可在 CPU 上调用 model 的 `training_input_hints()` 一次完成 global ID 路由与 source
+position 校验，再由 `ModelBatch.set_input_hints()` 保存严格类型的 `frozenset[Modality]` 和位置已校验
+标记；device transfer 保留这些提示。下游只消费该有类型契约，不传字符串 block name。
+
 真实推理使用 `generation.Request`；训练 bridge 从 batch 还原 Request，不使用缺 target 的半成品 batch。
 
 ### 2.4 Position 语义
@@ -212,11 +216,12 @@ Runtime 聚合互相兼容的 backbone、text/audio tokenizer、codec、layout�
 
 ## 5. Model 与 Objective
 
-`model.Config` 配置 token backbone 周边的 idspace embedding、semantic-audio input/output
-adapter，以及可选的 source-audio input tower。输入侧用 `anytrain.module.idspace.Embedding`
-统一 text/audio lookup 与 audio→hidden adapter；text/audio logits 严格 tied 到对应 block
-embedding weight。semantic-audio output adapter 是因果族：`none` / `linear` / `mlp` 为无序列
-混合特例，`transformer` 带独立 KV cache；acoustic composition 使用独立结构：
+`model.Config` 配置 token backbone 周边的 semantic-audio input/output adapter，以及可选的
+source-audio input tower。backbone 独占完整 text `nn.Embedding`；`Model.tokens` 是 S2S-local
+`TokenInterface`，注册 `audio_embedding`、`audio_projection` 和 `audio_head`，lookup 与 logits 时
+显式接收 backbone text embedding。`Model.source_audio_encoder` 独立注册，不属于 token interface。
+semantic-audio output adapter 是因果族：`none` / `linear` / `mlp` 为无序列混合特例，
+`transformer` 带独立 KV cache；acoustic composition 使用独立结构：
 
 ```python
 @dataclass(frozen=True)
@@ -249,7 +254,7 @@ Phase A: semantic codes -> SAC conditioner -> acoustic generator pretraining
 Phase B: aligned backbone hidden state -> HiddenConditionAdapter -> initialized generator joint training
 ```
 
-Phase A 由 `semantic-acoustic-codec` 拥有。Phase B 通过 `model.acoustic.init_artifact` 加载 SAC 的
+Phase A 由仓库外的 `semantic-acoustic-codec` 拥有。Phase B 通过 `model.acoustic.init_artifact` 加载 SAC 的
 `AcousticGeneratorArtifact`，只迁移 generator 权重和其 condition/acoustic contract；SAC semantic/reference
 conditioner 不进入 S2S model。artifact I/O、route/backend/config 校验由 `pl_module.composition` 持有，
 `FlowModel`/`RVQModel` 构造器只接收已加载对象，不读取路径。
@@ -269,23 +274,38 @@ token embedding 与 source-audio input tower 的数据流是：
 
 ```text
 global input_ids
-    -> idspace.Embedding (text + audio + adapters["audio"])
-    -> AudioInputTower overlay at audio_input_positions (none | mlp | non-causal transformer)
+    -> Model.tokens / TokenInterface
+         text -> backbone.get_input_embeddings()
+         audio -> tokens.audio_embedding -> tokens.audio_projection
+    -> source_audio_encoder overlay at audio_input_positions (none | mlp | causal transformer)
     -> Qwen backbone
-    -> AudioOutputAdapter (none | linear | mlp | causal transformer)
-    -> tied text/audio logits
+    -> backbone text embedding tied logits
+       or tokens.audio_head (none | linear | mlp | causal transformer) -> tied audio logits
 ```
 
-Stable / FSQ（`semantic_feature_dim == 1` 且 codec 暴露 `fsq_levels`）在 audio block 使用
-embedding 侧 unpack：序列仍是 product id，表示是 `Σ_j (b_j + q̃_j w_j)`，**默认维对齐
-backbone hidden**；tokenizer 不展开 per-dim tokens。`semantic_feature_dim == 1` 只标记 FSQ
-内在标量维。
+输入路由只接受 `frozenset[Modality]`。未提供 hint 时，`TokenInterface` 校验 global IDs 并推导精确
+模态集合；跳过校验时必须提供已验证 hint。backbone 的完整 text embedding 始终只有一条注册路径，
+TokenInterface 不持有 text module、不修改 HF 私有 module tree，也不创建 embedding proxy。
 
-`mlp` input tower 是逐帧 gated projection；`transformer` input tower 是保持帧数的非 causal
+Stable / FSQ（`semantic_feature_dim == 1` 且 codec 暴露 `fsq_levels`）在 audio block 使用
+embedding 侧 unpack：序列仍是 product id，表示是 `b + Σ_j q̃_j w_j`，**默认维对齐
+backbone hidden**。lookup 与 selected logits 只计算请求的 `rows()`；完整 raw/identity-space logits
+按 FSQ 因子分解计算，不物化全 vocabulary table。`.weight` 仅作为兼容接口和通用 projection
+fallback。tokenizer 不展开 per-dim tokens；`semantic_feature_dim == 1` 只标记 FSQ 内在标量维。
+FSQ state dict 持久化 stage/codebook/levels topology；strict load 拒绝缺失 topology，或参数 shape
+相同但 topology 不同的 checkpoint。
+
+`mlp` input tower 是逐帧 gated projection；`transformer` input tower 是保持帧数的 causal
 encoder。tower 只服务输入表示，不能读取或修改生成中的新 token，也不参与 output adapter、
 Flow/RVQ decoder 或 audio response grammar。显式位置由 datamodule/sample builder 和 generation
-request 传递；没有 source audio 时为 `None`。旧 `semantic_audio_*` checkpoint key 与
-`token_embedding.*` 不兼容，strict resume 显式失败。
+request 传递；没有 source audio 时为 `None`。overlay 位置先完成 shape、范围、重复项与 codec
+payload 校验，再生成 override mask；这些位置跳过普通 `audio_projection`，直接取稀疏 raw audio
+rows，经 `source_audio_encoder` 后写回。
+
+Lightning checkpoint 必须声明 `speech_to_speech_model_schema: v3`。v3 只接受当前 ownership
+路径：`backbone.*`、`tokens.audio_embedding.*`、`tokens.audio_projection.*`、
+`tokens.audio_head.*`、`source_audio_encoder.*` 与 Flow/RVQ 自身参数。text table 只出现在
+backbone 原生路径；model 与 FSQ 层均不做旧 key remap，旧 checkpoint 直接失败。
 
 model 的训练能力是：
 
@@ -330,9 +350,11 @@ model 对外提供：
 - `generate_audio_features()`：flow/RVQ 组合返回 sequence、padded codec acoustic features 与
   每行有效 frame count。
 
-通用 `generate_sequence()` 自回归循环位于私有 `model/_generation.py`，具体模型不跨文件调用
+通用自回归循环由 `model/generation.py` 的 `GenerationEngine` 持有，具体模型不跨文件调用
 基类私有方法。循环首步编码完整多模态 prompt，后续复用 KV cache；输入与 cache 保留完整 batch 轴，
-已结束行通过 device mask 屏蔽，只有 active rows 参与随机 sampling。cache 只属于单次调用。
+已结束行通过 device mask 屏蔽，只有 active rows 参与随机 sampling。transformer audio head 首步用
+完整 hidden 建立独立 KV cache，后续只接收当前 token hidden；该 cache 同时累计 boolean attention
+mask，保留左 padding 语义。cache 只属于单次调用。
 
 当前 generation 只接收已经映射到 layout global ID 空间的 semantic-token prompt；audio-source
 内容和 text-source 内容都编码在 `Request.prompt_ids` 中。audio-source request 可额外携带
@@ -366,7 +388,8 @@ collate 时读取；worker 侧 runtime 是不含 backbone/codec 的数据快照�
 正，以保证每个子 batch 的执行签名稳定。正式 joint loader 以 task 为最小调度单元：
 `fused_joint` 与 `serial_joint` 下每个 loader 必须且只能包含一个非零 task，避免 TTS/ASR
 这类输入输出 head 相反的任务在单个 microbatch 内隐式混合。`weighted_window` 下 loader weight 控制
-进入 accumulation window 的数据频率；`fused_joint` 与 `serial_joint` 下每个 loader 每个 optimizer
+进入 accumulation window 的数据频率；`token_weighted` 按实际监督 token 的累计 deficit 调度，适合
+文本和音频序列长度差异较大的预训练；`fused_joint` 与 `serial_joint` 下每个 loader 每个 optimizer
 step 固定执行一次，因此 loader weight 改为 task loss weight。joint weight 先按所有正权重 loader
 归一化；fused loss 直接计算加权和，serial microbatch 额外乘 loader 数量，以抵消 Lightning 对
 `accumulate_grad_batches` 的平均缩放，二者得到相同的 optimizer-step gradient。每个 microbatch
@@ -385,10 +408,19 @@ window batch，module 在一次 `training_step()` 内按 loader 顺序 forward�
 `trainer=staged_ddp` / `ddp_find_unused_parameters_true`。独立的
 `callbacks.parameter_policy` 显式声明可训练参数组、
 冻结参数组和 `backbone_top_fraction`，入口在 Trainer 创建前应用一次。正式
-`experiment=train/staged_joint/stage_1..4` 当前约定
-Stage 1 使用 LoRA policy，Stage 2 使用 speech-interface policy，Stage 3 解冻 Qwen 顶部 1/3 block 与 final norm，
-Stage 4 使用 full policy；experiment 文件显式选择 policy。RVQ decoder 的结构性冻结参数始终保持
+`experiment=train/staged_joint/stage_0..3` 当前约定：Stage 0 使用 LoRA policy，Stage 1 使用
+speech-interface policy，Stage 2 解冻 Qwen 顶部 1/3 block 与 final norm，Stage 3 使用 full
+policy；experiment 文件显式选择 policy。Stage 0 以 TTS/MT `0.9/0.1` 建立语音输出并保持文本翻译；
+Stage 1 以 ASR/TTS/MT `0.45/0.45/0.1` 建立三级级联；Stage 2 以
+ASR/S2TT/TTS/T2ST/MT `0.225/0.225/0.225/0.225/0.1` 建立跨模态分解能力；Stage 3 以
+S2ST `0.7` 为主，ASR/S2TT/TTS/T2ST 各 `0.05`、MT `0.1` 作为能力保持和分解监督。
+这些 joint-mode weight 是 loss 系数，不是 sampling probability。RVQ decoder 的结构性冻结参数始终保持
 frozen。
+
+跨 stage handoff 与同 stage resume 是两个契约。`train.ckpt_path` 只恢复相同模型拓扑和 optimizer
+参数组的 Lightning run；Stage 0 到 Stage 1 需要先把 PEFT LoRA merge/export 成无 LoRA 的模型权重，
+其余参数策略切换也需要仅加载模型权重并重新创建 optimizer。该 weight-only handoff 尚未实现，不能用
+`train.ckpt_path` 直接替代。
 
 需要参数高效适配时，`model.lora` 直接持有 Hugging Face `peft.LoraConfig`，通过
 `+model/lora@model.lora=qwen callback/parameter_policy=lora` 成对选择；项目不维护本地 LoRA config、layer 或注入
@@ -396,9 +428,10 @@ facade。PEFT 决定 backbone 内 trainable 参数，speech/acoustic interface �
 LoRA 的正式文本保真度先由固定
 `TextRetentionLogger` baseline 验证。
 
-这里的 `staged_joint/stage_1..4` 只表示 S2S 数据、任务和参数策略里程碑，不是上文 Phase A/B。SAC generator pretraining
-在进入任一使用 `model.acoustic.init_artifact` 的 S2S experiment 之前独立完成；S2S train experiment 不在运行中创建或
-替换 SAC artifact。
+这里的 `staged_joint/stage_0..3` 只表示 S2S 数据、任务和参数策略里程碑，不是上文 Phase A/B。
+SAC generator pretraining 在仓库外独立完成；进入使用 Flow/RVQ 的正式 S2S experiment 前，通过
+`model.acoustic.init_artifact` 显式传入导出产物。S2S train experiment 不在运行中创建、替换或
+回退到其他 codec 训练入口。
 
 正式 train 只在配置了独立 speech validation spec 时让 `val_dataloader()` 返回真实 loader；
 没有 spec 时返回空 iterable，text train loader 不被复用为 validation。teacher-forcing 指标由 loss 层的

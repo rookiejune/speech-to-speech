@@ -9,7 +9,7 @@ import torch
 from anydataset.types import Modality
 from torch import Tensor
 
-from ..model._generation import GenerationOutput
+from ..model.generation import GenerationOutput
 from ..prediction import PredictionModality
 from ._request import prediction_of, validate
 from .types import Request

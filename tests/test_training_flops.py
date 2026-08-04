@@ -3,12 +3,14 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import patch
 
 import torch
 from anytrain.module.idspace import Layout
 from lightning import pytorch as pl
 from lightning.fabric.utilities.throughput import measure_flops
 from torch import Tensor, nn
+from transformers import Qwen3Model
 
 from speech_to_speech._flops import (
     adapter,
@@ -34,6 +36,8 @@ from speech_to_speech.model import (
 from speech_to_speech.model.acoustic import DecoderConfig
 from speech_to_speech.model.acoustic.flow import FlowModel
 from speech_to_speech.model.acoustic.rvq import RVQModel
+from speech_to_speech.model.embedding.audio import SemanticAudioEmbedding
+from speech_to_speech.model.embedding.fsq import FsqAffineEmbedding
 from speech_to_speech.performance import TrainingFlops
 from speech_to_speech.pl_module import Config as ModuleConfig, SpeechToSpeechModule
 from speech_to_speech.prediction import PredictionModality
@@ -83,9 +87,9 @@ class TrainingFlopsTest(unittest.TestCase):
         )
         self.assertGreater(_flops(module, batch), _flops(module, fewer_labels))
 
-    def test_text_head_counts_only_the_layout_slice(self):
+    def test_text_head_counts_only_the_layout_slice_without_lm_head(self):
         model = _token_model()
-        model.backbone.lm_head = nn.Linear(4, 9, bias=False)
+        self.assertFalse(hasattr(model.backbone, "lm_head"))
         module = _module(model, TokenObjective(_layout()))
         batch = _batch(
             input_ids=torch.tensor([[1, 2, 3, 4], [1, 2, 0, 0]]),
@@ -147,7 +151,7 @@ class TrainingFlopsTest(unittest.TestCase):
             )
             model = _token_model(_model_config(audio_input_adapter=config))
             module = _module(model, TokenObjective(_layout()))
-            tower = model.audio_input_adapter
+            tower = model.source_audio_encoder
             if tower is None:
                 self.fail("audio input tower was not created")
             expected = _token_expected(model, batch) + 3 * audio_input_tower(
@@ -164,6 +168,51 @@ class TrainingFlopsTest(unittest.TestCase):
             )
             baseline = _token_expected(model, without_positions)
             self.assertEqual(_flops(module, without_positions), baseline)
+
+    def test_fsq_source_overlay_skips_input_projection_but_keeps_raw_rows(self):
+        positions = torch.tensor([[1, 2], [1, -1]])
+        batch = _batch(
+            input_ids=torch.tensor([[1, 7, 8, 2], [1, 9, 0, 0]]),
+            labels=torch.tensor([[-100, 7, 8, -100], [-100, 9, -100, -100]]),
+            tasks=[Task.TTS, Task.TTS],
+            audio_input_positions=positions,
+        )
+        model = _token_model(
+            _model_config(
+                semantic_audio_adapter=AdapterType.MLP,
+                audio_input_adapter=AudioInputAdapterConfig(
+                    type=AudioInputAdapterType.MLP,
+                ),
+            ),
+            runtime=_FsqRuntime(),
+        )
+        module = _module(model, TokenObjective(_layout()))
+        tower = model.source_audio_encoder
+        if tower is None:
+            self.fail("source audio encoder was not created")
+        tower_flops = 3 * audio_input_tower(
+            tower,
+            batch=positions.size(0),
+            frames=positions.size(1),
+        )
+        expected = _token_expected(model, batch) + tower_flops
+        embedding = cast(FsqAffineEmbedding, model.tokens.audio_embedding)
+
+        with patch.object(
+            embedding,
+            "_materialize",
+            side_effect=AssertionError("FSQ table must remain factorized"),
+        ):
+            measured = _flops(module, batch)
+            self.assertEqual(measured, expected)
+
+            without_positions = _batch(
+                input_ids=batch.input_ids,
+                labels=batch.token_labels,
+                tasks=batch.tasks,
+            )
+            baseline = _flops(module, without_positions)
+        self.assertLess(measured - tower_flops, baseline)
 
     def test_explicit_audio_output_adapter_is_counted(self):
         batch = _batch(
@@ -182,6 +231,40 @@ class TrainingFlopsTest(unittest.TestCase):
             expected = _token_expected(model, batch)
             self.assertEqual(_flops(module, batch), expected)
 
+    def test_fsq_counts_factorized_rows_and_logits_without_materializing(self):
+        batch = _batch(
+            input_ids=torch.tensor([[1, 7, 8, 2], [1, 9, 0, 0]]),
+            labels=torch.tensor([[-100, 7, 8, -100], [-100, 9, -100, -100]]),
+            tasks=[Task.TTS, Task.TTS],
+        )
+        for adapter_type in (
+            AudioOutputAdapterType.NONE,
+            AudioOutputAdapterType.MLP,
+        ):
+            with self.subTest(adapter_type=adapter_type):
+                model = _token_model(
+                    _model_config(
+                        audio_output_adapter=AudioOutputAdapterConfig(
+                            type=adapter_type
+                        )
+                    ),
+                    runtime=_FsqRuntime(),
+                )
+                module = _module(model, TokenObjective(_layout()))
+                embedding = cast(
+                    SemanticAudioEmbedding,
+                    model.tokens.audio_embedding,
+                )
+                self.assertIs(type(embedding), FsqAffineEmbedding)
+                expected = _token_expected(model, batch)
+
+                with patch.object(
+                    cast(FsqAffineEmbedding, embedding),
+                    "_materialize",
+                    side_effect=AssertionError("FSQ table must remain factorized"),
+                ):
+                    self.assertEqual(_flops(module, batch), expected)
+
     def test_flow_uses_padded_target_frames(self):
         model = _flow_model()
         module = _module(model, FlowObjective(_layout(), _flow_runtime()))
@@ -199,11 +282,17 @@ class TrainingFlopsTest(unittest.TestCase):
             tasks=sparse.tasks,
             acoustic_target=_target(torch.ones((2, 3), dtype=torch.bool)),
         )
+        acoustic_mask = sparse.acoustic_target_mask
+        if acoustic_mask is None:
+            self.fail("acoustic target mask was not created")
         expected = _token_expected(model, sparse) + 3 * flow_decoder(
             model.acoustic_decoder,
             batch=2,
             frames=3,
-        ) + 3 * linear(model.acoustic_condition.projection, sparse.acoustic_target_mask.numel())
+        ) + 3 * linear(
+            model.acoustic_condition.projection,
+            acoustic_mask.numel(),
+        )
         self.assertEqual(_flops(module, sparse), expected)
         self.assertEqual(_flops(module, dense), _flops(module, sparse))
 
@@ -249,11 +338,11 @@ class TrainingFlopsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "outputs do not match"):
             _flops(module, batch, outputs={"loss": torch.tensor(1.0)})
 
-        model.backbone.config._attn_implementation = "sdpa"
+        cast(Any, model.backbone.config)._attn_implementation = "sdpa"
         with self.assertRaisesRegex(ValueError, "FlashAttention 2"):
             _flops(module, batch)
 
-        model.backbone.config._attn_implementation = "flash_attention_2"
+        cast(Any, model.backbone.config)._attn_implementation = "flash_attention_2"
         next(
             parameter for parameter in model.parameters() if parameter.requires_grad
         ).requires_grad_(False)
@@ -334,13 +423,39 @@ class _Runtime:
     flow_matching = _flow_runtime()
 
 
+class _FsqTokenizer(_Tokenizer):
+    codebook_sizes = (3,)
+
+
+class _FsqCodec:
+    sample_rate = 16_000
+    frame_rate = 50.0
+    acoustic_feature_dim = 4
+    acoustic_codebook_sizes = (5, 6)
+    semantic_feature_dim = 1
+    codebook_sizes = (3,)
+    fsq_levels = ((3,),)
+
+    def acoustic_codes_to_features(self, codes: Tensor) -> Tensor:
+        return codes[..., :1].float().expand(*codes.shape[:-1], 4)
+
+    def decode_features(self, semantic: Tensor, acoustic: Tensor) -> Tensor:
+        return semantic[..., :1].float() + acoustic[..., :1]
+
+
+class _FsqRuntime(_Runtime):
+    codec = _FsqCodec()
+    audio_tokenizer = _FsqTokenizer()
+
+
 def _model_config(
     *,
+    semantic_audio_adapter: AdapterType = AdapterType.LINEAR,
     audio_input_adapter: AudioInputAdapterConfig | None = None,
     audio_output_adapter: AudioOutputAdapterConfig | None = None,
 ) -> ModelConfig:
     return ModelConfig(
-        semantic_audio_adapter=AdapterType.LINEAR,
+        semantic_audio_adapter=semantic_audio_adapter,
         audio_input_adapter=audio_input_adapter or AudioInputAdapterConfig(),
         audio_output_adapter=audio_output_adapter
         or AudioOutputAdapterConfig(),
@@ -354,9 +469,14 @@ def _model_config(
     )
 
 
-def _token_model(config: ModelConfig | None = None) -> Model:
-    model = Model(config or _model_config(), runtime=cast(Any, _Runtime()))
-    model.backbone.config._attn_implementation = "flash_attention_2"
+def _token_model(
+    config: ModelConfig | None = None,
+    *,
+    runtime: object | None = None,
+) -> Model:
+    runtime = _Runtime() if runtime is None else runtime
+    model = Model(config or _model_config(), runtime=cast(Any, runtime))
+    cast(Any, model.backbone.config)._attn_implementation = "flash_attention_2"
     return model
 
 
@@ -366,7 +486,7 @@ def _flow_model() -> FlowModel:
         runtime=cast(Any, _Runtime()),
         decoder=DecoderConfig(hidden_dim=4, layers=1, heads=1, ffn_ratio=2),
     )
-    model.backbone.config._attn_implementation = "flash_attention_2"
+    cast(Any, model.backbone.config)._attn_implementation = "flash_attention_2"
     return model
 
 
@@ -376,7 +496,7 @@ def _rvq_model() -> RVQModel:
         runtime=cast(Any, _Runtime()),
         decoder=DecoderConfig(hidden_dim=4, layers=1, heads=1, ffn_ratio=2),
     )
-    model.backbone.config._attn_implementation = "flash_attention_2"
+    cast(Any, model.backbone.config)._attn_implementation = "flash_attention_2"
     return model
 
 
@@ -426,15 +546,49 @@ def _target(mask: Tensor) -> AcousticTarget:
 
 
 def _token_expected(model: Model, batch: ModelBatch) -> int:
-    core = model.backbone.base_model
+    core = cast(Qwen3Model, model.backbone.base_model)
     input_ids = batch.input_ids
     hidden = core.config.hidden_size
-    embedding = model.token_embedding.embeddings["audio"]
+    embedding = cast(
+        SemanticAudioEmbedding,
+        model.tokens.audio_embedding,
+    )
     audio_start, audio_end = model.layout.blocks["audio"]
-    rows = int((input_ids.ge(audio_start) & input_ids.lt(audio_end)).sum())
-    audio_adapter = model.token_embedding.adapters["audio"]
-    forward = adapter(
-        getattr(audio_adapter, "module", audio_adapter),
+    audio_mask = input_ids.ge(audio_start) & input_ids.lt(audio_end)
+    projected_audio_mask = audio_mask
+    local_audio_ids = input_ids[audio_mask] - audio_start
+    positions = batch.audio_input_positions
+    if model.source_audio_encoder is not None and positions is not None:
+        if positions.size(1) > 0:
+            valid_positions = positions.ge(0)
+            safe_positions = positions.clamp(0, input_ids.size(1) - 1)
+            override = torch.zeros_like(audio_mask)
+            batch_indices = torch.arange(
+                input_ids.size(0),
+                device=input_ids.device,
+            )[:, None]
+            batch_indices = batch_indices.expand_as(safe_positions)
+            override[
+                batch_indices[valid_positions],
+                safe_positions[valid_positions],
+            ] = True
+            projected_audio_mask = audio_mask & ~override
+            selected_ids = input_ids.gather(1, safe_positions)
+            overlay_ids = (selected_ids - audio_start).clamp(
+                0,
+                embedding.num_embeddings - 1,
+            )
+            local_audio_ids = torch.cat(
+                (
+                    input_ids[projected_audio_mask] - audio_start,
+                    overlay_ids.flatten(),
+                )
+            )
+    rows = int(projected_audio_mask.sum())
+    forward = _expected_audio_rows(embedding, local_audio_ids)
+    audio_projection = model.tokens.audio_projection.module
+    forward += adapter(
+        audio_projection,
         rows=rows,
         in_features=embedding.embedding_dim,
         out_features=hidden,
@@ -449,29 +603,75 @@ def _token_expected(model: Model, batch: ModelBatch) -> int:
     valid = batch.token_labels[:, 1:].ne(-100)
     count = int(valid.sum())
     modality = batch.tasks[0].target_modality
+    if modality is None:
+        raise ValueError("test FLOPs expectation requires one target modality.")
     start, end = model.layout.blocks[modality.value]
     if modality.value == "audio":
-        if model.audio_output_adapter.config.type is AudioOutputAdapterType.NONE:
-            forward += adapter(
-                getattr(audio_adapter, "module", audio_adapter),
-                rows=embedding.num_embeddings,
-                in_features=embedding.embedding_dim,
-                out_features=hidden,
-                name="test tied audio head",
-            )
-            forward += 2 * count * hidden * embedding.num_embeddings
+        if model.tokens.audio_head.config.type is AudioOutputAdapterType.NONE:
+            if type(embedding) is FsqAffineEmbedding and type(audio_projection) is nn.Identity:
+                forward += _expected_fsq_logits(embedding, rows=count)
+            else:
+                forward += _expected_audio_table(embedding)
+                forward += adapter(
+                    audio_projection,
+                    rows=embedding.num_embeddings,
+                    in_features=embedding.embedding_dim,
+                    out_features=hidden,
+                    name="test tied audio head",
+                )
+                forward += 2 * count * hidden * embedding.num_embeddings
         else:
             forward += adapter(
-                model.audio_output_adapter,
+                model.tokens.audio_head,
                 rows=count,
                 in_features=hidden,
                 out_features=embedding.embedding_dim,
                 name="test output",
             )
-            forward += 2 * count * embedding.embedding_dim * embedding.num_embeddings
+            if type(embedding) is FsqAffineEmbedding:
+                forward += _expected_fsq_logits(embedding, rows=count)
+            else:
+                forward += (
+                    2 * count * embedding.embedding_dim * embedding.num_embeddings
+                )
     else:
         forward += 2 * count * hidden * (end - start)
     return 3 * forward
+
+
+def _expected_audio_rows(
+    embedding: SemanticAudioEmbedding,
+    local_ids: Tensor,
+) -> int:
+    if type(embedding) is not FsqAffineEmbedding:
+        return 0
+    total = 0
+    start = 0
+    for size, levels in zip(embedding.codebook_sizes, embedding.fsq_levels):
+        rows = int((local_ids.ge(start) & local_ids.lt(start + size)).sum())
+        total += 2 * rows * len(levels) * embedding.embedding_dim
+        start += size
+    return total
+
+
+def _expected_audio_table(embedding: SemanticAudioEmbedding) -> int:
+    if type(embedding) is not FsqAffineEmbedding:
+        return 0
+    return sum(
+        2 * size * len(levels) * embedding.embedding_dim
+        for size, levels in zip(embedding.codebook_sizes, embedding.fsq_levels)
+    )
+
+
+def _expected_fsq_logits(embedding: FsqAffineEmbedding, *, rows: int) -> int:
+    features = embedding.embedding_dim
+    total = 0
+    for size, levels in zip(embedding.codebook_sizes, embedding.fsq_levels):
+        width = len(levels)
+        total += 2 * rows * features * (width + 1)
+        total += 2 * rows * width * size
+    free = embedding.num_embeddings - sum(embedding.codebook_sizes)
+    return total + 2 * rows * features * free
 
 
 def _outputs(*, acoustic: str | None = None) -> dict[str, Any]:

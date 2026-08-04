@@ -138,38 +138,27 @@ def require_embedding(value: object, name: str) -> nn.Embedding:
     return value
 
 
-class EmbeddingView:
-    """Reference an embedding for backbone APIs without taking Module ownership."""
-
-    def __init__(self, embedding: nn.Embedding) -> None:
-        self._embedding = embedding
-
-    @property
-    def weight(self) -> torch.Tensor:
-        return self._embedding.weight
-
-    @property
-    def num_embeddings(self) -> int:
-        return self._embedding.num_embeddings
-
-    @property
-    def embedding_dim(self) -> int:
-        return self._embedding.embedding_dim
-
-    def __call__(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self._embedding(input_ids)
-
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self._embedding(input_ids)
-
-
 class CastOutput(GradientCheckpointingLayer):
-    """Cast adapter outputs to the backbone embedding dtype at the idspace boundary."""
+    """Cast adapter outputs to the current backbone dtype at the idspace boundary."""
 
-    def __init__(self, module: nn.Module, *, dtype: torch.dtype) -> None:
+    def __init__(self, module: nn.Module, *, reference: Tensor) -> None:
         super().__init__()
         self.module = module
-        self._dtype = dtype
+        parameter = next(module.parameters(), None)
+        compute_reference = (
+            reference.detach().new_empty(0, dtype=torch.float32)
+            if parameter is None
+            else parameter.detach().new_empty(0)
+        )
+        self._compute_reference: Tensor
+        self._output_reference: Tensor
+        register(self, "_compute_reference", compute_reference, persistent=False)
+        register(
+            self,
+            "_output_reference",
+            reference.detach().new_empty(0),
+            persistent=False,
+        )
 
     def forward(
         self,
@@ -177,7 +166,7 @@ class CastOutput(GradientCheckpointingLayer):
         *,
         cast_output: bool = True,
     ) -> torch.Tensor:
-        output = self.module(values)
+        output = self.module(values.to(dtype=self._compute_reference.dtype))
         if cast_output:
-            output = output.to(dtype=self._dtype)
+            output = output.to(dtype=self._output_reference.dtype)
         return output

@@ -48,7 +48,8 @@ class _MixedLoopState:
     states: Tensor
     active_mask: Tensor
     past: Cache | None = None
-    audio_past: object | None = None
+    audio_head_past: object | None = None
+    input_validated: bool = False
 
     @property
     def batch_size(self) -> int:
@@ -198,21 +199,31 @@ def _mixed_logits(
     temperature: float,
     use_cache: bool,
 ) -> Tensor:
+    validate_input = not state.input_validated
     output = model.generation_step(
         state.input_ids,
         attention_mask=state.attention[:, : state.length],
         output_hidden_states=False,
         token_ids=tokens.union,
+        token_kind="mixed",
         modality=None,
         past_key_values=state.past,
         use_cache=use_cache,
         audio_input_positions=state.positions,
-        audio_output_past=state.audio_past,
+        audio_head_past=state.audio_head_past,
+        input_modalities=(
+            None
+            if validate_input
+            else frozenset((Modality.TEXT, Modality.AUDIO))
+        ),
+        validate_input=validate_input,
+        validate_audio_input_positions=validate_input,
     )
     if output.logits is None:
         raise RuntimeError("model did not return generation logits.")
     state.past = output.past_key_values
-    state.audio_past = output.audio_output_past
+    state.audio_head_past = output.audio_head_past
+    state.input_validated = True
     if use_cache:
         if state.past is None:
             raise RuntimeError("backbone did not return a generation cache.")
@@ -315,7 +326,7 @@ def _advance_loop(
         state.positions = None
         return
     state.past = None
-    state.audio_past = None
+    state.audio_head_past = None
     state.input_ids = state.generated[:, : state.length]
 
 

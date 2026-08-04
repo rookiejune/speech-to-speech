@@ -115,6 +115,7 @@ def run(config: StagedTrainConfig) -> None:
             name: {
                 "weight": loader.weight,
                 "task_weights": dict(loader.task_weights),
+                "ar_framing": loader.ar_framing,
             }
             for name, loader in config.loader_plan.loaders.items()
         },
@@ -169,12 +170,14 @@ def _loader_spec(
             config.text_datamodule,
             loader.tasks,
             prediction=loader.prediction_modality,
+            ar_framing=loader.framing,
             tasks=config.datamodule.tasks,
         )
     return LoaderSpec.speech(
         config.datamodule,
         loader.tasks,
         prediction=loader.prediction_modality,
+        ar_framing=loader.framing,
     )
 
 
@@ -189,6 +192,7 @@ def _validation_spec(config: StagedTrainConfig) -> LoaderSpec:
             replace(config.text_datamodule, dataset=dataset),
             loader.tasks,
             prediction=loader.prediction_modality,
+            ar_framing=loader.framing,
             max_samples=config.validation.max_samples,
         )
     dataset = replace(
@@ -199,6 +203,7 @@ def _validation_spec(config: StagedTrainConfig) -> LoaderSpec:
         replace(config.datamodule, dataset=dataset),
         loader.tasks,
         prediction=loader.prediction_modality,
+        ar_framing=loader.framing,
     )
 
 

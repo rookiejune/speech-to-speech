@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from _contracts_helpers import *
+from speech_to_speech.loader_plan import ARFraming
 
 
 class SpeechSampleContractTest(unittest.TestCase):
@@ -93,6 +94,55 @@ class SpeechSampleContractTest(unittest.TestCase):
         self.assertEqual(batch.tasks, [Task.TEXT_AR])
         self.assertEqual(runtime.codec.calls, [])
 
+    def test_single_audio_ar_pretraining_collator_uses_boa_prompt(self):
+        runtime = _data_runtime()
+        tokenizer = _ChatTokenizer(10)
+        tokenizer.apply_chat_template = Mock(
+            side_effect=AssertionError("pretraining must not render chat prompts")
+        )
+        runtime.text_tokenizer = tokenizer
+
+        batch = SingleCollator(
+            runtime,
+            {Task.AUDIO_AR: 1.0},
+            ar_framing=ARFraming.PRETRAINING,
+        )([_raw_single_sample()])
+
+        self.assertIsInstance(batch, ModelBatch)
+        self.assertEqual(int(batch.generation_prompt_lengths[0]), 1)
+        self.assertEqual(int(batch.input_ids[0, 0]), runtime.boa_token_id)
+        self.assertEqual(int(batch.token_labels[0, 0]), -100)
+        self.assertTrue(
+            torch.equal(
+                batch.token_labels[0, 1:],
+                torch.tensor([10, 11, runtime.eoa_token_id]),
+            )
+        )
+        tokenizer.apply_chat_template.assert_not_called()
+
+    def test_pair_audio_ar_pretraining_collator_routes_without_chat_prompt(self):
+        runtime = _data_runtime()
+        tokenizer = _ChatTokenizer(10)
+        tokenizer.apply_chat_template = Mock(
+            side_effect=AssertionError("pretraining must not render chat prompts")
+        )
+        runtime.text_tokenizer = tokenizer
+
+        batch = Collator(
+            runtime,
+            {Task.AUDIO_AR: 1.0},
+            ar_framing=ARFraming.PRETRAINING,
+        )([_raw_sample()])
+
+        self.assertIsInstance(batch, ModelBatch)
+        self.assertEqual(int(batch.generation_prompt_lengths[0]), 1)
+        self.assertEqual(int(batch.input_ids[0, 0]), runtime.boa_token_id)
+        supervised = batch.token_labels[0][batch.token_labels[0].ne(-100)]
+        audio_start, _ = runtime.layout.blocks[Modality.AUDIO.value]
+        self.assertTrue(supervised[:-1].ge(audio_start).all())
+        self.assertEqual(int(supervised[-1]), runtime.eoa_token_id)
+        tokenizer.apply_chat_template.assert_not_called()
+
     def test_single_collator_emits_raw_batch_only_for_explicit_waveform_fallback(self):
         runtime = _data_runtime()
         runtime.text_tokenizer = _ChatTokenizer(10)
@@ -136,6 +186,28 @@ class SpeechSampleContractTest(unittest.TestCase):
         self.assertEqual(runtime.codec.calls, [((1, 1, 4), 4)])
         self.assertEqual(runtime.codec.input_dtypes, [torch.float32])
         self.assertEqual(runtime.codec.autocast_enabled, [False])
+
+    def test_audio_ar_pretraining_framing_survives_codec_materialization(self):
+        runtime = _data_runtime()
+        runtime.text_tokenizer = _ChatTokenizer(10)
+        runtime.codec = _EncodingCodec()
+        raw = SingleCollator(
+            runtime,
+            {Task.AUDIO_AR: 1.0},
+            encode_missing_codes=True,
+            ar_framing=ARFraming.PRETRAINING,
+        )([_raw_single_waveform_sample()])
+
+        batch = OnDeviceCodecMaterializer(runtime)(
+            raw,
+            device=torch.device("cpu"),
+        )
+
+        self.assertIsInstance(raw, RawSpeechBatch)
+        self.assertIs(raw.ar_framing, ARFraming.PRETRAINING)
+        self.assertEqual(int(batch.generation_prompt_lengths[0]), 1)
+        self.assertEqual(int(batch.input_ids[0, 0]), runtime.boa_token_id)
+        self.assertEqual(int(batch.token_labels[0, 0]), -100)
 
     def test_bicodec_online_tokenize_stays_fp32_outside_autocast(self):
         runtime = _bicodec_data_runtime()

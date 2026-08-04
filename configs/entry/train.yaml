@@ -47,6 +47,17 @@ text_datamodule:
     source_lang: zh
     target_lang: en
     toy_samples: 8
+    # Local general-text corpora may use JSONL (one string or {text, lang}
+    # object per line) or a single UTF-8 document.  Keep the path unset for
+    # the existing WMT19 default.
+    path:
+    format:
+    encoding: utf-8
+    language: en
+  # Token packing is applied after tokenizer conversion and is intended for
+  # instruction-free TEXT_AR pretraining.
+  max_tokens:
+  pack_documents: false
 
 train:
   seed: 0

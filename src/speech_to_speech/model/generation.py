@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 import torch
 from anydataset.types import Modality
@@ -11,17 +11,20 @@ from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
 from transformers.cache_utils import Cache
 
+from ..runtime.protocol import GenerationRuntime
 from ._helper import top_p_filter
-from .protocol import TokenModelRuntime
+
+
+TokenKind = Literal["text", "audio", "mixed"]
 
 
 @dataclass
 class GenerationStepResult:
-    """One autoregressive step: logits plus backbone and audio-output caches."""
+    """One autoregressive step: logits plus backbone and audio-head caches."""
 
     logits: Tensor
     past_key_values: Cache | None
-    audio_output_past: object | None
+    audio_head_past: object | None
     hidden_states: tuple[Tensor, ...] | None = None
 
 
@@ -36,6 +39,67 @@ class GenerationOutput:
     frame_spans: Tensor | None = None
 
 
+@dataclass(frozen=True)
+class GenerationRequest:
+    """Tensor inputs and vocabulary constraints for one batched generation run."""
+
+    prompt_ids: Tensor
+    prompt_attention_mask: Tensor | None = None
+    audio_input_positions: Tensor | None = None
+    stop_token_id: int | None = None
+    generation_modality: Modality | None = None
+    allowed_token_ids: Sequence[int] | Tensor | None = None
+
+
+@dataclass(frozen=True)
+class GenerationOptions:
+    """Sampling, cache, and output-collection options for generation."""
+
+    max_new_tokens: int
+    temperature: float = 1.0
+    top_p: float = 1.0
+    do_sample: bool = True
+    use_cache: bool = True
+    collect_audio_condition: bool = False
+    collect_logprobs: bool = False
+    min_new_tokens: int = 0
+
+
+class GenerationStepModel(Protocol):
+    @property
+    def layout(self) -> Layout: ...
+
+    @property
+    def runtime(self) -> GenerationRuntime: ...
+
+    @property
+    def audio_token_frame_spans(self) -> Tensor: ...
+
+    def generation_step(
+        self,
+        input_ids: Tensor,
+        *,
+        attention_mask: Tensor,
+        output_hidden_states: bool,
+        token_ids: Tensor | None,
+        token_kind: TokenKind | None = None,
+        modality: Modality | None,
+        past_key_values: Cache | None,
+        use_cache: bool,
+        audio_input_positions: Tensor | None = None,
+        audio_head_past: object | None = None,
+        input_modalities: frozenset[Modality] | None = None,
+        validate_input: bool = True,
+        validate_audio_input_positions: bool = True,
+    ) -> GenerationStepResult: ...
+
+    def select_audio_head_cache(
+        self,
+        past_key_values: object | None,
+        indices: Tensor,
+    ) -> object | None: ...
+
+
 @dataclass
 class _GenerationLoopState:
     generated: Tensor
@@ -45,205 +109,194 @@ class _GenerationLoopState:
     audio_input_positions: Tensor | None
     length: int
     past_key_values: Cache | None = None
-    audio_output_past: object | None = None
+    audio_head_past: object | None = None
+    input_validated: bool = False
 
 
 _DEVICE_DONE_CHECK_INTERVAL = 16
 
 
-class GenerationStepModel(Protocol):
-    layout: Layout
-    runtime: TokenModelRuntime
-    audio_token_frame_spans: Tensor
+class GenerationEngine:
+    """Run the shared autoregressive loop for a step-oriented token model."""
 
-    def generation_step(
+    def __init__(self, model: GenerationStepModel) -> None:
+        self.model = model
+
+    def generate(
         self,
-        input_ids: Tensor,
-        *,
-        attention_mask: Tensor,
-        output_hidden_states: bool,
-        token_ids: Tensor | None,
-        token_kind: str | None = None,
-        modality: Modality | None,
-        past_key_values: Cache | None,
-        use_cache: bool,
-        audio_input_positions: Tensor | None = None,
-        audio_output_past: object | None = None,
-    ) -> GenerationStepResult: ...
-
-    def audio_output_adapter_batch_select(
-        self,
-        past_key_values: object | None,
-        indices: Tensor,
-    ) -> object | None: ...
-
-
-def generate_sequence_full(
-    model: GenerationStepModel,
-    prompt_ids: Tensor,
-    *,
-    max_new_tokens: int,
-    temperature: float,
-    top_p: float,
-    prompt_attention_mask: Tensor | None,
-    audio_input_positions: Tensor | None,
-    stop_token_id: int | None,
-    generation_modality: Modality | None,
-    allowed_token_ids: Sequence[int] | Tensor | None,
-    token_kind: str | None = None,
-    do_sample: bool,
-    use_cache: bool,
-    collect_audio_condition: bool,
-    collect_logprobs: bool = False,
-    min_new_tokens: int = 0,
-) -> GenerationOutput:
-    prompt_attention_mask = _validate_generation_inputs(
-        prompt_ids,
-        max_new_tokens=max_new_tokens,
-        min_new_tokens=min_new_tokens,
-        temperature=temperature,
-        top_p=top_p,
-        prompt_attention_mask=prompt_attention_mask,
-        audio_input_positions=audio_input_positions,
-        generation_modality=generation_modality,
-        allowed_token_ids=allowed_token_ids,
-    )
-    generation_token_ids = _generation_token_ids(
-        allowed_token_ids,
-        prompt_ids,
-        model.layout,
-    )
-    stop_logit_index = (
-        _stop_logit_index(
-            stop_token_id,
-            generation_token_ids,
-            generation_modality,
-            model.layout,
+        request: GenerationRequest,
+        options: GenerationOptions,
+    ) -> GenerationOutput:
+        prompt_attention_mask = _validate_generation_inputs(request, options)
+        generation_token_ids, token_kind = _generation_token_ids(
+            request.allowed_token_ids,
+            request.prompt_ids,
+            self.model.layout,
         )
-        if min_new_tokens
-        else None
-    )
-    state = _initial_loop_state(
-        prompt_ids,
-        prompt_attention_mask,
-        max_new_tokens,
-        audio_input_positions,
-    )
-    batch_size = prompt_ids.size(0)
-    condition_steps: list[Tensor] = []
-    span_steps: list[Tensor] = []
-    logprob_steps: list[Tensor] = []
-    logprob_mask_steps: list[Tensor] = []
+        stop_logit_index = (
+            _stop_logit_index(
+                request.stop_token_id,
+                generation_token_ids,
+                request.generation_modality,
+                self.model.layout,
+            )
+            if options.min_new_tokens
+            else None
+        )
+        state = _initial_loop_state(request, options, prompt_attention_mask)
+        batch_size = request.prompt_ids.size(0)
+        condition_steps: list[Tensor] = []
+        span_steps: list[Tensor] = []
+        logprob_steps: list[Tensor] = []
+        logprob_mask_steps: list[Tensor] = []
 
-    for step in range(max_new_tokens):
-        output = _generation_loop_step(
-            model,
-            state,
-            collect_audio_condition=collect_audio_condition,
-            generation_token_ids=generation_token_ids,
-            token_kind=token_kind,
-            generation_modality=generation_modality,
-            use_cache=use_cache,
-        )
-        logits = _sampling_logits(
-            output.logits,
-            temperature,
-            top_p=top_p,
-            step=step,
-            min_new_tokens=min_new_tokens,
-            stop_logit_index=stop_logit_index,
-        )
-        next_indices = _sample_next_indices(logits, do_sample, state.active_mask)
-        if collect_logprobs:
-            _append_logprobs(
-                logprob_steps,
-                logprob_mask_steps,
+        for step in range(options.max_new_tokens):
+            output = self._step(
+                state,
+                request,
+                options,
+                generation_token_ids,
+                token_kind,
+            )
+            logits = _sampling_logits(
+                output.logits,
+                options.temperature,
+                top_p=options.top_p,
+                step=step,
+                min_new_tokens=options.min_new_tokens,
+                stop_logit_index=stop_logit_index,
+            )
+            next_indices = _sample_next_indices(
                 logits,
-                next_indices,
+                options.do_sample,
                 state.active_mask,
             )
-        next_ids = _selected_token_ids(
-            next_indices,
-            generation_token_ids,
-            generation_modality,
-            model.layout,
-        )
-        if collect_audio_condition:
-            _append_audio_condition(
-                condition_steps,
-                span_steps,
-                model,
+            if options.collect_logprobs:
+                _append_logprobs(
+                    logprob_steps,
+                    logprob_mask_steps,
+                    logits,
+                    next_indices,
+                    state.active_mask,
+                )
+            next_ids = _selected_token_ids(
+                next_indices,
+                generation_token_ids,
+                request.generation_modality,
+                self.model.layout,
+            )
+            if options.collect_audio_condition:
+                _append_audio_condition(
+                    condition_steps,
+                    span_steps,
+                    self.model,
+                    output,
+                    next_ids,
+                    state.active_mask,
+                )
+            _advance_generation_state(
+                state,
                 output,
                 next_ids,
-                state.active_mask,
+                stop_token_id=request.stop_token_id,
+                use_cache=options.use_cache,
             )
-        _advance_generation_state(
-            state,
-            output,
-            next_ids,
-            stop_token_id=stop_token_id,
-            use_cache=use_cache,
-        )
-        if _all_rows_finished(
-            state.active_mask,
-            step=step,
-            max_new_tokens=max_new_tokens,
-        ):
-            break
+            if _all_rows_finished(
+                state.active_mask,
+                step=step,
+                max_new_tokens=options.max_new_tokens,
+            ):
+                break
 
-    generated_steps = _generated_steps(
-        state.attention_mask,
-        prompt_width=prompt_ids.size(1),
-        attempted_steps=state.length - prompt_ids.size(1),
-        stop_token_id=stop_token_id,
-    )
-    return _build_generation_output(
-        state.generated[:, : prompt_ids.size(1) + generated_steps],
-        prompt_ids,
-        batch_size=batch_size,
-        logprob_steps=logprob_steps[:generated_steps],
-        logprob_mask_steps=logprob_mask_steps[:generated_steps],
-        condition_steps=condition_steps[:generated_steps],
-        span_steps=span_steps[:generated_steps],
-        collect_logprobs=collect_logprobs,
-    )
+        prompt_width = request.prompt_ids.size(1)
+        generated_steps = _generated_steps(
+            state.attention_mask,
+            prompt_width=prompt_width,
+            attempted_steps=state.length - prompt_width,
+            stop_token_id=request.stop_token_id,
+        )
+        return _build_generation_output(
+            state.generated[:, : prompt_width + generated_steps],
+            request.prompt_ids,
+            batch_size=batch_size,
+            logprob_steps=logprob_steps[:generated_steps],
+            logprob_mask_steps=logprob_mask_steps[:generated_steps],
+            condition_steps=condition_steps[:generated_steps],
+            span_steps=span_steps[:generated_steps],
+            collect_logprobs=options.collect_logprobs,
+        )
+
+    def _step(
+        self,
+        state: _GenerationLoopState,
+        request: GenerationRequest,
+        options: GenerationOptions,
+        generation_token_ids: Tensor | None,
+        token_kind: TokenKind | None,
+    ) -> GenerationStepResult:
+        validate_input = not state.input_validated
+        output = self.model.generation_step(
+            state.input_ids,
+            attention_mask=state.attention_mask[:, : state.length],
+            output_hidden_states=options.collect_audio_condition,
+            token_ids=generation_token_ids,
+            token_kind=token_kind,
+            modality=request.generation_modality,
+            past_key_values=state.past_key_values,
+            use_cache=options.use_cache,
+            audio_input_positions=state.audio_input_positions,
+            audio_head_past=state.audio_head_past,
+            input_modalities=_trusted_input_modalities(
+                state,
+                request,
+                options,
+                token_kind,
+            ),
+            validate_input=validate_input,
+            validate_audio_input_positions=validate_input,
+        )
+        if output.logits is None:
+            raise RuntimeError("model did not return generation logits.")
+        state.input_validated = True
+        return output
 
 
 def _validate_generation_inputs(
-    prompt_ids: Tensor,
-    *,
-    max_new_tokens: int,
-    min_new_tokens: int,
-    temperature: float,
-    top_p: float,
-    prompt_attention_mask: Tensor | None,
-    audio_input_positions: Tensor | None,
-    generation_modality: Modality | None,
-    allowed_token_ids: Sequence[int] | Tensor | None,
+    request: GenerationRequest,
+    options: GenerationOptions,
 ) -> Tensor:
     if (
-        max_new_tokens < 0
-        or min_new_tokens < 0
-        or min_new_tokens > max_new_tokens
-        or temperature <= 0
-        or not 0 < top_p <= 1
+        options.max_new_tokens < 0
+        or options.min_new_tokens < 0
+        or options.min_new_tokens > options.max_new_tokens
+        or options.temperature <= 0
+        or not 0 < options.top_p <= 1
     ):
         raise ValueError("invalid generation parameters")
-    if generation_modality is not None and generation_modality not in {
+    if request.generation_modality is not None and request.generation_modality not in {
         Modality.TEXT,
         Modality.AUDIO,
     }:
-        raise ValueError(f"unsupported generation modality: {generation_modality.value}")
-    if generation_modality is not None and allowed_token_ids is not None:
+        raise ValueError(
+            f"unsupported generation modality: {request.generation_modality.value}"
+        )
+    if (
+        request.generation_modality is not None
+        and request.allowed_token_ids is not None
+    ):
         raise ValueError("generation modality and allowed token ids cannot both be provided.")
+    prompt_ids = request.prompt_ids
     if prompt_ids.dim() != 2 or prompt_ids.size(0) < 1:
         raise ValueError("generation requires at least one prompt row.")
+    prompt_attention_mask = request.prompt_attention_mask
     if prompt_attention_mask is None:
         prompt_attention_mask = torch.ones_like(prompt_ids, dtype=torch.bool)
     if prompt_attention_mask.shape != prompt_ids.shape:
         raise ValueError("prompt attention mask must align with prompt ids.")
+    audio_input_positions = request.audio_input_positions
     if audio_input_positions is not None and (
-        audio_input_positions.dim() != 2 or audio_input_positions.size(0) != prompt_ids.size(0)
+        audio_input_positions.dim() != 2
+        or audio_input_positions.size(0) != prompt_ids.size(0)
     ):
         raise ValueError("audio_input_positions must have shape [batch, frames].")
     if not bool(prompt_attention_mask.any(dim=1).all()):
@@ -252,13 +305,13 @@ def _validate_generation_inputs(
 
 
 def _initial_loop_state(
-    prompt_ids: Tensor,
+    request: GenerationRequest,
+    options: GenerationOptions,
     prompt_attention_mask: Tensor,
-    max_new_tokens: int,
-    audio_input_positions: Tensor | None,
 ) -> _GenerationLoopState:
+    prompt_ids = request.prompt_ids
     prompt_width = prompt_ids.size(1)
-    capacity = prompt_width + max_new_tokens
+    capacity = prompt_width + options.max_new_tokens
     generated = prompt_ids.new_empty(prompt_ids.size(0), capacity)
     generated[:, :prompt_width] = prompt_ids
     attention_mask = torch.zeros_like(generated, dtype=torch.bool)
@@ -269,49 +322,28 @@ def _initial_loop_state(
         attention_mask=attention_mask,
         input_ids=generated[:, :prompt_width],
         active_mask=torch.ones(batch_size, dtype=torch.bool, device=prompt_ids.device),
-        audio_input_positions=audio_input_positions,
+        audio_input_positions=request.audio_input_positions,
         length=prompt_width,
     )
 
 
-def _generation_loop_step(
-    model: GenerationStepModel,
+def _trusted_input_modalities(
     state: _GenerationLoopState,
-    *,
-    collect_audio_condition: bool,
-    generation_token_ids: Tensor | None,
-    token_kind: str | None,
-    generation_modality: Modality | None,
-    use_cache: bool,
-) -> GenerationStepResult:
-    if token_kind is not None:
-        output = model.generation_step(
-            state.input_ids,
-            attention_mask=state.attention_mask[:, : state.length],
-            output_hidden_states=collect_audio_condition,
-            token_ids=generation_token_ids,
-            token_kind=token_kind,
-            modality=generation_modality,
-            past_key_values=state.past_key_values,
-            use_cache=use_cache,
-            audio_input_positions=state.audio_input_positions,
-            audio_output_past=state.audio_output_past,
-        )
-    else:
-        output = model.generation_step(
-            state.input_ids,
-            attention_mask=state.attention_mask[:, : state.length],
-            output_hidden_states=collect_audio_condition,
-            token_ids=generation_token_ids,
-            modality=generation_modality,
-            past_key_values=state.past_key_values,
-            use_cache=use_cache,
-            audio_input_positions=state.audio_input_positions,
-            audio_output_past=state.audio_output_past,
-        )
-    if output.logits is None:
-        raise RuntimeError("model did not return generation logits.")
-    return output
+    request: GenerationRequest,
+    options: GenerationOptions,
+    token_kind: TokenKind | None,
+) -> frozenset[Modality] | None:
+    if not state.input_validated:
+        return None
+    if not options.use_cache:
+        return frozenset((Modality.TEXT, Modality.AUDIO))
+    if request.generation_modality is not None:
+        return frozenset((request.generation_modality,))
+    if token_kind == Modality.TEXT.value:
+        return frozenset((Modality.TEXT,))
+    if token_kind == Modality.AUDIO.value:
+        return frozenset((Modality.AUDIO,))
+    return frozenset((Modality.TEXT, Modality.AUDIO))
 
 
 def _sampling_logits(
@@ -397,7 +429,10 @@ def _append_audio_condition(
         raise RuntimeError("model did not return generation hidden states.")
     codec_start, codec_end = model.runtime.codec_audio_range
     codec_tokens = next_ids.ge(codec_start) & next_ids.lt(codec_end)
-    local_ids = (next_ids - codec_start).clamp(0, model.audio_token_frame_spans.numel() - 1)
+    local_ids = (next_ids - codec_start).clamp(
+        0,
+        model.audio_token_frame_spans.numel() - 1,
+    )
     spans = model.audio_token_frame_spans.index_select(0, local_ids)
     span_steps.append(spans.masked_fill(~(codec_tokens & active_mask), 0))
     condition = output.hidden_states[-1][:, -1]
@@ -438,14 +473,12 @@ def _advance_cached_state(
     state.past_key_values = output.past_key_values
     if state.past_key_values is None:
         raise RuntimeError("backbone did not return a generation cache.")
-    state.audio_output_past = output.audio_output_past
+    state.audio_head_past = output.audio_head_past
     state.input_ids = next_ids.unsqueeze(-1)
 
 
-def _advance_full_recompute_state(
-    state: _GenerationLoopState,
-) -> None:
-    state.audio_output_past = None
+def _advance_full_recompute_state(state: _GenerationLoopState) -> None:
+    state.audio_head_past = None
     state.input_ids = state.generated[:, : state.length]
 
 
@@ -539,44 +572,6 @@ def _build_generation_output(
     )
 
 
-def generate_sequence(
-    model: GenerationStepModel,
-    prompt_ids: Tensor,
-    *,
-    max_new_tokens: int,
-    temperature: float,
-    top_p: float,
-    prompt_attention_mask: Tensor | None,
-    audio_input_positions: Tensor | None,
-    stop_token_id: int | None,
-    generation_modality: Modality | None,
-    allowed_token_ids: Sequence[int] | Tensor | None,
-    token_kind: str | None = None,
-    do_sample: bool,
-    use_cache: bool,
-    collect_audio_condition: bool,
-    min_new_tokens: int = 0,
-) -> tuple[Tensor, Tensor | None, Tensor | None]:
-    output = generate_sequence_full(
-        model,
-        prompt_ids,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        top_p=top_p,
-        prompt_attention_mask=prompt_attention_mask,
-        audio_input_positions=audio_input_positions,
-        stop_token_id=stop_token_id,
-        generation_modality=generation_modality,
-        allowed_token_ids=allowed_token_ids,
-        token_kind=token_kind,
-        do_sample=do_sample,
-        use_cache=use_cache,
-        collect_audio_condition=collect_audio_condition,
-        min_new_tokens=min_new_tokens,
-    )
-    return output.sequences, output.audio_condition, output.frame_spans
-
-
 def _stop_logit_index(
     stop_token_id: int | None,
     generation_token_ids: Tensor | None,
@@ -592,7 +587,7 @@ def _stop_logit_index(
         if generation_token_ids.numel() == 1:
             raise ValueError("minimum generation length left no non-stop token to sample.")
         return int(stop.nonzero(as_tuple=False)[0].item())
-    elif generation_modality is not None:
+    if generation_modality is not None:
         start, end = layout.blocks[generation_modality.value]
         if not start <= stop_token_id < end:
             return None
@@ -606,9 +601,9 @@ def _generation_token_ids(
     allowed_token_ids: Sequence[int] | Tensor | None,
     prompt_ids: Tensor,
     layout: Layout,
-) -> Tensor | None:
+) -> tuple[Tensor | None, TokenKind | None]:
     if allowed_token_ids is None:
-        return None
+        return None, None
     token_ids = torch.as_tensor(
         allowed_token_ids,
         device=prompt_ids.device,
@@ -624,4 +619,22 @@ def _generation_token_ids(
     audio_mask = token_ids.ge(audio_start) & token_ids.lt(audio_end)
     if not bool((text_mask | audio_mask).all()):
         raise ValueError("allowed_token_ids contains an invalid vocabulary id.")
-    return token_ids
+    kind: TokenKind
+    if bool(text_mask.all()):
+        kind = "text"
+    elif bool(audio_mask.all()):
+        kind = "audio"
+    else:
+        kind = "mixed"
+    return token_ids, kind
+
+
+__all__ = [
+    "GenerationEngine",
+    "GenerationOptions",
+    "GenerationOutput",
+    "GenerationRequest",
+    "GenerationStepModel",
+    "GenerationStepResult",
+    "TokenKind",
+]

@@ -69,7 +69,7 @@ def _preference_logps(
         attention_mask=attention_mask,
         audio_input_positions=_audio_input_positions(chosen, rejected),
         prediction=prediction,
-        **_embedding_kwargs(chosen, rejected),
+        **_input_kwargs(chosen, rejected),
     )
     token_logps = target_token_logps(
         model,
@@ -113,16 +113,16 @@ def _audio_input_positions(
     )
 
 
-def _embedding_kwargs(
+def _input_kwargs(
     chosen: ModelBatch,
     rejected: ModelBatch,
 ) -> dict[str, Any]:
-    first = chosen.embedding_blocks
-    second = rejected.embedding_blocks
+    first = chosen.input_modalities
+    second = rejected.input_modalities
     if first is None or second is None:
         return {}
     return {
-        "embedding_blocks": first | second,
+        "input_modalities": first | second,
         "validate_input": False,
         "validate_audio_input_positions": not (
             chosen.audio_input_positions_validated

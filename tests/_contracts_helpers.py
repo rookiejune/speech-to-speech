@@ -173,19 +173,20 @@ class _StageAcousticDecoder(nn.Module):
         self.head = nn.Linear(1, 1)
 
 
-class _TokenEmbedding(nn.Module):
+class _Tokens(nn.Module):
     def __init__(self, *, rows: int = 1, dim: int = 1) -> None:
         super().__init__()
-        self.embeddings = nn.ModuleDict({"audio": nn.Embedding(rows, dim)})
-        self.adapters = nn.ModuleDict({"audio": nn.Linear(dim, dim)})
+        self.audio_embedding = nn.Embedding(rows, dim)
+        self.audio_projection = nn.Linear(dim, dim)
+        self.audio_head = nn.Linear(dim, dim)
 
 
 class _StageModel(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.backbone = _StageBackbone()
-        self.token_embedding = _TokenEmbedding()
-        self.audio_output_adapter = nn.Linear(1, 1)
+        self.tokens = _Tokens()
+        self.source_audio_encoder = nn.Linear(1, 1)
         self.acoustic_decoder = _StageAcousticDecoder()
 
 

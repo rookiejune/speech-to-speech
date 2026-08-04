@@ -247,19 +247,44 @@ def _peft_trainable(
 
 
 def parameter_group(name: str) -> ParameterGroup:
+    legacy = next(
+        (
+            prefix
+            for prefix in (
+                "token_embedding.",
+                "audio_input_adapter.",
+                "audio_output_adapter.",
+            )
+            if name.startswith(prefix)
+        ),
+        None,
+    )
+    if legacy is not None:
+        raise ValueError(
+            f"parameter {name!r} uses legacy model ownership prefix {legacy!r}."
+        )
     if name.startswith("backbone."):
         if ".lora_A." in name or ".lora_B." in name:
             return ParameterGroup.BACKBONE_ADAPTER
         return ParameterGroup.BACKBONE
-    if name.startswith("token_embedding.embeddings.text"):
+    # MIMO owns a complete body plus local text/audio routes.  Keep these
+    # names explicit so the existing policy callback can validate coverage
+    # instead of silently falling back to an optimizer-wide parameter list.
+    if name.startswith(("body.", "text_embedding.", "text_head.")):
         return ParameterGroup.BACKBONE
-    if name.startswith("token_embedding.embeddings.audio"):
+    if name.startswith("audio_embedding."):
         return ParameterGroup.SEMANTIC_AUDIO_EMBEDDING
-    if name.startswith("token_embedding.adapters.audio"):
+    if name.startswith(("audio_feature_projection.",)):
         return ParameterGroup.SEMANTIC_AUDIO_ADAPTER
-    if name.startswith("audio_input_adapter."):
+    if name.startswith("audio_head."):
+        return ParameterGroup.AUDIO_OUTPUT
+    if name.startswith("tokens.audio_embedding."):
+        return ParameterGroup.SEMANTIC_AUDIO_EMBEDDING
+    if name.startswith("tokens.audio_projection."):
+        return ParameterGroup.SEMANTIC_AUDIO_ADAPTER
+    if name.startswith("source_audio_encoder."):
         return ParameterGroup.AUDIO_INPUT_ADAPTER
-    if name.startswith("audio_output_adapter."):
+    if name.startswith("tokens.audio_head."):
         return ParameterGroup.AUDIO_OUTPUT
     if (
         name.startswith("acoustic_condition.")
