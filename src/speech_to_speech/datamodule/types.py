@@ -7,7 +7,6 @@ from collections.abc import Iterator, Mapping
 from typing import TypeVar, TypedDict, Union
 
 import torch
-from anytrain.codec import AcousticLayout
 from anydataset.types import Item, Modality, Reference, Sample
 from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
@@ -68,13 +67,12 @@ class Language(StrEnum):
 class Speech:
     semantic_codes: Tensor
     acoustic_codes: Tensor | None
-    acoustic_layout: AcousticLayout
-    acoustic_unit_length: int | None
     text_token_ids: Tensor
     audio_token_ids: Tensor
     audio_token_spans: Tensor
     language: Language
     duration_seconds: float | None = None
+    global_codes: Tensor | None = None
 
     def __post_init__(self) -> None:
         if self.semantic_codes.dim() != 2:
@@ -82,19 +80,16 @@ class Speech:
         if self.acoustic_codes is not None:
             if self.acoustic_codes.dim() != 2:
                 raise ValueError("acoustic_codes must have shape [frames, codebooks].")
-            if (
-                self.acoustic_layout is AcousticLayout.FRAME_ALIGNED
-                and self.acoustic_codes.size(0) != self.semantic_codes.size(0)
-            ):
+            if self.acoustic_codes.size(0) != self.semantic_codes.size(0):
                 raise ValueError(
                     "semantic_codes and acoustic_codes must share the frame axis."
                 )
-            if (
-                self.acoustic_unit_length is not None
-                and self.acoustic_codes.size(0) != self.acoustic_unit_length
-            ):
+        if self.global_codes is not None:
+            if self.global_codes.dim() != 2:
+                raise ValueError("global_codes must have shape [slots, codebooks].")
+            if self.acoustic_codes is not None:
                 raise ValueError(
-                    "acoustic_codes must match the codec acoustic unit length."
+                    "Speech cannot contain global and aligned acoustic codes together."
                 )
         if self.audio_token_ids.dim() != 1 or self.audio_token_spans.shape != (
             self.audio_token_ids.numel(),
@@ -353,13 +348,14 @@ def _pin_task_item(
         acoustic_codes=(
             None if item.acoustic_codes is None else item.acoustic_codes.pin_memory()
         ),
-        acoustic_layout=item.acoustic_layout,
-        acoustic_unit_length=item.acoustic_unit_length,
         text_token_ids=item.text_token_ids.pin_memory(),
         audio_token_ids=item.audio_token_ids.pin_memory(),
         audio_token_spans=item.audio_token_spans.pin_memory(),
         language=item.language,
         duration_seconds=item.duration_seconds,
+        global_codes=(
+            None if item.global_codes is None else item.global_codes.pin_memory()
+        ),
     )
 
 

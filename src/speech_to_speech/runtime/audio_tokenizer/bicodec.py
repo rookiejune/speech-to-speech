@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 
 import torch
-from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
 from ...audio_stream import AudioStream
+from ...codes import AudioCodes
 from ._common import (
     codebook_size,
     token_tensor,
@@ -19,14 +18,8 @@ from .bpe import TorchCodecBPE
 from .native import NativeAudioTokenizer
 
 
-@dataclass(frozen=True)
-class BiCodecStreams:
-    semantic: Tensor | None
-    acoustic: Tensor | None
-
-
 class BiCodecAudioTokenizer:
-    """Serialize BiCodec semantic units and fixed-length acoustic speaker slots."""
+    """Serialize BiCodec semantic units and fixed-length global speaker slots."""
 
     embedding_initialization = "random"
 
@@ -34,8 +27,8 @@ class BiCodecAudioTokenizer:
         self,
         *,
         semantic_codebook_size: int,
-        acoustic_codebook_sizes: Sequence[int],
-        acoustic_unit_length: int | None,
+        global_codebook_sizes: Sequence[int],
+        global_unit_length: int,
         semantic_tokenizer: NativeAudioTokenizer | TorchCodecBPE | None = None,
     ) -> None:
         self._semantic_codebook_size = codebook_size(semantic_codebook_size)
@@ -49,21 +42,23 @@ class BiCodecAudioTokenizer:
             self._semantic_codebook_size,
         )
         self._semantic_vocab_size = codebook_size(self._semantic_tokenizer.vocab_size)
-        self._acoustic_codebook_sizes = tuple(
-            codebook_size(size) for size in acoustic_codebook_sizes
+        self._global_codebook_sizes = tuple(
+            codebook_size(size) for size in global_codebook_sizes
         )
-        if not self._acoustic_codebook_sizes:
-            raise ValueError("BiCodec tokenizer requires acoustic codebooks.")
-        if acoustic_unit_length is None or acoustic_unit_length <= 0:
-            raise ValueError("BiCodec tokenizer requires a positive acoustic unit length.")
-        self._acoustic_unit_length = int(acoustic_unit_length)
+        if not self._global_codebook_sizes:
+            raise ValueError("BiCodec tokenizer requires global codebooks.")
+        if isinstance(global_unit_length, bool) or not isinstance(global_unit_length, int):
+            raise TypeError("BiCodec global unit length must be an integer.")
+        if global_unit_length <= 0:
+            raise ValueError("BiCodec tokenizer requires a positive global unit length.")
+        self._global_unit_length = global_unit_length
         offsets = [self._semantic_vocab_size]
-        for size in self._acoustic_codebook_sizes[:-1]:
+        for size in self._global_codebook_sizes[:-1]:
             offsets.append(offsets[-1] + size)
-        self._acoustic_offsets = tuple(offsets)
-        marker_base = sum((self._semantic_vocab_size, *self._acoustic_codebook_sizes))
+        self._global_offsets = tuple(offsets)
+        marker_base = sum((self._semantic_vocab_size, *self._global_codebook_sizes))
         self._semantic_token_id = marker_base
-        self._acoustic_token_id = marker_base + 1
+        self._global_token_id = marker_base + 1
         self._end_token_id = marker_base + 2
         self._vocab_size = marker_base + 3
 
@@ -84,24 +79,24 @@ class BiCodecAudioTokenizer:
         return self._semantic_tokenizer
 
     @property
-    def acoustic_codebook_sizes(self) -> tuple[int, ...]:
-        return self._acoustic_codebook_sizes
+    def global_codebook_sizes(self) -> tuple[int, ...]:
+        return self._global_codebook_sizes
 
     @property
-    def acoustic_offsets(self) -> tuple[int, ...]:
-        return self._acoustic_offsets
+    def global_offsets(self) -> tuple[int, ...]:
+        return self._global_offsets
 
     @property
-    def acoustic_unit_length(self) -> int:
-        return self._acoustic_unit_length
+    def global_unit_length(self) -> int:
+        return self._global_unit_length
 
     @property
     def semantic_token_id(self) -> int:
         return self._semantic_token_id
 
     @property
-    def acoustic_token_id(self) -> int:
-        return self._acoustic_token_id
+    def global_token_id(self) -> int:
+        return self._global_token_id
 
     @property
     def end_token_id(self) -> int:
@@ -112,35 +107,35 @@ class BiCodecAudioTokenizer:
         return 0, self._semantic_vocab_size
 
     @property
-    def acoustic_token_ranges(self) -> tuple[tuple[int, int], ...]:
+    def global_token_ranges(self) -> tuple[tuple[int, int], ...]:
         return tuple(
             (offset, offset + size)
             for offset, size in zip(
-                self._acoustic_offsets,
-                self._acoustic_codebook_sizes,
+                self._global_offsets,
+                self._global_codebook_sizes,
             )
         )
 
     @property
     def prediction_token_ranges(self) -> tuple[tuple[int, int], ...]:
-        return (self.semantic_token_range, *self.acoustic_token_ranges)
+        return (self.semantic_token_range, *self.global_token_ranges)
 
     def contract_state(self) -> dict[str, object]:
         """Return the effective structured token-ID grammar used by checkpoints."""
         return {
-            "grammar": "bicodec-v1",
+            "grammar": "bicodec-v2",
             "semantic_codebook_size": self.semantic_codebook_size,
             "semantic_vocab_size": self.semantic_vocab_size,
             "semantic_tokenizer": dict(self.semantic_tokenizer.contract_state()),
             "semantic_token_range": list(self.semantic_token_range),
-            "acoustic_codebook_sizes": list(self.acoustic_codebook_sizes),
-            "acoustic_offsets": list(self.acoustic_offsets),
-            "acoustic_token_ranges": [
-                list(bounds) for bounds in self.acoustic_token_ranges
+            "global_codebook_sizes": list(self.global_codebook_sizes),
+            "global_offsets": list(self.global_offsets),
+            "global_token_ranges": [
+                list(bounds) for bounds in self.global_token_ranges
             ],
-            "acoustic_unit_length": self.acoustic_unit_length,
+            "global_unit_length": self.global_unit_length,
             "semantic_token_id": self.semantic_token_id,
-            "acoustic_token_id": self.acoustic_token_id,
+            "global_token_id": self.global_token_id,
             "end_token_id": self.end_token_id,
             "vocab_size": self.vocab_size,
         }
@@ -152,55 +147,55 @@ class BiCodecAudioTokenizer:
             return token_ids.to(dtype=torch.long)
         return torch.tensor(token_ids, dtype=torch.long)
 
-    def encode_full(self, value: SemanticAcousticCodes) -> Tensor:
+    def encode_full(self, value: AudioCodes) -> Tensor:
         return self.encode_streams(
             value,
-            (AudioStream.ACOUSTIC, AudioStream.SEMANTIC),
+            (AudioStream.GLOBAL, AudioStream.SEMANTIC),
         )
 
-    def encode_acoustic(self, value: SemanticAcousticCodes) -> Tensor:
-        """Encode only BiCodec's fixed-length acoustic speaker/style codes."""
-        return self.encode_streams(value, (AudioStream.ACOUSTIC,))
+    def encode_global(self, value: AudioCodes) -> Tensor:
+        """Encode only BiCodec's fixed-length global speaker/style codes."""
+        return self.encode_streams(value, (AudioStream.GLOBAL,))
 
     def encode_streams(
         self,
-        value: SemanticAcousticCodes,
+        value: AudioCodes,
         streams: Sequence[AudioStream],
     ) -> Tensor:
         streams = _bicodec_streams(streams)
-        semantic_value, acoustic_value = _bicodec_units(value, streams)
+        semantic_value, global_value = _bicodec_units(value, streams)
         semantic = (
             self.encode(semantic_value)
             if semantic_value is not None
             else None
         )
-        acoustic = (
-            _acoustic_tensor(acoustic_value, self._acoustic_codebook_sizes)
-            if acoustic_value is not None
+        global_codes = (
+            _global_tensor(global_value, self._global_codebook_sizes)
+            if global_value is not None
             else None
         )
-        if acoustic is not None and acoustic.size(0) != self._acoustic_unit_length:
+        if global_codes is not None and global_codes.size(0) != self._global_unit_length:
             raise ValueError(
-                "BiCodec acoustic units must match the configured fixed length."
+                "BiCodec global units must match the configured fixed length."
             )
         if (
             semantic is not None
-            and acoustic is not None
-            and semantic.device != acoustic.device
+            and global_codes is not None
+            and semantic.device != global_codes.device
         ):
             raise ValueError("BiCodec stream tensors must share a device.")
-        anchor = semantic if semantic is not None else acoustic
+        anchor = semantic if semantic is not None else global_codes
         if anchor is None:
             raise AssertionError("BiCodec serialization has no requested stream payload.")
         values: list[Tensor] = []
-        if AudioStream.ACOUSTIC in streams:
-            if acoustic is None:
-                raise AssertionError("BiCodec acoustic serialization has no payload.")
-            values.append(anchor.new_tensor([self._acoustic_token_id]))
-            for slot in range(self._acoustic_unit_length):
-                for index, offset in enumerate(self._acoustic_offsets):
+        if AudioStream.GLOBAL in streams:
+            if global_codes is None:
+                raise AssertionError("BiCodec global serialization has no payload.")
+            values.append(anchor.new_tensor([self._global_token_id]))
+            for slot in range(self._global_unit_length):
+                for index, offset in enumerate(self._global_offsets):
                     values.append(
-                        acoustic[slot, index].reshape(1).to(dtype=torch.long) + offset
+                        global_codes[slot, index].reshape(1).to(dtype=torch.long) + offset
                     )
         if AudioStream.SEMANTIC in streams:
             if semantic is None:
@@ -223,20 +218,20 @@ class BiCodecAudioTokenizer:
             raise ValueError("BiCodec full sequences must use decode_full().")
         return self._semantic_tokenizer.decode(token_ids)
 
-    def decode_full(self, token_ids: Sequence[int] | Tensor) -> SemanticAcousticCodes:
+    def decode_full(self, token_ids: Sequence[int] | Tensor) -> AudioCodes:
         decoded = self.decode_streams(token_ids)
-        if decoded.semantic is None or decoded.acoustic is None:
+        if decoded.semantic_codes is None or decoded.global_codes is None:
             raise AssertionError("full BiCodec decode must produce both streams.")
-        return SemanticAcousticCodes(
-            semantic=decoded.semantic,
-            acoustic=decoded.acoustic,
+        return AudioCodes(
+            semantic_codes=decoded.semantic_codes,
+            global_codes=decoded.global_codes,
         )
 
     def decode_streams(
         self,
         token_ids: Sequence[int] | Tensor,
         streams: Sequence[AudioStream] | None = None,
-    ) -> BiCodecStreams:
+    ) -> AudioCodes:
         tensor = token_tensor(token_ids)
         if tensor.numel() < 2:
             raise ValueError("BiCodec stream sequence is too short.")
@@ -245,32 +240,32 @@ class BiCodecAudioTokenizer:
 
         cursor = 0
         semantic: Tensor | None = None
-        acoustic: Tensor | None = None
-        if int(tensor[cursor]) == self._acoustic_token_id:
+        global_codes: Tensor | None = None
+        if int(tensor[cursor]) == self._global_token_id:
             cursor += 1
-            payload_length = self._acoustic_unit_length * len(
-                self._acoustic_codebook_sizes
+            payload_length = self._global_unit_length * len(
+                self._global_codebook_sizes
             )
             payload = tensor[cursor : cursor + payload_length]
             if payload.numel() != payload_length:
                 raise ValueError(
-                    "BiCodec stream sequence has an invalid acoustic payload length."
+                    "BiCodec stream sequence has an invalid global payload length."
                 )
             values = []
             payload_cursor = 0
-            for _ in range(self._acoustic_unit_length):
+            for _ in range(self._global_unit_length):
                 slot = []
                 for offset, size in zip(
-                    self._acoustic_offsets,
-                    self._acoustic_codebook_sizes,
+                    self._global_offsets,
+                    self._global_codebook_sizes,
                 ):
                     value = payload[payload_cursor] - offset
                     if bool((value < 0) or (value >= size)):
-                        raise ValueError("BiCodec acoustic tokens are out of range.")
+                        raise ValueError("BiCodec global tokens are out of range.")
                     slot.append(value)
                     payload_cursor += 1
                 values.append(torch.stack(slot))
-            acoustic = torch.stack(values, dim=0)
+            global_codes = torch.stack(values, dim=0)
             cursor += payload_length
 
         if cursor < tensor.numel() - 1 and int(tensor[cursor]) == self._semantic_token_id:
@@ -286,20 +281,23 @@ class BiCodecAudioTokenizer:
             semantic = _semantic_tensor(decoded, self._semantic_codebook_size)
             cursor = tensor.numel() - 1
 
-        if acoustic is None and semantic is None:
+        if global_codes is None and semantic is None:
             raise ValueError(
                 "BiCodec stream sequence must begin with a global or semantic marker."
             )
         if cursor != tensor.numel() - 1:
             raise ValueError("BiCodec stream sequence contains unexpected tokens.")
-        decoded_streams = BiCodecStreams(semantic=semantic, acoustic=acoustic)
+        decoded_streams = AudioCodes(
+            semantic_codes=semantic,
+            global_codes=global_codes,
+        )
         if streams is not None:
             expected = frozenset(_bicodec_streams(streams))
             actual = frozenset(
                 stream
                 for stream, value in (
-                    (AudioStream.ACOUSTIC, decoded_streams.acoustic),
-                    (AudioStream.SEMANTIC, decoded_streams.semantic),
+                    (AudioStream.GLOBAL, decoded_streams.global_codes),
+                    (AudioStream.SEMANTIC, decoded_streams.semantic_codes),
                 )
                 if value is not None
             )
@@ -357,26 +355,26 @@ def _bicodec_streams(
         raise ValueError("BiCodec serialization requires at least one audio stream.")
     if any(not isinstance(stream, AudioStream) for stream in values):
         raise TypeError("BiCodec streams must contain AudioStream values.")
-    unknown = set(values) - {AudioStream.ACOUSTIC, AudioStream.SEMANTIC}
+    unknown = set(values) - {AudioStream.GLOBAL, AudioStream.SEMANTIC}
     if unknown:
         labels = ", ".join(sorted(stream.value for stream in unknown))
         raise ValueError(f"BiCodec streams do not support: {labels}.")
     return tuple(
         stream
-        for stream in (AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
+        for stream in (AudioStream.GLOBAL, AudioStream.SEMANTIC)
         if stream in values
     )
 
 
 def _bicodec_units(
-    value: SemanticAcousticCodes,
+    value: AudioCodes,
     streams: Sequence[AudioStream],
 ) -> tuple[Tensor | None, Tensor | None]:
-    if not isinstance(value, SemanticAcousticCodes):
-        raise TypeError("BiCodec stream input must be SemanticAcousticCodes.")
-    semantic = value.semantic if AudioStream.SEMANTIC in streams else None
-    acoustic = value.acoustic if AudioStream.ACOUSTIC in streams else None
-    return semantic, acoustic
+    if not isinstance(value, AudioCodes):
+        raise TypeError("BiCodec stream input must be AudioCodes.")
+    semantic = value.semantic_codes if AudioStream.SEMANTIC in streams else None
+    global_codes = value.global_codes if AudioStream.GLOBAL in streams else None
+    return semantic, global_codes
 
 
 def _semantic_tensor(value: Sequence[Sequence[int]] | Tensor, vocab_size: int) -> Tensor:
@@ -393,10 +391,10 @@ def _semantic_tensor(value: Sequence[Sequence[int]] | Tensor, vocab_size: int) -
     return tensor.to(dtype=torch.long)
 
 
-def _acoustic_tensor(value: Tensor, codebook_sizes: Sequence[int]) -> Tensor:
-    validate_ids(value, "acoustic codes")
+def _global_tensor(value: Tensor, codebook_sizes: Sequence[int]) -> Tensor:
+    validate_ids(value, "global codes")
     if value.dim() != 2 or value.size(1) != len(codebook_sizes):
-        raise ValueError("BiCodec acoustic codes must have shape [slots, codebooks].")
+        raise ValueError("BiCodec global codes must have shape [slots, codebooks].")
     tensor = value.to(dtype=torch.long)
     validate_frame_ranges(tensor, codebook_sizes)
     return tensor

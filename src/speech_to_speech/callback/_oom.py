@@ -307,6 +307,7 @@ def item_report(value: Speech | Text | RawSpeech | None) -> dict[str, object] | 
     return {
         "type": type(value).__name__,
         "semantic_codes": tensor_report(value.semantic_codes),
+        "global_codes": tensor_report(value.global_codes),
         "acoustic_codes": tensor_report(value.acoustic_codes),
         "text_token_ids": tensor_report(value.text_token_ids),
         "audio_token_ids": tensor_report(value.audio_token_ids),

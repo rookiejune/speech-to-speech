@@ -156,8 +156,6 @@ class _Runtime:
         self.codec_frame_rate = 50.0
         self.audio_sequence_layout = AudioSequenceLayout.SEMANTIC
         self.semantic_codec_artifact = None
-        self.acoustic_layout = AcousticLayout.FRAME_ALIGNED
-        self.acoustic_unit_length = None
         self.text_tokenizer = _TextTokenizer()
         self.audio_tokenizer = NativeAudioTokenizer(vocab_size=8)
         self.codec = _Codec()

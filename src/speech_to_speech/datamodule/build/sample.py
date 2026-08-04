@@ -5,10 +5,10 @@ from typing import cast
 
 import torch
 from anydataset.types import Modality
-from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
 from ...audio_stream import AudioStream
+from ...codes import AudioCodes
 from ...loader_plan import ARFraming, validate_ar_framing
 from ...prediction import PredictionModality
 from ...runtime import AudioSequenceLayout
@@ -191,7 +191,7 @@ def _build_modal_sample(
     (
         input_ids,
         response_ids,
-        reference_audio_codes,
+        reference_codes,
         uses_bicodec,
     ) = _target_response(
         input_ids,
@@ -245,7 +245,7 @@ def _build_modal_sample(
             target,
             task,
             prediction,
-            audio_context=audio_context if reference_audio_codes is not None else None,
+            audio_context=audio_context if reference_codes is not None else None,
         ),
         audio_input_positions=audio_input_positions,
     )
@@ -289,7 +289,7 @@ def _target_response(
     runtime: DataRuntime,
     *,
     audio_context: Speech | None,
-) -> tuple[Tensor, Tensor, SemanticAcousticCodes | None, bool]:
+) -> tuple[Tensor, Tensor, AudioCodes | None, bool]:
     tokenizer = _bicodec_tokenizer(target, target_modality, runtime)
     if tokenizer is not None:
         input_ids, response_ids, reference = _bicodec_response(
@@ -317,9 +317,9 @@ def _bicodec_response(
     tokenizer: BiCodecAudioTokenizer,
     *,
     audio_context: Speech | None,
-) -> tuple[Tensor, Tensor, SemanticAcousticCodes | None]:
-    reference_audio_codes = None
-    source_has_global = isinstance(source, Speech) and source.acoustic_codes is not None
+) -> tuple[Tensor, Tensor, AudioCodes | None]:
+    reference_codes = None
+    source_has_global = isinstance(source, Speech) and source.global_codes is not None
     if source_has_global and audio_context is not None and audio_context is not source:
         raise ValueError(
             "BiCodec tasks cannot select both source and reference global streams."
@@ -327,16 +327,16 @@ def _bicodec_response(
     if audio_context is not None:
         prompt_ids = _global_bicodec_ids(
             audio_context,
-            (AudioStream.ACOUSTIC,),
+            (AudioStream.GLOBAL,),
             tokenizer,
             runtime,
         )
         input_ids = torch.cat((input_ids, _boa_eoa(prompt_ids, runtime)))
-        reference_audio_codes = _structured_codes(audio_context)
+        reference_codes = _structured_codes(audio_context)
     if source_has_global or audio_context is not None:
         response_streams = (AudioStream.SEMANTIC,)
     else:
-        response_streams = (AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
+        response_streams = (AudioStream.GLOBAL, AudioStream.SEMANTIC)
     response_local = tokenizer.encode_streams(
         _structured_codes(_speech(target, role="target")),
         response_streams,
@@ -345,7 +345,7 @@ def _bicodec_response(
         runtime.layout.to_global(Modality.AUDIO.value, response_local),
         runtime,
     )
-    return input_ids, response_ids, reference_audio_codes
+    return input_ids, response_ids, reference_codes
 
 
 def _token_supervision(
@@ -691,12 +691,12 @@ def _global_bicodec_ids(
     return runtime.layout.to_global(Modality.AUDIO.value, local_ids)
 
 
-def _structured_codes(speech: Speech) -> SemanticAcousticCodes:
-    if speech.acoustic_codes is None:
-        raise ValueError("BiCodec sequence layouts require semantic and acoustic codes.")
-    return SemanticAcousticCodes(
-        semantic=speech.semantic_codes,
-        acoustic=speech.acoustic_codes,
+def _structured_codes(speech: Speech) -> AudioCodes:
+    if speech.global_codes is None:
+        raise ValueError("BiCodec sequence layouts require semantic and global codes.")
+    return AudioCodes(
+        semantic_codes=speech.semantic_codes,
+        global_codes=speech.global_codes,
     )
 
 

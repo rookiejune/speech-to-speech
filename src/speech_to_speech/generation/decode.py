@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import cast
 
 import torch
-from anytrain.codec import SemanticAcousticCodes
+from anytrain.codec import AcousticLayout, SemanticAcousticCodes
 from torch import Generator, Tensor
 
 from .._tensor import is_signed_integer_dtype
+from ..codes import AudioCodes
 from ..runtime.audio_tokenizer import (
     BiCodecAudioTokenizer,
     semantic_codes_from_audio_tokens,
@@ -111,13 +113,15 @@ def decode_generated_bicodec_full(
     """Decode a structured BiCodec full sequence without collapsing its axes."""
     local_ids = _local_ids(audio_token_ids, audio_token_range)
     rows = [audio_tokenizer.decode_full(row) for row in local_ids]
-    if not rows or len({tuple(row.semantic.shape) for row in rows}) != 1:
+    semantic_rows = [cast(Tensor, row.semantic_codes) for row in rows]
+    global_rows = [cast(Tensor, row.global_codes) for row in rows]
+    if not rows or len({tuple(row.shape) for row in semantic_rows}) != 1:
         raise ValueError("BiCodec semantic token rows must have the same shape.")
-    if len({tuple(row.acoustic.shape) for row in rows}) != 1:
-        raise ValueError("BiCodec acoustic token rows must have the same shape.")
+    if len({tuple(row.shape) for row in global_rows}) != 1:
+        raise ValueError("BiCodec global token rows must have the same shape.")
     codes = SemanticAcousticCodes(
-        semantic=torch.stack([row.semantic for row in rows]),
-        acoustic=torch.stack([row.acoustic for row in rows]),
+        semantic=torch.stack(semantic_rows),
+        acoustic=torch.stack(global_rows),
     )
     return codec.detokenize(codes)
 
@@ -131,37 +135,46 @@ def decode_generated_bicodec_row(
     audio_token_range: tuple[int, int],
     boa_token_id: int,
     eoa_token_id: int,
-) -> tuple[Tensor, SemanticAcousticCodes]:
+) -> tuple[Tensor, AudioCodes]:
     """Resolve one self-describing BiCodec response against its prompt."""
     if audio_token_ids.dim() != 1:
         raise ValueError("BiCodec decode expects one generated token row.")
     local_ids = _local_ids(audio_token_ids[None], audio_token_range)[0]
     output = audio_tokenizer.decode_streams(local_ids)
-    if output.semantic is None:
+    if output.semantic_codes is None:
         raise ValueError("BiCodec generated output is missing semantic codes.")
-    prompt_acoustic = _prompt_bicodec_acoustic(
+    prompt_global = _prompt_bicodec_global(
         prompt_ids,
         audio_tokenizer=audio_tokenizer,
         audio_token_range=audio_token_range,
         boa_token_id=boa_token_id,
         eoa_token_id=eoa_token_id,
     )
-    if (prompt_acoustic is None) == (output.acoustic is None):
+    if (prompt_global is None) == (output.global_codes is None):
         raise ValueError(
             "BiCodec decode requires exactly one global stream owner across "
             "prompt and generated output."
         )
-    acoustic = output.acoustic if output.acoustic is not None else prompt_acoustic
-    if acoustic is None:
-        raise AssertionError("BiCodec global stream ownership was not resolved.")
-    resolved = SemanticAcousticCodes(
-        semantic=output.semantic.to(device=audio_token_ids.device, dtype=torch.long),
-        acoustic=acoustic.to(device=audio_token_ids.device, dtype=torch.long),
+    global_codes = (
+        output.global_codes if output.global_codes is not None else prompt_global
     )
+    if global_codes is None:
+        raise AssertionError("BiCodec global stream ownership was not resolved.")
+    resolved = AudioCodes(
+        semantic_codes=output.semantic_codes.to(
+            device=audio_token_ids.device,
+            dtype=torch.long,
+        ),
+        global_codes=global_codes.to(
+            device=audio_token_ids.device,
+            dtype=torch.long,
+        ),
+    )
+    resolved_semantic = cast(Tensor, resolved.semantic_codes)
     waveform = codec.detokenize(
         SemanticAcousticCodes(
-            semantic=resolved.semantic.unsqueeze(0),
-            acoustic=resolved.acoustic.unsqueeze(0),
+            semantic=resolved_semantic.unsqueeze(0),
+            acoustic=cast(Tensor, resolved.global_codes).unsqueeze(0),
         )
     )
     if waveform.dim() < 1 or waveform.size(0) != 1:
@@ -169,7 +182,7 @@ def decode_generated_bicodec_row(
     return waveform[0], resolved
 
 
-def _prompt_bicodec_acoustic(
+def _prompt_bicodec_global(
     prompt_ids: Tensor | None,
     *,
     audio_tokenizer: BiCodecAudioTokenizer,
@@ -182,7 +195,7 @@ def _prompt_bicodec_acoustic(
     if prompt_ids.dim() != 1:
         raise ValueError("BiCodec prompt ids must have shape [tokens].")
     start, end = audio_token_range
-    acoustic: list[Tensor] = []
+    global_streams: list[Tensor] = []
     cursor = 0
     while cursor < prompt_ids.numel():
         starts = prompt_ids[cursor:].eq(boa_token_id).nonzero(as_tuple=False)
@@ -199,12 +212,12 @@ def _prompt_bicodec_acoustic(
         if bool((payload < start).any()) or bool((payload >= end).any()):
             raise ValueError("BiCodec prompt audio span contains non-codec tokens.")
         decoded = audio_tokenizer.decode_streams(payload.to(dtype=torch.long) - start)
-        if decoded.acoustic is not None:
-            acoustic.append(decoded.acoustic)
+        if decoded.global_codes is not None:
+            global_streams.append(decoded.global_codes)
         cursor = span_end + 1
-    if len(acoustic) > 1:
+    if len(global_streams) > 1:
         raise ValueError("BiCodec prompt contains more than one global stream.")
-    return None if not acoustic else acoustic[0]
+    return None if not global_streams else global_streams[0]
 
 
 def decode_generated_codes(
@@ -231,12 +244,14 @@ def decode_reference_codes(
     codec: CodecBackend,
 ) -> Tensor:
     """Decode one prepared-code sample through its actual backend capability."""
-    if isinstance(codes, (Mapping, SemanticAcousticCodes)):
-        structured = _structured_codes(codes)
-        return structured_codec(codec).detokenize(
+    if isinstance(codes, (Mapping, AudioCodes)):
+        structured_backend = structured_codec(codec)
+        structured = _structured_codes(codes, structured_backend.acoustic_layout)
+        anycodec_codes = structured.to_anycodec(structured_backend.acoustic_layout)
+        return structured_backend.detokenize(
             SemanticAcousticCodes(
-                semantic=structured.semantic.unsqueeze(0),
-                acoustic=structured.acoustic.unsqueeze(0),
+                semantic=anycodec_codes.semantic.unsqueeze(0),
+                acoustic=anycodec_codes.acoustic.unsqueeze(0),
             )
         )
     if not isinstance(codes, Tensor):
@@ -278,22 +293,52 @@ def _decoded_frames(tokenizer: AudioTokenizer, token_ids: Tensor) -> Tensor:
     return frames.to(device=token_ids.device, dtype=torch.long)
 
 
-def _structured_codes(value: object) -> SemanticAcousticCodes:
-    if isinstance(value, SemanticAcousticCodes):
-        semantic = value.semantic
-        acoustic = value.acoustic
+def _structured_codes(value: object, layout: AcousticLayout) -> AudioCodes:
+    if isinstance(value, AudioCodes):
+        codes = value
     elif isinstance(value, Mapping):
         semantic = value.get("semantic")
-        acoustic = value.get("acoustic")
-        if not isinstance(semantic, Tensor) or not isinstance(acoustic, Tensor):
+        if not isinstance(semantic, Tensor):
             raise TypeError(
-                "structured reference codes must contain Tensor semantic/acoustic fields."
+                "anydataset structured reference codes must contain Tensor semantic."
             )
+        if layout is AcousticLayout.FIXED_LENGTH:
+            global_codes = value.get("acoustic")
+            if not isinstance(global_codes, Tensor):
+                raise TypeError(
+                    "anydataset fixed reference codes must contain Tensor acoustic."
+                )
+            codes = AudioCodes(
+                semantic_codes=semantic,
+                global_codes=global_codes,
+            )
+        elif layout is AcousticLayout.FRAME_ALIGNED:
+            acoustic = value.get("acoustic")
+            if not isinstance(acoustic, Tensor):
+                raise TypeError(
+                    "anydataset frame-aligned reference codes must contain Tensor acoustic."
+                )
+            codes = AudioCodes(
+                semantic_codes=semantic,
+                acoustic_codes=acoustic,
+            )
+        else:
+            raise ValueError(f"unsupported acoustic layout: {layout!r}.")
     else:
-        raise TypeError("structured reference codes require semantic/acoustic fields.")
+        raise TypeError("structured reference codes require AudioCodes fields.")
+    semantic = codes.semantic_codes
+    if semantic is None:
+        raise ValueError("structured reference codes are missing semantic codes.")
     _reference_code_tensor(semantic)
-    _reference_code_tensor(acoustic)
-    return SemanticAcousticCodes(semantic=semantic, acoustic=acoustic)
+    secondary = (
+        codes.global_codes
+        if layout is AcousticLayout.FIXED_LENGTH
+        else codes.acoustic_codes
+    )
+    if secondary is None:
+        raise ValueError("structured reference codes are missing non-semantic codes.")
+    _reference_code_tensor(secondary)
+    return codes
 
 
 def _reference_code_tensor(value: Tensor) -> None:

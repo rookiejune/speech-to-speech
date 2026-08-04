@@ -164,8 +164,8 @@ class SpeakerGridDatasetTest(unittest.TestCase):
                     audio_sequence_layout=AudioSequenceLayout.FLATTENED,
                     audio_tokenizer=BiCodecAudioTokenizer(
                         semantic_codebook_size=16,
-                        acoustic_codebook_sizes=(5, 7),
-                        acoustic_unit_length=3,
+                        global_codebook_sizes=(5, 7),
+                        global_unit_length=3,
                     ),
                 ),
             )
@@ -215,9 +215,9 @@ class BiCodecSpeakerCellTest(unittest.TestCase):
         decoded = runtime.audio_tokenizer.decode_streams(
             local_prompt,
         )
-        self.assertIsNone(decoded.semantic)
+        self.assertIsNone(decoded.semantic_codes)
         torch.testing.assert_close(
-            decoded.acoustic,
+            decoded.global_codes,
             torch.tensor([[0, 1], [2, 3], [4, 5]]),
         )
 
@@ -240,19 +240,19 @@ class BiCodecSpeakerCellTest(unittest.TestCase):
                     "audio",
                     torch.tensor(runtime.audio_tokenizer.semantic_token_id),
                 )
-                acoustic_marker = runtime.layout.to_global(
+                global_marker = runtime.layout.to_global(
                     "audio",
-                    torch.tensor(runtime.audio_tokenizer.acoustic_token_id),
+                    torch.tensor(runtime.audio_tokenizer.global_token_id),
                 )
                 if not with_audio_context:
-                    self.assertEqual(int(response[0]), int(acoustic_marker))
-                    acoustic_index = (response == acoustic_marker).nonzero(
+                    self.assertEqual(int(response[0]), int(global_marker))
+                    global_index = (response == global_marker).nonzero(
                         as_tuple=False,
                     )[0].item()
                     semantic_index = (response == semantic_marker).nonzero(
                         as_tuple=False,
                     )[0].item()
-                    self.assertLess(acoustic_index, semantic_index)
+                    self.assertLess(global_index, semantic_index)
                 else:
                     self.assertEqual(int(response[0]), int(semantic_marker))
                     boa_positions = (
@@ -349,8 +349,8 @@ def _cells() -> tuple[Sample, ...]:
 def _runtime(audio_sequence_layout: AudioSequenceLayout):
     tokenizer = BiCodecAudioTokenizer(
         semantic_codebook_size=16,
-        acoustic_codebook_sizes=(5, 7),
-        acoustic_unit_length=3,
+        global_codebook_sizes=(5, 7),
+        global_unit_length=3,
     )
     return SimpleNamespace(
         codec_name="bicodec",

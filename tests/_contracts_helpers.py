@@ -330,8 +330,6 @@ def _data_runtime():
         codec_frame_rate=50.0,
         audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
         semantic_codec_artifact=None,
-        acoustic_layout=AcousticLayout.FRAME_ALIGNED,
-        acoustic_unit_length=None,
         text_tokenizer=_Tokenizer(10),
         audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
         layout=Layout(text=(0, 10), audio=(10, 20)),
@@ -347,8 +345,8 @@ def _data_runtime():
 def _bicodec_data_runtime():
     tokenizer = BiCodecAudioTokenizer(
         semantic_codebook_size=8,
-        acoustic_codebook_sizes=(3,),
-        acoustic_unit_length=2,
+        global_codebook_sizes=(3,),
+        global_unit_length=2,
     )
     audio_start = 10
     boa_token_id = audio_start + tokenizer.vocab_size
@@ -358,8 +356,6 @@ def _bicodec_data_runtime():
         codec_frame_rate=50.0,
         audio_sequence_layout=AudioSequenceLayout.FLATTENED,
         semantic_codec_artifact=None,
-        acoustic_layout=AcousticLayout.FIXED_LENGTH,
-        acoustic_unit_length=2,
         text_tokenizer=_ChatTokenizer(10),
         audio_tokenizer=tokenizer,
         layout=Layout(text=(0, 10), audio=(audio_start, boa_token_id + 3)),

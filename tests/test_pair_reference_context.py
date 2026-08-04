@@ -15,7 +15,6 @@ from anydataset.types import (
     TextView,
 )
 from anydataset.types import AudioItem, TextItem
-from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 
 from speech_to_speech.datamodule.build.sample import build_task_sample
@@ -34,7 +33,7 @@ class PairReferenceContextTest(unittest.TestCase):
         built = build_task_sample(parsed, cast(object, runtime))
         response = built.labels.response_ids
         local = response[:-1] - runtime.layout.blocks["audio"][0]
-        self.assertEqual(int(local[0]), runtime.audio_tokenizer.acoustic_token_id)
+        self.assertEqual(int(local[0]), runtime.audio_tokenizer.global_token_id)
         self.assertNotIn("audio_context", built.request)
 
     def test_asr_does_not_materialize_decode_context(self) -> None:
@@ -51,9 +50,9 @@ class PairReferenceContextTest(unittest.TestCase):
         response = built.labels.response_ids
         local = response[:-1] - runtime.layout.blocks["audio"][0]
         self.assertEqual(int(local[0]), runtime.audio_tokenizer.semantic_token_id)
-        prompt_global = _prompt_acoustic_ids(built.request["prompt_ids"], runtime)
+        prompt_global = _prompt_global_ids(built.request["prompt_ids"], runtime)
         decoded = runtime.audio_tokenizer.decode_streams(prompt_global)
-        self.assertIsNotNone(decoded.acoustic)
+        self.assertIsNotNone(decoded.global_codes)
 
     def test_explicit_audio_context_is_serialized_into_prompt(self) -> None:
         runtime = _bicodec_runtime(AudioSequenceLayout.FLATTENED)
@@ -70,7 +69,7 @@ class PairReferenceContextTest(unittest.TestCase):
         self.assertIsInstance(parsed.audio_context, Speech)
         assert isinstance(parsed.audio_context, Speech)
         torch.testing.assert_close(
-            parsed.audio_context.acoustic_codes,
+            parsed.audio_context.global_codes,
             context_cell[(Role.DEFAULT, Modality.AUDIO)].views[AudioView.BICODEC][
                 "acoustic"
             ],
@@ -117,8 +116,8 @@ def _audio(offset: int) -> AudioItem:
 def _bicodec_runtime(audio_sequence_layout: AudioSequenceLayout):
     tokenizer = BiCodecAudioTokenizer(
         semantic_codebook_size=8,
-        acoustic_codebook_sizes=(3, 3),
-        acoustic_unit_length=2,
+        global_codebook_sizes=(3, 3),
+        global_unit_length=2,
     )
     audio_start = 10
     boa = audio_start + tokenizer.vocab_size
@@ -128,8 +127,6 @@ def _bicodec_runtime(audio_sequence_layout: AudioSequenceLayout):
         codec_frame_rate=50.0,
         audio_sequence_layout=audio_sequence_layout,
         semantic_codec_artifact=None,
-        acoustic_layout=AcousticLayout.FIXED_LENGTH,
-        acoustic_unit_length=2,
         text_tokenizer=_ChatTokenizer(),
         audio_tokenizer=tokenizer,
         layout=Layout(text=(0, 10), audio=(audio_start, boa + 3)),
@@ -156,7 +153,7 @@ class _ChatTokenizer:
         return " ".join(message["content"] for message in messages)
 
 
-def _prompt_acoustic_ids(input_ids: torch.Tensor, runtime) -> torch.Tensor:
+def _prompt_global_ids(input_ids: torch.Tensor, runtime) -> torch.Tensor:
     row = input_ids
     boa_positions = (row == runtime.boa_token_id).nonzero(as_tuple=False).flatten()
     if boa_positions.numel() < 1:

@@ -28,7 +28,9 @@ from ..runtime.types import (
     fsq_levels,
     fsq_radix_order,
     semantic_feature_dim,
+    structured_codec,
     supports_acoustic,
+    supports_structured,
 )
 from ._contract import (
     ModelCheckpointContract,
@@ -318,14 +320,18 @@ def _codec_contract(runtime: TokenModelRuntime) -> dict[str, object]:
     acoustic: dict[str, object] | None = None
     if supports_acoustic(codec):
         resolved = acoustic_codec(codec)
-        layout = runtime.acoustic_layout
-        if not isinstance(layout, AcousticLayout):
-            raise TypeError("runtime acoustic layout must be an AcousticLayout.")
+        if supports_structured(codec):
+            structured = structured_codec(codec)
+            layout = structured.acoustic_layout
+            unit_length = structured.acoustic_unit_length
+        else:
+            layout = AcousticLayout.FRAME_ALIGNED
+            unit_length = None
         acoustic = {
             "feature_dim": resolved.acoustic_feature_dim,
             "codebook_sizes": list(resolved.acoustic_codebook_sizes),
             "layout": layout.value,
-            "unit_length": runtime.acoustic_unit_length,
+            "unit_length": unit_length,
         }
     name = runtime.codec_name
     if not isinstance(name, str) or not name:

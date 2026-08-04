@@ -154,8 +154,6 @@ class ConfigRuntimeContractTest(unittest.TestCase):
             codec_frame_rate=50.0,
             audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
             semantic_codec_artifact=None,
-            acoustic_layout=AcousticLayout.FRAME_ALIGNED,
-            acoustic_unit_length=None,
             text_tokenizer=_Tokenizer(10),
             audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
             layout=Layout(text=(0, 10), audio=(10, 20)),

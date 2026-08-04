@@ -5,7 +5,6 @@ from functools import cached_property
 from typing import Protocol
 
 from anydataset.types import AudioView
-from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 
 from ..runtime import AudioSequenceLayout
@@ -64,8 +63,6 @@ class DataRuntimeSnapshot:
     codec_frame_rate: float
     audio_sequence_layout: AudioSequenceLayout
     semantic_codec_artifact: str | None
-    acoustic_layout: AcousticLayout
-    acoustic_unit_length: int | None
     text_tokenizer: TextTokenizer
     audio_tokenizer: AudioTokenizer
     layout_blocks: tuple[tuple[str, tuple[int, int]], ...]
@@ -83,8 +80,6 @@ class DataRuntimeSnapshot:
             codec_frame_rate=runtime.codec_frame_rate,
             audio_sequence_layout=runtime.audio_sequence_layout,
             semantic_codec_artifact=runtime.semantic_codec_artifact,
-            acoustic_layout=runtime.acoustic_layout,
-            acoustic_unit_length=runtime.acoustic_unit_length,
             text_tokenizer=runtime.text_tokenizer,
             audio_tokenizer=runtime.audio_tokenizer,
             layout_blocks=tuple(runtime.layout.blocks.items()),

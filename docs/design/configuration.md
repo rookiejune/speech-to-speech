@@ -237,8 +237,9 @@ codes/reference 中取得 acoustic 并直接序列化进 prompt。
   输入 global 直接序列化进 prompt，response 以 `<begin_of_semantic>` 开局；没有输入 global 时
   response 以 `<begin_of_global>` 开局，由 LLM 生成 global 后继续生成 semantic。global ownership
   由数据装配产生的 marker labels 学习，不是公开 config 或 runtime route 轴。
-- 非 semantic 单元的存储始终是 `SemanticAcousticCodes.acoustic`；frame-aligned 还是 fixed-length
-  由 codec 的 `AcousticLayout` 决定，不由 grammar/prompt 再造第三种 stream。
+- S2S 内部统一使用 `AudioCodes`：fixed-length non-semantic units 映射为 `global_codes`，
+  frame-aligned units 映射为 `acoustic_codes`。`SemanticAcousticCodes.acoustic` 只保留在 anycodec
+  adapter 边界。
 - `runtime.backbone_initialization=random` 从 `runtime.backbone` 读取 tokenizer 与完整 HF config，
   但不读取预训练权重；它不能与 `model=toy` 组合，并要求
   `callback/parameter_policy=full`。
@@ -250,7 +251,7 @@ codes/reference 中取得 acoustic 并直接序列化进 prompt。
   PromptManager 格式，后者需要独立的结构化 prompt adapter。
 - `runtime.semantic_codec_artifact` 为 `semantic-acoustic-codec` 的 semantic-only waveform
   support artifact；LongCat 的 `semantic` token-only 路径可使用它。BiCodec 不接受该 artifact，
-  unified structured sequence 始终恢复完整 `SemanticAcousticCodes` 后调用 backend `detokenize()`，
+  unified structured sequence 始终恢复完整 `AudioCodes`，在 backend 边界转换后调用 `detokenize()`，
   也不接入 Flow/RVQ composition。两份 BiCodec smoke 都选择
   `datamodule/dataset=qwen_tts_speaker` 和 `datamodule.shape=single`；可用
   `datamodule.dataset.speaker=<id>` 限制到一个 speaker；`bicodec_input_global_smoke` 使用 prompt

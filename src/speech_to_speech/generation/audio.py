@@ -7,10 +7,10 @@ from typing import Protocol, cast
 
 import torch
 from anydataset.types import Modality
-from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
+from ..codes import AudioCodes
 from ..prediction import PredictionModality
 from ..runtime import AudioSequenceLayout
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
@@ -290,7 +290,7 @@ class _Structured:
         self,
         token_ids: Tensor,
         request: Request | None,
-    ) -> tuple[Tensor, SemanticAcousticCodes]:
+    ) -> tuple[Tensor, AudioCodes]:
         return decode_generated_bicodec_row(
             token_ids,
             None if request is None else request["prompt_ids"],
@@ -402,7 +402,7 @@ def _audio_result(
     sample_rate: int,
     *,
     features: Tensor | None = None,
-    codes: SemanticAcousticCodes | None = None,
+    codes: AudioCodes | None = None,
 ) -> Result:
     return Result(
         response_ids=token_ids,

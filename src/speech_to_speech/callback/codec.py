@@ -5,6 +5,7 @@ from anytrain.codec import SemanticAcousticCodes
 from anydataset.types import AudioView
 from torch import Tensor
 
+from ..codes import AudioCodes
 from ..datamodule.protocol import DatasetRuntime
 from ..datamodule.parse.parser import speech_from_codes
 from ..datamodule.build.sample import build_task_sample
@@ -128,7 +129,8 @@ class OnDeviceCodecMaterializer:
                     raise TypeError(
                         "BiCodec waveform fallback requires a structured codec."
                     )
-                encoded = structured_codec(self.runtime.codec).tokenize(
+                codec = structured_codec(self.runtime.codec)
+                encoded = codec.tokenize(
                     batched_waveform,
                     sample.sample_rate,
                 )
@@ -138,9 +140,12 @@ class OnDeviceCodecMaterializer:
                     )
                 if encoded.semantic.size(0) != 1 or encoded.acoustic.size(0) != 1:
                     raise ValueError("per-sample codec fallback expects one encoded item.")
-                return SemanticAcousticCodes(
-                    semantic=encoded.semantic[0].detach().cpu(),
-                    acoustic=encoded.acoustic[0].detach().cpu(),
+                return AudioCodes.from_anycodec(
+                    SemanticAcousticCodes(
+                        semantic=encoded.semantic[0].detach().cpu(),
+                        acoustic=encoded.acoustic[0].detach().cpu(),
+                    ),
+                    codec.acoustic_layout,
                 )
             return _encoded_codes(
                 frame_codec(self.runtime.codec).encode(

@@ -192,8 +192,8 @@ class RuntimeCodecTest(unittest.TestCase):
         load_tokenizer.assert_called_once_with("/tmp/bicodec-semantic-bpe")
         build_tokenizer.assert_called_once_with(
             semantic_codebook_size=8,
-            acoustic_codebook_sizes=(5, 7),
-            acoustic_unit_length=3,
+            global_codebook_sizes=(5, 7),
+            global_unit_length=3,
             semantic_tokenizer=semantic_tokenizer,
         )
 

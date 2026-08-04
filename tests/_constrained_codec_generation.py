@@ -362,10 +362,10 @@ def _generate_bicodec_row(
     audio_start, _ = model.runtime.audio_head_range
     token_ids = _TokenIdSpace(prompt_ids, audio_start)
 
-    if AudioStream.ACOUSTIC in streams:
-        row.step(token_ids.token(tokenizer.acoustic_token_id))
-        for _ in range(tokenizer.acoustic_unit_length):
-            for start, end in tokenizer.acoustic_token_ranges:
+    if AudioStream.GLOBAL in streams:
+        row.step(token_ids.token(tokenizer.global_token_id))
+        for _ in range(tokenizer.global_unit_length):
+            for start, end in tokenizer.global_token_ranges:
                 row.step(token_ids.sized_range(start, end - start))
 
     if AudioStream.SEMANTIC in streams:
@@ -450,10 +450,10 @@ def _audio_streams(streams: Sequence[AudioStream]) -> tuple[AudioStream, ...]:
         raise ValueError("BiCodec generation requires at least one output stream.")
     if any(not isinstance(stream, AudioStream) for stream in values):
         raise TypeError("BiCodec generation streams must contain AudioStream values.")
-    unknown = set(values) - {AudioStream.ACOUSTIC, AudioStream.SEMANTIC}
+    unknown = set(values) - {AudioStream.GLOBAL, AudioStream.SEMANTIC}
     if unknown:
         labels = ", ".join(sorted(stream.value for stream in unknown))
         raise ValueError(f"BiCodec generation streams do not support: {labels}.")
     return tuple(
-        stream for stream in (AudioStream.ACOUSTIC, AudioStream.SEMANTIC) if stream in values
+        stream for stream in (AudioStream.GLOBAL, AudioStream.SEMANTIC) if stream in values
     )

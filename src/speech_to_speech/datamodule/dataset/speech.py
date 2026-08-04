@@ -314,15 +314,15 @@ class ToyDataset(MapStyleABC):
         if self.view is AudioView.BICODEC:
             structured = structured_codec(codec)
             self.codebook_sizes = tuple(structured.semantic_codebook_sizes)
-            self.acoustic_codebook_sizes = tuple(structured.acoustic_codebook_sizes)
+            self.global_codebook_sizes = tuple(structured.acoustic_codebook_sizes)
             unit_length = structured.acoustic_unit_length
             if unit_length is None:
-                raise ValueError("BiCodec toy data requires a fixed acoustic unit length.")
-            self.acoustic_unit_length = unit_length
+                raise ValueError("BiCodec toy data requires a fixed global unit length.")
+            self.global_unit_length = unit_length
         else:
             self.codebook_sizes = _codebook_sizes(self.view, codec)
-            self.acoustic_codebook_sizes = ()
-            self.acoustic_unit_length = None
+            self.global_codebook_sizes = ()
+            self.global_unit_length = None
 
     def __len__(self) -> int:
         return self.samples
@@ -349,19 +349,26 @@ class ToyDataset(MapStyleABC):
         steps = torch.arange(self.frames, dtype=torch.long)
         if self.view is AudioView.BICODEC:
             semantic = ((steps + offset) % self.codebook_sizes[0]).unsqueeze(-1)
-            unit_length = self.acoustic_unit_length
+            unit_length = self.global_unit_length
             if unit_length is None:
-                raise RuntimeError("BiCodec toy data is missing its acoustic unit length.")
-            acoustic_steps = torch.arange(unit_length, dtype=torch.long)
-            acoustic = torch.stack(
+                raise RuntimeError("BiCodec toy data is missing its global unit length.")
+            global_steps = torch.arange(unit_length, dtype=torch.long)
+            global_codes = torch.stack(
                 [
-                    (acoustic_steps + offset + codebook) % size
-                    for codebook, size in enumerate(self.acoustic_codebook_sizes)
+                    (global_steps + offset + codebook) % size
+                    for codebook, size in enumerate(self.global_codebook_sizes)
                 ],
                 dim=-1,
             )
             return AudioItem(
-                views={AudioView.BICODEC: {"semantic": semantic, "acoustic": acoustic}},
+                # The prepared-data view keeps anydataset's structured storage key;
+                # parser.py normalizes it to AudioCodes.global_codes immediately.
+                views={
+                    AudioView.BICODEC: {
+                        "semantic": semantic,
+                        "acoustic": global_codes,
+                    }
+                },
                 meta={AudioMeta.DURATION: self.frames / self.frame_rate},
             )
         columns = [

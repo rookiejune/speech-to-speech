@@ -236,8 +236,8 @@ overlay 直接稀疏读取对应 audio rows，经过 `source_audio_encoder` 后�
 
 Native/BPE semantic tokenizers 使用 codec codebook 初始化；完整 codec sequence tokenizer
 通常使用随机初始化，因为它的 vocab 同时包含多 codebook offset tokens、BiCodec
-semantic/acoustic ranges 与 codec/stream/end markers。BiCodec 的 semantic payload、各
-fixed-length acoustic slot 和 marker 共用这一稳定 layout vocabulary；训练 objective
+semantic/global ranges 与 codec/stream/end markers。BiCodec 的 semantic payload、各
+global slot 和 marker 共用这一稳定 layout vocabulary；训练 objective
 根据 self-describing marker 解释各位置的监督 groups，普通 generation 仍统一建模，不把这些 group 下推为
 隐式结构约束。
 随机初始化只读取 codec 声明的 semantic feature dimension，并使用 backbone embedding 作为

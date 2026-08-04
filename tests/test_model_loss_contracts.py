@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 import torch
 from anydataset.types import Modality
-from anytrain.codec import SemanticAcousticCodes
 from anytrain.loss import PackedCodebookLogits
 from anytrain.module.idspace import Layout
 from lightning.pytorch import LightningModule
@@ -26,6 +25,7 @@ from speech_to_speech.datamodule.types import (
     Text,
 )
 from speech_to_speech.audio_stream import AudioStream
+from speech_to_speech.codes import AudioCodes
 from semantic_acoustic_codec.loss.flow import FlowLoss
 
 from speech_to_speech.loss.module import FlowObjective, Objective, RVQObjective, TokenObjective
@@ -1248,17 +1248,17 @@ def _require_details(
 def _bicodec_full_vocab_case() -> SimpleNamespace:
     tokenizer = BiCodecAudioTokenizer(
         semantic_codebook_size=4,
-        acoustic_codebook_sizes=(2,),
-        acoustic_unit_length=1,
+        global_codebook_sizes=(2,),
+        global_unit_length=1,
     )
     layout = Layout(text=(0, 4), audio=(4, 4 + tokenizer.vocab_size))
-    codes = SemanticAcousticCodes(
-        semantic=torch.tensor([[1]]),
-        acoustic=torch.tensor([[0]]),
+    codes = AudioCodes(
+        semantic_codes=torch.tensor([[1]]),
+        global_codes=torch.tensor([[0]]),
     )
     local_ids = tokenizer.encode_streams(
         codes,
-        (AudioStream.ACOUSTIC, AudioStream.SEMANTIC),
+        (AudioStream.GLOBAL, AudioStream.SEMANTIC),
     )
     global_ids = layout.to_global(Modality.AUDIO.value, local_ids)
     input_ids = torch.cat((torch.tensor([1]), global_ids)).unsqueeze(0)

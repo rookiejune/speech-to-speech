@@ -11,6 +11,7 @@ from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 
 from speech_to_speech.audio_stream import AudioStream
+from speech_to_speech.codes import AudioCodes
 from speech_to_speech.generation.chat import (
     ChatRequest,
     completion_from_result,
@@ -94,10 +95,10 @@ class _StructuredCodec:
         return semantic_codes[..., 0].float()
 
 
-def _codes() -> SemanticAcousticCodes:
-    return SemanticAcousticCodes(
-        semantic=torch.tensor([[1], [2], [3]], dtype=torch.int32),
-        acoustic=torch.tensor([[0], [1]], dtype=torch.int64),
+def _codes() -> AudioCodes:
+    return AudioCodes(
+        semantic_codes=torch.tensor([[1], [2], [3]], dtype=torch.int32),
+        global_codes=torch.tensor([[0], [1]], dtype=torch.int64),
     )
 
 
@@ -109,8 +110,8 @@ def _runtime(
 ) -> GenerationRuntime:
     tokenizer = BiCodecAudioTokenizer(
         semantic_codebook_size=8,
-        acoustic_codebook_sizes=(3,),
-        acoustic_unit_length=2,
+        global_codebook_sizes=(3,),
+        global_unit_length=2,
     )
     runtime = SimpleNamespace(
         audio_sequence_layout=audio_sequence_layout,
@@ -138,7 +139,7 @@ class _RouteModel:
     def __init__(
         self,
         runtime: GenerationRuntime,
-        output: SemanticAcousticCodes,
+        output: AudioCodes,
     ) -> None:
         self.runtime = runtime
         embedding = nn.Embedding(1, 1)
@@ -150,7 +151,7 @@ class _RouteModel:
             ),
         )
         streams = (
-            (AudioStream.ACOUSTIC, AudioStream.SEMANTIC)
+            (AudioStream.GLOBAL, AudioStream.SEMANTIC)
             if runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED
             else (AudioStream.SEMANTIC,)
         )
@@ -337,11 +338,11 @@ class ChatAdapterTest(unittest.TestCase):
         private = to_request(request, runtime)
         self.assertNotIn("audio_context", private)
         self.assertIs(private["task"], Task.TTS)
-        local_acoustic = runtime.audio_tokenizer.encode_acoustic(codes)
+        local_global = runtime.audio_tokenizer.encode_global(codes)
         expected_suffix = torch.cat(
             (
                 torch.tensor([runtime.boa_token_id]),
-                runtime.layout.to_global(Modality.AUDIO.value, local_acoustic),
+                runtime.layout.to_global(Modality.AUDIO.value, local_global),
                 torch.tensor([runtime.eoa_token_id, runtime.boa_token_id]),
             )
         )
@@ -385,10 +386,12 @@ class ChatAdapterTest(unittest.TestCase):
             },
             runtime,
         )
-        self.assertIsInstance(codes, SemanticAcousticCodes)
-        assert isinstance(codes, SemanticAcousticCodes)
-        self.assertEqual(codes.semantic.size(1), 1)
-        self.assertEqual(codes.acoustic.size(0), 2)
+        self.assertIsInstance(codes, AudioCodes)
+        assert isinstance(codes, AudioCodes)
+        self.assertEqual(codes.semantic_codes.size(1), 1)
+        self.assertIsNotNone(codes.global_codes)
+        assert codes.global_codes is not None
+        self.assertEqual(codes.global_codes.size(0), 2)
 
     def test_create_returns_completion_for_text_task(self) -> None:
         runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)

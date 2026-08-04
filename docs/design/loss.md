@@ -119,13 +119,13 @@ rvq = self.rvq(logits, target_data["codes"], batch.acoustic_target_mask)
 
 所有 batch 都计算 token CE。是否增加 acoustic objective 只由
 `batch.acoustic_target is not None` 决定，不通过 task modality 猜测 codec
-representation，也不通过模式布尔开关表达组合。BiCodec grammar 的 structured acoustic payload 是
+representation，也不通过模式布尔开关表达组合。BiCodec grammar 的 structured global payload 是
 token objective 的 grouped CE，不是 frame-aligned `acoustic_target`；结构化 target fields 或
 prediction groups 不完整时直接报错。
 
 BiCodec grouped CE 的 candidate group 由 tokenizer 唯一拥有：codec/stream markers 使用 forced
 group，不计算 loss；semantic 首 token 使用 semantic group，后续 semantic tokens 与 sequence
-end 使用 semantic-or-end group；每个 fixed-length acoustic slot 使用对应 acoustic codebook
+end 使用 semantic-or-end group；每个 global slot 使用对应 global codebook
 range。`selected_logits()` 返回与该候选集合同序的 logits，target 不在集合内时显式失败。
 
 `TokenObjective` 不要求 model 提供 acoustic 能力。`FlowObjective` 固定组合 token CE 与

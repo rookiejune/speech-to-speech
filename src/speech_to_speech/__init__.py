@@ -1,3 +1,5 @@
 """Speech-to-speech training components."""
 
-__all__: list[str] = []
+from .codes import AudioCodes
+
+__all__ = ["AudioCodes"]

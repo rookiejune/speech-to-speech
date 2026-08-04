@@ -6,10 +6,10 @@ from collections.abc import Mapping, Sequence
 
 import torch
 from anydataset.types import Modality
-from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
+from ..codes import AudioCodes
 from ..prediction import PredictionModality
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..runtime.protocol import GenerationRuntime
@@ -22,7 +22,7 @@ def prepare_bicodec_tts_request(
     text: str,
     runtime: GenerationRuntime,
     *,
-    reference_codes: SemanticAcousticCodes | None = None,
+    reference_codes: AudioCodes | None = None,
     language: str = "English",
     messages: Sequence[Mapping[str, str]] | None = None,
     task: Task = Task.TTS,
@@ -43,7 +43,7 @@ def prepare_bicodec_tts_request(
     values = [text_ids]
     if reference_codes is not None:
         _validate_reference_codes(reference_codes)
-        local_audio_ids = tokenizer.encode_acoustic(reference_codes)
+        local_audio_ids = tokenizer.encode_global(reference_codes)
         global_audio_ids = runtime.layout.to_global(
             Modality.AUDIO.value,
             local_audio_ids,
@@ -90,23 +90,29 @@ def _validate_bicodec_tokenizer(runtime: GenerationRuntime) -> BiCodecAudioToken
 
 
 def _validate_reference_codes(value: object) -> None:
-    if not isinstance(value, SemanticAcousticCodes):
-        raise TypeError("BiCodec reference codes must be SemanticAcousticCodes.")
-    if value.semantic.dim() != 2 or value.semantic.size(1) != 1:
-        raise ValueError("BiCodec semantic reference codes must have shape [units, 1].")
-    if value.acoustic.dim() != 2:
+    if not isinstance(value, AudioCodes):
+        raise TypeError("BiCodec reference codes must be AudioCodes.")
+    if value.global_codes is None or value.global_codes.dim() != 2:
         raise ValueError(
-            "BiCodec acoustic reference codes must have shape [slots, codebooks]."
+            "BiCodec global reference codes must have shape [slots, codebooks]."
         )
-    if value.semantic.numel() == 0 or value.acoustic.numel() == 0:
-        raise ValueError("BiCodec reference codes must not be empty.")
-    if value.semantic.device != value.acoustic.device:
-        raise ValueError(
-            "BiCodec semantic and acoustic reference codes must share a device."
-        )
-    for name, codes in (("semantic", value.semantic), ("acoustic", value.acoustic)):
-        if not is_signed_integer_dtype(codes.dtype):
-            raise TypeError(f"BiCodec {name} reference codes must use signed integers.")
+    if value.acoustic_codes is not None:
+        raise ValueError("BiCodec reference codes must not contain aligned acoustic codes.")
+    if value.semantic_codes is not None:
+        if value.semantic_codes.dim() != 2 or value.semantic_codes.size(1) != 1:
+            raise ValueError(
+                "BiCodec semantic reference codes must have shape [units, 1]."
+            )
+        if value.semantic_codes.device != value.global_codes.device:
+            raise ValueError(
+                "BiCodec semantic and global reference codes must share a device."
+            )
+        if not is_signed_integer_dtype(value.semantic_codes.dtype):
+            raise TypeError(
+                "BiCodec semantic reference codes must use signed integers."
+            )
+    if not is_signed_integer_dtype(value.global_codes.dtype):
+        raise TypeError("BiCodec global reference codes must use signed integers.")
 
 
 def _text_prompt_ids(

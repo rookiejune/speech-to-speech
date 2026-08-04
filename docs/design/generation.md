@@ -22,7 +22,8 @@ ChatRequest(messages, task, language?)
   - `text`：标准文本
   - `audio`：`waveform` + `sample_rate`；入口侧用 runtime codec encode 成 codes
   - `codec_codes`：已 materialize 的 codes，携带 `codec` 名（须等于 `runtime.codec_name`）与
-    `codes`（`SemanticAcousticCodes` 或 frame `[frames, codebooks]`）。不同 codec 的轴序/stream
+    `codes`（`AudioCodes` 或 frame `[frames, codebooks]`）。`SemanticAcousticCodes` 只存在于
+    anycodec tokenize/detokenize 边界，不是 chat 输入。不同 codec 的轴序/stream
     排列只委托现有 audio tokenizer、内部固定 route 和 `audio_sequence_layout`，不在 messages 层另造布局。
 - `task` / `language` 是旁路字段，不伪装成 OpenAI 官方 schema。
 - `ChatCompletion`：`choices[].message` 含 `role=assistant`、可选 text `content`、可选
@@ -42,7 +43,8 @@ ChatRequest(messages, task, language?)
   在成功 decode 后填充 `AudioOutput`。可恢复的逐行 audio decode 失败返回 `audio=None`，并在
   `decode_error` 暴露异常类型与消息。
 - `AudioOutput(features, codes, waveform, sample_rate)`：audio task 的 decode 结果。`codes` 保存
-  route resolve 后的 structured semantic/acoustic codes；unified-token codec 没有独立 acoustic
+  规范化 `AudioCodes(semantic_codes, global_codes, acoustic_codes)`；BiCodec 填充 semantic/global，
+  frame-aligned structured codec 填充 semantic/acoustic。unified-token codec 没有独立非 semantic
   representation，因此 `features=None`。
 - `AcousticGeneration(sequence, features, frame_counts)`：acoustic model 与 audio strategy 之间的批量
   返回契约。
@@ -87,8 +89,8 @@ class Result(TypedDict):
 HF chat template / codec materialize → 私有 `Request`；`generate_responses()` 本身不渲染 chat
 template、不插入 instruction。按 task builder 契约构造的 audio-target request 已经以 BOA 结束。
 prompt 中若包含 BiCodec reference stream，`prompt_ids` 已经包含 serialized global stream，
-decode 直接从该 span 恢复 prompt-owned acoustic stream。reference builder 生成的结尾严格为
-`[BOA, serialized acoustic stream, EOA, BOA]`；无 reference 时只追加最后一个 BOA。response marker
+decode 直接从该 span 恢复 prompt-owned global stream。reference builder 生成的结尾严格为
+`[BOA, serialized global stream, EOA, BOA]`；无 reference 时只追加最后一个 BOA。response marker
 是序列自己的 generation contract：以 `<begin_of_global>` 开局时 LLM 生成 global，随后生成
 semantic；以 `<begin_of_semantic>` 开局时 LLM 只生成 semantic。decode 要求 prompt 与 response
 恰好一方包含 global；两边都有或都没有都报错。shape、dtype、值域和 fixed-length global 数量由
@@ -106,8 +108,8 @@ request 的调用方负责保持相同 task prefix 契约。
 当前 prompt 只由 layout global token IDs 表达；普通 audio-source 内容编码为 semantic audio token，
 并可通过 `audio_input_positions` 让 model 在这些 payload 的 embedding 上运行可配置的
 `AudioInputTower`。该 tower 只处理 source input，不改变 prompt 长度、generation token sequence 或
-output head。structured BiCodec reference acoustic 已经属于 prompt token sequence（在
-`FIXED_LENGTH` 下为 speaker slots），不会通过 request/batch side channel 旁路，也不会再次经过 source tower。
+output head。structured BiCodec reference global 已经属于 prompt token sequence，不会通过
+request/batch side channel 旁路，也不会再次经过 source tower。
 `Request` 不接受可切换的 acoustic feature side channel。
 
 service 在 padding 前校验每条 request 的通用外形，audio strategy 继续校验 codec sequence 契约：
@@ -197,10 +199,11 @@ codec，也只走 token-only generation 分支；实际 waveform decoder 仍按 
 semantic artifact 路径选择。
 `flattened` layout 对普通 `FrameCodec` 仍调用 `decode(full_codes)`；flattened parser 校验有序
 marker、各 codebook 等长 payload 和 EOA，非法序列只影响对应行的 audio decode。BiCodec parser
-从 prompt/response 的 marker 解析 semantic token 和固定数量 slot-major acoustic codebook token：
+从 prompt/response 的 marker 解析 semantic token 和固定数量 slot-major global codebook token：
 prompt 有 global 时 response 必须以 semantic marker 开局；prompt 没有 global 时 response 必须以
 global marker 开局并同时提供 global 与 semantic。parser 不读取 task/request route，只要求两侧恰好
-一个 global owner。恢复 `SemanticAcousticCodes` 后调用 `detokenize()`。配置
+一个 global owner。S2S 内部恢复 `AudioCodes`，只在调用 anycodec `detokenize()` 的边界把
+`global_codes` 映射回 `SemanticAcousticCodes.acoustic`。配置
 `runtime.semantic_codec_artifact` 后，semantic strategy 只处理 structured backend 的 semantic tokens，
 并把 waveform decode 交给 `SemanticCodecRuntime`；普通 frame codec 的 `decode()` 不再接收
 semantic-only codes。semantic-artifact 与 structured full-sequence 是配置阶段选择的两条解码路径；
@@ -229,7 +232,7 @@ padding；BiCodec reference 已经在 prompt 内，不再复制为 generation si
 位置。它不从第一个非 `-100` label 猜 prompt 边界；核心 service 不依赖 `ModelBatch`。
 
 `decode_reference_codes()` 是 raw task sample 的统一重建边界：二维 frame-code tensor 通过
-`frame_codec().decode()`，structured mapping 恢复为 `SemanticAcousticCodes` 后通过
+`frame_codec().decode()`，structured mapping 先规范化为 `AudioCodes`，再在 codec 边界转换后通过
 `structured_codec().detokenize()`。callback 不按 codec 名称复制 decode 分支，也不把 fixed-length
 acoustic units 当作 semantic frame 轴。
 
@@ -260,7 +263,7 @@ cached/full、batched/serial 任一 waveform 非 finite，或 greedy token 不�
 - `Request` 表达真实推理，不能用缺 target 的 `ModelBatch` 代替。
 - `response_ids` 始终保留 layout global ID 空间且不含 stop token；调用方需要文本时再通过
   runtime layout 与 tokenizer 解码。
-- BiCodec decode 必须从 prompt/output marker 得到且只得到一个 acoustic owner，并拥有 output
+- BiCodec decode 必须从 prompt/output marker 得到且只得到一个 global owner，并拥有 output
   semantic stream；缺失或重复时显式失败，不用 target codes 或 out-of-band context 静默补齐。
 - service 与 audio strategy 只依赖 Protocol，不依赖具体 flow/RVQ model 或 LightningModule；
   ordinary token generation 只依赖 AUDIO vocab 与 EOA，codec-specific parse/decode 配对留在 audio strategy。

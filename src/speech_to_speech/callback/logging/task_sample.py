@@ -8,13 +8,13 @@ from typing import Any, Protocol, TypedDict, cast
 
 import torch
 from anydataset import types
-from anytrain.codec import SemanticAcousticCodes
 from anytrain.module.idspace import Layout
 from anytrain.lightning import experiment
 from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 from torch import Tensor
 
+from ...codes import AudioCodes
 from ...generation import Request, Result, decode_response_text
 from ...generation.batch import requests_from_batch
 from ...generation.decode import decode_reference_codes
@@ -957,7 +957,7 @@ def _modality_metadata(
             **(
                 _waveform_metadata(value)
                 if view is types.AudioView.WAVEFORM
-                else _codes_metadata(value)
+                else _codes_metadata(value, view=view)
             ),
         }
     raise AssertionError(f"unsupported sample modality: {modality.value}")
@@ -1024,20 +1024,20 @@ def _partial_bicodec_metadata(
     audio_mask = ids.ge(start) & ids.lt(end)
     local = ids[audio_mask] - start
     values = [int(value) for value in local.tolist()]
-    expected_acoustic = tokenizer.acoustic_unit_length * len(
-        tokenizer.acoustic_codebook_sizes
+    expected_global = tokenizer.global_unit_length * len(
+        tokenizer.global_codebook_sizes
     )
     semantic_start, semantic_end = tokenizer.semantic_token_range
     summary: dict[str, Any] = {
-        "expected_acoustic_tokens": expected_acoustic,
-        "acoustic_tokens": 0,
+        "expected_global_tokens": expected_global,
+        "global_tokens": 0,
         "semantic_tokens": 0,
         "has_end_marker": tokenizer.end_token_id in values,
     }
 
-    acoustic_marker_index = _first_index(values, tokenizer.acoustic_token_id)
-    if acoustic_marker_index is not None:
-        payload_start = acoustic_marker_index + 1
+    global_marker_index = _first_index(values, tokenizer.global_token_id)
+    if global_marker_index is not None:
+        payload_start = global_marker_index + 1
         payload_end = _first_marker_index(
             values,
             (
@@ -1048,8 +1048,8 @@ def _partial_bicodec_metadata(
         )
         if payload_end is None:
             payload_end = len(values)
-        acoustic_payload = values[payload_start:payload_end]
-        summary["acoustic_tokens"] = len(acoustic_payload)
+        global_payload = values[payload_start:payload_end]
+        summary["global_tokens"] = len(global_payload)
 
     semantic_marker_index = _first_index(values, tokenizer.semantic_token_id)
     if semantic_marker_index is not None:
@@ -1091,25 +1091,44 @@ def _first_marker_index(
     return None
 
 
-def _codes_metadata(codes: object) -> dict[str, Any]:
-    if isinstance(codes, SemanticAcousticCodes):
-        semantic = codes.semantic
-        acoustic = codes.acoustic
+def _codes_metadata(
+    codes: object,
+    *,
+    view: types.AudioView | None = None,
+) -> dict[str, Any]:
+    if isinstance(codes, AudioCodes):
+        semantic = codes.semantic_codes
+        global_codes = codes.global_codes
+        acoustic = codes.acoustic_codes
     elif isinstance(codes, Mapping):
         semantic = codes.get("semantic")
-        acoustic = codes.get("acoustic")
-        if not isinstance(semantic, Tensor) or not isinstance(acoustic, Tensor):
+        secondary = codes.get("acoustic")
+        if not isinstance(semantic, Tensor) or not isinstance(secondary, Tensor):
             raise TypeError(
-                "structured audio sample codes require Tensor semantic/acoustic fields."
+                "anydataset structured audio codes require Tensor semantic/acoustic."
             )
+        if view is types.AudioView.BICODEC:
+            global_codes = secondary
+            acoustic = None
+        else:
+            global_codes = None
+            acoustic = secondary
     else:
         semantic = None
+        global_codes = None
         acoustic = None
-    if semantic is not None and acoustic is not None:
+    if semantic is not None and (global_codes is not None or acoustic is not None):
         return {
             "structured": True,
             "semantic": _code_tensor_metadata(semantic),
-            "acoustic": _code_tensor_metadata(acoustic),
+            "global": (
+                None
+                if global_codes is None
+                else _code_tensor_metadata(global_codes)
+            ),
+            "acoustic": (
+                None if acoustic is None else _code_tensor_metadata(acoustic)
+            ),
         }
     if not isinstance(codes, Tensor):
         raise TypeError("audio sample codes must be a Tensor or structured mapping.")

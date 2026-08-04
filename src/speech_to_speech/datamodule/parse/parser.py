@@ -5,7 +5,6 @@ from typing import cast
 
 import torch
 from anydataset import types
-from anytrain.codec import SemanticAcousticCodes
 from torch import Tensor
 
 from .._helper.duration import from_frames, from_samples
@@ -23,6 +22,7 @@ from ..types import (
 )
 from ...runtime import AudioSequenceLayout
 from ...runtime.audio_tokenizer import BiCodecAudioTokenizer
+from ...codes import AudioCodes
 from ...source import SourceLayout
 from ...task import Task
 from ...task_spec import resolve_prediction
@@ -158,6 +158,7 @@ def speech_from_codes(
     runtime: DataRuntime,
 ) -> Speech:
     semantic_codes, acoustic_codes = parse_audio_codes(codes, runtime)
+    global_codes = None
     if (
         runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED
         and runtime.audio_view is types.AudioView.BICODEC
@@ -166,13 +167,15 @@ def speech_from_codes(
         if not isinstance(tokenizer, BiCodecAudioTokenizer):
             raise TypeError("BiCodec full sequence requires BiCodecAudioTokenizer.")
         if acoustic_codes is None:
-            raise ValueError("BiCodec full sequence requires acoustic codes.")
+            raise ValueError("BiCodec full sequence requires global codes.")
         audio_token_ids = tokenizer.encode_full(
-            SemanticAcousticCodes(
-                semantic=semantic_codes,
-                acoustic=acoustic_codes,
+            AudioCodes(
+                semantic_codes=semantic_codes,
+                global_codes=acoustic_codes,
             )
         )
+        global_codes = acoustic_codes
+        acoustic_codes = None
     else:
         audio_token_ids = _as_tensor(runtime.audio_tokenizer.encode(semantic_codes))
     audio_token_spans = _as_tensor(
@@ -181,13 +184,12 @@ def speech_from_codes(
     return Speech(
         semantic_codes=semantic_codes,
         acoustic_codes=acoustic_codes,
-        acoustic_layout=runtime.acoustic_layout,
-        acoustic_unit_length=runtime.acoustic_unit_length,
         text_token_ids=text_token_ids,
         audio_token_ids=audio_token_ids,
         audio_token_spans=audio_token_spans,
         language=language,
         duration_seconds=duration_seconds,
+        global_codes=global_codes,
     )
 
 
@@ -196,14 +198,29 @@ def _split_audio_codes(
     view: types.AudioView,
 ) -> tuple[Tensor, Tensor | None]:
     if view is types.AudioView.BICODEC:
-        if isinstance(codes, SemanticAcousticCodes):
-            return _frame_codes(codes.semantic), _frame_codes(codes.acoustic)
+        if isinstance(codes, AudioCodes):
+            semantic = codes.semantic_codes
+            global_codes = codes.global_codes
+            if (
+                semantic is None
+                or global_codes is None
+                or codes.acoustic_codes is not None
+            ):
+                raise ValueError(
+                    "BiCodec prepared AudioCodes require semantic_codes and "
+                    "global_codes only."
+                )
+            return _frame_codes(semantic), _frame_codes(global_codes)
         if not isinstance(codes, Mapping):
-            raise ValueError("BiCodec view must be a semantic/acoustic mapping.")
+            raise ValueError(
+                "BiCodec view must be AudioCodes or an anydataset structured mapping."
+            )
         semantic = codes.get("semantic")
         acoustic = codes.get("acoustic")
         if not isinstance(semantic, Tensor) or not isinstance(acoustic, Tensor):
-            raise ValueError("BiCodec view must contain Tensor semantic/acoustic fields.")
+            raise ValueError(
+                "anydataset BiCodec views must contain Tensor semantic/acoustic fields."
+            )
         return _frame_codes(semantic), _frame_codes(acoustic)
     if not isinstance(codes, Tensor) or codes.dim() != 2:
         raise ValueError("codec view must have shape [frame, codebook].")

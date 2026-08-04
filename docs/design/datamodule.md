@@ -64,8 +64,9 @@
   或确定性的内存 `toy` data。`qwen_tts_speaker` 通过 workspace 加载
   `SpeakerAudioGrid`，再由 `SpeakerGridCellsDataset` 暴露 `Role.DEFAULT` flat cells；默认覆盖
   所有 speaker，也可用 `speaker` 显式选择一列。BiCodec prepared cell 使用
-  `AudioView.BICODEC` 的 structured mapping，semantic 和 fixed-length acoustic
-  （speaker）unit 分别保留独立轴；可选的 `split_manifest` + `split_label` 把已加载的 map-style dataset 限制到
+  `AudioView.BICODEC` 的 anydataset structured mapping；parser 进入 S2S 后立即把 semantic 与
+  fixed-length speaker slots 规范化为 `AudioCodes.semantic_codes/global_codes`，两者保留独立轴；
+  可选的 `split_manifest` + `split_label` 把已加载的 map-style dataset 限制到
   manifest 声明的非重复、非负索引；manifest 不替换底层 anydataset split，也不绕过其公开
   dataloader/batch-planning 契约。底层是 `MapStyleABC` 时，split view 委托其 `_shuffle()` 并
   映射回子集位置，以保留 store-backed payload locality。toy codes 根据正式 codec 的
@@ -190,12 +191,14 @@ batch 仍暴露对齐的 `input_ids` / `token_labels` / `token_groups` / `acoust
 `AcousticTarget` 包含 `semantic_codes`、`codes`、`token_positions`。分组使必须共同存在的 tensor
 不能形成半完整状态。
 
+`Speech` 使用三分字段：`semantic_codes`、`global_codes`、`acoustic_codes`。fixed-layout anycodec
+输入在 parser/构造边界归入 `global_codes`，frame-aligned 输入才进入 `acoustic_codes`。
+
 BiCodec sample builder 先按“task 实际可见的 audio source 或显式 reference”是否提供 global stream
 决定序列开局。prompt 已有 global 时，response 以 `<begin_of_semantic>` 开局；prompt 没有 global
-时，response 以 `<begin_of_global>` 开局并按 global-first / semantic-last 生成两者。`acoustic`
-对应 structured codes 的 fixed-length speaker/style slots；装配完成后不再另存一份 context codes
-给 model batch 或 decode，target semantic 也不会被放进 prompt。
-`token_groups` 只标记实际预测的 semantic、semantic-or-end 或各 acoustic codebook payload；forced
+时，response 以 `<begin_of_global>` 开局并按 global-first / semantic-last 生成两者。装配完成后
+不再另存一份 context codes 给 model batch 或 decode，target semantic 也不会被放进 prompt。
+`token_groups` 只标记实际预测的 semantic、semantic-or-end 或各 global codebook payload；forced
 codec/stream marker 与外层 EOA 不进入监督。
 
 `ModelBatch` 额外保存 `tasks: list[Task]`、`predictions: list[PredictionModality]` 和
@@ -251,7 +254,7 @@ BOA/EOA 则排除。
   也使用相同表示。fixed-length structured codec 不属于这条 frame-code parser 路径，其 prompt、
   output 和 decode ownership 由序列 marker 自描述，不作为 datamodule 公共配置轴。
 - audio tokenizer 的输出统一称为 `audio_token_ids`；codec codebook index 统一称为
-  `semantic_codes` / `acoustic_codes`。只有 layout global IDs 使用 `input_ids` 和
+  `semantic_codes` / `global_codes` / `acoustic_codes`。只有 layout global IDs 使用 `input_ids` 和
   `token_labels`。
 - chat template 先渲染为字符串并在字符串层切分 source placeholder，再分别 tokenize
   prefix/suffix；不能在 token IDs 中搜索单独编码的 placeholder，因为 BPE 分词受相邻文本

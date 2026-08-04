@@ -4,7 +4,6 @@ from functools import cached_property
 from typing import Protocol
 
 from anydataset.types import AudioView, Modality
-from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 
 from .runtime import AudioSequenceLayout
@@ -33,12 +32,6 @@ class DataRuntime(Protocol):
 
     @property
     def semantic_codec_artifact(self) -> str | None: ...
-
-    @property
-    def acoustic_layout(self) -> AcousticLayout: ...
-
-    @property
-    def acoustic_unit_length(self) -> int | None: ...
 
     @cached_property
     def text_tokenizer(self) -> TextTokenizer: ...

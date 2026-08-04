@@ -32,8 +32,8 @@
 显式报错。Hydra runtime preset 直接映射完整 `runtime.Config`，同时选择相互兼容的 codec、FrameCodec
 audio sequence layout、audio tokenizer 与 backbone snapshot。`flattened` 直接把完整
 FrameCodec codebooks 编入 token 序列，因此 frame-code codec 不能同时配置 BPE audio tokenizer；
-BiCodec 是例外，它只把 semantic 子流交给 BPE，再与原始 acoustic slots 组合。structured 顺序固定为
-acoustic-first / semantic-last。ODE method、NFE 与 step 数直接使用 `flow_method`、`flow_nfe` 与
+BiCodec 是例外，它只把 semantic 子流交给 BPE，再与 global slots 组合。structured 顺序固定为
+global-first / semantic-last。ODE method、NFE 与 step 数直接使用 `flow_method`、`flow_nfe` 与
 `flow_num_steps`，不再通过独立 sampler 组转换；`Config` 在构造时校验 method、正 NFE 和至少
 2 个 steps，因此 token/RVQ composition 也不会静默携带无效 runtime。model composition 由
 `model/acoustic` 选择。
@@ -85,9 +85,10 @@ LongCat 的 `DECOUPLED + model/acoustic=none` 必须配置 `semantic_codec_artif
 训练路径，仍由 `Codec.decode_features()` 消费生成的 features；它不代表 anytrain 提供
 semantic-only decoder。
 
-BiCodec 使用同一个 structured backend。非 semantic 单元存放在 `SemanticAcousticCodes.acoustic`；
-`AcousticLayout.FIXED_LENGTH` 表示这些单元是固定长度 speaker/style slots（口语里的 global），
-`FRAME_ALIGNED` 则与 semantic 时间对齐。BiCodec 只使用一套 `flattened` self-describing sequence：
+S2S 使用 `AudioCodes(semantic_codes, global_codes, acoustic_codes)` 作为内部设计语言。anycodec 的
+`SemanticAcousticCodes.acoustic` 只在 codec adapter 边界出现：`AcousticLayout.FIXED_LENGTH` 映射到
+`global_codes`，`FRAME_ALIGNED` 映射到 `acoustic_codes`。BiCodec 只使用一套 `flattened`
+self-describing sequence：
 fixed-length global payload 采用 slot-major 布局并排在 semantic payload 之前。response 以
 `<begin_of_global>` 开局时 LLM 生成 global 与 semantic；以 `<begin_of_semantic>` 开局时只生成
 semantic 并复用 prompt global。decode 从 prompt/response marker 解析唯一的 global owner，并要求
@@ -97,8 +98,9 @@ semantic 并复用 prompt global。decode 从 prompt/response marker 解析唯�
 module 或 semantic-acoustic codec。
 
 BiCodec 配置 `audio_tokenizer` 时，该 artifact 只作为 semantic 子 tokenizer：raw semantic IDs 先经
-`CodecBPE`，然后再进入 `BiCodecAudioTokenizer` 的 structured packing；acoustic IDs 不做 BPE。
-外层 stream order、markers 和终止规则没有变化，所以 grammar 仍是 `bicodec-v1`。native/BPE 差异
+`CodecBPE`，然后再进入 `BiCodecAudioTokenizer` 的 structured packing；global IDs 不做 BPE。
+外层 stream order、markers 和终止规则记录为 `bicodec-v2`；contract 只使用 `global_*` keys，
+不读取或生成旧 `acoustic_*` BiCodec contract。native/BPE 差异
 记录在嵌套的 `semantic_tokenizer` contract（`native-v1` 或 `codec-bpe-v1`）及 checkpoint hash 中。
 
 无 reference 的 generate 路由把 speaker/style latent 交给语言模型从 text 条件中自回归预测；在多
@@ -106,7 +108,7 @@ speaker 数据上如果没有额外 speaker/style 条件或 latent sampling，�
 这是建模条件的限制，不由 BiCodec tokenizer 隐式解决；需要在 experiment/checkpoint 设计中显式
 加入条件或采样策略。
 
-BiCodec 的 acoustic 轴是 `FIXED_LENGTH`，不能广播到 semantic frame 轴，也不能接入当前
+BiCodec 的 global 轴在 anycodec metadata 中对应 `FIXED_LENGTH`，不能广播到 semantic frame 轴，也不能接入当前
 frame-aligned Flow/RVQ side channel。
 
 `supports_structured()` 只表示 backend 同时提供 semantic/acoustic structured 能力，不决定 token
@@ -123,9 +125,9 @@ frame-aligned Flow/RVQ side channel。
   codec marker（Runtime 已固定单一 codec）。marker 的 frame span 为 0，首个 codebook token 的
   frame span 为 1，用于 generation 统计输出帧数。
 - `TorchCodecBPE`：为 CodecBPE 增加 tensor API。
-- `BiCodecAudioTokenizer`：组合一个 native 或 CodecBPE semantic tokenizer，并序列化 acoustic-only、
+- `BiCodecAudioTokenizer`：组合一个 native 或 CodecBPE semantic tokenizer，并序列化 global-only、
   semantic-only 或 global-first / semantic-last 的 self-describing structured sequence；full
-  sequence 的 acoustic payload 使用 slot-major 顺序。
+  sequence 的 global payload 使用 slot-major 顺序；公开 stream enum 使用 `GLOBAL/SEMANTIC`。
 - `semantic_codes_from_audio_tokens()`：把 audio token IDs 解码为
   `[frames, semantic_codebooks]`。
 
@@ -147,7 +149,7 @@ DataModule 与 generation service。runtime 不保存进程级 singleton；同�
 `audio_sequence_layout` 字符串作为兼容性判断，因为相同 layout 名下的 vocabulary、grammar 或
 composition 仍可能不兼容。校验按结构能力而非 preset 身份：`semantic` layout 要求 semantic-only
 decode provider 或 acoustic side module；`flattened` layout 要求 codec 能消费完整 full codes；
-BiCodec 固定使用 `flattened`，其 fixed-length 语义由 codec layout 提供，reference acoustic 直接来自
+BiCodec 固定使用 `flattened`，其 fixed-length metadata 在 S2S 内解释为 global，reference global 直接来自
 prompt 中的 structured stream，而不是额外配置轴或 side channel。
 
 文件职责保持分离：`runtime/runtime.py` 实现配置与资源聚合，`runtime/codec.py` 隔离 codec

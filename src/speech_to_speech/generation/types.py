@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import TypedDict
 
-from anytrain.codec import SemanticAcousticCodes
 from torch import Generator, Tensor
 from typing_extensions import NotRequired
 
 from ..prediction import PredictionModality
+from ..codes import AudioCodes
 from ..task import Task
 
 
@@ -22,7 +22,7 @@ class Request(TypedDict):
 
 class AudioOutput(TypedDict):
     features: Tensor | None
-    codes: SemanticAcousticCodes | None
+    codes: AudioCodes | None
     waveform: Tensor
     sample_rate: int
 

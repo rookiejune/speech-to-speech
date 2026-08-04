@@ -6,14 +6,13 @@ import torch
 from torch import Tensor
 
 from ..types import AudioTokenizer
-from .bicodec import BiCodecAudioTokenizer, BiCodecStreams
+from .bicodec import BiCodecAudioTokenizer
 from .bpe import TorchCodecBPE
 from .flattened import FlattenedAudioTokenizer
 from .native import NativeAudioTokenizer
 
 __all__ = [
     "BiCodecAudioTokenizer",
-    "BiCodecStreams",
     "FlattenedAudioTokenizer",
     "NativeAudioTokenizer",
     "TorchCodecBPE",

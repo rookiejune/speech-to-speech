@@ -191,18 +191,6 @@ class Runtime:
         return structured_codec(self.codec).acoustic_layout is AcousticLayout.FIXED_LENGTH
 
     @property
-    def acoustic_layout(self) -> AcousticLayout:
-        if supports_structured(self.codec):
-            return AcousticLayout(structured_codec(self.codec).acoustic_layout)
-        return AcousticLayout.FRAME_ALIGNED
-
-    @property
-    def acoustic_unit_length(self) -> int | None:
-        if supports_structured(self.codec):
-            return structured_codec(self.codec).acoustic_unit_length
-        return None
-
-    @property
     def backbone_trust_remote_code(self) -> bool:
         return self.config.backbone_trust_remote_code
 
@@ -307,10 +295,13 @@ class Runtime:
                 if self.config.audio_tokenizer is None
                 else audio_tokenizer(self.config.audio_tokenizer)
             )
+            global_unit_length = codec.acoustic_unit_length
+            if global_unit_length is None:
+                raise ValueError("BiCodec requires a fixed global unit length.")
             return BiCodecAudioTokenizer(
                 semantic_codebook_size=self.semantic_codebook_sizes[0],
-                acoustic_codebook_sizes=codec.acoustic_codebook_sizes,
-                acoustic_unit_length=codec.acoustic_unit_length,
+                global_codebook_sizes=codec.acoustic_codebook_sizes,
+                global_unit_length=global_unit_length,
                 semantic_tokenizer=semantic_tokenizer,
             )
         if self.audio_sequence_layout is AudioSequenceLayout.FLATTENED:

@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 import torch
 from anydataset.types import Modality
-from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 
 from speech_to_speech.datamodule.build.ar import (
@@ -35,8 +34,6 @@ def _speech(*, frames: int, text_ids: list[int], acoustic: bool) -> Speech:
     return Speech(
         semantic_codes=codes,
         acoustic_codes=codes + 10 if acoustic else None,
-        acoustic_layout=AcousticLayout.FRAME_ALIGNED,
-        acoustic_unit_length=None,
         text_token_ids=torch.tensor(text_ids, dtype=torch.long),
         audio_token_ids=torch.arange(frames, dtype=torch.long),
         audio_token_spans=torch.ones(frames, dtype=torch.long),

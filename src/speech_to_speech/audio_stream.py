@@ -4,7 +4,7 @@ from ._compat import StrEnum, auto
 
 
 class AudioStream(StrEnum):
-    """Non-text AR audio streams."""
+    """Non-text AR audio streams used by structured codecs."""
 
-    ACOUSTIC = auto()
+    GLOBAL = auto()
     SEMANTIC = auto()

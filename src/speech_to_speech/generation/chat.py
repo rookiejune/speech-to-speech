@@ -7,11 +7,12 @@ from typing import Literal, TypedDict, Union, cast
 
 import torch
 from anydataset.types import AudioView, Modality
-from anytrain.codec import SemanticAcousticCodes
+from anytrain.codec import AcousticLayout, SemanticAcousticCodes
 from torch import Tensor
 from typing_extensions import NotRequired
 
 from .._tensor import is_signed_integer_dtype
+from ..codes import AudioCodes
 from ..prediction import PredictionModality
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..runtime.protocol import GenerationRuntime
@@ -39,7 +40,7 @@ class AudioPart(TypedDict):
 class CodecCodesPart(TypedDict):
     type: Literal["codec_codes"]
     codec: str
-    codes: SemanticAcousticCodes | Tensor
+    codes: AudioCodes | Tensor
 
 
 ContentPart = Union[TextPart, AudioPart, CodecCodesPart]
@@ -120,7 +121,7 @@ def to_request(request: ChatRequest, runtime: GenerationRuntime) -> Request:
 def materialize_codes(
     part: AudioPart | CodecCodesPart,
     runtime: GenerationRuntime,
-) -> SemanticAcousticCodes | Tensor:
+) -> AudioCodes | Tensor:
     """Turn an audio or codec_codes part into runtime codes."""
     if part["type"] == "codec_codes":
         return _validated_codes(part, runtime)
@@ -153,7 +154,7 @@ def completion_from_result(
 def _build_request(
     prompt_messages: Sequence[Mapping[str, str]],
     source_text: str,
-    codes: SemanticAcousticCodes | Tensor | None,
+    codes: AudioCodes | Tensor | None,
     *,
     task: Task,
     language: str,
@@ -170,8 +171,8 @@ def _build_request(
 
     tokenizer = runtime.audio_tokenizer
     if isinstance(tokenizer, BiCodecAudioTokenizer):
-        if codes is not None and not isinstance(codes, SemanticAcousticCodes):
-            raise TypeError("BiCodec chat requests require SemanticAcousticCodes.")
+        if codes is not None and not isinstance(codes, AudioCodes):
+            raise TypeError("BiCodec chat requests require AudioCodes.")
         return prepare_bicodec_tts_request(
             source_text,
             runtime,
@@ -279,7 +280,7 @@ def _token_ids(text: str, runtime: GenerationRuntime) -> Tensor:
     return values
 
 
-def _encode_audio(part: AudioPart, runtime: GenerationRuntime) -> SemanticAcousticCodes | Tensor:
+def _encode_audio(part: AudioPart, runtime: GenerationRuntime) -> AudioCodes | Tensor:
     waveform = part["waveform"]
     sample_rate = part["sample_rate"]
     if not isinstance(waveform, Tensor):
@@ -301,9 +302,12 @@ def _encode_audio(part: AudioPart, runtime: GenerationRuntime) -> SemanticAcoust
                 )
             if encoded.semantic.size(0) != 1 or encoded.acoustic.size(0) != 1:
                 raise ValueError("audio encode expects one item.")
-            return SemanticAcousticCodes(
-                semantic=encoded.semantic[0].detach(),
-                acoustic=encoded.acoustic[0].detach(),
+            return AudioCodes.from_anycodec(
+                SemanticAcousticCodes(
+                    semantic=encoded.semantic[0].detach(),
+                    acoustic=encoded.acoustic[0].detach(),
+                ),
+                AcousticLayout.FIXED_LENGTH,
             )
         codes = frame_codec(runtime.codec).encode(batched, sample_rate)
     if not isinstance(codes, Tensor):
@@ -328,7 +332,7 @@ def _batched_waveform(waveform: Tensor) -> Tensor:
 def _validated_codes(
     part: CodecCodesPart,
     runtime: GenerationRuntime,
-) -> SemanticAcousticCodes | Tensor:
+) -> AudioCodes | Tensor:
     codec = part["codec"]
     if not isinstance(codec, str) or not codec.strip():
         raise TypeError("codec_codes codec must be a non-empty string.")
@@ -338,7 +342,7 @@ def _validated_codes(
             f"{runtime.codec_name!r}."
         )
     codes = part["codes"]
-    if isinstance(codes, SemanticAcousticCodes):
+    if isinstance(codes, AudioCodes):
         _validate_structured_codes(codes)
         return codes
     if isinstance(codes, Tensor):
@@ -350,23 +354,35 @@ def _validated_codes(
             raise TypeError("frame codec_codes must use signed integers.")
         return codes
     raise TypeError(
-        "codec_codes codes must be SemanticAcousticCodes or a frame-code Tensor."
+        "codec_codes codes must be AudioCodes or a frame-code Tensor."
     )
 
 
-def _validate_structured_codes(value: SemanticAcousticCodes) -> None:
-    if value.semantic.dim() != 2 or value.semantic.size(1) != 1:
+def _validate_structured_codes(value: AudioCodes) -> None:
+    semantic = value.semantic_codes
+    if semantic is not None and (semantic.dim() != 2 or semantic.size(1) != 1):
         raise ValueError("structured semantic codes must have shape [units, 1].")
-    if value.acoustic.dim() != 2:
-        raise ValueError("structured acoustic codes must have shape [slots, codebooks].")
-    if value.semantic.numel() == 0 or value.acoustic.numel() == 0:
-        raise ValueError("structured codec_codes must not be empty.")
-    if value.semantic.device != value.acoustic.device:
-        raise ValueError("structured semantic and acoustic codes must share a device.")
-    for name, codes in (("semantic", value.semantic), ("acoustic", value.acoustic)):
+    secondary = value.global_codes
+    name = "global"
+    if secondary is None:
+        secondary = value.acoustic_codes
+        name = "acoustic"
+    if secondary is None or secondary.dim() != 2:
+        raise ValueError(
+            "structured codes must contain global or aligned acoustic codes."
+        )
+    if value.global_codes is not None and value.acoustic_codes is not None:
+        raise ValueError("structured codec_codes must select one non-semantic layout.")
+    if semantic is not None and semantic.device != secondary.device:
+        raise ValueError(
+            f"structured semantic and {name} codes must share a device."
+        )
+    fields = [(name, secondary)]
+    if semantic is not None:
+        fields.insert(0, ("semantic", semantic))
+    for field, codes in fields:
         if not is_signed_integer_dtype(codes.dtype):
-            raise TypeError(f"structured {name} codes must use signed integers.")
-
+            raise TypeError(f"structured {field} codes must use signed integers.")
 
 def _task(request: ChatRequest) -> Task:
     task = request["task"]

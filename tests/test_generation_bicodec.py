@@ -12,6 +12,7 @@ from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 
 from speech_to_speech.audio_stream import AudioStream
+from speech_to_speech.codes import AudioCodes
 from speech_to_speech.generation import (
     Request,
     generate_responses,
@@ -51,8 +52,8 @@ class _TextTokenizer:
 def _runtime() -> GenerationRuntime:
     tokenizer = BiCodecAudioTokenizer(
         semantic_codebook_size=8,
-        acoustic_codebook_sizes=(3,),
-        acoustic_unit_length=2,
+        global_codebook_sizes=(3,),
+        global_unit_length=2,
     )
     runtime = SimpleNamespace(
         audio_sequence_layout=AudioSequenceLayout.FLATTENED,
@@ -74,10 +75,10 @@ def _runtime() -> GenerationRuntime:
     return cast(GenerationRuntime, runtime)
 
 
-def _codes() -> SemanticAcousticCodes:
-    return SemanticAcousticCodes(
-        semantic=torch.tensor([[1], [2], [3]], dtype=torch.int32),
-        acoustic=torch.tensor([[0], [1]], dtype=torch.int64),
+def _codes() -> AudioCodes:
+    return AudioCodes(
+        semantic_codes=torch.tensor([[1], [2], [3]], dtype=torch.int32),
+        global_codes=torch.tensor([[0], [1]], dtype=torch.int64),
     )
 
 
@@ -99,7 +100,7 @@ class BiCodecRequestInputTest(unittest.TestCase):
         self.assertIn("hello world", runtime.text_tokenizer.encoded[0])
         local_audio = runtime.audio_tokenizer.encode_streams(
             codes,
-            (AudioStream.ACOUSTIC,),
+            (AudioStream.GLOBAL,),
         )
         expected_suffix = torch.cat(
             (
@@ -137,12 +138,12 @@ class BiCodecRequestInputTest(unittest.TestCase):
 
     def test_reference_request_validates_code_shapes(self) -> None:
         codes = _codes()
-        malformed = SemanticAcousticCodes(
-            semantic=codes.semantic,
-            acoustic=codes.acoustic.unsqueeze(0),
+        malformed = AudioCodes(
+            semantic_codes=codes.semantic_codes,
+            global_codes=torch.tensor([[0, 1], [1, 2]]),
         )
 
-        with self.assertRaisesRegex(ValueError, "acoustic reference codes"):
+        with self.assertRaisesRegex(ValueError, "global codes must have shape"):
             prepare_bicodec_tts_request(
                 "hello",
                 _runtime(),
@@ -156,9 +157,9 @@ class BiCodecRequestInputTest(unittest.TestCase):
             runtime,
             reference_codes=_codes(),
         )
-        cast(dict[str, object], request)["audio_context"] = SemanticAcousticCodes(
-            semantic=torch.tensor([[1], [2], [3]], dtype=torch.long),
-            acoustic=torch.tensor([[2], [2]], dtype=torch.long),
+        cast(dict[str, object], request)["audio_context"] = AudioCodes(
+            semantic_codes=torch.tensor([[1], [2], [3]], dtype=torch.long),
+            global_codes=torch.tensor([[2], [2]], dtype=torch.long),
         )
 
         with self.assertRaisesRegex(ValueError, "audio_context is not supported"):
@@ -197,9 +198,9 @@ class BiCodecRequestInputTest(unittest.TestCase):
 
     def test_parallel_generation_decodes_one_structured_bicodec_span(self) -> None:
         runtime = _runtime()
-        output = SemanticAcousticCodes(
-            semantic=torch.tensor([[4], [5]], dtype=torch.long),
-            acoustic=torch.tensor([[2], [1]], dtype=torch.long),
+        output = AudioCodes(
+            semantic_codes=torch.tensor([[4], [5]], dtype=torch.long),
+            global_codes=torch.tensor([[2], [1]], dtype=torch.long),
         )
         codec = _StructuredCodec()
         cast(SimpleNamespace, cast(object, runtime)).codec = codec
@@ -214,15 +215,18 @@ class BiCodecRequestInputTest(unittest.TestCase):
         audio = result["audio"]
         if audio is None or audio["codes"] is None:
             self.fail("parallel BiCodec generation did not decode its audio span")
-        torch.testing.assert_close(audio["codes"].semantic, output.semantic)
-        torch.testing.assert_close(audio["codes"].acoustic, output.acoustic)
+        torch.testing.assert_close(
+            audio["codes"].semantic_codes,
+            output.semantic_codes,
+        )
+        torch.testing.assert_close(audio["codes"].global_codes, output.global_codes)
 
-    def test_reference_request_generates_semantic_and_reuses_prompt_acoustic(self) -> None:
+    def test_reference_request_generates_semantic_and_reuses_prompt_global(self) -> None:
         runtime = _runtime()
         context = _codes()
-        output = SemanticAcousticCodes(
-            semantic=torch.tensor([[4], [5]], dtype=torch.long),
-            acoustic=torch.tensor([[0], [0]], dtype=torch.long),
+        output = AudioCodes(
+            semantic_codes=torch.tensor([[4], [5]], dtype=torch.long),
+            global_codes=torch.tensor([[0], [0]], dtype=torch.long),
         )
         codec = _StructuredCodec()
         cast(SimpleNamespace, cast(object, runtime)).codec = codec
@@ -243,18 +247,27 @@ class BiCodecRequestInputTest(unittest.TestCase):
         audio = result["audio"]
         if audio is None or audio["codes"] is None:
             self.fail("route generation did not return structured audio codes")
-        torch.testing.assert_close(audio["codes"].semantic, output.semantic)
-        torch.testing.assert_close(audio["codes"].acoustic, context.acoustic)
+        torch.testing.assert_close(
+            audio["codes"].semantic_codes,
+            output.semantic_codes,
+        )
+        torch.testing.assert_close(audio["codes"].global_codes, context.global_codes)
         if codec.codes is None:
             self.fail("structured codec did not receive resolved route codes")
-        torch.testing.assert_close(codec.codes.semantic, output.semantic.unsqueeze(0))
-        torch.testing.assert_close(codec.codes.acoustic, context.acoustic.unsqueeze(0))
+        torch.testing.assert_close(
+            codec.codes.semantic,
+            output.semantic_codes.unsqueeze(0),
+        )
+        torch.testing.assert_close(
+            codec.codes.acoustic,
+            cast(Tensor, context.global_codes).unsqueeze(0),
+        )
 
-    def test_unconditioned_request_generates_acoustic_and_semantic(self) -> None:
+    def test_unconditioned_request_generates_global_and_semantic(self) -> None:
         runtime = _runtime()
-        output = SemanticAcousticCodes(
-            semantic=torch.tensor([[4], [5]], dtype=torch.long),
-            acoustic=torch.tensor([[2], [1]], dtype=torch.long),
+        output = AudioCodes(
+            semantic_codes=torch.tensor([[4], [5]], dtype=torch.long),
+            global_codes=torch.tensor([[2], [1]], dtype=torch.long),
         )
         codec = _StructuredCodec()
         cast(SimpleNamespace, cast(object, runtime)).codec = codec
@@ -269,8 +282,11 @@ class BiCodecRequestInputTest(unittest.TestCase):
         audio = result["audio"]
         if audio is None or audio["codes"] is None:
             self.fail("unconditioned generation did not return structured audio codes")
-        torch.testing.assert_close(audio["codes"].semantic, output.semantic)
-        torch.testing.assert_close(audio["codes"].acoustic, output.acoustic)
+        torch.testing.assert_close(
+            audio["codes"].semantic_codes,
+            output.semantic_codes,
+        )
+        torch.testing.assert_close(audio["codes"].global_codes, output.global_codes)
 
 
 class _StructuredCodec:
@@ -312,10 +328,10 @@ class _RouteModel:
     def __init__(
         self,
         runtime: GenerationRuntime,
-        output: SemanticAcousticCodes,
+        output: AudioCodes,
         *,
         streams: Sequence[AudioStream] = (
-            AudioStream.ACOUSTIC,
+            AudioStream.GLOBAL,
             AudioStream.SEMANTIC,
         ),
     ) -> None:
@@ -389,7 +405,7 @@ class _MixedRouteModel(_RouteModel):
     def __init__(
         self,
         runtime: GenerationRuntime,
-        output: SemanticAcousticCodes,
+        output: AudioCodes,
     ) -> None:
         super().__init__(runtime, output)
         runtime_object = cast(SimpleNamespace, cast(object, runtime))

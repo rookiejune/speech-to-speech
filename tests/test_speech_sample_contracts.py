@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from _contracts_helpers import *
+from speech_to_speech.codes import AudioCodes
 from speech_to_speech.datamodule.build.sample import build_speech_sample
 from speech_to_speech.datamodule.types import Speech
 from speech_to_speech.loader_plan import ARFraming
@@ -18,8 +19,6 @@ class SpeechSampleContractTest(unittest.TestCase):
             codec_frame_rate=50.0,
             audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
             semantic_codec_artifact=None,
-            acoustic_layout=AcousticLayout.FRAME_ALIGNED,
-            acoustic_unit_length=None,
             text_tokenizer=tokenizer,
             audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
         )
@@ -426,8 +425,6 @@ class SpeechSampleContractTest(unittest.TestCase):
             codec_frame_rate=50.0,
             audio_sequence_layout=AudioSequenceLayout.FLATTENED,
             semantic_codec_artifact=None,
-            acoustic_layout=AcousticLayout.FRAME_ALIGNED,
-            acoustic_unit_length=None,
             text_tokenizer=_ChatTokenizer(10),
             audio_tokenizer=tokenizer,
             layout=Layout(
@@ -467,23 +464,22 @@ class SpeechSampleContractTest(unittest.TestCase):
     def test_bicodec_ctc_span_includes_internal_serialization_markers(self):
         runtime = _bicodec_data_runtime()
         tokenizer = runtime.audio_tokenizer
-        codes = SemanticAcousticCodes(
-            semantic=torch.tensor([[1], [2]]),
-            acoustic=torch.tensor([[0], [1]]),
+        codes = AudioCodes(
+            semantic_codes=torch.tensor([[1], [2]]),
+            global_codes=torch.tensor([[0], [1]]),
         )
         serialized = tokenizer.encode_full(codes)
         spans = tokenizer.frame_spans(serialized)
         self.assertIsInstance(spans, torch.Tensor)
         speech = Speech(
-            semantic_codes=codes.semantic,
-            acoustic_codes=codes.acoustic,
-            acoustic_layout=AcousticLayout.FIXED_LENGTH,
-            acoustic_unit_length=2,
+            semantic_codes=codes.semantic_codes,
+            acoustic_codes=None,
             text_token_ids=torch.tensor([1, 2]),
             audio_token_ids=serialized,
             audio_token_spans=spans,
             language=Language.EN,
             duration_seconds=0.04,
+            global_codes=codes.global_codes,
         )
 
         sample = build_speech_sample(
@@ -500,7 +496,7 @@ class SpeechSampleContractTest(unittest.TestCase):
         audio_start, _ = runtime.layout.blocks[Modality.AUDIO.value]
         local_ids = sample.input_ids.index_select(0, positions) - audio_start
         self.assertTrue(torch.equal(local_ids, serialized))
-        self.assertEqual(int(local_ids[0]), tokenizer.acoustic_token_id)
+        self.assertEqual(int(local_ids[0]), tokenizer.global_token_id)
         self.assertTrue(local_ids.eq(tokenizer.semantic_token_id).any())
         self.assertEqual(int(local_ids[-1]), tokenizer.end_token_id)
 
