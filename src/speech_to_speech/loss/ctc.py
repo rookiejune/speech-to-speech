@@ -8,7 +8,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from ..datamodule.types import CTC_PAD_ID, CTCTarget
-from ..model.ctc import CTCConfig as _CTCConfig
+from ..model.ctc import CTCConfig
 from ..model.ctc import CTCRoute
 
 
@@ -18,13 +18,13 @@ CTCDecode = Callable[[CTCRoute, Tensor, Tensor], tuple[Tensor, Tensor]]
 class CTCAlignmentLoss(nn.Module):
     """Project audio-slot hidden states through the frozen text readout."""
 
-    def __init__(self, blank_token_id: int, config: _CTCConfig) -> None:
+    def __init__(self, blank_token_id: int, config: CTCConfig) -> None:
         super().__init__()
         if isinstance(blank_token_id, bool) or not isinstance(blank_token_id, int):
             raise TypeError("CTC blank_token_id must be an integer.")
         if blank_token_id < 0:
             raise ValueError("CTC blank_token_id must be non-negative.")
-        if not isinstance(config, _CTCConfig):
+        if not isinstance(config, CTCConfig):
             raise TypeError("CTC alignment config must be a CTCConfig.")
         self.blank_token_id = blank_token_id
         self.config = config
@@ -192,4 +192,4 @@ def _validate_pooled_lengths(
         )
 
 
-__all__ = ["CTCAlignmentLoss", "CTCDecode"]
+__all__ = ["CTCAlignmentLoss", "CTCConfig", "CTCDecode"]

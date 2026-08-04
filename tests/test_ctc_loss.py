@@ -5,7 +5,8 @@ import unittest
 import torch
 from torch import Tensor, nn
 
-from speech_to_speech.loss.ctc import CTCAlignmentLoss
+from speech_to_speech.loss import CTCConfig as ExportedCTCConfig
+from speech_to_speech.loss.ctc import CTCAlignmentLoss, CTCConfig as ModuleCTCConfig
 from speech_to_speech.model.ctc import CTCConfig, CTCRoute, CTCRouteConfig
 
 
@@ -31,6 +32,10 @@ class _Decode(nn.Module):
 
 
 class CTCAlignmentLossTest(unittest.TestCase):
+    def test_config_remains_available_from_loss_exports(self):
+        self.assertIs(ExportedCTCConfig, CTCConfig)
+        self.assertIs(ModuleCTCConfig, CTCConfig)
+
     def test_routes_use_independent_hidden_states_and_causal_positions(self):
         reference = torch.zeros((1, 5, 1), dtype=torch.float32)
         source_hidden = torch.arange(5, dtype=torch.float32).view(1, 5, 1)
