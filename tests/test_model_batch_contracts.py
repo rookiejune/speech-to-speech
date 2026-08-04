@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 
 from _contracts_helpers import *
-from speech_to_speech.prediction import PredictionModality
+from speech_to_speech.task import PredictionModality
 
 
 class ModelBatchContractTest(unittest.TestCase):

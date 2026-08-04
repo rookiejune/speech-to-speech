@@ -7,10 +7,13 @@ import unittest
 import torch
 
 from _contracts_helpers import *
-from speech_to_speech.datamodule.collate.joint import count_supervised_tokens
+from speech_to_speech.datamodule.loader import (
+    LoaderConfig,
+    LoaderPlanConfig,
+    LoaderStepMode,
+    count_supervised_tokens,
+)
 from speech_to_speech.datamodule.mimo import MimoBatch
-from speech_to_speech.loader_plan import LoaderConfig, LoaderPlanConfig
-from speech_to_speech.loader_step import LoaderStepMode
 
 
 class LoaderScheduleContractTest(unittest.TestCase):

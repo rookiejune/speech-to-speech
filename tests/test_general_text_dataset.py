@@ -26,10 +26,10 @@ from speech_to_speech.datamodule.dataset.text import (
     TextDatasetName,
     load_text_dataset,
 )
-from speech_to_speech.loader_plan import ARFraming
+from speech_to_speech.datamodule.loader import ARFraming
 from speech_to_speech.datamodule.protocol import TextRuntime
 from speech_to_speech.datamodule.types import ModelBatch, ModelSample
-from speech_to_speech.prediction import PredictionModality
+from speech_to_speech.task import PredictionModality
 from speech_to_speech.task import Task
 
 

@@ -7,7 +7,7 @@ from anydataset.types import Modality
 from anytrain.framework.rl import GRPOLoss, gather_token_logps
 from anytrain.module.idspace import Layout
 
-from speech_to_speech.datamodule.rollout import GRPOBatch
+from speech_to_speech.rl import GRPOBatch
 from speech_to_speech.datamodule.types import ModelBatch, PredictionModality
 from speech_to_speech.loss.rollout import GRPOObjective
 from speech_to_speech.task import Task

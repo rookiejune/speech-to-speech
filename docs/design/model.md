@@ -34,7 +34,7 @@
   所依赖的基础契约与可选 acoustic runtime 能力；`TokenGenerator` 含 `generate_tokens()` 与
   `generation_step()`（mixed AR 用）；`AcousticFeatureGenerator` 组合两者供训练侧静态 typing，
   `TextEvaluationModel` 组合 token generation 与 reference scoring。
-- `runtime.protocol.TokenModelRuntime` / `model.protocol.FlowModelRuntime`：token 与 flow
+- `runtime.protocol.TokenModelRuntime` / `model.acoustic.protocol.FlowModelRuntime`：token 与 flow
   model 各自消费的 runtime 资源边界。
 - `AdapterType`：semantic input/output adapter 的 `linear|mlp` 字符串枚举；`None` 表示输入输出
   dimension 相同的 identity adapter。

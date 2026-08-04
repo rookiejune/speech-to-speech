@@ -5,9 +5,7 @@ import multiprocessing
 from collections.abc import Mapping
 from typing import cast
 
-from ...prediction import PredictionModality
-from ...task import Task
-from ...task_spec import execution_signature, resolve_prediction
+from ...task import PredictionModality, Task, execution_signature, resolve_prediction
 
 
 class TaskWeights:

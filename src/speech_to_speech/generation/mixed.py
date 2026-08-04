@@ -9,8 +9,7 @@ from anydataset.types import Modality
 from torch import Tensor
 from transformers.cache_utils import Cache
 
-from ..prediction import PredictionModality
-from ..task import Task
+from ..task import PredictionModality, Task
 from ._request import prediction_of
 from .audio import decode_token_audio_results
 from .protocol import TokenGenerator

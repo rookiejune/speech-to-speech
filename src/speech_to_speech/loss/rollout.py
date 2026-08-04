@@ -6,9 +6,9 @@ from anytrain.framework.rl import GRPOLoss
 from anytrain.loss import LossItem
 from torch import Tensor
 
-from ..datamodule.rollout import GRPOBatch
 from ..datamodule.types import ModelBatch
 from ..model.base import Model
+from ..rl.types import GRPOBatch
 from .logprob import target_token_logps
 from .module import Objective
 from .types import Outputs

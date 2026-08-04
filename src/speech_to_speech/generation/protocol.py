@@ -9,7 +9,7 @@ from torch import Tensor
 from transformers.cache_utils import Cache
 
 from ..model.generation import GenerationStepResult, TokenKind
-from ..prediction import PredictionModality
+from ..task import PredictionModality
 from ..runtime.protocol import GenerationRuntime
 from ..runtime.types import Backbone
 from .types import AcousticGeneration

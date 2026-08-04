@@ -19,7 +19,7 @@ from speech_to_speech.model.ctc import (
     CTCRoute,
     CTCRouteConfig,
 )
-from speech_to_speech.prediction import PredictionModality
+from speech_to_speech.task import PredictionModality
 from speech_to_speech.runtime.backbone import BackboneBodyAdapter, BackboneReadout
 
 

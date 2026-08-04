@@ -11,9 +11,9 @@ from torch import Tensor
 
 from ...generation.types import AcousticGeneration
 from ...runtime.types import acoustic_codec
-from .._contract_state import rvq_acoustic_contract
+from ..contract import rvq_acoustic_contract
 from ..base import Config
-from ..protocol import TokenModelRuntime
+from ...runtime.protocol import TokenModelRuntime
 from ._config import DecoderConfig, decoder_options
 from ._codec import code_features
 from .base import AcousticModel

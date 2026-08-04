@@ -22,7 +22,7 @@ from speech_to_speech.task import Task
 
 if __package__:
     from ._generation_benchmark import benchmark_batch
-    from ._generation_smoke_config import (
+    from ._config.generation import (
         GenerationSmokeConfig,
         generation_smoke as parse_config,
     )
@@ -30,7 +30,7 @@ if __package__:
     from ._generation_probe import run as probe_run, second_step
 else:
     from _generation_benchmark import benchmark_batch
-    from _generation_smoke_config import (
+    from _config.generation import (
         GenerationSmokeConfig,
         generation_smoke as parse_config,
     )

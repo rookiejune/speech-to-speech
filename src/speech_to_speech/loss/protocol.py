@@ -9,7 +9,7 @@ from torch import Tensor
 
 from ..model.embedding.fsq import FsqNeighbors
 from ..model.ctc import CTCRoute, ObjectiveHiddenOutput
-from ..prediction import PredictionModality
+from ..task import PredictionModality
 
 
 class TokenObjectiveModel(Protocol):

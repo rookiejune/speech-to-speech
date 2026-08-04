@@ -8,7 +8,7 @@ import torch
 from anydataset.types import AudioView
 from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
-from speech_to_speech.prediction import PredictionModality
+from speech_to_speech.task import PredictionModality
 from semantic_acoustic_codec.config import (
     DecoderConfig as SharedDecoderConfig,
     Route,

@@ -5,7 +5,7 @@ from anytrain.codec import SemanticAcousticCodes
 from anydataset.types import AudioView
 from torch import Tensor
 
-from ..codes import AudioCodes
+from ..audio import AudioCodes
 from ..datamodule.protocol import DatasetRuntime
 from ..datamodule.parse.parser import speech_from_codes
 from ..datamodule.build.sample import build_task_sample

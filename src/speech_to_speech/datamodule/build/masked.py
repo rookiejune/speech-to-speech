@@ -4,9 +4,7 @@ import torch
 from anydataset.types import Modality
 from torch import Generator, Tensor
 
-from ...prediction import PredictionModality
-from ...task import Task
-from ...task_spec import resolve_prediction
+from ...task import PredictionModality, Task, resolve_prediction
 from .._helper.tokenization import token_ids
 from .ar import pack_interleaved, pack_parallel
 from ..protocol import DataRuntime

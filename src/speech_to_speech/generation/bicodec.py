@@ -9,12 +9,11 @@ from anydataset.types import Modality
 from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
-from ..codes import AudioCodes
-from ..prediction import PredictionModality
+from ..audio import AudioCodes
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..runtime.protocol import GenerationRuntime
-from ..task import Task
-from ..templates import format_instruction, select_template
+from ..task import PredictionModality, Task
+from ..task.templates import format_instruction, select_template
 from .types import Request
 
 

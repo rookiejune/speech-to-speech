@@ -10,8 +10,8 @@ from anydataset.types import Modality
 from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
-from ..codes import AudioCodes
-from ..prediction import PredictionModality
+from ..audio import AudioCodes
+from ..task import PredictionModality
 from ..runtime import AudioSequenceLayout
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..runtime.types import (

@@ -40,7 +40,7 @@ from speech_to_speech.datamodule.types import (
     Text,
 )
 from speech_to_speech.generation import Request, Result, decode_reference_codes
-from speech_to_speech.prediction import PredictionModality
+from speech_to_speech.task import PredictionModality
 from speech_to_speech.task import Task
 
 

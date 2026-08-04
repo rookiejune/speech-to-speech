@@ -14,12 +14,12 @@ from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 from torch import Tensor
 
-from ...codes import AudioCodes
+from ...audio import AudioCodes
 from ...generation import Request, Result, decode_response_text
 from ...generation.batch import requests_from_batch
 from ...generation.decode import decode_reference_codes
 from ...generation.eval.acoustic import reference_audio
-from ...prediction import PredictionModality
+from ...task import PredictionModality
 from ...runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ...datamodule.diagnostic import (
     SampleRef,

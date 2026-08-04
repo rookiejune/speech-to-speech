@@ -5,8 +5,7 @@ from collections.abc import Sequence
 import torch
 from torch import Tensor
 
-from ...audio_stream import AudioStream
-from ...codes import AudioCodes
+from ...audio import AudioCodes, AudioStream
 from ._common import (
     codebook_size,
     token_tensor,

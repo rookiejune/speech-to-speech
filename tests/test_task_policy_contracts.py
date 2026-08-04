@@ -5,8 +5,11 @@ from __future__ import annotations
 import unittest
 
 from _contracts_helpers import *
-from speech_to_speech.prediction import PredictionModality
-from speech_to_speech.task_spec import uses_source_ctc, uses_target_ctc
+from speech_to_speech.task import (
+    PredictionModality,
+    uses_source_ctc,
+    uses_target_ctc,
+)
 
 
 class TaskPolicyContractTest(unittest.TestCase):

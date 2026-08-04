@@ -1,0 +1,501 @@
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any, Protocol, cast
+
+import torch
+from anydataset.types import Modality
+from anytrain.lightning import GradientProbeLoggerCallback
+from anytrain.lightning.perf import training_flops_from_forward
+from lightning import pytorch as pl
+from lightning.pytorch.callbacks import Callback
+from torch import Tensor, nn
+from torch.nn.modules.linear import NonDynamicallyQuantizableLinear
+from transformers import Qwen3ForCausalLM, Qwen3Model
+
+from ._flops import (
+    adapter,
+    audio_input_tower,
+    flow_decoder,
+    linear,
+    qwen_backbone,
+    rvq_decoder,
+)
+from ..datamodule.types import LoaderBatch, ModelBatch
+from ..loss.module import FlowObjective, RVQObjective, TokenObjective
+from ..loss.types import LossItem
+from ..model import Model
+from ..model.acoustic.condition import HiddenConditionAdapter
+from ..model.acoustic.flow import FlowModel
+from ..model.acoustic.rvq import RVQModel
+from ..model.audio_output import AudioOutputAdapterType
+from ..model.embedding.audio import SemanticAudioEmbedding
+from ..model.embedding.fsq import FsqEmbedding, FsqFeature
+from ..pl_module import SpeechToSpeechModule
+
+
+class _Trainer(Protocol):
+    callbacks: list[Callback]
+
+
+class TrainingFlops:
+    """Estimate local-rank FLOPs for one standard joint-training batch.
+
+    The analytical estimate counts dense projections and attention matrix
+    multiplications, then uses the conventional two-forward-equivalents
+    estimate for backward. Lookup, scatter, normalization, activation, loss,
+    and frozen codec feature extraction are outside this model-MFU boundary.
+    """
+
+    def __call__(
+        self,
+        *,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        outputs: Any,
+        batch: Any,
+        batch_idx: int,
+    ) -> float:
+        del batch_idx
+        if type(pl_module) is not SpeechToSpeechModule:
+            raise TypeError("training FLOPs require SpeechToSpeechModule.")
+        if isinstance(batch, LoaderBatch):
+            batch = batch.batch
+        if not isinstance(batch, ModelBatch):
+            raise TypeError("training FLOPs require a ModelBatch.")
+        callbacks = cast(_Trainer, cast(object, trainer)).callbacks
+        if any(isinstance(callback, GradientProbeLoggerCallback) for callback in callbacks):
+            raise ValueError(
+                "training FLOPs do not support GradLogger because it adds "
+                "extra autograd work."
+            )
+
+        model = cast(nn.Module, cast(object, pl_module.model))
+        objective = cast(nn.Module, cast(object, pl_module.objective))
+        expected = {"loss", "token"}
+        if type(objective) is TokenObjective:
+            if type(model) is not Model:
+                raise TypeError("TokenObjective FLOPs require the standard Model.")
+        elif type(objective) is FlowObjective:
+            if type(model) is not FlowModel:
+                raise TypeError(
+                    "FlowObjective FLOPs require the standard FlowModel."
+                )
+            _flow_objective(cast(FlowObjective, objective), model)
+            if batch.acoustic_target is not None:
+                expected.add("flow_matching")
+        elif type(objective) is RVQObjective:
+            if type(model) is not RVQModel:
+                raise TypeError(
+                    "RVQObjective FLOPs require the standard RVQModel."
+                )
+            if batch.acoustic_target is not None:
+                expected.add("rvq")
+        else:
+            raise TypeError(
+                f"training FLOPs do not support objective {type(objective).__name__}."
+            )
+
+        _outputs(outputs, expected)
+        token_model = cast(Model, model)
+        core = _backbone(token_model)
+        _trainable(model)
+        forward = _token_path(token_model, core, batch)
+
+        if isinstance(model, FlowModel):
+            target = _target(batch, model)
+            if target is not None:
+                _, mask = target
+                decoder = model.acoustic_decoder
+                feature_dim = model.acoustic_codec.acoustic_feature_dim
+                if decoder.decoder.latent_dim != feature_dim:
+                    raise ValueError(
+                        "Flow decoder latent size does not match the codec feature size."
+                    )
+                forward += flow_decoder(
+                    decoder,
+                    batch=mask.size(0),
+                    frames=mask.size(1),
+                )
+                forward += _acoustic_condition(model.acoustic_condition, mask)
+        elif isinstance(model, RVQModel):
+            target = _target(batch, model)
+            if target is not None:
+                _, mask = target
+                decoder = model.acoustic_decoder
+                sizes = tuple(model.acoustic_codec.acoustic_codebook_sizes)
+                if tuple(decoder.codebook_sizes) != sizes:
+                    raise ValueError(
+                        "RVQ decoder codebooks do not match the runtime codec."
+                    )
+                forward += rvq_decoder(
+                    decoder,
+                    valid_frames=int(mask.sum().item()),
+                )
+                forward += _acoustic_condition(model.acoustic_condition, mask)
+
+        return training_flops_from_forward(float(forward), backward_multiplier=2.0)
+
+
+def _acoustic_condition(adapter: HiddenConditionAdapter, mask: Tensor) -> int:
+    if type(adapter) is not HiddenConditionAdapter:
+        raise TypeError("training FLOPs require the standard hidden condition adapter.")
+    if type(adapter.norm) is not nn.LayerNorm or type(adapter.projection) is not nn.Linear:
+        raise TypeError("hidden condition adapter uses unsupported modules.")
+    if adapter.norm.normalized_shape != (adapter.hidden_dim,):
+        raise ValueError("hidden condition adapter normalization does not match hidden_dim.")
+    if adapter.projection.in_features != adapter.hidden_dim:
+        raise ValueError("hidden condition projection does not match hidden_dim.")
+    if adapter.projection.out_features != adapter.condition_dim:
+        raise ValueError("hidden condition projection does not match condition_dim.")
+    return linear(adapter.projection, mask.numel())
+
+
+def _flow_objective(objective: FlowObjective, model: nn.Module) -> None:
+    if objective.repa_weight is not None or objective.repa_teacher is not None:
+        raise ValueError("training FLOPs do not support REPA.")
+    decoder = cast(FlowModel, model).acoustic_decoder.decoder
+    if decoder.feature_projection is not None or decoder.feature_layer is not None:
+        raise ValueError("training FLOPs do not support REPA.")
+
+
+def _outputs(outputs: Any, expected: set[str]) -> None:
+    if not isinstance(outputs, Mapping):
+        raise TypeError("training FLOPs outputs must be a mapping.")
+    keys = set(outputs)
+    if keys != expected:
+        raise ValueError(
+            "training FLOPs outputs do not match the active objective branch: "
+            f"expected {sorted(expected)}, got {sorted(keys)}."
+        )
+    if not isinstance(outputs["loss"], Tensor):
+        raise TypeError("training FLOPs loss output must be a tensor.")
+    for name in expected - {"loss"}:
+        if not isinstance(outputs[name], LossItem):
+            raise TypeError(f"training FLOPs output {name!r} must be a LossItem.")
+
+
+def _backbone(model: Model) -> Qwen3Model:
+    backbone = cast(object, model.backbone)
+    if type(backbone) is Qwen3Model:
+        core = cast(Qwen3Model, backbone)
+    elif type(backbone) is Qwen3ForCausalLM:
+        core = cast(Qwen3ForCausalLM, backbone).base_model
+    else:
+        raise TypeError("training FLOPs require a standard Qwen3 backbone.")
+    if type(core) is not Qwen3Model:
+        raise TypeError("training FLOPs require a standard Qwen3Model backbone body.")
+    if core.config._attn_implementation != "flash_attention_2":
+        raise ValueError("training FLOPs require Qwen3 FlashAttention 2.")
+    return core
+
+
+def _trainable(model: nn.Module) -> None:
+    replaced_linear = next(
+        (
+            type(module).__name__
+            for module in model.modules()
+            if isinstance(module, nn.Linear)
+            and type(module) not in {nn.Linear, NonDynamicallyQuantizableLinear}
+        ),
+        None,
+    )
+    if replaced_linear is not None:
+        raise TypeError(
+            "training FLOPs do not support replaced Linear modules such as "
+            f"{replaced_linear}."
+        )
+    allowed_frozen: set[str] = set()
+    if isinstance(model, Model):
+        text_weight = model.text_embedding.weight
+        allowed_frozen.update(
+            name
+            for name, parameter in model.named_parameters()
+            if parameter is text_weight
+        )
+    if isinstance(model, RVQModel):
+        last = model.acoustic_decoder.codebooks - 1
+        allowed_frozen.update(
+            {
+                "acoustic_decoder.decoder.embed_tokens.weight",
+                *(
+                    name
+                    for name, _ in model.named_parameters()
+                    if name.startswith(
+                        (
+                            f"acoustic_decoder.codebook_embeddings.{last}.",
+                            f"acoustic_decoder.embedding_projections.{last}.",
+                        )
+                    )
+                ),
+            }
+        )
+    frozen = sorted(
+        name
+        for name, parameter in model.named_parameters()
+        if not parameter.requires_grad and name not in allowed_frozen
+    )
+    if frozen:
+        raise ValueError(
+            "training FLOPs require the full model to be trainable; frozen "
+            f"parameters include {frozen[0]!r}."
+        )
+
+
+def _token_path(model: Model, core: Qwen3Model, batch: ModelBatch) -> int:
+    input_ids = batch.input_ids
+    if input_ids.dim() != 2 or input_ids.size(0) < 1 or input_ids.size(1) < 1:
+        raise ValueError("training FLOPs input ids must have shape [B, S].")
+    batch_size, sequence = input_ids.shape
+    attention_mask = batch.attention_mask
+    lengths = attention_mask.sum(dim=1)
+    if not bool(lengths.gt(0).all()):
+        raise ValueError("each training FLOPs input row must contain a valid token.")
+
+    embedding = cast(
+        SemanticAudioEmbedding,
+        model.tokens.audio_embedding,
+    )
+    hidden = core.config.hidden_size
+    audio_start, audio_end = model.layout.blocks[Modality.AUDIO.value]
+    if embedding.num_embeddings != audio_end - audio_start:
+        raise ValueError(
+            "semantic audio embedding rows do not match the audio layout block."
+        )
+    audio_mask = input_ids.ge(audio_start) & input_ids.lt(audio_end)
+    projected_audio_mask = audio_mask
+    local_audio_ids = input_ids[audio_mask] - audio_start
+    audio_positions = batch.audio_input_positions
+    audio_tower = model.source_audio_encoder
+    if audio_tower is not None and audio_positions is not None:
+        if audio_positions.dim() != 2 or audio_positions.size(0) != batch_size:
+            raise ValueError(
+                "training FLOPs audio input positions must have shape [batch, frames]."
+            )
+        if audio_positions.size(1) > 0:
+            valid_positions = audio_positions.ge(0)
+            safe_positions = audio_positions.clamp(0, sequence - 1)
+            override = torch.zeros_like(audio_mask)
+            batch_indices = torch.arange(batch_size, device=input_ids.device)[:, None]
+            batch_indices = batch_indices.expand_as(safe_positions)
+            override[
+                batch_indices[valid_positions],
+                safe_positions[valid_positions],
+            ] = True
+            projected_audio_mask = audio_mask & ~override
+            selected_ids = input_ids.gather(1, safe_positions)
+            overlay_ids = (selected_ids - audio_start).clamp(
+                0,
+                embedding.num_embeddings - 1,
+            )
+            local_audio_ids = torch.cat(
+                (
+                    input_ids[projected_audio_mask] - audio_start,
+                    overlay_ids.flatten(),
+                )
+            )
+    projected_audio_rows = int(projected_audio_mask.sum().item())
+    forward = _audio_row_flops(embedding, local_audio_ids)
+    forward += adapter(
+        model.tokens.audio_projection.module,
+        rows=projected_audio_rows,
+        in_features=embedding.embedding_dim,
+        out_features=hidden,
+        name="semantic audio adapter",
+    )
+    if audio_tower is not None and audio_positions is not None:
+        if audio_positions.size(1) > 0:
+            forward += audio_input_tower(
+                audio_tower,
+                batch=batch_size,
+                frames=audio_positions.size(1),
+            )
+    forward += qwen_backbone(
+        core,
+        batch=batch_size,
+        sequence=sequence,
+        lengths=lengths,
+    )
+    forward += _token_head(model, batch)
+    return forward
+
+
+def _token_head(model: Model, batch: ModelBatch) -> int:
+    labels = batch.token_labels[:, 1:]
+    valid = labels.ne(-100)
+    if not bool(valid.any(dim=1).all()):
+        raise ValueError(
+            "each training FLOPs token-label row must contain a valid target."
+        )
+    modalities = batch.prediction_modality.supervised_modalities()
+    allowed = torch.zeros_like(valid)
+    for modality in modalities:
+        start, end = model.layout.blocks[modality.value]
+        allowed |= labels.ge(start) & labels.lt(end)
+    if bool((valid & ~allowed).any()):
+        names = ", ".join(sorted(modality.value for modality in modalities))
+        raise ValueError(
+            f"training FLOPs labels contain an id outside supervised blocks: {names}."
+        )
+
+    hidden = model.backbone.config.hidden_size
+    total = 0
+    for modality in sorted(modalities, key=lambda value: value.value):
+        start, end = model.layout.blocks[modality.value]
+        mask = valid & labels.ge(start) & labels.lt(end)
+        if not bool(mask.any()):
+            continue
+        rows = int(mask.sum().item())
+        if modality is Modality.TEXT:
+            embedding = model.text_embedding
+            if (
+                embedding.num_embeddings < end - start
+                or embedding.embedding_dim != hidden
+            ):
+                raise ValueError(
+                    "text token embedding does not cover the text layout block."
+                )
+            total += 2 * rows * hidden * (end - start)
+            continue
+        if modality is Modality.AUDIO:
+            embedding = cast(
+                SemanticAudioEmbedding,
+                model.tokens.audio_embedding,
+            )
+            if model.tokens.audio_head.config.type is AudioOutputAdapterType.NONE:
+                projection = model.tokens.audio_projection.module
+                if type(embedding) is FsqEmbedding and type(projection) is nn.Identity:
+                    total += _fsq_logit_flops(embedding, rows=rows, features=hidden)
+                else:
+                    forward = _audio_table_flops(embedding)
+                    forward += adapter(
+                        projection,
+                        rows=embedding.num_embeddings,
+                        in_features=embedding.embedding_dim,
+                        out_features=hidden,
+                        name="semantic audio input adapter",
+                    )
+                    total += forward + 2 * rows * hidden * embedding.num_embeddings
+            else:
+                forward = adapter(
+                    model.tokens.audio_head,
+                    rows=rows,
+                    in_features=hidden,
+                    out_features=embedding.embedding_dim,
+                    name="semantic audio output adapter",
+                )
+                total += forward + _audio_logit_flops(
+                    embedding,
+                    rows=rows,
+                    features=embedding.embedding_dim,
+                )
+            continue
+        raise ValueError(f"training FLOPs do not support modality {modality.value!r}.")
+    return total
+
+
+def _audio_row_flops(
+    embedding: SemanticAudioEmbedding,
+    local_ids: Tensor,
+) -> int:
+    if type(embedding) is not FsqEmbedding:
+        return 0
+    if local_ids.dim() != 1:
+        raise ValueError("semantic audio row ids must be one-dimensional.")
+    if bool((local_ids < 0).any()) or bool(
+        (local_ids >= embedding.num_embeddings).any()
+    ):
+        raise ValueError("semantic audio row id is outside the embedding table.")
+
+    total = 0
+    start = 0
+    for size, levels in zip(embedding.codebook_sizes, embedding.fsq_levels):
+        rows = int(
+            (local_ids.ge(start) & local_ids.lt(start + size)).sum().item()
+        )
+        factor = 1 if embedding.config.feature is FsqFeature.DIGIT_ONEHOT else 2
+        total += factor * rows * len(levels) * embedding.embedding_dim
+        start += size
+    return total
+
+
+def _audio_table_flops(embedding: SemanticAudioEmbedding) -> int:
+    if type(embedding) is not FsqEmbedding:
+        return 0
+    return sum(
+        (1 if embedding.config.feature is FsqFeature.DIGIT_ONEHOT else 2)
+        * size
+        * len(levels)
+        * embedding.embedding_dim
+        for size, levels in zip(embedding.codebook_sizes, embedding.fsq_levels)
+    )
+
+
+def _audio_logit_flops(
+    embedding: SemanticAudioEmbedding,
+    *,
+    rows: int,
+    features: int,
+) -> int:
+    if type(embedding) is FsqEmbedding:
+        return _fsq_logit_flops(embedding, rows=rows, features=features)
+    return 2 * rows * features * embedding.num_embeddings
+
+
+def _fsq_logit_flops(
+    embedding: FsqEmbedding,
+    *,
+    rows: int,
+    features: int,
+) -> int:
+    if features != embedding.embedding_dim:
+        raise ValueError("FSQ logits require the unadapted audio embedding dimension.")
+    total = 0
+    for size, levels in zip(embedding.codebook_sizes, embedding.fsq_levels):
+        if embedding.config.feature is FsqFeature.DIGIT_ONEHOT:
+            total += 2 * rows * features * sum(levels)
+        else:
+            total += 2 * rows * features * len(levels)
+            total += rows * sum(levels)
+        prefix = 1
+        for level in levels[1:]:
+            prefix *= level
+            total += rows * prefix * levels[0]
+        total += 2 * rows * features
+        total += rows * size
+    free = embedding.num_embeddings - sum(embedding.codebook_sizes)
+    total += 2 * rows * features * free
+    return total
+
+def _target(
+    batch: ModelBatch,
+    model: FlowModel | RVQModel,
+) -> tuple[Tensor, Tensor] | None:
+    target = batch.acoustic_target
+    if target is None:
+        return None
+    codes = target["codes"]
+    mask = batch.acoustic_target_mask
+    if mask is None:
+        raise RuntimeError("training FLOPs acoustic target mask is unavailable.")
+    if codes.dim() != 3 or mask.dim() != 2 or codes.shape[:2] != mask.shape:
+        raise ValueError(
+            "training FLOPs acoustic codes and mask must have shapes "
+            "[B, F, Q] and [B, F]."
+        )
+    if mask.dtype != torch.bool:
+        raise TypeError("training FLOPs acoustic target mask must be boolean.")
+    if not bool(mask.any(dim=1).all()):
+        raise ValueError(
+            "each training FLOPs acoustic target row must contain a valid frame."
+        )
+    codebooks = tuple(model.acoustic_codec.acoustic_codebook_sizes)
+    if codes.size(-1) != len(codebooks):
+        raise ValueError(
+            f"training FLOPs target has {codes.size(-1)} acoustic codebooks; "
+            f"the runtime requires {len(codebooks)}."
+        )
+    return codes, mask
+
+
+__all__ = ["TrainingFlops"]

@@ -23,7 +23,7 @@ model:
 # workspace dataset factory for a real corpus; no raw corpus loading happens
 # inside the training entry.
 data:
-  factory: speech_to_speech.datamodule.mimo_dataset:JsonlMimoSegmentDataset
+  factory: speech_to_speech.datamodule.mimo.dataset:JsonlMimoSegmentDataset
   kwargs:
     path: ${oc.env:SPEECH_TO_SPEECH_MIMO_SEGMENTS,storage/mimo/segments.jsonl}
   kind: segments

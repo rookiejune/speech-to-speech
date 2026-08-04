@@ -15,7 +15,7 @@ from anytrain.lightning.schedule import UnitScheduleCallback
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig
 
-from scripts._overfit_config import overfit
+from scripts._config.overfit import overfit
 from scripts.overfit import (
     _gradient_logger,
     build_datamodule,

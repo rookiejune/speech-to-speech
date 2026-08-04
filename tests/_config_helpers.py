@@ -26,13 +26,13 @@ from omegaconf.errors import (
 )
 from peft import LoraConfig
 
-from scripts._overfit_config import (
+from scripts._config.overfit import (
     OverfitFlowConfig,
     OverfitRVQConfig,
     OverfitTokenConfig,
     overfit,
 )
-from scripts._train_config import (
+from scripts._config.train import (
     StagedTrainRVQConfig,
     StagedTrainTokenConfig,
     train as parse_train,
@@ -72,20 +72,19 @@ from speech_to_speech.model.ctc import (
 )
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.pl_module import SpeechToSpeechModule
-from speech_to_speech.optim import Config as OptimConfig
+from speech_to_speech.pl_module.optim import Config as OptimConfig
 from speech_to_speech.runtime import (
     AudioSequenceLayout,
     BackboneInitialization,
     BackboneType,
     Config as RuntimeConfig,
 )
-from speech_to_speech.loader_plan import LoaderConfig
-from speech_to_speech.loader_step import LoaderStepMode
-from speech_to_speech.parameter_policy import (
+from speech_to_speech.datamodule.loader import LoaderConfig, LoaderStepMode
+from speech_to_speech.training.parameter_policy import (
     ParameterGroup,
     ParameterPolicyName,
 )
-from speech_to_speech.prediction import PredictionModality
+from speech_to_speech.task import PredictionModality
 from speech_to_speech.task import Task
 
 

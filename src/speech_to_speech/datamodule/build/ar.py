@@ -6,9 +6,8 @@ import torch
 from anydataset.types import Modality
 from torch import Tensor
 
-from ...prediction import PredictionModality
 from ...runtime import AudioSequenceLayout
-from ...task import Task
+from ...task import PredictionModality, Task
 from .._helper.ctc import ctc_target
 from .._helper.tokenization import token_ids
 from ..protocol import DataRuntime, TextRuntime
@@ -46,7 +45,7 @@ def build_pretraining_ar_sample(
         raise ValueError(
             "pretraining AR samples only support AUDIO_AR and TEXT_AR tasks."
         )
-    from ...task_spec import resolve_prediction
+    from ...task import resolve_prediction
 
     prediction = resolve_prediction(task, prediction)
     if prediction is PredictionModality.TEXT:
@@ -124,7 +123,7 @@ def build_ar_sample(
         raise ValueError(f"{task.value} is not an autoregressive task.")
     if task.source_modality is not None:
         raise ValueError(f"{task.value} must not use a source modality.")
-    from ...task_spec import resolve_prediction
+    from ...task import resolve_prediction
 
     prediction = resolve_prediction(task, prediction)
     marker = token_ids(prompt, runtime.text_tokenizer)

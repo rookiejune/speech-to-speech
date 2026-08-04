@@ -53,7 +53,7 @@ from speech_to_speech.datamodule.dataset.speech import (
     ToyDataset,
     load_dataset,
 )
-from speech_to_speech.datamodule.collate.joint import LoaderSchedule, ScheduledDataLoader
+from speech_to_speech.datamodule.loader import LoaderSchedule, ScheduledDataLoader
 from speech_to_speech.datamodule.module import DataModule, LoaderSpec
 from speech_to_speech.datamodule.diagnostic import SampleSplit
 from speech_to_speech.datamodule.build.single import SingleCollator
@@ -93,7 +93,7 @@ from speech_to_speech.runtime.audio_tokenizer import (
     NativeAudioTokenizer,
     TorchCodecBPE,
 )
-from speech_to_speech.parameter_policy import (
+from speech_to_speech.training.parameter_policy import (
     PARAMETER_POLICY_SPECS,
     ParameterGroup,
     ParameterPolicyName,
@@ -103,8 +103,8 @@ from speech_to_speech.parameter_policy import (
 from speech_to_speech.task import Task
 
 
-from scripts._overfit_config import overfit as parse_overfit
-from scripts._config_common import TokenModelConfig
+from scripts._config.overfit import overfit as parse_overfit
+from scripts._config.common import TokenModelConfig
 from scripts._entry import runtime_config
 from scripts.create_split_manifest import build_manifest
 from scripts.overfit import (

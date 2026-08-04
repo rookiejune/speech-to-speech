@@ -11,10 +11,10 @@ from torch import Tensor, nn
 
 from ...generation.types import AcousticGeneration
 from ...runtime.types import acoustic_codec
-from .._contract_state import flow_acoustic_contract
+from ..contract import flow_acoustic_contract
 from .._helper import register
 from ..base import Config
-from ..protocol import FlowModelRuntime, FlowSamplingRuntime
+from .protocol import FlowModelRuntime, FlowSamplingRuntime
 from ._config import DecoderConfig, FlowRepaConfig, decoder_options
 from ._codec import code_features
 from .base import AcousticModel

@@ -10,8 +10,7 @@ from anytrain.codec import AcousticLayout, SemanticAcousticCodes
 from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 
-from speech_to_speech.audio_stream import AudioStream
-from speech_to_speech.codes import AudioCodes
+from speech_to_speech.audio import AudioCodes, AudioStream
 from speech_to_speech.generation.chat import (
     ChatRequest,
     completion_from_result,

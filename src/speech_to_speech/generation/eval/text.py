@@ -9,8 +9,7 @@ from anydataset.types import Modality
 from torch import Tensor
 
 from ..._oom import annotate, tensor_report
-from ...prediction import PredictionModality
-from ...task import Task
+from ...task import PredictionModality, Task
 from ..protocol import GenerationRuntime, TextEvaluationModel
 from ..service import generate_responses
 from ..text import decode_text_ids as _decode_text_ids

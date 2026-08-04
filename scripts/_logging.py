@@ -6,9 +6,9 @@ from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
 
 if TYPE_CHECKING:
     if __package__:
-        from ._config_common import LoggingConfig
+        from ._config.common import LoggingConfig
     else:
-        from _config_common import LoggingConfig
+        from _config.common import LoggingConfig
 
 
 def build(config: LoggingConfig) -> TensorBoardLogger | CSVLogger:

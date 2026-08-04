@@ -6,17 +6,16 @@ from itertools import cycle
 from unittest.mock import patch
 
 from _config_helpers import _train, build_train_datamodule
-from speech_to_speech.datamodule.collate.joint import (
+from speech_to_speech.datamodule.loader import (
     LoaderSchedule,
     ScheduledDataLoader,
 )
 from speech_to_speech.datamodule.dataset.text import TextDatasetName
-from speech_to_speech.loader_plan import ARFraming
-from speech_to_speech.loader_step import LoaderStepMode
+from speech_to_speech.datamodule.loader import ARFraming, LoaderStepMode
 from speech_to_speech.model.audio_input import AudioInputAdapterType
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.model.ctc import CTCDecoderType
-from speech_to_speech.parameter_policy import ParameterPolicyName
+from speech_to_speech.training.parameter_policy import ParameterPolicyName
 from speech_to_speech.runtime import AudioSequenceLayout, BackboneType
 from speech_to_speech.task import Task
 

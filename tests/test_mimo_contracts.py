@@ -11,7 +11,7 @@ from torch.nn import functional as F
 
 from speech_to_speech.datamodule.mimo import MimoBatch, MimoSample, collate_mimo
 from speech_to_speech.datamodule.config import DataLoaderConfig
-from speech_to_speech.datamodule.mimo_loader import MimoDataModule
+from speech_to_speech.datamodule.mimo import MimoDataModule
 from speech_to_speech.loss.mimo import MimoObjective
 from speech_to_speech.runtime.backbone import (
     BackboneReadout,
@@ -38,7 +38,7 @@ class MimoBatchContractTest(unittest.TestCase):
         )
 
         with patch(
-            "speech_to_speech.datamodule.mimo._validate_token_matrix",
+            "speech_to_speech.datamodule.mimo.batch._validate_token_matrix",
             side_effect=AssertionError("trusted transfer must not revalidate"),
         ):
             moved = batch.to(torch.device("cpu"), non_blocking=True)

@@ -7,7 +7,62 @@ import torch
 from semantic_acoustic_codec.rl import SACCandidate
 from torch import Tensor
 
-from speech_to_speech.generation.types import AudioOutput, Request
+from ..datamodule.types import ModelBatch
+from ..generation.types import AudioOutput, Request
+
+
+@dataclass
+class PreferenceBatch:
+    chosen: ModelBatch
+    rejected: ModelBatch
+    ref_chosen_logps: Tensor | None = None
+    ref_rejected_logps: Tensor | None = None
+
+    def __post_init__(self) -> None:
+        batch_size = self.chosen.input_ids.size(0)
+        if self.rejected.input_ids.size(0) != batch_size:
+            raise ValueError("chosen and rejected batches must have the same batch size.")
+        if self.chosen.input_ids.shape != self.chosen.token_labels.shape:
+            raise ValueError("chosen input ids and token labels must align.")
+        if self.rejected.input_ids.shape != self.rejected.token_labels.shape:
+            raise ValueError("rejected input ids and token labels must align.")
+        if self.chosen.input_ids.shape != self.rejected.input_ids.shape:
+            raise ValueError("chosen and rejected batches must have aligned shapes.")
+        if (self.ref_chosen_logps is None) != (self.ref_rejected_logps is None):
+            raise ValueError("reference chosen and rejected logps must be provided together.")
+        for name, logps in (
+            ("ref_chosen_logps", self.ref_chosen_logps),
+            ("ref_rejected_logps", self.ref_rejected_logps),
+        ):
+            if logps is not None and logps.shape != (batch_size,):
+                raise ValueError(f"{name} must have shape [batch].")
+
+
+@dataclass
+class GRPOBatch:
+    sequences: ModelBatch
+    old_token_logps: Tensor
+    rewards: Tensor
+    ref_token_logps: Tensor | None = None
+    group_mask: Tensor | None = None
+
+    def __post_init__(self) -> None:
+        if self.old_token_logps.dim() != 3:
+            raise ValueError("old token logps must have shape [batch, group, tokens].")
+        batch_size, group_size, token_count = self.old_token_logps.shape
+        if self.sequences.input_ids.size(0) != batch_size * group_size:
+            raise ValueError("sequence rows must equal batch times group.")
+        if self.sequences.input_ids.size(1) - 1 != token_count:
+            raise ValueError("old token logps must align with next-token targets.")
+        if self.rewards.shape != (batch_size, group_size):
+            raise ValueError("rewards must have shape [batch, group].")
+        if (
+            self.ref_token_logps is not None
+            and self.ref_token_logps.shape != self.old_token_logps.shape
+        ):
+            raise ValueError("reference token logps must align with old token logps.")
+        if self.group_mask is not None and self.group_mask.shape != self.rewards.shape:
+            raise ValueError("group mask must have shape [batch, group].")
 
 
 @dataclass(frozen=True)
@@ -86,4 +141,10 @@ def _non_negative(value: int, *, name: str) -> None:
         raise ValueError(f"{name} must be non-negative.")
 
 
-__all__ = ["S2SGenerationResult", "S2SRewardBatch", "S2SRollout"]
+__all__ = [
+    "GRPOBatch",
+    "PreferenceBatch",
+    "S2SGenerationResult",
+    "S2SRewardBatch",
+    "S2SRollout",
+]

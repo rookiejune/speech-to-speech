@@ -5,9 +5,8 @@ from collections.abc import Mapping
 import torch
 from anydataset.types import Sample as RawSample
 
-from ...loader_plan import ARFraming, validate_ar_framing
-from ...prediction import PredictionModality
-from ...task import Task
+from ..loader.contract import ARFraming, validate_ar_framing
+from ...task import PredictionModality, Task
 from .._helper.task import TaskWeights
 from ..config import TaskConfig
 from ..parse.parser import parse_task_sample, parse_text_sample
@@ -298,7 +297,7 @@ def _validate_text_tasks(
     *,
     prediction: PredictionModality | None = None,
 ) -> None:
-    from ...task_spec import resolve_prediction
+    from ...task import resolve_prediction
 
     for task in tasks:
         if (

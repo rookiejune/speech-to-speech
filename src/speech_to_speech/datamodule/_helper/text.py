@@ -8,9 +8,8 @@ from anydataset import IterableAnyDataset
 from anydataset.types import Sample as RawSample
 from torch.utils.data import DataLoader, Dataset, IterableDataset, Subset
 
-from ...loader_plan import ARFraming
-from ...prediction import PredictionModality
-from ...task import Task
+from ..loader.contract import ARFraming
+from ...task import PredictionModality, Task
 from ..collate.collator import TextCollator
 from ..config import TaskConfig
 from ..protocol import TextRuntime, TextRuntimeSnapshot

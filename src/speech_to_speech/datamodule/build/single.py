@@ -3,11 +3,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from anydataset import types
 
-from ...loader_plan import ARFraming, validate_ar_framing
-from ...prediction import PredictionModality
-from ...source import SourceLayout
-from ...task import Task
-from ...task_spec import resolve_prediction
+from ..loader.contract import ARFraming, validate_ar_framing
+from ...task import PredictionModality, SourceLayout, Task, resolve_prediction
 from ..config import TaskConfig
 from .._helper.duration import from_frames
 from .._helper.task import TaskWeights

@@ -7,8 +7,8 @@ from unittest.mock import patch
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig
 
-from scripts._overfit_config import overfit
-from scripts._train_config import train
+from scripts._config.overfit import overfit
+from scripts._config.train import train
 
 
 @patch.dict(

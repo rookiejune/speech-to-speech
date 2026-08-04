@@ -9,7 +9,7 @@ from torch import Tensor, nn
 
 from .._tensor import is_signed_integer_dtype
 from ..model.embedding.fsq import FsqNeighbors
-from ..prediction import PredictionModality
+from ..task import PredictionModality
 from .types import LossItem
 
 

@@ -40,7 +40,7 @@ model:
   initialize_audio_from_runtime: false
 
 data:
-  factory: speech_to_speech.datamodule.mimo_dataset:ToyMimoSegmentDataset
+  factory: speech_to_speech.datamodule.mimo.dataset:ToyMimoSegmentDataset
   kwargs: {}
   kind: segments
   samples_per_epoch: 8

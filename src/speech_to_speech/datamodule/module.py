@@ -12,16 +12,15 @@ from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader, Dataset, Subset
 
 from .._compat import StrEnum, auto
-from ..loader_plan import ARFraming, validate_ar_framing
-from ..prediction import PredictionModality
-from ..task import Task
+from .loader.contract import ARFraming, validate_ar_framing
+from ..task import PredictionModality, Task
 from ._helper.text import TextLoader
 from .collate.collator import Collator
 from .config import TaskConfig
 from .config import DataLoaderConfig, SpeechConfig
 from .dataset.speech import load_dataset
 from .diagnostic import SampleSplit
-from .collate.joint import LoaderSchedule, ScheduledDataLoader
+from .loader.schedule import LoaderSchedule, ScheduledDataLoader
 from .protocol import (
     DataRuntime,
     DataRuntimeSnapshot,

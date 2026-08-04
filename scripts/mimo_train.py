@@ -18,23 +18,27 @@ from omegaconf import DictConfig
 from torch import Tensor, nn
 from torch.utils.data import Dataset
 
-from speech_to_speech.datamodule.mimo import MimoSample
-from speech_to_speech.datamodule.mimo_dataset import MimoDatasetConfig, MimoTaskDataset
-from speech_to_speech.datamodule.mimo_loader import MimoDataModule
-from speech_to_speech.datamodule.mimo_tasks import MimoSegment, MimoTask
+from speech_to_speech.datamodule.mimo import (
+    MimoDataModule,
+    MimoDatasetConfig,
+    MimoSample,
+    MimoSegment,
+    MimoTask,
+    MimoTaskDataset,
+)
 from speech_to_speech.model import MimoModel, MimoModelConfig
 from speech_to_speech.model.mimo_factory import build_mimo_model, derive_mimo_vocab
 from speech_to_speech.pl_module.mimo import MimoModule
 from speech_to_speech.runtime import runtime_for_sequence_layout
 
 if __package__:
-    from ._mimo_train_config import (
+    from ._config.mimo import (
         MimoTrainConfig,
         PreparedMimoDataConfig,
         parse as parse_config,
     )
 else:
-    from _mimo_train_config import (  # type: ignore[no-redef]
+    from _config.mimo import (  # type: ignore[no-redef]
         MimoTrainConfig,
         PreparedMimoDataConfig,
         parse as parse_config,
@@ -177,7 +181,7 @@ def _data_for_model(
     }
     return replace(
         config.data,
-        factory="speech_to_speech.datamodule.mimo_dataset:ToyMimoSegmentDataset",
+        factory="speech_to_speech.datamodule.mimo.dataset:ToyMimoSegmentDataset",
         kwargs={
             key: value for key, value in config.data.kwargs.items() if key in toy_fields
         },

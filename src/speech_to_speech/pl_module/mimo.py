@@ -14,7 +14,7 @@ from torch import Tensor, nn
 
 from ..datamodule.mimo import MimoBatch
 from ..loss.mimo import MimoObjective
-from ..optim import Config as OptimConfig
+from .optim import Config as OptimConfig
 from ..runtime.backbone.mimo import (
     DualStreamHiddenStates,
     DualStreamLogits,

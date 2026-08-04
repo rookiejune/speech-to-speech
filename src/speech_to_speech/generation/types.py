@@ -5,9 +5,8 @@ from typing import TypedDict
 from torch import Generator, Tensor
 from typing_extensions import NotRequired
 
-from ..prediction import PredictionModality
-from ..codes import AudioCodes
-from ..task import Task
+from ..audio import AudioCodes
+from ..task import PredictionModality, Task
 
 
 class Request(TypedDict):

@@ -8,7 +8,7 @@ from peft import LoraConfig, inject_adapter_in_model
 from torch import nn
 
 from speech_to_speech.model.ctc import CTCConfig, CTCRouteConfig
-from speech_to_speech.parameter_policy import (
+from speech_to_speech.training.parameter_policy import (
     PARAMETER_POLICY_SPECS,
     ParameterGroup,
     ParameterPolicyName,

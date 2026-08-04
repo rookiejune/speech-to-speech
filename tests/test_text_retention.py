@@ -13,7 +13,7 @@ from hydra import compose, initialize_config_dir
 from torch import Tensor, nn
 
 from scripts import train as train_script
-from scripts._train_config import train as parse_train
+from scripts._config.train import train as parse_train
 from speech_to_speech._oom import context as oom_context
 from speech_to_speech.callback import OOMDiagnostics
 from speech_to_speech.callback.logging import TextRetentionLogger

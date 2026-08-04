@@ -198,7 +198,7 @@ blank 的时间步，只有外层 BOA/EOA 不进入 CTC positions。
 | INTERLEAVED_AR | none | interleaved | no | no | codec-dependent |
 | MASKED_AR | text+audio (masked) | parallel (optional interleaved) | no | no | codec-dependent |
 
-`PredictionModality`（`speech_to_speech.prediction`）是 token 监督与 generation 路径的事实来源：
+`PredictionModality`（`speech_to_speech.task`）是 token 监督与 generation 路径的事实来源：
 
 - `TEXT` / `AUDIO`：单模态 next-token。
 - `PARALLEL`：同一序列内独立 text/audio span，两套 head 都监督（块级，非时间交错）。
@@ -214,7 +214,7 @@ blank 的时间步，只有外层 BOA/EOA 不进入 CTC positions。
 `target_modality` 只对单模态 prediction 返回 TEXT/AUDIO；mixed 时为 `None`。
 
 `Task` 仍拥有 `uses_source_role` 与 instruction template。
-每个 task 在 `speech_to_speech.templates` 维护 30 条 paraphrase。
+每个 task 在 `speech_to_speech.task.templates` 维护 30 条 paraphrase。
 `SpeechConfig.tasks.<task>.template` 为 per-task 下标（`int` 固定，`null` 随机；默认 `0`）。
 训练经 `Task.sample_template(index)` / `select_template(task, index)` 取模板；generation
 要求固定下标，可用 `evaluation_template_index()`（`null` -> `0`）。task builder、collator、

@@ -5,7 +5,7 @@ import unittest
 import torch
 from anytrain.codec import AcousticLayout, SemanticAcousticCodes
 
-from speech_to_speech.codes import AudioCodes
+from speech_to_speech.audio import AudioCodes
 
 
 class AudioCodesTest(unittest.TestCase):

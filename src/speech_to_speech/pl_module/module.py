@@ -37,12 +37,11 @@ from ..loss.module import Objective
 from ..loss.protocol import TokenObjectiveModel
 from ..loss.types import Outputs, combine_outputs
 from ..loss.validation import validation_metrics
-from ..model._contract import ModelCheckpointContract, validate_checkpoint_contract
+from ..model.contract import ModelCheckpointContract, validate_checkpoint_contract
 from ..model.base import Model
 from ..generation.protocol import TextEvaluationModel
-from ..prediction import PredictionModality
-from ..task import Task
-from ..optim import Config as OptimConfig
+from ..task import PredictionModality, Task
+from .optim import Config as OptimConfig
 
 
 @dataclass(frozen=True)

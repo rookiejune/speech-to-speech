@@ -9,7 +9,7 @@ from torch import Tensor, nn
 from ...generation.types import AcousticGeneration
 from ...runtime.types import AcousticCodec, acoustic_codec
 from ..base import Config, Model
-from ..protocol import TokenModelRuntime
+from ...runtime.protocol import TokenModelRuntime
 from .condition import HiddenConditionAdapter
 
 

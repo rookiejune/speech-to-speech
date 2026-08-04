@@ -5,10 +5,10 @@ from __future__ import annotations
 import unittest
 
 from _contracts_helpers import *
-from speech_to_speech.codes import AudioCodes
+from speech_to_speech.audio import AudioCodes
 from speech_to_speech.datamodule.build.sample import build_speech_sample
 from speech_to_speech.datamodule.types import Speech
-from speech_to_speech.loader_plan import ARFraming
+from speech_to_speech.datamodule.loader import ARFraming
 
 
 class SpeechSampleContractTest(unittest.TestCase):

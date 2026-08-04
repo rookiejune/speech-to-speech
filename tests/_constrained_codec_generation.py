@@ -7,7 +7,7 @@ import torch
 from torch import Tensor
 from transformers.cache_utils import Cache
 
-from speech_to_speech.audio_stream import AudioStream
+from speech_to_speech.audio import AudioStream
 from speech_to_speech.model._helper import top_p_filter
 from speech_to_speech.model.generation import (
     GenerationEngine,

@@ -28,7 +28,7 @@ from speech_to_speech.model import (
     AudioOutputAdapterType,
     Model,
 )
-from speech_to_speech.model._contract import (
+from speech_to_speech.model.contract import (
     ModelCheckpointContract,
     validate_checkpoint_contract,
 )
@@ -42,7 +42,7 @@ from speech_to_speech.model.ctc import (
     CTCDecoderType,
     CTCRouteConfig,
 )
-from speech_to_speech.model.protocol import (
+from speech_to_speech.model.acoustic.protocol import (
     FlowModelRuntime,
     FlowSample,
     FlowSamplingRuntime,

@@ -1,5 +1,5 @@
 """Speech-to-speech training components."""
 
-from .codes import AudioCodes
+from .audio import AudioCodes
 
 __all__ = ["AudioCodes"]

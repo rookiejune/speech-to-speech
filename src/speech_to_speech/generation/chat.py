@@ -12,13 +12,12 @@ from torch import Tensor
 from typing_extensions import NotRequired
 
 from .._tensor import is_signed_integer_dtype
-from ..codes import AudioCodes
-from ..prediction import PredictionModality
+from ..audio import AudioCodes
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..runtime.protocol import GenerationRuntime
 from ..runtime.types import frame_codec, structured_codec, supports_structured
-from ..task import Task
-from ..templates import format_instruction, select_template
+from ..task import PredictionModality, Task
+from ..task.templates import format_instruction, select_template
 from .bicodec import prepare_bicodec_tts_request
 from .protocol import TokenGenerator
 from .service import generate_responses

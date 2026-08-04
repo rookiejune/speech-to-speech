@@ -24,7 +24,7 @@ from .audio_output import (
     create_audio_output_adapter,
 )
 from .embedding.audio import create_semantic_audio_embedding
-from .protocol import TokenModelRuntime
+from ..runtime.protocol import TokenModelRuntime
 from .token import TokenInterface
 from .toy import create_toy_backbone
 

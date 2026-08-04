@@ -8,7 +8,7 @@ from anytrain.codec import AcousticLayout, SemanticAcousticCodes
 from torch import Generator, Tensor
 
 from .._tensor import is_signed_integer_dtype
-from ..codes import AudioCodes
+from ..audio import AudioCodes
 from ..runtime.audio_tokenizer import (
     BiCodecAudioTokenizer,
     semantic_codes_from_audio_tokens,

@@ -22,11 +22,8 @@ from ..types import (
 )
 from ...runtime import AudioSequenceLayout
 from ...runtime.audio_tokenizer import BiCodecAudioTokenizer
-from ...codes import AudioCodes
-from ...source import SourceLayout
-from ...task import Task
-from ...task_spec import resolve_prediction
-from ...prediction import PredictionModality
+from ...audio import AudioCodes
+from ...task import PredictionModality, SourceLayout, Task, resolve_prediction
 
 
 def parse_sample(sample: types.Sample, runtime: DataRuntime) -> SpeechPair:

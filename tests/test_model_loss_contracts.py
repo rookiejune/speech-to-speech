@@ -24,8 +24,7 @@ from speech_to_speech.datamodule.types import (
     SpeechTaskSample,
     Text,
 )
-from speech_to_speech.audio_stream import AudioStream
-from speech_to_speech.codes import AudioCodes
+from speech_to_speech.audio import AudioCodes, AudioStream
 from semantic_acoustic_codec.loss.flow import FlowLoss
 
 from speech_to_speech.loss.module import FlowObjective, Objective, RVQObjective, TokenObjective
@@ -40,7 +39,7 @@ from speech_to_speech.model.audio_output import (
 )
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.pl_module import SpeechToSpeechModule
-from speech_to_speech.prediction import PredictionModality
+from speech_to_speech.task import PredictionModality
 from speech_to_speech.runtime.audio_tokenizer import (
     BiCodecAudioTokenizer,
     NativeAudioTokenizer,

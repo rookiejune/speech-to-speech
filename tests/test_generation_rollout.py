@@ -14,7 +14,7 @@ from speech_to_speech.generation.rollout import (
     write_rollouts_jsonl,
 )
 from speech_to_speech.model.generation import GenerationOutput
-from speech_to_speech.prediction import PredictionModality
+from speech_to_speech.task import PredictionModality
 from speech_to_speech.task import Task
 
 

@@ -9,7 +9,7 @@ import torch
 from anydataset import IterableAnyDataset
 
 from speech_to_speech.datamodule.dataset.speech import DatasetConfig
-from speech_to_speech.datamodule.collate.joint import LoaderSchedule, ScheduledDataLoader
+from speech_to_speech.datamodule.loader import LoaderSchedule, ScheduledDataLoader
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.module import DataModule, LoaderSpec
 from speech_to_speech.datamodule.diagnostic import SampleSplit

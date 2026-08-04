@@ -6,7 +6,7 @@ from typing import cast
 import torch
 from torch import Tensor
 
-from ..prediction import PredictionModality
+from ..task import PredictionModality
 from ._request import prediction_of, validate
 from .audio import generate_audio_responses
 from .mixed import generate_mixed_responses

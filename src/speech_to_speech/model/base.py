@@ -12,11 +12,10 @@ from transformers.cache_utils import Cache
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from .._tensor import is_signed_integer_dtype
-from ..prediction import PredictionModality
+from ..task import PredictionModality
 from ..runtime.backbone import BackboneOutputView
 from . import _assembly
-from ._contract import ModelCheckpointContract
-from ._contract_state import build_model_contract
+from .contract import ModelCheckpointContract, build_model_contract
 from .generation import (
     GenerationEngine,
     GenerationOptions,
@@ -30,7 +29,7 @@ from .audio_input import AudioInputAdapterConfig, AudioInputTower
 from .audio_output import AudioOutputAdapterConfig
 from .ctc import CTCConfig, CTCDecoderRoutes, CTCRoute, ObjectiveHiddenOutput
 from .embedding.fsq import FsqEmbeddingConfig, FsqNeighbors
-from .protocol import TokenModelRuntime
+from ..runtime.protocol import TokenModelRuntime
 from .token import TokenInterface
 from .toy import ToyConfig
 

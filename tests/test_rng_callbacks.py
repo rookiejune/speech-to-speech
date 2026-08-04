@@ -14,7 +14,7 @@ from speech_to_speech.callback.logging.task_sample import TaskSampleLogger
 from speech_to_speech.datamodule.types import ModelBatch
 from semantic_acoustic_codec.model import AcousticRVQDecoder
 from speech_to_speech.generation import Result
-from speech_to_speech.prediction import PredictionModality
+from speech_to_speech.task import PredictionModality
 from speech_to_speech.task import Task
 
 

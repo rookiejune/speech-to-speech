@@ -5,9 +5,8 @@ from anydataset.types import Modality
 from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
-from ..prediction import PredictionModality
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
-from ..task import Task
+from ..task import PredictionModality, Task
 from .audio import has_semantic_decode_options, validate_audio_request
 from .protocol import TokenGenerator
 from .types import Request

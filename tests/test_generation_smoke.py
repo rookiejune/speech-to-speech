@@ -13,7 +13,7 @@ import torch
 
 from scripts import _generation_benchmark as benchmark
 from scripts import _generation_probe as probe
-from scripts._generation_smoke_config import generation_smoke
+from scripts._config.generation import generation_smoke
 from scripts.generation_smoke import (
     _seed,
     _validate,

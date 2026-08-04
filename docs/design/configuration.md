@@ -90,7 +90,7 @@ fixed-sample 验收默认承担性能测试。显式启用时必须同时关闭 
 失败。`TaskSampleLogger` 在 `on_train_batch_start` 只由 rank zero 执行 generation，DDP 其他 rank 会在
 后续同步点等待，不能靠调整 callback 顺序可靠排除这段时间。
 
-满足该前提后，入口使用 `speech_to_speech.performance.TrainingFlops` 组装
+满足该前提后，入口使用 `speech_to_speech.training.performance.TrainingFlops` 组装
 `anytrain.PerformanceCallback`，并沿用同一套硬件峰值 override、cadence、warmup、窗口和 CUDA 同步
 配置。performance callback 位于 callback 列表首位，使其 step timer 在后续 batch-end 诊断前结束；
 该模式不组装 `GradLogger`，因为 comparison probes 的额外 `autograd.grad` 会进入实测
@@ -195,9 +195,9 @@ step 数，`serial_joint` 下乘以 `loader_plan.accumulate_grad_batches`。`san
 
 ## 入口边界
 
-`scripts/_config_common.py` 定义两个入口共享的 acoustic、Trainer、logging、callback 基础结构与
-组合校验；`scripts/_overfit_config.py` 和 `scripts/_train_config.py` 分别拥有入口 schema 与其业务规则。
-`scripts/_config_normalization.py` 隔离 OmegaConf 可写化、枚举规范化与 structured dataclass 合并，
+`scripts/_config/common.py` 定义两个入口共享的 acoustic、Trainer、logging、callback 基础结构与
+组合校验；`scripts/_config/overfit.py` 和 `scripts/_config/train.py` 分别拥有入口 schema 与其业务规则。
+`scripts/_config/normalization.py` 隔离 OmegaConf 可写化、枚举规范化与 structured dataclass 合并，
 不包含训练业务规则。`speech_to_speech.pl_module.composition` 负责 token/flow/RVQ 的
 model/objective/module 组装、基于 `model.acoustic.type` 的统一分发，以及 runtime acoustic side-channel
 约束；`scripts/_entry.py` 只放 overfit/train 共享的 runtime device、Trainer 与 performance callback

@@ -33,23 +33,22 @@ from speech_to_speech.callback.logging import (
     TextRetentionLogger,
 )
 from speech_to_speech.datamodule import DataModule, SampleSplit
-from speech_to_speech.datamodule.collate.joint import LoaderSchedule
+from speech_to_speech.datamodule.loader import LoaderConfig, LoaderSchedule
 from speech_to_speech.datamodule.module import LoaderSpec
-from speech_to_speech.loader_plan import LoaderConfig
 from speech_to_speech.pl_module.composition import build
 from speech_to_speech.runtime import runtime_for_sequence_layout
 from speech_to_speech.task import Task
 
 if TYPE_CHECKING:
     from speech_to_speech.runtime import Runtime
-    from scripts._train_config import (
+    from scripts._config.train import (
         GradientComparisonConfig,
         GradientProbeConfig,
         StagedTrainConfig,
     )
 
 if __package__:
-    from ._train_config import train as parse_config
+    from ._config.train import train as parse_config
     from ._entry import (
         performance,
         runtime_config,
@@ -57,7 +56,7 @@ if __package__:
     )
     from ._logging import build as build_logger
 else:
-    from _train_config import train as parse_config
+    from _config.train import train as parse_config
     from _entry import (
         performance,
         runtime_config,

@@ -19,7 +19,7 @@ from ...datamodule.types import (
     TrainInput,
 )
 from ...loss.types import loss_items
-from ...task_spec import uses_source_ctc, uses_target_ctc
+from ...task import uses_source_ctc, uses_target_ctc
 
 _OBJECTIVE_PREFIX = {
     "token": "token",

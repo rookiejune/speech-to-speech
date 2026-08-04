@@ -8,16 +8,14 @@ from tempfile import TemporaryDirectory
 import torch
 
 from speech_to_speech.datamodule.config import DataLoaderConfig
-from speech_to_speech.datamodule.mimo_loader import MimoDataModule
-from speech_to_speech.datamodule.mimo_dataset import (
+from speech_to_speech.datamodule.mimo import (
     JsonlMimoSegmentDataset,
+    MimoDataModule,
     MimoDatasetConfig,
-    MimoTaskDataset,
-)
-from speech_to_speech.datamodule.mimo_tasks import (
     MimoSegment,
     MimoSpecialTokens,
     MimoTask,
+    MimoTaskDataset,
 )
 
 

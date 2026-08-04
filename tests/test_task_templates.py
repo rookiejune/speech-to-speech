@@ -8,10 +8,8 @@ from omegaconf import OmegaConf
 
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.dataset.text import TextConfig
-from speech_to_speech.prediction import PredictionModality
-from speech_to_speech.source import SourceLayout
-from speech_to_speech.task import Task
-from speech_to_speech.templates import (
+from speech_to_speech.task import PredictionModality, SourceLayout, Task
+from speech_to_speech.task.templates import (
     CANONICAL_TEMPLATES,
     CANONICAL_TEMPLATES_PER_TASK,
     TEMPLATES,
@@ -94,7 +92,7 @@ class TaskTemplateTest(unittest.TestCase):
 
     def test_sample_template_defaults_to_index_zero(self):
         task = Task.TTS
-        with patch("speech_to_speech.templates.random.choice") as choice:
+        with patch("speech_to_speech.task.templates.random.choice") as choice:
             template = task.sample_template()
         choice.assert_not_called()
         self.assertEqual(template, task.templates[0])
@@ -102,7 +100,7 @@ class TaskTemplateTest(unittest.TestCase):
     def test_null_index_is_random(self):
         task = Task.S2ST
         with patch(
-            "speech_to_speech.templates.random.choice",
+            "speech_to_speech.task.templates.random.choice",
             return_value=TEMPLATES[task][2],
         ) as choice:
             sampled = select_template(task, None)
@@ -123,7 +121,7 @@ class TaskTemplateTest(unittest.TestCase):
             format_instruction(Task.TTS, source="hello", index=None)
 
     def test_speech_config_accepts_per_task_templates(self):
-        from scripts._config_normalization import prepare
+        from scripts._config.normalization import prepare
 
         raw = OmegaConf.create(
             {

@@ -14,11 +14,14 @@ from torch.nn.utils.rnn import pad_sequence
 from .._compat import StrEnum, auto
 from .._tensor import is_signed_integer_dtype
 from ..generation.types import Request
-from ..loader_plan import ARFraming, validate_ar_framing
-from ..prediction import PredictionModality
-from ..source import SourceLayout
-from ..task import Task
-from ..task_spec import uses_source_ctc, uses_target_ctc
+from .loader.contract import ARFraming, validate_ar_framing
+from ..task import (
+    PredictionModality,
+    SourceLayout,
+    Task,
+    uses_source_ctc,
+    uses_target_ctc,
+)
 from ._helper.duration import seconds
 
 ACOUSTIC_PAD_ID = -1

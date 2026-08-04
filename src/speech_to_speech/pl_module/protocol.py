@@ -4,7 +4,7 @@ from peft import LoraConfig
 
 from ..generation.protocol import AcousticFeatureGenerator
 from ..loss.protocol import FlowObjectiveModel, RVQObjectiveModel
-from ..model._contract import ModelCheckpointContract
+from ..model.contract import ModelCheckpointContract
 
 
 class FlowCompositionModel(

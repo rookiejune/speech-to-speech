@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from hydra import compose, initialize_config_dir
 
-from scripts._mimo_train_config import MimoTrainConfig, parse
+from scripts._config.mimo import MimoTrainConfig, parse
 from scripts.mimo_train import mimo_callbacks, run
 
 
@@ -37,7 +37,7 @@ class MimoTrainEntryTest(unittest.TestCase):
         self.assertFalse(config.model.toy)
         self.assertEqual(
             config.data.factory,
-            "speech_to_speech.datamodule.mimo_dataset:JsonlMimoSegmentDataset",
+            "speech_to_speech.datamodule.mimo.dataset:JsonlMimoSegmentDataset",
         )
         self.assertIsNone(config.model.audio_embedding_dim)
         self.assertEqual(config.data.max_sequence_length, 4096)
@@ -64,7 +64,7 @@ class MimoTrainEntryTest(unittest.TestCase):
         data = _data_for_model(config, None)
         self.assertEqual(
             data.factory,
-            "speech_to_speech.datamodule.mimo_dataset:ToyMimoSegmentDataset",
+            "speech_to_speech.datamodule.mimo.dataset:ToyMimoSegmentDataset",
         )
         self.assertFalse(data.derive_special_tokens)
 

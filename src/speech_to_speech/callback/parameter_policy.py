@@ -4,7 +4,7 @@ from anytrain.lightning import ParameterPolicyCallback
 from lightning import pytorch as pl
 from torch import nn
 
-from speech_to_speech.parameter_policy import (
+from speech_to_speech.training.parameter_policy import (
     ParameterPolicyConfig,
     ParameterPolicyTrainability,
 )

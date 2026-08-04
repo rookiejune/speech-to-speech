@@ -8,7 +8,7 @@ from anytrain.module.idspace import Layout
 from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
-from ..prediction import PredictionModality
+from ..task import PredictionModality
 from ..runtime.types import TextTokenizer
 
 

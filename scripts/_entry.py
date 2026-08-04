@@ -10,13 +10,13 @@ import torch
 from anytrain.lightning import PerformanceCallback
 from lightning.pytorch.callbacks import Callback
 
-from speech_to_speech.performance import TrainingFlops
+from speech_to_speech.training.performance import TrainingFlops
 from speech_to_speech.runtime import Config as RuntimeConfig
 
 if __package__:
-    from ._config_common import PerformanceConfig
+    from ._config.common import PerformanceConfig
 else:
-    from _config_common import PerformanceConfig
+    from _config.common import PerformanceConfig
 
 
 class TrainConfig(Protocol):

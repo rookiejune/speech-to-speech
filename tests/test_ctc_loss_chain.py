@@ -24,7 +24,7 @@ from speech_to_speech.model.ctc import (
     CTCRouteConfig,
     ObjectiveHiddenOutput,
 )
-from speech_to_speech.prediction import PredictionModality
+from speech_to_speech.task import PredictionModality
 from speech_to_speech.task import Task
 
 

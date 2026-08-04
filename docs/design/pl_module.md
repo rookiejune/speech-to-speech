@@ -137,7 +137,8 @@ performance 与 task sample logging 同时启用。`TaskSampleLogger` 在 `on_tr
 执行 generation，DDP 的其他 rank 会在后续同步点等待，因此改变 callback 顺序也不能可靠地把这段
 额外工作从各 rank 的 step time 中排除。
 
-满足该前提后，`scripts/overfit.py` 使用 `speech_to_speech.performance.TrainingFlops` 组装
+满足该前提后，`scripts/overfit.py` 使用
+`speech_to_speech.training.performance.TrainingFlops` 组装
 `anytrain.PerformanceCallback`。provider 按实际 module、batch 和 objective 输出分析 token、Flow 或
 RVQ 路径的动态训练 FLOPs；入口把 performance callback 放在 callback 列表首位，并省略
 `GradLogger`。comparison probes 的额外 `autograd.grad` 如果与 MFU 同时运行，会增加实测 step time，

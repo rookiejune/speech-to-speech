@@ -42,7 +42,7 @@
   instruction template。loader 可对白名单任务覆写 `prediction`（如 T2ST/S2ST 的
   `audio|parallel`）。同构 batch 比较 `(source_layout, prediction)`。`MASKED_AR` 使用
   `TEXT_AUDIO` source（mask 后）与 mixed prediction。instruction 文案在
-  `speech_to_speech.templates` 的每任务 paraphrase 池中；`SpeechConfig.tasks.<task>.template`
+  `speech_to_speech.task.templates` 的每任务 paraphrase 池中；`SpeechConfig.tasks.<task>.template`
   为每 task 的 `int|null`（`null`=该 task 池内随机，整数=固定下标；默认 `0`）。loader
   schedule（`loaders` / `step_mode` / `accumulate_grad_batches`）同属
   `SpeechConfig`。训练构建调用 `sample_template(index)`；generation 要求固定下标，可用

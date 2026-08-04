@@ -39,15 +39,15 @@ from speech_to_speech.pl_module.composition import build
 from speech_to_speech.runtime import Config as RuntimeConfig
 from speech_to_speech.runtime import runtime_for_sequence_layout
 from speech_to_speech.runtime.types import codec_sample_rate
-from speech_to_speech.parameter_policy import ParameterGroup
+from speech_to_speech.training.parameter_policy import ParameterGroup
 from speech_to_speech.task import Task
 
 if TYPE_CHECKING:
     from speech_to_speech.runtime import Runtime
-    from scripts._overfit_config import GradientProbeConfig, OverfitConfig
+    from scripts._config.overfit import GradientProbeConfig, OverfitConfig
 
 if __package__:
-    from ._overfit_config import (
+    from ._config.overfit import (
         OverfitFlowConfig,
         overfit as parse_config,
     )
@@ -58,7 +58,7 @@ if __package__:
     )
     from ._logging import build as build_logger
 else:
-    from _overfit_config import (
+    from _config.overfit import (
         OverfitFlowConfig,
         overfit as parse_config,
     )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 
 from _contracts_helpers import *
-from speech_to_speech.loader_plan import ARFraming
+from speech_to_speech.datamodule.loader import ARFraming
 
 
 class TextDataContractTest(unittest.TestCase):

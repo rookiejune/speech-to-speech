@@ -7,14 +7,17 @@ import torch
 from anydataset.types import Modality
 from torch import Tensor
 
-from ...audio_stream import AudioStream
-from ...codes import AudioCodes
-from ...loader_plan import ARFraming, validate_ar_framing
-from ...prediction import PredictionModality
+from ...audio import AudioCodes, AudioStream
+from ..loader.contract import ARFraming, validate_ar_framing
 from ...runtime import AudioSequenceLayout
 from ...runtime.audio_tokenizer import BiCodecAudioTokenizer
-from ...task import Task
-from ...task_spec import resolve_prediction, uses_source_ctc, uses_target_ctc
+from ...task import (
+    PredictionModality,
+    Task,
+    resolve_prediction,
+    uses_source_ctc,
+    uses_target_ctc,
+)
 from ..config import TaskConfig, task_template_index
 from .._helper.ctc import ctc_target
 from .._helper.tokenization import token_ids

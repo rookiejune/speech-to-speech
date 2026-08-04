@@ -11,8 +11,7 @@ from anytrain.codec import AcousticLayout, SemanticAcousticCodes
 from anytrain.tokenizer import CodecBPE
 from torch import Tensor
 
-from speech_to_speech.audio_stream import AudioStream
-from speech_to_speech.codes import AudioCodes
+from speech_to_speech.audio import AudioCodes, AudioStream
 from speech_to_speech.generation.decode import (
     decode_generated_bicodec_full,
     decode_generated_bicodec_row,

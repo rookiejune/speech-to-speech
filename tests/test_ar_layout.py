@@ -13,7 +13,7 @@ from speech_to_speech.datamodule.build.ar import (
 )
 from speech_to_speech.datamodule.types import Language, Speech, Text
 from speech_to_speech.loss.token import TokenLoss
-from speech_to_speech.prediction import PredictionModality
+from speech_to_speech.task import PredictionModality
 from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.task import Task
 

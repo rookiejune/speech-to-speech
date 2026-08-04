@@ -12,7 +12,7 @@ from lightning.fabric.utilities.throughput import measure_flops
 from torch import Tensor, nn
 from transformers import Qwen3Model
 
-from speech_to_speech._flops import (
+from speech_to_speech.training._flops import (
     adapter,
     audio_input_tower,
     flow_decoder,
@@ -38,9 +38,9 @@ from speech_to_speech.model.acoustic.flow import FlowModel
 from speech_to_speech.model.acoustic.rvq import RVQModel
 from speech_to_speech.model.embedding.audio import SemanticAudioEmbedding
 from speech_to_speech.model.embedding.fsq import FsqEmbedding, FsqFeature
-from speech_to_speech.performance import TrainingFlops
+from speech_to_speech.training.performance import TrainingFlops
 from speech_to_speech.pl_module import Config as ModuleConfig, SpeechToSpeechModule
-from speech_to_speech.prediction import PredictionModality
+from speech_to_speech.task import PredictionModality
 from speech_to_speech.task import Task
 
 
