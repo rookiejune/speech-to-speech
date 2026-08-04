@@ -29,7 +29,7 @@ from .protocol import (
     TextRuntime,
 )
 from .build.single import SingleCollator
-from .types import DataShape, TrainBatch, TrainInput
+from .types import AudioContextCostRow, DataShape, TrainBatch, TrainInput
 
 if TYPE_CHECKING:
     from .dataset.text import TextConfig
@@ -571,6 +571,8 @@ def _source_loader(
         max_batch_memory=loader.costs.max_batch_frames,
         max_batch_samples=batch_size,
         planning_window=loader.costs.planning_window,
+        materialize_callable_costs=True,
+        distributed_plan_sync="epoch",
         shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=loader.pin_memory,
@@ -605,6 +607,10 @@ def _sample_audio_frame_cost(row: object, *, frame_rate: float) -> int:
 
 
 def _audio_durations(row: object) -> Iterable[float]:
+    if isinstance(row, AudioContextCostRow):
+        yield from _audio_durations(row.sample)
+        yield from _audio_durations(row.audio_context)
+        return
     if isinstance(row, Mapping):
         for ref, item in row.items():
             if _is_audio_ref(ref):

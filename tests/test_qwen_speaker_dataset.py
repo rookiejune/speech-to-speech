@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 import torch
 from anydataset.dataset import MapStyleABC
-from anydataset.dataset.speaker import SpeakerAudioGrid
+from anydataset.dataset.speaker import SpeakerAudioGrid, SpeakerAudioRow
 from anydataset.types import (
     AudioItem,
     AudioMeta,
@@ -34,7 +34,8 @@ from speech_to_speech.datamodule.dataset.speech import (
 )
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.build.single import SingleCollator
-from speech_to_speech.datamodule.types import ModelBatch
+from speech_to_speech.datamodule.module import _sample_audio_frame_cost
+from speech_to_speech.datamodule.types import AudioContextCostRow, ModelBatch
 from speech_to_speech.audio_stream import AudioStream
 from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
@@ -63,6 +64,61 @@ class SpeakerGridDatasetTest(unittest.TestCase):
         self.assertEqual(dataset.global_index(1), 3)
         self.assertIs(dataset[0], grid.cells[1])
         self.assertIs(dataset[1], grid.cells[3])
+
+    def test_cost_row_delegates_after_speaker_index_mapping(self):
+        cells = _CostCells(_cells())
+        dataset = SpeakerGridCellsDataset(
+            SpeakerAudioGrid(cells, ("alice", "bob")),
+            speaker="bob",
+        )
+
+        row = dataset.cost_row(-1)
+
+        self.assertEqual(row, ("cost", 3))
+        self.assertEqual(cells.cost_requests, [3])
+        self.assertEqual(cells.item_requests, [])
+
+    def test_selected_speaker_maps_every_text_role_row(self):
+        cells = _CostCells((*_cells(), *_cells()))
+        grid = SpeakerAudioGrid(
+            cells,
+            ("alice", "bob"),
+            row_specs=(
+                SpeakerAudioRow(source_index=0, role=Role.SOURCE),
+                SpeakerAudioRow(source_index=0, role=Role.TARGET),
+                SpeakerAudioRow(source_index=1, role=Role.SOURCE),
+                SpeakerAudioRow(source_index=1, role=Role.TARGET),
+            ),
+        )
+        dataset = SpeakerGridCellsDataset(grid, speaker="bob")
+
+        self.assertEqual(grid.shape, (2, 2, 2))
+        self.assertEqual(len(dataset), 4)
+        self.assertEqual(
+            [dataset.global_index(index) for index in range(len(dataset))],
+            [1, 3, 5, 7],
+        )
+
+    def test_context_cost_sums_two_metadata_rows_without_payload_reads(self):
+        cells = _CostCells(
+            _cells(),
+            cost_rows=tuple(
+                _cost_row(duration)
+                for duration in (0.02, 0.04, 0.06, 0.08)
+            ),
+        )
+        dataset = SpeakerGridCellsDataset(
+            SpeakerAudioGrid(cells, ("alice", "bob")),
+            speaker="bob",
+            with_audio_context=True,
+        )
+
+        row = dataset.cost_row(0)
+
+        self.assertIsInstance(row, AudioContextCostRow)
+        self.assertEqual(cells.cost_requests, [1, 3])
+        self.assertEqual(cells.item_requests, [])
+        self.assertEqual(_sample_audio_frame_cost(row, frame_rate=50.0), 6)
 
     def test_selected_speaker_shards_rows_after_filtering(self):
         cells = _Cells(_cells())
@@ -302,6 +358,29 @@ class _Cells(MapStyleABC):
         yield (2, 3)
 
 
+class _CostCells(_Cells):
+    def __init__(
+        self,
+        samples: Sequence[Sample],
+        *,
+        cost_rows: Sequence[object] | None = None,
+    ) -> None:
+        super().__init__(samples)
+        self.cost_rows = cost_rows
+        self.cost_requests: list[int] = []
+        self.item_requests: list[int] = []
+
+    def __getitem__(self, index: int) -> Sample:
+        self.item_requests.append(index)
+        return super().__getitem__(index)
+
+    def cost_row(self, index: int) -> object:
+        self.cost_requests.append(index)
+        if self.cost_rows is not None:
+            return self.cost_rows[index]
+        return "cost", index
+
+
 class _TextTokenizer:
     special_tokens_map: dict[str, str] = {}
 
@@ -359,6 +438,17 @@ def _cells() -> tuple[Sample, ...]:
                 }
             )
     return tuple(samples)
+
+
+def _cost_row(duration: float) -> SimpleNamespace:
+    return SimpleNamespace(
+        items=(
+            (
+                (Role.DEFAULT, Modality.AUDIO),
+                {AudioMeta.DURATION.value: duration},
+            ),
+        ),
+    )
 
 
 def _runtime(audio_sequence_layout: AudioSequenceLayout):

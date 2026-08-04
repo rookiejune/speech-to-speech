@@ -43,6 +43,14 @@ class AudioContextSample(Mapping[Reference, Item]):
         return len(self.sample)
 
 
+@dataclass(frozen=True)
+class AudioContextCostRow:
+    """Keep target and enrollment metadata rows separate during cost planning."""
+
+    sample: object
+    audio_context: object
+
+
 class DataShape(StrEnum):
     PAIR = auto()
     SINGLE = auto()

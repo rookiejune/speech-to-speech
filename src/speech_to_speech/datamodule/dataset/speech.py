@@ -32,7 +32,7 @@ from ...runtime.types import (
 )
 from .._helper.audio_context import needs_reference_audio_context
 from ..protocol import DatasetRuntime
-from ..types import AudioContextSample
+from ..types import AudioContextCostRow, AudioContextSample
 
 
 class DatasetName(StrEnum):
@@ -187,8 +187,9 @@ class SpeakerGridCellsDataset(MapStyleABC):
         self.grid = grid
         self.cells = cast(Dataset[Sample], cast(object, grid.cells))
         self.speaker_ids = tuple(grid.speaker_ids)
+        self.row_count = len(grid.row_specs)
         self.with_audio_context = with_audio_context
-        if with_audio_context and len(grid) < 2:
+        if with_audio_context and self.row_count < 2:
             raise ValueError(
                 "Qwen TTS audio context requires at least two text rows."
             )
@@ -205,20 +206,14 @@ class SpeakerGridCellsDataset(MapStyleABC):
     def __len__(self) -> int:
         if self.speaker_index is None:
             return len(cast(Sized, self.cells))
-        return len(self.grid)
+        return self.row_count
 
     def __getitem__(self, index: int) -> Sample:
         global_index = self.global_index(index)
         sample = _single_cell(self.cells[global_index], global_index=global_index)
         if not self.with_audio_context:
             return sample
-        speaker_count = len(self.speaker_ids)
-        row = global_index // speaker_count
-        speaker_index = global_index % speaker_count
-        context_row = (row + 1) % len(self.grid)
-        context_index = context_row * speaker_count + speaker_index
-        if context_index == global_index:
-            raise RuntimeError("Qwen TTS audio context must differ from its target cell.")
+        context_index = self._context_global_index(global_index)
         context = _single_cell(
             self.cells[context_index],
             global_index=context_index,
@@ -240,6 +235,33 @@ class SpeakerGridCellsDataset(MapStyleABC):
         if self.speaker_index is None:
             return index
         return index * len(self.speaker_ids) + self.speaker_index
+
+    def cost_row(self, index: int) -> Any:
+        global_index = self.global_index(index)
+        sample = self._cell_cost_row(global_index)
+        if not self.with_audio_context:
+            return sample
+        return AudioContextCostRow(
+            sample=sample,
+            audio_context=self._cell_cost_row(
+                self._context_global_index(global_index)
+            ),
+        )
+
+    def _cell_cost_row(self, global_index: int) -> Any:
+        cost_row = getattr(self.cells, "cost_row", None)
+        if callable(cost_row):
+            return cast(Callable[[int], Any], cost_row)(global_index)
+        return self.cells[global_index]
+
+    def _context_global_index(self, global_index: int) -> int:
+        speaker_count = len(self.speaker_ids)
+        row, speaker_index = divmod(global_index, speaker_count)
+        context_row = (row + 1) % self.row_count
+        context_index = context_row * speaker_count + speaker_index
+        if context_index == global_index:
+            raise RuntimeError("Qwen TTS audio context must differ from its target cell.")
+        return context_index
 
     def _shuffle(
         self,

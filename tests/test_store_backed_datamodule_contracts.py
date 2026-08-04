@@ -88,6 +88,8 @@ class StoreBackedDataModuleContractTest(unittest.TestCase):
             self.assertIsNotNone(sampler.costs)
             self.assertEqual(sampler.costs[0], 4)
             self.assertEqual(sampler.planning_window, 4)
+            self.assertTrue(sampler.materialize_callable_costs)
+            self.assertEqual(sampler.distributed_plan_sync, "epoch")
     def test_datamodule_uses_store_backed_data_without_duration(self):
         samples = [_raw_sample_without_duration(index) for index in range(4)]
         with _store_dataset(samples) as dataset:
