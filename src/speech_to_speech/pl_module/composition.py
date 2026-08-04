@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import Optional, Protocol, Union, cast
 
-from semantic_acoustic_codec.config import Route
-from semantic_acoustic_codec.runtime.artifact import AcousticGeneratorArtifact
+from semantic_acoustic_generator.config import Route
+from semantic_acoustic_generator.runtime.artifact import AcousticGeneratorArtifact
 
-from semantic_acoustic_codec.loss.repa import WavLMTeacher
+from semantic_acoustic_generator.loss.repa import WavLMTeacher
 
 from speech_to_speech.loss.module import FlowObjective, RVQObjective, TokenObjective
 from speech_to_speech.model import Config as ModelConfig
@@ -19,7 +19,7 @@ from speech_to_speech.model.acoustic.flow import FlowModel
 from speech_to_speech.model.acoustic.initialization import load_acoustic_initialization
 from speech_to_speech.model.acoustic.rvq import RVQModel
 from speech_to_speech.runtime import Runtime
-from speech_to_speech.runtime.types import frame_codec
+from speech_to_speech.runtime.codec_contract import frame_codec
 
 from .module import Config, SpeechToSpeechModule
 from .protocol import FlowCompositionModel, RVQCompositionModel

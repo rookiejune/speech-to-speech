@@ -8,9 +8,6 @@ from typing import TYPE_CHECKING, cast
 import hydra
 import torch
 from anytrain.lightning import (
-    GradientComparison,
-    GradientProbe,
-    GradientTarget,
     ModelCheckpoint,
     validation,
 )
@@ -20,49 +17,39 @@ from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig
 
 from speech_to_speech.callback import (
-    OOMDiagnostics,
+    AssetMaterialization,
     OnDeviceCodecMaterializer,
-    build_parameter_policy,
     build_unit_schedule,
 )
 from speech_to_speech.callback.logging import (
-    GradLogger,
     LossSummary,
     OutputsLogger,
     TaskSampleLogger,
-    TextRetentionLogger,
 )
-from speech_to_speech.datamodule import DataModule, SampleSplit
+from speech_to_speech.datamodule import SampleSplit
+from speech_to_speech.datamodule.module import DataModule
 from speech_to_speech.datamodule.loader import LoaderConfig, LoaderSchedule
 from speech_to_speech.datamodule.module import LoaderSpec
 from speech_to_speech.pl_module.composition import build
-from speech_to_speech.runtime import runtime_for_sequence_layout
+from speech_to_speech.runtime import config_for_local_rank, runtime_for_sequence_layout
+from speech_to_speech.training.composition import (
+    base_callbacks,
+    build_logger,
+    create_trainer,
+    gradient_comparisons,
+    gradient_logger,
+    text_retention_logger,
+)
 from speech_to_speech.task import Task
 
 if TYPE_CHECKING:
     from speech_to_speech.runtime import Runtime
-    from scripts._config.train import (
-        GradientComparisonConfig,
-        GradientProbeConfig,
-        StagedTrainConfig,
-    )
+    from scripts._config.train import StagedTrainConfig
 
 if __package__:
     from ._config.train import train as parse_config
-    from ._entry import (
-        performance,
-        runtime_config,
-        trainer as entry_trainer,
-    )
-    from ._logging import build as build_logger
 else:
     from _config.train import train as parse_config
-    from _entry import (
-        performance,
-        runtime_config,
-        trainer as entry_trainer,
-    )
-    from _logging import build as build_logger
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="train")
@@ -75,7 +62,7 @@ def run(config: StagedTrainConfig) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     pl.seed_everything(config.train.seed, workers=True)
-    rt_config = runtime_config(config.runtime)
+    rt_config = config_for_local_rank(config.runtime)
     rt = runtime_for_sequence_layout(rt_config, config.audio_sequence_layout)
 
     torch.manual_seed(config.train.seed)
@@ -213,7 +200,7 @@ def build_trainer(
 ) -> pl.Trainer:
     return cast(
         pl.Trainer,
-        entry_trainer(
+        create_trainer(
             config,
             output_dir,
             callbacks,
@@ -230,6 +217,9 @@ def build_trainer(
                 config.validation.sanity_steps
                 if config.validation.enabled
                 else None
+            ),
+            reload_dataloaders_every_n_epochs=(
+                1 if config.datamodule.materialization.enabled else 0
             ),
         ),
     )
@@ -250,19 +240,21 @@ def training_callbacks(
     validation_history: Callback | None = None,
     schedule_runtime: ScheduleRuntime | None = None,
 ) -> list[Callback]:
-    callbacks: list[Callback] = [
-        build_parameter_policy(config.callbacks.parameter_policy)
-    ]
-    performance_callback = performance(config.callbacks.performance)
-    if performance_callback is not None:
-        callbacks.append(performance_callback)
-    callbacks.append(OOMDiagnostics())
     if schedule_runtime is None:
         schedule_runtime = build_unit_schedule(config.optim.schedule)
-    callbacks.extend(schedule_runtime.callbacks())
+    callbacks, performance_callback = base_callbacks(
+        config.callbacks.parameter_policy,
+        config.callbacks.performance,
+        schedule_runtime,
+        before_schedule=(
+            (AssetMaterialization(),)
+            if config.datamodule.materialization.enabled
+            else ()
+        ),
+    )
     callbacks.extend(_logging_callbacks(summary, validation_history))
     callbacks.extend(_task_sample_loggers(config))
-    text_retention = _text_retention_logger(config)
+    text_retention = text_retention_logger(config.callbacks.text_retention)
     if text_retention is not None:
         callbacks.append(text_retention)
     gradient = _gradient_logger(config, performance_callback)
@@ -306,23 +298,6 @@ def _task_sample_loggers(config: StagedTrainConfig) -> list[Callback]:
     ]
 
 
-def _text_retention_logger(config: StagedTrainConfig) -> Callback | None:
-    text_retention = config.callbacks.text_retention
-    if not text_retention.enabled:
-        return None
-    return TextRetentionLogger(
-        {
-            name: {
-                "instruction": probe.instruction,
-                "reference": probe.reference,
-            }
-            for name, probe in text_retention.probes.items()
-        },
-        every_n_steps=text_retention.every_n_steps,
-        max_new_tokens=text_retention.max_new_tokens,
-    )
-
-
 def _checkpoint_callback(
     config: StagedTrainConfig,
     output_dir: Path,
@@ -344,40 +319,14 @@ def _checkpoint_callback(
 def _gradient_logger(
     config: StagedTrainConfig,
     performance_callback: Callback | None,
-) -> GradLogger | None:
+) -> Callback | None:
     callback = config.callbacks.gradient_probe
     if not callback.enabled or performance_callback is not None:
         return None
-    return GradLogger(
-        _gradient_comparisons(callback.comparisons),
-        _gradient_probes(callback.probes),
+    return gradient_logger(
+        gradient_comparisons(callback.comparisons),
+        callback.probes,
         every_n_steps=callback.every_n_steps,
-    )
-
-
-def _gradient_probes(
-    probes: dict[str, "GradientProbeConfig"],
-) -> tuple[GradientProbe, ...]:
-    return tuple(
-        GradientProbe(
-            name=name,
-            parameters=tuple(probe.parameters),
-            match=probe.match,
-            trainable_only=probe.trainable_only,
-        )
-        for name, probe in probes.items()
-    )
-
-
-def _gradient_comparisons(
-    comparisons: list["GradientComparisonConfig"],
-) -> tuple[GradientComparison, ...]:
-    return tuple(
-        GradientComparison(
-            GradientTarget(comparison.left.loss, comparison.left.group),
-            GradientTarget(comparison.right.loss, comparison.right.group),
-        )
-        for comparison in comparisons
     )
 
 

@@ -4,7 +4,8 @@ from anydataset.types import Modality
 from torch import Tensor
 
 from ..protocol import DataRuntime
-from ..types import CTCTarget, Speech
+from ..sample import Speech
+from ..target import CTCTarget
 
 
 def ctc_target(

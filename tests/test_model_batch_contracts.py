@@ -41,7 +41,7 @@ class ModelBatchContractTest(unittest.TestCase):
         expected = batch.training_units("tokens")
 
         with patch(
-            "speech_to_speech.datamodule.types._validate_batch_tensors",
+            "speech_to_speech.datamodule._batch_ops._validate_batch_tensors",
             side_effect=AssertionError("trusted transfer must not revalidate"),
         ):
             moved = batch.to(torch.device("cpu"), non_blocking=True)

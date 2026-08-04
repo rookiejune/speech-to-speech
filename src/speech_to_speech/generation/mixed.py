@@ -13,7 +13,8 @@ from ..task import PredictionModality, Task
 from ._request import prediction_of
 from .audio import decode_token_audio_results
 from .protocol import TokenGenerator
-from .types import Request, Result
+from ..task import Request
+from .result import Result
 
 
 class _State(Enum):

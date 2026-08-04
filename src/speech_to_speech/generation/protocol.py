@@ -11,8 +11,8 @@ from transformers.cache_utils import Cache
 from ..model.generation import GenerationStepResult, TokenKind
 from ..task import PredictionModality
 from ..runtime.protocol import GenerationRuntime
-from ..runtime.types import Backbone
-from .types import AcousticGeneration
+from ..runtime.backbone.contract import Backbone
+from ..model.output import AcousticGeneration
 
 
 class TokenGenerator(Protocol):

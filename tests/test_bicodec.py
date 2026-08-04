@@ -461,7 +461,7 @@ class BiCodecConfigTest(unittest.TestCase):
             Runtime(
                 Config(
                     codec="bicodec",
-                    semantic_codec_artifact="/tmp/bicodec-semantic",
+                    acoustic_generator_artifact="/tmp/bicodec-semantic",
                 ),
                 audio_sequence_layout=AudioSequenceLayout.FLATTENED,
             )
@@ -471,7 +471,7 @@ class BiCodecConfigTest(unittest.TestCase):
             Config(codec="bicodec", audio_tokenizer="/tmp/bicodec-semantic-bpe"),
             audio_sequence_layout=AudioSequenceLayout.FLATTENED,
         )
-        self.assertIsNone(runtime.semantic_codec_artifact)
+        self.assertIsNone(runtime.acoustic_generator_artifact)
 
     def test_frame_codec_flattened_layout_still_rejects_bpe(self):
         with self.assertRaisesRegex(ValueError, "frame-code codecs"):

@@ -10,7 +10,12 @@ from anydataset.types import Modality
 from torch import nn
 from transformers.cache_utils import Cache
 
-from ..types import Backbone, BackboneOutput, BackboneReadout, TextTokenizer
+from ..tokenizer import TextTokenizer
+from ..backbone.contract import (
+    Backbone,
+    BackboneOutput,
+    BackboneReadout,
+)
 
 
 BackboneExtra = Mapping[str, object]

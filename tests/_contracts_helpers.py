@@ -63,7 +63,7 @@ from speech_to_speech.datamodule.dataset.text import (
     TextDatasetName,
     load_text_dataset,
 )
-from speech_to_speech.datamodule.types import DataShape
+from speech_to_speech.datamodule.sample import DataShape
 from speech_to_speech.datamodule.parse.parser import (
     _parse_audio_item,
     parse_sample,
@@ -72,10 +72,12 @@ from speech_to_speech.datamodule.parse.parser import (
 from speech_to_speech.datamodule.build.sample import build_sample
 from speech_to_speech.datamodule.build.single import build_single_sample, parse_single_sample
 from speech_to_speech.datamodule.protocol import DataRuntimeSnapshot
-from speech_to_speech.datamodule.types import (
-    Language,
+from speech_to_speech.datamodule.batch import (
     ModelBatch,
     ModelSample,
+)
+from speech_to_speech.datamodule.sample import (
+    Language,
     RawSpeech,
     RawSpeechBatch,
 )
@@ -86,7 +88,8 @@ from speech_to_speech.runtime import (
     Config,
     Runtime,
 )
-from speech_to_speech.runtime.runtime import audio_tokenizer, dtype
+from speech_to_speech.runtime.backbone import dtype
+from speech_to_speech.runtime.tokenizer_factory import audio_tokenizer
 from speech_to_speech.runtime.audio_tokenizer import (
     BiCodecAudioTokenizer,
     FlattenedAudioTokenizer,
@@ -104,8 +107,8 @@ from speech_to_speech.task import Task
 
 
 from scripts._config.overfit import overfit as parse_overfit
-from scripts._config.common import TokenModelConfig
-from scripts._entry import runtime_config
+from speech_to_speech.runtime import config_for_local_rank as runtime_config
+from speech_to_speech.training.config import TokenModelConfig
 from scripts.create_split_manifest import build_manifest
 from scripts.overfit import (
     _prepare_generation_module,
@@ -329,7 +332,7 @@ def _data_runtime():
         audio_view=AudioView.LONGCAT,
         codec_frame_rate=50.0,
         audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
-        semantic_codec_artifact=None,
+        acoustic_generator_artifact=None,
         text_tokenizer=_Tokenizer(10),
         audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
         layout=Layout(text=(0, 10), audio=(10, 20)),
@@ -355,7 +358,7 @@ def _bicodec_data_runtime():
         audio_view=AudioView.BICODEC,
         codec_frame_rate=50.0,
         audio_sequence_layout=AudioSequenceLayout.FLATTENED,
-        semantic_codec_artifact=None,
+        acoustic_generator_artifact=None,
         text_tokenizer=_ChatTokenizer(10),
         audio_tokenizer=tokenizer,
         layout=Layout(text=(0, 10), audio=(audio_start, boa_token_id + 3)),

@@ -12,15 +12,14 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 from transformers.cache_utils import Cache
 
-from ..datamodule.mimo import MimoBatch
-from ..generation.mimo import MimoGenerationStep
+from ..mimo import MimoBatch, MimoGenerationStep
 from ..runtime.backbone.mimo import (
     DualStreamBodyAdapter,
     DualStreamHiddenStates,
     DualStreamLogits,
     DualStreamOutput,
 )
-from ..runtime.types import BackboneReadout
+from ..runtime.backbone.contract import BackboneReadout
 
 
 @dataclass(frozen=True)

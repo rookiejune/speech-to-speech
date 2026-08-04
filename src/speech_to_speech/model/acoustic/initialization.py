@@ -4,13 +4,13 @@ from pathlib import Path
 
 import torch
 from anytrain.codec import AcousticLayout
-from semantic_acoustic_codec.config import Route
-from semantic_acoustic_codec.model import (
+from semantic_acoustic_generator.config import Route
+from semantic_acoustic_generator.model import (
     AcousticRVQDecoder,
     FMFeatureGenerator,
     RVQCodeGenerator,
 )
-from semantic_acoustic_codec.runtime.artifact import (
+from semantic_acoustic_generator.runtime.artifact import (
     AcousticGeneratorBackend,
     AcousticGeneratorArtifact,
     load_generator_artifact,
@@ -26,7 +26,7 @@ def load_acoustic_initialization(
     route: Route,
     device: torch.device,
 ) -> AcousticGeneratorArtifact:
-    """Load and validate a SAC generator used to initialize joint training."""
+    """Load and validate an external generator used to initialize joint training."""
     if not isinstance(codec, AcousticGeneratorBackend):
         raise TypeError(
             "acoustic initialization requires codec feature, codebook, and layout metadata."

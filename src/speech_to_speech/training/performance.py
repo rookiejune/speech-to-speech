@@ -21,7 +21,10 @@ from ._flops import (
     qwen_backbone,
     rvq_decoder,
 )
-from ..datamodule.types import LoaderBatch, ModelBatch
+from ..datamodule.batch import (
+    LoaderBatch,
+    ModelBatch,
+)
 from ..loss.module import FlowObjective, RVQObjective, TokenObjective
 from ..loss.types import LossItem
 from ..model import Model

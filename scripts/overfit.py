@@ -6,30 +6,30 @@ from typing import TYPE_CHECKING, Union, cast
 
 import hydra
 import torch
-from anytrain.lightning import GradientComparison, GradientProbe, GradientTarget
+from anytrain.lightning import GradientComparison, GradientTarget
 from anytrain.lightning.schedule import ScheduleRuntime
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig
 
 from speech_to_speech.callback import (
-    OOMDiagnostics,
     OnDeviceCodecMaterializer,
     build_unit_schedule,
-    build_parameter_policy,
 )
 from speech_to_speech.callback.logging import (
     AcousticEvaluation,
     FlowMatchingLogger,
-    GradLogger,
     LossSummary,
     OutputsLogger,
     TaskSampleLogger,
-    TextRetentionLogger,
 )
-from speech_to_speech.datamodule import DataModule
+from speech_to_speech.datamodule.module import DataModule
 from speech_to_speech.datamodule.module import LoaderSpec
-from speech_to_speech.datamodule.types import FusedBatch, ModelBatch, TrainInput
+from speech_to_speech.datamodule.batch import (
+    FusedBatch,
+    ModelBatch,
+    TrainInput,
+)
 from speech_to_speech.generation.eval.acoustic import evaluate_autoregressive
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.model.acoustic.flow import FlowModel
@@ -37,37 +37,32 @@ from speech_to_speech.model.acoustic.rvq import RVQModel
 from speech_to_speech.pl_module import SpeechToSpeechModule
 from speech_to_speech.pl_module.composition import build
 from speech_to_speech.runtime import Config as RuntimeConfig
-from speech_to_speech.runtime import runtime_for_sequence_layout
-from speech_to_speech.runtime.types import codec_sample_rate
+from speech_to_speech.runtime import config_for_local_rank, runtime_for_sequence_layout
+from speech_to_speech.runtime.codec_contract import codec_sample_rate
 from speech_to_speech.training.parameter_policy import ParameterGroup
+from speech_to_speech.training.composition import (
+    base_callbacks,
+    build_logger,
+    create_trainer,
+    gradient_logger,
+    text_retention_logger,
+)
 from speech_to_speech.task import Task
 
 if TYPE_CHECKING:
     from speech_to_speech.runtime import Runtime
-    from scripts._config.overfit import GradientProbeConfig, OverfitConfig
+    from scripts._config.overfit import OverfitConfig
 
 if __package__:
     from ._config.overfit import (
         OverfitFlowConfig,
         overfit as parse_config,
     )
-    from ._entry import (
-        performance,
-        runtime_config,
-        trainer as entry_trainer,
-    )
-    from ._logging import build as build_logger
 else:
     from _config.overfit import (
         OverfitFlowConfig,
         overfit as parse_config,
     )
-    from _entry import (
-        performance,
-        runtime_config,
-        trainer as entry_trainer,
-    )
-    from _logging import build as build_logger
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="overfit")
@@ -80,7 +75,7 @@ def run(config: OverfitConfig) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     pl.seed_everything(config.train.seed, workers=True)
-    rt_config = runtime_config(config.runtime)
+    rt_config = config_for_local_rank(config.runtime)
     rt = runtime_for_sequence_layout(rt_config, config.audio_sequence_layout)
     codec = rt.codec
     task = Task(config.task)
@@ -227,16 +222,13 @@ def training_callbacks(
     evaluation: AcousticEvaluation | None,
     schedule_runtime: ScheduleRuntime | None = None,
 ) -> list[Callback]:
-    performance_callback = performance(config.callbacks.performance)
-    callbacks: list[Callback] = [
-        build_parameter_policy(config.callbacks.parameter_policy)
-    ]
-    if performance_callback is not None:
-        callbacks.append(performance_callback)
-    callbacks.append(OOMDiagnostics())
     if schedule_runtime is None:
         schedule_runtime = build_unit_schedule(config.optim.schedule)
-    callbacks.extend(schedule_runtime.callbacks())
+    callbacks, _ = base_callbacks(
+        config.callbacks.parameter_policy,
+        config.callbacks.performance,
+        schedule_runtime,
+    )
     callbacks.append(OutputsLogger())
 
     flow = config.callbacks.flow_matching
@@ -260,21 +252,9 @@ def training_callbacks(
                 task=task,
             )
         )
-    text_retention = config.callbacks.text_retention
-    if text_retention.enabled:
-        callbacks.append(
-            TextRetentionLogger(
-                {
-                    name: {
-                        "instruction": probe.instruction,
-                        "reference": probe.reference,
-                    }
-                    for name, probe in text_retention.probes.items()
-                },
-                every_n_steps=text_retention.every_n_steps,
-                max_new_tokens=text_retention.max_new_tokens,
-            )
-        )
+    text_retention = text_retention_logger(config.callbacks.text_retention)
+    if text_retention is not None:
+        callbacks.append(text_retention)
     callbacks.append(summary)
     if evaluation is not None:
         callbacks.append(evaluation)
@@ -288,7 +268,7 @@ def build_trainer(
 ) -> pl.Trainer:
     return cast(
         pl.Trainer,
-        entry_trainer(
+        create_trainer(
             config,
             output_dir,
             callbacks,
@@ -319,7 +299,7 @@ def _gradient_logger(
     config: OverfitConfig,
     acoustic_type: AcousticType,
     gradient_comparison: GradientComparison | None,
-) -> GradLogger | None:
+) -> Callback | None:
     callback = config.callbacks.gradient_probe
     if (
         not callback.enabled
@@ -341,24 +321,10 @@ def _gradient_logger(
         )
         else callback.probes
     )
-    return GradLogger(
+    return gradient_logger(
         (gradient_comparison,),
-        _gradient_probes(selected_probes),
+        selected_probes,
         every_n_steps=callback.every_n_steps,
-    )
-
-
-def _gradient_probes(
-    probes: dict[str, "GradientProbeConfig"],
-) -> tuple[GradientProbe, ...]:
-    return tuple(
-        GradientProbe(
-            name=name,
-            parameters=tuple(probe.parameters),
-            match=probe.match,
-            trainable_only=probe.trainable_only,
-        )
-        for name, probe in probes.items()
     )
 
 

@@ -13,7 +13,7 @@ from ...task import PredictionModality, Task
 from ..protocol import GenerationRuntime, TextEvaluationModel
 from ..service import generate_responses
 from ..text import decode_text_ids as _decode_text_ids
-from ..types import Request
+from ...task import Request
 
 
 class TextProbe(TypedDict):

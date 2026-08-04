@@ -7,7 +7,10 @@ import torch
 from anytrain.codec import load_frame, load_semantic_acoustic
 from torch import Tensor
 
-from .types import CodecBackend, StructuredCodec
+from .codec_contract import (
+    CodecBackend,
+    StructuredCodec,
+)
 
 # Stable posthoc / native FSQ layouts keyed by product codebook sizes.
 _FSQ_LEVELS_BY_SIZES: dict[tuple[int, ...], tuple[tuple[int, ...], ...]] = {

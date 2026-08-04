@@ -37,11 +37,6 @@ from scripts._config.train import (
     StagedTrainTokenConfig,
     train as parse_train,
 )
-from scripts._entry import (
-    performance as build_performance,
-    runtime_config,
-)
-from scripts._logging import build as build_logger
 from scripts import train as train_script
 from scripts.overfit import (
     _gradient_logger,
@@ -50,10 +45,14 @@ from scripts.overfit import (
 from scripts.train import (
     build_datamodule as build_train_datamodule,
 )
-from speech_to_speech.datamodule import DataModule
+from speech_to_speech.datamodule.module import DataModule
 from speech_to_speech.datamodule.module import LoaderKind
 from speech_to_speech.datamodule.dataset.speech import DatasetName
-from speech_to_speech.datamodule.types import DataShape, FusedBatch, ModelBatch
+from speech_to_speech.datamodule.batch import (
+    FusedBatch,
+    ModelBatch,
+)
+from speech_to_speech.datamodule.sample import DataShape
 from speech_to_speech.callback import BatchUnits
 from speech_to_speech.model import (
     AdapterType,
@@ -86,6 +85,11 @@ from speech_to_speech.training.parameter_policy import (
 )
 from speech_to_speech.task import PredictionModality
 from speech_to_speech.task import Task
+from speech_to_speech.runtime import config_for_local_rank as runtime_config
+from speech_to_speech.training.composition import (
+    build_logger,
+    build_performance,
+)
 
 
 class _DeviceRestoreModule(torch.nn.Module):

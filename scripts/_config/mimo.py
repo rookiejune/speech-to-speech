@@ -12,7 +12,7 @@ from speech_to_speech.datamodule.config import (
     DataLoaderConfig,
     DataLoaderCostsConfig,
 )
-from speech_to_speech.datamodule.mimo import MimoSpecialTokens
+from speech_to_speech.mimo import MimoSpecialTokens
 from speech_to_speech.model.mimo_factory import MimoFactoryConfig
 from speech_to_speech.pl_module.optim import Config as OptimConfig
 from speech_to_speech.runtime import (
@@ -20,6 +20,7 @@ from speech_to_speech.runtime import (
     BackboneInitialization,
     BackboneType,
     Config as RuntimeConfig,
+    migrate_config_fields,
 )
 
 
@@ -183,6 +184,7 @@ def validate(config: MimoTrainConfig) -> None:
 
 def _runtime(value: Mapping[str, Any]) -> RuntimeConfig:
     fields = dict(value)
+    migrate_config_fields(fields)
     fields["backbone_type"] = BackboneType(str(fields.get("backbone_type", "hf_causal_lm")))
     fields["backbone_initialization"] = BackboneInitialization(
         str(fields.get("backbone_initialization", "pretrained"))

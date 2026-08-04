@@ -17,7 +17,7 @@ run_name: longcat-semantic-only
 output_subdir: longcat-semantic-only-smoke/${task}/${run_name}
 
 runtime:
-  semantic_codec_artifact: ${oc.env:SPEECH_TO_SPEECH_SEMANTIC_CODEC_ARTIFACT}
+  acoustic_generator_artifact: ${oc.env:SPEECH_TO_SPEECH_ACOUSTIC_GENERATOR_ARTIFACT}
   device: cpu
   dtype: float32
   attn_implementation:

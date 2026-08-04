@@ -14,18 +14,20 @@ from peft import LoraConfig
 from torch import Tensor, nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from speech_to_speech.datamodule.types import (
+from speech_to_speech.datamodule.batch import (
     FusedBatch,
-    Language,
     LoaderBatch,
     ModelBatch,
+)
+from speech_to_speech.datamodule.sample import (
+    Language,
     RawSpeech,
     RawSpeechBatch,
     SpeechTaskSample,
     Text,
 )
 from speech_to_speech.audio import AudioCodes, AudioStream
-from semantic_acoustic_codec.loss.flow import FlowLoss
+from semantic_acoustic_generator.loss.flow import FlowLoss
 
 from speech_to_speech.loss.module import FlowObjective, Objective, RVQObjective, TokenObjective
 from speech_to_speech.loss.token import TokenLoss

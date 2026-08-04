@@ -11,6 +11,9 @@ This repository exposes two autoregressive paths:
 
 ## MIMO sample contract
 
+`speech_to_speech.mimo.contract` owns `MimoSample`, `MimoBatch`,
+`MimoGenerationStep`, and `MIMO_IGNORE_INDEX`; model, loss, and Lightning code
+depend on this neutral package rather than on datamodule internals.
 `MimoSample` and `MimoBatch` contain independent `text_loss_mask` and
 `audio_loss_mask`.  Labels are unshifted; the objective shifts both routes by
 one position and counts only targets whose predecessor is attended.  Text and
@@ -28,7 +31,8 @@ channel.
 
 ## Seven task mixture
 
-`build_mimo_sample` implements the seven Kimi pretraining routes:
+`speech_to_speech.mimo.task.build_mimo_sample` implements the seven Kimi
+pretraining routes:
 
 `audio_only:text_only:audio_to_text:text_to_audio:audio_to_next_semantic:audio_to_next_text:audio_to_next_semantic_and_text`
 
@@ -51,9 +55,12 @@ scripts/mimo_train.py
 `model.mimo_factory.build_mimo_model` retains the runtime backbone as the only
 registered parameter owner while calling the runtime-adapted body.  This keeps
 Kimi's `return_dict=True` and activation-checkpoint behavior intact.  The
-prepared-data boundary is an importable factory returning `MimoSegment` or
-`MimoSample` datasets; `MimoTaskDataset` adds deterministic task sampling and
-`MimoDataModule` pads aligned examples.
+prepared-data boundary is `datamodule.mimo.factory.create_dataset`, backed by
+an importable factory returning `MimoSegment` or `MimoSample` datasets;
+`datamodule.mimo.MimoTaskDataset` adds deterministic task sampling,
+`datamodule.mimo.collate_mimo` pads aligned examples, and
+`datamodule.mimo.MimoDataModule` owns loader integration. Toy model assembly
+belongs to `model.mimo_toy`, not the executable script.
 
 The Kimi experiment preset reads a prepared JSONL manifest through
 `SPEECH_TO_SPEECH_MIMO_SEGMENTS` (or `storage/mimo/segments.jsonl`).  Each
@@ -65,7 +72,7 @@ recordings.
 For a CPU smoke run:
 
 ```bash
-env PYTHONPATH=src:../semantic-acoustic-codec/src:../third_party/anydataset/src:../third_party/anytrain/src:../workspace/src \
+env PYTHONPATH=src:../semantic-acoustic-generator/src:../third_party/anydataset/src:../third_party/anytrain/src:../workspace/src \
   /Users/zhuyin/miniconda3/envs/py39/bin/python scripts/mimo_train.py \
   model.toy=true trainer.accelerator=cpu trainer.devices=1 \
   trainer.precision=32-true trainer.enable_checkpointing=false train.max_steps=1 \

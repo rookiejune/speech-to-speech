@@ -9,16 +9,22 @@ from ..audio import AudioCodes
 from ..datamodule.protocol import DatasetRuntime
 from ..datamodule.parse.parser import speech_from_codes
 from ..datamodule.build.sample import build_task_sample
-from ..datamodule.types import (
+from ..datamodule.batch import (
     ModelBatch,
+    TrainInput,
+)
+from ..datamodule.sample import (
     RawSpeech,
     RawSpeechBatch,
     Speech,
     SpeechTaskSample,
     Text,
-    TrainInput,
 )
-from ..runtime.types import frame_codec, structured_codec, supports_structured
+from ..runtime.codec_contract import (
+    frame_codec,
+    structured_codec,
+    supports_structured,
+)
 
 
 class OnDeviceCodecMaterializer:

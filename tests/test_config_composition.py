@@ -150,7 +150,7 @@ class ConfigCompositionTest(ConfigTestCase):
     def test_decoupled_semantic_smoke_loads_artifact_config(self):
         with patch.dict(
             "os.environ",
-            {"SPEECH_TO_SPEECH_SEMANTIC_CODEC_ARTIFACT": "/tmp/semantic-codec"},
+            {"SPEECH_TO_SPEECH_ACOUSTIC_GENERATOR_ARTIFACT": "/tmp/semantic-codec"},
         ):
             config = overfit(
                 _compose(
@@ -162,7 +162,7 @@ class ConfigCompositionTest(ConfigTestCase):
         self.assertIsInstance(config, OverfitTokenConfig)
         self.assertEqual(config.runtime.codec, "longcat")
         self.assertEqual(
-            config.runtime.semantic_codec_artifact,
+            config.runtime.acoustic_generator_artifact,
             "/tmp/semantic-codec",
         )
         self.assertEqual(config.runtime.device, "cpu")
@@ -192,8 +192,8 @@ class ConfigCompositionTest(ConfigTestCase):
         self.assertEqual(generate.run_name, "bicodec-generate-global")
         self.assertIn("bicodec-input-global-smoke", reuse.output_dir)
         self.assertIn("bicodec-generate-global-smoke", generate.output_dir)
-        self.assertIsNone(reuse.runtime.semantic_codec_artifact)
-        self.assertIsNone(generate.runtime.semantic_codec_artifact)
+        self.assertIsNone(reuse.runtime.acoustic_generator_artifact)
+        self.assertIsNone(generate.runtime.acoustic_generator_artifact)
 
     def test_root_schema_rejects_unknown_and_foreign_fields(self):
         cases = [

@@ -1,3 +1,5 @@
+"""Task-level tensor request shared by training and generation."""
+
 from __future__ import annotations
 
 from typing import TypedDict
@@ -5,8 +7,7 @@ from typing import TypedDict
 from torch import Generator, Tensor
 from typing_extensions import NotRequired
 
-from ..audio import AudioCodes
-from ..task import PredictionModality, Task
+from .contract import PredictionModality, Task
 
 
 class Request(TypedDict):
@@ -19,20 +20,4 @@ class Request(TypedDict):
     semantic_decode_generator: NotRequired[Generator | None]
 
 
-class AudioOutput(TypedDict):
-    features: Tensor | None
-    codes: AudioCodes | None
-    waveform: Tensor
-    sample_rate: int
-
-
-class AcousticGeneration(TypedDict):
-    sequence: Tensor
-    features: Tensor
-    frame_counts: Tensor
-
-
-class Result(TypedDict):
-    response_ids: Tensor
-    audio: AudioOutput | None
-    decode_error: NotRequired[dict[str, str]]
+__all__ = ["Request"]

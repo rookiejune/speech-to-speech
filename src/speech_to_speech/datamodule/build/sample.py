@@ -23,17 +23,19 @@ from .._helper.ctc import ctc_target
 from .._helper.tokenization import token_ids
 from .ar import build_ar_sample, build_pretraining_ar_sample, is_ar_task
 from ..protocol import DataRuntime, TextRuntime
-from ..types import (
-    AcousticTarget,
-    CTCTarget,
+from ..batch import ModelSample
+from ..sample import (
     Language,
-    ModelSample,
     RawSpeech,
     Speech,
     SpeechPair,
     SpeechTaskSample,
     Text,
     TextPair,
+)
+from ..target import (
+    AcousticTarget,
+    CTCTarget,
 )
 
 _PLACEHOLDER = "$$$PLACEHOLDER$$$"
@@ -387,7 +389,7 @@ def _acoustic_codes(
         raise TypeError("audio target must be Speech.")
     if (
         target.acoustic_codes is not None
-        and runtime.semantic_codec_artifact is None
+        and runtime.acoustic_generator_artifact is None
         and not uses_bicodec
         and runtime.audio_sequence_layout is not AudioSequenceLayout.FLATTENED
     ):
@@ -454,7 +456,7 @@ def _parallel_response(
     _supervise_labels(labels, input_ids.numel(), text)
     _supervise_labels(labels, input_ids.numel() + text.numel() + 1, audio[1:])
     acoustic = None
-    if target.acoustic_codes is not None and runtime.semantic_codec_artifact is None and (
+    if target.acoustic_codes is not None and runtime.acoustic_generator_artifact is None and (
         runtime.audio_sequence_layout is not AudioSequenceLayout.FLATTENED
     ):
         positions = torch.arange(

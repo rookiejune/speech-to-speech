@@ -93,7 +93,7 @@ class ConfigRuntimeContractTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "DataLoaderConfig"):
             TextConfig(dataloader=loader)
 
-    def test_runtime_loads_semantic_codec_artifact_with_existing_backend(self):
+    def test_runtime_loads_acoustic_generator_artifact_with_existing_backend(self):
         backend = SimpleNamespace(name="longcat")
         support = SimpleNamespace()
         semantic_runtime = SimpleNamespace(sample_rate=24_000, frame_rate=50.0, decode=Mock())
@@ -104,21 +104,21 @@ class ConfigRuntimeContractTest(unittest.TestCase):
             runtime = Runtime(
                 Config(
                     codec="longcat",
-                    semantic_codec_artifact=str(artifact),
+                    acoustic_generator_artifact=str(artifact),
                 )
             )
 
             with (
                 patch(
-                    "speech_to_speech.runtime.runtime.load_codec",
+                    "speech_to_speech.runtime.core.load_codec",
                     return_value=backend,
                 ),
                 patch(
-                    "semantic_acoustic_codec.runtime.artifact.load_artifact",
+                    "semantic_acoustic_generator.runtime.artifact.load_artifact",
                     return_value=support,
                 ) as load,
                 patch(
-                    "semantic_acoustic_codec.runtime.SemanticCodecRuntime",
+                    "semantic_acoustic_generator.runtime.GeneratorRuntime",
                     return_value=semantic_runtime,
                 ) as bind,
             ):
@@ -131,18 +131,18 @@ class ConfigRuntimeContractTest(unittest.TestCase):
     def test_runtime_rejects_semantic_codec_without_artifact(self):
         runtime = Runtime(Config(codec="longcat"))
 
-        with self.assertRaisesRegex(RuntimeError, "semantic_codec_artifact"):
+        with self.assertRaisesRegex(RuntimeError, "acoustic_generator_artifact"):
             _ = runtime.semantic_codec
 
-    def test_semantic_codec_artifact_disables_acoustic_side_channel(self):
+    def test_acoustic_generator_artifact_disables_acoustic_side_channel(self):
         runtime = Runtime(
             Config(
                 codec="longcat",
-                semantic_codec_artifact="/tmp/semantic-codec",
+                acoustic_generator_artifact="/tmp/semantic-codec",
             )
         )
 
-        with patch("speech_to_speech.runtime.runtime.load_codec") as load:
+        with patch("speech_to_speech.runtime.core.load_codec") as load:
             self.assertFalse(runtime.acoustic_side_channel)
 
         load.assert_not_called()
@@ -153,7 +153,7 @@ class ConfigRuntimeContractTest(unittest.TestCase):
             audio_view=AudioView.LONGCAT,
             codec_frame_rate=50.0,
             audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
-            semantic_codec_artifact=None,
+            acoustic_generator_artifact=None,
             text_tokenizer=_Tokenizer(10),
             audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
             layout=Layout(text=(0, 10), audio=(10, 20)),
@@ -299,7 +299,7 @@ class ConfigRuntimeContractTest(unittest.TestCase):
             )
             with (
                 patch("scripts.overfit.pl.seed_everything"),
-                patch("scripts.overfit.runtime_config", return_value=Mock()),
+                patch("scripts.overfit.config_for_local_rank", return_value=Mock()),
                 patch("scripts.overfit.runtime_for_sequence_layout", return_value=runtime),
                 patch("scripts.overfit.DataModule", return_value=datamodule),
                 patch(

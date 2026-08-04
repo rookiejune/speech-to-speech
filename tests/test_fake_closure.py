@@ -9,20 +9,21 @@ from anydataset.types import AudioView
 from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 from speech_to_speech.task import PredictionModality
-from semantic_acoustic_codec.config import (
+from semantic_acoustic_generator.config import (
     DecoderConfig as SharedDecoderConfig,
+    FeatureAdapter,
     Route,
     RVQPredictor,
 )
-from semantic_acoustic_codec.model import (
+from semantic_acoustic_generator.model import (
     AcousticRVQDecoder as SharedRVQDecoder,
     FMFeatureGenerator,
     RVQCodeGenerator,
 )
-from semantic_acoustic_codec.runtime import (
+from semantic_acoustic_generator.runtime import (
     SamplingConfig,
 )
-from semantic_acoustic_codec.runtime.artifact import (
+from semantic_acoustic_generator.runtime.artifact import (
     AcousticGeneratorArtifact,
     AcousticGeneratorSpec,
 )
@@ -32,7 +33,7 @@ from speech_to_speech.datamodule.collate.collator import Collator
 from speech_to_speech.datamodule.dataset.speech import ToyDataset
 from speech_to_speech.loss.module import FlowObjective
 from speech_to_speech.model import ToyConfig
-from semantic_acoustic_codec.model.dit import DiTDecoder
+from semantic_acoustic_generator.model.dit import DiTDecoder
 from speech_to_speech.model.acoustic.flow import FlowModel
 from speech_to_speech.model.acoustic.rvq import RVQModel
 from speech_to_speech.model.base import Config as ModelConfig
@@ -155,7 +156,7 @@ class _Runtime:
         self.audio_view = AudioView.LONGCAT
         self.codec_frame_rate = 50.0
         self.audio_sequence_layout = AudioSequenceLayout.SEMANTIC
-        self.semantic_codec_artifact = None
+        self.acoustic_generator_artifact = None
         self.text_tokenizer = _TextTokenizer()
         self.audio_tokenizer = NativeAudioTokenizer(vocab_size=8)
         self.codec = _Codec()
@@ -487,6 +488,7 @@ def _artifact(
         spec=AcousticGeneratorSpec(
             route=route,
             condition_dim=condition_dim,
+            feature_adapter=FeatureAdapter.NONE,
             decoder=decoder,
             backend_name="fake",
             sample_rate=16_000,

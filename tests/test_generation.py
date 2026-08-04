@@ -10,7 +10,7 @@ import torch
 from anydataset.types import Modality
 from anytrain.module.idspace import Layout
 from torch import Tensor, nn
-from speech_to_speech.datamodule.types import ModelBatch
+from speech_to_speech.datamodule.batch import ModelBatch
 from speech_to_speech.model import (
     AdapterType,
     AudioOutputAdapter,
@@ -48,7 +48,7 @@ from speech_to_speech.runtime import (
     Config as RuntimeConfig,
 )
 from speech_to_speech.runtime import Runtime
-from speech_to_speech.runtime.types import supports_acoustic
+from speech_to_speech.runtime.codec_contract import supports_acoustic
 from speech_to_speech.task import Task
 
 

@@ -15,7 +15,7 @@ dependencies = [
     "lightning>=2.0",
     "omegaconf>=2.3",
     "peft>=0.17.1,<0.21",
-    "semantic-acoustic-codec",
+    "semantic-acoustic-generator",
     "tokenizers>=0.20",
     "torch>=2.8",
     "transformers>=4.46",

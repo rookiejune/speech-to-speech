@@ -20,8 +20,10 @@ from speech_to_speech.runtime import AudioSequenceLayout, Config as RuntimeConfi
 from speech_to_speech.training.parameter_policy import ParameterPolicyConfig
 from speech_to_speech.task import Task
 
-from .common import (
+from speech_to_speech.training.config import (
     FlowModelConfig,
+    GradientComparisonConfig,
+    GradientProbeConfig,
     LoggingConfig,
     OptimConfig,
     PerformanceConfig,
@@ -31,9 +33,10 @@ from .common import (
     TokenModelConfig,
     TrainConfig,
     TrainerConfig,
-    non_empty_string,
     non_negative_integer,
     positive_integer,
+    validate_gradient_comparisons,
+    validate_gradient_probes,
     validate_training,
 )
 from .normalization import parse, peft_lora, prepare
@@ -82,25 +85,6 @@ class CheckpointCallbackConfig:
     save_last: bool = MISSING
     save_top_k: int = MISSING
     every_n_train_steps: int = MISSING
-
-
-@dataclass
-class GradientProbeConfig:
-    parameters: list[str] = field(default_factory=list)
-    match: str = "exact"
-    trainable_only: bool = True
-
-
-@dataclass
-class GradientTargetConfig:
-    loss: str = MISSING
-    group: str = "batch"
-
-
-@dataclass
-class GradientComparisonConfig:
-    left: GradientTargetConfig = field(default_factory=GradientTargetConfig)
-    right: GradientTargetConfig = field(default_factory=GradientTargetConfig)
 
 
 @dataclass
@@ -284,11 +268,11 @@ def _validate_callback_cadences(config: StagedCallbacksConfig) -> None:
 
 def _validate_gradient_probe(config: StagedTrainConfig) -> None:
     callback = config.callbacks.gradient_probe
-    _validate_gradient_probes(
+    validate_gradient_probes(
         callback.probes,
         "callbacks.gradient_probe.probes",
     )
-    _validate_gradient_comparisons(
+    validate_gradient_comparisons(
         callback.comparisons,
         "callbacks.gradient_probe.comparisons",
     )
@@ -310,43 +294,6 @@ def _validate_gradient_probe(config: StagedTrainConfig) -> None:
                     "gradient non-batch comparisons require "
                     "loader_plan.step_mode=fused_joint."
                 )
-
-
-def _validate_gradient_probes(
-    probes: dict[str, GradientProbeConfig],
-    path: str,
-) -> None:
-    if not isinstance(probes, dict):
-        raise TypeError(f"{path} must be a mapping.")
-    for name, probe in probes.items():
-        non_empty_string(name, f"{path} probe name")
-        if probe.match not in {"exact", "regex"}:
-            raise ValueError(f"{path}.{name}.match must be 'exact' or 'regex'.")
-        if not isinstance(probe.trainable_only, bool):
-            raise TypeError(f"{path}.{name}.trainable_only must be a boolean.")
-        if not probe.parameters:
-            raise ValueError(f"{path}.{name}.parameters must not be empty.")
-        for index, parameter in enumerate(probe.parameters):
-            non_empty_string(
-                parameter,
-                f"{path}.{name}.parameters[{index}]",
-            )
-
-
-def _validate_gradient_comparisons(
-    comparisons: list[GradientComparisonConfig],
-    path: str,
-) -> None:
-    if not isinstance(comparisons, list):
-        raise TypeError(f"{path} must be a list.")
-    for index, comparison in enumerate(comparisons):
-        _validate_gradient_target(comparison.left, f"{path}[{index}].left")
-        _validate_gradient_target(comparison.right, f"{path}[{index}].right")
-
-
-def _validate_gradient_target(target: GradientTargetConfig, path: str) -> None:
-    non_empty_string(target.loss, f"{path}.loss")
-    non_empty_string(target.group, f"{path}.group")
 
 
 def _validate_loader_schedule(config: StagedTrainConfig) -> None:

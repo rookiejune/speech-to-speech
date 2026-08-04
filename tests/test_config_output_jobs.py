@@ -159,11 +159,11 @@ class ConfigOutputJobTest(ConfigTestCase):
         self.assertIn("scripts/train.py", source)
         self.assertNotIn("scripts/overfit.py", source)
         self.assertIn("SPEECH_TO_SPEECH_STEP_MODE", source)
-        self.assertIn("SPEECH_TO_SPEECH_SAC_ARTIFACT", source)
+        self.assertIn("SPEECH_TO_SPEECH_ACOUSTIC_GENERATOR_ARTIFACT", source)
         self.assertIn('trainer="staged_static_ddp"', source)
         self.assertIn('trainer="staged_ddp"', source)
         self.assertIn('"loader_plan.step_mode=${step_mode}"', source)
-        self.assertIn('"model.acoustic.init_artifact=${sac_artifact}"', source)
+        self.assertIn('"model.acoustic.init_artifact=${generator_artifact}"', source)
         self.assertIn(
             '"loader_plan.accumulate_grad_batches=${accumulate_grad_batches}"',
             source,

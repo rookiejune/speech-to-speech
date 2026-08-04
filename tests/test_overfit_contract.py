@@ -23,7 +23,7 @@ from scripts.overfit import (
 )
 from speech_to_speech.datamodule.config import SpeechConfig
 from speech_to_speech.datamodule.dataset.speech import DatasetName
-from speech_to_speech.datamodule.types import DataShape
+from speech_to_speech.datamodule.sample import DataShape
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.task import Task
 
@@ -116,18 +116,30 @@ class OverfitContractTest(unittest.TestCase):
 
         with ExitStack() as stack:
             factories = {
-                name: stack.enter_context(patch(f"scripts.overfit.{name}"))
-                for name in (
-                    "OOMDiagnostics",
-                    "OutputsLogger",
-                    "FlowMatchingLogger",
-                    "GradLogger",
-                    "TaskSampleLogger",
-                    "TextRetentionLogger",
-                )
+                "OOMDiagnostics": stack.enter_context(
+                    patch("speech_to_speech.training.composition.OOMDiagnostics")
+                ),
+                "OutputsLogger": stack.enter_context(
+                    patch("scripts.overfit.OutputsLogger")
+                ),
+                "FlowMatchingLogger": stack.enter_context(
+                    patch("scripts.overfit.FlowMatchingLogger")
+                ),
+                "GradLogger": stack.enter_context(
+                    patch("speech_to_speech.training.composition.GradLogger")
+                ),
+                "TaskSampleLogger": stack.enter_context(
+                    patch("scripts.overfit.TaskSampleLogger")
+                ),
+                "TextRetentionLogger": stack.enter_context(
+                    patch("speech_to_speech.training.composition.TextRetentionLogger")
+                ),
             }
             performance = stack.enter_context(
-                patch("scripts.overfit.performance", return_value=None)
+                patch(
+                    "speech_to_speech.training.composition.build_performance",
+                    return_value=None,
+                )
             )
             callbacks = training_callbacks(
                 config,
@@ -224,8 +236,14 @@ class OverfitContractTest(unittest.TestCase):
         outputs = Mock()
 
         with (
-            patch("scripts.overfit.performance", return_value=None),
-            patch("scripts.overfit.OOMDiagnostics", return_value=oom),
+            patch(
+                "speech_to_speech.training.composition.build_performance",
+                return_value=None,
+            ),
+            patch(
+                "speech_to_speech.training.composition.OOMDiagnostics",
+                return_value=oom,
+            ),
             patch("scripts.overfit.OutputsLogger", return_value=outputs),
         ):
             callbacks = training_callbacks(
@@ -258,8 +276,14 @@ class OverfitContractTest(unittest.TestCase):
         oom = Mock()
 
         with (
-            patch("scripts.overfit.performance", return_value=performance),
-            patch("scripts.overfit.OOMDiagnostics", return_value=oom),
+            patch(
+                "speech_to_speech.training.composition.build_performance",
+                return_value=performance,
+            ),
+            patch(
+                "speech_to_speech.training.composition.OOMDiagnostics",
+                return_value=oom,
+            ),
         ):
             callbacks = training_callbacks(
                 config,
@@ -285,7 +309,7 @@ class OverfitContractTest(unittest.TestCase):
             )
         )
 
-        with patch("scripts.overfit.GradLogger") as logger:
+        with patch("speech_to_speech.training.composition.GradLogger") as logger:
             built = _gradient_logger(
                 config,
                 AcousticType.RVQ,

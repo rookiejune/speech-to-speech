@@ -10,7 +10,7 @@ from torch import Tensor
 from .._helper.duration import from_frames, from_samples
 from .._helper.tokenization import token_ids
 from ..protocol import DataRuntime, TextRuntime
-from ..types import (
+from ..sample import (
     Language,
     AudioContextSample,
     RawSpeech,

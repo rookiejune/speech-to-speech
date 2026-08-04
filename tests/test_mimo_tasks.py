@@ -4,7 +4,7 @@ import unittest
 
 import torch
 
-from speech_to_speech.datamodule.mimo import (
+from speech_to_speech.mimo import (
     KIMI_PRETRAIN_TASK_WEIGHTS,
     MimoSegment,
     MimoSpecialTokens,

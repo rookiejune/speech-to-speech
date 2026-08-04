@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from torch import Tensor
 
-from ...runtime.types import AcousticCodec, Backbone
+from ...runtime.codec_contract import AcousticCodec
+from ...runtime.backbone.contract import Backbone
 
 
 def code_features(

@@ -5,7 +5,7 @@ from typing import cast
 
 from transformers import Qwen3Config, Qwen3Model
 
-from ..runtime.types import Backbone
+from ..runtime.backbone.contract import Backbone
 
 
 @dataclass(frozen=True)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 import torch
-from semantic_acoustic_codec.rl import SACRLAdapter
+from semantic_acoustic_generator.rl import GeneratorRLAdapter
 
 from speech_to_speech.rl import (
     S2SGenerationResult,
@@ -14,7 +14,7 @@ from speech_to_speech.task import Task
 
 
 def test_s2s_adapter_delegates_grpo_contract_to_sac() -> None:
-    adapter = S2SRLAdapter(SACRLAdapter())
+    adapter = S2SRLAdapter(GeneratorRLAdapter())
     rewards = S2SRewardBatch(torch.tensor([[1.0, 0.5], [0.0, 2.0]]))
     policy = torch.zeros(2, 2, 3)
     old = torch.full((2, 2, 3), -0.1)
@@ -34,7 +34,7 @@ def test_s2s_adapter_delegates_grpo_contract_to_sac() -> None:
 
 
 def test_s2s_adapter_delegates_continuous_and_neighbor_contracts() -> None:
-    adapter = S2SRLAdapter(SACRLAdapter())
+    adapter = S2SRLAdapter(GeneratorRLAdapter())
     rewards = S2SRewardBatch(torch.ones(2, 3))
     steps = torch.zeros(2, 3, 4)
     step_mask = torch.ones(2, 3, 4, dtype=torch.bool)
@@ -63,7 +63,7 @@ def test_s2s_adapter_delegates_continuous_and_neighbor_contracts() -> None:
 
 
 def test_s2s_score_requires_external_rewards() -> None:
-    adapter = S2SRLAdapter(SACRLAdapter())
+    adapter = S2SRLAdapter(GeneratorRLAdapter())
     result = S2SGenerationResult(
         sample_id=0,
         group_id=0,

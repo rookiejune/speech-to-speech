@@ -10,11 +10,11 @@ from anytrain.loss import (
     loss_item_mean,
 )
 from anytrain.module.idspace import Layout
-from semantic_acoustic_codec.loss.flow import FlowLoss, FlowRuntime
-from semantic_acoustic_codec.loss.repa import Teacher
+from semantic_acoustic_generator.loss.flow import FlowLoss, FlowRuntime
+from semantic_acoustic_generator.loss.repa import Teacher
 from torch import Tensor, nn
 
-from ..datamodule.types import ModelBatch
+from ..datamodule.batch import ModelBatch
 from ..model.ctc import CTCConfig, CTCRoute, ObjectiveHiddenOutput
 from .ctc import CTCAlignmentLoss
 from .protocol import (

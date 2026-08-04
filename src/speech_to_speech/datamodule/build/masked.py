@@ -8,7 +8,8 @@ from ...task import PredictionModality, Task, resolve_prediction
 from .._helper.tokenization import token_ids
 from .ar import pack_interleaved, pack_parallel
 from ..protocol import DataRuntime
-from ..types import ModelSample, Speech
+from ..batch import ModelSample
+from ..sample import Speech
 
 
 def build_masked_sample(

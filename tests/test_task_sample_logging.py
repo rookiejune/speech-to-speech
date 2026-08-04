@@ -22,18 +22,20 @@ from anytrain.module.idspace import Layout
 
 from speech_to_speech.callback.logging import TaskSampleLogger
 from speech_to_speech.callback.logging._sample_metrics import audio_metrics, text_metrics
-from speech_to_speech.callback.logging.task_sample import (
-    _log_source_audio,
-    _log_target_audio,
-    _request_metadata,
-    _target_text,
+from speech_to_speech.callback.logging._sample_audio import (
+    log_source_audio,
+    log_target_audio,
+)
+from speech_to_speech.callback.logging._sample_metadata import (
+    build_request_metadata,
+    reference_text,
 )
 from speech_to_speech.datamodule import SampleSplit
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.module import DataModule, LoaderSpec
-from speech_to_speech.datamodule.types import (
+from speech_to_speech.datamodule.batch import ModelBatch
+from speech_to_speech.datamodule.sample import (
     Language,
-    ModelBatch,
     RawSpeech,
     RawSpeechBatch,
     SpeechTaskSample,
@@ -394,7 +396,7 @@ class TaskSampleLoggingTest(unittest.TestCase):
             runtime=SimpleNamespace(codec=codec, audio_view=AudioView.BICODEC)
         )
 
-        _log_source_audio(writer, datamodule, _sample(), Task.ASR, "sample", 7)
+        log_source_audio(writer, datamodule, _sample(), Task.ASR, "sample", 7)
 
         writer.add_audio.assert_called_once()
         self.assertEqual(writer.add_audio.call_args.args[0], "sample/source")
@@ -403,7 +405,7 @@ class TaskSampleLoggingTest(unittest.TestCase):
     def test_single_sample_metadata_uses_default_role(self):
         sample = _sample()
 
-        metadata = _request_metadata(
+        metadata = build_request_metadata(
             3,
             sample,
             Request(prompt_ids=torch.tensor([1, 2]), task=Task.TTS),
@@ -415,7 +417,7 @@ class TaskSampleLoggingTest(unittest.TestCase):
 
     def test_single_sample_text_target_uses_default_role(self):
         self.assertEqual(
-            _target_text(_sample(), Task.ASR, PredictionModality.TEXT),
+            reference_text(_sample(), Task.ASR, PredictionModality.TEXT),
             "hello",
         )
 
@@ -426,7 +428,7 @@ class TaskSampleLoggingTest(unittest.TestCase):
             meta={AudioMeta.DURATION: 1.0},
         )
 
-        metadata = _request_metadata(
+        metadata = build_request_metadata(
             3,
             sample,
             Request(
@@ -446,7 +448,7 @@ class TaskSampleLoggingTest(unittest.TestCase):
             runtime=SimpleNamespace(codec=codec, audio_view=AudioView.BICODEC)
         )
 
-        _log_target_audio(writer, datamodule, _sample(), Task.TTS, "sample", 7)
+        log_target_audio(writer, datamodule, _sample(), Task.TTS, "sample", 7)
 
         self.assertIsNotNone(codec.decoded)
         self.assertEqual(codec.decoded.semantic.shape, (1, 2, 1))

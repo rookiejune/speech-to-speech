@@ -10,7 +10,10 @@ from torch import Tensor, nn
 
 from .._compat import StrEnum, auto
 from ..runtime.backbone import BackboneOutputView
-from ..runtime.types import BackboneOutput, BackboneReadout
+from ..runtime.backbone.contract import (
+    BackboneOutput,
+    BackboneReadout,
+)
 from ._checkpointing import GradientCheckpointingLayer
 from ._helper import register, safe_transformer_mask, validate_tower_fields
 

@@ -20,7 +20,8 @@ from speech_to_speech.training._flops import (
     qwen_backbone,
     rvq_decoder,
 )
-from speech_to_speech.datamodule.types import AcousticTarget, ModelBatch
+from speech_to_speech.datamodule.batch import ModelBatch
+from speech_to_speech.datamodule.target import AcousticTarget
 from speech_to_speech.loss.module import FlowObjective, RVQObjective, TokenObjective
 from speech_to_speech.loss.types import LossItem
 from speech_to_speech.model import (

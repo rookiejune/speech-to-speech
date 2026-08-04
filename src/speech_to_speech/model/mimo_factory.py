@@ -17,8 +17,8 @@ from torch import Tensor, nn
 
 from ..runtime.backbone import BackboneBodyAdapter
 from ..runtime.backbone.mimo import DualStreamBodyAdapter
-from ..runtime.types import BackboneReadout
-from ..datamodule.mimo import MimoSpecialTokens
+from ..runtime.backbone.contract import BackboneReadout
+from ..mimo import MimoSpecialTokens
 from .mimo import MimoModel, MimoModelConfig, TiedEmbeddingHead
 
 

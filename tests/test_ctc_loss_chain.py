@@ -9,11 +9,15 @@ import torch
 from anydataset.types import Modality
 from anytrain.module.idspace import Layout
 from lightning import pytorch as pl
-from semantic_acoustic_codec.loss.flow import FlowRuntime
+from semantic_acoustic_generator.loss.flow import FlowRuntime
 from torch import Tensor, nn
 
 from speech_to_speech.callback.logging.outputs import OutputsLogger
-from speech_to_speech.datamodule.types import FusedBatch, ModelBatch, ModelSample
+from speech_to_speech.datamodule.batch import (
+    FusedBatch,
+    ModelBatch,
+    ModelSample,
+)
 from speech_to_speech.loss.ctc import CTCAlignmentLoss
 from speech_to_speech.loss.module import FlowObjective, RVQObjective, TokenObjective
 from speech_to_speech.loss.types import LossItem, Outputs

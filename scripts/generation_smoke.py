@@ -13,11 +13,18 @@ from omegaconf import DictConfig
 from speech_to_speech.callback import OnDeviceCodecMaterializer
 from speech_to_speech.datamodule.collate.collator import Collator
 from speech_to_speech.datamodule.dataset.speech import load_dataset
-from speech_to_speech.datamodule.types import ModelBatch, TrainInput
+from speech_to_speech.datamodule.batch import (
+    ModelBatch,
+    TrainInput,
+)
 from speech_to_speech.generation.batch import requests_from_batch
 from speech_to_speech.generation.eval.reporting import compare, summary
 from speech_to_speech.model.acoustic.flow import FlowModel
-from speech_to_speech.runtime import Runtime, runtime_for_sequence_layout
+from speech_to_speech.runtime import (
+    Runtime,
+    config_for_local_rank,
+    runtime_for_sequence_layout,
+)
 from speech_to_speech.task import Task
 
 if __package__:
@@ -26,7 +33,6 @@ if __package__:
         GenerationSmokeConfig,
         generation_smoke as parse_config,
     )
-    from ._entry import runtime_config
     from ._generation_probe import run as probe_run, second_step
 else:
     from _generation_benchmark import benchmark_batch
@@ -34,7 +40,6 @@ else:
         GenerationSmokeConfig,
         generation_smoke as parse_config,
     )
-    from _entry import runtime_config
     from _generation_probe import run as probe_run, second_step
 
 
@@ -47,7 +52,7 @@ def run(config: GenerationSmokeConfig) -> None:
     output_dir = Path(config.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    rt_config = runtime_config(config.runtime)
+    rt_config = config_for_local_rank(config.runtime)
     device = None if rt_config.device is None else torch.device(rt_config.device)
     _seed(config.seed, device or torch.device("cpu"))
     runtime = runtime_for_sequence_layout(rt_config, config.audio_sequence_layout)

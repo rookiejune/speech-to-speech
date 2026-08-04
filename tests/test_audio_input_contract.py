@@ -4,7 +4,10 @@ import unittest
 
 import torch
 
-from speech_to_speech.datamodule.types import ModelBatch, ModelSample
+from speech_to_speech.datamodule.batch import (
+    ModelBatch,
+    ModelSample,
+)
 from speech_to_speech.generation.batch import requests_from_batch
 from speech_to_speech.task import Task
 

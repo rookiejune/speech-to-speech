@@ -6,8 +6,11 @@ from typing import Protocol
 import torch
 from torch import Tensor, nn
 
-from ...generation.types import AcousticGeneration
-from ...runtime.types import AcousticCodec, acoustic_codec
+from ..output import AcousticGeneration
+from ...runtime.codec_contract import (
+    AcousticCodec,
+    acoustic_codec,
+)
 from ..base import Config, Model
 from ...runtime.protocol import TokenModelRuntime
 from .condition import HiddenConditionAdapter

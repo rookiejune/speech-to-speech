@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from speech_to_speech.runtime.runtime import (
-    bind_chat_bos,
+from speech_to_speech.runtime.backbone import bind_chat_bos
+from speech_to_speech.runtime.tokenizer_factory import (
     text_special_id,
     text_tokenizer_vocab_size,
 )

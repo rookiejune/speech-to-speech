@@ -7,8 +7,11 @@ from typing import TYPE_CHECKING, Any
 import torch
 from torch import Tensor
 
-from ...datamodule.types import ModelBatch
-from ...runtime.types import AcousticCodec, codec_sample_rate
+from ...datamodule.batch import ModelBatch
+from ...runtime.codec_contract import (
+    AcousticCodec,
+    codec_sample_rate,
+)
 from ..batch import requests_from_batch
 from .reporting import audio_output
 

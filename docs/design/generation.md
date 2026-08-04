@@ -1,7 +1,7 @@
 # generation
 
-提供独立于 Lightning 和训练 batch 的真实推理入口。跨模块生成流程见
-[总览 §6](../model-design.md)，model 侧原语见 [model](model.md)。
+提供独立于 Lightning 和训练 batch 的真实推理入口。跨模块所有权见
+[设计总览](../model-design.md)，model 侧原语见 [model](model.md)。
 
 ## 对外能力
 
@@ -31,22 +31,22 @@ ChatRequest(messages, task, language?)
 
 私有张量契约（service / strategy 仍使用，不作为包级推荐入口）：
 
-- `Request(prompt_ids, task, audio_input_positions, prediction?)`：无 target、无
+- `task.io.Request(prompt_ids, task, audio_input_positions, prediction?)`：无 target、无
   batch padding 的单条推理输入，与训练 `ModelSample.request` 共用同一类型。`prompt_ids` 是一维
   layout global token IDs；BiCodec reference global stream 也直接序列化在这里，不存在并行的
   context codes 字段。可选的
   `audio_input_positions` 只标记 source audio payload 在 prompt 中的位置。可选的 `prediction` 覆写
   task 默认 prediction；未设置时使用 `task.prediction_modality`。请求不能选择 route。
-- `Result(response_ids, audio, decode_error?)`：按原请求顺序返回的单条结果。TEXT / AUDIO 路径的
+- `generation.result.Result(response_ids, audio, decode_error?)`：按原请求顺序返回的单条结果。TEXT / AUDIO 路径的
   `response_ids` 是裁掉 stop token 后的 layout global token IDs；mixed 路径当前保留状态机产生的
   EOS/BOA/EOA，供 audio span 抽取。纯 text prediction 的 `audio=None`；AUDIO 与 token-only mixed
   在成功 decode 后填充 `AudioOutput`。可恢复的逐行 audio decode 失败返回 `audio=None`，并在
   `decode_error` 暴露异常类型与消息。
-- `AudioOutput(features, codes, waveform, sample_rate)`：audio task 的 decode 结果。`codes` 保存
+- `generation.result.AudioOutput(features, codes, waveform, sample_rate)`：audio task 的 decode 结果。`codes` 保存
   规范化 `AudioCodes(semantic_codes, global_codes, acoustic_codes)`；BiCodec 填充 semantic/global，
   frame-aligned structured codec 填充 semantic/acoustic。unified-token codec 没有独立非 semantic
   representation，因此 `features=None`。
-- `AcousticGeneration(sequence, features, frame_counts)`：acoustic model 与 audio strategy 之间的批量
+- `model.output.AcousticGeneration(sequence, features, frame_counts)`：acoustic model 与 audio strategy 之间的批量
   返回契约。
 - `generate_responses()`：校验私有 request、按有效 `prediction`（request 覆写或 task 默认）分组并生成。
 - `generation.bicodec`：BiCodec 私有 request 组装 helper；公开路径应走 `create` /
@@ -175,7 +175,7 @@ text prediction
 
 audio prediction + token-only model
     -> generate_tokens(stop=EOA)
-    -> FrameCodec full-code decode, marker-driven BiCodec detokenize, or SAC SemanticCodecRuntime decode
+    -> FrameCodec full-code decode, marker-driven BiCodec detokenize, or generator plugin GeneratorRuntime decode
 
 audio prediction + runtime acoustic side channel + acoustic feature generator
     -> generate_audio_features()
@@ -204,8 +204,8 @@ prompt 有 global 时 response 必须以 semantic marker 开局；prompt 没有 
 global marker 开局并同时提供 global 与 semantic。parser 不读取 task/request route，只要求两侧恰好
 一个 global owner。S2S 内部恢复 `AudioCodes`，只在调用 anycodec `detokenize()` 的边界把
 `global_codes` 映射回 `SemanticAcousticCodes.acoustic`。配置
-`runtime.semantic_codec_artifact` 后，semantic strategy 只处理 structured backend 的 semantic tokens，
-并把 waveform decode 交给 `SemanticCodecRuntime`；普通 frame codec 的 `decode()` 不再接收
+`runtime.acoustic_generator_artifact` 后，semantic strategy 只处理 structured backend 的 semantic tokens，
+并把 waveform decode 交给 `GeneratorRuntime`；普通 frame codec 的 `decode()` 不再接收
 semantic-only codes。semantic-artifact 与 structured full-sequence 是配置阶段选择的两条解码路径；
 structured full-sequence 内部的 prompt/output/decode ownership 由 self-describing marker 决定，
 generation 请求不能覆盖；

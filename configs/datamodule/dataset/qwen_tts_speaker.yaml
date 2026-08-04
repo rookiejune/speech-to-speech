@@ -1,6 +1,7 @@
 name: qwen_tts_speaker
 root:
 split: train
+filter:
 split_manifest:
 split_label: train
 speaker:

@@ -11,13 +11,13 @@ from anytrain.loss import LossItem
 from lightning import pytorch as pl
 from torch import Tensor
 
-from ...datamodule.types import (
+from ...datamodule.batch import (
     FusedBatch,
     LoaderBatch,
     ModelBatch,
-    RawSpeechBatch,
     TrainInput,
 )
+from ...datamodule.sample import RawSpeechBatch
 from ...loss.types import loss_items
 from ...task import uses_source_ctc, uses_target_ctc
 

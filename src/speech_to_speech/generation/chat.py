@@ -15,14 +15,19 @@ from .._tensor import is_signed_integer_dtype
 from ..audio import AudioCodes
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..runtime.protocol import GenerationRuntime
-from ..runtime.types import frame_codec, structured_codec, supports_structured
+from ..runtime.codec_contract import (
+    frame_codec,
+    structured_codec,
+    supports_structured,
+)
 from ..task import PredictionModality, Task
 from ..task.templates import format_instruction, select_template
 from .bicodec import prepare_bicodec_tts_request
 from .protocol import TokenGenerator
 from .service import generate_responses
 from .text import decode_response_text
-from .types import AudioOutput, Request, Result
+from ..task import Request
+from .result import AudioOutput, Result
 
 
 class TextPart(TypedDict):

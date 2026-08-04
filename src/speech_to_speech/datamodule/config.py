@@ -4,9 +4,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
+from anydataset.types import AudioView
+
 from ..task import Task
 from .dataset.speech import DatasetConfig, DatasetName
-from .types import DataShape
+from .sample import DataShape
 
 
 @dataclass
@@ -79,6 +81,84 @@ class TaskConfig:
 
 
 @dataclass
+class AssetMaterializationConfig:
+    """Read-through workspace codec asset materialization options."""
+
+    enabled: bool = False
+    codec_view: Optional[str] = None
+    output_root: Optional[str] = None
+    device: Optional[str] = None
+    provider_id: Optional[str] = None
+    input_id: Optional[str] = None
+    source_factory: Optional[str] = None
+    max_shard_samples: int = 100_000
+    batch_size: int = 1
+    commit_samples: Optional[int] = None
+    write_workers: int = 1
+    write_prefetch: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise TypeError("asset materialization enabled must be a boolean.")
+        if self.codec_view is not None:
+            _non_empty_string("asset materialization codec_view", self.codec_view)
+            try:
+                AudioView(self.codec_view)
+            except ValueError as error:
+                raise ValueError(
+                    f"unsupported asset materialization codec_view: {self.codec_view!r}."
+                ) from error
+        for name in ("output_root", "device", "provider_id", "input_id"):
+            value = getattr(self, name)
+            if value is not None:
+                _non_empty_string(f"asset materialization {name}", value)
+        if self.source_factory is not None:
+            _non_empty_string(
+                "asset materialization source_factory",
+                self.source_factory,
+            )
+            module, separator, attribute = self.source_factory.partition(":")
+            if not separator or not module or not attribute:
+                raise ValueError(
+                    "asset materialization source_factory must use "
+                    "'module:attribute' syntax."
+                )
+        for name in ("max_shard_samples", "batch_size"):
+            _positive_integer(f"asset materialization {name}", getattr(self, name))
+        if self.commit_samples is not None:
+            _positive_integer(
+                "asset materialization commit_samples",
+                self.commit_samples,
+            )
+        if isinstance(self.write_workers, bool) or not isinstance(
+            self.write_workers,
+            int,
+        ):
+            raise TypeError("asset materialization write_workers must be an integer.")
+        if self.write_workers < 0:
+            raise ValueError(
+                "asset materialization write_workers must be non-negative."
+            )
+        if self.write_prefetch is not None:
+            _positive_integer(
+                "asset materialization write_prefetch",
+                self.write_prefetch,
+            )
+        if not self.enabled:
+            return
+        for name in ("output_root", "device", "provider_id"):
+            if getattr(self, name) is None:
+                raise ValueError(
+                    f"enabled asset materialization requires {name}."
+                )
+        if self.device == "auto":
+            raise ValueError(
+                "asset materialization device must name one explicit device; "
+                "'auto' could start multiple writers."
+            )
+
+
+@dataclass
 class SpeechConfig:
     codec: str
     dataloader: DataLoaderConfig
@@ -89,6 +169,9 @@ class SpeechConfig:
     mask_audio_ratio: float = 0.5
     tasks: Optional[Dict[Task, TaskConfig]] = None
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
+    materialization: AssetMaterializationConfig = field(
+        default_factory=AssetMaterializationConfig
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.dataloader, DataLoaderConfig):
@@ -97,6 +180,15 @@ class SpeechConfig:
             raise TypeError("data shape must be a DataShape.")
         if not isinstance(self.encode_missing_codes, bool):
             raise TypeError("encode_missing_codes must be a boolean.")
+        if not isinstance(self.materialization, AssetMaterializationConfig):
+            raise TypeError(
+                "materialization must be an AssetMaterializationConfig."
+            )
+        if self.materialization.enabled and not self.encode_missing_codes:
+            raise ValueError(
+                "enabled asset materialization requires encode_missing_codes=true "
+                "for the first-epoch waveform fallback."
+            )
         if (
             isinstance(self.interleave_audio_frames, bool)
             or not isinstance(self.interleave_audio_frames, int)
@@ -159,7 +251,22 @@ def _task(value: object) -> Task:
     raise TypeError(f"task key must be a Task or string, got {type(value)}.")
 
 
+def _non_empty_string(name: str, value: object) -> None:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string or None.")
+    if not value:
+        raise ValueError(f"{name} must not be empty.")
+
+
+def _positive_integer(name: str, value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an integer.")
+    if value <= 0:
+        raise ValueError(f"{name} must be positive.")
+
+
 __all__ = [
+    "AssetMaterializationConfig",
     "DataLoaderConfig",
     "DataLoaderCostsConfig",
     "SpeechConfig",

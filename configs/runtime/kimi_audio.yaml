@@ -13,7 +13,7 @@ backbone_module: ""
 backbone_body: base_model
 backbone_supports_cache_position: false
 audio_tokenizer:
-semantic_codec_artifact:
+acoustic_generator_artifact:
 device: cuda
 dtype: bfloat16
 attn_implementation: flash_attention_2

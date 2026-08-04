@@ -99,21 +99,21 @@ class RuntimeConfigContractTest(ConfigTestCase):
                 )
             )
 
-    def test_semantic_codec_artifact_requires_token_only_longcat(self):
+    def test_acoustic_generator_artifact_requires_token_only_longcat(self):
         token = overfit(
             _compose(
                 "overfit",
                 "runtime=longcat_native",
                 "model/acoustic=none",
-                "runtime.semantic_codec_artifact=/tmp/semantic-codec",
+                "runtime.acoustic_generator_artifact=/tmp/semantic-codec",
             )
         )
 
         self.assertEqual(
-            token.runtime.semantic_codec_artifact,
+            token.runtime.acoustic_generator_artifact,
             "/tmp/semantic-codec",
         )
-        with self.assertRaisesRegex(ValueError, "semantic_codec_artifact"):
+        with self.assertRaisesRegex(ValueError, "acoustic_generator_artifact"):
             overfit(
                 _compose(
                     "overfit",
@@ -126,16 +126,16 @@ class RuntimeConfigContractTest(ConfigTestCase):
                 _compose(
                     "overfit",
                     "runtime=longcat_native",
-                    "runtime.semantic_codec_artifact=/tmp/semantic-codec",
+                    "runtime.acoustic_generator_artifact=/tmp/semantic-codec",
                 )
             )
-        with self.assertRaisesRegex(ValueError, "semantic codec artifacts"):
+        with self.assertRaisesRegex(ValueError, "acoustic generator artifacts"):
             overfit(
                 _compose(
                     "overfit",
                     "runtime=unicodec",
                     "model/acoustic=none",
-                    "runtime.semantic_codec_artifact=/tmp/semantic-codec",
+                    "runtime.acoustic_generator_artifact=/tmp/semantic-codec",
                 )
             )
         with self.assertRaisesRegex(ValueError, "audio_sequence_layout=semantic"):
@@ -145,7 +145,7 @@ class RuntimeConfigContractTest(ConfigTestCase):
                     "runtime=longcat_native",
                     "audio_sequence_layout=flattened",
                     "model/acoustic=none",
-                    "runtime.semantic_codec_artifact=/tmp/semantic-codec",
+                    "runtime.acoustic_generator_artifact=/tmp/semantic-codec",
                 )
             )
 

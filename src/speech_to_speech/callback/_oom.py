@@ -12,10 +12,12 @@ from torch import Tensor
 
 from .._oom import context as exception_context
 from .._oom import is_oom, tensor_report
-from ..datamodule.types import (
+from ..datamodule.batch import (
     FusedBatch,
     LoaderBatch,
     ModelBatch,
+)
+from ..datamodule.sample import (
     RawSpeech,
     RawSpeechBatch,
     Speech,
@@ -24,7 +26,7 @@ from ..datamodule.types import (
 
 if TYPE_CHECKING:
     from ..generation.eval.text import TextProbe
-    from ..generation.types import Request
+    from ..task import Request
 
 
 class _CallbackTrainer(Protocol):

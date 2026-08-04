@@ -9,7 +9,8 @@ from anytrain.framework.rl import gather_token_logps, sequence_logps
 from anytrain.module.idspace import Layout
 
 from speech_to_speech.rl import PreferenceBatch
-from speech_to_speech.datamodule.types import ModelBatch, PredictionModality
+from speech_to_speech.datamodule.batch import ModelBatch
+from speech_to_speech.task import PredictionModality
 from speech_to_speech.loss.preference import DPOObjective
 from speech_to_speech.task import Task
 

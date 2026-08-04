@@ -22,7 +22,7 @@ from speech_to_speech.model.generation import GenerationStepResult
 from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.runtime.protocol import GenerationRuntime
-from speech_to_speech.runtime.types import Backbone
+from speech_to_speech.runtime.backbone.contract import Backbone
 from speech_to_speech.task import Task
 
 

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import ANY, Mock, patch
 
 import torch
-from semantic_acoustic_codec.config import Route
+from semantic_acoustic_generator.config import Route
 
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model.ctc import CTCConfig, CTCRouteConfig

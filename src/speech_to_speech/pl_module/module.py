@@ -16,14 +16,14 @@ from lightning.pytorch import LightningModule
 from peft import LoraConfig
 from torch import nn
 
-from ..datamodule.types import (
+from ..datamodule.batch import (
     FusedBatch,
     LoaderBatch,
     ModelBatch,
-    RawSpeechBatch,
     TrainBatch,
     TrainInput,
 )
+from ..datamodule.sample import RawSpeechBatch
 from ..generation.batch import requests_from_batch
 from ..generation.service import generate_responses
 from ..generation.eval.text import (
@@ -32,7 +32,7 @@ from ..generation.eval.text import (
     evaluate_text,
 )
 from ..generation.text import decode_text_ids
-from ..generation.types import Request, Result
+from ..generation.result import Result
 from ..loss.module import Objective
 from ..loss.protocol import TokenObjectiveModel
 from ..loss.types import Outputs, combine_outputs
@@ -40,7 +40,7 @@ from ..loss.validation import validation_metrics
 from ..model.contract import ModelCheckpointContract, validate_checkpoint_contract
 from ..model.base import Model
 from ..generation.protocol import TextEvaluationModel
-from ..task import PredictionModality, Task
+from ..task import PredictionModality, Request, Task
 from .optim import Config as OptimConfig
 
 

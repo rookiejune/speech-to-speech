@@ -9,7 +9,8 @@ from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader, Dataset
 
 from ..config import DataLoaderConfig
-from .batch import MIMO_IGNORE_INDEX, MimoBatch, MimoSample, collate_mimo
+from ...mimo import MIMO_IGNORE_INDEX, MimoBatch, MimoSample
+from .collate import collate_mimo
 
 
 class MimoDataModule(LightningDataModule):

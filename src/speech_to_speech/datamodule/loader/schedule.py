@@ -4,18 +4,12 @@ import math
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from .contract import LoaderStepMode
-from ..mimo import MimoBatch
-from ..types import (
-    FusedBatch,
-    LoaderBatch,
-    ModelBatch,
-    RawSpeechBatch,
-    TrainBatch,
-    TrainInput,
-)
+
+if TYPE_CHECKING:
+    from ..batch import TrainBatch, TrainInput
 
 
 SupervisedTokenCounter = Callable[[object], int]
@@ -40,6 +34,10 @@ def count_supervised_tokens(batch: object, *, ignore_index: int = -100) -> int:
     """
     if isinstance(ignore_index, bool) or not isinstance(ignore_index, int):
         raise TypeError("ignore_index must be an integer.")
+    from ...mimo import MimoBatch
+    from ..batch import FusedBatch, LoaderBatch, ModelBatch
+    from ..sample import RawSpeechBatch
+
     if isinstance(batch, LoaderBatch):
         return count_supervised_tokens(batch.batch, ignore_index=ignore_index)
     if isinstance(batch, FusedBatch):
@@ -163,6 +161,8 @@ class ScheduledDataLoader:
         self.synchronize_token_counts = synchronize_token_counts
 
     def __iter__(self) -> Iterator[TrainBatch]:
+        from ..batch import FusedBatch, LoaderBatch
+
         keys = tuple(self.schedule.weights)
         weights = self.schedule.weights
         iterators = {key: iter(self.loaders[key]) for key in keys}

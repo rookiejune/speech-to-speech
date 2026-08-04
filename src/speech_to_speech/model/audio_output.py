@@ -9,8 +9,8 @@ from torch import Tensor, nn
 
 from .._compat import StrEnum, auto
 from ._checkpointing import GradientCheckpointingLayer
+from .adapter import MLPAdapter
 from ._helper import (
-    MLPAdapter,
     register,
     safe_transformer_mask,
     tower_fields,

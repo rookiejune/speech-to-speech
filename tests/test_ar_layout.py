@@ -11,7 +11,11 @@ from speech_to_speech.datamodule.build.ar import (
     build_ar_sample,
     build_pretraining_ar_sample,
 )
-from speech_to_speech.datamodule.types import Language, Speech, Text
+from speech_to_speech.datamodule.sample import (
+    Language,
+    Speech,
+    Text,
+)
 from speech_to_speech.loss.token import TokenLoss
 from speech_to_speech.task import PredictionModality
 from speech_to_speech.runtime import AudioSequenceLayout
@@ -51,7 +55,7 @@ class AutoregressiveLayoutTest(unittest.TestCase):
             eoa_token_id=19,
             eos_token_id=7,
             pad_token_id=0,
-            semantic_codec_artifact=None,
+            acoustic_generator_artifact=None,
             audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
             audio_tokenizer=None,
         )

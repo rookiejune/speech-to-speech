@@ -4,11 +4,12 @@ from dataclasses import dataclass, field
 from typing import Mapping
 
 import torch
-from semantic_acoustic_codec.rl import SACCandidate
+from semantic_acoustic_generator.rl import GeneratorCandidate
 from torch import Tensor
 
-from ..datamodule.types import ModelBatch
-from ..generation.types import AudioOutput, Request
+from ..datamodule.batch import ModelBatch
+from ..generation.result import AudioOutput
+from ..task import Request
 
 
 @dataclass
@@ -73,7 +74,7 @@ class S2SGenerationResult:
     request: Request
     response_ids: Tensor
     audio: AudioOutput | None = None
-    sac_candidate: SACCandidate | None = None
+    sac_candidate: GeneratorCandidate | None = None
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

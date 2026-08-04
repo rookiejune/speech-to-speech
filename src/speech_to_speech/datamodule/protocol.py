@@ -9,7 +9,11 @@ from anytrain.module.idspace import Layout
 
 from ..runtime import AudioSequenceLayout
 from ..runtime.protocol import DataRuntime
-from ..runtime.types import AudioTokenizer, CodecBackend, TextTokenizer
+from ..runtime.codec_contract import CodecBackend
+from ..runtime.tokenizer import (
+    AudioTokenizer,
+    TextTokenizer,
+)
 
 
 class TextRuntime(Protocol):
@@ -62,7 +66,7 @@ class DataRuntimeSnapshot:
     audio_view: AudioView
     codec_frame_rate: float
     audio_sequence_layout: AudioSequenceLayout
-    semantic_codec_artifact: str | None
+    acoustic_generator_artifact: str | None
     text_tokenizer: TextTokenizer
     audio_tokenizer: AudioTokenizer
     layout_blocks: tuple[tuple[str, tuple[int, int]], ...]
@@ -79,7 +83,7 @@ class DataRuntimeSnapshot:
             audio_view=runtime.audio_view,
             codec_frame_rate=runtime.codec_frame_rate,
             audio_sequence_layout=runtime.audio_sequence_layout,
-            semantic_codec_artifact=runtime.semantic_codec_artifact,
+            acoustic_generator_artifact=runtime.acoustic_generator_artifact,
             text_tokenizer=runtime.text_tokenizer,
             audio_tokenizer=runtime.audio_tokenizer,
             layout_blocks=tuple(runtime.layout.blocks.items()),

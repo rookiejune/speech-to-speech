@@ -1,7 +1,7 @@
 # model
 
-组装 token backbone、multimodal embedding 与 acoustic decoder。position 语义见
-[总览 §2.4](../model-design.md)。
+组装 token backbone、multimodal embedding 与 acoustic decoder。跨模块 position 所有权见
+[设计总览](../model-design.md)，字段级规则由 datamodule 与 generation 文档展开。
 
 ## 对外能力
 
@@ -20,12 +20,12 @@
   space；`none` / `linear` / `mlp` 为无序列混合特例，`transformer` 为带独立 KV cache 的因果栈。
 - `acoustic.base.AcousticModel`：集中 Flow/RVQ 共用的 frame condition、decoder dtype、codec
   capability 与 acoustic generation 模板；具体 composition 只保留各自 decoder/sampler 逻辑。
-- `acoustic.flow.FlowModel`：在基础模型上组合 SAC `FMFeatureGenerator`（`DiTDecoder` core），提供
+- `acoustic.flow.FlowModel`：在基础模型上组合 generator plugin `FMFeatureGenerator`（`DiTDecoder` core），提供
   flow target、sampling 和 `generate_audio_features()`；S2S 不再平行维护 DiT 实现。
-- `acoustic.rvq.RVQModel`：组合 SAC `AcousticRVQDecoder`，提供 teacher-forced
-  codebook logits、sampling 和 `generate_audio_features()`；类型从 SAC 导入，不经 S2S 再导出。
+- `acoustic.rvq.RVQModel`：组合 generator plugin `AcousticRVQDecoder`，提供 teacher-forced
+  codebook logits、sampling 和 `generate_audio_features()`；类型从 generator plugin 导入，不经 S2S 再导出。
 - `acoustic.condition.HiddenConditionAdapter`：以 `LayerNorm + Linear` 把对齐后的 backbone hidden state 映射到
-  SAC generator 的 condition space；训练和 generation 共用该入口。
+  acoustic generator 的 condition space；训练和 generation 共用该入口。
 - `acoustic.flow.AcousticFlow`：薄包装，持有 `FMFeatureGenerator` 与 S2S `flow_matching` runtime
   做 ODE sampling，并保留 feature mean/std 归一化缓冲。
 - `loss.protocol.TokenObjectiveModel` / `FlowObjectiveModel` / `RVQObjectiveModel`：objective
@@ -36,7 +36,8 @@
   `TextEvaluationModel` 组合 token generation 与 reference scoring。
 - `runtime.protocol.TokenModelRuntime` / `model.acoustic.protocol.FlowModelRuntime`：token 与 flow
   model 各自消费的 runtime 资源边界。
-- `AdapterType`：semantic input/output adapter 的 `linear|mlp` 字符串枚举；`None` 表示输入输出
+- `adapter.AdapterType` / `adapter.MLPAdapter`：semantic input/output adapter 的公开结构；
+  `AdapterType` 提供 `linear|mlp` 字符串枚举，`None` 表示输入输出
   dimension 相同的 identity adapter。
 - `AudioInputAdapterType` / `AudioInputAdapterConfig`：source audio tower 的 `none|mlp|transformer`
   配置；`transformer` 保持同长度，默认双向，`causal=true` 时改为因果 encoder。
@@ -201,9 +202,9 @@ fixed-length speaker/style 含义来自 `AcousticLayout.FIXED_LENGTH`，不是�
 latent sampling，acoustic（speaker）预测可能偏向数据中的主导 speaker，这属于模型条件设计而
 不是 codec 序列化问题。
 
-底层 acoustic decoder 的所有权在 `semantic-acoustic-codec`：S2S 的 Flow/RVQ model 只负责
-从 backbone hidden state 取 frame-aligned condition，经 `HiddenConditionAdapter` 映射后送入 SAC 的
-DiT/DiT+REPA/RVQ decoder。`model.acoustic.init_artifact` 可在 composition 边界加载 SAC generator；model
+底层 acoustic decoder 的所有权在 `semantic-acoustic-generator`：S2S 的 Flow/RVQ model 只负责
+从 backbone hidden state 取 frame-aligned condition，经 `HiddenConditionAdapter` 映射后送入 generator plugin 的
+DiT/DiT+REPA/RVQ decoder。`model.acoustic.init_artifact` 可在 composition 边界加载 acoustic generator；model
 构造器不执行 artifact I/O。S2S 不维护 acoustic-only codec oracle，也不复制底层 decoder 实现。
 
 ## Embedding
@@ -269,7 +270,7 @@ ownership key 由 checkpoint gate/strict load 明确拒绝。
 
 v3 checkpoint 还必须包含 `speech_to_speech_model_contract`。该 contract 从已解析 runtime 与实际
 module topology 构造，而不是直接序列化一份可能含无效字段的原始 Hydra config；它覆盖 codec
-shape/capability、semantic codec artifact 内容摘要、token layout 与 special IDs、text/audio
+shape/capability、acoustic generator artifact 内容摘要、token layout 与 special IDs、text/audio
 tokenizer state digest、backbone architecture/readout、semantic audio embedding、input/output tower，
 source/target CTC decoder 的 readout、pooling 与有效 topology，以及 none/Flow/RVQ 的有效 decoder
 topology；CTC loss weight 不属于模型身份。contract 还记录 state dict 的 key、shape 与
@@ -281,7 +282,7 @@ readout、layout 或 codec topology 变化仍会明确失败。
 
 fast tokenizer 使用完整 backend 序列化状态；Kimi 优先使用 raw tokenizer 的显式 contract，随后才
 退到已知 serialized/tiktoken backend 和固定行为探针。行为探针能发现常见编码变化，但在 opaque
-tokenizer 不暴露内容状态时，不能证明所有输入上的资产身份。`runtime.semantic_codec_artifact` 是
+tokenizer 不暴露内容状态时，不能证明所有输入上的资产身份。`runtime.acoustic_generator_artifact` 是
 本地文件或目录时会按内容摘要，不包含机器相关根路径。其他 Hugging Face / remote-code backbone 或
 codec 若只提供同名路径而没有不可变 revision/content digest，contract 仍只能记录实际实现类型、
 解析后的配置与可见结构；需要供应链级复现时，训练 manifest 仍必须固定外部 revision 或内容摘要。
@@ -316,7 +317,7 @@ adapter 后再清除无效位置。
 - Runtime codec 固定 codebook 输入、feature dimension 与 waveform decode；model 不任意切取
   codebooks。
 
-联合初始化只支持 frame-aligned SAC artifact。Flow 严格迁移 decoder state 与 feature normalization；
+联合初始化只支持 frame-aligned generator artifact。Flow 严格迁移 decoder state 与 feature normalization；
 RVQ 只接收 `codebook_ar` generator。route、decoder topology、REPA 和 acoustic backend metadata 不匹配时
 直接失败；semantic vocab/embedding 不参与联合初始化校验，因为该路径的输入是 hidden state 而不是 codes。
 旧 Flow/RVQ checkpoint 没有 `acoustic_condition.*` 参数，strict resume 不做兼容填充。

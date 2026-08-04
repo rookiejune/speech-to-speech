@@ -44,7 +44,7 @@ topology；`pl_module.Config` 不再持有另一份仅含权重的 CTC 配置。
 FSQ code target 混合 immediate +/-1 digit 邻居 NLL，邻居在各 residual stage 内归一化，marker 和其他
 free/special audio row 仍使用 hard CE。该设置属于 loss，不改变 embedding、output head 或 MIMO objective。
 该模块通过窄 Protocol 消费 acoustic config，不反向依赖 scripts 入口 schema。当
-`model.acoustic.init_artifact` 非空时，composition 负责加载 SAC
+`model.acoustic.init_artifact` 非空时，composition 负责加载 generator plugin
 `AcousticGeneratorArtifact`，校验 route、frame layout 与 backend metadata，并把已加载对象传给 model；
 model 构造器不接收路径或执行文件 I/O。
 

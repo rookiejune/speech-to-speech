@@ -11,7 +11,8 @@ from ._request import prediction_of, validate
 from .audio import generate_audio_responses
 from .mixed import generate_mixed_responses
 from .protocol import TokenGenerator
-from .types import Request, Result
+from ..task import Request
+from .result import Result
 
 
 @torch.no_grad()

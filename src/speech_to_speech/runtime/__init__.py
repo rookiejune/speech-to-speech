@@ -1,11 +1,12 @@
-from .runtime import (
+from .backbone import BackboneInitialization, BackboneType
+from .config import (
     AudioSequenceLayout,
-    BackboneInitialization,
-    BackboneType,
     Config,
-    Runtime,
-    runtime_for_sequence_layout,
+    config_for_local_rank,
+    migrate_config_fields,
 )
+from .core import Runtime
+from .factory import runtime_for_sequence_layout
 
 __all__ = [
     "AudioSequenceLayout",
@@ -13,5 +14,7 @@ __all__ = [
     "BackboneType",
     "Config",
     "Runtime",
+    "config_for_local_rank",
+    "migrate_config_fields",
     "runtime_for_sequence_layout",
 ]

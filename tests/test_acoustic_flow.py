@@ -8,7 +8,7 @@ import torch
 from anytrain.loss import MaskedCosineAlignmentLoss
 from torch import Tensor, nn
 
-from semantic_acoustic_codec.loss.repa import WavLMTeacher
+from semantic_acoustic_generator.loss.repa import WavLMTeacher
 from speech_to_speech.model.acoustic.flow import AcousticFlow
 
 
@@ -35,8 +35,8 @@ class AcousticFlowTest(unittest.TestCase):
             flow.sample(condition, mask=torch.ones(1, 2))
 
     def test_wraps_sac_feature_generator(self):
-        from semantic_acoustic_codec.model import FMFeatureGenerator
-        from semantic_acoustic_codec.model.dit import DiTDecoder
+        from semantic_acoustic_generator.model import FMFeatureGenerator
+        from semantic_acoustic_generator.model.dit import DiTDecoder
 
         flow = AcousticFlow(2, 2, _FlowRuntime(), hidden_dim=2, layers=1, heads=1)
         self.assertIsInstance(flow.generator, FMFeatureGenerator)

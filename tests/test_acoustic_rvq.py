@@ -5,7 +5,7 @@ import unittest
 import torch
 
 from anytrain.loss import MaskedCodebookCrossEntropyLoss
-from semantic_acoustic_codec.model import AcousticRVQDecoder
+from semantic_acoustic_generator.model import AcousticRVQDecoder
 
 
 class AcousticRVQTest(unittest.TestCase):

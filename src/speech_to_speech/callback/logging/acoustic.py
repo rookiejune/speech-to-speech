@@ -10,11 +10,11 @@ from lightning import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 from torch import Tensor
 
-from ...datamodule.types import ModelBatch
+from ...datamodule.batch import ModelBatch
 from ...generation.eval.acoustic import evaluate
 from ...model.acoustic.flow import FlowModel
 from ...model.acoustic.rvq import RVQModel
-from ...runtime.types import AcousticCodec
+from ...runtime.codec_contract import AcousticCodec
 from .._oom import batch_report, report_oom
 from ..interval import TrainInterval
 

@@ -6,10 +6,10 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
-from speech_to_speech.datamodule.mimo import MimoBatch
+from speech_to_speech.mimo import MimoBatch
 from speech_to_speech.loss.mimo import MimoObjective
 from speech_to_speech.model.mimo import MimoModel, MimoModelConfig
-from speech_to_speech.runtime.types import BackboneReadout
+from speech_to_speech.runtime.backbone.contract import BackboneReadout
 
 
 class _Body(nn.Module):

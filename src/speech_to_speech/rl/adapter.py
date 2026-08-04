@@ -3,24 +3,24 @@ from __future__ import annotations
 from typing import Mapping
 
 from anytrain.framework.rl import ContinuousRolloutBatch, NeighborRolloutBatch, RolloutBatch
-from semantic_acoustic_codec.rl import SACRLAdapter, SACRewardBatch, SACRollout
+from semantic_acoustic_generator.rl import GeneratorRLAdapter, GeneratorRewardBatch, GeneratorRollout
 from torch import Tensor
 
 from .types import S2SRewardBatch, S2SRollout
 
 
 class S2SRLAdapter:
-    """S2S-owned RL adapter that delegates codec-substrate tensors to SAC.
+    """S2S-owned RL adapter that delegates acoustic-generator tensors to the plugin.
 
-    Speech-to-speech keeps request/result/reward semantics here. The wrapped SAC
+    Speech-to-speech keeps request/result/reward semantics here. The wrapped generator
     adapter converts only tensor-level policy data into anytrain RL contracts.
     """
 
-    def __init__(self, sac_adapter: SACRLAdapter) -> None:
+    def __init__(self, sac_adapter: GeneratorRLAdapter) -> None:
         self.sac_adapter = sac_adapter
 
-    def from_sac_rollout(self, rollout: SACRollout) -> SACRollout:
-        """Expose the SAC substrate unchanged for S2S callers that build results separately."""
+    def from_sac_rollout(self, rollout: GeneratorRollout) -> GeneratorRollout:
+        """Expose the generator substrate for S2S callers that build results separately."""
 
         return rollout
 
@@ -42,8 +42,8 @@ class S2SRLAdapter:
             components={} if components is None else components,
         )
 
-    def to_sac_rewards(self, reward_batch: S2SRewardBatch) -> SACRewardBatch:
-        return SACRewardBatch(
+    def to_sac_rewards(self, reward_batch: S2SRewardBatch) -> GeneratorRewardBatch:
+        return GeneratorRewardBatch(
             rewards=reward_batch.rewards,
             group_mask=reward_batch.group_mask,
             components=reward_batch.components,

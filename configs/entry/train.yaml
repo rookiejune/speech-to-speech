@@ -11,6 +11,19 @@ output_dir: ${repo_output_root}/${output_subdir}
 
 datamodule:
   codec: ${runtime.codec}
+  materialization:
+    enabled: false
+    codec_view:
+    output_root:
+    device:
+    provider_id:
+    input_id:
+    source_factory:
+    max_shard_samples: 100000
+    batch_size: 1
+    commit_samples:
+    write_workers: 1
+    write_prefetch:
   dataloader:
     batch_size: 8
     num_workers: 4

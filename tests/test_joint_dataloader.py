@@ -14,7 +14,11 @@ from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.module import DataModule, LoaderSpec
 from speech_to_speech.datamodule.diagnostic import SampleSplit
 from speech_to_speech.datamodule.dataset.text import TextConfig
-from speech_to_speech.datamodule.types import FusedBatch, LoaderBatch, ModelBatch
+from speech_to_speech.datamodule.batch import (
+    FusedBatch,
+    LoaderBatch,
+    ModelBatch,
+)
 from speech_to_speech.task import Task
 
 

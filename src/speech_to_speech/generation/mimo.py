@@ -13,25 +13,7 @@ import torch
 from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
-
-
-@dataclass(frozen=True)
-class MimoGenerationStep:
-    text_logits: Tensor
-    audio_logits: Tensor
-    past_key_values: object | None = None
-
-    def __post_init__(self) -> None:
-        for name, value in (
-            ("text_logits", self.text_logits),
-            ("audio_logits", self.audio_logits),
-        ):
-            if value.dim() not in {2, 3}:
-                raise ValueError(f"{name} must have shape [B, V] or [B, T, V].")
-            if value.size(-1) < 1 or not value.is_floating_point():
-                raise TypeError(f"{name} must be floating-point with V > 0.")
-        if self.text_logits.size(0) != self.audio_logits.size(0):
-            raise ValueError("text and audio generation logits must align on batch.")
+from ..mimo import MimoGenerationStep
 
 
 class MimoGenerationModel(Protocol):

@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, Callable, Mapping, Sequence, cast
+from typing import Any, cast
 
 import hydra
 import torch
@@ -15,18 +13,16 @@ from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
 from omegaconf import DictConfig
-from torch import Tensor, nn
+from torch import nn
 from torch.utils.data import Dataset
 
 from speech_to_speech.datamodule.mimo import (
     MimoDataModule,
     MimoDatasetConfig,
-    MimoSample,
-    MimoSegment,
-    MimoTask,
-    MimoTaskDataset,
 )
-from speech_to_speech.model import MimoModel, MimoModelConfig
+from speech_to_speech.datamodule.mimo.factory import create_dataset, task_weights
+from speech_to_speech.mimo import MimoSample
+from speech_to_speech.model.mimo_toy import create_toy_mimo_model
 from speech_to_speech.model.mimo_factory import build_mimo_model, derive_mimo_vocab
 from speech_to_speech.pl_module.mimo import MimoModule
 from speech_to_speech.runtime import runtime_for_sequence_layout
@@ -63,10 +59,10 @@ def run(config: MimoTrainConfig | DictConfig) -> dict[str, Any]:
 
     model, runtime = build_model(parsed)
     data_config = _data_for_model(parsed, runtime)
-    train_dataset = build_dataset(data_config, data_config.factory, data_config.kwargs)
+    train_dataset = _dataset(data_config, data_config.factory, data_config.kwargs)
     validation_dataset = None
     if data_config.validation_factory is not None:
-        validation_dataset = build_dataset(
+        validation_dataset = _dataset(
             data_config,
             data_config.validation_factory,
             data_config.validation_kwargs,
@@ -132,7 +128,17 @@ def build_model(config: MimoTrainConfig) -> tuple[nn.Module, Any | None]:
     """Build a runtime model, or a tiny local model for CPU smoke tests."""
 
     if bool(getattr(config.model, "toy", False)):
-        return _toy_model(config), None
+        kwargs = config.data.kwargs
+        return (
+            create_toy_mimo_model(
+                text_vocab_size=int(kwargs.get("text_vocab_size", 128)),
+                audio_vocab_size=int(kwargs.get("audio_vocab_size", 256)) + 3,
+                hidden_size=int(
+                    getattr(config.model, "audio_embedding_dim", None) or 32
+                ),
+            ),
+            None,
+        )
     runtime_config = config.runtime
     runtime = runtime_for_sequence_layout(
         runtime_config,
@@ -189,50 +195,23 @@ def _data_for_model(
     )
 
 
-def build_dataset(
+def _dataset(
     config: PreparedMimoDataConfig,
     factory_path: str,
-    kwargs: Mapping[str, Any],
+    kwargs: dict[str, Any],
 ) -> Dataset[MimoSample]:
-    """Instantiate a configured prepared dataset and normalize its contract."""
-
-    factory = import_factory(factory_path)
-    value = factory(**dict(kwargs))
-    if config.kind == "samples":
-        return _sample_dataset(value)
-    if config.kind != "segments":
-        raise ValueError("data.kind must be 'segments' or 'samples'.")
-    source = _segment_source(value)
-    weights = (
-        {MimoTask(key): float(weight) for key, weight in config.task_weights.items()}
-        if config.task_weights
-        else None
-    )
-    return MimoTaskDataset(
-        source,
-        config.special,
+    return create_dataset(
+        factory_path,
+        kwargs,
+        kind=config.kind,
+        special=config.special,
         config=MimoDatasetConfig(
             samples_per_epoch=config.samples_per_epoch,
             seed=config.seed,
             max_sequence_length=config.max_sequence_length,
-            task_weights=weights,
+            task_weights=task_weights(config.task_weights),
         ),
     )
-
-
-def import_factory(path: str) -> Callable[..., Any]:
-    if not isinstance(path, str) or not path:
-        raise ValueError("dataset factory must be a non-empty import path.")
-    if ":" in path:
-        module_name, attribute = path.split(":", 1)
-    else:
-        module_name, _, attribute = path.rpartition(".")
-    if not module_name or not attribute:
-        raise ValueError("dataset factory must use module:attribute or module.attribute.")
-    value = getattr(importlib.import_module(module_name), attribute, None)
-    if not callable(value):
-        raise TypeError(f"dataset factory {path!r} is not callable.")
-    return cast(Callable[..., Any], value)
 
 
 def mimo_callbacks(config: MimoTrainConfig) -> list[Callback]:
@@ -273,76 +252,6 @@ def _logger(config: MimoTrainConfig):
     raise ValueError("logging.name must be csv or tensorboard.")
 
 
-def _segment_source(value: object) -> Any:
-    if isinstance(value, Dataset):
-        return value
-    if isinstance(value, Sequence):
-        values = tuple(value)
-        if not values or any(not isinstance(item, MimoSegment) for item in values):
-            raise TypeError("segment factory sequences must contain MimoSegment values.")
-        return _SequenceDataset(values)
-    raise TypeError("segment factory must return a Dataset or sequence of MimoSegment.")
-
-
-def _sample_dataset(value: object) -> Dataset[MimoSample]:
-    if isinstance(value, Dataset):
-        return cast(Dataset[MimoSample], value)
-    if isinstance(value, Sequence):
-        values = tuple(value)
-        if not values or any(not isinstance(item, MimoSample) for item in values):
-            raise TypeError("sample factory sequences must contain MimoSample values.")
-        return _SequenceDataset(values)
-    raise TypeError("sample factory must return a Dataset or sequence of MimoSample.")
-
-
-class _SequenceDataset(Dataset[Any]):
-    def __init__(self, values: Sequence[Any]) -> None:
-        self.values = tuple(values)
-
-    def __len__(self) -> int:
-        return len(self.values)
-
-    def __getitem__(self, index: int) -> Any:
-        return self.values[index]
-
-
-class _ToyBody(nn.Module):
-    def __init__(self, hidden_size: int) -> None:
-        super().__init__()
-        self.proj = nn.Linear(hidden_size, hidden_size)
-        self.norm = nn.LayerNorm(hidden_size)
-
-    def forward(self, *, inputs_embeds: Tensor, **_: object) -> object:
-        hidden = self.norm(torch.tanh(self.proj(inputs_embeds)))
-        return SimpleNamespace(
-            last_hidden_state=(hidden, hidden),
-            past_key_values=None,
-            hidden_states=None,
-            attentions=None,
-        )
-
-
-def _toy_model(config: MimoTrainConfig) -> MimoModel:
-    # These dimensions intentionally match ToyMimoSegmentDataset defaults and
-    # are overridable through ``data.kwargs`` for a small deterministic smoke.
-    kwargs = config.data.kwargs
-    text_vocab = int(kwargs.get("text_vocab_size", 128))
-    audio_vocab = int(kwargs.get("audio_vocab_size", 256)) + 3
-    hidden = int(getattr(config.model, "audio_embedding_dim", None) or 32)
-    text_embedding = nn.Embedding(text_vocab, hidden)
-    audio_embedding = nn.Embedding(audio_vocab, hidden)
-    return MimoModel(
-        _ToyBody(hidden),
-        text_embedding=text_embedding,
-        audio_embedding=audio_embedding,
-        text_readout=__import__(
-            "speech_to_speech.runtime.types", fromlist=["BackboneReadout"]
-        ).BackboneReadout("last_hidden_state[0]"),
-        audio_readout=__import__(
-            "speech_to_speech.runtime.types", fromlist=["BackboneReadout"]
-        ).BackboneReadout("last_hidden_state[1]"),
-        config=MimoModelConfig(supports_cache_position=False),
-    )
 
 
 if __name__ == "__main__":
@@ -350,9 +259,7 @@ if __name__ == "__main__":
 
 
 __all__ = [
-    "build_dataset",
     "build_model",
-    "import_factory",
     "main",
     "mimo_callbacks",
     "run",

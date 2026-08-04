@@ -12,7 +12,7 @@ from torch import Tensor
 from ..model.generation import GenerationOutput
 from ..task import PredictionModality
 from ._request import prediction_of, validate
-from .types import Request
+from ..task import Request
 
 
 class RolloutRow(TypedDict):

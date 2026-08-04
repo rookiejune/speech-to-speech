@@ -5,12 +5,12 @@ from functools import partial
 
 import torch
 from anytrain.loss import PackedCodebookLogits
-from semantic_acoustic_codec.model import AcousticRVQDecoder
-from semantic_acoustic_codec.runtime.artifact import AcousticGeneratorArtifact
+from semantic_acoustic_generator.model import AcousticRVQDecoder
+from semantic_acoustic_generator.runtime.artifact import AcousticGeneratorArtifact
 from torch import Tensor
 
-from ...generation.types import AcousticGeneration
-from ...runtime.types import acoustic_codec
+from ..output import AcousticGeneration
+from ...runtime.codec_contract import acoustic_codec
 from ..contract import rvq_acoustic_contract
 from ..base import Config
 from ...runtime.protocol import TokenModelRuntime

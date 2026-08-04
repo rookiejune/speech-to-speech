@@ -7,7 +7,10 @@ from anytrain.loss import LossItem
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from ..datamodule.types import CTC_PAD_ID, CTCTarget
+from ..datamodule.target import (
+    CTC_PAD_ID,
+    CTCTarget,
+)
 from ..model.ctc import CTCConfig
 from ..model.ctc import CTCRoute
 

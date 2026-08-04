@@ -12,7 +12,14 @@ from ..config import TaskConfig
 from ..parse.parser import parse_task_sample, parse_text_sample
 from ..protocol import DataRuntime, TextRuntime
 from ..build.sample import build_task_sample, build_text_sample
-from ..types import ModelBatch, ModelSample, RawSpeechBatch, SpeechTaskSample
+from ..batch import (
+    ModelBatch,
+    ModelSample,
+)
+from ..sample import (
+    RawSpeechBatch,
+    SpeechTaskSample,
+)
 
 
 class Collator:

@@ -14,7 +14,7 @@ from ..collate.collator import TextCollator
 from ..config import TaskConfig
 from ..protocol import TextRuntime, TextRuntimeSnapshot
 from ..dataset.text import TextConfig, load_text_dataset
-from ..types import ModelBatch
+from ..batch import ModelBatch
 
 
 class TextLoader:

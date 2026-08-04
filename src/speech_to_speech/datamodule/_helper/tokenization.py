@@ -1,7 +1,7 @@
 import torch
 from torch import Tensor
 
-from ...runtime.types import TextTokenizer
+from ...runtime.tokenizer import TextTokenizer
 
 
 def token_ids(text: str, tokenizer: TextTokenizer) -> Tensor:

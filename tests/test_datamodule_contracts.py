@@ -5,6 +5,8 @@ from __future__ import annotations
 import unittest
 
 from _contracts_helpers import *
+from speech_to_speech.datamodule.asset import AssetPhase, AssetResolution
+from speech_to_speech.datamodule.config import AssetMaterializationConfig
 
 
 class DataModuleContractTest(unittest.TestCase):
@@ -253,6 +255,109 @@ class DataModuleContractTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "same codec"):
             datamodule.setup()
+
+    @patch("speech_to_speech.datamodule.module.resolve_workspace_asset")
+    def test_datamodule_refreshes_materialized_asset_for_next_epoch(
+        self,
+        resolve_workspace_asset,
+    ):
+        fallback = [_raw_sample()]
+        ready = [_raw_sample(), _raw_sample()]
+
+        class FakeJob:
+            request_id = "asset-request-v1"
+
+            def __init__(self):
+                self.phase = AssetPhase.FALLBACK
+                self.starts = []
+                self.finishes = []
+                self.loads = 0
+
+            def start(self, *, owner):
+                self.starts.append(owner)
+                self.phase = AssetPhase.MATERIALIZING
+
+            def finish(self, *, owner):
+                self.finishes.append(owner)
+                self.phase = AssetPhase.READY
+
+            def load_ready(self):
+                self.loads += 1
+                return ready
+
+            def close(self):
+                pass
+
+        job = FakeJob()
+        resolve_workspace_asset.return_value = AssetResolution(
+            fallback,
+            request_id=job.request_id,
+            job=cast(Any, job),
+        )
+        config = SpeechConfig(
+            codec="longcat",
+            dataloader=_loader(),
+            encode_missing_codes=True,
+            materialization=AssetMaterializationConfig(
+                enabled=True,
+                output_root="/tmp/s2s-assets",
+                device="cpu",
+                provider_id="longcat-provider-v1",
+            ),
+        )
+        datamodule = DataModule(
+            _data_runtime(),
+            {"train": LoaderSpec.speech(config, {Task.TTS: 1.0})},
+        )
+
+        datamodule.setup()
+        epoch_zero = cast(Any, datamodule.train_dataloader())
+        self.assertIs(epoch_zero.dataset, fallback)
+        self.assertTrue(datamodule.materialization_enabled)
+        self.assertTrue(datamodule.has_pending_assets)
+
+        datamodule.start_asset_materialization(owner=True)
+        datamodule.finish_asset_materialization(owner=True)
+        datamodule.refresh_materialized_assets()
+
+        epoch_one = cast(Any, datamodule.train_dataloader())
+        self.assertIs(epoch_one.dataset, ready)
+        self.assertFalse(datamodule.has_pending_assets)
+        self.assertEqual(job.starts, [True])
+        self.assertEqual(job.finishes, [True])
+        self.assertEqual(job.loads, 1)
+        resolve_workspace_asset.assert_called_once_with(
+            config.dataset,
+            datamodule.runtime,
+            config.materialization,
+        )
+
+    def test_datamodule_rejects_multiple_training_loaders_during_materialization(
+        self,
+    ):
+        config = SpeechConfig(
+            codec="longcat",
+            dataloader=_loader(),
+            encode_missing_codes=True,
+            materialization=AssetMaterializationConfig(
+                enabled=True,
+                output_root="/tmp/s2s-assets",
+                device="cpu",
+                provider_id="longcat-provider-v1",
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "exactly one training speech loader",
+        ):
+            DataModule(
+                _data_runtime(),
+                {
+                    "asr": LoaderSpec.speech(config, {Task.ASR: 1.0}),
+                    "tts": LoaderSpec.speech(config, {Task.TTS: 1.0}),
+                },
+            )
 
 
 if __name__ == "__main__":

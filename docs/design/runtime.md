@@ -12,9 +12,9 @@
 - `codec`：经本地 capability Protocol adapter 暴露当前 backend 实际拥有的 encode/decode、
   codebook table 或 acoustic feature 能力，不为缺失能力提供占位属性。
 - `semantic_codec`：semantic token generation 的 waveform decoder。配置
-  `semantic_codec_artifact` 时惰性加载 `semantic-acoustic-codec` artifact，并复用同一个
+  `acoustic_generator_artifact` 时惰性加载 `semantic-acoustic-generator` artifact，并复用同一个
   structured backend；FrameCodec 不把 semantic-only codes 传给自身 `decode()`。
-- `semantic_codec_artifact_sha256`：semantic codec artifact 的内容身份。单文件按字节计算
+- `acoustic_generator_artifact_sha256`：acoustic generator artifact 的内容身份。单文件按字节计算
   SHA-256；目录按排序后的相对文件路径和内容计算，不包含机器相关的 artifact 根路径或文件元数据。
   该值在单个 Runtime 内缓存；artifact 内容更新后必须新建 Runtime，避免一次训练期间身份漂移。
 - `audio_sequence_layout`：公开音频序列格式，当前为 `flattened` 或 `semantic`。`flattened`
@@ -56,8 +56,9 @@ hidden tensor，支持 `last_hidden_state` 或单层序列索引形如 `last_hid
 
 ## 协议
 
-`runtime/types.py` 定义资源对象的 `SemanticCodec`、`Codec`、`StructuredCodec`、
-`CodebookCodec`、`AcousticCodec`、`AudioTokenizer`、`TextTokenizer` 与 `Backbone` Protocol。
+`runtime/codec_contract.py` 定义 codec capability Protocol 与 metadata helper；
+`runtime/tokenizer.py` 定义 `AudioTokenizer` / `TextTokenizer`；
+`runtime/backbone/contract.py` 定义 `Backbone` 与 readout contract。
 `runtime/protocol.py` 统一定义 `DataRuntime`、`GenerationRuntime` 与
 `TokenModelRuntime` capability；消费模块不重复声明相同属性。`DataRuntime` 只公开 parser、
 sample builder 和 batch padding 所需资源。
@@ -65,9 +66,9 @@ sample builder 和 batch padding 所需资源。
 `anytrain.codec` 只提供两种 backend capability：`FrameCodec` 和
 `SemanticAcousticCodec`。S2S 的 `Codec` 只表示完整 frame-code 路径，不能再继承
 semantic-only decoder。`FULL_CODEC_SEQUENCE` 对 `FrameCodec` 展开全部 codebooks，生成后调用
-完整 `decode(codes)`；配置 `semantic_codec_artifact` 时，S2S 只处理
+完整 `decode(codes)`；配置 `acoustic_generator_artifact` 时，S2S 只处理
 `SemanticAcousticCodec` 的 semantic units，waveform 由
-`semantic_acoustic_codec.runtime.SemanticCodecRuntime` 负责。semantic-only decoder 不放回
+`semantic_acoustic_generator.runtime.GeneratorRuntime` 负责。semantic-only decoder 不放回
 anytrain，也不通过普通 codec 的 `decode()` 伪装。
 
 能力检查按实际接口而不是 codec 名称分派：`frame_codec()` 要求完整 encode/decode、frame rate 和
@@ -80,7 +81,7 @@ codebook sizes 必须是非空正整数 tuple，feature dim 必须是正整数�
 无效时直接暴露错误。只消费采样率或 frame-code codebook metadata 的调用点分别使用
 `codec_sample_rate()` 与 `frame_codebook_sizes()`，不要求无关的完整 encode/decode 能力。
 
-LongCat 的 `DECOUPLED + model/acoustic=none` 必须配置 `semantic_codec_artifact`；没有 artifact
+LongCat 的 `DECOUPLED + model/acoustic=none` 必须配置 `acoustic_generator_artifact`；没有 artifact
 时应选择 `FULL_CODEC_SEQUENCE`。`DECOUPLED + Flow/RVQ` 是现有 S2S 内部 acoustic-feature
 训练路径，仍由 `Codec.decode_features()` 消费生成的 features；它不代表 anytrain 提供
 semantic-only decoder。
@@ -152,8 +153,10 @@ decode provider 或 acoustic side module；`flattened` layout 要求 codec 能�
 BiCodec 固定使用 `flattened`，其 fixed-length metadata 在 S2S 内解释为 global，reference global 直接来自
 prompt 中的 structured stream，而不是额外配置轴或 side channel。
 
-文件职责保持分离：`runtime/runtime.py` 实现配置与资源聚合，`runtime/codec.py` 隔离 codec
-adapter 和加载，`runtime/audio_tokenizer/` 按实现拆分 Native / Flattened / BiCodec / CodecBPE。
+文件职责保持分离：`runtime/config.py` 拥有配置、layout 校验和 local-rank device 绑定；
+`runtime/core.py` 聚合资源；`runtime/factory.py` 选择 sequence-layout runtime；
+`runtime/tokenizer_factory.py` 构造 tokenizer 和 special IDs；`runtime/codec.py` 隔离 codec
+adapter/加载；`runtime/audio_tokenizer/` 按实现拆分 Native / Flattened / BiCodec / CodecBPE。
 DataModule/Collator 接收显式 `DataRuntime`；parser、sample builder、batch padding、objective
 与 generation service 不读取全局 runtime 状态。
 

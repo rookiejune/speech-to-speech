@@ -12,7 +12,7 @@ from anytrain.optim.llm import create_optimizer
 from lightning.pytorch import LightningModule
 from torch import Tensor, nn
 
-from ..datamodule.mimo import MimoBatch
+from ..mimo import MimoBatch
 from ..loss.mimo import MimoObjective
 from .optim import Config as OptimConfig
 from ..runtime.backbone.mimo import (

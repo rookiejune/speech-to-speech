@@ -13,7 +13,7 @@ from speech_to_speech.datamodule.loader import (
     LoaderStepMode,
     count_supervised_tokens,
 )
-from speech_to_speech.datamodule.mimo import MimoBatch
+from speech_to_speech.mimo import MimoBatch
 
 
 class LoaderScheduleContractTest(unittest.TestCase):

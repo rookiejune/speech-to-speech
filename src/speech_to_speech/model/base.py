@@ -24,7 +24,8 @@ from .generation import (
     GenerationStepResult,
     TokenKind,
 )
-from ._helper import AdapterType, register
+from .adapter import AdapterType
+from ._helper import register
 from .audio_input import AudioInputAdapterConfig, AudioInputTower
 from .audio_output import AudioOutputAdapterConfig
 from .ctc import CTCConfig, CTCDecoderRoutes, CTCRoute, ObjectiveHiddenOutput

@@ -19,10 +19,10 @@ from typing import Protocol, cast
 import torch
 from torch.utils.data import Dataset
 
-from .batch import MimoSample
-from .task import (
+from ...mimo import (
     KIMI_PRETRAIN_TASK_WEIGHTS,
     MimoSegment,
+    MimoSample,
     MimoSpecialTokens,
     MimoTask,
     build_mimo_sample,

@@ -90,6 +90,25 @@ class PerformanceConfig:
 
 
 @dataclass
+class GradientProbeConfig:
+    parameters: list[str] = field(default_factory=list)
+    match: str = "exact"
+    trainable_only: bool = True
+
+
+@dataclass
+class GradientTargetConfig:
+    loss: str = MISSING
+    group: str = "batch"
+
+
+@dataclass
+class GradientComparisonConfig:
+    left: GradientTargetConfig = field(default_factory=GradientTargetConfig)
+    right: GradientTargetConfig = field(default_factory=GradientTargetConfig)
+
+
+@dataclass
 class UnitScheduleCurveConfig:
     type: str = "constant"
     value: Optional[float] = None
@@ -260,6 +279,40 @@ def non_empty_string(value: object, name: str) -> None:
         raise TypeError(f"{name} must be a non-empty string.")
 
 
+def validate_gradient_probes(
+    probes: dict[str, GradientProbeConfig],
+    path: str,
+) -> None:
+    if not isinstance(probes, dict):
+        raise TypeError(f"{path} must be a mapping.")
+    for name, probe in probes.items():
+        non_empty_string(name, f"{path} probe name")
+        if probe.match not in {"exact", "regex"}:
+            raise ValueError(f"{path}.{name}.match must be 'exact' or 'regex'.")
+        if not isinstance(probe.trainable_only, bool):
+            raise TypeError(f"{path}.{name}.trainable_only must be a boolean.")
+        if not probe.parameters:
+            raise ValueError(f"{path}.{name}.parameters must not be empty.")
+        for index, parameter in enumerate(probe.parameters):
+            non_empty_string(
+                parameter,
+                f"{path}.{name}.parameters[{index}]",
+            )
+
+
+def validate_gradient_comparisons(
+    comparisons: list[GradientComparisonConfig],
+    path: str,
+) -> None:
+    if not isinstance(comparisons, list):
+        raise TypeError(f"{path} must be a list.")
+    for index, comparison in enumerate(comparisons):
+        for side, target in (("left", comparison.left), ("right", comparison.right)):
+            target_path = f"{path}[{index}].{side}"
+            non_empty_string(target.loss, f"{target_path}.loss")
+            non_empty_string(target.group, f"{target_path}.group")
+
+
 def _validate_performance(config: PerformanceConfig) -> None:
     positive_integer(
         config.log_every_n_steps,
@@ -297,33 +350,33 @@ def _validate_audio_sequence_layout(config: _EntryConfig) -> None:
             "because full codec codes are trained as sequence tokens."
         )
     if (
-        config.runtime.semantic_codec_artifact is not None
+        config.runtime.acoustic_generator_artifact is not None
         and config.audio_sequence_layout is AudioSequenceLayout.FLATTENED
     ):
         raise ValueError(
-            "runtime.semantic_codec_artifact requires audio_sequence_layout=semantic."
+            "runtime.acoustic_generator_artifact requires audio_sequence_layout=semantic."
         )
     if (
-        config.runtime.semantic_codec_artifact is not None
+        config.runtime.acoustic_generator_artifact is not None
         and acoustic is not AcousticType.NONE
     ):
         raise ValueError(
-            "runtime.semantic_codec_artifact requires model/acoustic=none."
+            "runtime.acoustic_generator_artifact requires model/acoustic=none."
         )
     if config.runtime.audio_view is AudioView.BICODEC and acoustic is not AcousticType.NONE:
         raise ValueError(
             "BiCodec fixed-length acoustic units require model/acoustic=none; "
-            "use runtime.semantic_codec_artifact or audio_sequence_layout=flattened."
+            "use runtime.acoustic_generator_artifact or audio_sequence_layout=flattened."
         )
     if (
         acoustic is AcousticType.NONE
         and config.runtime.audio_view is AudioView.LONGCAT
         and config.audio_sequence_layout is AudioSequenceLayout.SEMANTIC
-        and config.runtime.semantic_codec_artifact is None
+        and config.runtime.acoustic_generator_artifact is None
     ):
         raise ValueError(
             "audio_sequence_layout=semantic with model/acoustic=none requires "
-            "runtime.semantic_codec_artifact; use audio_sequence_layout=flattened "
+            "runtime.acoustic_generator_artifact; use audio_sequence_layout=flattened "
             "for token-only training."
         )
 
@@ -454,6 +507,9 @@ __all__ = [
     "AcousticNoneConfig",
     "FlowConfig",
     "FlowModelConfig",
+    "GradientComparisonConfig",
+    "GradientProbeConfig",
+    "GradientTargetConfig",
     "LoggingConfig",
     "OptimConfig",
     "PerformanceConfig",
@@ -473,4 +529,6 @@ __all__ = [
     "optional_positive_number",
     "positive_integer",
     "validate_training",
+    "validate_gradient_comparisons",
+    "validate_gradient_probes",
 ]

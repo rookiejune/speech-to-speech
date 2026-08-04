@@ -14,7 +14,7 @@ from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..runtime.protocol import GenerationRuntime
 from ..task import PredictionModality, Task
 from ..task.templates import format_instruction, select_template
-from .types import Request
+from ..task import Request
 
 
 def prepare_bicodec_tts_request(

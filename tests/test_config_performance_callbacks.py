@@ -33,8 +33,8 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
         with self.assertRaisesRegex(ValueError, "task_sample.enabled=false"):
             _overfit("callbacks.performance.enabled=true")
 
-    @patch("scripts._entry.TrainingFlops")
-    @patch("scripts._entry.PerformanceCallback")
+    @patch("speech_to_speech.training.composition.TrainingFlops")
+    @patch("speech_to_speech.training.composition.PerformanceCallback")
     def test_overfit_performance_builds_the_dynamic_provider(
         self,
         performance,
@@ -59,7 +59,7 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
         )
         self.assertIs(callback, performance.return_value)
 
-    @patch("scripts.overfit.GradLogger")
+    @patch("speech_to_speech.training.composition.GradLogger")
     def test_overfit_performance_omits_extra_gradient_passes(self, grad_logger):
         default = _overfit()
         performance = _performance_overfit()
@@ -108,7 +108,9 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
 
     def test_logging_builder_uses_the_configured_layout(self):
         tensorboard = _overfit().logging
-        with patch("scripts._logging.TensorBoardLogger") as logger:
+        with patch(
+            "speech_to_speech.training.composition.TensorBoardLogger"
+        ) as logger:
             built = build_logger(tensorboard)
 
         self.assertIs(built, logger.return_value)
@@ -118,7 +120,7 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
         )
 
         csv = _overfit("experiment=overfit/toy_smoke").logging
-        with patch("scripts._logging.CSVLogger") as logger:
+        with patch("speech_to_speech.training.composition.CSVLogger") as logger:
             built = build_logger(csv)
 
         self.assertIs(built, logger.return_value)
@@ -247,7 +249,10 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
         )
         built = Mock()
 
-        with patch("scripts.train.GradLogger", return_value=built) as factory:
+        with patch(
+            "speech_to_speech.training.composition.GradLogger",
+            return_value=built,
+        ) as factory:
             callbacks = train_script.training_callbacks(
                 config,
                 Path("/tmp/output"),
@@ -289,8 +294,11 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
         performance = Mock()
 
         with (
-            patch("scripts.train.performance", return_value=performance),
-            patch("scripts.train.GradLogger") as factory,
+            patch(
+                "speech_to_speech.training.composition.build_performance",
+                return_value=performance,
+            ),
+            patch("speech_to_speech.training.composition.GradLogger") as factory,
         ):
             callbacks = train_script.training_callbacks(
                 config,

@@ -61,14 +61,18 @@ from speech_to_speech.runtime.backbone import (
     BackboneOutputView,
 )
 from speech_to_speech.runtime.protocol import TokenModelRuntime
-from speech_to_speech.runtime.types import (
+from speech_to_speech.runtime.codec_contract import (
+    CodecBackend,
+    SemanticCodec,
+)
+from speech_to_speech.runtime.tokenizer import (
     AudioTokenizer,
+    TextTokenizer,
+)
+from speech_to_speech.runtime.backbone.contract import (
     Backbone,
     BackboneOutput,
     BackboneReadout,
-    CodecBackend,
-    SemanticCodec,
-    TextTokenizer,
 )
 
 
@@ -992,13 +996,13 @@ class _ContractRuntime:
         return self._audio_sequence_layout
 
     @property
-    def semantic_codec_artifact(self) -> str | None:
+    def acoustic_generator_artifact(self) -> str | None:
         if self._semantic_artifact_sha256 is None:
             return None
         return "/fixture/semantic-codec"
 
     @cached_property
-    def semantic_codec_artifact_sha256(self) -> str | None:
+    def acoustic_generator_artifact_sha256(self) -> str | None:
         return self._semantic_artifact_sha256
 
     @property

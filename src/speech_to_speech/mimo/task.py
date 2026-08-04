@@ -14,9 +14,9 @@ from typing import Iterable
 import torch
 from torch import Tensor
 
-from ..._compat import StrEnum, auto
-from ..._tensor import is_signed_integer_dtype
-from .batch import MIMO_IGNORE_INDEX, MimoSample
+from .._compat import StrEnum, auto
+from .._tensor import is_signed_integer_dtype
+from .contract import MIMO_IGNORE_INDEX, MimoSample
 
 
 class MimoTask(StrEnum):

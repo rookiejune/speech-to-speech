@@ -15,6 +15,7 @@ from speech_to_speech.runtime import (
     AudioSequenceLayout,
     Config,
     Runtime,
+    migrate_config_fields,
     runtime_for_sequence_layout,
 )
 from speech_to_speech.runtime.audio_tokenizer import (
@@ -22,7 +23,7 @@ from speech_to_speech.runtime.audio_tokenizer import (
     FlattenedAudioTokenizer,
 )
 from speech_to_speech.runtime.codec import load_codec
-from speech_to_speech.runtime.types import (
+from speech_to_speech.runtime.codec_contract import (
     frame_codec,
     supports_acoustic,
     supports_structured,
@@ -30,31 +31,51 @@ from speech_to_speech.runtime.types import (
 
 
 class RuntimeCodecTest(unittest.TestCase):
-    def test_semantic_codec_artifact_file_digest_is_cached_per_runtime(self) -> None:
+    def test_legacy_generator_artifact_config_field_is_migrated_explicitly(self) -> None:
+        fields = {"semantic_codec_artifact": "/tmp/legacy-generator"}
+
+        with self.assertWarns(FutureWarning):
+            migrate_config_fields(fields)
+
+        self.assertEqual(
+            fields,
+            {"acoustic_generator_artifact": "/tmp/legacy-generator"},
+        )
+
+    def test_legacy_generator_artifact_config_field_rejects_conflicts(self) -> None:
+        fields = {
+            "acoustic_generator_artifact": "/tmp/current-generator",
+            "semantic_codec_artifact": "/tmp/legacy-generator",
+        }
+
+        with self.assertRaisesRegex(ValueError, "conflicting"):
+            migrate_config_fields(fields)
+
+    def test_acoustic_generator_artifact_file_digest_is_cached_per_runtime(self) -> None:
         with TemporaryDirectory() as directory:
             artifact = Path(directory) / "semantic-codec.pt"
             artifact.write_bytes(b"semantic-codec-v1")
             runtime = Runtime(
                 Config(
                     codec="longcat",
-                    semantic_codec_artifact=str(artifact),
+                    acoustic_generator_artifact=str(artifact),
                 )
             )
 
-            first = runtime.semantic_codec_artifact_sha256
+            first = runtime.acoustic_generator_artifact_sha256
             artifact.write_bytes(b"semantic-codec-v2")
 
             self.assertEqual(
                 first,
                 hashlib.sha256(b"semantic-codec-v1").hexdigest(),
             )
-            self.assertEqual(runtime.semantic_codec_artifact_sha256, first)
+            self.assertEqual(runtime.acoustic_generator_artifact_sha256, first)
             self.assertNotEqual(
-                Runtime(runtime.config).semantic_codec_artifact_sha256,
+                Runtime(runtime.config).acoustic_generator_artifact_sha256,
                 first,
             )
 
-    def test_semantic_codec_artifact_directory_digest_uses_relative_content(self) -> None:
+    def test_acoustic_generator_artifact_directory_digest_uses_relative_content(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             first = root / "first" / "artifact"
@@ -75,23 +96,23 @@ class RuntimeCodecTest(unittest.TestCase):
             (second / "weights.bin").write_bytes(b"weights")
 
             first_digest = Runtime(
-                Config(codec="longcat", semantic_codec_artifact=str(first))
-            ).semantic_codec_artifact_sha256
+                Config(codec="longcat", acoustic_generator_artifact=str(first))
+            ).acoustic_generator_artifact_sha256
             second_digest = Runtime(
-                Config(codec="longcat", semantic_codec_artifact=str(second))
-            ).semantic_codec_artifact_sha256
+                Config(codec="longcat", acoustic_generator_artifact=str(second))
+            ).acoustic_generator_artifact_sha256
 
             self.assertEqual(first_digest, second_digest)
             (second / "nested" / "config.json").rename(second / "config.json")
             self.assertNotEqual(
                 Runtime(
-                    Config(codec="longcat", semantic_codec_artifact=str(second))
-                ).semantic_codec_artifact_sha256,
+                    Config(codec="longcat", acoustic_generator_artifact=str(second))
+                ).acoustic_generator_artifact_sha256,
                 first_digest,
             )
 
-    def test_runtime_without_semantic_codec_artifact_has_no_digest(self) -> None:
-        self.assertIsNone(Runtime(Config(codec="longcat")).semantic_codec_artifact_sha256)
+    def test_runtime_without_acoustic_generator_artifact_has_no_digest(self) -> None:
+        self.assertIsNone(Runtime(Config(codec="longcat")).acoustic_generator_artifact_sha256)
 
     def test_load_codec_longcat_uses_anytrain_backend(self) -> None:
         backend = SimpleNamespace(name="longcat")
@@ -178,11 +199,11 @@ class RuntimeCodecTest(unittest.TestCase):
 
         with (
             patch(
-                "speech_to_speech.runtime.runtime.audio_tokenizer",
+                "speech_to_speech.runtime.core.audio_tokenizer",
                 return_value=semantic_tokenizer,
             ) as load_tokenizer,
             patch(
-                "speech_to_speech.runtime.runtime.BiCodecAudioTokenizer",
+                "speech_to_speech.runtime.core.BiCodecAudioTokenizer",
                 return_value=outer_tokenizer,
             ) as build_tokenizer,
         ):
@@ -295,11 +316,11 @@ class RuntimeAudioSequenceLayoutTest(unittest.TestCase):
                 audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
             )
 
-        with self.assertRaisesRegex(ValueError, "cannot use.*semantic_codec_artifact"):
+        with self.assertRaisesRegex(ValueError, "cannot use.*acoustic_generator_artifact"):
             Runtime(
                 Config(
                     codec="bicodec",
-                    semantic_codec_artifact="/tmp/bicodec-semantic",
+                    acoustic_generator_artifact="/tmp/bicodec-semantic",
                 ),
                 audio_sequence_layout=AudioSequenceLayout.FLATTENED,
             )

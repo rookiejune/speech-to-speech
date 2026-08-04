@@ -19,7 +19,10 @@ from anytrain.module.idspace import Layout
 
 from speech_to_speech.datamodule.build.sample import build_task_sample
 from speech_to_speech.datamodule.parse.parser import parse_task_sample
-from speech_to_speech.datamodule.types import AudioContextSample, Speech
+from speech_to_speech.datamodule.sample import (
+    AudioContextSample,
+    Speech,
+)
 from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.task import Task
@@ -126,7 +129,7 @@ def _bicodec_runtime(audio_sequence_layout: AudioSequenceLayout):
         audio_view=AudioView.BICODEC,
         codec_frame_rate=50.0,
         audio_sequence_layout=audio_sequence_layout,
-        semantic_codec_artifact=None,
+        acoustic_generator_artifact=None,
         text_tokenizer=_ChatTokenizer(),
         audio_tokenizer=tokenizer,
         layout=Layout(text=(0, 10), audio=(audio_start, boa + 3)),

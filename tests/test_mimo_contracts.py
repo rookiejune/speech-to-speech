@@ -9,10 +9,10 @@ from torch import nn
 from torch.utils.data import Dataset
 from torch.nn import functional as F
 
-from speech_to_speech.datamodule.mimo import MimoBatch, MimoSample, collate_mimo
+from speech_to_speech.datamodule.mimo import MimoDataModule, collate_mimo
 from speech_to_speech.datamodule.config import DataLoaderConfig
-from speech_to_speech.datamodule.mimo import MimoDataModule
 from speech_to_speech.loss.mimo import MimoObjective
+from speech_to_speech.mimo import MimoBatch, MimoSample
 from speech_to_speech.runtime.backbone import (
     BackboneReadout,
     DualStreamBodyAdapter,
@@ -24,7 +24,7 @@ from speech_to_speech.runtime.backbone import (
 
 class MimoBatchContractTest(unittest.TestCase):
     def test_transfer_reuses_validated_batch_contract(self) -> None:
-        batch = MimoBatch.from_samples(
+        batch = collate_mimo(
             [
                 MimoSample(
                     torch.tensor([1, 2]),
@@ -38,7 +38,7 @@ class MimoBatchContractTest(unittest.TestCase):
         )
 
         with patch(
-            "speech_to_speech.datamodule.mimo.batch._validate_token_matrix",
+            "speech_to_speech.mimo.contract._validate_token_matrix",
             side_effect=AssertionError("trusted transfer must not revalidate"),
         ):
             moved = batch.to(torch.device("cpu"), non_blocking=True)
@@ -254,7 +254,7 @@ class MimoObjectiveContractTest(unittest.TestCase):
             text_loss_mask=torch.tensor([False, True, True]),
             audio_loss_mask=torch.tensor([False, True, True]),
         )
-        batch = MimoBatch.from_samples(
+        batch = collate_mimo(
             [sample],
             text_pad_token_id=99,
             audio_pad_token_id=98,

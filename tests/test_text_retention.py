@@ -321,7 +321,10 @@ class TextRetentionConfigTest(unittest.TestCase):
         callback.max_new_tokens = 23
         built = Mock()
 
-        with patch("scripts.train.TextRetentionLogger", return_value=built) as factory:
+        with patch(
+            "speech_to_speech.training.composition.TextRetentionLogger",
+            return_value=built,
+        ) as factory:
             callbacks = train_script.training_callbacks(
                 config,
                 Path("/tmp/output"),
@@ -345,7 +348,10 @@ class TextRetentionConfigTest(unittest.TestCase):
         config = parse_train(_compose_train())
         performance = Mock()
 
-        with patch("scripts.train.performance", return_value=performance):
+        with patch(
+            "speech_to_speech.training.composition.build_performance",
+            return_value=performance,
+        ):
             callbacks = train_script.training_callbacks(
                 config,
                 Path("/tmp/output"),

@@ -5,8 +5,8 @@ from typing import cast
 
 import torch
 from anytrain.module.dit import DiTBlock, SequenceAttention, TimeEmbedding
-from semantic_acoustic_codec.model.dit import DiTDecoder
-from semantic_acoustic_codec.model.rvq import AcousticRVQDecoder
+from semantic_acoustic_generator.model.dit import DiTDecoder
+from semantic_acoustic_generator.model.rvq import AcousticRVQDecoder
 from torch import Tensor, nn
 from torch.nn.modules.linear import NonDynamicallyQuantizableLinear
 from transformers import Qwen3Model
@@ -16,7 +16,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3MLP,
 )
 
-from ..model._helper import MLPAdapter
+from ..model.adapter import MLPAdapter
 from ..model.audio_input import AudioInputAdapterType, AudioInputTower
 from ..model.audio_output import AudioOutputAdapter, AudioOutputAdapterType
 
@@ -214,9 +214,9 @@ def _linear_module(module: nn.Module, rows: int) -> int:
 
 
 def flow_decoder(decoder: DiTDecoder, *, batch: int, frames: int) -> int:
-    """Count a standard dense SAC ``DiTDecoder`` forward pass."""
+    """Count a standard dense generator ``DiTDecoder`` forward pass."""
     if type(decoder) is not DiTDecoder:
-        raise TypeError("Flow FLOPs require the standard SAC DiTDecoder.")
+        raise TypeError("Flow FLOPs require the standard generator DiTDecoder.")
     if batch < 1 or frames < 1:
         raise ValueError("Flow FLOPs batch and frame dimensions must be positive.")
     core = decoder.decoder

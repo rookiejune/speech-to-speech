@@ -11,7 +11,7 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
   root-level `audio_sequence_layout=flattened|semantic` 是公开的音频序列轴：`flattened` 把完整 codec
   codes 作为 acoustic-first / semantic-last 的 token 序列训练；`semantic` 的逻辑输入输出仍是
   full codes，但 token sequence 只处理 semantic，acoustic 由 Flow/RVQ side module 或
-  `semantic-acoustic-codec` artifact 补齐。`longcat`、`longcat_native`、`bicodec`、
+  `semantic-acoustic-generator` artifact 补齐。`longcat`、`longcat_native`、`bicodec`、
   `unicodec` 表示相互兼容的资源 snapshot；不再拆分 `codec` 和 `sampler` 组。
 - `model`：完整映射 `model.Config` 的 semantic adapter、可选 source-audio input adapter、
   route-local CTC decoder、`ToyConfig`、`AudioOutputAdapterConfig` 与 `peft.LoraConfig | None`。
@@ -40,7 +40,7 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
 - `pl_module`：只保留 Lightning module 自身行为配置，例如 validation generation token budget；
   不再持有 optimizer 或 LR schedule knobs。
 
-Acoustic-only codec screening 已迁入 `semantic-acoustic-codec`。本仓库不再维护对应的 Hydra root、
+Acoustic-only codec screening 已迁入 `semantic-acoustic-generator`。本仓库不再维护对应的 Hydra root、
 job wrapper 或 config schema；历史实验记录仍保存在 `docs/experiments/` 中。
 
 `entry`、`trainer`、`logging`、`callback` 与 `experiment` 属于 Lightning/Hydra 运行编排，可以没有同名
@@ -82,7 +82,7 @@ decoder 为 identity，训练 experiment 只覆写需要启用的 route weight�
 ## 生产默认与完整链路测试
 
 Acoustic-only codec screening 的生产默认、smoke budget 和 MFU provider 由
-`semantic-acoustic-codec` 维护。本仓库的生产默认只覆盖 joint token/Flow/RVQ 训练入口。
+`semantic-acoustic-generator` 维护。本仓库的生产默认只覆盖 joint token/Flow/RVQ 训练入口。
 
 联合 token/Flow/RVQ 训练的 overfit root config 保持 `callbacks.performance.enabled: false`，避免短
 fixed-sample 验收默认承担性能测试。显式启用时必须同时关闭 task sample logging，例如
@@ -151,8 +151,8 @@ experiment 之前，以便非 LoRA experiment 用 `model.lora: null` 覆盖）�
   optimizer steps 的 train fixed panels，并都包含 MT panel；正式 entry 还默认启用独立的
   text-retention baseline。MT panel 只允许 train split，validation panel 仍要求 speech loader 与
   独立 validation dataset。
-  UniCodec smoke 只验证独立的 full-code 兼容路径，不属于 staged joint 课程；SAC 预训练和 artifact
-  导出由仓外的 `semantic-acoustic-codec` 负责。
+  UniCodec smoke 只验证独立的 full-code 兼容路径，不属于 staged joint 课程；generator plugin 预训练和 artifact
+  导出由仓外的 `semantic-acoustic-generator` 负责。
   新课程输出统一写入 `staged-joint/s2st/stage_0..3/`，与其他训练路线的 checkpoint、
   `last.ckpt` 和 TensorBoard 目录隔离。
 - `train/smoke/parameter_policy`：参数冻结专用两步实验。它固定 toy model/data 与 CPU trainer，
@@ -178,10 +178,10 @@ experiment 之前，以便非 LoRA experiment 用 `model.lora: null` 覆盖）�
 该字段只用于同一 stage、相同模型拓扑和 optimizer 参数组的断点续训；它不承担跨 stage 权重迁移，
 且只属于 staged train，overfit 配置不接受它。
 
-SAC 预训练、codec 筛选和 generator artifact 导出属于仓库外的
-`semantic-acoustic-codec`。本仓库的 staged wrapper 不启动这些流程，也不切换到其他 codec
+generator plugin 预训练、codec 筛选和 generator artifact 导出属于仓库外的
+`semantic-acoustic-generator`。本仓库的 staged wrapper 不启动这些流程，也不切换到其他 codec
 训练入口。正式 Flow/RVQ stage 必须通过
-`SPEECH_TO_SPEECH_SAC_ARTIFACT` 指定仓外产物；wrapper 将其传给
+`SPEECH_TO_SPEECH_ACOUSTIC_GENERATOR_ARTIFACT` 指定仓外产物；wrapper 将其传给
 `model.acoustic.init_artifact`，composition 再在构造 S2S model 前校验 artifact 的 route、frame
 layout、decoder 配置和 acoustic backend metadata。该变量缺失或为空时 wrapper 在启动 Python 前失败。
 
@@ -195,13 +195,14 @@ step 数，`serial_joint` 下乘以 `loader_plan.accumulate_grad_batches`。`san
 
 ## 入口边界
 
-`scripts/_config/common.py` 定义两个入口共享的 acoustic、Trainer、logging、callback 基础结构与
+`speech_to_speech.training.config` 定义两个入口共享的 model、Trainer、logging、callback 配置结构与
 组合校验；`scripts/_config/overfit.py` 和 `scripts/_config/train.py` 分别拥有入口 schema 与其业务规则。
 `scripts/_config/normalization.py` 隔离 OmegaConf 可写化、枚举规范化与 structured dataclass 合并，
 不包含训练业务规则。`speech_to_speech.pl_module.composition` 负责 token/flow/RVQ 的
 model/objective/module 组装、基于 `model.acoustic.type` 的统一分发，以及 runtime acoustic side-channel
-约束；`scripts/_entry.py` 只放 overfit/train 共享的 runtime device、Trainer 与 performance callback
-组装。
+约束；`speech_to_speech.training.composition` 组装共享 logger、Trainer、performance、基础 callback、
+gradient probe 与 text-retention callback。未索引 CUDA device 的 local-rank 绑定由
+`speech_to_speech.runtime.config.config_for_local_rank` 负责。
 `runtime.Config`、`model.Config`、`pl_module.Config`、`model.DecoderConfig`、
 `datamodule.config.SpeechConfig`、`DataLoaderConfig` 和 `datamodule.dataset.text.TextConfig` 直接进入 root
 schema，不重复声明字段；`scripts/overfit.py` 与 `scripts/train.py` 都直接把解析后的 datamodule config 交给 `LoaderSpec`，不做
@@ -232,7 +233,7 @@ codes/reference 中取得 acoustic 并直接序列化进 prompt。
   semantic-last。
 - `audio_sequence_layout=semantic` 保持逻辑输入输出为 full codes，但模型 token sequence
   只预测 semantic。需要 waveform 时，acoustic 由 Flow/RVQ side module 或
-  `runtime.semantic_codec_artifact` 提供。
+  `runtime.acoustic_generator_artifact` 提供。
 - BiCodec 只允许 `audio_sequence_layout=flattened` 的 self-describing structured sequence。
   输入 global 直接序列化进 prompt，response 以 `<begin_of_semantic>` 开局；没有输入 global 时
   response 以 `<begin_of_global>` 开局，由 LLM 生成 global 后继续生成 semantic。global ownership
@@ -249,16 +250,18 @@ codes/reference 中取得 acoustic 并直接序列化进 prompt。
   Qwen/Qwen3 contract。`configs/runtime/kimi_audio.yaml` 使用 Kimi-Audio 的 remote-code
   双分支 readout，并显式配置本项目的单流 Jinja instruction template；这不是 Kimi 官方双流
   PromptManager 格式，后者需要独立的结构化 prompt adapter。
-- `runtime.semantic_codec_artifact` 为 `semantic-acoustic-codec` 的 semantic-only waveform
+- `runtime.acoustic_generator_artifact` 为 `semantic-acoustic-generator` 的 semantic-only waveform
   support artifact；LongCat 的 `semantic` token-only 路径可使用它。BiCodec 不接受该 artifact，
   unified structured sequence 始终恢复完整 `AudioCodes`，在 backend 边界转换后调用 `detokenize()`，
   也不接入 Flow/RVQ composition。两份 BiCodec smoke 都选择
   `datamodule/dataset=qwen_tts_speaker` 和 `datamodule.shape=single`；可用
-  `datamodule.dataset.speaker=<id>` 限制到一个 speaker；`bicodec_input_global_smoke` 使用 prompt
+  `datamodule.dataset.speaker=<id>` 限制到一个 speaker，也可用
+  `datamodule.dataset.filter=<grid-revision>` 选择 workspace 已发布的 Qwen grid quality revision；
+  `bicodec_input_global_smoke` 使用 prompt
   global stream，`bicodec_generate_global_smoke` 从 text 生成 global stream。FrameCodec 的
   token-only full-code baseline 使用 `audio_sequence_layout=flattened`。
 - `model.acoustic.init_artifact` 是 Flow/RVQ 联合训练的 generator 初始化路径，与
-  `runtime.semantic_codec_artifact` 不同。composition 加载 artifact 后校验 frame-aligned layout、
+  `runtime.acoustic_generator_artifact` 不同。composition 加载 artifact 后校验 frame-aligned layout、
   decoder/REPA 配置和 acoustic backend metadata，再把已加载对象交给 model；semantic conditioner 不进入
   S2S。Flow 迁移 decoder 与 feature normalization，RVQ 当前只接受 `codebook_ar` artifact。
 - UniCodec 也是 `FrameCodec`，`runtime=unicodec model/acoustic=none` 使用
@@ -308,6 +311,6 @@ nested structured config 展开，因此 normalization 边界先用官方字段�
 overfit 入口继续默认 `callbacks.parameter_policy.name=full` 且不启用 LoRA，专门验收全参闭环。
 
 `staged_joint/stage_0..3` 是 S2S 内部的数据/任务/参数策略里程碑命名，
-不等同于“先在 SAC 预训练 generator、再在 S2S 用 hidden state 联合训练”的两个 phase。SAC
+不等同于“先在 generator plugin 预训练 generator、再在 S2S 用 hidden state 联合训练”的两个 phase。generator plugin
 在仓库外预训练并导出 artifact；本仓库的初始化只在 model composition 时发生一次，loader plan
 不拥有 artifact 训练、导出或切换逻辑。

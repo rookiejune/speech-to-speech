@@ -5,7 +5,7 @@ from typing import Any
 
 import torch
 
-from ..types import AudioOutput, Result
+from ..result import AudioOutput, Result
 
 
 def summary(run_output: dict[str, Any]) -> dict[str, Any]:

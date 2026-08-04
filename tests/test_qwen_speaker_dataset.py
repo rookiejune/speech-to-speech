@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 import torch
 from anydataset.dataset import MapStyleABC
-from anydataset.dataset.speaker import SpeakerAudioGrid
+from anydataset.dataset.speaker import SpeakerAudioGrid, SpeakerAudioRow
 from anydataset.types import (
     AudioItem,
     AudioMeta,
@@ -34,7 +34,9 @@ from speech_to_speech.datamodule.dataset.speech import (
 )
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.build.single import SingleCollator
-from speech_to_speech.datamodule.types import ModelBatch
+from speech_to_speech.datamodule.module import _sample_audio_frame_cost
+from speech_to_speech.datamodule.batch import ModelBatch
+from speech_to_speech.datamodule.sample import AudioContextCostRow
 from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.task import Task
@@ -62,6 +64,51 @@ class SpeakerGridDatasetTest(unittest.TestCase):
         self.assertEqual(dataset.global_index(1), 3)
         self.assertIs(dataset[0], grid.cells[1])
         self.assertIs(dataset[1], grid.cells[3])
+
+    def test_cost_row_delegates_after_speaker_index_mapping(self):
+        cells = _CostCells(_cells())
+        dataset = SpeakerGridCellsDataset(
+            SpeakerAudioGrid(cells, ("alice", "bob")),
+            speaker="bob",
+        )
+
+        row = dataset.cost_row(-1)
+
+        self.assertEqual(row, ("cost", 3))
+        self.assertEqual(cells.cost_requests, [3])
+        self.assertEqual(cells.item_requests, [])
+
+    def test_selected_speaker_maps_every_text_role_row(self):
+        grid = _multi_role_grid()
+        dataset = SpeakerGridCellsDataset(grid, speaker="bob")
+
+        self.assertEqual(grid.shape, (2, 2, 2))
+        self.assertEqual(len(dataset), 4)
+        self.assertEqual(
+            [dataset.global_index(index) for index in range(len(dataset))],
+            [1, 3, 5, 7],
+        )
+
+    def test_context_cost_sums_two_metadata_rows_without_payload_reads(self):
+        cells = _CostCells(
+            _cells(),
+            cost_rows=tuple(
+                _cost_row(duration)
+                for duration in (0.02, 0.04, 0.06, 0.08)
+            ),
+        )
+        dataset = SpeakerGridCellsDataset(
+            SpeakerAudioGrid(cells, ("alice", "bob")),
+            speaker="bob",
+            with_audio_context=True,
+        )
+
+        row = dataset.cost_row(0)
+
+        self.assertIsInstance(row, AudioContextCostRow)
+        self.assertEqual(cells.cost_requests, [1, 3])
+        self.assertEqual(cells.item_requests, [])
+        self.assertEqual(_sample_audio_frame_cost(row, frame_rate=50.0), 6)
 
     def test_selected_speaker_shards_rows_after_filtering(self):
         cells = _Cells(_cells())
@@ -122,6 +169,19 @@ class SpeakerGridDatasetTest(unittest.TestCase):
             0,
         )
 
+    def test_reference_context_uses_text_rows_not_source_axis(self):
+        cells = _CostCells(_multi_role_cells(source_count=1))
+        dataset = SpeakerGridCellsDataset(
+            _multi_role_grid(source_count=1, cells=cells),
+            speaker="bob",
+            with_audio_context=True,
+        )
+
+        self.assertEqual(len(dataset), 2)
+        _ = dataset[0]
+        _ = dataset[1]
+        self.assertEqual(cells.item_requests, [1, 3, 3, 1])
+
     def test_reference_context_requires_two_rows(self):
         one_row = SpeakerAudioGrid(_Cells(_cells()[:2]), ("alice", "bob"))
 
@@ -130,11 +190,14 @@ class SpeakerGridDatasetTest(unittest.TestCase):
 
     def test_loader_selects_runtime_codec_and_speaker(self):
         load = Mock()
-        load.return_value = SimpleNamespace(load=lambda: _grid())
+        view = load.return_value
+        selected = view.filter.return_value
+        selected.load.return_value = _grid()
         config = DatasetConfig(
             name=DatasetName.QWEN_TTS_SPEAKER,
             root="/tmp/qwen-bicodec",
             split="train",
+            filter="grid_quality_v1",
             speaker="bob",
         )
 
@@ -151,13 +214,17 @@ class SpeakerGridDatasetTest(unittest.TestCase):
             root=Path("/tmp/qwen-bicodec"),
             split="train",
         )
+        view.filter.assert_called_once_with("grid_quality_v1")
+        selected.load.assert_called_once_with()
 
     def test_loader_does_not_infer_reference_context_from_runtime(self):
         load = Mock()
-        load.return_value = SimpleNamespace(load=lambda: _grid())
+        view = load.return_value
+        selected = view.filter.return_value
+        selected.load.return_value = _grid()
         with _qwen_tts_loader(load):
             dataset = load_dataset(
-                DatasetConfig(name=DatasetName.QWEN_TTS_SPEAKER),
+                DatasetConfig(name=DatasetName.QWEN_TTS_SPEAKER, filter=None),
                 SimpleNamespace(
                     codec_name="bicodec",
                     audio_view=AudioView.BICODEC,
@@ -172,6 +239,7 @@ class SpeakerGridDatasetTest(unittest.TestCase):
 
         self.assertIsInstance(dataset, SpeakerGridCellsDataset)
         self.assertFalse(dataset.with_audio_context)
+        view.filter.assert_called_once_with(None)
 
     def test_loader_rejects_unsupported_codec(self):
         config = DatasetConfig(name=DatasetName.QWEN_TTS_SPEAKER)
@@ -287,6 +355,29 @@ class _Cells(MapStyleABC):
         yield (2, 3)
 
 
+class _CostCells(_Cells):
+    def __init__(
+        self,
+        samples: Sequence[Sample],
+        *,
+        cost_rows: Sequence[object] | None = None,
+    ) -> None:
+        super().__init__(samples)
+        self.cost_rows = cost_rows
+        self.cost_requests: list[int] = []
+        self.item_requests: list[int] = []
+
+    def __getitem__(self, index: int) -> Sample:
+        self.item_requests.append(index)
+        return super().__getitem__(index)
+
+    def cost_row(self, index: int) -> object:
+        self.cost_requests.append(index)
+        if self.cost_rows is not None:
+            return self.cost_rows[index]
+        return "cost", index
+
+
 class _TextTokenizer:
     special_tokens_map: dict[str, str] = {}
 
@@ -304,6 +395,68 @@ class _TextTokenizer:
 
 def _grid() -> SpeakerAudioGrid:
     return SpeakerAudioGrid(_Cells(_cells()), ("alice", "bob"))
+
+
+def _multi_role_grid(
+    *,
+    source_count: int = 2,
+    cells: _Cells | None = None,
+) -> SpeakerAudioGrid:
+    return SpeakerAudioGrid(
+        _Cells(_multi_role_cells(source_count)) if cells is None else cells,
+        ("alice", "bob"),
+        row_specs=tuple(
+            SpeakerAudioRow(source_index=source, role=role)
+            for source in range(source_count)
+            for role in (Role.SOURCE, Role.TARGET)
+        ),
+    )
+
+
+def _multi_role_cells(source_count: int) -> tuple[Sample, ...]:
+    samples: list[Sample] = []
+    for source in range(source_count):
+        for role in (Role.SOURCE, Role.TARGET):
+            for speaker_index, speaker in enumerate(("alice", "bob")):
+                offset = source * 4 + int(role is Role.TARGET) * 2 + speaker_index
+                samples.append(
+                    {
+                        (Role.DEFAULT, Modality.TEXT): TextItem(
+                            views={
+                                TextView.TEXT: f"source {source} {role.value}",
+                                TextView.SPEAKERS: speaker,
+                            },
+                            meta={
+                                TextMeta.LANG: Lang.EN,
+                                TextMeta.SOURCE_INDEX: source,
+                            },
+                        ),
+                        (Role.DEFAULT, Modality.AUDIO): AudioItem(
+                            views={
+                                AudioView.BICODEC: {
+                                    "semantic": torch.tensor([[offset]]),
+                                    "acoustic": torch.tensor([[0, 1]]),
+                                }
+                            },
+                            meta={
+                                AudioMeta.DURATION: 0.02 * (offset + 1),
+                                AudioMeta.SPEAKER_ID: speaker,
+                            },
+                        ),
+                    }
+                )
+    return tuple(samples)
+
+
+def _cost_row(duration: float) -> SimpleNamespace:
+    return SimpleNamespace(
+        items=(
+            (
+                (Role.DEFAULT, Modality.AUDIO),
+                {AudioMeta.DURATION.value: duration},
+            ),
+        ),
+    )
 
 
 def _cells() -> tuple[Sample, ...]:
@@ -357,7 +510,7 @@ def _runtime(audio_sequence_layout: AudioSequenceLayout):
         audio_view=AudioView.BICODEC,
         codec_frame_rate=50.0,
         audio_sequence_layout=audio_sequence_layout,
-        semantic_codec_artifact=(
+        acoustic_generator_artifact=(
             "/tmp/bicodec-semantic"
             if audio_sequence_layout is AudioSequenceLayout.SEMANTIC
             else None

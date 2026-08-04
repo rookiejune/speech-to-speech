@@ -8,7 +8,7 @@ from typing import Any
 
 from torch import Tensor
 
-from ..datamodule.types import ModelBatch
+from ..datamodule.batch import ModelBatch
 from ..model.base import Model
 from ..rl.types import PreferenceBatch
 from .logprob import target_token_logps

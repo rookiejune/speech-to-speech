@@ -11,8 +11,9 @@ from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.runtime import AudioSequenceLayout, Config as RuntimeConfig
 from speech_to_speech.training.parameter_policy import ParameterPolicyConfig
 
-from .common import (
+from speech_to_speech.training.config import (
     FlowModelConfig,
+    GradientProbeConfig,
     LoggingConfig,
     OptimConfig,
     PerformanceConfig,
@@ -21,9 +22,9 @@ from .common import (
     TokenModelConfig,
     TrainConfig,
     TrainerConfig,
-    non_empty_string,
     non_negative_integer,
     positive_integer,
+    validate_gradient_probes,
     validate_training,
 )
 from .normalization import parse, peft_lora, prepare
@@ -38,13 +39,6 @@ class TaskSampleCallbackConfig:
 @dataclass
 class EvaluationCallbackConfig:
     enabled: bool = True
-
-
-@dataclass
-class GradientProbeConfig:
-    parameters: list[str] = field(default_factory=list)
-    match: str = "exact"
-    trainable_only: bool = True
 
 
 @dataclass
@@ -156,11 +150,11 @@ def _validate_callbacks(config: OverfitCallbacksConfig) -> None:
         config.gradient_probe.every_n_steps,
         "callbacks.gradient_probe.every_n_steps",
     )
-    _validate_gradient_probes(
+    validate_gradient_probes(
         config.gradient_probe.probes,
         "callbacks.gradient_probe.probes",
     )
-    _validate_gradient_probes(
+    validate_gradient_probes(
         config.gradient_probe.partial_probes,
         "callbacks.gradient_probe.partial_probes",
     )
@@ -170,27 +164,6 @@ def _validate_callbacks(config: OverfitCallbacksConfig) -> None:
         config.flow_matching.every_n_steps,
         "callbacks.flow_matching.every_n_steps",
     )
-
-
-def _validate_gradient_probes(
-    probes: dict[str, GradientProbeConfig],
-    path: str,
-) -> None:
-    if not isinstance(probes, dict):
-        raise TypeError(f"{path} must be a mapping.")
-    for name, probe in probes.items():
-        non_empty_string(name, f"{path} probe name")
-        if probe.match not in {"exact", "regex"}:
-            raise ValueError(f"{path}.{name}.match must be 'exact' or 'regex'.")
-        if not isinstance(probe.trainable_only, bool):
-            raise TypeError(f"{path}.{name}.trainable_only must be a boolean.")
-        if not probe.parameters:
-            raise ValueError(f"{path}.{name}.parameters must not be empty.")
-        for index, parameter in enumerate(probe.parameters):
-            non_empty_string(
-                parameter,
-                f"{path}.{name}.parameters[{index}]",
-            )
 
 
 __all__ = [

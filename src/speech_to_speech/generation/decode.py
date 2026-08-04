@@ -13,9 +13,8 @@ from ..runtime.audio_tokenizer import (
     BiCodecAudioTokenizer,
     semantic_codes_from_audio_tokens,
 )
-from ..runtime.types import (
+from ..runtime.codec_contract import (
     AcousticCodec,
-    AudioTokenizer,
     Codec,
     CodecBackend,
     SemanticCodec,
@@ -23,6 +22,7 @@ from ..runtime.types import (
     frame_codec,
     structured_codec,
 )
+from ..runtime.tokenizer import AudioTokenizer
 
 
 def decode_generated_audio(

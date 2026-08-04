@@ -8,12 +8,12 @@ from .core import (
     contract_sha256,
     validate_checkpoint_contract,
 )
-from .state import (
-    build_model_contract,
+from .acoustic import (
     condition_adapter_contract,
     flow_acoustic_contract,
     rvq_acoustic_contract,
 )
+from .build import build_model_contract
 
 __all__ = [
     "MODEL_CONTRACT_GRAMMAR",

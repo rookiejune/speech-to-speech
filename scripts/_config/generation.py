@@ -9,7 +9,7 @@ from speech_to_speech.datamodule.config import SpeechConfig
 from speech_to_speech.runtime import AudioSequenceLayout, Config as RuntimeConfig
 from speech_to_speech.task import Task
 
-from .common import non_negative_integer, positive_integer
+from speech_to_speech.training.config import non_negative_integer, positive_integer
 from .normalization import parse, prepare
 
 

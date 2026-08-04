@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from ..._compat import StrEnum, auto
-from ..types import validate_backbone_readout
+from .contract import validate_backbone_readout
 
 
 class BackboneInitialization(StrEnum):

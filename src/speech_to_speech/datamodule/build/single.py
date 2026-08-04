@@ -13,9 +13,11 @@ from .ar import build_ar_sample, build_pretraining_ar_sample, is_ar_task
 from ..parse.parser import parse_audio_codes, raw_speech, speech_from_codes
 from ..protocol import DataRuntime
 from .sample import build_speech_sample, build_task_sample, chat_prompt
-from ..types import (
+from ..batch import (
     ModelBatch,
     ModelSample,
+)
+from ..sample import (
     RawSpeech,
     RawSpeechBatch,
     Speech,
@@ -340,7 +342,7 @@ def _codec_codes(audio_item: types.AudioItem, runtime: DataRuntime) -> object:
 
 
 def _language(text_item: types.TextItem):
-    from ..types import Language
+    from ..sample import Language
 
     return Language(text_item.meta[types.TextMeta.LANG])
 

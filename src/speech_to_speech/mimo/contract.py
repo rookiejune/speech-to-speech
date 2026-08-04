@@ -7,14 +7,12 @@ step, so it has a deliberately separate batch contract in this module.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
 from torch import Tensor
-from torch.nn.utils.rnn import pad_sequence
 
-from ..._tensor import is_signed_integer_dtype
+from .._tensor import is_signed_integer_dtype
 
 
 MIMO_IGNORE_INDEX = -100
@@ -305,22 +303,6 @@ class MimoBatch:
             self.audio_feature_mask,
         )
 
-    @classmethod
-    def from_samples(
-        cls,
-        samples: Sequence[MimoSample],
-        *,
-        text_pad_token_id: int,
-        audio_pad_token_id: int,
-        ignore_index: int = MIMO_IGNORE_INDEX,
-    ) -> MimoBatch:
-        return collate_mimo(
-            samples,
-            text_pad_token_id=text_pad_token_id,
-            audio_pad_token_id=audio_pad_token_id,
-            ignore_index=ignore_index,
-        )
-
     @property
     def batch_size(self) -> int:
         return self.text_input_ids.size(0)
@@ -444,138 +426,25 @@ class MimoBatch:
         return result
 
 
-def collate_mimo(
-    samples: Sequence[MimoSample],
-    *,
-    text_pad_token_id: int,
-    audio_pad_token_id: int,
-    ignore_index: int = MIMO_IGNORE_INDEX,
-) -> MimoBatch:
-    """Right-pad aligned MIMO samples into a :class:`MimoBatch`.
+@dataclass(frozen=True)
+class MimoGenerationStep:
+    """One aligned autoregressive step produced by a MIMO model."""
 
-    Feature tensors are optional per sample, but when present every sample must
-    use the same feature width.  Missing rows receive zero features and a false
-    feature mask, making accidental target-feature leakage explicit.
-    """
+    text_logits: Tensor
+    audio_logits: Tensor
+    past_key_values: object | None = None
 
-    values = list(samples)
-    if not values:
-        raise ValueError("collate_mimo requires at least one sample.")
-    if any(not isinstance(sample, MimoSample) for sample in values):
-        raise TypeError("collate_mimo samples must be MimoSample values.")
-    if any(sample.ignore_index != ignore_index for sample in values):
-        raise ValueError("all MimoSample ignore_index values must match collate_mimo.")
-    if len({sample.text_input_ids.device for sample in values}) != 1:
-        raise ValueError("all MimoSample values must share a device.")
-    for name, tensors in (
-        ("text_input_ids", [sample.text_input_ids for sample in values]),
-        ("audio_input_ids", [sample.audio_input_ids for sample in values]),
-        ("text_labels", [sample.text_labels for sample in values]),
-        ("audio_labels", [sample.audio_labels for sample in values]),
-    ):
-        if len({value.dtype for value in tensors}) != 1:
-            raise TypeError(f"all MimoSample {name} tensors must share a dtype.")
-
-    text_input_ids = pad_sequence(
-        [sample.text_input_ids for sample in values],
-        batch_first=True,
-        padding_value=text_pad_token_id,
-    )
-    audio_input_ids = pad_sequence(
-        [sample.audio_input_ids for sample in values],
-        batch_first=True,
-        padding_value=audio_pad_token_id,
-    )
-    text_labels = pad_sequence(
-        [sample.text_labels for sample in values],
-        batch_first=True,
-        padding_value=ignore_index,
-    )
-    audio_labels = pad_sequence(
-        [sample.audio_labels for sample in values],
-        batch_first=True,
-        padding_value=ignore_index,
-    )
-    attention_mask = pad_sequence(
-        [sample.effective_attention_mask for sample in values],
-        batch_first=True,
-        padding_value=False,
-    )
-    text_loss_mask = pad_sequence(
-        [sample.effective_text_loss_mask for sample in values],
-        batch_first=True,
-        padding_value=False,
-    )
-    audio_loss_mask = pad_sequence(
-        [sample.effective_audio_loss_mask for sample in values],
-        batch_first=True,
-        padding_value=False,
-    )
-
-    feature_values = [sample.audio_features for sample in values]
-    audio_features: Tensor | None = None
-    audio_feature_mask: Tensor | None = None
-    if any(value is not None for value in feature_values):
-        present = [value for value in feature_values if value is not None]
-        if not present:
-            raise AssertionError("feature presence check was inconsistent.")
-        feature_width = present[0].size(1)
-        if any(value.size(1) != feature_width for value in present):
-            raise ValueError("all audio_features must share the feature dimension.")
-        if any(value.dtype != present[0].dtype for value in present):
-            raise TypeError("all audio_features must share a dtype.")
-        if any(value.device != present[0].device for value in present):
-            raise ValueError("all audio_features must share a device.")
-        padded_features: list[Tensor] = []
-        padded_masks: list[Tensor] = []
-        for sample, feature in zip(values, feature_values):
-            if feature is None:
-                padded_features.append(
-                    torch.zeros(
-                        (sample.text_input_ids.numel(), feature_width),
-                        dtype=present[0].dtype,
-                        device=present[0].device,
-                    )
-                )
-                padded_masks.append(
-                    torch.zeros(
-                        sample.text_input_ids.shape,
-                        dtype=torch.bool,
-                        device=sample.text_input_ids.device,
-                    )
-                )
-            else:
-                if sample.audio_feature_mask is None:
-                    raise AssertionError("validated samples must carry feature masks.")
-                padded_features.append(feature)
-                padded_masks.append(sample.audio_feature_mask)
-        audio_features = pad_sequence(
-            padded_features,
-            batch_first=True,
-            padding_value=0.0,
-        )
-        audio_feature_mask = pad_sequence(
-            padded_masks,
-            batch_first=True,
-            padding_value=False,
-        )
-
-    return MimoBatch(
-        text_input_ids=text_input_ids,
-        audio_input_ids=audio_input_ids,
-        text_labels=text_labels,
-        audio_labels=audio_labels,
-        text_pad_token_id=text_pad_token_id,
-        audio_pad_token_id=audio_pad_token_id,
-        attention_mask=attention_mask,
-        text_loss_mask=text_loss_mask,
-        audio_loss_mask=audio_loss_mask,
-        audio_features=audio_features,
-        audio_feature_mask=audio_feature_mask,
-        task_ids=tuple(sample.task_id for sample in values),
-        recording_ids=tuple(sample.recording_id for sample in values),
-        ignore_index=ignore_index,
-    )
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("text_logits", self.text_logits),
+            ("audio_logits", self.audio_logits),
+        ):
+            if value.dim() not in {2, 3}:
+                raise ValueError(f"{name} must have shape [B, V] or [B, T, V].")
+            if value.size(-1) < 1 or not value.is_floating_point():
+                raise TypeError(f"{name} must be floating-point with V > 0.")
+        if self.text_logits.size(0) != self.audio_logits.size(0):
+            raise ValueError("text and audio generation logits must align on batch.")
 
 
 def _validate_token_vector(value: Tensor, *, name: str) -> None:
@@ -656,6 +525,6 @@ def _validate_same_device(values: tuple[Tensor, ...]) -> None:
 __all__ = [
     "MIMO_IGNORE_INDEX",
     "MimoBatch",
+    "MimoGenerationStep",
     "MimoSample",
-    "collate_mimo",
 ]

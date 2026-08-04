@@ -16,7 +16,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from .._tensor import is_signed_integer_dtype
-from ..datamodule.mimo import MIMO_IGNORE_INDEX, MimoBatch
+from ..mimo import MIMO_IGNORE_INDEX, MimoBatch
 
 TensorReadout = Callable[[Tensor], Tensor]
 

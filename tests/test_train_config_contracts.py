@@ -64,6 +64,7 @@ class TrainConfigContractTest(ConfigTestCase):
         self.assertTrue(config.datamodule.dataloader.costs.enabled)
         self.assertEqual(config.datamodule.dataloader.costs.max_batch_frames, 4800)
         self.assertEqual(config.datamodule.dataloader.costs.planning_window, 256)
+        self.assertIsNone(config.datamodule.dataset.filter)
 
     def test_null_task_config_uses_default_template_for_loader_tasks(self):
         config = _train("datamodule.tasks=null")
@@ -96,7 +97,7 @@ class TrainConfigContractTest(ConfigTestCase):
                 "trainer.strategy=ddp_find_unused_parameters_false",
             )
 
-    def test_train_token_config_requires_semantic_codec_artifact(self):
+    def test_train_token_config_requires_acoustic_generator_artifact(self):
         token = _train(
             "runtime=longcat_native",
             "model/acoustic=none",
@@ -106,7 +107,7 @@ class TrainConfigContractTest(ConfigTestCase):
         self.assertIsInstance(token, StagedTrainTokenConfig)
         self.assertEqual(token.model.acoustic.type, AcousticType.NONE.value)
         self.assertEqual(token.run_name, "token")
-        with self.assertRaisesRegex(ValueError, "semantic_codec_artifact"):
+        with self.assertRaisesRegex(ValueError, "acoustic_generator_artifact"):
             _train("model/acoustic=none")
 
     def test_staged_joint_experiments_bind_loader_plan_and_parameter_policy(self):
@@ -419,7 +420,7 @@ class TrainConfigContractTest(ConfigTestCase):
         callbacks = []
 
         with (
-            patch("scripts.train.entry_trainer") as entry,
+            patch("scripts.train.create_trainer") as entry,
             patch("scripts.train.build_logger") as logger,
         ):
             trainer = train_script.build_trainer(config, Path("/tmp/output"), callbacks)
@@ -439,7 +440,7 @@ class TrainConfigContractTest(ConfigTestCase):
         )
 
         with (
-            patch("scripts.train.entry_trainer") as entry,
+            patch("scripts.train.create_trainer") as entry,
             patch("scripts.train.build_logger"),
         ):
             train_script.build_trainer(config, Path("/tmp/output"), [])
@@ -464,7 +465,7 @@ class TrainConfigContractTest(ConfigTestCase):
         )
 
         with (
-            patch("scripts.train.entry_trainer") as entry,
+            patch("scripts.train.create_trainer") as entry,
             patch("scripts.train.build_logger"),
         ):
             train_script.build_trainer(config, Path("/tmp/output"), [])

@@ -1,7 +1,7 @@
 # loss
 
 组合训练 objective，消费 `ModelBatch` 和模型公开接口，产出含标量 `loss` 的 mapping。
-position 语义见 [总览 §2.4](../model-design.md)。
+跨模块 position 所有权见 [设计总览](../model-design.md)。
 
 ## 对外能力
 
@@ -26,13 +26,13 @@ position 语义见 [总览 §2.4](../model-design.md)。
   最终都通过冻结 tied text readout 得到 tokenizer-local text logits。blank 是 runtime PAD 在 text
   block 内的 local ID。每条 route 的 CTC 先按 transcript token 数归一；source/target 权重项在同一
   row 内相加，组合项再按有效 `sequences`（有任一 active route 的样本行数，而不是 audio span 数）聚合。
-- `FlowLoss`：直接从 `semantic-acoustic-codec.loss` 包级导出；S2S 只保留 joint
+- `FlowLoss`：直接从 `semantic-acoustic-generator.loss` 包级导出；S2S 只保留 joint
   token/acoustic objective 的组合，不再维护独立 loss 子模块或重命名 alias。
 - `MaskedCodebookCrossEntropyLoss`：直接从 `anytrain.loss` 包级导出；训练 forward
   的 `details` 只保留逐行 `codebook_N` 和有效 frame 数。`RVQObjective.validation()` 显式请求
   `codebook_N_top1`，训练 step 不额外执行大码本 argmax；acoustic padding ID 不进入 decoder
   embedding、loss 或 accuracy。
-- `WavLMTeacher`：由 `semantic-acoustic-codec.loss` 提供；按 boolean frame mask 在线解码 target
+- `WavLMTeacher`：由 `semantic-acoustic-generator.loss` 提供；按 boolean frame mask 在线解码 target
   semantic/acoustic codes，以 16 kHz waveform 运行冻结 WavLM，取得配置层的 hidden states 并插值、
   写回原有效 frame 位置。
 - `MaskedCosineAlignmentLoss`：把选定 DiT block 的逐帧表示投影到 WavLM hidden dimension，再转给
@@ -136,7 +136,7 @@ flow matching；传入包含正数 `weight` 和 `teacher` 的 `RepaConfig` 时�
 REPA 只属于 flow 组合。teacher 显式接收 `acoustic_target["semantic_codes"]`、
 `acoustic_target["codes"]` 和 `acoustic_target_mask`；dataset 不绑定 WavLM 型号、层号或
 teacher features。acoustic-only codec screening 与 oracle artifact 导出由
-`semantic-acoustic-codec` 维护，本仓库只组合 joint token/Flow/RVQ objective。
+`semantic-acoustic-generator` 维护，本仓库只组合 joint token/Flow/RVQ objective。
 
 ## 边界
 
@@ -179,5 +179,5 @@ teacher features。acoustic-only codec screening 与 oracle artifact 导出由
 - `causal_lm.py` 只实现离散 acoustic RVQ objective，不读取 model/runtime 或重复 condition
   对齐；其稳定输出键是 `rvq`。
 - REPA teacher 始终保持 eval/frozen；teacher features detach，梯度只进入 DiT 与 student
-  projector。声学 route 的 batch-free 训练入口由 `semantic-acoustic-codec` 维护，S2S 不再复制
+  projector。声学 route 的 batch-free 训练入口由 `semantic-acoustic-generator` 维护，S2S 不再复制
   route-specific loss/teacher 实现。

@@ -28,7 +28,7 @@ from speech_to_speech.model.embedding.fsq import (
 )
 from speech_to_speech.runtime.audio_tokenizer import FlattenedAudioTokenizer
 from speech_to_speech.runtime.codec import StableCodec
-from speech_to_speech.runtime.types import (
+from speech_to_speech.runtime.codec_contract import (
     fsq_level_values,
     fsq_levels,
     fsq_radix_order,

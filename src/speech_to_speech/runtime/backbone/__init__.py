@@ -1,4 +1,11 @@
-from ..types import BackboneReadout
+from .contract import (
+    Backbone,
+    BackboneBody,
+    BackboneConfig,
+    BackboneOutput,
+    BackboneReadout,
+    validate_backbone_readout,
+)
 from .adapter import (
     BackboneAdapter,
     BackboneBodyAdapter,
@@ -23,11 +30,15 @@ from .mimo import (
 __all__ = [
     "AdapterConfig",
     "BackboneAdapter",
+    "Backbone",
+    "BackboneBody",
+    "BackboneConfig",
     "BackboneBodyAdapter",
     "BackboneEncoder",
     "BackboneExtra",
     "BackboneInitialization",
     "BackboneOutputView",
+    "BackboneOutput",
     "BackboneReadout",
     "BackboneType",
     "DualStreamBodyAdapter",
@@ -43,4 +54,5 @@ __all__ = [
     "dtype",
     "fuse_dual_embeddings",
     "shared_dual_hidden_states",
+    "validate_backbone_readout",
 ]

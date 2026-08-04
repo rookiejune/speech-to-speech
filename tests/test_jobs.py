@@ -19,7 +19,7 @@ def _environment(**overrides: str) -> dict[str, str]:
         "SPEECH_TO_SPEECH_ROOT",
         "SPEECH_TO_SPEECH_EXPERIMENT",
         "SPEECH_TO_SPEECH_PYTHON",
-        "SPEECH_TO_SPEECH_SAC_ARTIFACT",
+        "SPEECH_TO_SPEECH_ACOUSTIC_GENERATOR_ARTIFACT",
         "SPEECH_TO_SPEECH_STAGE_DATA_ROOT",
         "SPEECH_TO_SPEECH_STEP_MODE",
         "CUDA_VISIBLE_DEVICES",
@@ -33,7 +33,7 @@ def _environment(**overrides: str) -> dict[str, str]:
             "STATIC_HOME": "/private/tmp/speech-to-speech-jobs-static",
             "DYNAMIC_HOME": "/private/tmp/speech-to-speech-jobs-dynamic",
             "PYTHONPYCACHEPREFIX": "/private/tmp/speech-to-speech-jobs-pycache",
-            "SPEECH_TO_SPEECH_SAC_ARTIFACT": "/private/tmp/speech-to-speech-sac-artifact",
+            "SPEECH_TO_SPEECH_ACOUSTIC_GENERATOR_ARTIFACT": "/private/tmp/speech-to-speech-sac-artifact",
             "SPEECH_TO_SPEECH_STAGE_DATA_ROOT": "/private/tmp/speech-to-speech-jobs-data",
         }
     )
@@ -186,14 +186,14 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("must be", result.stderr)
 
-    def test_staged_wrapper_requires_external_sac_artifact(self) -> None:
+    def test_staged_wrapper_requires_external_generator_artifact(self) -> None:
         result = _run(
             JOBS / "011" / "03_staged_joint_train.sh",
-            environment=_environment(SPEECH_TO_SPEECH_SAC_ARTIFACT=""),
+            environment=_environment(SPEECH_TO_SPEECH_ACOUSTIC_GENERATOR_ARTIFACT=""),
         )
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("SPEECH_TO_SPEECH_SAC_ARTIFACT", result.stderr)
+        self.assertIn("SPEECH_TO_SPEECH_ACOUSTIC_GENERATOR_ARTIFACT", result.stderr)
 
 
 if __name__ == "__main__":

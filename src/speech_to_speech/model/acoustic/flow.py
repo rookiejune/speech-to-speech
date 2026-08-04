@@ -3,14 +3,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 import torch
-from semantic_acoustic_codec.config import DecoderConfig as SacDecoderConfig
-from semantic_acoustic_codec.model import FMFeatureGenerator
-from semantic_acoustic_codec.model.dit import DiTDecoder
-from semantic_acoustic_codec.runtime.artifact import AcousticGeneratorArtifact
+from semantic_acoustic_generator.config import DecoderConfig as SacDecoderConfig
+from semantic_acoustic_generator.model import FMFeatureGenerator
+from semantic_acoustic_generator.model.dit import DiTDecoder
+from semantic_acoustic_generator.runtime.artifact import AcousticGeneratorArtifact
 from torch import Tensor, nn
 
-from ...generation.types import AcousticGeneration
-from ...runtime.types import acoustic_codec
+from ..output import AcousticGeneration
+from ...runtime.codec_contract import acoustic_codec
 from ..contract import flow_acoustic_contract
 from .._helper import register
 from ..base import Config
@@ -22,7 +22,7 @@ from .initialization import flow_generator
 
 
 class AcousticFlow(nn.Module):
-    """S2S sampling wrapper around SAC ``FMFeatureGenerator``."""
+    """S2S sampling wrapper around the plugin's ``FMFeatureGenerator``."""
 
     feature_mean: Tensor
     feature_std: Tensor

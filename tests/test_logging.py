@@ -14,7 +14,11 @@ from speech_to_speech.callback.logging import (
     OutputsLogger,
 )
 from speech_to_speech.callback import TrainInterval
-from speech_to_speech.datamodule.types import FusedBatch, ModelBatch, ModelSample
+from speech_to_speech.datamodule.batch import (
+    FusedBatch,
+    ModelBatch,
+    ModelSample,
+)
 from speech_to_speech.loss.types import LossItem, Outputs, loss_items
 from speech_to_speech.pl_module import Config, SpeechToSpeechModule
 from speech_to_speech.task import Task

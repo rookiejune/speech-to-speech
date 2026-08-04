@@ -7,7 +7,8 @@ from lightning.pytorch import Trainer
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
-from speech_to_speech.datamodule.mimo import MimoBatch, MimoSample, collate_mimo
+from speech_to_speech.datamodule.mimo import collate_mimo
+from speech_to_speech.mimo import MimoBatch, MimoSample
 from speech_to_speech.pl_module.optim import Config as OptimConfig
 from speech_to_speech.pl_module.mimo import MimoModule
 from speech_to_speech.runtime.backbone.mimo import (

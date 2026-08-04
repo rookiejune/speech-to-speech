@@ -1,7 +1,7 @@
 # datamodule
 
-把 anydataset 的 raw sample 组织成模型可直接消费的 `ModelBatch`。数据契约与 position
-语义的权威定义见 [总览 §2](../model-design.md)。
+把 anydataset 的 raw sample 组织成模型可直接消费的 `ModelBatch`。跨模块所有权与依赖方向见
+[设计总览](../model-design.md)。
 
 ## 对外能力
 
@@ -18,7 +18,7 @@
   `AudioView` 与 runtime `audio_sequence_layout`：逻辑 audio 输入/输出始终保留完整
   semantic/acoustic codes；`flattened` 把完整 codes 投影为 audio token sequence（acoustic-first、
   semantic-last），`semantic` 只把 semantic 放进 sequence，并保留 acoustic codes 给 side module、
-  SAC。BiCodec 固定使用 self-describing `flattened` sequence，prompt/output ownership 由 sample
+  generator plugin。BiCodec 固定使用 self-describing `flattened` sequence，prompt/output ownership 由 sample
   builder 根据 source/reference 是否提供 global stream 处理，不由 parser 另造 semantic route。
 - `parse.parser.parse_task_sample()`：按 `Task` 只解析实际消费的 source/target modality。pair/single
   只决定 role 映射；codec view 缺失时是否使用 waveform fallback 与数据 shape 无关。
@@ -31,10 +31,10 @@
   positions。
 - `build.single.build_single_sample()`：复用同一 `ModelSample` / `ModelBatch` 输出契约，把 single
   utterance 组装成 text->audio 或 audio->text 序列；`pl_module` 不区分 batch 来源。
-- `types.Speech` / `types.SpeechPair`：prepared sample 的 codec、token 和语言逻辑视图；
+- `sample.Speech` / `sample.SpeechPair`：prepared sample 的 codec、token 和语言逻辑视图；
   `AudioContextSample` 为 raw sample 绑定独立 audio reference；`RawSpeech` / `SpeechTaskSample` /
   `RawSpeechBatch` 表达 task 已选择、但部分 audio item 或 reference 尚待 codec encode 的中间状态。
-- `types.ModelSample` / `types.ModelBatch`：单条和 batch 级模型输入；
+- `batch.ModelSample` / `batch.ModelBatch`：单条和 batch 级模型输入；
   `ModelBatch.from_samples(..., pad_token_id=...)` 完成校验与 padding，mask 由 padding 字段
   派生并缓存。
 - `task.Task` / `prediction.PredictionModality` / `source.SourceLayout`：`Task` 拥有
@@ -63,7 +63,9 @@
 - `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts`、`qwen_tts_speaker` prepared data
   或确定性的内存 `toy` data。`qwen_tts_speaker` 通过 workspace 加载
   `SpeakerAudioGrid`，再由 `SpeakerGridCellsDataset` 暴露 `Role.DEFAULT` flat cells；默认覆盖
-  所有 speaker，也可用 `speaker` 显式选择一列。BiCodec prepared cell 使用
+  所有 speaker，也可用 `speaker` 显式选择一列。它的 `filter` 是绑定当前 waveform/codec
+  grid snapshot 的 source-level selection revision，默认 `null`；不复用 WMT19-TTS 生成前的
+  `speech_translation_v1` source filter。BiCodec prepared cell 使用
   `AudioView.BICODEC` 的 anydataset structured mapping；parser 进入 S2S 后立即把 semantic 与
   fixed-length speaker slots 规范化为 `AudioCodes.semantic_codes/global_codes`，两者保留独立轴；
   可选的 `split_manifest` + `split_label` 把已加载的 map-style dataset 限制到
@@ -124,6 +126,62 @@ checkpoint 的收敛和生成音质仍需单独验收。
   schedule 在 DataModule 构造时固定；切换 stage 必须启动绑定新 stage 的 run，不提供运行时
   loader-weight setter。
 
+## Workspace codec 读穿补产
+
+`SpeechConfig.materialization` 为 prepared workspace 增加 request-scoped read-through 路径。开启时
+必须同时设置 `encode_missing_codes=true`，并让可选的 `codec_view` 与 runtime `AudioView` 完全一致。
+解析顺序固定为：
+
+1. 先按 workspace root、split、codec view 和 `DatasetConfig.filter` 读取现有 codec store；命中后
+   直接复用，不创建后台任务。
+2. codec store 或该 filtered selection 尚未发布时，读取同一个 filter 下的 waveform dataset 作为
+   epoch 0 fallback，并创建完整补产任务。store 已存在但 manifest、payload 或 provenance 损坏时
+   直接失败，不把损坏资产当成 miss。
+3. workspace 连 filtered waveform selection 都不存在时，不允许退化为 `filter(None)`。调用方必须用
+   `materialization.source_factory="module:attribute"` 注册包含目标过滤规则的流式 source，并显式提供
+   `input_id`；否则无法安全确定输入身份并直接报错。该 source 在训练 setup 阶段先解析出稳定的
+   filtered dataset，filter 本身不在训练 batch 内做稀疏增量发布。factory 必须在所有 rank 上返回
+   相同长度、顺序和过滤结果，并自行保证并发调用安全。这里是两段式接口：所有 rank 都必须能 import
+   的 module-level builder 接收 `AssetRequest` 并返回 dataset factory；builder 和返回值都必须是可由
+   `spawn` pickle 的确定性对象，不能使用 lambda、局部函数或捕获不可 pickle 状态的 closure。factory
+   会在每个 rank 的 setup 调用一次，并在 global owner 的 daemon worker 中再次调用，因此必须幂等、
+   可重入且只读，不能再启动 multiprocessing 子进程。返回值必须是有限、稳定且有 `__len__` 的 dataset，
+   并提供 map-style `__getitem__` 或 anydataset 支持的显式 shard iteration；Sample 必须包含内置
+   `CodecProvider` 所需的 waveform/file audio，以及 workspace pair schema 所需的 source/target text、
+   `TextView.TEXT` 和 `TextMeta.LANG`。
+
+补产结果保持 workspace codec dataset 的读取格式，但它本身已经是过滤后的 composite store，因此
+ready store 加载时不再二次应用 filter。逻辑请求由 dataset/source root、split、codec、codec view、
+filter、`input_id`、`provider_id` 和 source factory 共同确定 request ID，写入目录为
+`<output_root>/<request-id>/<codec-store-dir>`。这样不同过滤规则、输入版本或 codec provider 不会共用
+同一补产目录；manifest provenance 必须精确匹配 `input_id` 和 `provider_id` 才能复用。这两个 ID 是
+调用方维护的语义版本：source 内容、filter 实现或样本顺序变化时必须更新 `input_id`，codec checkpoint、
+provider 配置或 code 语义变化时必须更新 `provider_id`，否则系统会按旧 provenance 合法复用旧资产。
+
+生命周期跨一个明确的 epoch 边界：epoch 0 的 DataLoader 使用 filtered waveform fallback，同时只有
+global owner 在后台写完整 store；epoch 结束时 owner 的 `finish` 等待所有缺失样本写完，并把异常广播
+给全部 rank。成功后先执行 DDP barrier，再由每个 rank `refresh_materialized_assets()`。Trainer 每个
+epoch 重建 DataLoader，因此 epoch 1 开始读取 ready codec store，不再走 waveform fallback。这个边界
+保证完整跑完一次 epoch 后，请求所需的全部 codec 数据已生成或训练以明确错误终止。
+
+`finish` 会在 epoch 边界等待全量补产完成，不设置短超时；因此卡死的 source/provider 也会让该边界持续
+等待。训练若在到达 epoch end 前异常退出，teardown 只负责终止后台 worker，本次不承诺 ready；
+ViewMaterializer 的 resume state 会供后续同一请求继续补产。直接构造 DataModule/Trainer 的调用方必须
+自行安装 `AssetMaterialization` callback，并设置 `reload_dataloaders_every_n_epochs=1`；正式
+`scripts/train.py` 已自动配置这两个条件。
+
+当前实现只允许唯一的 training loader，且它必须是启用补产的 speech loader，以提供有限且唯一的 reload
+边界；validation 若也启用补产，
+必须与 training 指向同一个 codec source request。内置 provider 当前只支持 `wmt19_tts` 的 frame-code
+view；resolver 会直接拒绝 BiCodec，单独配置 `source_factory` 不能绕过，必须先扩展对应 provider/backend。
+其他 dataset 也需要先提供明确 backend/source 契约，不能沿用 frame-code materializer 猜测格式。
+`source_root` 和 `output_root` 必须在所有 rank 解析成完全相同的绝对路径；global owner 对 output 可写、
+全部 rank 可读，且共享文件系统在 barrier 后必须一致可见。即使两个挂载前缀指向同一存储，路径字符串
+不同也会形成不同 request ID。`device` 禁止使用 `auto`，并应显式选择不会与训练争抢显存且 codec backend
+确实支持的单一设备。`write_workers` 只控制该后台进程内的 writer 线程，不创建额外 materializer 进程；
+布局/吞吐字段 `max_shard_samples`、`batch_size`、`commit_samples`、`write_workers` 和 `write_prefetch`
+不属于逻辑 request identity。
+
 ## 输入输出
 
 输入是 `anydataset.types.Sample`，包含 source/target 两个 role 及 audio/text modality。
@@ -163,7 +221,7 @@ LongCat 同时暴露 structured capability 就改变数据表示。同一 batch 
 ```python
 @dataclass
 class ModelSample:
-    request: Request   # generation.types.Request
+    request: Request   # task.io.Request
     labels: Labels
 
 # Request（与推理共用）
@@ -227,9 +285,9 @@ BOA/EOA 则排除。
 
 ## 边界
 
-- 包级 `speech_to_speech.datamodule` 只导出唯一运行入口 `DataModule`。`LoaderSpec`、配置结构、
-  schedule、parser、sample、types、protocol、collator、dataset factory 等契约从对应子模块导入，
-  不提升为包级稳定 API。
+- 包级 `speech_to_speech.datamodule` 只导出诊断坐标 `SampleSplit`。`DataModule`、`LoaderSpec`、
+  配置结构、schedule、parser、sample、target、batch、protocol、collator 和 dataset factory
+  从对应子模块导入，不提升为宽 facade。
 - runtime 必须由组合入口显式传入：含 speech loader 的 `DataModule` 接收 `DatasetRuntime`，纯文本
   loader 只需要 `TextRuntime`；`Collator` 及下游 parser 和 sample builder 只消费更小的 runtime
   协议。datamodule 不自行选择 tokenizer、layout 或 special tokens。
@@ -247,7 +305,8 @@ BOA/EOA 则排除。
 - toy dataset 只读取正式 runtime 的 codec identity 与 codebook metadata；它不提供 tokenizer、
   codec、layout 或 special token，因此不存在 toy runtime 分支。
 - `parse.parser` 只解释 raw dataset representation；`build.sample` 只实现任务序列规则；
-  `types.py` 保存结构并处理局部校验、padding 和 mask。三层不反向读取彼此的私有逻辑。
+  `sample.py`、`target.py`、`batch.py` 分别保存领域样本、监督结构与训练 batch，私有
+  `_batch_ops.py` 集中 padding/transfer/assembly。各层不反向读取彼此的私有逻辑。
 - LongCat 的第 0 个 codebook 和后续 codebooks 只在 parser 边界解释为 semantic/acoustic。
   `flattened` sequence layout 不拆 semantic/acoustic side channel，而是把完整 codec codes 放入
   `semantic_codes` 并设置 `acoustic_codes=None`；Stable Codec 与 UniCodec 的完整 frame codes

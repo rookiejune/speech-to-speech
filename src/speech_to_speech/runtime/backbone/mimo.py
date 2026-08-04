@@ -10,7 +10,10 @@ import torch
 from torch import Tensor
 from transformers.cache_utils import Cache
 
-from ..types import BackboneOutput, BackboneReadout
+from ..backbone.contract import (
+    BackboneOutput,
+    BackboneReadout,
+)
 
 
 @dataclass(frozen=True)

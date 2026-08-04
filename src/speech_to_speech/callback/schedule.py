@@ -15,12 +15,12 @@ from anytrain.lightning.schedule import (
     UnitClock,
     require_unit_name,
 )
-from speech_to_speech.datamodule.types import (
+from speech_to_speech.datamodule.batch import (
     FusedBatch,
     LoaderBatch,
     ModelBatch,
-    RawSpeechBatch,
 )
+from speech_to_speech.datamodule.sample import RawSpeechBatch
 
 SUPPORTED_UNIT_NAMES = frozenset({"tokens", "frames", "audio_seconds"})
 

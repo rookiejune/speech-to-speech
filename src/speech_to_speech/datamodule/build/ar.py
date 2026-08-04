@@ -11,7 +11,15 @@ from ...task import PredictionModality, Task
 from .._helper.ctc import ctc_target
 from .._helper.tokenization import token_ids
 from ..protocol import DataRuntime, TextRuntime
-from ..types import AcousticTarget, CTCTarget, ModelSample, Speech, Text
+from ..batch import ModelSample
+from ..sample import (
+    Speech,
+    Text,
+)
+from ..target import (
+    AcousticTarget,
+    CTCTarget,
+)
 
 
 _AR_TASKS = frozenset(
@@ -386,7 +394,7 @@ def _acoustic_from_positions(
     runtime: DataRuntime,
     token_positions: Tensor,
 ) -> AcousticTarget | None:
-    if speech.acoustic_codes is None or runtime.semantic_codec_artifact is not None:
+    if speech.acoustic_codes is None or runtime.acoustic_generator_artifact is not None:
         return None
     if runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
         return None

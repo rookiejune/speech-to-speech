@@ -14,7 +14,7 @@ from ..audio import AudioCodes
 from ..task import PredictionModality
 from ..runtime import AudioSequenceLayout
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
-from ..runtime.types import (
+from ..runtime.codec_contract import (
     AcousticCodec,
     Codec,
     SemanticCodec,
@@ -32,7 +32,8 @@ from .decode import (
     decode_generated_semantic,
 )
 from .protocol import AcousticFeatureGeneration, TokenGenerator
-from .types import AudioOutput, Request, Result
+from ..task import Request
+from .result import AudioOutput, Result
 
 
 @dataclass(frozen=True)

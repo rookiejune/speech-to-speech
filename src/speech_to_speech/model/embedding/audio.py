@@ -7,8 +7,7 @@ from typing import Any, Protocol, cast, runtime_checkable
 import torch
 from torch import Tensor, nn
 
-from ...runtime.types import (
-    AudioTokenizer,
+from ...runtime.codec_contract import (
     CodebookCodec,
     codebook_codec,
     fsq_level_values,
@@ -16,6 +15,7 @@ from ...runtime.types import (
     fsq_radix_order,
     semantic_feature_dim,
 )
+from ...runtime.tokenizer import AudioTokenizer
 from .fsq import FsqEmbedding, FsqEmbeddingConfig, reference_rms
 
 _MISSING = object()

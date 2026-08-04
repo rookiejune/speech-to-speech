@@ -7,7 +7,7 @@ import unittest
 from _contracts_helpers import *
 from speech_to_speech.audio import AudioCodes
 from speech_to_speech.datamodule.build.sample import build_speech_sample
-from speech_to_speech.datamodule.types import Speech
+from speech_to_speech.datamodule.sample import Speech
 from speech_to_speech.datamodule.loader import ARFraming
 
 
@@ -18,7 +18,7 @@ class SpeechSampleContractTest(unittest.TestCase):
             audio_view=AudioView.LONGCAT,
             codec_frame_rate=50.0,
             audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
-            semantic_codec_artifact=None,
+            acoustic_generator_artifact=None,
             text_tokenizer=tokenizer,
             audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
         )
@@ -424,7 +424,7 @@ class SpeechSampleContractTest(unittest.TestCase):
             audio_view=AudioView.LONGCAT,
             codec_frame_rate=50.0,
             audio_sequence_layout=AudioSequenceLayout.FLATTENED,
-            semantic_codec_artifact=None,
+            acoustic_generator_artifact=None,
             text_tokenizer=_ChatTokenizer(10),
             audio_tokenizer=tokenizer,
             layout=Layout(

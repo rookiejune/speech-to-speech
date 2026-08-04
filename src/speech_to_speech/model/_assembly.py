@@ -9,9 +9,14 @@ from peft.utils.other import cast_mixed_precision_params
 from torch import nn
 
 from ..runtime.backbone import BackboneBodyAdapter, BackboneEncoder
-from ..runtime.types import Backbone, BackboneOutput, BackboneReadout
+from ..runtime.backbone.contract import (
+    Backbone,
+    BackboneOutput,
+    BackboneReadout,
+)
 from ._checkpointing import enable_gradient_checkpointing
-from ._helper import AdapterType, CastOutput, create_adapter
+from .adapter import AdapterType, create_adapter
+from ._helper import CastOutput
 from .audio_input import (
     AudioInputAdapterType,
     AudioInputTower,

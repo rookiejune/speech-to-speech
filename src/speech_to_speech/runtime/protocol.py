@@ -6,15 +6,17 @@ from typing import Protocol
 from anydataset.types import AudioView, Modality
 from anytrain.module.idspace import Layout
 
-from .runtime import AudioSequenceLayout
+from .config import AudioSequenceLayout
 from .backbone import BackboneAdapter
-from .types import (
-    AudioTokenizer,
-    Backbone,
+from .codec_contract import (
     CodecBackend,
     SemanticCodec,
+)
+from .tokenizer import (
+    AudioTokenizer,
     TextTokenizer,
 )
+from .backbone.contract import Backbone
 
 
 class DataRuntime(Protocol):
@@ -31,7 +33,7 @@ class DataRuntime(Protocol):
     def audio_sequence_layout(self) -> AudioSequenceLayout: ...
 
     @property
-    def semantic_codec_artifact(self) -> str | None: ...
+    def acoustic_generator_artifact(self) -> str | None: ...
 
     @cached_property
     def text_tokenizer(self) -> TextTokenizer: ...
@@ -90,7 +92,7 @@ class GenerationRuntime(DataRuntime, Protocol):
 
 class TokenModelRuntime(GenerationRuntime, Protocol):
     @cached_property
-    def semantic_codec_artifact_sha256(self) -> str | None: ...
+    def acoustic_generator_artifact_sha256(self) -> str | None: ...
 
     @property
     def semantic_codebook_sizes(self) -> tuple[int, ...]: ...

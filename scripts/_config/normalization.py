@@ -11,7 +11,7 @@ from peft import LoraConfig
 from speech_to_speech.task import Task
 from speech_to_speech.datamodule.dataset.speech import DatasetName
 from speech_to_speech.datamodule.dataset.text import TextDatasetName
-from speech_to_speech.datamodule.types import DataShape
+from speech_to_speech.datamodule.sample import DataShape
 from speech_to_speech.model import (
     AdapterType,
     AudioInputAdapterType,
@@ -24,6 +24,7 @@ from speech_to_speech.runtime import (
     AudioSequenceLayout,
     BackboneInitialization,
     BackboneType,
+    migrate_config_fields,
 )
 from speech_to_speech.training.parameter_policy import (
     ParameterGroup,
@@ -75,6 +76,7 @@ def prepare(config: DictConfig) -> DictConfig:
     _reject_audio_representation(result)
     runtime = result.get("runtime")
     if runtime is not None:
+        migrate_config_fields(runtime)
         backbone_type = runtime.get("backbone_type")
         if backbone_type is not None:
             runtime.backbone_type = _enum_name(

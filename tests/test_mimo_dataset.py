@@ -12,11 +12,9 @@ from speech_to_speech.datamodule.mimo import (
     JsonlMimoSegmentDataset,
     MimoDataModule,
     MimoDatasetConfig,
-    MimoSegment,
-    MimoSpecialTokens,
-    MimoTask,
     MimoTaskDataset,
 )
+from speech_to_speech.mimo import MimoSegment, MimoSpecialTokens, MimoTask
 
 
 class JsonlMimoSegmentDatasetTest(unittest.TestCase):

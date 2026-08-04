@@ -8,7 +8,7 @@ from typing import cast
 import torch
 from torch import nn
 
-from speech_to_speech.datamodule.mimo import MimoBatch
+from speech_to_speech.mimo import MimoBatch
 from speech_to_speech.model.mimo_factory import (
     MimoFactoryConfig,
     build_mimo_model,
@@ -16,7 +16,10 @@ from speech_to_speech.model.mimo_factory import (
 )
 from speech_to_speech.model.mimo import TiedEmbeddingHead
 from speech_to_speech.runtime.backbone.adapter import BackboneBodyAdapter
-from speech_to_speech.runtime.types import BackboneOutput, BackboneReadout
+from speech_to_speech.runtime.backbone.contract import (
+    BackboneOutput,
+    BackboneReadout,
+)
 
 
 class _StrictBody(nn.Module):

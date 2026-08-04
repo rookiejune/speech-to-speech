@@ -36,9 +36,9 @@ integration is provided by `SpeechToSpeechModule`.
   `workspace/jobs/env.sh` and owns only speech-to-speech roots, dependency
   paths, checkpoint discovery, and dataset override helpers.
 
-SAC pretraining, codec screening, and acoustic-generator artifact export are
-owned by the external `semantic-acoustic-codec` repository. This repository
-does not train SAC; the staged curriculum consumes its exported artifact through
+generator pretraining, codec screening, and acoustic-generator artifact export are
+owned by the external `semantic-acoustic-generator` repository. This repository
+does not train generator plugin; the staged curriculum consumes its exported artifact through
 `model.acoustic.init_artifact` and owns the joint S2ST training and generation
 path.
 
@@ -57,13 +57,13 @@ jobs/004/01_s2st.sh experiment=generation/online_encode_smoke
 jobs/004/01_s2st.sh 'batch_sizes=[1]' data.dataset.filter=null data.encode_missing_codes=true
 jobs/005/02_unicodec.sh
 jobs/005/05_unicodec_ddp.sh
-SPEECH_TO_SPEECH_SAC_ARTIFACT=/path/to/sac-artifact \
+SPEECH_TO_SPEECH_ACOUSTIC_GENERATOR_ARTIFACT=/path/to/sac-artifact \
   SPEECH_TO_SPEECH_EXPERIMENT=train/staged_joint/stage_0 \
   jobs/011/03_staged_joint_train.sh
 ```
 
 The 005 wrappers are standalone UniCodec full-path compatibility checks, not
-part of the staged joint curriculum or the external SAC artifact pipeline.
+part of the staged joint curriculum or the external generator artifact pipeline.
 They select explicit experiments containing their data, trainer, callback, and
 step budgets:
 UniCodec fixed-sample overfit uses 100 steps, and UniCodec DDP smoke uses two
@@ -78,8 +78,8 @@ joint execution. The experiment, task, and loader-plan identities cannot be
 overridden through trailing Hydra arguments; use the environment selector and
 invoke the wrapper once per desired stage. Other Hydra overrides still pass
 through to the real Python entry point. Production Flow/RVQ runs must pass the
-artifact exported by `semantic-acoustic-codec` through
-`SPEECH_TO_SPEECH_SAC_ARTIFACT`; the wrapper forwards it to
+artifact exported by `semantic-acoustic-generator` through
+`SPEECH_TO_SPEECH_ACOUSTIC_GENERATOR_ARTIFACT`; the wrapper forwards it to
 `model.acoustic.init_artifact`.
 
 For the source-level model/data contract smoke, select
@@ -187,7 +187,7 @@ repositories and this package in editable mode:
 ```bash
 python -m pip install -e third_party/anydataset
 python -m pip install -e "third_party/anytrain[peft,text,flow,test]"
-python -m pip install -e "semantic-acoustic-codec[train,test]"
+python -m pip install -e "semantic-acoustic-generator[train,test]"
 python -m pip install -e workspace
 python -m pip install -e "speech-to-speech[dev]"
 ```
@@ -196,7 +196,7 @@ The minimal CI gate currently blocks on Ruff's `E`/`F` checks, unit tests, and
 `compileall`. Use the same sibling `PYTHONPATH` that CI sets:
 
 ```bash
-export PYTHONPATH=speech-to-speech/src:semantic-acoustic-codec/src:third_party/anydataset/src:third_party/anytrain/src:workspace/src
+export PYTHONPATH=speech-to-speech/src:semantic-acoustic-generator/src:third_party/anydataset/src:third_party/anytrain/src:workspace/src
 python -m ruff check speech-to-speech/src speech-to-speech/scripts speech-to-speech/tests
 DYNAMIC_HOME=/private/tmp/speech-to-speech-test PYTHONPYCACHEPREFIX=/private/tmp/speech-to-speech-pycache python -m unittest discover -s speech-to-speech/tests -v
 PYTHONPYCACHEPREFIX=/private/tmp/speech-to-speech-pycache python -m compileall -q speech-to-speech/src speech-to-speech/scripts speech-to-speech/tests
@@ -210,7 +210,7 @@ baseline is clean:
 python -m basedpyright --project speech-to-speech/pyrightconfig.json --pythonpath "$(command -v python)"
 ```
 
-The GitHub workflow checks out `speech-to-speech`, `semantic-acoustic-codec`,
+The GitHub workflow checks out `speech-to-speech`, `semantic-acoustic-generator`,
 `third_party/anydataset`, `third_party/anytrain`, and `workspace` as sibling
 repositories. If any sibling repository is private, configure the
 `CI_REPO_TOKEN` secret with access to those repositories.

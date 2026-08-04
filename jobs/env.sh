@@ -70,5 +70,5 @@ fdu_qwen_root() {
 export SPEECH_TO_SPEECH_PYTHON="${SPEECH_TO_SPEECH_PYTHON:-$WORKSPACE_PYTHON}"
 export SPEECH_TO_SPEECH_TRAIN_ROOT="${SPEECH_TO_SPEECH_TRAIN_ROOT:-${DYNAMIC_HOME}/train/speech-to-speech}"
 export SPEECH_TO_SPEECH_AUDIO_TOKENIZER="${SPEECH_TO_SPEECH_AUDIO_TOKENIZER:-${STATIC_HOME}/bpe/longcat/vocab_100k_minfreq_0_maxlen_none_codes_8192}"
-SPEECH_TO_SPEECH_PYTHONPATH="$SPEECH_TO_SPEECH_ROOT/src:$REPOS_ROOT/semantic-acoustic-codec/src:$REPOS_ROOT/third_party/length-based-batching-adapter/src"
+SPEECH_TO_SPEECH_PYTHONPATH="$SPEECH_TO_SPEECH_ROOT/src:$REPOS_ROOT/semantic-acoustic-generator/src:$REPOS_ROOT/third_party/length-based-batching-adapter/src"
 export PYTHONPATH="$SPEECH_TO_SPEECH_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}"

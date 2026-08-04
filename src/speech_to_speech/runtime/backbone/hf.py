@@ -22,7 +22,12 @@ from transformers import (
 from transformers.cache_utils import Cache
 from transformers.modeling_layers import GradientCheckpointingLayer
 
-from ..types import Backbone, BackboneOutput, BackboneReadout, TextTokenizer
+from ..tokenizer import TextTokenizer
+from ..backbone.contract import (
+    Backbone,
+    BackboneOutput,
+    BackboneReadout,
+)
 from .adapter import BackboneBodyAdapter, BackboneExtra, BackboneOutputView
 from .config import AdapterConfig, BackboneInitialization, BackboneType
 from .kimi import (

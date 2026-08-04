@@ -11,12 +11,12 @@ from anytrain.codec import (
     SemanticAcousticCodec,
     semantic_acoustic_spec,
 )
-from semantic_acoustic_codec.config import DecoderConfig, Route
-from semantic_acoustic_codec.runtime import (
-    SemanticSupportConfig,
+from semantic_acoustic_generator.config import DecoderConfig, Route
+from semantic_acoustic_generator.runtime import (
+    GeneratorConfig,
     build_support,
 )
-from semantic_acoustic_codec.runtime.artifact import save_artifact
+from semantic_acoustic_generator.runtime.artifact import save_artifact
 
 from speech_to_speech.model.acoustic.initialization import load_acoustic_initialization
 
@@ -93,7 +93,7 @@ class AcousticInitializationTest(unittest.TestCase):
 
 def _save(path: Path) -> None:
     backend = _Backend()
-    config = SemanticSupportConfig(
+    config = GeneratorConfig(
         route=Route.FM,
         condition_dim=6,
         decoder=DecoderConfig(hidden_dim=4, layers=1, heads=1, ffn_ratio=2),

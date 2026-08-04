@@ -9,7 +9,7 @@ from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..task import PredictionModality, Task
 from .audio import has_semantic_decode_options, validate_audio_request
 from .protocol import TokenGenerator
-from .types import Request
+from ..task import Request
 
 
 def prediction_of(request: Request) -> PredictionModality:

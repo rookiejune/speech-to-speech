@@ -20,7 +20,7 @@ runtime:
   backbone_module: ""
   backbone_body: base_model
   audio_tokenizer:
-  semantic_codec_artifact:
+  acoustic_generator_artifact:
   device:
   dtype:
   attn_implementation:

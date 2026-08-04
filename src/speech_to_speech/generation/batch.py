@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from ..datamodule.types import ModelBatch
-from .types import Request
+from ..datamodule.batch import ModelBatch
+from ..task import Request
 
 
 def requests_from_batch(batch: ModelBatch) -> list[Request]:

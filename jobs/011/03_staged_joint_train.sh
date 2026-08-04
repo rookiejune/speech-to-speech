@@ -48,7 +48,7 @@ case "$step_mode" in
     ;;
 esac
 job_reject_overrides experiment task loader_plan model.acoustic.init_artifact -- "$@"
-sac_artifact="${SPEECH_TO_SPEECH_SAC_ARTIFACT:?set SPEECH_TO_SPEECH_SAC_ARTIFACT to an artifact exported by semantic-acoustic-codec}"
+generator_artifact="${SPEECH_TO_SPEECH_ACOUSTIC_GENERATOR_ARTIFACT:?set SPEECH_TO_SPEECH_ACOUSTIC_GENERATOR_ARTIFACT to an artifact exported by semantic-acoustic-generator}"
 
 fdu_stage_data_args datamodule.dataset.root
 
@@ -58,7 +58,7 @@ args=(
   "experiment=${experiment}" \
   "trainer=${trainer}" \
   "loader_plan.step_mode=${step_mode}" \
-  "model.acoustic.init_artifact=${sac_artifact}" \
+  "model.acoustic.init_artifact=${generator_artifact}" \
   "repo_output_root=${SPEECH_TO_SPEECH_TRAIN_ROOT}" \
   "runtime.backbone=${qwen_root}" \
   "${FDU_DATA_ARGS[@]}" \

@@ -11,8 +11,8 @@ from anytrain.module.idspace import Layout
 
 from speech_to_speech.generation.eval.acoustic import evaluate
 from speech_to_speech.callback.logging.task_sample import TaskSampleLogger
-from speech_to_speech.datamodule.types import ModelBatch
-from semantic_acoustic_codec.model import AcousticRVQDecoder
+from speech_to_speech.datamodule.batch import ModelBatch
+from semantic_acoustic_generator.model import AcousticRVQDecoder
 from speech_to_speech.generation import Result
 from speech_to_speech.task import PredictionModality
 from speech_to_speech.task import Task

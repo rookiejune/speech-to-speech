@@ -12,13 +12,14 @@ from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader, Dataset, Subset
 
 from .._compat import StrEnum, auto
+from .asset import AssetJob, resolve_workspace_asset
 from .loader.contract import ARFraming, validate_ar_framing
 from ..task import PredictionModality, Task
 from ._helper.text import TextLoader
 from .collate.collator import Collator
 from .config import TaskConfig
 from .config import DataLoaderConfig, SpeechConfig
-from .dataset.speech import load_dataset
+from .dataset.speech import _apply_split_manifest, load_dataset
 from .diagnostic import SampleSplit
 from .loader.schedule import LoaderSchedule, ScheduledDataLoader
 from .protocol import (
@@ -28,7 +29,14 @@ from .protocol import (
     TextRuntime,
 )
 from .build.single import SingleCollator
-from .types import DataShape, TrainBatch, TrainInput
+from .batch import (
+    TrainBatch,
+    TrainInput,
+)
+from .sample import (
+    AudioContextCostRow,
+    DataShape,
+)
 
 if TYPE_CHECKING:
     from .dataset.text import TextConfig
@@ -173,6 +181,7 @@ class _SpeechLoader:
         self.num_workers = config.dataloader.num_workers
         self._dataset: Dataset[RawSample] | None = None
         self._subset: Subset[RawSample] | None = None
+        self._asset_job: AssetJob | None = None
 
     def setup(
         self,
@@ -192,11 +201,38 @@ class _SpeechLoader:
                 "datamodule and runtime must use the same codec: "
                 f"{self.config.codec!r} != {runtime_codec!r}."
             )
-        self._dataset = (
-            load_dataset(self.config.dataset, self.runtime)
-            if dataset is None
-            else dataset
-        )
+        if dataset is not None:
+            self._set_dataset(dataset)
+            return
+        materialization = self.config.materialization
+        if materialization.enabled:
+            resolution = resolve_workspace_asset(
+                self.config.dataset,
+                self.runtime,
+                materialization,
+            )
+            self._asset_job = resolution.job
+            self._set_dataset(
+                _apply_split_manifest(resolution.dataset, self.config.dataset)
+            )
+            return
+        self._set_dataset(load_dataset(self.config.dataset, self.runtime))
+
+    @property
+    def asset_job(self) -> AssetJob | None:
+        return self._asset_job
+
+    def refresh_materialized_asset(self) -> None:
+        job = self._asset_job
+        if job is None:
+            return
+        ready = job.load_ready()
+        self._set_dataset(_apply_split_manifest(ready, self.config.dataset))
+        self._asset_job = None
+
+    def _set_dataset(self, dataset: Dataset[RawSample]) -> None:
+        self._dataset = dataset
+        self._subset = None
         if self.sample_index is not None:
             if self.sample_index >= len(cast(Sized, self._dataset)):
                 raise IndexError(
@@ -313,6 +349,7 @@ class DataModule(LightningDataModule):
         )
         if any(not name for name in self.loader_specs):
             raise ValueError("loader names must not be empty.")
+        _validate_materialization_plan(self.loader_specs, validation)
         self.schedule = schedule or LoaderSchedule(
             {name: 1.0 for name in self.loader_specs}
         )
@@ -344,6 +381,36 @@ class DataModule(LightningDataModule):
     @property
     def loader_names(self) -> tuple[str, ...]:
         return tuple(self.loader_specs)
+
+    @property
+    def materialization_enabled(self) -> bool:
+        return any(
+            spec.kind is LoaderKind.SPEECH
+            and spec.speech_config is not None
+            and spec.speech_config.materialization.enabled
+            for spec in self.loader_specs.values()
+        )
+
+    @property
+    def has_pending_assets(self) -> bool:
+        return bool(self._asset_jobs())
+
+    def start_asset_materialization(self, *, owner: bool) -> None:
+        for job in self._asset_jobs():
+            job.start(owner=owner)
+
+    def finish_asset_materialization(self, *, owner: bool) -> None:
+        for job in self._asset_jobs():
+            job.finish(owner=owner)
+
+    def refresh_materialized_assets(self) -> None:
+        for loader in self._speech_loaders(include_validation=True):
+            loader.refresh_materialized_asset()
+
+    def teardown(self, stage: str | None = None) -> None:
+        del stage
+        for job in self._asset_jobs():
+            job.close()
 
     def diagnostic_samples(
         self,
@@ -378,6 +445,32 @@ class DataModule(LightningDataModule):
             Iterable[TrainInput],
             self._validation_loader.validation_dataloader(),
         )
+
+    def _asset_jobs(self) -> tuple[AssetJob, ...]:
+        jobs: dict[str, AssetJob] = {}
+        for loader in self._speech_loaders(include_validation=True):
+            job = loader.asset_job
+            if job is not None:
+                jobs.setdefault(job.request_id, job)
+        return tuple(jobs.values())
+
+    def _speech_loaders(
+        self,
+        *,
+        include_validation: bool,
+    ) -> tuple[_SpeechLoader, ...]:
+        loaders = tuple(
+            loader
+            for loader in self._loaders.values()
+            if isinstance(loader, _SpeechLoader)
+        )
+        validation = self._validation_loader
+        if (
+            include_validation
+            and isinstance(validation, _SpeechLoader)
+        ):
+            return (*loaders, validation)
+        return loaders
 
     def _diagnostic_loader(
         self,
@@ -451,6 +544,63 @@ def _build_validation_loader(
         ar_framing=spec.ar_framing,
         max_samples=spec.max_samples,
         tasks=spec.task_configs,
+    )
+
+
+def _validate_materialization_plan(
+    loaders: Mapping[str, LoaderSpec],
+    validation: LoaderSpec | None,
+) -> None:
+    enabled = [
+        spec
+        for spec in loaders.values()
+        if spec.kind is LoaderKind.SPEECH
+        and spec.speech_config is not None
+        and spec.speech_config.materialization.enabled
+    ]
+    validation_config = (
+        validation.speech_config
+        if validation is not None and validation.kind is LoaderKind.SPEECH
+        else None
+    )
+    if not enabled:
+        if (
+            validation_config is not None
+            and validation_config.materialization.enabled
+        ):
+            raise ValueError(
+                "validation asset materialization requires an enabled training "
+                "speech loader."
+            )
+        return
+    if len(loaders) != 1 or len(enabled) != 1:
+        raise ValueError(
+            "asset materialization currently requires exactly one training "
+            "speech loader so the epoch has a finite reload boundary."
+        )
+    train = enabled[0].speech_config
+    if train is None or validation_config is None:
+        return
+    if not validation_config.materialization.enabled:
+        return
+    if (
+        train.codec != validation_config.codec
+        or train.materialization != validation_config.materialization
+        or _asset_source_key(train) != _asset_source_key(validation_config)
+    ):
+        raise ValueError(
+            "training and validation asset materialization must resolve the same "
+            "codec source request."
+        )
+
+
+def _asset_source_key(config: SpeechConfig) -> tuple[object, ...]:
+    dataset = config.dataset
+    return (
+        dataset.name,
+        dataset.root,
+        dataset.split,
+        dataset.filter,
     )
 
 
@@ -570,6 +720,8 @@ def _source_loader(
         max_batch_memory=loader.costs.max_batch_frames,
         max_batch_samples=batch_size,
         planning_window=loader.costs.planning_window,
+        materialize_callable_costs=True,
+        distributed_plan_sync="epoch",
         shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=loader.pin_memory,
@@ -604,6 +756,10 @@ def _sample_audio_frame_cost(row: object, *, frame_rate: float) -> int:
 
 
 def _audio_durations(row: object) -> Iterable[float]:
+    if isinstance(row, AudioContextCostRow):
+        yield from _audio_durations(row.sample)
+        yield from _audio_durations(row.audio_context)
+        return
     if isinstance(row, Mapping):
         for ref, item in row.items():
             if _is_audio_ref(ref):

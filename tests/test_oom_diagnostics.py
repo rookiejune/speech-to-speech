@@ -12,9 +12,9 @@ import torch
 from speech_to_speech.callback import OOMDiagnostics
 from speech_to_speech.callback._oom import generation_report, report_oom
 from speech_to_speech.callback.logging.acoustic import AcousticEvaluation
-from speech_to_speech.datamodule.types import (
+from speech_to_speech.datamodule.batch import ModelBatch
+from speech_to_speech.datamodule.sample import (
     Language,
-    ModelBatch,
     RawSpeech,
     RawSpeechBatch,
     SpeechTaskSample,

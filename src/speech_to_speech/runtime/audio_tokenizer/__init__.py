@@ -5,7 +5,7 @@ from collections.abc import Sequence
 import torch
 from torch import Tensor
 
-from ..types import AudioTokenizer
+from ..tokenizer import AudioTokenizer
 from .bicodec import BiCodecAudioTokenizer
 from .bpe import TorchCodecBPE
 from .flattened import FlattenedAudioTokenizer
