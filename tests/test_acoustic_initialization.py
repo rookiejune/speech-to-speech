@@ -18,7 +18,7 @@ from semantic_acoustic_generator.runtime import (
 )
 from semantic_acoustic_generator.runtime.artifact import save_artifact
 
-from speech_to_speech.model.acoustic.initialization import load_acoustic_initialization
+from speech_to_speech.model.acoustic.factory import load_acoustic_initialization
 
 
 class _Backend:

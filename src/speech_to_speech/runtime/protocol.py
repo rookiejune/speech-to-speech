@@ -7,16 +7,13 @@ from anydataset.types import AudioView, Modality
 from anytrain.module.idspace import Layout
 
 from .config import AudioSequenceLayout
+from .audio_tokenizer.contract import AudioTokenizer
 from .backbone import BackboneAdapter
+from .backbone.contract import Backbone, TextTokenizer
 from .codec_contract import (
     CodecBackend,
     SemanticCodec,
 )
-from .tokenizer import (
-    AudioTokenizer,
-    TextTokenizer,
-)
-from .backbone.contract import Backbone
 
 
 class DataRuntime(Protocol):

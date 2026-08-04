@@ -5,7 +5,7 @@ from collections.abc import Sequence
 import torch
 from torch import Tensor
 
-from ..tokenizer import AudioTokenizer
+from .contract import AudioTokenizer
 from .bicodec import BiCodecAudioTokenizer
 from .bpe import TorchCodecBPE
 from .flattened import FlattenedAudioTokenizer
@@ -13,6 +13,7 @@ from .native import NativeAudioTokenizer
 
 __all__ = [
     "BiCodecAudioTokenizer",
+    "AudioTokenizer",
     "FlattenedAudioTokenizer",
     "NativeAudioTokenizer",
     "TorchCodecBPE",

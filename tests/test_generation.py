@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 import torch
 from anydataset.types import Modality
+from anytrain.codec import AcousticLayout, SemanticAcousticCodes
 from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 from speech_to_speech.datamodule.batch import ModelBatch
@@ -37,8 +38,8 @@ from speech_to_speech.generation import (
     decode_generated_semantic,
     generate_responses,
 )
-from speech_to_speech.generation.batch import requests_from_batch
-from speech_to_speech.generation.eval.acoustic import evaluate_autoregressive
+from speech_to_speech.generation.service import requests_from_batch
+from speech_to_speech.generation.evaluation import evaluate_autoregressive
 from speech_to_speech.runtime.audio_tokenizer import (
     FlattenedAudioTokenizer,
     NativeAudioTokenizer,
@@ -62,7 +63,10 @@ def _has_gradient(parameters: Iterable[nn.Parameter]) -> bool:
 class _Codec:
     acoustic_feature_dim = 2
     acoustic_codebook_sizes = (8,)
+    acoustic_layout = AcousticLayout.FRAME_ALIGNED
+    acoustic_unit_length = None
     semantic_codebook = torch.randn(2, 2)
+    semantic_codebook_sizes = (2,)
     sample_rate = 16_000
     frame_rate = 50.0
 
@@ -82,6 +86,19 @@ class _Codec:
     def decode(self, codes: Tensor) -> Tensor:
         self.decode_calls += 1
         return codes[..., 0].float()
+
+    def tokenize(self, audio: Tensor, sample_rate: int) -> SemanticAcousticCodes:
+        del sample_rate
+        shape = (audio.size(0), 1, 1)
+        semantic = torch.zeros(shape, dtype=torch.long, device=audio.device)
+        acoustic = torch.zeros(shape, dtype=torch.long, device=audio.device)
+        return SemanticAcousticCodes(semantic=semantic, acoustic=acoustic)
+
+    def detokenize(self, codes: SemanticAcousticCodes) -> Tensor:
+        return self.decode_features(
+            codes.semantic,
+            self.acoustic_codes_to_features(codes.acoustic),
+        )
 
 
 class _UnifiedCodec:
@@ -211,11 +228,10 @@ class _Runtime:
         return start <= token_id < end
 
 
-class _TinyCodec:
+class _TinyCodec(_Codec):
     acoustic_feature_dim = 8
     acoustic_codebook_sizes = (8,)
     semantic_codebook = torch.randn(2, 8)
-    sample_rate = 16_000
 
     def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor:
         values = acoustic_codes[..., :1].to(dtype=torch.float32)
@@ -706,11 +722,11 @@ class GenerationTest(unittest.TestCase):
         requests = [Mock()]
         with (
             patch(
-                "speech_to_speech.generation.eval.acoustic.requests_from_batch",
+                "speech_to_speech.generation.evaluation.requests_from_batch",
                 return_value=requests,
             ),
             patch(
-                "speech_to_speech.generation.eval.acoustic.time.perf_counter",
+                "speech_to_speech.generation.evaluation.time.perf_counter",
                 side_effect=(1.0, 1.5),
             ),
         ):
@@ -1025,7 +1041,7 @@ class GenerationTest(unittest.TestCase):
         self.assertEqual(model.audio_token_frame_spans.device.type, "meta")
         self.assertNotIn("audio_token_frame_spans", model.state_dict())
 
-    @patch("speech_to_speech.model._helper.nn.Buffer", new=None)
+    @patch("speech_to_speech._compat.nn.Buffer", new=None)
     def test_frame_span_buffer_supports_torch_without_nn_buffer(self):
         model = Model(
             _model_config(),

@@ -8,7 +8,7 @@ from semantic_acoustic_generator.rl import GeneratorCandidate
 from torch import Tensor
 
 from ..datamodule.batch import ModelBatch
-from ..generation.result import AudioOutput
+from ..generation.contract import AudioOutput
 from ..task import Request
 
 

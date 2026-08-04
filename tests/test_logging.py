@@ -19,7 +19,7 @@ from speech_to_speech.datamodule.batch import (
     ModelBatch,
     ModelSample,
 )
-from speech_to_speech.loss.types import LossItem, Outputs, loss_items
+from speech_to_speech.loss.contract import LossItem, Outputs, loss_items
 from speech_to_speech.pl_module import Config, SpeechToSpeechModule
 from speech_to_speech.task import Task
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 import torch
-from anytrain.codec import AcousticLayout, SemanticAcousticCodes
+from anytrain.codec import SemanticAcousticCodes, SemanticGlobalCodes
 
 from speech_to_speech.audio import AudioCodes
 
@@ -15,55 +15,49 @@ class AudioCodesTest(unittest.TestCase):
         self.assertIsNone(codes.semantic_codes)
         self.assertIsNone(codes.acoustic_codes)
 
-    def test_anycodec_export_requires_semantic_stream(self) -> None:
+    def test_semantic_global_export_requires_semantic_stream(self) -> None:
         codes = AudioCodes(global_codes=torch.tensor([[1], [2]]))
 
         with self.assertRaisesRegex(ValueError, "requires semantic_codes"):
-            codes.to_anycodec(AcousticLayout.FIXED_LENGTH)
+            codes.to_semantic_global()
 
-    def test_fixed_anycodec_codes_become_global(self) -> None:
-        anycodec_codes = SemanticAcousticCodes(
+    def test_semantic_global_codes_roundtrip(self) -> None:
+        structured = SemanticGlobalCodes(
             semantic=torch.tensor([[1], [2]]),
-            acoustic=torch.tensor([[3, 4], [5, 6]]),
+            global_codes=torch.tensor([[3, 4], [5, 6]]),
         )
 
-        codes = AudioCodes.from_anycodec(
-            anycodec_codes,
-            AcousticLayout.FIXED_LENGTH,
-        )
+        codes = AudioCodes.from_semantic_global(structured)
 
-        torch.testing.assert_close(codes.semantic_codes, anycodec_codes.semantic)
-        torch.testing.assert_close(codes.global_codes, anycodec_codes.acoustic)
+        torch.testing.assert_close(codes.semantic_codes, structured.semantic)
+        torch.testing.assert_close(codes.global_codes, structured.global_codes)
         self.assertIsNone(codes.acoustic_codes)
-        restored = codes.to_anycodec(AcousticLayout.FIXED_LENGTH)
-        torch.testing.assert_close(restored.semantic, anycodec_codes.semantic)
-        torch.testing.assert_close(restored.acoustic, anycodec_codes.acoustic)
+        restored = codes.to_semantic_global()
+        torch.testing.assert_close(restored.semantic, structured.semantic)
+        torch.testing.assert_close(restored.global_codes, structured.global_codes)
 
-    def test_frame_aligned_anycodec_codes_remain_acoustic(self) -> None:
-        anycodec_codes = SemanticAcousticCodes(
+    def test_semantic_acoustic_codes_roundtrip(self) -> None:
+        structured = SemanticAcousticCodes(
             semantic=torch.tensor([[1], [2]]),
             acoustic=torch.tensor([[3, 4], [5, 6]]),
         )
 
-        codes = AudioCodes.from_anycodec(
-            anycodec_codes,
-            AcousticLayout.FRAME_ALIGNED,
-        )
+        codes = AudioCodes.from_semantic_acoustic(structured)
 
         self.assertIsNone(codes.global_codes)
-        torch.testing.assert_close(codes.acoustic_codes, anycodec_codes.acoustic)
-        restored = codes.to_anycodec(AcousticLayout.FRAME_ALIGNED)
-        torch.testing.assert_close(restored.semantic, anycodec_codes.semantic)
-        torch.testing.assert_close(restored.acoustic, anycodec_codes.acoustic)
+        torch.testing.assert_close(codes.acoustic_codes, structured.acoustic)
+        restored = codes.to_semantic_acoustic()
+        torch.testing.assert_close(restored.semantic, structured.semantic)
+        torch.testing.assert_close(restored.acoustic, structured.acoustic)
 
-    def test_anycodec_export_rejects_the_wrong_non_semantic_layout(self) -> None:
+    def test_semantic_acoustic_export_rejects_global_codes(self) -> None:
         codes = AudioCodes(
             semantic_codes=torch.tensor([[1]]),
             global_codes=torch.tensor([[2]]),
         )
 
-        with self.assertRaisesRegex(ValueError, "acoustic_codes only"):
-            codes.to_anycodec(AcousticLayout.FRAME_ALIGNED)
+        with self.assertRaisesRegex(ValueError, "requires.*acoustic_codes"):
+            codes.to_semantic_acoustic()
 
 
 if __name__ == "__main__":

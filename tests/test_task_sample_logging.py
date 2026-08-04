@@ -17,18 +17,17 @@ from anydataset.types import (
     TextMeta,
     TextView,
 )
-from anytrain.codec import AcousticLayout, SemanticAcousticCodes
+from anytrain.codec import SemanticGlobalCodes
 from anytrain.module.idspace import Layout
 
 from speech_to_speech.callback.logging import TaskSampleLogger
-from speech_to_speech.callback.logging._sample_metrics import audio_metrics, text_metrics
-from speech_to_speech.callback.logging._sample_audio import (
+from speech_to_speech.callback.logging.sample_report import (
+    audio_metrics,
+    build_request_metadata,
     log_source_audio,
     log_target_audio,
-)
-from speech_to_speech.callback.logging._sample_metadata import (
-    build_request_metadata,
     reference_text,
+    text_metrics,
 )
 from speech_to_speech.datamodule import SampleSplit
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
@@ -145,7 +144,7 @@ class TaskSampleLoggingTest(unittest.TestCase):
 
     def test_validation_asr_panel_logs_source_and_model_free_metrics(self):
         batch = _batch(Task.ASR)
-        codec = _StructuredCodec()
+        codec = _GlobalCodec()
         ctx = _started_logger(
             batch,
             Task.ASR,
@@ -184,7 +183,7 @@ class TaskSampleLoggingTest(unittest.TestCase):
 
     def test_tts_decode_error_logs_partial_audio_metadata(self):
         batch = _batch(Task.TTS, input_ids=[1, 2, 3], token_labels=[-100, 2, 3])
-        codec = _StructuredCodec()
+        codec = _GlobalCodec()
         ctx = _started_logger(
             batch,
             Task.TTS,
@@ -390,7 +389,7 @@ class TaskSampleLoggingTest(unittest.TestCase):
         self.assertEqual(metrics["audio/clipping_ratio"], 0.5)
 
     def test_audio_source_is_logged_without_an_evaluator_model(self):
-        codec = _StructuredCodec()
+        codec = _GlobalCodec()
         writer = Mock()
         datamodule = SimpleNamespace(
             runtime=SimpleNamespace(codec=codec, audio_view=AudioView.BICODEC)
@@ -442,7 +441,7 @@ class TaskSampleLoggingTest(unittest.TestCase):
         self.assertEqual(metadata["source"]["duration_seconds"], 1.0)
 
     def test_structured_target_audio_uses_detokenize(self):
-        codec = _StructuredCodec()
+        codec = _GlobalCodec()
         writer = Mock()
         datamodule = SimpleNamespace(
             runtime=SimpleNamespace(codec=codec, audio_view=AudioView.BICODEC)
@@ -452,7 +451,7 @@ class TaskSampleLoggingTest(unittest.TestCase):
 
         self.assertIsNotNone(codec.decoded)
         self.assertEqual(codec.decoded.semantic.shape, (1, 2, 1))
-        self.assertEqual(codec.decoded.acoustic.shape, (1, 3, 2))
+        self.assertEqual(codec.decoded.global_codes.shape, (1, 3, 2))
         writer.add_audio.assert_called_once()
         self.assertEqual(writer.add_audio.call_args.kwargs["sample_rate"], 16_000)
 
@@ -466,38 +465,37 @@ class TaskSampleLoggingTest(unittest.TestCase):
         self.assertEqual(waveform.shape, (1, 2))
 
 
-class _StructuredCodec:
+class _GlobalCodec:
     sample_rate = 16_000
     frame_rate = 50.0
     semantic_codebook = torch.zeros(8, 4)
     semantic_codebook_sizes = (8,)
-    acoustic_codebook_sizes = (5, 7)
-    acoustic_feature_dim = 4
-    acoustic_layout = AcousticLayout.FIXED_LENGTH
-    acoustic_unit_length = 3
+    global_codebook_sizes = (5, 7)
+    global_feature_dim = 4
+    global_unit_length = 3
 
     def __init__(self) -> None:
-        self.decoded: SemanticAcousticCodes | None = None
+        self.decoded: SemanticGlobalCodes | None = None
 
     def tokenize(self, audio: torch.Tensor, sample_rate: int) -> object:
         del audio, sample_rate
         raise NotImplementedError
 
     def detokenize(self, codes: object) -> torch.Tensor:
-        if not isinstance(codes, SemanticAcousticCodes):
-            raise TypeError("expected SemanticAcousticCodes")
+        if not isinstance(codes, SemanticGlobalCodes):
+            raise TypeError("expected SemanticGlobalCodes")
         self.decoded = codes
         return torch.zeros(1, 1, 32)
 
-    def acoustic_codes_to_features(self, codes: torch.Tensor) -> torch.Tensor:
-        return torch.zeros(*codes.shape[:2], self.acoustic_feature_dim)
+    def global_codes_to_features(self, codes: torch.Tensor) -> torch.Tensor:
+        return torch.zeros(*codes.shape[:2], self.global_feature_dim)
 
     def decode_features(
         self,
         semantic_codes: torch.Tensor,
-        acoustic_features: torch.Tensor,
+        global_features: torch.Tensor,
     ) -> torch.Tensor:
-        del semantic_codes, acoustic_features
+        del semantic_codes, global_features
         return torch.zeros(1, 1, 32)
 
 
@@ -741,7 +739,7 @@ def _sample():
             views={
                 AudioView.BICODEC: {
                     "semantic": torch.tensor([[1], [2]]),
-                    "acoustic": torch.tensor([[0, 1], [2, 3], [4, 5]]),
+                    "global": torch.tensor([[0, 1], [2, 3], [4, 5]]),
                 }
             },
             meta={AudioMeta.DURATION: 0.04},

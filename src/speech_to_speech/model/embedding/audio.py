@@ -15,7 +15,7 @@ from ...runtime.codec_contract import (
     fsq_radix_order,
     semantic_feature_dim,
 )
-from ...runtime.tokenizer import AudioTokenizer
+from ...runtime.audio_tokenizer.contract import AudioTokenizer
 from .fsq import FsqEmbedding, FsqEmbeddingConfig, reference_rms
 
 _MISSING = object()

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import torch
-from anytrain.codec import SemanticAcousticCodes
+from anytrain.codec import SemanticGlobalCodes
 from anydataset.types import AudioView
 from torch import Tensor
 
 from ..audio import AudioCodes
-from ..datamodule.protocol import DatasetRuntime
-from ..datamodule.parse.parser import speech_from_codes
-from ..datamodule.build.sample import build_task_sample
+from ..datamodule.contract import DatasetRuntime
+from ..datamodule.parse import speech_from_codes
+from ..datamodule.builder import build_task_sample
 from ..datamodule.batch import (
     ModelBatch,
     TrainInput,
@@ -22,8 +22,8 @@ from ..datamodule.sample import (
 )
 from ..runtime.codec_contract import (
     frame_codec,
-    structured_codec,
-    supports_structured,
+    global_codec,
+    supports_global,
 )
 
 
@@ -131,27 +131,29 @@ class OnDeviceCodecMaterializer:
             enabled=False,
         ):
             if self.runtime.audio_view is AudioView.BICODEC:
-                if not supports_structured(self.runtime.codec):
+                if not supports_global(self.runtime.codec):
                     raise TypeError(
-                        "BiCodec waveform fallback requires a structured codec."
+                        "BiCodec waveform fallback requires a semantic-global codec."
                     )
-                codec = structured_codec(self.runtime.codec)
+                codec = global_codec(self.runtime.codec)
                 encoded = codec.tokenize(
                     batched_waveform,
                     sample.sample_rate,
                 )
-                if not isinstance(encoded, SemanticAcousticCodes):
+                if not isinstance(encoded, SemanticGlobalCodes):
                     raise TypeError(
-                        "structured codec tokenize must return SemanticAcousticCodes."
+                        "BiCodec tokenize must return SemanticGlobalCodes."
                     )
-                if encoded.semantic.size(0) != 1 or encoded.acoustic.size(0) != 1:
+                if (
+                    encoded.semantic.size(0) != 1
+                    or encoded.global_codes.size(0) != 1
+                ):
                     raise ValueError("per-sample codec fallback expects one encoded item.")
-                return AudioCodes.from_anycodec(
-                    SemanticAcousticCodes(
+                return AudioCodes.from_semantic_global(
+                    SemanticGlobalCodes(
                         semantic=encoded.semantic[0].detach().cpu(),
-                        acoustic=encoded.acoustic[0].detach().cpu(),
-                    ),
-                    codec.acoustic_layout,
+                        global_codes=encoded.global_codes[0].detach().cpu(),
+                    )
                 )
             return _encoded_codes(
                 frame_codec(self.runtime.codec).encode(

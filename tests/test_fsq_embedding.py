@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from speech_to_speech.model import AdapterType
-from speech_to_speech.model._assembly import (
+from speech_to_speech.model.factory import (
     aligned_audio_adapter,
     aligned_audio_output_adapter,
 )

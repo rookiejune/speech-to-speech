@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from anydataset.types import AudioView, Modality
-from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 
 from ._artifact import content_sha256
 from .audio_tokenizer import (
+    AudioTokenizer,
     BiCodecAudioTokenizer,
     FlattenedAudioTokenizer,
     NativeAudioTokenizer,
@@ -20,20 +20,23 @@ from .backbone import (
     AdapterConfig as BackboneAdapterConfig,
     Backbone,
     BackboneAdapter,
+    TextTokenizer,
     create as create_backbone_adapter,
 )
 from .codec import load_codec
 from .codec_contract import (
     CodecBackend,
     SemanticCodec,
+    acoustic_codec,
     codec_frame_rate as validated_codec_frame_rate,
     frame_codec,
+    global_codec,
     structured_codec,
     supports_acoustic,
+    supports_global,
     supports_structured,
 )
 from .config import AudioSequenceLayout, Config, validate_sequence_layout_config
-from .tokenizer import AudioTokenizer, TextTokenizer
 from .tokenizer_factory import (
     audio_tokenizer,
     text_special_id,
@@ -88,11 +91,10 @@ class Runtime:
 
     @property
     def structured_full_sequence(self) -> bool:
-        if self.audio_sequence_layout is not AudioSequenceLayout.FLATTENED:
-            return False
-        if not supports_structured(self.codec):
-            return False
-        return structured_codec(self.codec).acoustic_layout is AcousticLayout.FIXED_LENGTH
+        return (
+            self.audio_sequence_layout is AudioSequenceLayout.FLATTENED
+            and supports_global(self.codec)
+        )
 
     @property
     def backbone_trust_remote_code(self) -> bool:
@@ -184,28 +186,26 @@ class Runtime:
             Path(artifact).expanduser(),
             device=self.config.device,
         )
+        backend = acoustic_codec(self.codec)
         runtime = GeneratorRuntime(
             support,
-            cast("SemanticAcousticCodec", cast(object, self.codec)),
+            cast("SemanticAcousticCodec", cast(object, backend)),
         )
         return cast(SemanticCodec, cast(object, runtime))
 
     @cached_property
     def audio_tokenizer(self) -> AudioTokenizer:
         if self.audio_view is AudioView.BICODEC:
-            codec = structured_codec(self.codec)
+            codec = global_codec(self.codec)
             semantic_tokenizer = (
                 None
                 if self.config.audio_tokenizer is None
                 else audio_tokenizer(self.config.audio_tokenizer)
             )
-            global_unit_length = codec.acoustic_unit_length
-            if global_unit_length is None:
-                raise ValueError("BiCodec requires a fixed global unit length.")
             return BiCodecAudioTokenizer(
                 semantic_codebook_size=self.semantic_codebook_sizes[0],
-                global_codebook_sizes=codec.acoustic_codebook_sizes,
-                global_unit_length=global_unit_length,
+                global_codebook_sizes=codec.global_codebook_sizes,
+                global_unit_length=codec.global_unit_length,
                 semantic_tokenizer=semantic_tokenizer,
             )
         if self.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
@@ -297,4 +297,12 @@ class Runtime:
         start, end = self.codec_audio_range
         return start <= token_id < end
 
-__all__ = ["Runtime"]
+
+def runtime_for_sequence_layout(
+    config: Config,
+    layout: AudioSequenceLayout,
+) -> Runtime:
+    return Runtime(config, audio_sequence_layout=layout)
+
+
+__all__ = ["Runtime", "runtime_for_sequence_layout"]

@@ -17,8 +17,8 @@ from anydataset.types import (
 from anydataset.types import AudioItem, TextItem
 from anytrain.module.idspace import Layout
 
-from speech_to_speech.datamodule.build.sample import build_task_sample
-from speech_to_speech.datamodule.parse.parser import parse_task_sample
+from speech_to_speech.datamodule.builder import build_task_sample
+from speech_to_speech.datamodule.parse import parse_task_sample
 from speech_to_speech.datamodule.sample import (
     AudioContextSample,
     Speech,
@@ -74,7 +74,7 @@ class PairReferenceContextTest(unittest.TestCase):
         torch.testing.assert_close(
             parsed.audio_context.global_codes,
             context_cell[(Role.DEFAULT, Modality.AUDIO)].views[AudioView.BICODEC][
-                "acoustic"
+                "global"
             ],
         )
         built = build_task_sample(parsed, cast(object, runtime))
@@ -103,7 +103,7 @@ def _audio(offset: int) -> AudioItem:
     frames = 4
     unit_length = 2
     semantic = ((torch.arange(frames) + offset) % 8).unsqueeze(-1)
-    acoustic = torch.stack(
+    global_codes = torch.stack(
         [
             (torch.arange(unit_length) + offset) % 3,
             (torch.arange(unit_length) + offset + 1) % 3,
@@ -111,7 +111,12 @@ def _audio(offset: int) -> AudioItem:
         dim=-1,
     )
     return AudioItem(
-        views={AudioView.BICODEC: {"semantic": semantic, "acoustic": acoustic}},
+        views={
+            AudioView.BICODEC: {
+                "semantic": semantic,
+                "global": global_codes,
+            }
+        },
         meta={AudioMeta.DURATION: frames / 50.0},
     )
 

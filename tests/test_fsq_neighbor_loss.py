@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from anydataset.types import Modality
 from anytrain.module.idspace import Layout
 
-from speech_to_speech.loss.token import TokenLoss
+from speech_to_speech.loss.supervised import TokenLoss
 from speech_to_speech.model.embedding.fsq import FsqNeighbors
 
 

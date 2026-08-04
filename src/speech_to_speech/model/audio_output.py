@@ -7,11 +7,10 @@ from typing import Optional, Union, cast
 import torch
 from torch import Tensor, nn
 
-from .._compat import StrEnum, auto
-from ._checkpointing import GradientCheckpointingLayer
+from .._compat import StrEnum, auto, register
 from .adapter import MLPAdapter
-from ._helper import (
-    register,
+from .tower import (
+    GradientCheckpointingLayer,
     safe_transformer_mask,
     tower_fields,
     valid_mask,

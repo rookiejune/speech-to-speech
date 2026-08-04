@@ -6,7 +6,7 @@ from anydataset.types import Modality
 from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 
-from ._helper import CastOutput
+from .tower import CastOutput
 from .audio_output import AudioOutputAdapter, AudioOutputAdapterType
 from .embedding.audio import SemanticAudioEmbedding, require_semantic_audio_embedding
 from .embedding.fsq import FsqEmbedding, FsqNeighbors

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal, Protocol, TypedDict
 
 import torch
 from anydataset.types import Modality
@@ -12,10 +12,31 @@ from torch.nn.utils.rnn import pad_sequence
 from transformers.cache_utils import Cache
 
 from ..runtime.protocol import GenerationRuntime
-from ._helper import top_p_filter
 
 
 TokenKind = Literal["text", "audio", "mixed"]
+
+
+def top_p_filter(logits: Tensor, top_p: float) -> Tensor:
+    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+    probabilities = sorted_logits.softmax(dim=-1)
+    remove = probabilities.cumsum(dim=-1) - probabilities >= top_p
+    remove[..., 0] = False
+    filtered = logits.new_full(logits.shape, float("-inf"))
+    filtered.scatter_(
+        dim=-1,
+        index=sorted_indices,
+        src=sorted_logits.masked_fill(remove, float("-inf")),
+    )
+    return filtered
+
+
+class AcousticGeneration(TypedDict):
+    """Token sequence and frame-aligned features produced by an acoustic model."""
+
+    sequence: Tensor
+    features: Tensor
+    frame_counts: Tensor
 
 
 @dataclass
@@ -630,6 +651,7 @@ def _generation_token_ids(
 
 
 __all__ = [
+    "AcousticGeneration",
     "GenerationEngine",
     "GenerationOptions",
     "GenerationOutput",
@@ -637,4 +659,5 @@ __all__ = [
     "GenerationStepModel",
     "GenerationStepResult",
     "TokenKind",
+    "top_p_filter",
 ]

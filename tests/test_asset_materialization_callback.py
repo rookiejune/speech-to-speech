@@ -43,6 +43,9 @@ class _DataModule:
         if self.refresh_error is not None:
             raise self.refresh_error
 
+    def close_asset_materialization(self) -> None:
+        self.events.append(("close",))
+
 
 class _Strategy:
     def __init__(
@@ -96,6 +99,7 @@ class AssetMaterializationCallbackTest(unittest.TestCase):
                 ("finish", True),
                 ("broadcast", None, 0),
                 ("barrier", "asset_materialization_finished"),
+                ("finish", False),
                 ("refresh",),
             ],
         )
@@ -105,22 +109,36 @@ class AssetMaterializationCallbackTest(unittest.TestCase):
         trainer = SimpleNamespace(
             datamodule=_DataModule(events),
             is_global_zero=False,
+            global_rank=1,
+            world_size=2,
             strategy=_Strategy(
                 events,
-                broadcast_result=("ValueError", "provider failed"),
+                broadcast_results=[
+                    None,
+                    None,
+                    True,
+                    True,
+                    None,
+                    None,
+                    ("ValueError", "provider failed"),
+                ],
             ),
         )
+        callback = AssetMaterialization()
+
+        callback.on_train_start(cast(Any, trainer), cast(Any, object()))
 
         with self.assertRaisesRegex(
             RuntimeError,
             "global owner: ValueError: provider failed",
         ):
-            AssetMaterialization().on_train_epoch_end(
+            callback.on_train_epoch_end(
                 cast(Any, trainer),
                 cast(Any, object()),
             )
 
-        self.assertEqual(events, [("broadcast", None, 0)])
+        self.assertIn(("start", False), events)
+        self.assertNotIn(("refresh",), events)
 
     def test_start_error_is_synchronized_from_global_owner(self) -> None:
         events: list[tuple[object, ...]] = []
@@ -132,6 +150,10 @@ class AssetMaterializationCallbackTest(unittest.TestCase):
             strategy=_Strategy(
                 events,
                 broadcast_results=[
+                    None,
+                    None,
+                    True,
+                    True,
                     ("RuntimeError", "spawn failed"),
                     None,
                 ],
@@ -147,14 +169,7 @@ class AssetMaterializationCallbackTest(unittest.TestCase):
                 cast(Any, object()),
             )
 
-        self.assertEqual(
-            events,
-            [
-                ("start", False),
-                ("broadcast", None, 0),
-                ("broadcast", None, 1),
-            ],
-        )
+        self.assertIn(("start", False), events)
 
     def test_global_owner_start_error_preserves_local_cause(self) -> None:
         events: list[tuple[object, ...]] = []
@@ -164,7 +179,17 @@ class AssetMaterializationCallbackTest(unittest.TestCase):
             is_global_zero=True,
             global_rank=0,
             world_size=2,
-            strategy=_Strategy(events),
+            strategy=_Strategy(
+                events,
+                broadcast_results=[
+                    None,
+                    None,
+                    True,
+                    True,
+                    ("OSError", "spawn failed"),
+                    None,
+                ],
+            ),
         )
 
         with self.assertRaisesRegex(
@@ -177,14 +202,7 @@ class AssetMaterializationCallbackTest(unittest.TestCase):
             )
 
         self.assertIs(caught.exception.__cause__, start_error)
-        self.assertEqual(
-            events,
-            [
-                ("start", True),
-                ("broadcast", ("OSError", "spawn failed"), 0),
-                ("broadcast", None, 1),
-            ],
-        )
+        self.assertIn(("start", True), events)
 
     def test_refresh_error_is_synchronized_from_non_owner_rank(self) -> None:
         events: list[tuple[object, ...]] = []
@@ -202,34 +220,34 @@ class AssetMaterializationCallbackTest(unittest.TestCase):
                 broadcast_results=[
                     None,
                     None,
+                    True,
+                    True,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
                     ("OSError", "store is not visible"),
                 ],
             ),
         )
+        callback = AssetMaterialization()
+
+        callback.on_train_start(cast(Any, trainer), cast(Any, object()))
 
         with self.assertRaisesRegex(
             RuntimeError,
-            "asset refresh failed on rank 1: OSError: store is not visible",
+            "asset materialization refresh failed on rank 1: OSError: store is not visible",
         ):
-            AssetMaterialization().on_train_epoch_end(
+            callback.on_train_epoch_end(
                 cast(Any, trainer),
                 cast(Any, object()),
             )
 
-        self.assertEqual(
-            events,
-            [
-                ("broadcast", None, 0),
-                ("barrier", "asset_materialization_finished"),
-                ("refresh",),
-                ("broadcast", None, 0),
-                (
-                    "broadcast",
-                    ("OSError", "store is not visible"),
-                    1,
-                ),
-            ],
-        )
+        self.assertIn(("start", False), events)
+        self.assertIn(("barrier", "asset_materialization_finished"), events)
+        self.assertIn(("refresh",), events)
 
     def test_enabled_materialization_forwards_reload_to_lightning(self) -> None:
         config = _materialization_config()

@@ -23,7 +23,6 @@ from anydataset.types import (
     TextMeta,
     TextView,
 )
-from anytrain.codec import AcousticLayout
 from anytrain.module.idspace import Layout
 
 from speech_to_speech.datamodule.dataset.speech import (
@@ -33,7 +32,7 @@ from speech_to_speech.datamodule.dataset.speech import (
     load_dataset,
 )
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
-from speech_to_speech.datamodule.build.single import SingleCollator
+from speech_to_speech.datamodule.single import SingleCollator
 from speech_to_speech.datamodule.module import _sample_audio_frame_cost
 from speech_to_speech.datamodule.batch import ModelBatch
 from speech_to_speech.datamodule.sample import AudioContextCostRow
@@ -435,7 +434,7 @@ def _multi_role_cells(source_count: int) -> tuple[Sample, ...]:
                             views={
                                 AudioView.BICODEC: {
                                     "semantic": torch.tensor([[offset]]),
-                                    "acoustic": torch.tensor([[0, 1]]),
+                                    "global": torch.tensor([[0, 1]]),
                                 }
                             },
                             meta={
@@ -483,7 +482,7 @@ def _cells() -> tuple[Sample, ...]:
                                     [[offset], [offset + 1]],
                                     dtype=torch.long,
                                 ),
-                                "acoustic": torch.tensor(
+                                "global": torch.tensor(
                                     [[0, 1], [2, 3], [4, 5]],
                                     dtype=torch.long,
                                 ),
@@ -515,8 +514,7 @@ def _runtime(audio_sequence_layout: AudioSequenceLayout):
             if audio_sequence_layout is AudioSequenceLayout.SEMANTIC
             else None
         ),
-        acoustic_layout=AcousticLayout.FIXED_LENGTH,
-        acoustic_unit_length=3,
+        global_unit_length=3,
         text_tokenizer=_TextTokenizer(),
         audio_tokenizer=tokenizer,
         layout=Layout(text=(0, 10), audio=(10, 10 + tokenizer.vocab_size)),

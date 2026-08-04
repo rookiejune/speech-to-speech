@@ -15,7 +15,7 @@ from anytrain.module.idspace import Layout
 
 from _contracts_helpers import _ChatTokenizer
 from _config_helpers import _train
-from speech_to_speech.datamodule.collate.collator import TextCollator, pack_text_samples
+from speech_to_speech.datamodule.collate import TextCollator, pack_text_samples
 from speech_to_speech.datamodule.config import DataLoaderConfig
 from speech_to_speech.datamodule.dataset.text import TextConfig
 from speech_to_speech.datamodule.module import DataModule, LoaderSpec
@@ -27,7 +27,7 @@ from speech_to_speech.datamodule.dataset.text import (
     load_text_dataset,
 )
 from speech_to_speech.datamodule.loader import ARFraming
-from speech_to_speech.datamodule.protocol import TextRuntime
+from speech_to_speech.datamodule.contract import TextRuntime
 from speech_to_speech.datamodule.batch import (
     ModelBatch,
     ModelSample,

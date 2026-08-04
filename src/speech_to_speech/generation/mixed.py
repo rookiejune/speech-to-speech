@@ -10,11 +10,11 @@ from torch import Tensor
 from transformers.cache_utils import Cache
 
 from ..task import PredictionModality, Task
-from ._request import prediction_of
+from .request import prediction_of
 from .audio import decode_token_audio_results
-from .protocol import TokenGenerator
+from .contract import TokenGenerator
 from ..task import Request
-from .result import Result
+from .contract import Result
 
 
 class _State(Enum):

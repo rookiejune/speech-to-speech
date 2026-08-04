@@ -15,20 +15,20 @@ from .._compat import StrEnum, auto
 from .asset import AssetJob, resolve_workspace_asset
 from .loader.contract import ARFraming, validate_ar_framing
 from ..task import PredictionModality, Task
-from ._helper.text import TextLoader
-from .collate.collator import Collator
+from .collate import Collator
 from .config import TaskConfig
 from .config import DataLoaderConfig, SpeechConfig
 from .dataset.speech import _apply_split_manifest, load_dataset
+from .dataset.text import TextLoader
 from .diagnostic import SampleSplit
 from .loader.schedule import LoaderSchedule, ScheduledDataLoader
-from .protocol import (
+from .contract import (
     DataRuntime,
     DataRuntimeSnapshot,
     DatasetRuntime,
     TextRuntime,
 )
-from .build.single import SingleCollator
+from .single import SingleCollator
 from .batch import (
     TrainBatch,
     TrainInput,
@@ -407,10 +407,13 @@ class DataModule(LightningDataModule):
         for loader in self._speech_loaders(include_validation=True):
             loader.refresh_materialized_asset()
 
-    def teardown(self, stage: str | None = None) -> None:
-        del stage
+    def close_asset_materialization(self) -> None:
         for job in self._asset_jobs():
             job.close()
+
+    def teardown(self, stage: str | None = None) -> None:
+        del stage
+        self.close_asset_materialization()
 
     def diagnostic_samples(
         self,

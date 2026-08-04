@@ -9,7 +9,7 @@ from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
 from ..task import PredictionModality
-from ..runtime.tokenizer import TextTokenizer
+from ..runtime.backbone.contract import TextTokenizer
 
 
 class ResponseTextRuntime(Protocol):

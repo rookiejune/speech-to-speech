@@ -3,7 +3,11 @@ from __future__ import annotations
 import math
 from typing import Protocol, Union, cast, runtime_checkable
 
-from anytrain.codec import AcousticLayout
+from anytrain.codec import (
+    AcousticLayout,
+    SemanticAcousticCodes,
+    SemanticGlobalCodes,
+)
 from torch import Generator, Tensor
 
 
@@ -51,7 +55,7 @@ class Codec(Protocol):
     def decode(self, codes: Tensor) -> Tensor: ...
 
 
-class StructuredCodec(SemanticCodebookCodec, Protocol):
+class AcousticCodec(SemanticCodebookCodec, Protocol):
     @property
     def semantic_codebook_sizes(self) -> tuple[int, ...]: ...
 
@@ -67,9 +71,9 @@ class StructuredCodec(SemanticCodebookCodec, Protocol):
     @property
     def acoustic_feature_dim(self) -> int: ...
 
-    def tokenize(self, audio: Tensor, sample_rate: int) -> object: ...
+    def tokenize(self, audio: Tensor, sample_rate: int) -> SemanticAcousticCodes: ...
 
-    def detokenize(self, codes: object) -> Tensor: ...
+    def detokenize(self, codes: SemanticAcousticCodes) -> Tensor: ...
 
     def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor: ...
 
@@ -78,25 +82,36 @@ class StructuredCodec(SemanticCodebookCodec, Protocol):
     ) -> Tensor: ...
 
 
-CodecBackend = Union[Codec, StructuredCodec]
+class GlobalCodec(SemanticCodebookCodec, Protocol):
+    @property
+    def semantic_codebook_sizes(self) -> tuple[int, ...]: ...
+
+    @property
+    def global_codebook_sizes(self) -> tuple[int, ...]: ...
+
+    @property
+    def global_unit_length(self) -> int: ...
+
+    @property
+    def global_feature_dim(self) -> int: ...
+
+    def tokenize(self, audio: Tensor, sample_rate: int) -> SemanticGlobalCodes: ...
+
+    def detokenize(self, codes: SemanticGlobalCodes) -> Tensor: ...
+
+    def global_codes_to_features(self, global_codes: Tensor) -> Tensor: ...
+
+    def decode_features(
+        self, semantic_codes: Tensor, global_features: Tensor
+    ) -> Tensor: ...
+
+
+StructuredCodec = Union[AcousticCodec, GlobalCodec]
+CodecBackend = Union[Codec, AcousticCodec, GlobalCodec]
 
 
 class CodebookCodec(SemanticCodebookCodec, Protocol):
     pass
-
-
-class AcousticCodec(CodebookCodec, Protocol):
-    @property
-    def acoustic_feature_dim(self) -> int: ...
-
-    @property
-    def acoustic_codebook_sizes(self) -> tuple[int, ...]: ...
-
-    def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor: ...
-
-    def decode_features(
-        self, semantic_codes: Tensor, acoustic_features: Tensor
-    ) -> Tensor: ...
 
 
 @runtime_checkable
@@ -147,27 +162,10 @@ class _AcousticCapability(
     Protocol,
 ):
     @property
-    def acoustic_feature_dim(self) -> int: ...
-
-    @property
-    def acoustic_codebook_sizes(self) -> tuple[int, ...]: ...
-
-    def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor: ...
-
-    def decode_features(
-        self, semantic_codes: Tensor, acoustic_features: Tensor
-    ) -> Tensor: ...
-
-
-@runtime_checkable
-class _StructuredCapability(
-    _SampleRateCapability,
-    _FrameRateCapability,
-    _CodebookCapability,
-    Protocol,
-):
-    @property
     def semantic_codebook_sizes(self) -> tuple[int, ...]: ...
+
+    @property
+    def acoustic_feature_dim(self) -> int: ...
 
     @property
     def acoustic_codebook_sizes(self) -> tuple[int, ...]: ...
@@ -178,17 +176,44 @@ class _StructuredCapability(
     @property
     def acoustic_unit_length(self) -> int | None: ...
 
-    @property
-    def acoustic_feature_dim(self) -> int: ...
-
-    def tokenize(self, audio: Tensor, sample_rate: int) -> object: ...
-
-    def detokenize(self, codes: object) -> Tensor: ...
-
     def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor: ...
+
+    def tokenize(self, audio: Tensor, sample_rate: int) -> SemanticAcousticCodes: ...
+
+    def detokenize(self, codes: SemanticAcousticCodes) -> Tensor: ...
 
     def decode_features(
         self, semantic_codes: Tensor, acoustic_features: Tensor
+    ) -> Tensor: ...
+
+
+@runtime_checkable
+class _GlobalCapability(
+    _SampleRateCapability,
+    _FrameRateCapability,
+    _CodebookCapability,
+    Protocol,
+):
+    @property
+    def semantic_codebook_sizes(self) -> tuple[int, ...]: ...
+
+    @property
+    def global_codebook_sizes(self) -> tuple[int, ...]: ...
+
+    @property
+    def global_unit_length(self) -> int: ...
+
+    @property
+    def global_feature_dim(self) -> int: ...
+
+    def tokenize(self, audio: Tensor, sample_rate: int) -> SemanticGlobalCodes: ...
+
+    def detokenize(self, codes: SemanticGlobalCodes) -> Tensor: ...
+
+    def global_codes_to_features(self, global_codes: Tensor) -> Tensor: ...
+
+    def decode_features(
+        self, semantic_codes: Tensor, global_features: Tensor
     ) -> Tensor: ...
 
 
@@ -328,8 +353,16 @@ def acoustic_codec(codec: object) -> AcousticCodec:
         raise TypeError("acoustic decoding requires an acoustic codec capability.")
     codec_sample_rate(codec)
     codec_frame_rate(codec)
+    _codebook_sizes(codec.semantic_codebook_sizes, "semantic codec")
     _codebook_sizes(codec.acoustic_codebook_sizes, "acoustic codec")
     _positive_int(codec.acoustic_feature_dim, "acoustic codec feature dimension")
+    layout = codec.acoustic_layout
+    if not isinstance(layout, AcousticLayout):
+        raise TypeError("acoustic codec layout must be an AcousticLayout.")
+    if layout is not AcousticLayout.FRAME_ALIGNED:
+        raise ValueError("acoustic codecs must use a frame-aligned acoustic layout.")
+    if codec.acoustic_unit_length is not None:
+        raise ValueError("frame-aligned acoustic codec unit length must be None.")
     return cast(AcousticCodec, codec)
 
 
@@ -340,29 +373,39 @@ def supports_acoustic(codec: object) -> bool:
     return True
 
 
-def structured_codec(codec: object) -> StructuredCodec:
-    if not isinstance(codec, _StructuredCapability):
-        raise TypeError("structured codec capability is required.")
+def global_codec(codec: object) -> GlobalCodec:
+    if not isinstance(codec, _GlobalCapability):
+        raise TypeError("global decoding requires a semantic-global codec capability.")
     codec_sample_rate(codec)
     codec_frame_rate(codec)
-    _codebook_sizes(codec.semantic_codebook_sizes, "structured semantic codec")
-    _codebook_sizes(codec.acoustic_codebook_sizes, "structured acoustic codec")
-    _positive_int(codec.acoustic_feature_dim, "structured codec acoustic feature dimension")
-    layout = codec.acoustic_layout
-    if not isinstance(layout, AcousticLayout):
-        raise TypeError("structured codec acoustic layout must be an AcousticLayout.")
-    unit_length = codec.acoustic_unit_length
-    if layout is AcousticLayout.FIXED_LENGTH:
-        _positive_int(unit_length, "fixed-length structured codec acoustic unit length")
-    elif unit_length is not None:
-        raise ValueError(
-            "frame-aligned structured codec acoustic unit length must be None."
-        )
-    return cast(StructuredCodec, codec)
+    _codebook_sizes(codec.semantic_codebook_sizes, "semantic codec")
+    _codebook_sizes(codec.global_codebook_sizes, "global codec")
+    _positive_int(codec.global_feature_dim, "global codec feature dimension")
+    _positive_int(codec.global_unit_length, "global codec unit length")
+    return cast(GlobalCodec, codec)
+
+
+def supports_global(codec: object) -> bool:
+    if not isinstance(codec, _GlobalCapability):
+        return False
+    global_codec(codec)
+    return True
+
+
+def structured_codec(codec: object) -> StructuredCodec:
+    acoustic = supports_acoustic(codec)
+    global_ = supports_global(codec)
+    if acoustic == global_:
+        raise TypeError("structured codec capability is required.")
+    if acoustic:
+        return acoustic_codec(codec)
+    return global_codec(codec)
 
 
 def supports_structured(codec: object) -> bool:
-    if not isinstance(codec, _StructuredCapability):
+    acoustic = isinstance(codec, _AcousticCapability)
+    global_ = isinstance(codec, _GlobalCapability)
+    if acoustic == global_:
         return False
     structured_codec(codec)
     return True
@@ -421,6 +464,7 @@ __all__ = [
     "CodebookCodec",
     "Codec",
     "CodecBackend",
+    "GlobalCodec",
     "SemanticCodebookCodec",
     "SemanticCodec",
     "StructuredCodec",
@@ -433,8 +477,10 @@ __all__ = [
     "fsq_level_values",
     "fsq_levels",
     "fsq_radix_order",
+    "global_codec",
     "semantic_feature_dim",
     "structured_codec",
     "supports_acoustic",
+    "supports_global",
     "supports_structured",
 ]

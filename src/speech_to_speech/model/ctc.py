@@ -8,14 +8,17 @@ from typing import Optional, cast
 import torch
 from torch import Tensor, nn
 
-from .._compat import StrEnum, auto
+from .._compat import StrEnum, auto, register
 from ..runtime.backbone import BackboneOutputView
 from ..runtime.backbone.contract import (
     BackboneOutput,
     BackboneReadout,
 )
-from ._checkpointing import GradientCheckpointingLayer
-from ._helper import register, safe_transformer_mask, validate_tower_fields
+from .tower import (
+    GradientCheckpointingLayer,
+    safe_transformer_mask,
+    validate_tower_fields,
+)
 
 
 class CTCRoute(StrEnum):

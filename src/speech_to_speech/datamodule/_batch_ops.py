@@ -9,7 +9,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 from .._tensor import is_signed_integer_dtype
 from ..task import PredictionModality, Task, uses_source_ctc, uses_target_ctc
-from .target import ACOUSTIC_PAD_ID, CTC_PAD_ID, AcousticTarget, CTCTarget
+from .contract import ACOUSTIC_PAD_ID, CTC_PAD_ID, AcousticTarget, CTCTarget
 
 if TYPE_CHECKING:
     from .batch import ModelSample

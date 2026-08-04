@@ -6,6 +6,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import torch
+from anytrain.codec import AcousticLayout, SemanticAcousticCodes
 from anytrain.module.idspace import Layout
 from lightning import pytorch as pl
 from lightning.fabric.utilities.throughput import measure_flops
@@ -21,9 +22,9 @@ from speech_to_speech.training._flops import (
     rvq_decoder,
 )
 from speech_to_speech.datamodule.batch import ModelBatch
-from speech_to_speech.datamodule.target import AcousticTarget
-from speech_to_speech.loss.module import FlowObjective, RVQObjective, TokenObjective
-from speech_to_speech.loss.types import LossItem
+from speech_to_speech.datamodule.batch import AcousticTarget
+from speech_to_speech.loss.contract import LossItem
+from speech_to_speech.loss.supervised import FlowObjective, RVQObjective, TokenObjective
 from speech_to_speech.model import (
     AdapterType,
     AudioInputAdapterConfig,
@@ -397,9 +398,28 @@ class _Codec:
     frame_rate = 50.0
     acoustic_feature_dim = 4
     acoustic_codebook_sizes = (5, 6)
+    acoustic_layout = AcousticLayout.FRAME_ALIGNED
+    acoustic_unit_length = None
     semantic_feature_dim = 4
     codebook_sizes = (3, 5, 6)
     semantic_codebook = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    semantic_codebook_sizes = (3,)
+
+    def tokenize(self, audio: Tensor, sample_rate: int) -> SemanticAcousticCodes:
+        del sample_rate
+        semantic = torch.zeros(
+            (audio.size(0), 1, 1), dtype=torch.long, device=audio.device
+        )
+        acoustic = torch.zeros(
+            (audio.size(0), 1, 2), dtype=torch.long, device=audio.device
+        )
+        return SemanticAcousticCodes(semantic=semantic, acoustic=acoustic)
+
+    def detokenize(self, codes: SemanticAcousticCodes) -> Tensor:
+        return self.decode_features(
+            codes.semantic,
+            self.acoustic_codes_to_features(codes.acoustic),
+        )
 
     def acoustic_codes_to_features(self, codes: Tensor) -> Tensor:
         return codes[..., :1].float().expand(*codes.shape[:-1], 4)

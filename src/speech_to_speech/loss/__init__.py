@@ -11,8 +11,7 @@ from .ctc import CTCAlignmentLoss, CTCConfig, CTCRouteConfig
 from .mimo import MimoLoss, MimoObjective
 
 if TYPE_CHECKING:
-    from .preference import DPOObjective
-    from .rollout import GRPOObjective
+    from .policy import DPOObjective, GRPOObjective
 
 __all__ = [
     "CTCAlignmentLoss",
@@ -27,11 +26,11 @@ __all__ = [
 
 def __getattr__(name: str) -> object:
     if name == "DPOObjective":
-        from .preference import DPOObjective
+        from .policy import DPOObjective
 
         return DPOObjective
     if name == "GRPOObjective":
-        from .rollout import GRPOObjective
+        from .policy import GRPOObjective
 
         return GRPOObjective
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

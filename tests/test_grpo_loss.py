@@ -10,7 +10,7 @@ from anytrain.module.idspace import Layout
 from speech_to_speech.rl import GRPOBatch
 from speech_to_speech.datamodule.batch import ModelBatch
 from speech_to_speech.task import PredictionModality
-from speech_to_speech.loss.rollout import GRPOObjective
+from speech_to_speech.loss.policy import GRPOObjective
 from speech_to_speech.task import Task
 
 

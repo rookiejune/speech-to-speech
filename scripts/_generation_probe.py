@@ -8,7 +8,7 @@ import torch
 from anydataset.types import Modality
 
 from speech_to_speech.generation import Request, generate_responses
-from speech_to_speech.generation.eval.reporting import (
+from speech_to_speech.generation.evaluation import (
     allowed_values,
     hidden_last,
     hidden_layer_max_abs,

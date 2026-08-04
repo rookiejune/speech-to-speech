@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import torch
-from anytrain.codec import AcousticLayout, SemanticAcousticCodes
+from anytrain.codec import SemanticGlobalCodes
 from anytrain.tokenizer import CodecBPE
 from torch import Tensor
 
@@ -242,7 +242,7 @@ class BiCodecDecodeTest(unittest.TestCase):
         )
         tokens = tokenizer.encode_full(expected)
 
-        codec = _StructuredCodec()
+        codec = _GlobalCodec()
         waveform = decode_generated_bicodec_full(
             tokens[None] + 10,
             codec=codec,
@@ -257,7 +257,7 @@ class BiCodecDecodeTest(unittest.TestCase):
             expected.semantic_codes[None],
         )
         torch.testing.assert_close(
-            codec.codes.acoustic,
+            codec.codes.global_codes,
             cast(Tensor, expected.global_codes)[None],
         )
 
@@ -279,7 +279,7 @@ class BiCodecDecodeTest(unittest.TestCase):
         _, resolved = decode_generated_bicodec_row(
             tokens + 10,
             torch.tensor([1, boa]),
-            codec=_StructuredCodec(),
+            codec=_GlobalCodec(),
             audio_tokenizer=tokenizer,
             audio_token_range=(10, 10 + tokenizer.vocab_size),
             boa_token_id=boa,
@@ -321,7 +321,7 @@ class BiCodecDecodeTest(unittest.TestCase):
         _, resolved = decode_generated_bicodec_row(
             tokens + 10,
             prompt,
-            codec=_StructuredCodec(),
+            codec=_GlobalCodec(),
             audio_tokenizer=tokenizer,
             audio_token_range=(10, 10 + tokenizer.vocab_size),
             boa_token_id=boa,
@@ -366,7 +366,7 @@ class BiCodecDecodeTest(unittest.TestCase):
                 decode_generated_bicodec_row(
                     response,
                     prompt_ids,
-                    codec=_StructuredCodec(),
+                    codec=_GlobalCodec(),
                     audio_tokenizer=tokenizer,
                     audio_token_range=(10, 10 + tokenizer.vocab_size),
                     boa_token_id=boa,
@@ -504,19 +504,38 @@ def contract_hash(state: dict[str, object]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-class _StructuredCodec:
-    acoustic_layout = AcousticLayout.FIXED_LENGTH
-    acoustic_unit_length = 2
+class _GlobalCodec:
+    global_unit_length = 2
     semantic_codebook_sizes = (8,)
-    acoustic_codebook_sizes = (3,)
+    global_codebook_sizes = (3,)
+    global_feature_dim = 4
     sample_rate = 16_000
     frame_rate = 50.0
     semantic_codebook = torch.zeros(8, 4)
-    codes: SemanticAcousticCodes | None = None
+    codes: SemanticGlobalCodes | None = None
 
-    def detokenize(self, codes: SemanticAcousticCodes) -> torch.Tensor:
+    def tokenize(
+        self,
+        audio: torch.Tensor,
+        sample_rate: int,
+    ) -> SemanticGlobalCodes:
+        del audio, sample_rate
+        raise NotImplementedError
+
+    def detokenize(self, codes: SemanticGlobalCodes) -> torch.Tensor:
         self.codes = codes
-        return torch.zeros(codes.semantic.size(0), 1, codes.acoustic.size(1))
+        return torch.zeros(codes.semantic.size(0), 1, codes.global_codes.size(1))
+
+    def global_codes_to_features(self, global_codes: torch.Tensor) -> torch.Tensor:
+        return global_codes.to(dtype=torch.float32)
+
+    def decode_features(
+        self,
+        semantic_codes: torch.Tensor,
+        global_features: torch.Tensor,
+    ) -> torch.Tensor:
+        del semantic_codes
+        return global_features.new_zeros((1, 1, 1))
 
 
 class _GenerationModel:

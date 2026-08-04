@@ -365,8 +365,8 @@ def _validate_audio_sequence_layout(config: _EntryConfig) -> None:
         )
     if config.runtime.audio_view is AudioView.BICODEC and acoustic is not AcousticType.NONE:
         raise ValueError(
-            "BiCodec fixed-length acoustic units require model/acoustic=none; "
-            "use runtime.acoustic_generator_artifact or audio_sequence_layout=flattened."
+            "BiCodec global units require model/acoustic=none and "
+            "audio_sequence_layout=flattened."
         )
     if (
         acoustic is AcousticType.NONE

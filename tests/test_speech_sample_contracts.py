@@ -6,7 +6,7 @@ import unittest
 
 from _contracts_helpers import *
 from speech_to_speech.audio import AudioCodes
-from speech_to_speech.datamodule.build.sample import build_speech_sample
+from speech_to_speech.datamodule.builder import build_speech_sample
 from speech_to_speech.datamodule.sample import Speech
 from speech_to_speech.datamodule.loader import ARFraming
 
@@ -287,15 +287,12 @@ class SpeechSampleContractTest(unittest.TestCase):
         )([_raw_single_waveform_sample()])
 
         with patch(
-            "speech_to_speech.callback.codec.supports_structured",
-            return_value=True,
-        ), patch(
-            "speech_to_speech.callback.codec.structured_codec",
-        ) as structured:
+            "speech_to_speech.callback.codec.global_codec",
+        ) as global_backend:
             batch = OnDeviceCodecMaterializer(runtime)(raw, device=torch.device("cpu"))
 
         self.assertIsInstance(batch, ModelBatch)
-        structured.assert_not_called()
+        global_backend.assert_not_called()
         self.assertEqual(runtime.codec.calls, [((1, 1, 4), 4)])
 
     def test_pair_waveform_fallback_encodes_both_s2st_roles(self):

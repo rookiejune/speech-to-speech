@@ -11,7 +11,7 @@ from torch import Tensor
 
 from ..model.generation import GenerationOutput
 from ..task import PredictionModality
-from ._request import prediction_of, validate
+from .request import prediction_of, validate
 from ..task import Request
 
 

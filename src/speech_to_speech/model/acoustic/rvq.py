@@ -9,15 +9,15 @@ from semantic_acoustic_generator.model import AcousticRVQDecoder
 from semantic_acoustic_generator.runtime.artifact import AcousticGeneratorArtifact
 from torch import Tensor
 
-from ..output import AcousticGeneration
+from ..generation import AcousticGeneration
 from ...runtime.codec_contract import acoustic_codec
-from ..contract import rvq_acoustic_contract
+from ..checkpoint_contract import rvq_acoustic_contract
 from ..base import Config
 from ...runtime.protocol import TokenModelRuntime
-from ._config import DecoderConfig, decoder_options
-from ._codec import code_features
+from .config import DecoderConfig, decoder_options
+from .base import code_features
 from .base import AcousticModel
-from .initialization import rvq_generator
+from .factory import rvq_generator
 
 
 class RVQModel(AcousticModel):

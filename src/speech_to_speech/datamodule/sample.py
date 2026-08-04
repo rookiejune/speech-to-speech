@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Union
@@ -10,8 +11,18 @@ from torch import Tensor
 from .._compat import StrEnum, auto
 from .._tensor import is_signed_integer_dtype
 from ..task import PredictionModality, SourceLayout, Task
-from ._helper.duration import seconds
 from .loader.contract import ARFraming, validate_ar_framing
+
+
+def seconds(value: object, *, name: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a number or None.")
+    result = float(value)
+    if not math.isfinite(result) or result < 0:
+        raise ValueError(f"{name} must be finite and non-negative.")
+    return result
 
 
 @dataclass(frozen=True)

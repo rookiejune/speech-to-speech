@@ -9,16 +9,16 @@ from semantic_acoustic_generator.model.dit import DiTDecoder
 from semantic_acoustic_generator.runtime.artifact import AcousticGeneratorArtifact
 from torch import Tensor, nn
 
-from ..output import AcousticGeneration
+from ..generation import AcousticGeneration
 from ...runtime.codec_contract import acoustic_codec
-from ..contract import flow_acoustic_contract
-from .._helper import register
+from ..checkpoint_contract import flow_acoustic_contract
+from ..._compat import register
 from ..base import Config
-from .protocol import FlowModelRuntime, FlowSamplingRuntime
-from ._config import DecoderConfig, FlowRepaConfig, decoder_options
-from ._codec import code_features
+from .contract import FlowModelRuntime, FlowSamplingRuntime
+from .config import DecoderConfig, FlowRepaConfig, decoder_options
+from .base import code_features
 from .base import AcousticModel
-from .initialization import flow_generator
+from .factory import flow_generator
 
 
 class AcousticFlow(nn.Module):
@@ -70,7 +70,10 @@ class AcousticFlow(nn.Module):
 
     @property
     def decoder(self) -> DiTDecoder:
-        return self.generator.core
+        decoder = self.generator.core
+        if decoder is None:
+            raise RuntimeError("AcousticFlow requires a flow velocity decoder.")
+        return decoder
 
     @torch.no_grad()
     def sample(
@@ -147,7 +150,12 @@ class FlowModel(AcousticModel):
             ),
         ).to(device=backbone_weight.device, dtype=torch.float32)
         if generator is not None:
-            self.acoustic_decoder.load_state_dict(generator.core.state_dict())
+            artifact_decoder = generator.core
+            if artifact_decoder is None:
+                raise ValueError(
+                    "Flow initialization requires an artifact with a flow decoder."
+                )
+            self.acoustic_decoder.load_state_dict(artifact_decoder.state_dict())
 
     @property
     def acoustic_decoder(self) -> DiTDecoder:

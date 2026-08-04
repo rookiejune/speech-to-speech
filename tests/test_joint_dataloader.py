@@ -183,7 +183,7 @@ class ScheduledDataLoaderTest(unittest.TestCase):
         dataset = _IterableSamples(samples)
 
         with patch(
-            "speech_to_speech.datamodule._helper.text.load_text_dataset",
+            "speech_to_speech.datamodule.dataset.text.load_text_dataset",
             return_value=dataset,
         ):
             datamodule = DataModule(Mock(), {"mt": spec})

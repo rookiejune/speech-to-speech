@@ -72,12 +72,12 @@ semantic-only decoder。`FULL_CODEC_SEQUENCE` 对 `FrameCodec` 展开全部 code
 anytrain，也不通过普通 codec 的 `decode()` 伪装。
 
 能力检查按实际接口而不是 codec 名称分派：`frame_codec()` 要求完整 encode/decode、frame rate 和
-codebook sizes；`structured_codec()` 要求 tokenize/detokenize、semantic/acoustic codebook、layout
-与 feature decode 接口；`acoustic_codec()` 只用于 frame-aligned side channel。一个 backend 只有在
+codebook sizes；`structured_codec()` 接受完整的 semantic/acoustic 或 semantic/global contract；
+`acoustic_codec()` 只用于 frame-aligned side channel，`global_codec()` 只用于独立 global units。一个 backend 只有在
 满足对应完整 Protocol 时才进入该路径，不用单个同名属性推断整组能力。
 capability metadata 在这些边界统一校验：sample rate 必须是正整数，frame rate 必须是有限正数，
-codebook sizes 必须是非空正整数 tuple，feature dim 必须是正整数，structured layout 必须是
-`AcousticLayout`，且 `FIXED_LENGTH` 必须提供正整数 `acoustic_unit_length`；接口存在但 metadata
+codebook sizes 必须是非空正整数 tuple，feature dim 必须是正整数；semantic/acoustic 只能使用
+`FRAME_ALIGNED` 且不设置 unit length，semantic/global 必须提供正整数 `global_unit_length`；接口存在但 metadata
 无效时直接暴露错误。只消费采样率或 frame-code codebook metadata 的调用点分别使用
 `codec_sample_rate()` 与 `frame_codebook_sizes()`，不要求无关的完整 encode/decode 能力。
 
@@ -86,9 +86,9 @@ LongCat 的 `DECOUPLED + model/acoustic=none` 必须配置 `acoustic_generator_a
 训练路径，仍由 `Codec.decode_features()` 消费生成的 features；它不代表 anytrain 提供
 semantic-only decoder。
 
-S2S 使用 `AudioCodes(semantic_codes, global_codes, acoustic_codes)` 作为内部设计语言。anycodec 的
-`SemanticAcousticCodes.acoustic` 只在 codec adapter 边界出现：`AcousticLayout.FIXED_LENGTH` 映射到
-`global_codes`，`FRAME_ALIGNED` 映射到 `acoustic_codes`。BiCodec 只使用一套 `flattened`
+S2S 使用 `AudioCodes(semantic_codes, global_codes, acoustic_codes)` 作为内部设计语言。
+`SemanticGlobalCodes` 只映射到 semantic/global，`SemanticAcousticCodes` 只映射到
+semantic/frame-aligned acoustic。BiCodec 只使用一套 `flattened`
 self-describing sequence：
 fixed-length global payload 采用 slot-major 布局并排在 semantic payload 之前。response 以
 `<begin_of_global>` 开局时 LLM 生成 global 与 semantic；以 `<begin_of_semantic>` 开局时只生成
@@ -109,12 +109,12 @@ speaker 数据上如果没有额外 speaker/style 条件或 latent sampling，�
 这是建模条件的限制，不由 BiCodec tokenizer 隐式解决；需要在 experiment/checkpoint 设计中显式
 加入条件或采样策略。
 
-BiCodec 的 global 轴在 anycodec metadata 中对应 `FIXED_LENGTH`，不能广播到 semantic frame 轴，也不能接入当前
+BiCodec 的 global 轴独立于 semantic frame 轴，不能广播到 frame 轴，也不能接入当前
 frame-aligned Flow/RVQ side channel。
 
-`supports_structured()` 只表示 backend 同时提供 semantic/acoustic structured 能力，不决定 token
-序列格式。`FULL_CODEC_SEQUENCE` 按 layout 分派：`FIXED_LENGTH` 使用
-`BiCodecAudioTokenizer` 的 structured 状态机；`FRAME_ALIGNED` 必须同时满足 `frame_codec()`，并用
+`supports_structured()` 只表示 backend 提供完整 semantic/acoustic 或 semantic/global contract，
+不决定 token 序列格式。semantic/global 使用 `BiCodecAudioTokenizer` 的 structured 状态机；
+frame-aligned full-code 路径必须同时满足 `frame_codec()`，并用
 `FlattenedAudioTokenizer` 展开完整 frame codebooks。因此同时实现 frame 与 structured capability
 的 LongCat 不会误入固定长度状态机。
 
@@ -150,7 +150,7 @@ DataModule 与 generation service。runtime 不保存进程级 singleton；同�
 `audio_sequence_layout` 字符串作为兼容性判断，因为相同 layout 名下的 vocabulary、grammar 或
 composition 仍可能不兼容。校验按结构能力而非 preset 身份：`semantic` layout 要求 semantic-only
 decode provider 或 acoustic side module；`flattened` layout 要求 codec 能消费完整 full codes；
-BiCodec 固定使用 `flattened`，其 fixed-length metadata 在 S2S 内解释为 global，reference global 直接来自
+BiCodec 固定使用 `flattened`，reference global 直接来自
 prompt 中的 structured stream，而不是额外配置轴或 side channel。
 
 文件职责保持分离：`runtime/config.py` 拥有配置、layout 校验和 local-rank device 绑定；

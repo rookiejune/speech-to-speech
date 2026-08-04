@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import cast
 
 from .audio_tokenizer import TorchCodecBPE
-from .tokenizer import TextTokenizer
+from .backbone.contract import TextTokenizer
 
 
 def audio_tokenizer(path: str | Path) -> TorchCodecBPE:

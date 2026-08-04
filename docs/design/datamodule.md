@@ -144,11 +144,13 @@ checkpoint 的收敛和生成音质仍需单独验收。
    相同长度、顺序和过滤结果，并自行保证并发调用安全。这里是两段式接口：所有 rank 都必须能 import
    的 module-level builder 接收 `AssetRequest` 并返回 dataset factory；builder 和返回值都必须是可由
    `spawn` pickle 的确定性对象，不能使用 lambda、局部函数或捕获不可 pickle 状态的 closure。factory
-   会在每个 rank 的 setup 调用一次，并在 global owner 的 daemon worker 中再次调用，因此必须幂等、
-   可重入且只读，不能再启动 multiprocessing 子进程。返回值必须是有限、稳定且有 `__len__` 的 dataset，
+   会在每个 rank 的 setup 调用一次，并在 global owner 的 non-daemon spawn worker 中再次调用，因此
+   必须幂等、可重入且只读。non-daemon worker 允许 materializer 在内部继续启动多设备/DataLoader
+   子进程。返回值必须是有限、稳定且有 `__len__` 的 dataset，
    并提供 map-style `__getitem__` 或 anydataset 支持的显式 shard iteration；Sample 必须包含内置
-   `CodecProvider` 所需的 waveform/file audio，以及 workspace pair schema 所需的 source/target text、
-   `TextView.TEXT` 和 `TextMeta.LANG`。
+   codec provider 所需的 waveform/file audio，以及 workspace pair schema 所需的 source/target text、
+   `TextView.TEXT` 和 `TextMeta.LANG`。frame-code view 使用 anydataset `CodecProvider.encode()`；
+   BiCodec 使用 structured `tokenize()`，并支持同一 WMT19 sample 内 source/target 两个 audio reference。
 
 补产结果保持 workspace codec dataset 的读取格式，但它本身已经是过滤后的 composite store，因此
 ready store 加载时不再二次应用 filter。逻辑请求由 dataset/source root、split、codec、codec view、
@@ -157,30 +159,38 @@ filter、`input_id`、`provider_id` 和 source factory 共同确定 request ID�
 同一补产目录；manifest provenance 必须精确匹配 `input_id` 和 `provider_id` 才能复用。这两个 ID 是
 调用方维护的语义版本：source 内容、filter 实现或样本顺序变化时必须更新 `input_id`，codec checkpoint、
 provider 配置或 code 语义变化时必须更新 `provider_id`，否则系统会按旧 provenance 合法复用旧资产。
+BiCodec store 使用 anydataset 的 `{"semantic": Tensor, "global": Tensor}` schema。parser 直接把
+两条流映射到 `AudioCodes.semantic_codes/global_codes`，不会经过 acoustic 字段或 layout 转换。
+旧 `semantic/acoustic` BiCodec store 必须显式离线迁移，运行时不会静默兼容。
 
 生命周期跨一个明确的 epoch 边界：epoch 0 的 DataLoader 使用 filtered waveform fallback，同时只有
 global owner 在后台写完整 store；epoch 结束时 owner 的 `finish` 等待所有缺失样本写完，并把异常广播
 给全部 rank。成功后先执行 DDP barrier，再由每个 rank `refresh_materialized_assets()`。Trainer 每个
 epoch 重建 DataLoader，因此 epoch 1 开始读取 ready codec store，不再走 waveform fallback。这个边界
-保证完整跑完一次 epoch 后，请求所需的全部 codec 数据已生成或训练以明确错误终止。
+保证完整跑完一次 epoch 后，请求所需的全部 codec 数据已生成或训练以明确错误终止。通用后台进程、
+状态机、跨 rank 同步和异常回收由 `anytrain.lightning` 提供；本项目只保留业务 request、DataModule
+方法和 `AssetMaterialization` 薄适配。
 
 `finish` 会在 epoch 边界等待全量补产完成，不设置短超时；因此卡死的 source/provider 也会让该边界持续
-等待。训练若在到达 epoch end 前异常退出，teardown 只负责终止后台 worker，本次不承诺 ready；
+等待。训练若在到达 epoch end 前异常退出，callback/teardown 会 best-effort 终止后台 worker，本次不承诺
+ready；
 ViewMaterializer 的 resume state 会供后续同一请求继续补产。直接构造 DataModule/Trainer 的调用方必须
 自行安装 `AssetMaterialization` callback，并设置 `reload_dataloaders_every_n_epochs=1`；正式
 `scripts/train.py` 已自动配置这两个条件。
 
 当前实现只允许唯一的 training loader，且它必须是启用补产的 speech loader，以提供有限且唯一的 reload
-边界；validation 若也启用补产，
-必须与 training 指向同一个 codec source request。内置 provider 当前只支持 `wmt19_tts` 的 frame-code
-view；resolver 会直接拒绝 BiCodec，单独配置 `source_factory` 不能绕过，必须先扩展对应 provider/backend。
-其他 dataset 也需要先提供明确 backend/source 契约，不能沿用 frame-code materializer 猜测格式。
+边界；validation 若也启用补产，必须与 training 指向同一个 codec source request。内置 provider 当前
+支持 `wmt19_tts` 的 DAC、LongCat、Stable Codec、UniCodec frame-code view，以及 semantic/global BiCodec
+view。WMT19 workspace 为每个 codec store 单独解析 filter selection；BiCodec selection
+缺失时仍走同一 filtered waveform/stream fallback，不会拿 `base` selection 冒充 `bicodec` selection。
+Qwen speaker-grid read-through 仍需要独立 backend：它拥有不同的 waveform/codec root、DEFAULT-role flat
+cell 和 `speaker_grid_manifest.jsonl` 契约，不能沿用 WMT19 pair materializer 猜测格式。
 `source_root` 和 `output_root` 必须在所有 rank 解析成完全相同的绝对路径；global owner 对 output 可写、
 全部 rank 可读，且共享文件系统在 barrier 后必须一致可见。即使两个挂载前缀指向同一存储，路径字符串
 不同也会形成不同 request ID。`device` 禁止使用 `auto`，并应显式选择不会与训练争抢显存且 codec backend
-确实支持的单一设备。`write_workers` 只控制该后台进程内的 writer 线程，不创建额外 materializer 进程；
-布局/吞吐字段 `max_shard_samples`、`batch_size`、`commit_samples`、`write_workers` 和 `write_prefetch`
-不属于逻辑 request identity。
+确实支持的单一设备。`write_workers` 只控制该后台进程内的 writer 线程，不创建额外顶层 materializer
+进程；布局/吞吐字段 `max_shard_samples`、`max_shard_bytes`、`batch_size`、`commit_samples`、
+`write_workers` 和 `write_prefetch` 不属于逻辑 request identity。
 
 ## 输入输出
 

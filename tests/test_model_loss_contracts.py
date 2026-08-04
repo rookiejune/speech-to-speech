@@ -29,11 +29,16 @@ from speech_to_speech.datamodule.sample import (
 from speech_to_speech.audio import AudioCodes, AudioStream
 from semantic_acoustic_generator.loss.flow import FlowLoss
 
-from speech_to_speech.loss.module import FlowObjective, Objective, RVQObjective, TokenObjective
-from speech_to_speech.loss.token import TokenLoss
-from speech_to_speech.loss.types import LossItem, Outputs, combine_outputs
-from speech_to_speech.loss.validation import validation_metrics
-from speech_to_speech.model._assembly import text_embedding
+from speech_to_speech.loss.contract import LossItem, Outputs, combine_outputs
+from speech_to_speech.loss.supervised import (
+    FlowObjective,
+    Objective,
+    RVQObjective,
+    TokenLoss,
+    TokenObjective,
+    validation_metrics,
+)
+from speech_to_speech.model.factory import text_embedding
 from speech_to_speech.model.base import Config, Model
 from speech_to_speech.model.audio_output import (
     AudioOutputAdapterConfig,

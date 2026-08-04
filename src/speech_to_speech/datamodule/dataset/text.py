@@ -2,16 +2,24 @@ from __future__ import annotations
 
 import codecs
 import json
+from collections.abc import Iterable, Iterator, Mapping, Sequence, Sized
 from dataclasses import dataclass, field
+from itertools import islice
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, cast
 
 from anydataset import IterableAnyDataset
 from anydataset.types import Lang, Modality, Role, Sample, TextItem, TextMeta, TextView
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset, Subset
 
 from ..._compat import StrEnum, auto
+from ...task import PredictionModality, Task
+from ..batch import ModelBatch
+from ..collate import TextCollator
 from ..config import DataLoaderConfig
+from ..config import TaskConfig
+from ..loader.contract import ARFraming
+from ..contract import TextRuntime, TextRuntimeSnapshot
 
 
 class TextDatasetName(StrEnum):
@@ -414,6 +422,140 @@ JSONLTextDataset = JsonlTextDataset
 PlainTextDataset = DocumentTextDataset
 
 
+class TextLoader:
+    def __init__(
+        self,
+        config: TextConfig,
+        runtime: TextRuntime,
+        task_weights: Mapping[Task, float],
+        *,
+        prediction: PredictionModality | None = None,
+        ar_framing: ARFraming = ARFraming.INSTRUCTION,
+        max_samples: int | None = None,
+        tasks: Mapping[Task, TaskConfig] | None = None,
+    ) -> None:
+        self.config = config
+        self.runtime = runtime
+        self.task_configs = tasks
+        self.collator = TextCollator(
+            runtime,
+            task_weights,
+            prediction=prediction,
+            ar_framing=ar_framing,
+            tasks=tasks,
+            max_tokens=config.max_tokens,
+            pack_documents=config.pack_documents,
+        )
+        self.max_samples = max_samples
+        self.num_workers = config.dataloader.num_workers
+        self._train_dataset: Dataset[Sample] | IterableAnyDataset | None = None
+
+    def setup(self, stage: str | None = None) -> None:
+        del stage
+        if self._train_dataset is not None:
+            return
+        self._train_dataset = load_text_dataset(self.config.dataset)
+
+    def train_samples(self, indices: Sequence[int]) -> list[Sample]:
+        if self._train_dataset is None:
+            raise RuntimeError("TextLoader.setup() must run before reading samples.")
+        return _samples(self._train_dataset, indices)
+
+    def diagnostic_collator(self, task: Task) -> TextCollator:
+        return TextCollator(
+            self.runtime,
+            {task: 1.0},
+            prediction=self.collator.prediction,
+            ar_framing=self.collator.ar_framing,
+            tasks=self.task_configs,
+            max_tokens=self.config.max_tokens,
+            pack_documents=self.config.pack_documents,
+        )
+
+    def train_dataloader(self) -> Iterable[ModelBatch]:
+        return self._dataloader(shuffle=True)
+
+    def validation_dataloader(self) -> Iterable[ModelBatch]:
+        return self._dataloader(shuffle=False)
+
+    def _dataloader(self, *, shuffle: bool) -> Iterable[ModelBatch]:
+        if self._train_dataset is None:
+            raise RuntimeError(
+                "text loader setup() must run before building a dataloader."
+            )
+        loader = self.config.dataloader
+        num_workers = self.num_workers
+        if not isinstance(self.collator.runtime, TextRuntimeSnapshot):
+            self.collator.runtime = cast(
+                TextRuntime,
+                cast(object, TextRuntimeSnapshot.from_runtime(self.runtime)),
+            )
+        dataset = _limit_dataset(self._train_dataset, self.max_samples)
+        map_style = not isinstance(dataset, (IterableAnyDataset, IterableDataset))
+        return DataLoader(
+            dataset,
+            batch_size=loader.batch_size,
+            shuffle=(shuffle and map_style),
+            num_workers=num_workers,
+            pin_memory=loader.pin_memory,
+            persistent_workers=(loader.persistent_workers and num_workers > 0),
+            collate_fn=self.collator,
+        )
+
+
+def _samples(
+    dataset: Dataset[Sample] | IterableAnyDataset,
+    indices: Sequence[int],
+) -> list[Sample]:
+    if not indices:
+        return []
+    if any(isinstance(index, bool) or not isinstance(index, int) for index in indices):
+        raise TypeError("text sample indices must contain integers.")
+    if any(index < 0 for index in indices):
+        raise ValueError("text sample indices must be non-negative.")
+    if not isinstance(dataset, IterableAnyDataset):
+        return [dataset[index] for index in indices]
+
+    selected: dict[int, Sample] = {}
+    requested = set(indices)
+    iterator: Iterator[tuple[int, Sample]] = dataset.iter_shard(1, 0)
+    for index, sample in islice(iterator, max(requested) + 1):
+        if index in requested:
+            selected[index] = sample
+    missing = requested - set(selected)
+    if missing:
+        raise IndexError(f"text sample index {min(missing)} is outside the dataset.")
+    return [selected[index] for index in indices]
+
+
+def _limit_dataset(
+    dataset: Dataset[Sample] | IterableAnyDataset,
+    max_samples: int | None,
+) -> Dataset[Sample] | IterableAnyDataset | IterableDataset[Sample]:
+    if max_samples is None:
+        return dataset
+    if isinstance(max_samples, bool) or not isinstance(max_samples, int):
+        raise TypeError("text max_samples must be an integer or None.")
+    if max_samples <= 0:
+        raise ValueError("text max_samples must be positive.")
+    if not isinstance(dataset, IterableAnyDataset):
+        length = len(cast(Sized, dataset))
+        return Subset(dataset, range(min(max_samples, length)))
+    return _LimitedAnyDataset(dataset, max_samples)
+
+
+class _LimitedAnyDataset(IterableDataset[Sample]):
+    def __init__(self, dataset: IterableAnyDataset, max_samples: int) -> None:
+        self.dataset = dataset
+        self.max_samples = max_samples
+
+    def __iter__(self) -> Iterator[Sample]:
+        for index, sample in self.dataset.iter_shard(1, 0):
+            if index >= self.max_samples:
+                break
+            yield sample
+
+
 __all__ = [
     "DocumentTextDataset",
     "JSONLTextDataset",
@@ -422,6 +564,7 @@ __all__ = [
     "TextConfig",
     "TextDatasetConfig",
     "TextDatasetName",
+    "TextLoader",
     "load_text_dataset",
     "ToyTextDataset",
 ]

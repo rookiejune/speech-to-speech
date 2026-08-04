@@ -56,7 +56,7 @@ ChatRequest(messages, task, language?)
 - `TextProbe` / `TextProbeResult` / `evaluate_text()`：greedy text generation 与 reference NLL
   评估。
 
-`generation.protocol` 定义 service 与 audio strategy 所依赖的窄模型协议：
+`generation.contract` 定义 service 与 audio strategy 所依赖的窄模型协议：
 
 - `TokenGenerator`：公开 runtime、backbone、`generate_tokens()`，以及供 mixed AR 使用的
   `generation_step()`（按 modality 或候选 `token_ids` 选择输出 head）。ordinary AUDIO
@@ -103,7 +103,7 @@ block length；这些规则只在 decode 前解析 `response_ids` 时校验。ma
 codec parser 完整解释则继续 decode，不强制补 EOA。多码本、flattened 或 structured span
 缺少后续 codebook/stream、范围非法或结构不完整时，按行 warning、`audio=None`，不把不完整
 结构交给 codec，也不让整批结果失败。
-`generation.batch.requests_from_batch()` 会从 teacher-forcing batch 保留 task prefix，直接构造
+`generation.service.requests_from_batch()` 会从 teacher-forcing batch 保留 task prefix，直接构造
 request 的调用方负责保持相同 task prefix 契约。
 当前 prompt 只由 layout global token IDs 表达；普通 audio-source 内容编码为 semantic audio token，
 并可通过 `audio_input_positions` 让 model 在这些 payload 的 embedding 上运行可配置的
@@ -225,7 +225,7 @@ mixed 中进一步只接收 `TEXT` / `AUDIO` 行；`DONE` 与确定性发 BOA �
 
 ## 训练桥接与文本评估
 
-`generation.batch.requests_from_batch()` 仅供 teacher-forcing 日志使用：它直接读取
+`generation.service.requests_from_batch()` 仅供 teacher-forcing 日志使用：它直接读取
 `ModelBatch.generation_prompt_lengths` 切出每行显式 prompt，并携带对应 `predictions`，再去掉 batch
 padding；BiCodec reference 已经在 prompt 内，不再复制为 generation side channel。bridge 同时保留
 `audio_input_positions` 的逐行 source payload
@@ -240,11 +240,11 @@ acoustic units 当作 semantic frame 轴。
 text modality-local logits 计算，并包含 EOS target。`SpeechToSpeechModule.generate()` 与
 `evaluate_text()` 只提供 eval-mode/no-grad 的 Lightning 适配，不改变 generation 契约。
 
-`generation.eval.reporting` 提供 generation smoke/probe 复用的比较和摘要 helper；它服务于诊断脚本，
+`generation.evaluation` 提供 generation smoke/probe 复用的比较和摘要 helper；它服务于诊断脚本，
 不进入包级 `generation` API，也不参与在线推理流程。
-`generation._request` 单点维护 prompt layout、source-audio positions 与 task 的请求
+`generation.request` 单点维护 prompt layout、source-audio positions 与 task 的请求
 约束；generation service 在分组和 padding 前调用它，相邻契约测试不再导入 service 的函数级私有实现。
-`generation.eval.acoustic` 提供 fixed-sample acoustic evaluation 复用的 waveform/STFT helper，
+`generation.evaluation` 同时提供 fixed-sample acoustic evaluation 复用的 waveform/STFT helper，
 并负责 overfit 结束后的单样本自回归生成健康度、耗时与 RTF 汇总；训练侧 callback 与脚本只负责
 cadence、设备编排、日志和落盘，不维护平行评估实现。
 

@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import torch
 from anydataset.types import AudioView
-from anytrain.codec import AcousticLayout
+from anytrain.codec import AcousticLayout, SemanticAcousticCodes
 from anytrain.module.idspace import Layout
 from speech_to_speech.task import PredictionModality
 from semantic_acoustic_generator.config import (
@@ -29,9 +29,9 @@ from semantic_acoustic_generator.runtime.artifact import (
 )
 from torch import Tensor, nn
 
-from speech_to_speech.datamodule.collate.collator import Collator
+from speech_to_speech.datamodule.collate import Collator
 from speech_to_speech.datamodule.dataset.speech import ToyDataset
-from speech_to_speech.loss.module import FlowObjective
+from speech_to_speech.loss.supervised import FlowObjective
 from speech_to_speech.model import ToyConfig
 from semantic_acoustic_generator.model.dit import DiTDecoder
 from speech_to_speech.model.acoustic.flow import FlowModel
@@ -75,7 +75,10 @@ class _TextTokenizer:
 class _Codec:
     acoustic_feature_dim = 4
     acoustic_codebook_sizes = (16,)
+    acoustic_layout = AcousticLayout.FRAME_ALIGNED
+    acoustic_unit_length = None
     semantic_feature_dim = 4
+    semantic_codebook_sizes = (8,)
     codebook_sizes = (8, 16)
     frame_rate = 50.0
     sample_rate = 16_000
@@ -96,6 +99,16 @@ class _Codec:
 
     def decode(self, codes: Tensor) -> Tensor:
         return codes[..., 0].float()
+
+    def tokenize(self, audio: Tensor, sample_rate: int) -> SemanticAcousticCodes:
+        codes = self.encode(audio, sample_rate)
+        return SemanticAcousticCodes(
+            semantic=codes[..., :1],
+            acoustic=codes[..., 1:],
+        )
+
+    def detokenize(self, codes: SemanticAcousticCodes) -> Tensor:
+        return self.decode_features(codes.semantic, self.acoustic_codes_to_features(codes.acoustic))
 
     def decode_features(
         self, semantic_codes: Tensor, acoustic_features: Tensor

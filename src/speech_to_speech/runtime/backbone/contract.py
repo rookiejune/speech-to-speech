@@ -1,11 +1,44 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol, cast
 
 from torch import Tensor, nn
 from transformers.cache_utils import Cache
+
+
+class TextTokenizer(Protocol):
+    special_tokens_map: Mapping[str, str | Sequence[str]]
+    pad_token_id: int | None
+    eos_token_id: int | None
+    bos_token_id: int | None
+
+    def __len__(self) -> int: ...
+
+    def encode(
+        self,
+        text: str,
+        *,
+        add_special_tokens: bool = False,
+    ) -> list[int]: ...
+
+    def decode(
+        self,
+        token_ids: Sequence[int],
+        *,
+        skip_special_tokens: bool = True,
+    ) -> str: ...
+
+    def apply_chat_template(
+        self,
+        conversation: Sequence[Mapping[str, str]],
+        *,
+        tokenize: bool = ...,
+        add_generation_prompt: bool = ...,
+        enable_thinking: bool = ...,
+        return_dict: bool = ...,
+    ) -> str | list[int]: ...
 
 
 class BackboneConfig(Protocol):
@@ -132,5 +165,6 @@ __all__ = [
     "BackboneConfig",
     "BackboneOutput",
     "BackboneReadout",
+    "TextTokenizer",
     "validate_backbone_readout",
 ]

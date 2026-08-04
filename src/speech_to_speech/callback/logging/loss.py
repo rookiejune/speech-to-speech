@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from anytrain.lightning import LossSummaryCallback
 
-from ...loss.types import loss_items
+from ...loss.contract import loss_items
 
 
 class LossSummary(LossSummaryCallback):

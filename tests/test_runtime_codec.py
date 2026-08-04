@@ -26,6 +26,7 @@ from speech_to_speech.runtime.codec import load_codec
 from speech_to_speech.runtime.codec_contract import (
     frame_codec,
     supports_acoustic,
+    supports_global,
     supports_structured,
 )
 
@@ -126,6 +127,18 @@ class RuntimeCodecTest(unittest.TestCase):
         self.assertIs(codec, backend)
         load_codec_backend.assert_called_once_with("longcat", device="cuda")
 
+    def test_load_codec_bicodec_uses_anytrain_global_backend(self) -> None:
+        backend = SimpleNamespace(name="bicodec")
+
+        with patch(
+            "speech_to_speech.runtime.codec.load_semantic_global",
+            return_value=backend,
+        ) as load_codec_backend:
+            codec = load_codec("bicodec", device="cuda")
+
+        self.assertIs(codec, backend)
+        load_codec_backend.assert_called_once_with("bicodec", device="cuda")
+
     def test_load_codec_stable_uses_frame_backend(self) -> None:
         backend = _StableSource()
 
@@ -173,13 +186,13 @@ class RuntimeCodecTest(unittest.TestCase):
         self.assertIs(config.audio_view, AudioView.STABLE)
 
     def test_frame_aligned_structured_codec_uses_frame_full_sequence(self) -> None:
-        runtime = _runtime("longcat", _codec(AcousticLayout.FRAME_ALIGNED))
+        runtime = _runtime("longcat", _acoustic_codec())
 
         self.assertFalse(runtime.structured_full_sequence)
         self.assertIsInstance(runtime.audio_tokenizer, FlattenedAudioTokenizer)
 
-    def test_fixed_length_structured_codec_uses_structured_full_sequence(self) -> None:
-        runtime = _runtime("bicodec", _codec(AcousticLayout.FIXED_LENGTH))
+    def test_global_codec_uses_structured_full_sequence(self) -> None:
+        runtime = _runtime("bicodec", _global_codec())
 
         self.assertTrue(runtime.structured_full_sequence)
         self.assertIsInstance(runtime.audio_tokenizer, BiCodecAudioTokenizer)
@@ -193,7 +206,7 @@ class RuntimeCodecTest(unittest.TestCase):
             config,
             audio_sequence_layout=AudioSequenceLayout.FLATTENED,
         )
-        runtime.__dict__["codec"] = _codec(AcousticLayout.FIXED_LENGTH)
+        runtime.__dict__["codec"] = _global_codec()
         semantic_tokenizer = Mock()
         outer_tokenizer = Mock()
 
@@ -228,7 +241,7 @@ class RuntimeCodecTest(unittest.TestCase):
         )
         for sizes, error, message in cases:
             with self.subTest(sizes=sizes), self.assertRaisesRegex(error, message):
-                frame_codec(_codec(AcousticLayout.FRAME_ALIGNED, codebook_sizes=sizes))
+                frame_codec(_acoustic_codec(codebook_sizes=sizes))
 
     def test_frame_codec_rejects_invalid_rate_metadata(self) -> None:
         cases = (
@@ -239,7 +252,7 @@ class RuntimeCodecTest(unittest.TestCase):
             ({"frame_rate": 0.0}, ValueError, "positive"),
         )
         for overrides, error, message in cases:
-            codec = _codec(AcousticLayout.FRAME_ALIGNED, **overrides)
+            codec = _acoustic_codec(**overrides)
             with self.subTest(overrides=overrides), self.assertRaisesRegex(error, message):
                 frame_codec(codec)
 
@@ -254,7 +267,7 @@ class RuntimeCodecTest(unittest.TestCase):
             ({"acoustic_feature_dim": 0}, ValueError, "positive"),
         )
         for overrides, error, message in cases:
-            codec = _codec(AcousticLayout.FRAME_ALIGNED, **overrides)
+            codec = _acoustic_codec(**overrides)
             with self.subTest(overrides=overrides), self.assertRaisesRegex(error, message):
                 supports_acoustic(codec)
 
@@ -265,27 +278,30 @@ class RuntimeCodecTest(unittest.TestCase):
             ({"semantic_codebook_sizes": (True,)}, TypeError, "integer"),
             ({"acoustic_codebook_sizes": (1.5,)}, TypeError, "integer"),
             ({"acoustic_layout": "fixed_length"}, TypeError, "AcousticLayout"),
-            (
-                {"acoustic_layout": AcousticLayout.FIXED_LENGTH, "acoustic_unit_length": None},
-                TypeError,
-                "integer",
-            ),
-            (
-                {"acoustic_layout": AcousticLayout.FIXED_LENGTH, "acoustic_unit_length": True},
-                TypeError,
-                "integer",
-            ),
-            (
-                {"acoustic_layout": AcousticLayout.FIXED_LENGTH, "acoustic_unit_length": 0},
-                ValueError,
-                "positive",
-            ),
             ({"acoustic_unit_length": 2}, ValueError, "must be None"),
         )
         for overrides, error, message in cases:
-            codec = _codec(AcousticLayout.FRAME_ALIGNED, **overrides)
+            codec = _acoustic_codec(**overrides)
             with self.subTest(overrides=overrides), self.assertRaisesRegex(error, message):
                 supports_structured(codec)
+
+    def test_global_capability_rejects_invalid_metadata(self) -> None:
+        cases = (
+            ({"semantic_codebook_sizes": []}, TypeError, "tuple"),
+            ({"global_codebook_sizes": []}, TypeError, "tuple"),
+            ({"global_codebook_sizes": ()}, ValueError, "non-empty"),
+            ({"global_codebook_sizes": (True,)}, TypeError, "integer"),
+            ({"global_codebook_sizes": (1.5,)}, TypeError, "integer"),
+            ({"global_feature_dim": True}, TypeError, "integer"),
+            ({"global_feature_dim": 0}, ValueError, "positive"),
+            ({"global_unit_length": None}, TypeError, "integer"),
+            ({"global_unit_length": True}, TypeError, "integer"),
+            ({"global_unit_length": 0}, ValueError, "positive"),
+        )
+        for overrides, error, message in cases:
+            codec = _global_codec(**overrides)
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(error, message):
+                supports_global(codec)
 
 
 class RuntimeAudioSequenceLayoutTest(unittest.TestCase):
@@ -388,7 +404,7 @@ def _runtime(codec_name: str, codec: object) -> Runtime:
     return runtime
 
 
-def _codec(layout: AcousticLayout, **overrides: object) -> SimpleNamespace:
+def _acoustic_codec(**overrides: object) -> SimpleNamespace:
     values: dict[str, object] = {
         "sample_rate": 16_000,
         "frame_rate": 50.0,
@@ -397,15 +413,31 @@ def _codec(layout: AcousticLayout, **overrides: object) -> SimpleNamespace:
         "semantic_codebook_sizes": (8,),
         "acoustic_codebook_sizes": (5, 7),
         "acoustic_feature_dim": 4,
-        "acoustic_layout": layout,
-        "acoustic_unit_length": (
-            3 if layout is AcousticLayout.FIXED_LENGTH else None
-        ),
+        "acoustic_layout": AcousticLayout.FRAME_ALIGNED,
+        "acoustic_unit_length": None,
         "encode": Mock(),
         "decode": Mock(),
         "tokenize": Mock(),
         "detokenize": Mock(),
         "acoustic_codes_to_features": Mock(),
+        "decode_features": Mock(),
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _global_codec(**overrides: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "sample_rate": 16_000,
+        "frame_rate": 50.0,
+        "semantic_codebook": torch.zeros(8, 4),
+        "semantic_codebook_sizes": (8,),
+        "global_codebook_sizes": (5, 7),
+        "global_feature_dim": 4,
+        "global_unit_length": 3,
+        "tokenize": Mock(),
+        "detokenize": Mock(),
+        "global_codes_to_features": Mock(),
         "decode_features": Mock(),
     }
     values.update(overrides)

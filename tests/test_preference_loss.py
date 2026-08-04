@@ -11,7 +11,7 @@ from anytrain.module.idspace import Layout
 from speech_to_speech.rl import PreferenceBatch
 from speech_to_speech.datamodule.batch import ModelBatch
 from speech_to_speech.task import PredictionModality
-from speech_to_speech.loss.preference import DPOObjective
+from speech_to_speech.loss.policy import DPOObjective
 from speech_to_speech.task import Task
 
 

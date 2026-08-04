@@ -25,10 +25,10 @@ from ..datamodule.batch import (
     LoaderBatch,
     ModelBatch,
 )
-from ..loss.module import FlowObjective, RVQObjective, TokenObjective
-from ..loss.types import LossItem
+from ..loss.contract import LossItem
+from ..loss.supervised import FlowObjective, RVQObjective, TokenObjective
 from ..model import Model
-from ..model.acoustic.condition import HiddenConditionAdapter
+from ..model.acoustic.base import HiddenConditionAdapter
 from ..model.acoustic.flow import FlowModel
 from ..model.acoustic.rvq import RVQModel
 from ..model.audio_output import AudioOutputAdapterType

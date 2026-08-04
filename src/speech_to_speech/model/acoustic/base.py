@@ -6,14 +6,50 @@ from typing import Protocol
 import torch
 from torch import Tensor, nn
 
-from ..output import AcousticGeneration
+from ..generation import AcousticGeneration
 from ...runtime.codec_contract import (
     AcousticCodec,
     acoustic_codec,
 )
+from ...runtime.backbone.contract import Backbone
 from ..base import Config, Model
 from ...runtime.protocol import TokenModelRuntime
-from .condition import HiddenConditionAdapter
+
+
+class HiddenConditionAdapter(nn.Module):
+    """Map causal token-model states into the acoustic condition space."""
+
+    def __init__(self, hidden_dim: int, condition_dim: int) -> None:
+        super().__init__()
+        if hidden_dim <= 0 or condition_dim <= 0:
+            raise ValueError("hidden and acoustic condition dimensions must be positive.")
+        self.hidden_dim = hidden_dim
+        self.condition_dim = condition_dim
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.projection = nn.Linear(hidden_dim, condition_dim)
+        if hidden_dim == condition_dim:
+            with torch.no_grad():
+                self.projection.weight.copy_(torch.eye(hidden_dim))
+                self.projection.bias.zero_()
+
+    def forward(self, hidden_state: Tensor) -> Tensor:
+        if hidden_state.dim() != 3 or hidden_state.size(-1) != self.hidden_dim:
+            raise ValueError("hidden state must have shape [batch, frame, hidden_dim].")
+        parameter = self.projection.weight
+        value = hidden_state.to(device=parameter.device, dtype=parameter.dtype)
+        return self.projection(self.norm(value))
+
+
+def code_features(
+    codec: AcousticCodec,
+    backbone: Backbone,
+    codes: Tensor,
+    *,
+    like: Tensor | None = None,
+) -> Tensor:
+    features = codec.acoustic_codes_to_features(codes)
+    reference = backbone.get_input_embeddings().weight if like is None else like
+    return features.to(device=reference.device, dtype=reference.dtype)
 
 
 class AcousticFeatureSampler(Protocol):

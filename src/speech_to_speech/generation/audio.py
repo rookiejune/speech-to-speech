@@ -17,12 +17,12 @@ from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..runtime.codec_contract import (
     AcousticCodec,
     Codec,
+    GlobalCodec,
     SemanticCodec,
-    StructuredCodec,
     acoustic_codec,
     codec_sample_rate,
     frame_codec,
-    structured_codec,
+    global_codec,
 )
 from .decode import (
     decode_generated_audio,
@@ -31,9 +31,9 @@ from .decode import (
     decode_generated_frame_codes,
     decode_generated_semantic,
 )
-from .protocol import AcousticFeatureGeneration, TokenGenerator
+from .contract import AcousticFeatureGeneration, TokenGenerator
 from ..task import Request
-from .result import AudioOutput, Result
+from .contract import AudioOutput, Result
 
 
 @dataclass(frozen=True)
@@ -114,7 +114,7 @@ def _strategy(model: TokenGenerator) -> _Strategy:
     if model.runtime.acoustic_side_channel and isinstance(model, AcousticFeatureGeneration):
         return _Acoustic(model)
     if model.runtime.structured_full_sequence:
-        return _Structured(model)
+        return _SemanticGlobal(model)
     if model.runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
         return _Frame(model)
     return _Semantic(model)
@@ -257,14 +257,14 @@ class _Frame:
         )
 
 
-class _Structured:
+class _SemanticGlobal:
     def __init__(self, model: TokenGenerator) -> None:
         tokenizer = model.runtime.audio_tokenizer
         if not isinstance(tokenizer, BiCodecAudioTokenizer):
-            raise TypeError("structured audio generation requires BiCodecAudioTokenizer.")
+            raise TypeError("semantic-global generation requires BiCodecAudioTokenizer.")
         self.model = model
         self.tokenizer = tokenizer
-        self.codec: StructuredCodec = structured_codec(model.runtime.codec)
+        self.codec: GlobalCodec = global_codec(model.runtime.codec)
         self.sample_rate = codec_sample_rate(self.codec)
 
     def generate(self, batch: _Batch) -> list[Result]:
@@ -304,7 +304,7 @@ class _Structured:
 
     def decode(self, token_ids: Tensor, features: Tensor | None) -> Tensor:
         if features is not None:
-            raise ValueError("structured audio generation must not provide features.")
+            raise ValueError("semantic-global generation must not provide features.")
         return decode_generated_bicodec_full(
             token_ids,
             codec=self.codec,
@@ -558,7 +558,7 @@ def decode_token_audio_results(
     active_rows = [codec_rows[index] for index in active_index]
     if isinstance(decoder, _Frame):
         decoded = [decoder._decode_result(row) for row in active_rows]
-    elif isinstance(decoder, _Structured):
+    elif isinstance(decoder, _SemanticGlobal):
         decoded = [decoder._decode_result(row, None) for row in active_rows]
     else:
         decoded = _decoded_results(
@@ -581,7 +581,7 @@ def _codec_payload(token_ids: Tensor, model: TokenGenerator) -> Tensor:
 
 def _token_decoder(model: TokenGenerator) -> _Decoder:
     if model.runtime.structured_full_sequence:
-        return _Structured(model)
+        return _SemanticGlobal(model)
     if model.runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
         return _Frame(model)
     return _Semantic(model)

@@ -94,7 +94,7 @@ class ConfigRuntimeContractTest(unittest.TestCase):
             TextConfig(dataloader=loader)
 
     def test_runtime_loads_acoustic_generator_artifact_with_existing_backend(self):
-        backend = SimpleNamespace(name="longcat")
+        backend = _longcat_codec()
         support = SimpleNamespace()
         semantic_runtime = SimpleNamespace(sample_rate=24_000, frame_rate=50.0, decode=Mock())
         with TemporaryDirectory() as directory:
@@ -357,19 +357,23 @@ class ConfigRuntimeContractTest(unittest.TestCase):
 
     def test_unified_codec_uses_semantic_codes_without_acoustic_side_channel(self):
         item = AudioItem(views={AudioView.UNICODEC: torch.tensor([[1], [2], [3]])})
-        semantic, acoustic = _parse_audio_item(item, AudioView.UNICODEC)
+        parsed = _parse_audio_item(item, AudioView.UNICODEC)
 
-        self.assertTrue(torch.equal(semantic, torch.tensor([[1], [2], [3]])))
-        self.assertIsNone(acoustic)
+        self.assertTrue(
+            torch.equal(parsed.semantic_codes, torch.tensor([[1], [2], [3]]))
+        )
+        self.assertIsNone(parsed.acoustic_codes)
+        self.assertIsNone(parsed.global_codes)
 
     def test_stable_codec_uses_full_codes_without_acoustic_side_channel(self):
         codes = torch.tensor([[1], [2], [3]])
         item = AudioItem(views={AudioView.STABLE: codes})
 
-        semantic, acoustic = _parse_audio_item(item, AudioView.STABLE)
+        parsed = _parse_audio_item(item, AudioView.STABLE)
 
-        self.assertIs(semantic, codes)
-        self.assertIsNone(acoustic)
+        self.assertIs(parsed.semantic_codes, codes)
+        self.assertIsNone(parsed.acoustic_codes)
+        self.assertIsNone(parsed.global_codes)
 
     def test_bicodec_runtime_requires_self_describing_sequence_layout(self):
         with self.assertRaisesRegex(ValueError, "self-describing structured"):

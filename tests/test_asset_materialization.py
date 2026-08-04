@@ -27,7 +27,7 @@ from speech_to_speech.datamodule.config import (
     SpeechConfig,
 )
 from speech_to_speech.datamodule.dataset.speech import DatasetConfig
-from speech_to_speech.datamodule.protocol import DatasetRuntime
+from speech_to_speech.datamodule.contract import DatasetRuntime
 
 
 class _TaggedDataset(MapStyleABC):
@@ -110,10 +110,10 @@ class AssetMaterializationTest(unittest.TestCase):
                 ),
             )
 
-    def test_non_frame_codec_view_is_rejected(self) -> None:
+    def test_unsupported_codec_view_is_rejected(self) -> None:
         with self.assertRaisesRegex(
             ValueError,
-            "supports only frame-code codec views.*waveform",
+            "supports BiCodec structured units.*frame-code codec views.*waveform",
         ):
             resolve_workspace_asset(
                 DatasetConfig(),
@@ -123,6 +123,57 @@ class AssetMaterializationTest(unittest.TestCase):
                     codec_view=AudioView.WAVEFORM.value,
                 ),
             )
+
+    def test_bicodec_workspace_hit_is_supported(self) -> None:
+        existing = _TaggedDataset("workspace-bicodec")
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "workspace"
+            with (
+                _workspace(root),
+                patch.object(asset, "_load_codec_dataset", return_value=existing) as load,
+            ):
+                resolution = resolve_workspace_asset(
+                    DatasetConfig(root=str(root), filter="speech_translation_v1"),
+                    _runtime(codec_name="bicodec", audio_view=AudioView.BICODEC),
+                    _materialization(
+                        Path(directory) / "output",
+                        codec_view=AudioView.BICODEC.value,
+                    ),
+                )
+
+        self.assertIs(resolution.dataset, existing)
+        self.assertIsNone(resolution.job)
+        load.assert_called_once_with(
+            root.resolve(),
+            split="train",
+            view=AudioView.BICODEC,
+            filter_policy="speech_translation_v1",
+            missing_ok=True,
+        )
+
+    def test_bicodec_request_uses_structured_provider_factory(self) -> None:
+        request = AssetRequest(
+            dataset="wmt19_tts",
+            source_root=Path("/source"),
+            output_root=Path("/output"),
+            split="train",
+            codec="bicodec",
+            codec_view=AudioView.BICODEC,
+            filter_policy="speech_translation_v1",
+            input_id="input-v1",
+            provider_id="provider-v1",
+        )
+
+        provider = asset._provider_factory(request)
+        producer = WorkspaceCodecProducer(
+            request,
+            Mock(return_value=_TaggedDataset("source")),
+            _materialization(Path("/output")),
+        )
+
+        self.assertIsInstance(provider, asset.BiCodecProviderFactory)
+        self.assertEqual(provider.codec, "bicodec")
+        self.assertEqual(producer.output_dir, request.asset_root / "bicodec")
 
     def test_workspace_hit_reuses_filtered_codec_without_job(self) -> None:
         existing = _TaggedDataset("workspace")
@@ -428,7 +479,7 @@ class AssetMaterializationTest(unittest.TestCase):
 
             job.start(owner=True)
             self.assertIs(job.phase, AssetPhase.MATERIALIZING)
-            self.assertTrue(job._process is not None and job._process.daemon)
+            self.assertTrue(job._process is not None and not job._process.daemon)
             job.finish(owner=True)
             loaded = job.load_ready()
             job.close()

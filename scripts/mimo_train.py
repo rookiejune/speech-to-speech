@@ -22,7 +22,7 @@ from speech_to_speech.datamodule.mimo import (
 )
 from speech_to_speech.datamodule.mimo.factory import create_dataset, task_weights
 from speech_to_speech.mimo import MimoSample
-from speech_to_speech.model.mimo_toy import create_toy_mimo_model
+from speech_to_speech.model.toy import create_toy_mimo_model
 from speech_to_speech.model.mimo_factory import build_mimo_model, derive_mimo_vocab
 from speech_to_speech.pl_module.mimo import MimoModule
 from speech_to_speech.runtime import runtime_for_sequence_layout

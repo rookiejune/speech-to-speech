@@ -9,7 +9,7 @@ from anytrain.loss import LossItem
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from ..datamodule.target import (
+from ..datamodule.contract import (
     CTC_PAD_ID,
     CTCTarget,
 )

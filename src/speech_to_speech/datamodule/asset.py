@@ -3,13 +3,9 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
-import traceback
 from collections.abc import Mapping, Sized
 from dataclasses import dataclass
-from multiprocessing import get_context
-from multiprocessing.process import BaseProcess
 from pathlib import Path
-from queue import Empty
 from typing import Protocol, cast
 
 from anydataset.dataset import IndexSelection
@@ -25,19 +21,20 @@ from anydataset.types import (
     TextReq,
     TextView,
 )
-from anytrain.codec import load_frame
+from anytrain.codec import load_frame, load_semantic_global
+from anytrain.lightning import (
+    BackgroundMaterialization,
+    MaterializationPhase,
+    MaterializationProducer,
+)
 from torch.utils.data import Dataset
 
-from .._compat import StrEnum, auto
+from ._asset_provider import BiCodecProvider
 from .config import AssetMaterializationConfig
 from .dataset.speech import DatasetConfig, DatasetName
-from .protocol import DatasetRuntime
+from .contract import DatasetRuntime
 
-_ASSET_CONTRACT_VERSION = 1
-_RESULT_POLL_SECONDS = 0.1
-_RESULT_FINAL_WAIT_SECONDS = 1.0
-_MAX_ERROR_MESSAGE_CHARS = 16_384
-_MAX_ERROR_TRACEBACK_CHARS = 32_768
+_ASSET_CONTRACT_VERSION = 2
 _FRAME_CODEC_VIEWS = frozenset(
     {
         AudioView.DAC,
@@ -46,13 +43,10 @@ _FRAME_CODEC_VIEWS = frozenset(
         AudioView.UNICODEC,
     }
 )
+_BUILTIN_CODEC_VIEWS = _FRAME_CODEC_VIEWS | frozenset({AudioView.BICODEC})
 
 
-class AssetPhase(StrEnum):
-    FALLBACK = auto()
-    MATERIALIZING = auto()
-    READY = auto()
-    FAILED = auto()
+AssetPhase = MaterializationPhase
 
 
 class _WorkspaceFilterMissing(FileNotFoundError):
@@ -131,20 +125,7 @@ class AssetJob(Protocol):
     def close(self) -> None: ...
 
 
-class AssetProducer(Protocol):
-    def __call__(self) -> None: ...
-
-    def load(self) -> Dataset[Sample]: ...
-
-
-class _ResultQueue(Protocol):
-    def put(self, value: _WorkerResult) -> None: ...
-
-    def get(self, block: bool = True, timeout: float | None = None) -> _WorkerResult: ...
-
-    def close(self) -> None: ...
-
-    def join_thread(self) -> None: ...
+AssetProducer = MaterializationProducer[Dataset[Sample]]
 
 
 @dataclass(frozen=True)
@@ -194,6 +175,14 @@ class FrameCodecProviderFactory:
 
 
 @dataclass(frozen=True)
+class BiCodecProviderFactory:
+    codec: str
+
+    def __call__(self, device: str) -> BiCodecProvider:
+        return BiCodecProvider(load_semantic_global(self.codec, device=device))
+
+
+@dataclass(frozen=True)
 class WorkspaceCodecProducer:
     request: AssetRequest
     source: DatasetFactory
@@ -219,10 +208,7 @@ class WorkspaceCodecProducer:
                 provider_id=self.request.provider_id,
             ).write(
                 dataset_factory=self.source,
-                provider_factory=FrameCodecProviderFactory(
-                    self.request.codec,
-                    self.request.codec_view,
-                ),
+                provider_factory=_provider_factory(self.request),
                 devices=cast(str, self.config.device),
             )
         except Exception:
@@ -242,7 +228,7 @@ class WorkspaceCodecProducer:
         return dataset
 
 
-class BackgroundAssetJob:
+class BackgroundAssetJob(BackgroundMaterialization[Dataset[Sample]]):
     """Run one complete materializer on the global owner during epoch zero."""
 
     def __init__(
@@ -253,167 +239,13 @@ class BackgroundAssetJob:
     ) -> None:
         self.request = request
         self.fallback = fallback
-        self.producer = producer
-        self._phase = AssetPhase.FALLBACK
-        self._process: BaseProcess | None = None
-        self._results: _ResultQueue | None = None
-        self._error: Exception | None = None
-
-    @property
-    def request_id(self) -> str:
-        return self.request.id
-
-    @property
-    def phase(self) -> AssetPhase:
-        return self._phase
-
-    def start(self, *, owner: bool) -> None:
-        if self._phase is not AssetPhase.FALLBACK:
-            return
-        if not owner:
-            self._phase = AssetPhase.MATERIALIZING
-            return
-        context = get_context("spawn")
-        results = cast(_ResultQueue, context.Queue(maxsize=1))
-        process = context.Process(
-            target=_run_producer,
-            args=(self.producer, results),
-            name="s2s-asset-materializer",
-            daemon=True,
+        super().__init__(
+            request.id,
+            producer,
+            worker_name="s2s-asset-materializer",
+            label="asset materialization",
+            daemon=False,
         )
-        try:
-            process.start()
-        except Exception as error:
-            results.close()
-            results.join_thread()
-            self._error = error
-            self._phase = AssetPhase.FAILED
-            raise
-        self._process = process
-        self._results = results
-        self._phase = AssetPhase.MATERIALIZING
-
-    def finish(self, *, owner: bool) -> None:
-        if self._phase is AssetPhase.READY:
-            return
-        if self._phase is AssetPhase.FAILED:
-            if self._error is None:
-                raise RuntimeError("asset materialization failed without an exception.")
-            raise RuntimeError("asset materialization previously failed.") from self._error
-        if not owner:
-            return
-        process = self._process
-        if process is None:
-            raise RuntimeError("asset materialization owner did not start its worker.")
-        try:
-            failure = self._wait_for_worker(process)
-            if failure is None:
-                self._phase = AssetPhase.READY
-                return
-            self._error = failure
-            self._phase = AssetPhase.FAILED
-            raise failure
-        finally:
-            self._cleanup_worker()
-
-    def _wait_for_worker(self, process: BaseProcess) -> Exception | None:
-        results = self._results
-        if results is None:
-            return RuntimeError("asset materialization worker has no result queue.")
-        while True:
-            try:
-                result = results.get(timeout=_RESULT_POLL_SECONDS)
-            except Empty:
-                if process.is_alive():
-                    continue
-                process.join()
-                try:
-                    result = results.get(timeout=_RESULT_FINAL_WAIT_SECONDS)
-                except Empty:
-                    return self._missing_worker_result(process)
-            break
-        process.join()
-        if process.exitcode not in (0, None):
-            return RuntimeError(
-                f"asset materialization worker exited with code {process.exitcode}."
-            )
-        if result.error_type is None:
-            return None
-        details = f"{result.error_type}: {result.message}"
-        if result.traceback:
-            details = f"{details}\n{result.traceback}"
-        return RuntimeError(f"asset materialization worker failed: {details}")
-
-    @staticmethod
-    def _missing_worker_result(process: BaseProcess) -> Exception:
-        if process.exitcode not in (0, None):
-            return RuntimeError(
-                f"asset materialization worker exited with code {process.exitcode}."
-            )
-        return RuntimeError("asset materialization worker returned no result.")
-
-    def load_ready(self) -> Dataset[Sample]:
-        dataset = self.producer.load()
-        self._phase = AssetPhase.READY
-        return dataset
-
-    def close(self) -> None:
-        process = self._process
-        if process is not None and process.is_alive():
-            process.terminate()
-            process.join(timeout=5.0)
-            if process.is_alive():
-                process.kill()
-                process.join(timeout=5.0)
-            self._error = RuntimeError("asset materialization was cancelled during teardown.")
-            self._phase = AssetPhase.FAILED
-        self._cleanup_worker()
-
-    def _cleanup_worker(self) -> None:
-        process = self._process
-        if process is not None and not process.is_alive():
-            process.close()
-        results = self._results
-        if results is not None:
-            results.close()
-            results.join_thread()
-        self._process = None
-        self._results = None
-
-
-@dataclass(frozen=True)
-class _WorkerResult:
-    error_type: str | None = None
-    message: str = ""
-    traceback: str = ""
-
-
-def _run_producer(
-    producer: AssetProducer,
-    results: _ResultQueue,
-) -> None:
-    try:
-        producer()
-    except Exception as error:
-        results.put(
-            _WorkerResult(
-                error_type=type(error).__name__,
-                message=_bounded_text(str(error), _MAX_ERROR_MESSAGE_CHARS),
-                traceback=_bounded_text(
-                    traceback.format_exc(),
-                    _MAX_ERROR_TRACEBACK_CHARS,
-                ),
-            )
-        )
-    else:
-        results.put(_WorkerResult())
-
-
-def _bounded_text(value: str, limit: int) -> str:
-    if len(value) <= limit:
-        return value
-    omitted = len(value) - limit
-    return f"{value[:limit]}\n... <truncated {omitted} characters>"
 
 
 def resolve_workspace_asset(
@@ -435,12 +267,12 @@ def resolve_workspace_asset(
                 "materialization codec_view must match the runtime audio view: "
                 f"{configured_view.value!r} != {view.value!r}."
             )
-    if view not in _FRAME_CODEC_VIEWS:
-        supported = ", ".join(sorted(entry.value for entry in _FRAME_CODEC_VIEWS))
+    if view not in _BUILTIN_CODEC_VIEWS:
+        frame_views = ", ".join(sorted(entry.value for entry in _FRAME_CODEC_VIEWS))
         raise ValueError(
-            "the built-in materializer supports only frame-code codec views "
-            f"({supported}); got {view.value!r}. Extend the provider/backend "
-            "before materializing another representation."
+            "the built-in materializer supports BiCodec structured units and "
+            f"frame-code codec views ({frame_views}); got {view.value!r}. "
+            "Extend the provider/backend before materializing another representation."
         )
 
     from zhuyin.datasets.wmt19 import moss_tts
@@ -544,6 +376,18 @@ def _request(
         input_id=input_id,
         provider_id=cast(str, materialization.provider_id),
         source_factory=source_factory,
+    )
+
+
+def _provider_factory(
+    request: AssetRequest,
+) -> FrameCodecProviderFactory | BiCodecProviderFactory:
+    if request.codec_view is AudioView.BICODEC:
+        return BiCodecProviderFactory(request.codec)
+    if request.codec_view in _FRAME_CODEC_VIEWS:
+        return FrameCodecProviderFactory(request.codec, request.codec_view)
+    raise ValueError(
+        f"unsupported workspace codec materialization view: {request.codec_view.value!r}."
     )
 
 

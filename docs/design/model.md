@@ -24,17 +24,17 @@
   flow target、sampling 和 `generate_audio_features()`；S2S 不再平行维护 DiT 实现。
 - `acoustic.rvq.RVQModel`：组合 generator plugin `AcousticRVQDecoder`，提供 teacher-forced
   codebook logits、sampling 和 `generate_audio_features()`；类型从 generator plugin 导入，不经 S2S 再导出。
-- `acoustic.condition.HiddenConditionAdapter`：以 `LayerNorm + Linear` 把对齐后的 backbone hidden state 映射到
+- `acoustic.base.HiddenConditionAdapter`：以 `LayerNorm + Linear` 把对齐后的 backbone hidden state 映射到
   acoustic generator 的 condition space；训练和 generation 共用该入口。
 - `acoustic.flow.AcousticFlow`：薄包装，持有 `FMFeatureGenerator` 与 S2S `flow_matching` runtime
   做 ODE sampling，并保留 feature mean/std 归一化缓冲。
-- `loss.protocol.TokenObjectiveModel` / `FlowObjectiveModel` / `RVQObjectiveModel`：objective
+- `loss.contract.TokenObjectiveModel` / `FlowObjectiveModel` / `RVQObjectiveModel`：objective
   所依赖的训练能力。
 - `generation.protocol.TokenGenerator` / `AcousticFeatureGeneration`：generation service
   所依赖的基础契约与可选 acoustic runtime 能力；`TokenGenerator` 含 `generate_tokens()` 与
   `generation_step()`（mixed AR 用）；`AcousticFeatureGenerator` 组合两者供训练侧静态 typing，
   `TextEvaluationModel` 组合 token generation 与 reference scoring。
-- `runtime.protocol.TokenModelRuntime` / `model.acoustic.protocol.FlowModelRuntime`：token 与 flow
+- `runtime.protocol.TokenModelRuntime` / `model.acoustic.contract.FlowModelRuntime`：token 与 flow
   model 各自消费的 runtime 资源边界。
 - `adapter.AdapterType` / `adapter.MLPAdapter`：semantic input/output adapter 的公开结构；
   `AdapterType` 提供 `linear|mlp` 字符串枚举，`None` 表示输入输出
@@ -192,14 +192,14 @@ codebook 的 `codebook_embeddings`，但没有 REPA 参数。Hydra 使用
 与 student REPA 配置。ODE sampling 由 `runtime.Config.flow_*` 拥有。没有独立 acoustic
 codebooks 的 unified-token codec 必须使用 `model/acoustic=none`；有独立 acoustic codebook 的
 codec 也可以显式选择 `none` 作为 token-only baseline。入口不根据 codec 静默覆盖用户选择。
-fixed-length structured codec（例如 BiCodec）使用独立的 model-facing token layout。它只支持
+semantic/global codec（例如 BiCodec）使用独立的 model-facing token layout。它只支持
 一套 self-describing structured sequence，不接入当前 frame-aligned Flow/RVQ acoustic side channel。
-fixed-length speaker/style 含义来自 `AcousticLayout.FIXED_LENGTH`，不是单独的 stream 枚举。
-有 prompt-owned acoustic 时 response 只输出 semantic；否则 response 同时输出 acoustic 与 semantic。
+speaker/style 含义由 `SemanticGlobalCodec` 的 global contract 明确表达。
+有 prompt-owned global 时 response 只输出 semantic；否则 response 同时输出 global 与 semantic。
 两种 ownership 使用同一套稳定 vocabulary，由 marker 和 prompt 内容决定，不按 request 动态改变
 模型 head 或 token generation 规则。无 reference 的 global generation 不自带 speaker ID；多 speaker
 训练若没有额外条件或
-latent sampling，acoustic（speaker）预测可能偏向数据中的主导 speaker，这属于模型条件设计而
+latent sampling，global（speaker）预测可能偏向数据中的主导 speaker，这属于模型条件设计而
 不是 codec 序列化问题。
 
 底层 acoustic decoder 的所有权在 `semantic-acoustic-generator`：S2S 的 Flow/RVQ model 只负责

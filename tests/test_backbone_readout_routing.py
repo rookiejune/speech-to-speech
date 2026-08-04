@@ -10,7 +10,7 @@ from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 from transformers.cache_utils import Cache
 
-from speech_to_speech.loss.module import TokenObjective
+from speech_to_speech.loss.supervised import TokenObjective
 from speech_to_speech.model.base import Model
 from speech_to_speech.model.ctc import (
     CTCDecoderConfig,

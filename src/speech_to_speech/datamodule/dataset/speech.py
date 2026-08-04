@@ -28,9 +28,9 @@ from ...runtime.codec_contract import (
     CodecBackend,
     acoustic_codec,
     frame_codebook_sizes,
-    structured_codec,
+    global_codec,
 )
-from ..protocol import DatasetRuntime
+from ..contract import DatasetRuntime
 from ..sample import AudioContextCostRow, AudioContextSample
 
 
@@ -334,13 +334,10 @@ class ToyDataset(MapStyleABC):
         self.frames = config.toy_frames
         self.frame_rate = codec.frame_rate
         if self.view is AudioView.BICODEC:
-            structured = structured_codec(codec)
+            structured = global_codec(codec)
             self.codebook_sizes = tuple(structured.semantic_codebook_sizes)
-            self.global_codebook_sizes = tuple(structured.acoustic_codebook_sizes)
-            unit_length = structured.acoustic_unit_length
-            if unit_length is None:
-                raise ValueError("BiCodec toy data requires a fixed global unit length.")
-            self.global_unit_length = unit_length
+            self.global_codebook_sizes = tuple(structured.global_codebook_sizes)
+            self.global_unit_length = structured.global_unit_length
         else:
             self.codebook_sizes = _codebook_sizes(self.view, codec)
             self.global_codebook_sizes = ()
@@ -383,12 +380,10 @@ class ToyDataset(MapStyleABC):
                 dim=-1,
             )
             return AudioItem(
-                # The prepared-data view keeps anydataset's structured storage key;
-                # parser.py normalizes it to AudioCodes.global_codes immediately.
                 views={
                     AudioView.BICODEC: {
                         "semantic": semantic,
-                        "acoustic": global_codes,
+                        "global": global_codes,
                     }
                 },
                 meta={AudioMeta.DURATION: self.frames / self.frame_rate},

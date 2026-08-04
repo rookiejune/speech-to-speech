@@ -4,6 +4,7 @@ from .contract import (
     BackboneConfig,
     BackboneOutput,
     BackboneReadout,
+    TextTokenizer,
     validate_backbone_readout,
 )
 from .adapter import (
@@ -41,6 +42,7 @@ __all__ = [
     "BackboneOutput",
     "BackboneReadout",
     "BackboneType",
+    "TextTokenizer",
     "DualStreamBodyAdapter",
     "DualStreamEncoder",
     "DualStreamHiddenStates",

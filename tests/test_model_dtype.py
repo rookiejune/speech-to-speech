@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import torch
 from anydataset.types import Modality
+from anytrain.codec import AcousticLayout, SemanticAcousticCodes
 from anytrain.lightning import apply_parameter_trainability
 from anytrain.module.idspace import Layout
 from torch import Tensor, nn
@@ -235,10 +236,13 @@ class _Codec:
     sample_rate = 24_000
     frame_rate = 50.0
     semantic_feature_dim = 4
+    semantic_codebook_sizes = (3,)
     codebook_sizes = (3, 3)
     semantic_codebook = torch.randn(3, 4, dtype=torch.bfloat16)
     acoustic_feature_dim = 4
     acoustic_codebook_sizes = (3,)
+    acoustic_layout = AcousticLayout.FRAME_ALIGNED
+    acoustic_unit_length = None
 
     def encode(self, audio: Tensor, sample_rate: int) -> Tensor:
         del sample_rate
@@ -246,6 +250,19 @@ class _Codec:
 
     def decode(self, codes: Tensor) -> Tensor:
         return codes.new_zeros(1, dtype=torch.float32)
+
+    def tokenize(self, audio: Tensor, sample_rate: int) -> SemanticAcousticCodes:
+        del sample_rate
+        shape = (audio.size(0), 1, 1)
+        semantic = torch.zeros(shape, dtype=torch.long, device=audio.device)
+        acoustic = torch.zeros(shape, dtype=torch.long, device=audio.device)
+        return SemanticAcousticCodes(semantic=semantic, acoustic=acoustic)
+
+    def detokenize(self, codes: SemanticAcousticCodes) -> Tensor:
+        return self.decode_features(
+            codes.semantic,
+            self.acoustic_codes_to_features(codes.acoustic),
+        )
 
     def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor:
         return torch.nn.functional.one_hot(

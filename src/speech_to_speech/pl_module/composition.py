@@ -7,7 +7,9 @@ from semantic_acoustic_generator.runtime.artifact import AcousticGeneratorArtifa
 
 from semantic_acoustic_generator.loss.repa import WavLMTeacher
 
-from speech_to_speech.loss.module import FlowObjective, RVQObjective, TokenObjective
+from speech_to_speech.loss.supervised import FlowObjective, RVQObjective, TokenObjective
+from speech_to_speech.loss.contract import FlowObjectiveModel, RVQObjectiveModel
+from speech_to_speech.generation.contract import AcousticFeatureGenerator
 from speech_to_speech.model import Config as ModelConfig
 from speech_to_speech.model import Model
 from speech_to_speech.model.acoustic import (
@@ -16,13 +18,38 @@ from speech_to_speech.model.acoustic import (
     FlowRepaConfig,
 )
 from speech_to_speech.model.acoustic.flow import FlowModel
-from speech_to_speech.model.acoustic.initialization import load_acoustic_initialization
+from speech_to_speech.model.acoustic.factory import load_acoustic_initialization
 from speech_to_speech.model.acoustic.rvq import RVQModel
 from speech_to_speech.runtime import Runtime
 from speech_to_speech.runtime.codec_contract import frame_codec
+from speech_to_speech.model.checkpoint_contract import ModelCheckpointContract
+from peft import LoraConfig
 
 from .module import Config, SpeechToSpeechModule
-from .protocol import FlowCompositionModel, RVQCompositionModel
+
+
+class FlowCompositionModel(
+    FlowObjectiveModel,
+    AcousticFeatureGenerator,
+    Protocol,
+):
+    @property
+    def checkpoint_contract(self) -> ModelCheckpointContract: ...
+
+    @property
+    def lora_config(self) -> Optional[LoraConfig]: ...
+
+
+class RVQCompositionModel(
+    RVQObjectiveModel,
+    AcousticFeatureGenerator,
+    Protocol,
+):
+    @property
+    def checkpoint_contract(self) -> ModelCheckpointContract: ...
+
+    @property
+    def lora_config(self) -> Optional[LoraConfig]: ...
 
 
 class RepaConfig(Protocol):

@@ -106,9 +106,14 @@ class Config:
         if self.acoustic_generator_artifact is not None:
             if not self.acoustic_generator_artifact:
                 raise ValueError("acoustic_generator_artifact must not be empty.")
-            if self.audio_view not in {AudioView.LONGCAT, AudioView.BICODEC}:
+            if self.audio_view is AudioView.BICODEC:
                 raise ValueError(
-                    "acoustic generator artifacts currently require LongCat or BiCodec."
+                    "BiCodec cannot use runtime.acoustic_generator_artifact; "
+                    "its global units belong to the token sequence."
+                )
+            if self.audio_view is not AudioView.LONGCAT:
+                raise ValueError(
+                    "acoustic generator artifacts currently require LongCat."
                 )
         if not isinstance(self.gradient_checkpointing, bool):
             raise TypeError("gradient_checkpointing must be a bool.")

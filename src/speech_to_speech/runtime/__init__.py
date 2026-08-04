@@ -5,8 +5,7 @@ from .config import (
     config_for_local_rank,
     migrate_config_fields,
 )
-from .core import Runtime
-from .factory import runtime_for_sequence_layout
+from .core import Runtime, runtime_for_sequence_layout
 
 __all__ = [
     "AudioSequenceLayout",

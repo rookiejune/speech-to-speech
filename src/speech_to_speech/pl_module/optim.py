@@ -1,4 +1,4 @@
-"""Optimizer configuration owned by Lightning training modules."""
+"""Lightweight optimizer contract shared by optional training modules."""
 
 from __future__ import annotations
 

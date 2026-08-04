@@ -19,9 +19,13 @@ from speech_to_speech.datamodule.batch import (
     ModelSample,
 )
 from speech_to_speech.loss.ctc import CTCAlignmentLoss, CTCConfig, CTCRouteConfig
-from speech_to_speech.loss.module import FlowObjective, RVQObjective, TokenObjective
-from speech_to_speech.loss.types import LossItem, Outputs
-from speech_to_speech.loss.validation import validation_metrics
+from speech_to_speech.loss.contract import LossItem, Outputs
+from speech_to_speech.loss.supervised import (
+    FlowObjective,
+    RVQObjective,
+    TokenObjective,
+    validation_metrics,
+)
 from speech_to_speech.model.ctc import (
     CTCRoute,
     ObjectiveHiddenOutput,

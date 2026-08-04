@@ -22,7 +22,7 @@ from transformers import (
 from transformers.cache_utils import Cache
 from transformers.modeling_layers import GradientCheckpointingLayer
 
-from ..tokenizer import TextTokenizer
+from .contract import TextTokenizer
 from ..backbone.contract import (
     Backbone,
     BackboneOutput,

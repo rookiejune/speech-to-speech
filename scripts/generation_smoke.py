@@ -11,14 +11,14 @@ import torch
 from omegaconf import DictConfig
 
 from speech_to_speech.callback import OnDeviceCodecMaterializer
-from speech_to_speech.datamodule.collate.collator import Collator
+from speech_to_speech.datamodule.collate import Collator
 from speech_to_speech.datamodule.dataset.speech import load_dataset
 from speech_to_speech.datamodule.batch import (
     ModelBatch,
     TrainInput,
 )
-from speech_to_speech.generation.batch import requests_from_batch
-from speech_to_speech.generation.eval.reporting import compare, summary
+from speech_to_speech.generation.service import requests_from_batch
+from speech_to_speech.generation.evaluation import compare, summary
 from speech_to_speech.model.acoustic.flow import FlowModel
 from speech_to_speech.runtime import (
     Runtime,

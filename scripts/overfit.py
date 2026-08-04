@@ -30,7 +30,7 @@ from speech_to_speech.datamodule.batch import (
     ModelBatch,
     TrainInput,
 )
-from speech_to_speech.generation.eval.acoustic import evaluate_autoregressive
+from speech_to_speech.generation.evaluation import evaluate_autoregressive
 from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.model.acoustic.flow import FlowModel
 from speech_to_speech.model.acoustic.rvq import RVQModel

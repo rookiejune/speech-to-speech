@@ -7,7 +7,7 @@ from typing import Literal, TypedDict, Union, cast
 
 import torch
 from anydataset.types import AudioView, Modality
-from anytrain.codec import AcousticLayout, SemanticAcousticCodes
+from anytrain.codec import SemanticGlobalCodes
 from torch import Tensor
 from typing_extensions import NotRequired
 
@@ -17,17 +17,17 @@ from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..runtime.protocol import GenerationRuntime
 from ..runtime.codec_contract import (
     frame_codec,
-    structured_codec,
-    supports_structured,
+    global_codec,
+    supports_global,
 )
 from ..task import PredictionModality, Task
 from ..task.templates import format_instruction, select_template
 from .bicodec import prepare_bicodec_tts_request
-from .protocol import TokenGenerator
+from .contract import TokenGenerator
 from .service import generate_responses
 from .text import decode_response_text
 from ..task import Request
-from .result import AudioOutput, Result
+from .contract import AudioOutput, Result
 
 
 class TextPart(TypedDict):
@@ -297,21 +297,20 @@ def _encode_audio(part: AudioPart, runtime: GenerationRuntime) -> AudioCodes | T
     batched = _batched_waveform(waveform)
     with torch.autocast(device_type=batched.device.type, enabled=False):
         if runtime.audio_view is AudioView.BICODEC:
-            if not supports_structured(runtime.codec):
-                raise TypeError("BiCodec audio parts require a structured codec.")
-            encoded = structured_codec(runtime.codec).tokenize(batched, sample_rate)
-            if not isinstance(encoded, SemanticAcousticCodes):
+            if not supports_global(runtime.codec):
+                raise TypeError("BiCodec audio parts require a semantic-global codec.")
+            encoded = global_codec(runtime.codec).tokenize(batched, sample_rate)
+            if not isinstance(encoded, SemanticGlobalCodes):
                 raise TypeError(
-                    "structured codec tokenize must return SemanticAcousticCodes."
+                    "BiCodec tokenize must return SemanticGlobalCodes."
                 )
-            if encoded.semantic.size(0) != 1 or encoded.acoustic.size(0) != 1:
+            if encoded.semantic.size(0) != 1 or encoded.global_codes.size(0) != 1:
                 raise ValueError("audio encode expects one item.")
-            return AudioCodes.from_anycodec(
-                SemanticAcousticCodes(
+            return AudioCodes.from_semantic_global(
+                SemanticGlobalCodes(
                     semantic=encoded.semantic[0].detach(),
-                    acoustic=encoded.acoustic[0].detach(),
-                ),
-                AcousticLayout.FIXED_LENGTH,
+                    global_codes=encoded.global_codes[0].detach(),
+                )
             )
         codes = frame_codec(runtime.codec).encode(batched, sample_rate)
     if not isinstance(codes, Tensor):

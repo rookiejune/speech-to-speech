@@ -25,12 +25,12 @@ from .mimo import (
     generate_mimo,
 )
 from .rollout import RolloutRow, generate_rollouts, write_rollouts_jsonl
-from .eval.text import TextProbe, TextProbeResult, evaluate_text
+from .evaluation import TextProbe, TextProbeResult, evaluate_text
 from .text import decode_response_text, decode_text_ids, response_text_ids
 from ..mimo import MimoGenerationStep
-from ..model.output import AcousticGeneration
+from ..model.generation import AcousticGeneration
 from ..task import Request
-from .result import AudioOutput, Result
+from .contract import AudioOutput, Result
 
 __all__ = [
     "AcousticGeneration",

@@ -14,8 +14,8 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from .._tensor import is_signed_integer_dtype
 from ..task import PredictionModality
 from ..runtime.backbone import BackboneOutputView
-from . import _assembly
-from .contract import ModelCheckpointContract, build_model_contract
+from . import factory
+from .checkpoint_contract import ModelCheckpointContract, build_model_contract
 from .generation import (
     GenerationEngine,
     GenerationOptions,
@@ -25,7 +25,7 @@ from .generation import (
     TokenKind,
 )
 from .adapter import AdapterType
-from ._helper import register
+from .._compat import register
 from .audio_input import AudioInputAdapterConfig, AudioInputTower
 from .audio_output import AudioOutputAdapterConfig
 from .ctc import (
@@ -89,20 +89,20 @@ class Model(nn.Module):
         self.layout = self.runtime.layout
         text_start, text_end = self.layout.blocks["text"]
         text_vocab_size = text_end - text_start
-        self.backbone = _assembly.backbone(self.runtime, self.config, text_vocab_size)
-        text_embedding = _assembly.text_embedding(self.backbone, text_vocab_size)
+        self.backbone = factory.backbone(self.runtime, self.config, text_vocab_size)
+        text_embedding = factory.text_embedding(self.backbone, text_vocab_size)
         text_embedding.requires_grad_(False)
-        self._encoder = _assembly.backbone_adapter(
+        self._encoder = factory.backbone_adapter(
             self.runtime,
             self.backbone,
             prefer_runtime=self.config.toy is None,
         )
-        hidden_size = _assembly.backbone_hidden_size(
+        hidden_size = factory.backbone_hidden_size(
             self.runtime,
             self.backbone,
             prefer_runtime=self.config.toy is None,
         )
-        self.tokens = _assembly.tokens(
+        self.tokens = factory.tokens(
             self.runtime,
             self.config,
             text_embedding,
@@ -112,11 +112,11 @@ class Model(nn.Module):
         register(
             self,
             "audio_token_frame_spans",
-            _assembly.frame_span_lookup(self.runtime).to(device=backbone_weight.device),
+            factory.frame_span_lookup(self.runtime).to(device=backbone_weight.device),
             persistent=False,
         )
         semantic_audio_dim = self.tokens.semantic_audio_embedding.embedding_dim
-        self.source_audio_encoder = _assembly.audio_input_adapter(
+        self.source_audio_encoder = factory.audio_input_adapter(
             self.config,
             semantic_audio_dim,
             hidden_size,
@@ -126,8 +126,8 @@ class Model(nn.Module):
             self.config.ctc,
             hidden_size,
         ).to(device=backbone_weight.device, dtype=torch.float32)
-        if _assembly.runtime_gradient_checkpointing(self.runtime):
-            _assembly.enable_interface_gradient_checkpointing(
+        if factory.runtime_gradient_checkpointing(self.runtime):
+            factory.enable_interface_gradient_checkpointing(
                 self.tokens,
                 self.source_audio_encoder,
                 self.ctc_decoders,
@@ -136,7 +136,7 @@ class Model(nn.Module):
     @property
     def text_embedding(self) -> nn.Embedding:
         text_start, text_end = self.layout.blocks[Modality.TEXT.value]
-        return _assembly.text_embedding(self.backbone, text_end - text_start)
+        return factory.text_embedding(self.backbone, text_end - text_start)
 
     def select_audio_head_cache(
         self,

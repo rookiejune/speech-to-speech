@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import torch
 from anydataset.types import AudioView, Modality
-from anytrain.codec import AcousticLayout
+from anytrain.codec import AcousticLayout, SemanticAcousticCodes
 from anytrain.module.idspace import Layout
 from peft import LoraConfig
 from tokenizers import Tokenizer, normalizers, pre_tokenizers
@@ -28,7 +28,7 @@ from speech_to_speech.model import (
     AudioOutputAdapterType,
     Model,
 )
-from speech_to_speech.model.contract import (
+from speech_to_speech.model.checkpoint_contract import (
     ModelCheckpointContract,
     validate_checkpoint_contract,
 )
@@ -41,7 +41,7 @@ from speech_to_speech.model.ctc import (
     CTCDecoderRoutesConfig,
     CTCDecoderType,
 )
-from speech_to_speech.model.acoustic.protocol import (
+from speech_to_speech.model.acoustic.contract import (
     FlowModelRuntime,
     FlowSample,
     FlowSamplingRuntime,
@@ -50,6 +50,7 @@ from speech_to_speech.model.toy import ToyConfig, create_toy_backbone
 from speech_to_speech.pl_module import Config, SpeechToSpeechModule
 from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.runtime.audio_tokenizer import (
+    BiCodecAudioTokenizer,
     FlattenedAudioTokenizer,
     NativeAudioTokenizer,
 )
@@ -64,10 +65,8 @@ from speech_to_speech.runtime.codec_contract import (
     CodecBackend,
     SemanticCodec,
 )
-from speech_to_speech.runtime.tokenizer import (
-    AudioTokenizer,
-    TextTokenizer,
-)
+from speech_to_speech.runtime.audio_tokenizer.contract import AudioTokenizer
+from speech_to_speech.runtime.backbone.contract import TextTokenizer
 from speech_to_speech.runtime.backbone.contract import (
     Backbone,
     BackboneOutput,
@@ -320,6 +319,26 @@ class ModelCheckpointContractTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "lowercase SHA-256"):
             _ = model.checkpoint_contract
+
+    def test_bicodec_contract_records_global_units_separately_from_acoustic(self) -> None:
+        codec = cast(
+            Mapping[str, object],
+            _component(
+                _token_model(runtime=_GlobalContractRuntime()),
+                "runtime",
+                "codec",
+            ),
+        )
+
+        self.assertIsNone(codec["acoustic"])
+        self.assertEqual(
+            codec["global"],
+            {
+                "feature_dim": 6,
+                "codebook_sizes": [5, 7],
+                "unit_length": 2,
+            },
+        )
 
     def test_real_model_contract_rejects_backbone_readout_mismatch(self) -> None:
         checkpoint_model = _token_model(
@@ -771,7 +790,10 @@ class _Codec:
     codebook_sizes = (4, 3)
     acoustic_feature_dim = 8
     acoustic_codebook_sizes = (4,)
+    acoustic_layout = AcousticLayout.FRAME_ALIGNED
+    acoustic_unit_length = None
     semantic_codebook = torch.arange(24, dtype=torch.float32).reshape(3, 8)
+    semantic_codebook_sizes = (3,)
 
     def encode(self, audio: Tensor, sample_rate: int) -> Tensor:
         del sample_rate
@@ -779,6 +801,19 @@ class _Codec:
 
     def decode(self, codes: Tensor) -> Tensor:
         return codes.new_zeros(1, dtype=torch.float32)
+
+    def tokenize(self, audio: Tensor, sample_rate: int) -> SemanticAcousticCodes:
+        del sample_rate
+        shape = (audio.size(0), 1, 1)
+        semantic = torch.zeros(shape, dtype=torch.long, device=audio.device)
+        acoustic = torch.zeros(shape, dtype=torch.long, device=audio.device)
+        return SemanticAcousticCodes(semantic=semantic, acoustic=acoustic)
+
+    def detokenize(self, codes: SemanticAcousticCodes) -> Tensor:
+        return self.decode_features(
+            codes.semantic,
+            self.acoustic_codes_to_features(codes.acoustic),
+        )
 
     def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor:
         shape = (*acoustic_codes.shape[:-1], self.acoustic_feature_dim)
@@ -971,14 +1006,6 @@ class _ContractRuntime:
         return self._semantic_artifact_sha256
 
     @property
-    def acoustic_layout(self) -> AcousticLayout:
-        return AcousticLayout.FRAME_ALIGNED
-
-    @property
-    def acoustic_unit_length(self) -> int | None:
-        return None
-
-    @property
     def semantic_codebook_sizes(self) -> tuple[int, ...]:
         return (3,)
 
@@ -1111,6 +1138,80 @@ class _ContractRuntime:
     def is_codec_audio_id(self, token_id: int) -> bool:
         start, end = self.codec_audio_range
         return start <= token_id < end
+
+
+class _GlobalCodec:
+    sample_rate = 16_000
+    frame_rate = 50.0
+    semantic_codebook = torch.arange(24, dtype=torch.float32).reshape(3, 8)
+    semantic_codebook_sizes = (3,)
+    global_codebook_sizes = (5, 7)
+    global_feature_dim = 6
+    global_unit_length = 2
+
+    def tokenize(self, audio: Tensor, sample_rate: int) -> object:
+        del audio, sample_rate
+        raise NotImplementedError
+
+    def detokenize(self, codes: object) -> Tensor:
+        del codes
+        raise NotImplementedError
+
+    def global_codes_to_features(self, global_codes: Tensor) -> Tensor:
+        shape = (*global_codes.shape[:-1], self.global_feature_dim)
+        return global_codes.new_zeros(shape, dtype=torch.float32)
+
+    def decode_features(
+        self,
+        semantic_codes: Tensor,
+        global_features: Tensor,
+    ) -> Tensor:
+        del semantic_codes
+        return global_features.new_zeros(1)
+
+
+class _GlobalContractRuntime(_ContractRuntime):
+    def __init__(self) -> None:
+        super().__init__(
+            audio_sequence_layout=AudioSequenceLayout.FLATTENED,
+            text_tokenizer_state="text-v1",
+            audio_tokenizer_state="audio-v1",
+            backbone_readout="last_hidden_state",
+            backbone_supports_cache_position=True,
+            semantic_artifact_sha256=None,
+        )
+        self._codec = _GlobalCodec()
+        self._audio_tokenizer = BiCodecAudioTokenizer(
+            semantic_codebook_size=3,
+            global_codebook_sizes=self._codec.global_codebook_sizes,
+            global_unit_length=self._codec.global_unit_length,
+        )
+        text_end = len(self._text_tokenizer)
+        audio_end = text_end + self._audio_tokenizer.vocab_size + 3
+        self._layout = Layout(text=(0, text_end), audio=(text_end, audio_end))
+        self._boa_token_id = audio_end - 3
+        self._eoa_token_id = audio_end - 2
+        self._mask_token_id = audio_end - 1
+
+    @property
+    def codec_name(self) -> str:
+        return "bicodec"
+
+    @property
+    def audio_view(self) -> AudioView:
+        return AudioView.BICODEC
+
+    @property
+    def semantic_codebook_sizes(self) -> tuple[int, ...]:
+        return self._codec.semantic_codebook_sizes
+
+    @property
+    def acoustic_side_channel(self) -> bool:
+        return False
+
+    @property
+    def structured_full_sequence(self) -> bool:
+        return True
 
 
 def _contract_runtime(

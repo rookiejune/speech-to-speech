@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..._compat import StrEnum, auto
-from .._helper import register
+from ..._compat import register
 
 
 class FsqFeature(StrEnum):

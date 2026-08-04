@@ -4,12 +4,12 @@ from math import prod
 from typing import Protocol, cast
 
 import torch
-from anytrain.codec import load_frame, load_semantic_acoustic
+from anytrain.codec import load_frame, load_semantic_acoustic, load_semantic_global
 from torch import Tensor
 
 from .codec_contract import (
     CodecBackend,
-    StructuredCodec,
+    GlobalCodec,
 )
 
 # Stable posthoc / native FSQ layouts keyed by product codebook sizes.
@@ -201,8 +201,8 @@ def load_codec(name: str, device: str | None) -> CodecBackend:
         )
     if name == "bicodec":
         return cast(
-            StructuredCodec,
-            cast(object, load_semantic_acoustic("bicodec", device=device)),
+            GlobalCodec,
+            cast(object, load_semantic_global("bicodec", device=device)),
         )
     if name == "unicodec":
         source = cast(

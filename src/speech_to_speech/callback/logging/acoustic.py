@@ -11,7 +11,7 @@ from lightning.pytorch.callbacks import Callback
 from torch import Tensor
 
 from ...datamodule.batch import ModelBatch
-from ...generation.eval.acoustic import evaluate
+from ...generation.evaluation import evaluate
 from ...model.acoustic.flow import FlowModel
 from ...model.acoustic.rvq import RVQModel
 from ...runtime.codec_contract import AcousticCodec

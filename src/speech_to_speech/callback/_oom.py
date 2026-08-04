@@ -25,7 +25,7 @@ from ..datamodule.sample import (
 )
 
 if TYPE_CHECKING:
-    from ..generation.eval.text import TextProbe
+    from ..generation.evaluation import TextProbe
     from ..task import Request
 
 

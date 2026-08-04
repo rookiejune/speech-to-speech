@@ -24,23 +24,21 @@ from ..datamodule.batch import (
     TrainInput,
 )
 from ..datamodule.sample import RawSpeechBatch
-from ..generation.batch import requests_from_batch
+from ..generation.service import requests_from_batch
 from ..generation.service import generate_responses
-from ..generation.eval.text import (
+from ..generation.evaluation import (
     TextProbe,
     TextProbeResult,
     evaluate_text,
 )
 from ..generation.text import decode_text_ids
-from ..generation.result import Result
-from ..loss.module import Objective
+from ..generation.contract import Result
+from ..loss.contract import Outputs, TokenObjectiveModel, combine_outputs
 from ..loss.ctc import CTCConfig
-from ..loss.protocol import TokenObjectiveModel
-from ..loss.types import Outputs, combine_outputs
-from ..loss.validation import validation_metrics
-from ..model.contract import ModelCheckpointContract, validate_checkpoint_contract
+from ..loss.supervised import Objective, validation_metrics
+from ..model.checkpoint_contract import ModelCheckpointContract, validate_checkpoint_contract
 from ..model.base import Model
-from ..generation.protocol import TextEvaluationModel
+from ..generation.contract import TextEvaluationModel
 from ..task import PredictionModality, Request, Task
 from .optim import Config as OptimConfig
 

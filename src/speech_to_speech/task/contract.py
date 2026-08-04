@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, TypedDict
 
 from anydataset.types import Modality
+from torch import Generator, Tensor
+from typing_extensions import NotRequired
 
 from .._compat import StrEnum, auto
 
@@ -76,6 +78,17 @@ class SourceLayout(StrEnum):
             return Modality.AUDIO
         return None
 
+
+class Request(TypedDict):
+    """Task-level tensor request shared by data and generation services."""
+
+    prompt_ids: Tensor
+    task: Task
+    audio_input_positions: Tensor | None
+    prediction: NotRequired[PredictionModality | None]
+    semantic_reference_features: NotRequired[Tensor | None]
+    semantic_reference_mask: NotRequired[Tensor | None]
+    semantic_decode_generator: NotRequired[Generator | None]
 
 class Task(StrEnum):
     AUDIO_AR = auto()
@@ -222,6 +235,7 @@ def uses_target_ctc(
 
 __all__ = [
     "PredictionModality",
+    "Request",
     "SourceLayout",
     "Task",
     "execution_signature",

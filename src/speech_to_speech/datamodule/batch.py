@@ -16,6 +16,8 @@ from ..task import (
     uses_source_ctc,
     uses_target_ctc,
 )
+
+
 from ._batch_ops import (
     _BatchGenerationFields,
     _BatchUnitCounts,
@@ -39,8 +41,8 @@ from ._batch_ops import (
     _validate_batch_tasks,
     _validate_batch_tensors,
 )
+from .contract import AcousticTarget, CTCTarget, Labels
 from .sample import RawSpeechBatch
-from .target import AcousticTarget, CTCTarget, Labels
 
 
 @dataclass

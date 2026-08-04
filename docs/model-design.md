@@ -53,18 +53,18 @@ runtime protocols ← datamodule / model / generation
 
 | 契约 | 权威模块 | 主要消费者 |
 | --- | --- | --- |
-| `Request` | `speech_to_speech.task.io` | datamodule bridge、generation、model protocol |
-| `Result` | `speech_to_speech.generation.result` | generation service、evaluation、reporting |
-| `AcousticGeneration` | `speech_to_speech.model.output` | acoustic model、generation decode |
+| `Request` | `speech_to_speech.task.contract` | datamodule bridge、generation、model protocol |
+| `Result` | `speech_to_speech.generation.contract` | generation service、evaluation、reporting |
+| `AcousticGeneration` | `speech_to_speech.model.generation` | acoustic model、generation decode |
 | raw/domain sample | `speech_to_speech.datamodule.sample` | parser、builder、collator、materializer |
-| targets | `speech_to_speech.datamodule.target` | builder、batch、loss |
+| targets | `speech_to_speech.datamodule.contract` | builder、batch、loss |
 | model/training batch | `speech_to_speech.datamodule.batch` | loader、pl_module、callback、loss |
 | MIMO contract | `speech_to_speech.mimo.contract` | MIMO dataset、model、loss、pl_module |
 | runtime config/resources | `speech_to_speech.runtime.config` / `core` | executable entries and all runtime consumers |
 | codec capability | `speech_to_speech.runtime.codec_contract` | runtime、datamodule、model、generation |
-| tokenizer capability | `speech_to_speech.runtime.tokenizer` | runtime、layout consumers |
+| tokenizer capability | `speech_to_speech.runtime.audio_tokenizer.contract` / `backbone.contract` | runtime、layout consumers |
 | backbone capability | `speech_to_speech.runtime.backbone.contract` | runtime、model、MIMO |
-| checkpoint contract | `speech_to_speech.model.contract` | model composition、Lightning checkpoint gate |
+| checkpoint contract | `speech_to_speech.model.checkpoint_contract` | model composition、Lightning checkpoint gate |
 | shared training composition | `speech_to_speech.training.composition` | train / overfit entries |
 
 包级 `__init__.py` 只提供稳定 facade。内部模块优先导入权威模块；只有 `loss` 为隔离可选音频训练

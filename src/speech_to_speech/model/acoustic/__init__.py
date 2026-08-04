@@ -1,4 +1,4 @@
-from ._config import (
+from .config import (
     AcousticConfig,
     AcousticNoneConfig,
     AcousticType,

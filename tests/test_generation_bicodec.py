@@ -7,7 +7,7 @@ from typing import cast
 
 import torch
 from anydataset.types import Modality
-from anytrain.codec import AcousticLayout, SemanticAcousticCodes
+from anytrain.codec import SemanticGlobalCodes
 from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 
@@ -17,7 +17,7 @@ from speech_to_speech.generation import (
     generate_responses,
 )
 from speech_to_speech.generation.bicodec import prepare_bicodec_tts_request
-from speech_to_speech.generation._request import validate
+from speech_to_speech.generation.request import validate
 from speech_to_speech.model.generation import GenerationStepResult
 from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
@@ -201,7 +201,7 @@ class BiCodecRequestInputTest(unittest.TestCase):
             semantic_codes=torch.tensor([[4], [5]], dtype=torch.long),
             global_codes=torch.tensor([[2], [1]], dtype=torch.long),
         )
-        codec = _StructuredCodec()
+        codec = _GlobalCodec()
         cast(SimpleNamespace, cast(object, runtime)).codec = codec
 
         result = generate_responses(
@@ -227,7 +227,7 @@ class BiCodecRequestInputTest(unittest.TestCase):
             semantic_codes=torch.tensor([[4], [5]], dtype=torch.long),
             global_codes=torch.tensor([[0], [0]], dtype=torch.long),
         )
-        codec = _StructuredCodec()
+        codec = _GlobalCodec()
         cast(SimpleNamespace, cast(object, runtime)).codec = codec
 
         result = generate_responses(
@@ -258,7 +258,7 @@ class BiCodecRequestInputTest(unittest.TestCase):
             output.semantic_codes.unsqueeze(0),
         )
         torch.testing.assert_close(
-            codec.codes.acoustic,
+            codec.codes.global_codes,
             cast(Tensor, context.global_codes).unsqueeze(0),
         )
 
@@ -268,7 +268,7 @@ class BiCodecRequestInputTest(unittest.TestCase):
             semantic_codes=torch.tensor([[4], [5]], dtype=torch.long),
             global_codes=torch.tensor([[2], [1]], dtype=torch.long),
         )
-        codec = _StructuredCodec()
+        codec = _GlobalCodec()
         cast(SimpleNamespace, cast(object, runtime)).codec = codec
 
         result = generate_responses(
@@ -288,38 +288,37 @@ class BiCodecRequestInputTest(unittest.TestCase):
         torch.testing.assert_close(audio["codes"].global_codes, output.global_codes)
 
 
-class _StructuredCodec:
+class _GlobalCodec:
     sample_rate = 16_000
     frame_rate = 50.0
     semantic_codebook = torch.zeros(8, 4)
     semantic_codebook_sizes = (8,)
-    acoustic_codebook_sizes = (3,)
-    acoustic_layout = AcousticLayout.FIXED_LENGTH
-    acoustic_unit_length = 2
-    acoustic_feature_dim = 4
+    global_codebook_sizes = (3,)
+    global_unit_length = 2
+    global_feature_dim = 4
 
     def __init__(self) -> None:
-        self.codes: SemanticAcousticCodes | None = None
+        self.codes: SemanticGlobalCodes | None = None
 
     def tokenize(self, audio: Tensor, sample_rate: int) -> object:
         del audio, sample_rate
         raise NotImplementedError
 
     def detokenize(self, codes: object) -> Tensor:
-        if not isinstance(codes, SemanticAcousticCodes):
-            raise TypeError("codes must be SemanticAcousticCodes")
+        if not isinstance(codes, SemanticGlobalCodes):
+            raise TypeError("codes must be SemanticGlobalCodes")
         self.codes = codes
         return codes.semantic[..., 0].float()
 
-    def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor:
-        return acoustic_codes.float()
+    def global_codes_to_features(self, global_codes: Tensor) -> Tensor:
+        return global_codes.float()
 
     def decode_features(
         self,
         semantic_codes: Tensor,
-        acoustic_features: Tensor,
+        global_features: Tensor,
     ) -> Tensor:
-        del acoustic_features
+        del global_features
         return semantic_codes[..., 0].float()
 
 

@@ -6,7 +6,7 @@ from typing import cast
 
 import torch
 from anydataset.types import AudioView, Modality
-from anytrain.codec import AcousticLayout, SemanticAcousticCodes
+from anytrain.codec import SemanticGlobalCodes
 from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 
@@ -18,7 +18,7 @@ from speech_to_speech.generation.chat import (
     materialize_codes,
     to_request,
 )
-from speech_to_speech.generation.protocol import TokenGenerator
+from speech_to_speech.generation.contract import TokenGenerator
 from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.runtime.protocol import GenerationRuntime
@@ -57,40 +57,39 @@ class _TextTokenizer:
         return "decoded:" + ",".join(str(value) for value in values)
 
 
-class _StructuredCodec:
+class _GlobalCodec:
     sample_rate = 16_000
     frame_rate = 50.0
     semantic_codebook = torch.zeros(8, 4)
     semantic_codebook_sizes = (8,)
-    acoustic_codebook_sizes = (3,)
-    acoustic_layout = AcousticLayout.FIXED_LENGTH
-    acoustic_unit_length = 2
-    acoustic_feature_dim = 4
+    global_codebook_sizes = (3,)
+    global_unit_length = 2
+    global_feature_dim = 4
 
-    def tokenize(self, audio: Tensor, sample_rate: int) -> SemanticAcousticCodes:
+    def tokenize(self, audio: Tensor, sample_rate: int) -> SemanticGlobalCodes:
         del sample_rate
         if audio.dim() != 3:
             raise ValueError("expected batched waveform")
         frames = max(audio.size(-1) // 2, 1)
-        return SemanticAcousticCodes(
+        return SemanticGlobalCodes(
             semantic=torch.arange(frames, dtype=torch.long).view(1, frames, 1),
-            acoustic=torch.zeros(1, 2, 1, dtype=torch.long),
+            global_codes=torch.zeros(1, 2, 1, dtype=torch.long),
         )
 
     def detokenize(self, codes: object) -> Tensor:
-        if not isinstance(codes, SemanticAcousticCodes):
-            raise TypeError("codes must be SemanticAcousticCodes")
+        if not isinstance(codes, SemanticGlobalCodes):
+            raise TypeError("codes must be SemanticGlobalCodes")
         return codes.semantic[..., 0].float()
 
-    def acoustic_codes_to_features(self, acoustic_codes: Tensor) -> Tensor:
-        return acoustic_codes.float()
+    def global_codes_to_features(self, global_codes: Tensor) -> Tensor:
+        return global_codes.float()
 
     def decode_features(
         self,
         semantic_codes: Tensor,
-        acoustic_features: Tensor,
+        global_features: Tensor,
     ) -> Tensor:
-        del acoustic_features
+        del global_features
         return semantic_codes[..., 0].float()
 
 
@@ -374,7 +373,7 @@ class ChatAdapterTest(unittest.TestCase):
             )
 
     def test_audio_part_encodes_with_structured_codec(self) -> None:
-        codec = _StructuredCodec()
+        codec = _GlobalCodec()
         runtime = _runtime(codec=codec)
         waveform = torch.zeros(8, dtype=torch.float32)
         codes = materialize_codes(

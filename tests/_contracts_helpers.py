@@ -30,7 +30,7 @@ from anydataset.types import (
     TextView,
 )
 from hydra import compose, initialize_config_dir
-from anytrain.codec import AcousticLayout, SemanticAcousticCodes
+from anytrain.codec import AcousticLayout, SemanticGlobalCodes
 from anytrain.lightning import apply_parameter_trainability
 from anytrain.module.idspace import Layout
 from lightning.pytorch.callbacks import Callback
@@ -44,8 +44,8 @@ from speech_to_speech.datamodule.config import (
     DataLoaderCostsConfig,
     SpeechConfig,
 )
-from speech_to_speech.datamodule._helper.task import TaskWeights, allocate_tasks
-from speech_to_speech.datamodule.collate.collator import Collator, TextCollator
+from speech_to_speech.datamodule.collate import TaskWeights, allocate_tasks
+from speech_to_speech.datamodule.collate import Collator, TextCollator
 from speech_to_speech.datamodule.dataset.speech import (
     DatasetConfig,
     DatasetName,
@@ -56,7 +56,7 @@ from speech_to_speech.datamodule.dataset.speech import (
 from speech_to_speech.datamodule.loader import LoaderSchedule, ScheduledDataLoader
 from speech_to_speech.datamodule.module import DataModule, LoaderSpec
 from speech_to_speech.datamodule.diagnostic import SampleSplit
-from speech_to_speech.datamodule.build.single import SingleCollator
+from speech_to_speech.datamodule.single import SingleCollator
 from speech_to_speech.datamodule.dataset.text import (
     TextConfig,
     TextDatasetConfig,
@@ -64,14 +64,14 @@ from speech_to_speech.datamodule.dataset.text import (
     load_text_dataset,
 )
 from speech_to_speech.datamodule.sample import DataShape
-from speech_to_speech.datamodule.parse.parser import (
+from speech_to_speech.datamodule.parse import (
     _parse_audio_item,
     parse_sample,
     parse_text_sample,
 )
-from speech_to_speech.datamodule.build.sample import build_sample
-from speech_to_speech.datamodule.build.single import build_single_sample, parse_single_sample
-from speech_to_speech.datamodule.protocol import DataRuntimeSnapshot
+from speech_to_speech.datamodule.builder import build_sample
+from speech_to_speech.datamodule.single import build_single_sample, parse_single_sample
+from speech_to_speech.datamodule.contract import DataRuntimeSnapshot
 from speech_to_speech.datamodule.batch import (
     ModelBatch,
     ModelSample,
@@ -367,7 +367,7 @@ def _bicodec_data_runtime():
         boa_token_id=boa_token_id,
         eoa_token_id=boa_token_id + 1,
         mask_token_id=boa_token_id + 2,
-        codec=_StructuredEncodingCodec(),
+        codec=_GlobalEncodingCodec(),
     )
 
 
@@ -380,10 +380,15 @@ def _longcat_codec():
         sample_rate=16_000,
         semantic_feature_dim=4,
         semantic_codebook=torch.zeros(5, 4),
+        semantic_codebook_sizes=(5,),
         codebook_sizes=(5, 3),
         acoustic_feature_dim=4,
         acoustic_codebook_sizes=(3,),
+        acoustic_layout=AcousticLayout.FRAME_ALIGNED,
+        acoustic_unit_length=None,
         acoustic_codes_to_features=Mock(),
+        tokenize=Mock(),
+        detokenize=Mock(),
         decode_features=Mock(),
         frame_rate=50.0,
     )
@@ -409,15 +414,14 @@ class _EncodingCodec:
         return codes.new_zeros((codes.size(0), 1, codes.size(1)), dtype=torch.float32)
 
 
-class _StructuredEncodingCodec:
+class _GlobalEncodingCodec:
     sample_rate = 16_000
     frame_rate = 50.0
     semantic_codebook = torch.zeros(8, 4)
     semantic_codebook_sizes = (8,)
-    acoustic_codebook_sizes = (3,)
-    acoustic_layout = AcousticLayout.FIXED_LENGTH
-    acoustic_unit_length = 2
-    acoustic_feature_dim = 4
+    global_codebook_sizes = (3,)
+    global_unit_length = 2
+    global_feature_dim = 4
 
     def __init__(self) -> None:
         self.calls: list[tuple[tuple[int, ...], int]] = []
@@ -428,29 +432,29 @@ class _StructuredEncodingCodec:
         self,
         audio: torch.Tensor,
         sample_rate: int,
-    ) -> SemanticAcousticCodes:
+    ) -> SemanticGlobalCodes:
         self.calls.append((tuple(audio.shape), sample_rate))
         self.input_dtypes.append(audio.dtype)
         self.autocast_enabled.append(torch.is_autocast_enabled(audio.device.type))
-        return SemanticAcousticCodes(
+        return SemanticGlobalCodes(
             semantic=torch.tensor([[[1], [2]]], device=audio.device),
-            acoustic=torch.tensor([[[0], [1]]], device=audio.device),
+            global_codes=torch.tensor([[[0], [1]]], device=audio.device),
         )
 
     def detokenize(self, codes: object) -> torch.Tensor:
         del codes
         return torch.zeros(1, 1, 1)
 
-    def acoustic_codes_to_features(self, acoustic_codes: torch.Tensor) -> torch.Tensor:
-        return acoustic_codes.to(dtype=torch.float32)
+    def global_codes_to_features(self, global_codes: torch.Tensor) -> torch.Tensor:
+        return global_codes.to(dtype=torch.float32)
 
     def decode_features(
         self,
         semantic_codes: torch.Tensor,
-        acoustic_features: torch.Tensor,
+        global_features: torch.Tensor,
     ) -> torch.Tensor:
         del semantic_codes
-        return acoustic_features.new_zeros((1, 1, 1))
+        return global_features.new_zeros((1, 1, 1))
 
 
 def _raw_sample(index: int = 0):
