@@ -158,18 +158,24 @@ class ConfigOutputJobTest(ConfigTestCase):
 
         self.assertIn("scripts/train.py", source)
         self.assertNotIn("scripts/overfit.py", source)
-        self.assertIn('SPEECH_TO_SPEECH_STEP_MODE:-fused_joint', source)
+        self.assertIn("SPEECH_TO_SPEECH_STEP_MODE", source)
+        self.assertIn("SPEECH_TO_SPEECH_SAC_ARTIFACT", source)
         self.assertIn('trainer="staged_static_ddp"', source)
         self.assertIn('trainer="staged_ddp"', source)
         self.assertIn('"loader_plan.step_mode=${step_mode}"', source)
+        self.assertIn('"model.acoustic.init_artifact=${sac_artifact}"', source)
         self.assertIn(
             '"loader_plan.accumulate_grad_batches=${accumulate_grad_batches}"',
             source,
         )
         self.assertIn("fdu_stage_data_args datamodule.dataset.root", source)
-        self.assertIn("SPEECH_TO_SPEECH_EXPERIMENT:-train/staged_joint/stage_1", source)
+        self.assertIn("SPEECH_TO_SPEECH_EXPERIMENT:-train/staged_joint/stage_0", source)
         self.assertIn('"experiment=${experiment}"', source)
-        self.assertIn('job_reject_overrides experiment task loader_plan -- "$@"', source)
+        self.assertIn(
+            "job_reject_overrides experiment task loader_plan "
+            'model.acoustic.init_artifact -- "$@"',
+            source,
+        )
 
     def test_job_wrappers_source_existing_project_environment(self):
         root = Path(__file__).parents[1]

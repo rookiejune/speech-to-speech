@@ -4,7 +4,7 @@ defaults:
   - /model: default
   - /model/acoustic@model.acoustic: rvq
   - /datamodule/dataset@datamodule.dataset: wmt19_tts
-  - /callback/parameter_policy@callbacks.parameter_policy: speech_interface
+  - /callback/parameter_policy@callbacks.parameter_policy: speech_interface_top_third
   - /pl_module: sft
   - /trainer: staged_static_ddp
   - /logging: tensorboard
@@ -12,25 +12,32 @@ defaults:
 
 audio_sequence_layout: semantic
 
-output_subdir: staged-joint/stage_2/${run_name}
+output_subdir: staged-joint/s2st/stage_2/${run_name}
 
 loader_plan:
   loaders:
     asr:
-      weight: 0.45
+      weight: 0.225
       task_weights:
         asr: 1.0
+    s2tt:
+      weight: 0.225
+      task_weights:
+        s2tt: 1.0
     tts:
-      weight: 0.45
+      weight: 0.225
       task_weights:
         tts: 1.0
+    t2st:
+      weight: 0.225
+      task_weights:
+        t2st: 1.0
     mt:
       weight: 0.1
       task_weights:
         mt: 1.0
-  accumulate_grad_batches: 10
-  step_mode: weighted_window
-  fuse_loaders_per_step: true
+  accumulate_grad_batches: 5
+  step_mode: fused_joint
 
 model:
   lora: null
@@ -44,8 +51,16 @@ callbacks:
         task: asr
         indices: [0, 1, 2]
       - split: train
+        loader: s2tt
+        task: s2tt
+        indices: [0, 1, 2]
+      - split: train
         loader: tts
         task: tts
+        indices: [0, 1, 2]
+      - split: train
+        loader: t2st
+        task: t2st
         indices: [0, 1, 2]
       - split: train
         loader: mt

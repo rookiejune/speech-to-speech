@@ -241,7 +241,10 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
         self.assertEqual(optimizer.param_groups[0]["lr"], OptimConfig().learning_rate)
 
     def test_train_constructs_gradient_probe_callback(self):
-        config = _train("callbacks.gradient_probe.enabled=true")
+        config = _train(
+            "experiment=train/staged_joint/stage_1",
+            "callbacks.gradient_probe.enabled=true",
+        )
         built = Mock()
 
         with patch("scripts.train.GradLogger", return_value=built) as factory:
@@ -279,7 +282,10 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
         )
 
     def test_train_performance_omits_gradient_probe_callback(self):
-        config = _train("callbacks.gradient_probe.enabled=true")
+        config = _train(
+            "experiment=train/staged_joint/stage_1",
+            "callbacks.gradient_probe.enabled=true",
+        )
         performance = Mock()
 
         with (

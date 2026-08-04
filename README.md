@@ -36,16 +36,11 @@ integration is provided by `SpeechToSpeechModule`.
   `workspace/jobs/env.sh` and owns only speech-to-speech roots, dependency
   paths, checkpoint discovery, and dataset override helpers.
 
-The Stable Codec no-audio-BPE TTS+ASR long run is
-`jobs/015/01_stable_codec_stage1.sh`. It selects the Stable Codec full-code
-sequence, stage 1 (50% ASR / 50% TTS), a 1M-step budget, 10k-step checkpoints,
-and fixed-sample TensorBoard logging for both loaders.
-The wrapper requires `SPEECH_TO_SPEECH_STABLE_PYTHON`, because the optional
-`stable-codec` dependency has its own compatibility environment.
-
-Acoustic-only codec screening and the former codec-oracle training entry have
-moved to `semantic-acoustic-codec`; this repository keeps the joint S2ST
-training and generation path.
+SAC pretraining, codec screening, and acoustic-generator artifact export are
+owned by the external `semantic-acoustic-codec` repository. This repository
+does not train SAC; the staged curriculum consumes its exported artifact through
+`model.acoustic.init_artifact` and owns the joint S2ST training and generation
+path.
 
 ## Experiment Runs
 
@@ -62,20 +57,30 @@ jobs/004/01_s2st.sh experiment=generation/online_encode_smoke
 jobs/004/01_s2st.sh 'batch_sizes=[1]' data.dataset.filter=null data.encode_missing_codes=true
 jobs/005/02_unicodec.sh
 jobs/005/05_unicodec_ddp.sh
-SPEECH_TO_SPEECH_STAGE=stage_1 jobs/011/03_staged_joint_train.sh
+SPEECH_TO_SPEECH_SAC_ARTIFACT=/path/to/sac-artifact \
+  SPEECH_TO_SPEECH_EXPERIMENT=train/staged_joint/stage_0 \
+  jobs/011/03_staged_joint_train.sh
 ```
 
-The 005 wrappers are UniCodec full-path validation runs. They select explicit
-experiments containing their data, trainer, callback, and step budgets:
+The 005 wrappers are standalone UniCodec full-path compatibility checks, not
+part of the staged joint curriculum or the external SAC artifact pipeline.
+They select explicit experiments containing their data, trainer, callback, and
+step budgets:
 UniCodec fixed-sample overfit uses 100 steps, and UniCodec DDP smoke uses two
 steps.
 The 002 wrappers likewise select `experiment=overfit` explicitly.
 
-The staged wrapper accepts `SPEECH_TO_SPEECH_STAGE=stage_1..stage_4` and
-defaults to `stage_1`. Its experiment, task, and stage identities cannot be
+The staged wrapper accepts
+`SPEECH_TO_SPEECH_EXPERIMENT=train/staged_joint/stage_0..stage_3` and defaults
+to Stage 0. Stage 0 uses serial joint execution with find-unused DDP because
+TTS+MT does not cover the speech-input branch; Stages 1-3 default to fused
+joint execution. The experiment, task, and loader-plan identities cannot be
 overridden through trailing Hydra arguments; use the environment selector and
 invoke the wrapper once per desired stage. Other Hydra overrides still pass
-through to the real Python entry point.
+through to the real Python entry point. Production Flow/RVQ runs must pass the
+artifact exported by `semantic-acoustic-codec` through
+`SPEECH_TO_SPEECH_SAC_ARTIFACT`; the wrapper forwards it to
+`model.acoustic.init_artifact`.
 
 For the source-level model/data contract smoke, select
 `experiment=toy_smoke`. It uses a random tiny Qwen backbone and deterministic

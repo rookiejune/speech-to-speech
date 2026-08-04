@@ -2,46 +2,36 @@
 defaults:
   - /runtime: longcat_native
   - /model: default
+  - /model/lora@model.lora: qwen
   - /model/acoustic@model.acoustic: rvq
   - /datamodule/dataset@datamodule.dataset: wmt19_tts
-  - /callback/parameter_policy@callbacks.parameter_policy: speech_interface
+  - /callback/parameter_policy@callbacks.parameter_policy: lora
   - /pl_module: sft
-  - /trainer: staged_static_ddp
+  - /trainer: staged_ddp
   - /logging: tensorboard
   - _self_
 
 audio_sequence_layout: semantic
 
-output_subdir: staged-joint/s2st/stage_1/${run_name}
+output_subdir: staged-joint/s2st/stage_0/${run_name}
 
 loader_plan:
   loaders:
-    asr:
-      weight: 0.45
-      task_weights:
-        asr: 1.0
     tts:
-      weight: 0.45
+      weight: 0.9
       task_weights:
         tts: 1.0
     mt:
       weight: 0.1
       task_weights:
         mt: 1.0
-  accumulate_grad_batches: 3
-  step_mode: fused_joint
-
-model:
-  lora: null
+  accumulate_grad_batches: 2
+  step_mode: serial_joint
 
 callbacks:
   task_sample:
     enabled: true
     panels:
-      - split: train
-        loader: asr
-        task: asr
-        indices: [0, 1, 2]
       - split: train
         loader: tts
         task: tts

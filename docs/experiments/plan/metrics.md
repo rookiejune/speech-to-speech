@@ -1,6 +1,7 @@
 # S2ST 具体指标
 
 日期：2026-07-31  
+更新：2026-08-04
 状态：内部评估标准
 
 ## 1. 评估原则
@@ -14,13 +15,15 @@
 3. 能力保持：训练语音任务前后，LLM 原有文本/MT/指令能力是否退化；
 4. 效率：首包延迟、RTF、显存、吞吐、单次前向 vs 多次前向。
 
-## 2. Stage 0：TTS 指标
+最终模型选择以 Stage 3 的直接 S2ST 质量、稳定性和效率为主。ASR、MT、TTS、S2TT 和 T2ST 指标用于能力保持、分解诊断和 teacher 上限评估，不替代直接 S2ST 指标。
+
+## 2. Stage 0：TTS + MT 指标
+
+训练任务与初始损失权重：TTS 0.9，MT 0.1。
 
 比较对象：
 
-- Spark-TTS；
-- BiCodec reconstruction upper bound；
-- Stable Codec / UniCodec 对照组；
+- Stage 0 外部 SAC generator 的 reconstruction upper bound；
 - 强特殊 Token、少量特殊 Token、纯文本 Prompt 三种接口。
 
 核心指标：
@@ -42,7 +45,9 @@
 - 长文本没有系统性重复/截断；
 - Qwen3 文本 MT 能力无明显退化。
 
-## 3. Stage 1：ASR + TTS 指标
+## 3. Stage 1：ASR + TTS + MT 指标
+
+训练任务与初始损失权重：ASR 0.45，TTS 0.45，MT 0.1。
 
 比较对象：
 
@@ -77,7 +82,9 @@ LLM 能力保持指标：
 - 文本 MT 没有明显退化；
 - 同一模型可通过三次前向稳定完成 ASR + MT + TTS 闭环。
 
-## 4. Stage 2：S2TT + T2ST 指标
+## 4. Stage 2：S2TT + T2ST + ASR + TTS + MT 指标
+
+训练任务与初始损失权重：ASR、S2TT、TTS、T2ST 各 0.225，MT 0.1。
 
 比较对象：
 
@@ -113,13 +120,15 @@ T2ST 指标：
 - 实体、数字、否定关系没有明显退化；
 - Stage 1 的 ASR/TTS 能力仍保留。
 
-## 5. Stage 3：S2ST 指标
+## 5. Stage 3：S2ST + S2TT + T2ST + ASR + TTS + MT 指标
+
+训练任务与初始损失权重：S2ST 0.7；ASR、S2TT、TTS、T2ST 各 0.05；MT 0.1。模型选择首先看直接 S2ST；其他任务指标作为退化约束和问题定位信号。
 
 比较对象：
 
 - Stage 1 ASR + MT + TTS 三级级联；
 - Stage 2 S2TT / T2ST；
-- Stage 1 TTS；
+- Stage 2 TTS；
 - Codec reconstruction upper bound。
 
 核心指标：
@@ -133,7 +142,7 @@ T2ST 指标：
 | 说话人相似度 | 判断源说话人音色是否保持 |
 | 韵律/情绪保持 | 判断语气、节奏、情绪是否迁移 |
 | 生成稳定性 | 重复、截断、乱码、异常 token、长度漂移 |
-| 质量—效率 Pareto | 判断一次前向是否值得 |
+| 质量—效率 Pareto | 衡量直接 S2ST 的质量与效率权衡 |
 
 推荐评估方式：
 
@@ -145,10 +154,16 @@ T2ST 指标：
 
 最低 gate：
 
-- 翻译准确性接近 Stage 2 S2TT；
-- 语音质量接近 Stage 1 TTS；
+- 翻译准确性接近 Stage 2 S2TT 和三级级联；
+- 语音质量接近 Stage 2 T2ST / TTS；
 - 相对三级级联有显著延迟或算力收益；
 - 质量损失和效率收益形成可接受 Pareto。
+
+辅助任务退化约束：
+
+- ASR、TTS 和 MT 相对各自上一阶段不得出现不可接受退化；
+- S2TT 和 T2ST 相对 Stage 2 不得出现不可接受退化；
+- 若直接 S2ST 提升与辅助任务退化冲突，优先保证 S2ST 主目标，但必须报告退化幅度并定位对应分解能力。
 
 ## 6. 系统效率指标
 

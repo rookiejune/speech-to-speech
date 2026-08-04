@@ -7,12 +7,16 @@
 
 ## 文档结构
 
-1. [简单介绍](plan/overview.md)：说明 V1 失败原因、当前路线判断、Codec 选型和四阶段总体思路。
+1. [简单介绍](plan/overview.md)：说明 V1 失败原因、外部 SAC 边界和四阶段总体思路。
 2. [接下来要做的事](plan/next_steps.md)：列出近期执行顺序、每个阶段的任务、gate 和后备方案。
 3. [具体指标](plan/metrics.md)：定义 ASR、MT/S2TT、TTS/T2ST/S2ST、效率和 LLM 能力保持的评估指标。
 
 ## 当前核心结论
 
-短期不要直接把“端到端一次前向 S2ST”作为第一目标。更稳妥的路线是先做出统一模型内的 ASR + MT + TTS 强闭环，再逐步压缩为 S2TT、T2ST 和 S2ST。
+最终目标是直接 S2ST。Stage 0-2 先建立 TTS、ASR、MT 和跨模态分解能力，Stage 3 以直接
+S2ST 为主损失和模型选择目标，辅助任务只用于能力保持、分解监督和故障定位。
 
-V1 的 LongCat 显式「语义码 → 声学码」路线暂时不应继续追加主要预算；下一阶段以 BiCodec 为主方案，Stable Codec 和 UniCodec 作为对照。
+SAC 的 conditioner、acoustic generator 预训练和 artifact 导出由仓库外的
+`semantic-acoustic-codec` 完成。本仓库在 composition 时通过
+`model.acoustic.init_artifact` 显式消费 frame-aligned SAC artifact，不把 SAC 训练或其他 codec
+训练入口纳入 staged joint 路线。

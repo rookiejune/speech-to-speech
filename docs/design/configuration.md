@@ -134,15 +134,19 @@ experiment 之前，以便非 LoRA experiment 用 `model.lora: null` 覆盖）�
 - `overfit/unicodec`：UniCodec fixed-sample 100-step overfit。
 - `unicodec_ddp_smoke`：UniCodec 显式 DDP 两步验收。
 - `overfit`：TTS/S2ST fixed-sample 完整链路实验。
-- `train/staged_joint/stage_1..4`：正式 staged joint experiments。每个文件显式内联
-  `loader_plan` 并选择 `callback/parameter_policy`；`stage_1..4` 只是 experiment 目录名，
+- `train/staged_joint/stage_0..3`：正式 staged joint experiments。每个文件显式内联
+  `loader_plan` 并选择 `callback/parameter_policy`；`stage_0..3` 只是 experiment 目录名，
   不再生成运行身份字段或独立 stage config。`loader_plan.loaders` /
   `loader_plan.step_mode` / `loader_plan.accumulate_grad_batches` 等持有 loader/task 契约，再构造唯一 `DataModule`。每个 speech
   loader 使用 `LoaderSpec.speech(...)`，纯文本 MT loader 使用 `LoaderSpec.text(...)`（读
   `datamodule.tasks`），多 loader 调度由 `LoaderSchedule` 持有。四个正式 stage 都启用每 10,000
-  optimizer steps 的 train fixed panels；Stage 2-4 的 panels 包含 MT；正式 entry 还默认启用独立的
+  optimizer steps 的 train fixed panels，并都包含 MT panel；正式 entry 还默认启用独立的
   text-retention baseline。MT panel 只允许 train split，validation panel 仍要求 speech loader 与
   独立 validation dataset。
+  UniCodec smoke 只验证独立的 full-code 兼容路径，不属于 staged joint 课程；SAC 预训练和 artifact
+  导出由仓外的 `semantic-acoustic-codec` 负责。
+  新课程输出统一写入 `staged-joint/s2st/stage_0..3/`，与其他训练路线的 checkpoint、
+  `last.ckpt` 和 TensorBoard 目录隔离。
 - `train/smoke/parameter_policy`：参数冻结专用两步实验。它固定 toy model/data 与 CPU trainer，
   只通过 `callback/parameter_policy=<name>` 切换冻结策略，不借用正式长跑配置充当策略测试夹具。
 - `toy_smoke`：正式 LongCat runtime 加 tiny model/in-memory dataset 的 CPU 两步训练契约测试；
@@ -154,28 +158,24 @@ experiment 之前，以便非 LoRA experiment 用 `model.lora: null` 覆盖）�
 再传 `train.max_steps=2`。`jobs/004/01_s2st.sh` 是独立的 generation smoke，不属于训练入口。
 
 `jobs/011/03_staged_joint_train.sh` 是正式 staged joint training wrapper，调用
-`scripts/train.py`，根据 `SPEECH_TO_SPEECH_EXPERIMENT=train/staged_joint/stage_*` 选择对应 experiment，
+`scripts/train.py`，根据 `SPEECH_TO_SPEECH_EXPERIMENT=train/staged_joint/stage_0..stage_3` 选择对应 experiment，
 并通过 `SPEECH_TO_SPEECH_STEP_MODE=fused_joint|serial_joint` 成对选择
 `trainer=staged_static_ddp` 或 `trainer=staged_ddp`；未设置时默认
-`train/staged_joint/stage_1` + `fused_joint`。该 wrapper 在启动 Python 前拒绝通过末尾 `"$@"`
-覆写 `experiment`、`task` 或 `loader_plan`，需要切换 identity 时必须使用对应环境选择器并单独提交一次
-wrapper。正式 train 入口通过
+`train/staged_joint/stage_0` + `serial_joint`。Stage 0 的 TTS+MT 不覆盖可训练的 speech-input
+分支，因此即使显式选择 `fused_joint` 也使用 find-unused DDP；Stage 1-3 默认使用
+`fused_joint` + static DDP。该 wrapper 在启动 Python 前拒绝通过末尾 `"$@"`
+覆写 `experiment`、`task`、`loader_plan` 或 `model.acoustic.init_artifact`，需要切换 identity 时必须使用
+对应环境选择器并单独提交一次 wrapper。正式 train 入口通过
 `train.ckpt_path=<checkpoint>` 显式恢复 Lightning checkpoint；默认值为空，普通训练不走 resume。
-该字段只属于 staged train，overfit 配置不接受它。
+该字段只用于同一 stage、相同模型拓扑和 optimizer 参数组的断点续训；它不承担跨 stage 权重迁移，
+且只属于 staged train，overfit 配置不接受它。
 
-`jobs/015/01_stable_codec_stage1.sh` 是 Stable Codec 的默认长跑入口：固定
-`runtime=stable_codec`、`full_codec_sequence`（不使用 audio BPE）、stage 1 的 ASR/TTS
-双 loader、1,000,000 optimizer steps 和每 10,000 steps 的 checkpoint。它启用每 10,000 steps
-  的 teacher-forcing dev validation，并为 ASR/TTS 各配置三条 train 固定样本 panel；panel
-  显式绑定 split、loader、task 与 indices（取数坐标），TensorBoard 路径为
-  `sample/{task}/{index}/...`。Stable 的 FrameCodec
-  路径没有独立的 acoustic
-  teacher-forcing，因此 TTS TensorBoard audio 记录 codec 重建的 `target` 和自回归
-  `generated`。只有 Flow/RVQ acoustic 路径才会额外记录 `reference_generation`；ASR 记录
-  source audio、target/generated text 与无外部模型的字符回归指标。所有 panel 使用固定 seed；
-  waveform health 指标也只基于现有生成结果，不加载 ASR/MOS/speaker evaluator。
-该 wrapper 要求显式设置 `SPEECH_TO_SPEECH_STABLE_PYTHON`，因为 Stable Codec 的
-`stable-codec` 依赖使用独立兼容环境，不能默认复用普通训练 Python。
+SAC 预训练、codec 筛选和 generator artifact 导出属于仓库外的
+`semantic-acoustic-codec`。本仓库的 staged wrapper 不启动这些流程，也不切换到其他 codec
+训练入口。正式 Flow/RVQ stage 必须通过
+`SPEECH_TO_SPEECH_SAC_ARTIFACT` 指定仓外产物；wrapper 将其传给
+`model.acoustic.init_artifact`，composition 再在构造 S2S model 前校验 artifact 的 route、frame
+layout、decoder 配置和 acoustic backend metadata。该变量缺失或为空时 wrapper 在启动 Python 前失败。
 
 正式 train 的 `validation` 默认关闭。启用时，`loader` 必须选择当前 `loader_plan` 的一个 speech loader，
 且 `datamodule.dataset.split_manifest` 必须存在、`split_label` 必须与训练 split 不同。入口复制该 loader
@@ -268,12 +268,19 @@ loader mix 属于 train experiment 内联的 `loader_plan`，由
 参数冻结和 backbone top-fraction 位于
 `callbacks.parameter_policy`，由 `callback/parameter_policy` 组写入，并在 Trainer/optimizer
 创建前一次性应用。一个正式 job 只选择一个 experiment，运行中不切换数据计划或参数冻结。
-`staged_joint/stage_1..4` 只是人工训练里程碑目录名；它不生成运行身份字段，也不隐式选择
-policy。约定组合：stage 1 使用 `lora`，stage 2 使用 `speech_interface`，stage 3 使用
-`speech_interface_top_third`，stage 4 使用 `full`。这些非 LoRA 对照
+`staged_joint/stage_0..3` 只是人工训练里程碑目录名；它不生成运行身份字段，也不隐式选择
+policy。约定组合：stage 0 使用 `lora`，stage 1 使用 `speech_interface`，stage 2 使用
+`speech_interface_top_third`，stage 3 使用 `full`。这些非 LoRA 对照
 experiment 会在配置体中显式写 `model.lora: null`，以覆盖正式 train 的默认 LoRA。需要只训练
 semantic token interface 时在专用 experiment 中显式选择
 `callback/parameter_policy=semantic_only`。
+
+四个 stage 的 joint loss 初始权重为：Stage 0 使用 TTS `0.9`、MT `0.1`；Stage 1 使用
+ASR/TTS 各 `0.45`、MT `0.1`；Stage 2 使用 ASR/S2TT/TTS/T2ST 各 `0.225`、MT `0.1`；
+Stage 3 使用 S2ST `0.7`、ASR/S2TT/TTS/T2ST 各 `0.05`、MT `0.1`。Stage 1-3 默认
+`fused_joint`，每个 loader 每个 optimizer step 各执行一次，`weight` 因而是归一化 loss
+系数而非 sampling probability；Stage 0 的 `serial_joint` 也按相同 loss 权重契约缩放两个
+microbatch。Stage 3 以直接 S2ST 为模型选择主目标，其余任务用于能力保持和分解诊断。
 
 正式 train 入口默认选择 LoRA preset 与
 `callback/parameter_policy=lora`（PiSSA 初始化）。
@@ -288,6 +295,7 @@ nested structured config 展开，因此 normalization 边界先用官方字段�
 
 overfit 入口继续默认 `callbacks.parameter_policy.name=full` 且不启用 LoRA，专门验收全参闭环。
 
-`staged_joint/stage_1..4` 是 S2S 内部的数据/任务/参数策略里程碑命名，
-不等同于“先在 SAC 预训练 generator、再在 S2S 用 hidden state 联合训练”的两个 phase。artifact
-初始化只在 model composition 时发生一次，loader plan 不拥有 artifact 导出或切换逻辑。
+`staged_joint/stage_0..3` 是 S2S 内部的数据/任务/参数策略里程碑命名，
+不等同于“先在 SAC 预训练 generator、再在 S2S 用 hidden state 联合训练”的两个 phase。SAC
+在仓库外预训练并导出 artifact；本仓库的初始化只在 model composition 时发生一次，loader plan
+不拥有 artifact 训练、导出或切换逻辑。

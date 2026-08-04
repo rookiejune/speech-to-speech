@@ -6,58 +6,49 @@ source "${JOB_DIR%/jobs/*}/jobs/env.sh"
 
 qwen_root="$(fdu_qwen_root)"
 
-experiment="${SPEECH_TO_SPEECH_EXPERIMENT:-train/staged_joint/stage_1}"
+experiment="${SPEECH_TO_SPEECH_EXPERIMENT:-train/staged_joint/stage_0}"
 case "$experiment" in
-  train/staged_joint/stage_1 | train/staged_joint/stage_2 | train/staged_joint/stage_3 | train/staged_joint/stage_4)
+  train/staged_joint/stage_0)
+    accumulate_grad_batches="2"
+    default_step_mode="serial_joint"
+    ;;
+  train/staged_joint/stage_1)
+    accumulate_grad_batches="3"
+    default_step_mode="fused_joint"
+    ;;
+  train/staged_joint/stage_2)
+    accumulate_grad_batches="5"
+    default_step_mode="fused_joint"
+    ;;
+  train/staged_joint/stage_3)
+    accumulate_grad_batches="6"
+    default_step_mode="fused_joint"
     ;;
   *)
-    echo "SPEECH_TO_SPEECH_EXPERIMENT must be train/staged_joint/stage_1 through stage_4, got: $experiment" >&2
+    echo "SPEECH_TO_SPEECH_EXPERIMENT must be train/staged_joint/stage_0 through stage_3, got: $experiment" >&2
     exit 2
     ;;
 esac
 visible_devices="${CUDA_VISIBLE_DEVICES:-${SPEECH_TO_SPEECH_EXPERIMENT_GPUS:-0,1}}"
-step_mode="${SPEECH_TO_SPEECH_STEP_MODE:-fused_joint}"
+step_mode="${SPEECH_TO_SPEECH_STEP_MODE:-${default_step_mode}}"
 case "$step_mode" in
   fused_joint)
-    trainer="staged_static_ddp"
-    case "$experiment" in
-      train/staged_joint/stage_1)
-        accumulate_grad_batches="2"
-        ;;
-      train/staged_joint/stage_2)
-        accumulate_grad_batches="3"
-        ;;
-      train/staged_joint/stage_3)
-        accumulate_grad_batches="5"
-        ;;
-      train/staged_joint/stage_4)
-        accumulate_grad_batches="6"
-        ;;
-    esac
+    if [[ "$experiment" == "train/staged_joint/stage_0" ]]; then
+      trainer="staged_ddp"
+    else
+      trainer="staged_static_ddp"
+    fi
     ;;
   serial_joint)
     trainer="staged_ddp"
-    case "$experiment" in
-      train/staged_joint/stage_1)
-        accumulate_grad_batches="2"
-        ;;
-      train/staged_joint/stage_2)
-        accumulate_grad_batches="3"
-        ;;
-      train/staged_joint/stage_3)
-        accumulate_grad_batches="5"
-        ;;
-      train/staged_joint/stage_4)
-        accumulate_grad_batches="6"
-        ;;
-    esac
     ;;
   *)
     echo "SPEECH_TO_SPEECH_STEP_MODE must be fused_joint or serial_joint, got: $step_mode" >&2
     exit 2
     ;;
 esac
-job_reject_overrides experiment task loader_plan -- "$@"
+job_reject_overrides experiment task loader_plan model.acoustic.init_artifact -- "$@"
+sac_artifact="${SPEECH_TO_SPEECH_SAC_ARTIFACT:?set SPEECH_TO_SPEECH_SAC_ARTIFACT to an artifact exported by semantic-acoustic-codec}"
 
 fdu_stage_data_args datamodule.dataset.root
 
@@ -67,6 +58,7 @@ args=(
   "experiment=${experiment}" \
   "trainer=${trainer}" \
   "loader_plan.step_mode=${step_mode}" \
+  "model.acoustic.init_artifact=${sac_artifact}" \
   "repo_output_root=${SPEECH_TO_SPEECH_TRAIN_ROOT}" \
   "runtime.backbone=${qwen_root}" \
   "${FDU_DATA_ARGS[@]}" \

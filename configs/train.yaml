@@ -1,6 +1,6 @@
 defaults:
   - entry: train
-  - experiment: train/staged_joint/stage_1
+  - experiment: train/staged_joint/stage_0
   - _self_
 
 hydra:

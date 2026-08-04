@@ -1,16 +1,17 @@
 # S2ST 路线简单介绍
 
 日期：2026-07-31  
+更新：2026-08-04
 状态：内部讨论稿
 
 ## 1. 背景
 
-当前短期目标是找到一条让 LLM 可以做 S2ST（Speech-to-Speech Translation）的可验证路线。这里的目标不是立刻证明端到端一次前向系统一定优于传统级联，而是逐步验证：
+最终目标是优化 LLM 直接完成 S2ST（Speech-to-Speech Translation）的质量和效率。为避免直接训练时无法定位输入理解、翻译或语音生成侧的问题，路线按能力依赖逐步增加任务：
 
 1. LLM 能否稳定生成语音 Codec Token；
 2. LLM 能否同时具备 ASR、MT 和 TTS 能力；
 3. LLM 原有文本翻译能力能否被语音输入和语音输出调用；
-4. 在这些基础成立后，是否值得把多次前向压缩成一次 S2ST 前向。
+4. 如何用分解任务持续监督直接 S2ST，并避免端到端优化破坏已有能力。
 
 ## 2. V1 方案为什么失败
 
@@ -57,41 +58,45 @@ flowchart LR
 
 需要注意：去掉显式 ASR/TTS 模块，不意味着系统不需要 ASR/TTS 能力，而是要把这些能力内化到 LLM 中。
 
-## 4. Codec 选型
+## 4. 外部 SAC 前置依赖
 
-| Codec | 表征形式 | 主要特点 | 当前定位 |
-| --- | --- | --- | --- |
-| BiCodec | 语义与声学解耦 | 声学条件可交换，更接近 speaker embedding / timbre condition | 主方案 |
-| Stable Codec | 单码本，FSQ | 避免显式多层 RVQ 预测 | 对照方案 |
-| UniCodec | 单码本，VQ | 单序列建模，接口相对简单 | 对照方案 |
+Codec 预训练、筛选、重建上限评估和 generator artifact 导出由仓库外的
+`semantic-acoustic-codec` 负责。本仓库不在 staged curriculum 中重新训练 codec，也不通过其他
+codec 训练入口绕过这条边界。
 
-BiCodec 是主方案，因为它的声学部分更像说话人/音色条件，可以在不同语义内容之间交换，不要求模型从语义码中精确恢复完整声学细节。这比 LongCat 显式语义码到声学码生成更符合当前风险判断。
-
-Stable Codec 和 UniCodec 更适合作为对照：它们接口更简单，尤其单码本形式能避免多层 RVQ 预测问题，但缺少与 LLM 结合的下游任务验证。
+Stage 0-3 的 Flow/RVQ S2S 训练在 composition 时显式读取外部导出的、frame-aligned
+`AcousticGeneratorArtifact`。正式 wrapper 通过 `SPEECH_TO_SPEECH_SAC_ARTIFACT` 接收路径并转写到
+`model.acoustic.init_artifact`。SAC 的 conditioner、训练数据和导出流程不进入 S2S model；本仓库只
+训练 hidden-state condition adapter、LLM 与 joint task objectives。artifact 的 route、decoder 配置、
+frame layout 和 backend metadata 必须在进入正式训练前通过校验。
 
 ## 5. 四阶段路线
 
 ~~~mermaid
 flowchart LR
-    S0["Stage 0<br/>TTS"] --> S1["Stage 1<br/>TTS + ASR"]
-    S1 --> S2["Stage 2<br/>S2TT + T2ST"]
-    S2 --> S3["Stage 3<br/>S2ST"]
+    S0["Stage 0<br/>TTS + MT"] --> S1["Stage 1<br/>ASR + TTS + MT"]
+    S1 --> S2["Stage 2<br/>S2TT + T2ST<br/>+ ASR + TTS + MT"]
+    S2 --> S3["Stage 3<br/>S2ST + S2TT + T2ST<br/>+ ASR + TTS + MT"]
 
-    S0 -.文本到语音.-> A[建立语音生成能力]
+    S0 -.生成与文本能力保持.-> A[建立语音生成能力]
     S1 -.语音与文本双向对齐.-> B[形成统一基础模型]
-    S2 -.引入跨语言能力.-> C[验证翻译能力迁移]
-    S3 -.单次前向.-> D[端到端语音翻译]
+    S2 -.跨模态分解监督.-> C[建立直接翻译能力]
+    S3 -.以直接 S2ST 为主任务.-> D[优化端到端语音翻译]
 ~~~
 
-四个阶段的关系是：
+各阶段的训练任务和损失权重为：
 
-1. Stage 0 先验证 LLM 能不能做 TTS；
-2. Stage 1 验证 TTS、ASR 和原有文本能力能否共存；
-3. Stage 2 验证跨语言能力能否跨模态迁移；
-4. Stage 3 才验证一次前向 S2ST 是否值得。
+| 阶段 | 训练任务 | 损失权重 | 阶段目的 |
+| --- | --- | --- | --- |
+| Stage 0 | TTS + MT | TTS 0.9，MT 0.1 | 建立语音生成能力，同时保持文本翻译能力 |
+| Stage 1 | ASR + TTS + MT | ASR 0.45，TTS 0.45，MT 0.1 | 建立语音与文本双向映射，同时保持文本翻译能力 |
+| Stage 2 | S2TT + T2ST + ASR + TTS + MT | ASR、S2TT、TTS、T2ST 各 0.225，MT 0.1 | 用基础任务和跨模态分解任务建立完整翻译链路 |
+| Stage 3 | S2ST + S2TT + T2ST + ASR + TTS + MT | S2ST 0.7；ASR、S2TT、TTS、T2ST 各 0.05；MT 0.1 | 以直接 S2ST 为主目标，其他任务提供能力保持和分解监督 |
+
+这里的权重是多任务混合 Loss 的初始权重，不默认等同于任务采样比例；采样不均衡时应同时报告采样概率与 Loss 权重，避免重复放大或缩小任务的有效贡献。如不同任务的 Loss 尺度差异明显，应先做归一化或梯度量级校准，再按验证集结果调整。Stage 0-2 不是独立终点，而是 Stage 3 的能力初始化和可诊断基线。Stage 3 中 S2ST 占主导，ASR、S2TT、TTS、T2ST 用于约束输入理解、跨语言映射和语音生成能力，MT 用于保持 LLM 原有文本翻译能力。
 
 ## 6. 当前内部判断
 
-近期目标不是马上证明「LLM 可以直接做 S2ST」，而是先证明一个更基础的问题：统一模型能否形成 ASR + MT + TTS 的强闭环。
+直接 S2ST 是唯一最终优化目标，三级级联和 S2TT/T2ST 路径用于提供 teacher、质量上限和故障定位，不替代 Stage 3 的端到端目标。
 
-如果 Stage 0/1 不成立，Stage 2/3 没有继续投入基础。如果 Stage 0/1 成立，即使 Stage 3 最终质量不如三级级联，也仍然可以得到一个工程上有价值的统一模型级联系统。
+如果前一阶段未通过 gate，应先修复对应基础能力再进入下一阶段；进入 Stage 3 后，则以直接 S2ST 指标作为主要模型选择依据，并把辅助任务指标作为退化约束。即使三级级联暂时质量更高，也应将其作为 baseline 和蒸馏来源，而不是改变最终目标。

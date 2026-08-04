@@ -105,17 +105,19 @@ class _OptimizerModel(torch.nn.Module):
 
 _STAGED_JOINT_CASES = (
     (
-        1,
+        0,
         ParameterPolicyName.LORA,
-        (("asr", "asr"), ("tts", "tts")),
+        (("tts", "tts"), ("mt", "mt")),
+        {"tts": 0.9, "mt": 0.1},
+    ),
+    (
+        1,
+        ParameterPolicyName.SPEECH_INTERFACE,
+        (("asr", "asr"), ("tts", "tts"), ("mt", "mt")),
+        {"asr": 0.45, "tts": 0.45, "mt": 0.1},
     ),
     (
         2,
-        ParameterPolicyName.SPEECH_INTERFACE,
-        (("asr", "asr"), ("tts", "tts"), ("mt", "mt")),
-    ),
-    (
-        3,
         ParameterPolicyName.SPEECH_INTERFACE_TOP_THIRD,
         (
             ("asr", "asr"),
@@ -124,9 +126,10 @@ _STAGED_JOINT_CASES = (
             ("t2st", "t2st"),
             ("mt", "mt"),
         ),
+        {"asr": 0.225, "s2tt": 0.225, "tts": 0.225, "t2st": 0.225, "mt": 0.1},
     ),
     (
-        4,
+        3,
         ParameterPolicyName.FULL,
         (
             ("asr", "asr"),
@@ -136,6 +139,7 @@ _STAGED_JOINT_CASES = (
             ("s2st", "s2st"),
             ("mt", "mt"),
         ),
+        {"asr": 0.05, "s2tt": 0.05, "tts": 0.05, "t2st": 0.05, "s2st": 0.7, "mt": 0.1},
     ),
 )
 
