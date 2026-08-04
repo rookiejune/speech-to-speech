@@ -37,10 +37,9 @@ from speech_to_speech.model.acoustic.flow import FlowModel
 from speech_to_speech.model.acoustic.rvq import RVQModel
 from speech_to_speech.model.base import Config as ModelConfig
 from speech_to_speech.model.ctc import (
-    CTCConfig,
     CTCDecoderConfig,
+    CTCDecoderRoutesConfig,
     CTCDecoderType,
-    CTCRouteConfig,
 )
 from speech_to_speech.model.acoustic.protocol import (
     FlowModelRuntime,
@@ -422,30 +421,24 @@ class ModelCheckpointContractTest(unittest.TestCase):
     def test_real_model_contract_records_route_local_ctc_decoders(self) -> None:
         model = _token_model(
             config=_model_config(
-                ctc=CTCConfig(
-                    source=CTCRouteConfig(
-                        weight=0.25,
-                        decoder=CTCDecoderConfig(
-                            type=CTCDecoderType.TRANSFORMER,
-                            backbone_readout="hidden_states[0]",
-                            pool_factor=3,
-                            layers=3,
-                            heads=2,
-                            ffn_ratio=6.0,
-                            dropout=0.125,
-                        ),
+                ctc=CTCDecoderRoutesConfig(
+                    source=CTCDecoderConfig(
+                        type=CTCDecoderType.TRANSFORMER,
+                        backbone_readout="hidden_states[0]",
+                        pool_factor=3,
+                        layers=3,
+                        heads=2,
+                        ffn_ratio=6.0,
+                        dropout=0.125,
                     ),
-                    target=CTCRouteConfig(
-                        weight=0.75,
-                        decoder=CTCDecoderConfig(
-                            type=CTCDecoderType.LINEAR,
-                            backbone_readout="last_hidden_state",
-                            pool_factor=2,
-                            layers=5,
-                            heads=4,
-                            ffn_ratio=3.0,
-                            dropout=0.25,
-                        ),
+                    target=CTCDecoderConfig(
+                        type=CTCDecoderType.LINEAR,
+                        backbone_readout="last_hidden_state",
+                        pool_factor=2,
+                        layers=5,
+                        heads=4,
+                        ffn_ratio=3.0,
+                        dropout=0.25,
                     ),
                 )
             )
@@ -483,51 +476,23 @@ class ModelCheckpointContractTest(unittest.TestCase):
             },
         )
 
-    def test_ctc_loss_weights_do_not_affect_model_contract(self) -> None:
-        decoder = CTCDecoderConfig(
-            type=CTCDecoderType.LINEAR,
-            pool_factor=2,
-        )
-        first = _token_model(
-            config=_model_config(
-                ctc=CTCConfig(
-                    source=CTCRouteConfig(weight=0.0, decoder=decoder),
-                    target=CTCRouteConfig(weight=0.25, decoder=decoder),
-                )
-            )
-        )
-        second = _token_model(
-            config=_model_config(
-                ctc=CTCConfig(
-                    source=CTCRouteConfig(weight=1.0, decoder=decoder),
-                    target=CTCRouteConfig(weight=2.0, decoder=decoder),
-                )
-            )
-        )
-
-        self.assertEqual(first.checkpoint_contract, second.checkpoint_contract)
-
     def test_real_model_contract_rejects_route_local_ctc_decoder_mismatch(
         self,
     ) -> None:
         cases = (
             (
-                CTCConfig(),
-                CTCConfig(
-                    source=CTCRouteConfig(
-                        decoder=CTCDecoderConfig(
-                            type=CTCDecoderType.LINEAR,
-                        )
+                CTCDecoderRoutesConfig(),
+                CTCDecoderRoutesConfig(
+                    source=CTCDecoderConfig(
+                        type=CTCDecoderType.LINEAR,
                     )
                 ),
                 "components.interface.ctc_decoders.source.type",
             ),
             (
-                CTCConfig(),
-                CTCConfig(
-                    target=CTCRouteConfig(
-                        decoder=CTCDecoderConfig(pool_factor=2)
-                    )
+                CTCDecoderRoutesConfig(),
+                CTCDecoderRoutesConfig(
+                    target=CTCDecoderConfig(pool_factor=2)
                 ),
                 "components.interface.ctc_decoders.target.pool_factor",
             ),
@@ -1234,7 +1199,7 @@ def _model_config(
     audio_input: AudioInputAdapterType = AudioInputAdapterType.MLP,
     audio_input_causal: bool = False,
     audio_output: AudioOutputAdapterType = AudioOutputAdapterType.NONE,
-    ctc: CTCConfig | None = None,
+    ctc: CTCDecoderRoutesConfig | None = None,
 ) -> ModelConfig:
     return ModelConfig(
         semantic_audio_adapter=AdapterType.LINEAR,
@@ -1251,7 +1216,7 @@ def _model_config(
             heads=2,
             ffn_ratio=2,
         ),
-        ctc=CTCConfig() if ctc is None else ctc,
+        ctc=CTCDecoderRoutesConfig() if ctc is None else ctc,
         toy=_toy_config(),
     )
 

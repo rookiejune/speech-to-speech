@@ -4,6 +4,7 @@ from anytrain.lightning import ParameterPolicyCallback
 from lightning import pytorch as pl
 from torch import nn
 
+from speech_to_speech.model.ctc import CTCRoute
 from speech_to_speech.training.parameter_policy import (
     ParameterPolicyConfig,
     ParameterPolicyTrainability,
@@ -12,9 +13,14 @@ from speech_to_speech.training.parameter_policy import (
 
 def build_parameter_policy(
     config: ParameterPolicyConfig,
+    *,
+    active_ctc_routes: frozenset[CTCRoute] = frozenset(CTCRoute),
 ) -> ParameterPolicyCallback:
     return ParameterPolicyCallback(
-        ParameterPolicyTrainability(config.spec()),
+        ParameterPolicyTrainability(
+            config.spec(),
+            active_ctc_routes=active_ctc_routes,
+        ),
         module=_model,
     )
 

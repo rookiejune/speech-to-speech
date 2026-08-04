@@ -7,8 +7,8 @@ from unittest.mock import ANY, Mock, patch
 import torch
 from semantic_acoustic_generator.config import Route
 
+from speech_to_speech.loss.ctc import CTCConfig, CTCRouteConfig
 from speech_to_speech.model import Config as ModelConfig
-from speech_to_speech.model.ctc import CTCConfig, CTCRouteConfig
 from speech_to_speech.model.acoustic import AcousticType, DecoderConfig
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.pl_module.composition import build, flow, rvq, token
@@ -80,8 +80,8 @@ class PlModuleCompositionTest(unittest.TestCase):
             source=CTCRouteConfig(weight=0.25),
             target=CTCRouteConfig(weight=0.5),
         )
-        model_config = ModelConfig(ctc=ctc)
-        module_config = ModuleConfig(audio_neighbor_smoothing=0.05)
+        model_config = ModelConfig()
+        module_config = ModuleConfig(audio_neighbor_smoothing=0.05, ctc=ctc)
         built_module, built_model = token(runtime, module_config, model_config)
 
         self.assertIs(built_model, model.return_value)

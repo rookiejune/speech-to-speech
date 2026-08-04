@@ -7,36 +7,29 @@ from torch import nn
 from torch.nn import functional as F
 
 from speech_to_speech.model.ctc import (
-    CTCConfig,
     CTCDecoderConfig,
     CTCDecoderRoutes,
+    CTCDecoderRoutesConfig,
     CTCDecoderType,
     CTCRoute,
-    CTCRouteConfig,
 )
 
 
 class CTCDecoderTest(unittest.TestCase):
     def test_source_and_target_have_independent_realized_configs(self) -> None:
         routes = CTCDecoderRoutes(
-            CTCConfig(
-                source=CTCRouteConfig(
-                    weight=1.0,
-                    decoder=CTCDecoderConfig(
-                        type=CTCDecoderType.LINEAR,
-                        backbone_readout="hidden_states[2]",
-                        pool_factor=2,
-                    ),
+            CTCDecoderRoutesConfig(
+                source=CTCDecoderConfig(
+                    type=CTCDecoderType.LINEAR,
+                    backbone_readout="hidden_states[2]",
+                    pool_factor=2,
                 ),
-                target=CTCRouteConfig(
-                    weight=1.0,
-                    decoder=CTCDecoderConfig(
-                        type=CTCDecoderType.TRANSFORMER,
-                        pool_factor=4,
-                        layers=1,
-                        heads=2,
-                        ffn_ratio=2.0,
-                    ),
+                target=CTCDecoderConfig(
+                    type=CTCDecoderType.TRANSFORMER,
+                    pool_factor=4,
+                    layers=1,
+                    heads=2,
+                    ffn_ratio=2.0,
                 ),
             ),
             hidden_size=4,
@@ -58,11 +51,8 @@ class CTCDecoderTest(unittest.TestCase):
 
     def test_identity_decoder_applies_masked_mean_pooling(self) -> None:
         routes = CTCDecoderRoutes(
-            CTCConfig(
-                source=CTCRouteConfig(
-                    weight=1.0,
-                    decoder=CTCDecoderConfig(pool_factor=2),
-                )
+            CTCDecoderRoutesConfig(
+                source=CTCDecoderConfig(pool_factor=2),
             ),
             hidden_size=1,
         )
@@ -89,9 +79,9 @@ class CTCDecoderTest(unittest.TestCase):
             dropout=0.0,
         )
         routes = CTCDecoderRoutes(
-            CTCConfig(
-                source=CTCRouteConfig(weight=1.0, decoder=decoder),
-                target=CTCRouteConfig(weight=1.0, decoder=decoder),
+            CTCDecoderRoutesConfig(
+                source=decoder,
+                target=decoder,
             ),
             hidden_size=4,
         ).eval()
@@ -123,11 +113,8 @@ class CTCDecoderTest(unittest.TestCase):
 
     def test_trainable_decoder_receives_gradient_before_frozen_text_head(self) -> None:
         routes = CTCDecoderRoutes(
-            CTCConfig(
-                source=CTCRouteConfig(
-                    weight=1.0,
-                    decoder=CTCDecoderConfig(type=CTCDecoderType.LINEAR),
-                )
+            CTCDecoderRoutesConfig(
+                source=CTCDecoderConfig(type=CTCDecoderType.LINEAR),
             ),
             hidden_size=4,
         )
@@ -153,12 +140,10 @@ class CTCDecoderTest(unittest.TestCase):
             CTCDecoderConfig(pool_factor=True)
         with self.assertRaises(ValueError):
             CTCDecoderRoutes(
-                CTCConfig(
-                    source=CTCRouteConfig(
-                        decoder=CTCDecoderConfig(
-                            type=CTCDecoderType.TRANSFORMER,
-                            heads=3,
-                        )
+                CTCDecoderRoutesConfig(
+                    source=CTCDecoderConfig(
+                        type=CTCDecoderType.TRANSFORMER,
+                        heads=3,
                     )
                 ),
                 hidden_size=4,

@@ -13,11 +13,10 @@ from transformers.cache_utils import Cache
 from speech_to_speech.loss.module import TokenObjective
 from speech_to_speech.model.base import Model
 from speech_to_speech.model.ctc import (
-    CTCConfig,
     CTCDecoderConfig,
     CTCDecoderRoutes,
+    CTCDecoderRoutesConfig,
     CTCRoute,
-    CTCRouteConfig,
 )
 from speech_to_speech.task import PredictionModality
 from speech_to_speech.runtime.backbone import BackboneBodyAdapter, BackboneReadout
@@ -263,18 +262,12 @@ class BackboneReadoutRoutingTest(unittest.TestCase):
             )
         )
         model.ctc_decoders = CTCDecoderRoutes(
-            CTCConfig(
-                source=CTCRouteConfig(
-                    weight=1.0,
-                    decoder=CTCDecoderConfig(
-                        backbone_readout="hidden_states[0]"
-                    ),
+            CTCDecoderRoutesConfig(
+                source=CTCDecoderConfig(
+                    backbone_readout="hidden_states[0]"
                 ),
-                target=CTCRouteConfig(
-                    weight=1.0,
-                    decoder=CTCDecoderConfig(
-                        backbone_readout="last_hidden_state[1]"
-                    ),
+                target=CTCDecoderConfig(
+                    backbone_readout="last_hidden_state[1]"
                 ),
             ),
             hidden_size=3,

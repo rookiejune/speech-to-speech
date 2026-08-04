@@ -26,6 +26,7 @@ from .config import (
     TextRetentionCallbackConfig,
 )
 from .parameter_policy import ParameterPolicyConfig
+from ..model.ctc import CTCRoute
 from .performance import TrainingFlops
 
 
@@ -138,10 +139,16 @@ def base_callbacks(
     performance: PerformanceConfig,
     schedule: ScheduleRuntime,
     *,
+    active_ctc_routes: frozenset[CTCRoute] = frozenset(CTCRoute),
     before_schedule: Iterable[Callback] = (),
 ) -> tuple[list[Callback], Callback | None]:
     performance_callback = build_performance(performance)
-    callbacks: list[Callback] = [build_parameter_policy(parameter_policy)]
+    callbacks: list[Callback] = [
+        build_parameter_policy(
+            parameter_policy,
+            active_ctc_routes=active_ctc_routes,
+        )
+    ]
     if performance_callback is not None:
         callbacks.append(performance_callback)
     callbacks.append(OOMDiagnostics())

@@ -7,7 +7,7 @@ pull optional audio-training dependencies.  Keep the latter lazy so importing
 
 from typing import TYPE_CHECKING
 
-from .ctc import CTCAlignmentLoss, CTCConfig
+from .ctc import CTCAlignmentLoss, CTCConfig, CTCRouteConfig
 from .mimo import MimoLoss, MimoObjective
 
 if TYPE_CHECKING:
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CTCAlignmentLoss",
     "CTCConfig",
+    "CTCRouteConfig",
     "DPOObjective",
     "GRPOObjective",
     "MimoLoss",

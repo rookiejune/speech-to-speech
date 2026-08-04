@@ -246,6 +246,7 @@ def training_callbacks(
         config.callbacks.parameter_policy,
         config.callbacks.performance,
         schedule_runtime,
+        active_ctc_routes=config.pl_module.ctc.active_routes,
         before_schedule=(
             (AssetMaterialization(),)
             if config.datamodule.materialization.enabled

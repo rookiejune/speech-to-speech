@@ -144,8 +144,8 @@ class TrainConfigContractTest(ConfigTestCase):
                 )
                 self.assertEqual(
                     (
-                        config.model.ctc.source.weight,
-                        config.model.ctc.target.weight,
+                        config.pl_module.ctc.source.weight,
+                        config.pl_module.ctc.target.weight,
                     ),
                     expected_ctc,
                 )
@@ -271,14 +271,14 @@ class TrainConfigContractTest(ConfigTestCase):
         self.assertEqual(config.runtime.codec, "stable_codec")
         self.assertIs(config.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
         self.assertIsNone(config.runtime.audio_tokenizer)
-        self.assertEqual(config.model.ctc.source.weight, 1.0)
-        self.assertEqual(config.model.ctc.target.weight, 0.0)
+        self.assertEqual(config.pl_module.ctc.source.weight, 1.0)
+        self.assertEqual(config.pl_module.ctc.target.weight, 0.0)
         self.assertIs(
-            config.model.ctc.source.decoder.type,
+            config.model.ctc.source.type,
             CTCDecoderType.IDENTITY,
         )
         self.assertIs(
-            config.model.ctc.target.decoder.type,
+            config.model.ctc.target.type,
             CTCDecoderType.IDENTITY,
         )
         self.assertIs(

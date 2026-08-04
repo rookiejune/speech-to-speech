@@ -77,50 +77,17 @@ class CTCDecoderConfig:
 
 
 @dataclass(frozen=True)
-class CTCRouteConfig:
-    weight: float = 0.0
-    decoder: CTCDecoderConfig = field(default_factory=CTCDecoderConfig)
+class CTCDecoderRoutesConfig:
+    source: CTCDecoderConfig = field(default_factory=CTCDecoderConfig)
+    target: CTCDecoderConfig = field(default_factory=CTCDecoderConfig)
 
     def __post_init__(self) -> None:
-        if isinstance(self.weight, bool) or not isinstance(self.weight, (int, float)):
-            raise TypeError("CTC route weight must be a number.")
-        if not math.isfinite(float(self.weight)) or self.weight < 0:
-            raise ValueError("CTC route weight must be finite and non-negative.")
-        if not isinstance(self.decoder, CTCDecoderConfig):
-            raise TypeError("CTC route decoder must be a CTCDecoderConfig.")
+        if not isinstance(self.source, CTCDecoderConfig):
+            raise TypeError("CTC source decoder must be a CTCDecoderConfig.")
+        if not isinstance(self.target, CTCDecoderConfig):
+            raise TypeError("CTC target decoder must be a CTCDecoderConfig.")
 
-    @property
-    def enabled(self) -> bool:
-        return self.weight > 0
-
-
-@dataclass(frozen=True)
-class CTCConfig:
-    source: CTCRouteConfig = field(default_factory=CTCRouteConfig)
-    target: CTCRouteConfig = field(default_factory=CTCRouteConfig)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.source, CTCRouteConfig):
-            raise TypeError("CTC source route must be a CTCRouteConfig.")
-        if not isinstance(self.target, CTCRouteConfig):
-            raise TypeError("CTC target route must be a CTCRouteConfig.")
-
-    @property
-    def enabled(self) -> bool:
-        return self.source.enabled or self.target.enabled
-
-    @property
-    def active_routes(self) -> frozenset[CTCRoute]:
-        return frozenset(
-            route
-            for route, config in (
-                (CTCRoute.SOURCE, self.source),
-                (CTCRoute.TARGET, self.target),
-            )
-            if config.enabled
-        )
-
-    def route(self, route: CTCRoute) -> CTCRouteConfig:
+    def route(self, route: CTCRoute) -> CTCDecoderConfig:
         if route is CTCRoute.SOURCE:
             return self.source
         if route is CTCRoute.TARGET:
@@ -255,13 +222,13 @@ class CTCDecoder(GradientCheckpointingLayer):
 
 
 class CTCDecoderRoutes(nn.Module):
-    def __init__(self, config: CTCConfig, hidden_size: int) -> None:
+    def __init__(self, config: CTCDecoderRoutesConfig, hidden_size: int) -> None:
         super().__init__()
-        if not isinstance(config, CTCConfig):
-            raise TypeError("CTC decoder routes require a CTCConfig.")
+        if not isinstance(config, CTCDecoderRoutesConfig):
+            raise TypeError("CTC decoder routes require a CTCDecoderRoutesConfig.")
         self.config = config
-        self.source = CTCDecoder(config.source.decoder, hidden_size, causal=False)
-        self.target = CTCDecoder(config.target.decoder, hidden_size, causal=True)
+        self.source = CTCDecoder(config.source, hidden_size, causal=False)
+        self.target = CTCDecoder(config.target, hidden_size, causal=True)
 
     def decoder(self, route: CTCRoute) -> CTCDecoder:
         if route is CTCRoute.SOURCE:
@@ -329,12 +296,11 @@ def _masked_mean_pool(
 
 
 __all__ = [
-    "CTCConfig",
     "CTCDecoder",
     "CTCDecoderConfig",
     "CTCDecoderRoutes",
+    "CTCDecoderRoutesConfig",
     "CTCDecoderType",
     "CTCRoute",
-    "CTCRouteConfig",
     "ObjectiveHiddenOutput",
 ]

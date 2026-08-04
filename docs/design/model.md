@@ -159,15 +159,15 @@ adapter 前的 backbone hidden。
 该配置不会改变 token generation 契约，也不会替换 Flow/RVQ
 `HiddenConditionAdapter`。
 
-`ctc.source` 与 `ctc.target` 分别配置 loss weight 和 route-local decoder。两侧 decoder 可独立选择
+`ctc.source` 与 `ctc.target` 只配置 route-local decoder。两侧 decoder 可独立选择
 prediction 主 readout 或显式 `BackboneReadout`、masked-mean pooling factor，以及
 `identity|linear|transformer` topology；source transformer 固定 non-causal，target transformer 固定
 causal，shift 仍固定为 source `h[p]` / target `h[p-1]`。decoder 只做 hidden-to-hidden 变换，最终
 vocabulary projection 始终调用冻结的 `Model.text_logits()`；默认 `identity + pool_factor=1` 保留直接
 对齐基线。任一路由需要中间层 history 时，`objective_hidden_output()` 只开启同一次 backbone forward
 的 `output_hidden_states`，不会为 CTC 重跑 backbone。decoder 参数归入独立
-`ALIGNMENT_DECODER` 参数组；weight 为 0 的 route 在参数策略入口结构性冻结，避免 static DDP 永久
-unused 参数。
+`ALIGNMENT_DECODER` 参数组；loss 侧未启用的 route 由 composition 显式传给参数策略并结构性冻结，
+避免 static DDP 永久 unused 参数。loss weight 不属于 model config 或 checkpoint identity。
 
 `lora` 直接持有 `peft.LoraConfig | None`，项目不再维护本地 LoRA config、layer 或注入 facade。
 正式 train 默认组合 LoRA preset（`init_lora_weights=pissa`）与

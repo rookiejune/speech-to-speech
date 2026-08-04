@@ -171,10 +171,7 @@ def _ctc(value: object) -> None:
     if not isinstance(value, DictConfig):
         return
     for route_name in ("source", "target"):
-        route = value.get(route_name)
-        if not isinstance(route, DictConfig):
-            continue
-        decoder = route.get("decoder")
+        decoder = value.get(route_name)
         if not isinstance(decoder, DictConfig):
             continue
         decoder_type = decoder.get("type")

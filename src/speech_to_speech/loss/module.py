@@ -15,8 +15,8 @@ from semantic_acoustic_generator.loss.repa import Teacher
 from torch import Tensor, nn
 
 from ..datamodule.batch import ModelBatch
-from ..model.ctc import CTCConfig, CTCRoute, ObjectiveHiddenOutput
-from .ctc import CTCAlignmentLoss
+from ..model.ctc import CTCRoute, ObjectiveHiddenOutput
+from .ctc import CTCAlignmentLoss, CTCConfig
 from .protocol import (
     FlowObjectiveModel,
     RVQObjectiveModel,

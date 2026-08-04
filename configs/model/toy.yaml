@@ -14,25 +14,21 @@ audio_input_adapter:
   causal: false
 ctc:
   source:
-    weight: 0.0
-    decoder:
-      type: identity
-      backbone_readout: null
-      pool_factor: 1
-      layers: 2
-      heads: 8
-      ffn_ratio: 4.0
-      dropout: 0.0
+    type: identity
+    backbone_readout: null
+    pool_factor: 1
+    layers: 2
+    heads: 8
+    ffn_ratio: 4.0
+    dropout: 0.0
   target:
-    weight: 0.0
-    decoder:
-      type: identity
-      backbone_readout: null
-      pool_factor: 1
-      layers: 2
-      heads: 8
-      ffn_ratio: 4.0
-      dropout: 0.0
+    type: identity
+    backbone_readout: null
+    pool_factor: 1
+    layers: 2
+    heads: 8
+    ffn_ratio: 4.0
+    dropout: 0.0
 fsq_embedding:
   feature: digit_onehot
 toy:

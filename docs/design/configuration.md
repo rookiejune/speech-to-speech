@@ -71,13 +71,14 @@ pointwise 特例；`transformer` 启用因果 self-attention，并携带独立 K
 同步 compact）。可配置 `layers`、`heads`、`ffn_ratio`、`dropout`（仅 transformer 使用）。该模块
 同时服务 teacher forcing、候选 logits 和 autoregressive generation。
 
-`model.ctc.source` / `model.ctc.target` 各自包含 `weight` 与 `decoder`。decoder 可配置
+`model.ctc.source` / `model.ctc.target` 只配置 route-local decoder topology，可直接设置
 `type=identity|linear|transformer`、`backbone_readout`、`pool_factor`、`layers`、`heads`、
 `ffn_ratio` 和 `dropout`；`backbone_readout=null` 表示复用当前 prediction modality 的主 readout。
 source 的时序 decoder 固定 non-causal，target 固定 causal，不能通过 Hydra 反转；两侧最终都复用冻结
 text head。标准 HF backbone 可用 `hidden_states[N]` 挂中间层；remote-code/multibranch backend 只有在
-实际 output 暴露兼容 history 时才支持该路径，默认 null/final 路径不作此假设。默认 weight 为 `0`、
-decoder 为 identity，训练 experiment 只覆写需要启用的 route weight。
+实际 output 暴露兼容 history 时才支持该路径，默认 null/final 路径不作此假设。model decoder 默认
+为 identity；`pl_module.ctc.source.weight` / `pl_module.ctc.target.weight` 独立声明 loss 权重且默认
+为 `0`。训练 experiment 只覆写需要启用的 route weight，不通过 loss 配置改变模型 topology。
 
 ## 生产默认与完整链路测试
 

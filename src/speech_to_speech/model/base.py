@@ -28,7 +28,12 @@ from .adapter import AdapterType
 from ._helper import register
 from .audio_input import AudioInputAdapterConfig, AudioInputTower
 from .audio_output import AudioOutputAdapterConfig
-from .ctc import CTCConfig, CTCDecoderRoutes, CTCRoute, ObjectiveHiddenOutput
+from .ctc import (
+    CTCDecoderRoutes,
+    CTCDecoderRoutesConfig,
+    CTCRoute,
+    ObjectiveHiddenOutput,
+)
 from .embedding.fsq import FsqEmbeddingConfig, FsqNeighbors
 from ..runtime.protocol import TokenModelRuntime
 from .token import TokenInterface
@@ -45,7 +50,7 @@ class Config:
         default_factory=AudioInputAdapterConfig
     )
     fsq_embedding: FsqEmbeddingConfig = field(default_factory=FsqEmbeddingConfig)
-    ctc: CTCConfig = field(default_factory=CTCConfig)
+    ctc: CTCDecoderRoutesConfig = field(default_factory=CTCDecoderRoutesConfig)
     toy: Optional[ToyConfig] = None
     lora: Optional[LoraConfig] = None
 

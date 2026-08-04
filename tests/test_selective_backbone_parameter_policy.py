@@ -7,7 +7,7 @@ from anytrain.lightning import apply_parameter_trainability
 from peft import LoraConfig, inject_adapter_in_model
 from torch import nn
 
-from speech_to_speech.model.ctc import CTCConfig, CTCRouteConfig
+from speech_to_speech.model.ctc import CTCRoute
 from speech_to_speech.training.parameter_policy import (
     PARAMETER_POLICY_SPECS,
     ParameterGroup,
@@ -49,15 +49,8 @@ class _SelectiveBackbone(nn.Module):
 
 
 class _SelectiveModel(nn.Module):
-    def __init__(self, ctc: CTCConfig | None = None) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.config = SimpleNamespace(
-            ctc=ctc
-            or CTCConfig(
-                source=CTCRouteConfig(weight=1.0),
-                target=CTCRouteConfig(weight=1.0),
-            )
-        )
         self.backbone = _SelectiveBackbone()
         self.ctc_decoders = nn.ModuleDict(
             {
@@ -180,17 +173,13 @@ class SelectiveBackboneParameterPolicyTest(unittest.TestCase):
                 )
 
     def test_inactive_alignment_route_is_structurally_frozen(self):
-        model = _SelectiveModel(
-            CTCConfig(
-                source=CTCRouteConfig(weight=1.0),
-                target=CTCRouteConfig(weight=0.0),
-            )
-        )
+        model = _SelectiveModel()
 
         apply_parameter_trainability(
             model,
             ParameterPolicyTrainability(
-                PARAMETER_POLICY_SPECS[ParameterPolicyName.FULL]
+                PARAMETER_POLICY_SPECS[ParameterPolicyName.FULL],
+                active_ctc_routes=frozenset({CTCRoute.SOURCE}),
             ),
         )
 

@@ -60,12 +60,14 @@ loader_plan:
   step_mode: token_weighted
   fuse_loaders_per_step: false
 
-model:
+pl_module:
   ctc:
     source:
       weight: 1.0
     target:
       weight: 1.0
+
+model:
   audio_input_adapter:
     type: transformer
     causal: false

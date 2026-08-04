@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import torch
 from anytrain.loss import LossItem
@@ -11,11 +13,59 @@ from ..datamodule.target import (
     CTC_PAD_ID,
     CTCTarget,
 )
-from ..model.ctc import CTCConfig
 from ..model.ctc import CTCRoute
 
 
 CTCDecode = Callable[[CTCRoute, Tensor, Tensor], tuple[Tensor, Tensor]]
+
+
+@dataclass(frozen=True)
+class CTCRouteConfig:
+    weight: float = 0.0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.weight, bool) or not isinstance(self.weight, (int, float)):
+            raise TypeError("CTC route weight must be a number.")
+        if not math.isfinite(float(self.weight)) or self.weight < 0:
+            raise ValueError("CTC route weight must be finite and non-negative.")
+
+    @property
+    def enabled(self) -> bool:
+        return self.weight > 0
+
+
+@dataclass(frozen=True)
+class CTCConfig:
+    source: CTCRouteConfig = field(default_factory=CTCRouteConfig)
+    target: CTCRouteConfig = field(default_factory=CTCRouteConfig)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, CTCRouteConfig):
+            raise TypeError("CTC source loss must be a CTCRouteConfig.")
+        if not isinstance(self.target, CTCRouteConfig):
+            raise TypeError("CTC target loss must be a CTCRouteConfig.")
+
+    @property
+    def enabled(self) -> bool:
+        return self.source.enabled or self.target.enabled
+
+    @property
+    def active_routes(self) -> frozenset[CTCRoute]:
+        return frozenset(
+            route
+            for route, config in (
+                (CTCRoute.SOURCE, self.source),
+                (CTCRoute.TARGET, self.target),
+            )
+            if config.enabled
+        )
+
+    def route(self, route: CTCRoute) -> CTCRouteConfig:
+        if route is CTCRoute.SOURCE:
+            return self.source
+        if route is CTCRoute.TARGET:
+            return self.target
+        raise AssertionError(f"unsupported CTC route: {route}")
 
 
 class CTCAlignmentLoss(nn.Module):
@@ -195,4 +245,9 @@ def _validate_pooled_lengths(
         )
 
 
-__all__ = ["CTCAlignmentLoss", "CTCConfig", "CTCDecode"]
+__all__ = [
+    "CTCAlignmentLoss",
+    "CTCConfig",
+    "CTCDecode",
+    "CTCRouteConfig",
+]

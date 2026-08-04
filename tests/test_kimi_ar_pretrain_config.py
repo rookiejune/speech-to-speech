@@ -37,14 +37,14 @@ class KimiARPretrainConfigTest(unittest.TestCase):
         self.assertEqual(config.model.acoustic.type, AcousticType.NONE.value)
         self.assertIs(config.callbacks.parameter_policy.name, ParameterPolicyName.FULL)
         self.assertIsNone(config.model.lora)
-        self.assertEqual(config.model.ctc.source.weight, 1.0)
-        self.assertEqual(config.model.ctc.target.weight, 1.0)
+        self.assertEqual(config.pl_module.ctc.source.weight, 1.0)
+        self.assertEqual(config.pl_module.ctc.target.weight, 1.0)
         self.assertIs(
-            config.model.ctc.source.decoder.type,
+            config.model.ctc.source.type,
             CTCDecoderType.IDENTITY,
         )
         self.assertIs(
-            config.model.ctc.target.decoder.type,
+            config.model.ctc.target.type,
             CTCDecoderType.IDENTITY,
         )
         self.assertIs(

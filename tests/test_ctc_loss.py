@@ -6,8 +6,13 @@ import torch
 from torch import Tensor, nn
 
 from speech_to_speech.loss import CTCConfig as ExportedCTCConfig
-from speech_to_speech.loss.ctc import CTCAlignmentLoss, CTCConfig as ModuleCTCConfig
-from speech_to_speech.model.ctc import CTCConfig, CTCRoute, CTCRouteConfig
+from speech_to_speech.loss.ctc import (
+    CTCAlignmentLoss,
+    CTCConfig,
+    CTCConfig as ModuleCTCConfig,
+    CTCRouteConfig,
+)
+from speech_to_speech.model.ctc import CTCRoute
 
 
 class _Decode(nn.Module):

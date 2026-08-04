@@ -63,11 +63,11 @@ from speech_to_speech.model import (
     ToyConfig,
 )
 from speech_to_speech.model.acoustic import AcousticType, DecoderConfig
+from speech_to_speech.loss.ctc import CTCConfig, CTCRouteConfig
 from speech_to_speech.model.ctc import (
-    CTCConfig,
     CTCDecoderConfig,
+    CTCDecoderRoutesConfig,
     CTCDecoderType,
-    CTCRouteConfig,
 )
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.pl_module import SpeechToSpeechModule

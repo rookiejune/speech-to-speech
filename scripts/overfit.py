@@ -228,6 +228,7 @@ def training_callbacks(
         config.callbacks.parameter_policy,
         config.callbacks.performance,
         schedule_runtime,
+        active_ctc_routes=config.pl_module.ctc.active_routes,
     )
     callbacks.append(OutputsLogger())
 

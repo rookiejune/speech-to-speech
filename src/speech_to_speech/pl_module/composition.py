@@ -116,7 +116,7 @@ def token(
         objective=TokenObjective(
             runtime.layout,
             audio_neighbor_smoothing=config.audio_neighbor_smoothing,
-            ctc=model_config.ctc,
+            ctc=config.ctc,
             ctc_blank_token_id=ctc_blank_token_id,
         ),
     )
@@ -168,7 +168,7 @@ def flow(
             None if weight is None or teacher is None else {"weight": weight, "teacher": teacher}
         ),
         audio_neighbor_smoothing=config.audio_neighbor_smoothing,
-        ctc=model_config.ctc,
+        ctc=config.ctc,
         ctc_blank_token_id=_ctc_blank_token_id(runtime),
     )
     return SpeechToSpeechModule(config, model=model, objective=objective), model
@@ -193,7 +193,7 @@ def rvq(
         objective=RVQObjective(
             runtime.layout,
             audio_neighbor_smoothing=config.audio_neighbor_smoothing,
-            ctc=model_config.ctc,
+            ctc=config.ctc,
             ctc_blank_token_id=_ctc_blank_token_id(runtime),
         ),
     )

@@ -26,6 +26,8 @@
   最终都通过冻结 tied text readout 得到 tokenizer-local text logits。blank 是 runtime PAD 在 text
   block 内的 local ID。每条 route 的 CTC 先按 transcript token 数归一；source/target 权重项在同一
   row 内相加，组合项再按有效 `sequences`（有任一 active route 的样本行数，而不是 audio span 数）聚合。
+  `CTCConfig` / `CTCRouteConfig` 只声明 source/target loss weight，由 `pl_module.ctc` 持有；decoder
+  readout、pooling 与 topology 属于 `model.ctc`，loss 通过窄 `decode=model.ctc_logits` 接口消费。
 - `FlowLoss`：直接从 `semantic-acoustic-generator.loss` 包级导出；S2S 只保留 joint
   token/acoustic objective 的组合，不再维护独立 loss 子模块或重命名 alias。
 - `MaskedCodebookCrossEntropyLoss`：直接从 `anytrain.loss` 包级导出；训练 forward

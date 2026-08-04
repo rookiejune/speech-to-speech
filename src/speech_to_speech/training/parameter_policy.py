@@ -9,7 +9,7 @@ from typing import Optional, Protocol, runtime_checkable
 from torch import nn
 
 from .._compat import StrEnum, auto
-from ..model.ctc import CTCConfig, CTCRoute
+from ..model.ctc import CTCRoute
 
 
 class ParameterGroup(StrEnum):
@@ -191,10 +191,17 @@ _FINAL_NORM_PATTERN = re.compile(r"^backbone\.norm\.")
 @dataclass(frozen=True)
 class ParameterPolicyTrainability:
     spec: ParameterPolicySpec
+    active_ctc_routes: frozenset[CTCRoute] = field(
+        default_factory=lambda: frozenset(CTCRoute)
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.spec, ParameterPolicySpec):
             raise TypeError("parameter policy trainability requires a spec.")
+        if not isinstance(self.active_ctc_routes, frozenset) or any(
+            not isinstance(route, CTCRoute) for route in self.active_ctc_routes
+        ):
+            raise TypeError("active_ctc_routes must be a frozenset of CTCRoute values.")
 
     def __call__(
         self,
@@ -203,7 +210,12 @@ class ParameterPolicyTrainability:
         parameter: nn.Parameter,
     ) -> bool:
         group = _policy_group(name, parameter, self.spec)
-        if _structurally_frozen(name, module, parameter):
+        if _structurally_frozen(
+            name,
+            module,
+            parameter,
+            active_ctc_routes=self.active_ctc_routes,
+        ):
             return False
         trainable = (
             _peft_trainable(name, parameter, self.spec)
@@ -315,10 +327,12 @@ def _structurally_frozen(
     name: str,
     model: ParameterPolicyModel,
     parameter: nn.Parameter,
+    *,
+    active_ctc_routes: frozenset[CTCRoute],
 ) -> bool:
     if _is_text_embedding(model, parameter):
         return True
-    if _inactive_ctc_decoder(name, model):
+    if _inactive_ctc_decoder(name, active_ctc_routes):
         return True
     if name.startswith("acoustic_decoder.decoder.embed_tokens."):
         return True
@@ -335,7 +349,10 @@ def _structurally_frozen(
     return False
 
 
-def _inactive_ctc_decoder(name: str, model: ParameterPolicyModel) -> bool:
+def _inactive_ctc_decoder(
+    name: str,
+    active_routes: frozenset[CTCRoute],
+) -> bool:
     route: CTCRoute | None = None
     if name.startswith("ctc_decoders.source."):
         route = CTCRoute.SOURCE
@@ -343,9 +360,7 @@ def _inactive_ctc_decoder(name: str, model: ParameterPolicyModel) -> bool:
         route = CTCRoute.TARGET
     if route is None:
         return False
-    model_config = getattr(model, "config", None)
-    config = getattr(model_config, "ctc", None)
-    return isinstance(config, CTCConfig) and not config.route(route).enabled
+    return route not in active_routes
 
 
 def _is_text_embedding(

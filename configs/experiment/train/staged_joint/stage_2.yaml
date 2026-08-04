@@ -39,12 +39,14 @@ loader_plan:
   accumulate_grad_batches: 5
   step_mode: fused_joint
 
-model:
+pl_module:
   ctc:
     source:
       weight: 1.0
     target:
       weight: 1.0
+
+model:
   audio_input_adapter:
     type: transformer
     causal: false

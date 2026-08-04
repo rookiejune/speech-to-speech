@@ -31,7 +31,8 @@ class ConfigCompositionTest(ConfigTestCase):
         self.assertIsInstance(flow.runtime, RuntimeConfig)
         self.assertIsInstance(flow.model, ModelConfig)
         self.assertIsInstance(flow.pl_module, ModuleConfig)
-        self.assertIsInstance(flow.model.ctc, CTCConfig)
+        self.assertIsInstance(flow.model.ctc, CTCDecoderRoutesConfig)
+        self.assertIsInstance(flow.pl_module.ctc, CTCConfig)
         self.assertIsInstance(flow.model.acoustic.decoder, DecoderConfig)
         self.assertEqual(flow.runtime.codec, "longcat")
         self.assertEqual(token.runtime.codec, "unicodec")
@@ -360,41 +361,42 @@ class ConfigCompositionTest(ConfigTestCase):
     def test_ctc_routes_and_decoders_are_structured_and_validated(self):
         default = _overfit()
         configured = _overfit(
-            "model.ctc.source.weight=0.25",
-            "model.ctc.target.weight=0.5",
-            "model.ctc.source.decoder.type=linear",
-            "model.ctc.source.decoder.pool_factor=2",
-            "model.ctc.target.decoder.type=transformer",
-            "model.ctc.target.decoder.pool_factor=4",
+            "pl_module.ctc.source.weight=0.25",
+            "pl_module.ctc.target.weight=0.5",
+            "model.ctc.source.type=linear",
+            "model.ctc.source.pool_factor=2",
+            "model.ctc.target.type=transformer",
+            "model.ctc.target.pool_factor=4",
         )
 
-        for route in (default.model.ctc.source, default.model.ctc.target):
+        for route in (default.pl_module.ctc.source, default.pl_module.ctc.target):
             self.assertIsInstance(route, CTCRouteConfig)
-            self.assertIsInstance(route.decoder, CTCDecoderConfig)
             self.assertEqual(route.weight, 0.0)
-            self.assertIs(route.decoder.type, CTCDecoderType.IDENTITY)
-            self.assertIsNone(route.decoder.backbone_readout)
-            self.assertEqual(route.decoder.pool_factor, 1)
-            self.assertEqual(route.decoder.layers, 2)
-            self.assertEqual(route.decoder.heads, 8)
-            self.assertEqual(route.decoder.ffn_ratio, 4.0)
-            self.assertEqual(route.decoder.dropout, 0.0)
-        self.assertEqual(configured.model.ctc.source.weight, 0.25)
-        self.assertEqual(configured.model.ctc.target.weight, 0.5)
+        for decoder in (default.model.ctc.source, default.model.ctc.target):
+            self.assertIsInstance(decoder, CTCDecoderConfig)
+            self.assertIs(decoder.type, CTCDecoderType.IDENTITY)
+            self.assertIsNone(decoder.backbone_readout)
+            self.assertEqual(decoder.pool_factor, 1)
+            self.assertEqual(decoder.layers, 2)
+            self.assertEqual(decoder.heads, 8)
+            self.assertEqual(decoder.ffn_ratio, 4.0)
+            self.assertEqual(decoder.dropout, 0.0)
+        self.assertEqual(configured.pl_module.ctc.source.weight, 0.25)
+        self.assertEqual(configured.pl_module.ctc.target.weight, 0.5)
         self.assertIs(
-            configured.model.ctc.source.decoder.type,
+            configured.model.ctc.source.type,
             CTCDecoderType.LINEAR,
         )
-        self.assertEqual(configured.model.ctc.source.decoder.pool_factor, 2)
+        self.assertEqual(configured.model.ctc.source.pool_factor, 2)
         self.assertIs(
-            configured.model.ctc.target.decoder.type,
+            configured.model.ctc.target.type,
             CTCDecoderType.TRANSFORMER,
         )
-        self.assertEqual(configured.model.ctc.target.decoder.pool_factor, 4)
+        self.assertEqual(configured.model.ctc.target.pool_factor, 4)
         with self.assertRaises(ValueError):
-            _overfit("model.ctc.source.weight=-1")
+            _overfit("pl_module.ctc.source.weight=-1")
         with self.assertRaises(ValueError):
-            _overfit("model.ctc.target.decoder.type=invalid")
+            _overfit("model.ctc.target.type=invalid")
 
     def test_audio_input_adapter_is_structured_and_mlp_by_default(self):
         default = _overfit()
