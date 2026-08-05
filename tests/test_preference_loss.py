@@ -99,7 +99,6 @@ def _batch(
         token_labels=token_labels,
         acoustic_target=None,
         tasks=[Task.T2TT],
-        predictions=[PredictionModality.TEXT],
         pad_token_id=0,
         audio_input_positions=audio_input_positions,
     )

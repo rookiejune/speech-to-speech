@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+
 from hydra import compose, initialize_config_dir
 
 from scripts._config.mimo import MimoTrainConfig, parse
@@ -35,6 +36,9 @@ class MimoTrainEntryTest(unittest.TestCase):
         config = parse(self._compose())
 
         self.assertFalse(config.model.toy)
+        self.assertIsNone(config.runtime.audio_input)
+        self.assertEqual(config.runtime.audio_output.tokenizer, "bicodec")
+        self.assertEqual(config.runtime.audio_output.detokenizer, "bicodec")
         self.assertEqual(
             config.data.factory,
             "speech_to_speech.datamodule.mimo.dataset:JsonlMimoSegmentDataset",
@@ -45,6 +49,38 @@ class MimoTrainEntryTest(unittest.TestCase):
         self.assertEqual(config.model.audio_readout, "last_hidden_state[0]")
         self.assertEqual(config.data.audio_delay_tokens, 5)
         self.assertTrue(config.data.derive_special_tokens)
+
+    def test_canonical_dual_audio_runtime_overrides_parse(self) -> None:
+        config = parse(
+            self._compose(
+                "runtime.audio_input={tokenizer:glm4,bpe:null}",
+            )
+        )
+
+        self.assertIsNotNone(config.runtime.audio_input)
+        if config.runtime.audio_input is None:
+            self.fail("configured input audio must be independent")
+        self.assertEqual(config.runtime.audio_input.tokenizer, "glm4")
+        self.assertIsNone(config.runtime.audio_input.bpe)
+        self.assertEqual(config.runtime.audio_output.tokenizer, "bicodec")
+        self.assertEqual(config.runtime.audio_output.detokenizer, "bicodec")
+        self.assertIsNone(config.runtime.audio_output.bpe)
+
+    def test_legacy_dual_audio_runtime_overrides_parse(self) -> None:
+        with self.assertWarns(FutureWarning):
+            config = parse(
+                self._compose(
+                    "+runtime.input_audio={codec:glm4,vocab_size:16384,frame_rate:12.5}",
+                )
+            )
+
+        self.assertIsNotNone(config.runtime.audio_input)
+        if config.runtime.audio_input is None:
+            self.fail("legacy configured input audio must be independent")
+        self.assertEqual(config.runtime.audio_input.tokenizer, "glm4")
+        self.assertEqual(config.runtime.audio_input.vocab_size, 16384)
+        self.assertEqual(config.runtime.audio_output.tokenizer, "bicodec")
+        self.assertEqual(config.runtime.audio_output.detokenizer, "bicodec")
 
     def test_toy_override_switches_prepared_factory_for_cpu_smoke(self) -> None:
         config = parse(

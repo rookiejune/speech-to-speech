@@ -85,9 +85,7 @@ class _Runtime:
         self.backbone_body = "base_model"
         self.layout = SimpleNamespace(blocks={"text": (0, text_vocab_size)})
         self.audio_tokenizer = (
-            SimpleNamespace(vocab_size=7)
-            if audio_tokenizer is None
-            else audio_tokenizer
+            SimpleNamespace(vocab_size=7) if audio_tokenizer is None else audio_tokenizer
         )
         self.backbone_readouts = {
             "text": "last_hidden_state[0]",
@@ -138,6 +136,19 @@ class MimoFactoryTest(unittest.TestCase):
         self.assertEqual(vocab.audio_blank, 9)
         special = vocab.special_tokens(audio_delay_tokens=2)
         self.assertEqual(special.audio_delay_tokens, 2)
+
+    def test_runtime_control_rows_do_not_expand_mimo_lexical_vocabulary(self) -> None:
+        runtime = _Runtime(text_vocab_size=18)
+        runtime.lexical_text_vocab_size = 12
+
+        vocab = derive_mimo_vocab(runtime)
+        model = build_mimo_model(
+            runtime,
+            MimoFactoryConfig(audio_embedding_dim=4),
+        )
+
+        self.assertEqual(vocab.text_size, 12)
+        self.assertEqual(model(_batch()).text.shape[-1], 12)
 
     def test_bicodec_like_tokenizer_uses_semantic_payload_vocab(self) -> None:
         runtime = _Runtime(

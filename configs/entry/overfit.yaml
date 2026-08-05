@@ -8,7 +8,7 @@ repo_output_root: ${oc.env:SPEECH_TO_SPEECH_TRAIN_ROOT,${oc.env:DYNAMIC_HOME}/tr
 output_dir: ${repo_output_root}/${output_subdir}
 
 datamodule:
-  codec: ${runtime.codec}
+  codec: ${runtime.audio_output.tokenizer}
   dataloader:
     batch_size: 1
     num_workers: 0

@@ -87,8 +87,7 @@ class Model(nn.Module):
         self.config = config or Config()
         self.runtime = runtime
         self.layout = self.runtime.layout
-        text_start, text_end = self.layout.blocks["text"]
-        text_vocab_size = text_end - text_start
+        text_vocab_size = factory.lexical_text_vocab_size(self.runtime)
         self.backbone = factory.backbone(self.runtime, self.config, text_vocab_size)
         text_embedding = factory.text_embedding(self.backbone, text_vocab_size)
         text_embedding.requires_grad_(False)
@@ -135,8 +134,10 @@ class Model(nn.Module):
 
     @property
     def text_embedding(self) -> nn.Embedding:
-        text_start, text_end = self.layout.blocks[Modality.TEXT.value]
-        return factory.text_embedding(self.backbone, text_end - text_start)
+        return factory.text_embedding(
+            self.backbone,
+            factory.lexical_text_vocab_size(self.runtime),
+        )
 
     def select_audio_head_cache(
         self,
@@ -208,7 +209,11 @@ class Model(nn.Module):
         blocked_token_ids = (
             (self.runtime.pad_token_id, self.runtime.bos_token_id)
             if modality is Modality.TEXT
-            else (self.runtime.boa_token_id, self.runtime.mask_token_id)
+            else (
+                self.runtime.boa_token_id,
+                self.runtime.mask_token_id,
+                self.runtime.audio_schema_token_id,
+            )
         )
         return self.tokens.modality_logits(
             self.text_embedding,
@@ -463,7 +468,7 @@ class Model(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Decode one CTC route, then apply the frozen tied text readout."""
         decoded, pooled_mask = self.ctc_decoders(route, hidden_states, mask)
-        return self.text_logits(decoded), pooled_mask
+        return self.tokens.lexical_text_logits(self.text_embedding, decoded), pooled_mask
 
     def training_input_hints(
         self,
@@ -601,13 +606,17 @@ class Model(nn.Module):
         use_cache: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Generate audio tokens and their frame-aligned acoustic condition."""
+        codec_start, codec_end = self.runtime.codec_audio_range
         output = GenerationEngine(self).generate(
             GenerationRequest(
                 prompt_ids=prompt_ids,
                 prompt_attention_mask=prompt_attention_mask,
                 audio_input_positions=audio_input_positions,
                 stop_token_id=self.runtime.eoa_token_id,
-                generation_modality=Modality.AUDIO,
+                allowed_token_ids=(
+                    *range(codec_start, codec_end),
+                    self.runtime.eoa_token_id,
+                ),
             ),
             GenerationOptions(
                 max_new_tokens=max_new_tokens,

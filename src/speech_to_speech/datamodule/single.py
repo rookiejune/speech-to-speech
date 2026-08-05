@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from anydataset import types
 
-from ..task import PredictionModality, SourceLayout, Task, resolve_response
+from ..task import ResponseSpec, SourceLayout, Task, resolve_response
 from .batch import (
     ModelBatch,
     ModelSample,
@@ -42,7 +42,6 @@ class SingleCollator:
         interleave_audio_frames: int = 25,
         mask_text_ratio: float = 0.5,
         mask_audio_ratio: float = 0.5,
-        prediction: PredictionModality | None = None,
         trace: str | None = None,
         ar_framing: ARFraming = ARFraming.INSTRUCTION,
         tasks: Mapping[Task, TaskConfig] | None = None,
@@ -59,17 +58,12 @@ class SingleCollator:
         validate_ar_framing(ar_framing, active_tasks)
         self._task_weights = TaskWeights(
             task_weights,
-            prediction=prediction,
             trace=trace,
         )
 
     @property
     def tasks(self) -> list[Task]:
         return self._task_weights.tasks
-
-    @property
-    def prediction(self) -> PredictionModality | None:
-        return self._task_weights.prediction
 
     @property
     def trace(self) -> str | None:
@@ -83,7 +77,6 @@ class SingleCollator:
                 task,
                 self.runtime,
                 encode_missing_codes=self.encode_missing_codes,
-                prediction=self.prediction,
                 trace=self.trace,
             )
             for sample, task in zip(samples, tasks)
@@ -146,14 +139,13 @@ def build_single_sample(
     interleave_audio_frames: int = 25,
     mask_text_ratio: float = 0.5,
     mask_audio_ratio: float = 0.5,
-    prediction: PredictionModality | None = None,
     trace: str | None = None,
     ar_framing: ARFraming = ARFraming.INSTRUCTION,
     tasks: Mapping[Task, TaskConfig] | None = None,
 ) -> ModelSample:
     _validate_single_tasks([task])
     validate_ar_framing(ar_framing, [task])
-    response = resolve_response(task, prediction=prediction, trace=trace)
+    response = resolve_response(task, trace=trace)
     prediction = response.prediction
     if task is Task.MASKED_AR:
         return build_masked_sample(
@@ -165,10 +157,9 @@ def build_single_sample(
                 task,
                 runtime,
                 tasks=tasks,
-                prediction=prediction,
                 trace=response.name,
             ),
-            prediction=prediction,
+            trace=response.name,
             interleave_audio_frames=interleave_audio_frames,
             mask_text_ratio=mask_text_ratio,
             mask_audio_ratio=mask_audio_ratio,
@@ -187,7 +178,7 @@ def build_single_sample(
                 target,
                 task,
                 runtime,
-                prediction=prediction,
+                trace=response.name,
             )
         return build_ar_sample(
             target,
@@ -198,10 +189,9 @@ def build_single_sample(
                 task,
                 runtime,
                 tasks=tasks,
-                prediction=prediction,
                 trace=response.name,
             ),
-            prediction=prediction,
+            trace=response.name,
             interleave_audio_frames=interleave_audio_frames,
         )
     prompt = chat_prompt(
@@ -209,7 +199,6 @@ def build_single_sample(
         task,
         runtime,
         tasks=tasks,
-        prediction=prediction,
         trace=response.name,
     )
     return build_speech_sample(
@@ -218,7 +207,6 @@ def build_single_sample(
         task,
         runtime,
         prompt=prompt,
-        prediction=prediction,
         trace=response.name,
     )
 
@@ -229,11 +217,10 @@ def _build_item(
     runtime: DataRuntime,
     *,
     encode_missing_codes: bool,
-    prediction: PredictionModality | None,
     trace: str | None,
 ) -> SpeechTaskSample:
     _validate_single_tasks([task])
-    response = resolve_response(task, prediction=prediction, trace=trace)
+    response = resolve_response(task, trace=trace)
     prediction = response.prediction
     audio_item, text_item = _single_items(sample)
     text = Text(
@@ -251,7 +238,6 @@ def _build_item(
             source=None,
             target=text,
             task=task,
-            prediction=prediction,
             trace=response.name,
         )
     utterance = _utterance(
@@ -273,8 +259,7 @@ def _build_item(
         utterance,
         text,
         task,
-        prediction=prediction,
-        trace=response.name,
+        response=response,
         audio_context=audio_context,
     )
 
@@ -310,8 +295,7 @@ def _task_sample(
     text: Text,
     task: Task,
     *,
-    prediction: PredictionModality,
-    trace: str,
+    response: ResponseSpec,
     audio_context: Speech | RawSpeech | None = None,
 ) -> SpeechTaskSample:
     source = None
@@ -321,7 +305,7 @@ def _task_sample(
         source = utterance
     elif task.source_modality is types.Modality.TEXT:
         source = text
-    if prediction.supervises_audio:
+    if response.prediction.supervises_audio:
         target: Speech | RawSpeech | Text = utterance
     else:
         target = text
@@ -329,8 +313,7 @@ def _task_sample(
         source=source,
         target=target,
         task=task,
-        prediction=prediction,
-        trace=trace,
+        trace=response.name,
         audio_context=audio_context,
     )
 

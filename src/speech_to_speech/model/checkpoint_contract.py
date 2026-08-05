@@ -14,12 +14,16 @@ from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast, runtime_checka
 
 import torch
 from anydataset.types import AudioView, Modality
+from anytrain.codec import AudioBackendIdentity, AudioCodeSpec
 from torch import Tensor, nn
 
 from ..runtime import AudioSequenceLayout
+from ..runtime.audio_schema import AudioTokenSpec
+from ..task import ControlToken
 from ..runtime.audio_tokenizer.contract import AudioTokenizer
 from ..runtime.backbone import BackboneEncoder
 from ..runtime.backbone.contract import Backbone, TextTokenizer
+from ..runtime.codec import audio_backend_identity, audio_code_spec
 from ..runtime.codec_contract import (
     acoustic_codec,
     codec_frame_rate,
@@ -55,7 +59,7 @@ class _HiddenConditionAdapter(Protocol):
     projection: nn.Linear
 
 
-MODEL_CONTRACT_GRAMMAR = "s2s-model-v4-contract-v4"
+MODEL_CONTRACT_GRAMMAR = "s2s-model-v4-contract-v7"
 _MODEL_CONTRACT_FIELDS = frozenset({"grammar", "components", "sha256"})
 _MISSING = "<missing>"
 _DIFFERENCE_KEY_ORDER = {
@@ -65,20 +69,41 @@ _DIFFERENCE_KEY_ORDER = {
         "audio_sequence_layout",
         "blocks",
         "special_ids",
+        "text_controls",
         "text_tokenizer",
-        "audio_tokenizers",
+        "audio_schemas",
     ),
-    "components.runtime.token_space.audio_tokenizers": (
+    "components.runtime.token_space.audio_schemas": (
         "sharing",
         "input",
         "output",
+    ),
+    "components.runtime.token_space.audio_schemas.input": (
+        "selector_id",
+        "payload_range",
+        "tokenizer",
+        "private_grammar",
+        "schema_id",
+        "selector",
+        "spec",
+    ),
+    "components.runtime.token_space.audio_schemas.output": (
+        "selector_id",
+        "payload_range",
+        "tokenizer",
+        "private_grammar",
+        "schema_id",
+        "selector",
+        "spec",
     ),
     "components.runtime.audio_codecs": (
         "sharing",
         "input",
         "output",
+        "output_detokenizer",
     ),
     "components.interface": (
+        "control_embedding",
         "audio_embeddings",
         "input_audio_projection",
         "audio_projection",
@@ -153,9 +178,7 @@ def validate_checkpoint_contract(
     if not isinstance(actual, Mapping):
         raise TypeError("checkpoint model contract must be a mapping.")
     if set(actual) != _MODEL_CONTRACT_FIELDS:
-        raise ValueError(
-            "checkpoint model contract fields do not match its grammar."
-        )
+        raise ValueError("checkpoint model contract fields do not match its grammar.")
     grammar = actual.get("grammar")
     if grammar != MODEL_CONTRACT_GRAMMAR:
         raise ValueError(
@@ -197,10 +220,7 @@ def canonical_value(value: Any) -> Any:
     if isinstance(value, Mapping):
         if not all(isinstance(key, str) for key in value):
             raise TypeError("model contract mapping keys must be strings.")
-        return {
-            key: canonical_value(value[key])
-            for key in sorted(value)
-        }
+        return {key: canonical_value(value[key]) for key in sorted(value)}
     if isinstance(value, (set, frozenset)):
         items = [canonical_value(item) for item in value]
         return sorted(items, key=_canonical_json)
@@ -212,9 +232,7 @@ def canonical_value(value: Any) -> Any:
         return value
     if value is None or isinstance(value, (bool, int, str)):
         return value
-    raise TypeError(
-        f"unsupported model contract value: {type(value).__name__}."
-    )
+    raise TypeError(f"unsupported model contract value: {type(value).__name__}.")
 
 
 def contract_sha256(value: object) -> str:
@@ -251,10 +269,7 @@ def _first_difference(
     if isinstance(actual, dict):
         actual_keys = set(actual)
         expected_keys = set(expected)
-        order = {
-            key: index
-            for index, key in enumerate(_DIFFERENCE_KEY_ORDER.get(path, ()))
-        }
+        order = {key: index for index, key in enumerate(_DIFFERENCE_KEY_ORDER.get(path, ()))}
         for key in sorted(
             actual_keys | expected_keys,
             key=lambda item: (order.get(item, len(order)), item),
@@ -286,11 +301,6 @@ def _first_difference(
     if actual != expected:
         return path, actual, expected
     return None
-
-
-
-
-
 
 
 class ContractModel(Protocol):
@@ -356,11 +366,6 @@ class ConfigOwner(Protocol):
     def config(self) -> object: ...
 
 
-
-
-
-
-
 HF_NON_ARCHITECTURE_CONFIG_FIELDS = frozenset(
     {
         "_attn_implementation",
@@ -413,6 +418,7 @@ HF_NON_ARCHITECTURE_CONFIG_FIELDS = frozenset(
     }
 )
 
+
 def contract_state(value: ContractStateProvider) -> dict[str, Any]:
     state = canonical_value(value.contract_state())
     if not isinstance(state, dict):
@@ -428,8 +434,6 @@ def state_grammar(state: Mapping[str, Any]) -> str:
     return grammar
 
 
-
-
 def backbone_config_state(config: object) -> dict[str, Any]:
     if isinstance(config, ConfigStateProvider):
         state = config.to_dict()
@@ -437,9 +441,7 @@ def backbone_config_state(config: object) -> dict[str, Any]:
         try:
             state = vars(config)
         except TypeError as error:
-            raise TypeError(
-                "backbone config must expose to_dict() or attributes."
-            ) from error
+            raise TypeError("backbone config must expose to_dict() or attributes.") from error
     if not isinstance(state, Mapping):
         raise TypeError("backbone config state must be a mapping.")
     canonical = semantic_config_value(state)
@@ -453,10 +455,7 @@ def semantic_config_value(value: Any) -> Any:
         result = {
             semantic_config_key(key): semantic_config_value(item)
             for key, item in value.items()
-            if not (
-                isinstance(key, str)
-                and key in HF_NON_ARCHITECTURE_CONFIG_FIELDS
-            )
+            if not (isinstance(key, str) and key in HF_NON_ARCHITECTURE_CONFIG_FIELDS)
         }
         return {key: result[key] for key in sorted(result)}
     if isinstance(value, (list, tuple)):
@@ -474,17 +473,11 @@ def semantic_config_key(value: object) -> str:
     return f"int:{value}"
 
 
-
-
 def token_block(
     value: object,
     name: str,
 ) -> tuple[int, int]:
-    if (
-        not isinstance(value, Sequence)
-        or isinstance(value, (str, bytes))
-        or len(value) != 2
-    ):
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or len(value) != 2:
         raise TypeError(f"token layout block {name!r} must contain two ids.")
     start = non_negative_int(value[0], f"{name} token block start")
     end = positive_int(value[1], f"{name} token block end")
@@ -547,25 +540,14 @@ def optional_sha256(value: object, name: str) -> str | None:
     return value
 
 
-
-
 def qualified_name(value: object) -> str:
     return f"{type(value).__module__}.{type(value).__qualname__}"
 
 
-
-
-
-
-
 def state_dict_contract(model: nn.Module) -> dict[str, object]:
     state = model.state_dict(keep_vars=True)
-    parameter_names = {
-        name for name, _ in model.named_parameters(remove_duplicate=False)
-    }
-    buffer_names = {
-        name for name, _ in model.named_buffers(remove_duplicate=False)
-    }
+    parameter_names = {name for name, _ in model.named_parameters(remove_duplicate=False)}
+    buffer_names = {name for name, _ in model.named_buffers(remove_duplicate=False)}
     entries: list[dict[str, object]] = []
     parameter_entries = 0
     for name in sorted(state):
@@ -577,9 +559,7 @@ def state_dict_contract(model: nn.Module) -> dict[str, object]:
         is_parameter = name in parameter_names
         is_buffer = name in buffer_names
         if is_parameter == is_buffer:
-            raise TypeError(
-                f"model state entry {name!r} must resolve to one parameter or buffer."
-            )
+            raise TypeError(f"model state entry {name!r} must resolve to one parameter or buffer.")
         kind = "parameter" if is_parameter else "buffer"
         if is_parameter:
             parameter_entries += 1
@@ -606,15 +586,63 @@ def audio_resource_sharing(runtime: TokenModelRuntime) -> str:
     return "independent" if decoupled else "shared"
 
 
+def audio_backend_sharing(runtime: TokenModelRuntime) -> str:
+    """Describe encoder/decoder ownership independently of model token IDs."""
+
+    input_identity = getattr(runtime, "input_audio_backend_identity", None)
+    output_identity = getattr(runtime, "output_audio_backend_identity", None)
+    if isinstance(input_identity, AudioBackendIdentity) and isinstance(
+        output_identity,
+        AudioBackendIdentity,
+    ):
+        return "shared" if input_identity == output_identity else "independent"
+    return (
+        "shared"
+        if runtime.input_codec_name == runtime.codec_name
+        and runtime.input_audio_view is runtime.audio_view
+        else "independent"
+    )
+
+
 def interface_contract(model: ContractModel) -> dict[str, object]:
     tokens = model.tokens
     return {
+        "control_embedding": control_embedding_contract(tokens),
         "audio_embeddings": audio_embeddings_contract(model),
         "input_audio_projection": input_audio_projection_contract(model),
         "audio_projection": adapter_contract(tokens.audio_projection),
         "audio_head": audio_head_contract(tokens.audio_head),
         "source_audio_encoder": source_audio_contract(model.source_audio_encoder),
         "ctc_decoders": ctc_decoders_contract(model.ctc_decoders),
+    }
+
+
+def control_embedding_contract(tokens: TokenInterface) -> dict[str, object]:
+    text_start, text_end = token_block(
+        tokens.layout.blocks.get(Modality.TEXT.value),
+        Modality.TEXT.value,
+    )
+    lexical_size = positive_int(
+        tokens.lexical_text_vocab_size,
+        "lexical text vocabulary size",
+    )
+    control_rows = text_end - text_start - lexical_size
+    if control_rows < 0:
+        raise ValueError("lexical text vocabulary exceeds the text layout block.")
+    embedding = tokens.control_embedding
+    if control_rows == 0:
+        if embedding is not None:
+            raise ValueError("a lexical-only text block must not register a control embedding.")
+        return {"family": "none"}
+    if embedding is None:
+        raise ValueError("a control-extended text block requires a control embedding.")
+    if embedding.num_embeddings != control_rows:
+        raise ValueError("control embedding rows must match the runtime control vocabulary.")
+    return {
+        "family": "dense-v1",
+        "rows": embedding.num_embeddings,
+        "dim": embedding.embedding_dim,
+        "trainable": embedding.weight.requires_grad,
     }
 
 
@@ -630,8 +658,7 @@ def input_audio_projection_contract(model: ContractModel) -> dict[str, object]:
         return {"sharing": "shared"}
     if projection is None:
         raise ValueError(
-            "independent input/output audio token spaces require an input audio "
-            "projection."
+            "independent input/output audio token spaces require an input audio projection."
         )
     return {
         "sharing": "independent",
@@ -653,8 +680,7 @@ def audio_embeddings_contract(model: ContractModel) -> dict[str, object]:
     else:
         if input_embedding is None:
             raise ValueError(
-                "independent input/output audio token spaces require an input audio "
-                "embedding."
+                "independent input/output audio token spaces require an input audio embedding."
             )
         input_ = audio_embedding_contract(input_embedding)
     return {
@@ -786,11 +812,6 @@ def source_audio_contract(
     return result
 
 
-
-
-
-
-
 def runtime_contract(model: ContractModel) -> dict[str, object]:
     return {
         "token_space": token_space_contract(model.runtime),
@@ -800,7 +821,7 @@ def runtime_contract(model: ContractModel) -> dict[str, object]:
 
 
 def audio_codecs_contract(runtime: TokenModelRuntime) -> dict[str, object]:
-    sharing = audio_resource_sharing(runtime)
+    sharing = audio_backend_sharing(runtime)
     input_ = input_codec_contract(runtime)
     output = codec_contract(runtime)
     if sharing == "shared":
@@ -810,13 +831,80 @@ def audio_codecs_contract(runtime: TokenModelRuntime) -> dict[str, object]:
             "frame_rate": output["frame_rate"],
         }
         if input_ != shared_fields:
-            raise ValueError(
-                "shared input/output audio codec metadata must resolve identically."
-            )
+            raise ValueError("shared input/output audio codec metadata must resolve identically.")
     return {
         "sharing": sharing,
         "input": input_,
         "output": output,
+        "output_detokenizer": output_detokenizer_contract(runtime),
+    }
+
+
+def output_detokenizer_contract(
+    runtime: TokenModelRuntime,
+) -> dict[str, object] | None:
+    name = getattr(runtime, "output_audio_detokenizer_name", runtime.codec_name)
+    if name is None:
+        return None
+    if not isinstance(name, str) or not name:
+        raise TypeError(
+            "runtime output_audio_detokenizer_name must be a non-empty string or None."
+        )
+    identity = getattr(runtime, "output_audio_detokenizer_identity", None)
+    if not isinstance(identity, AudioBackendIdentity):
+        identity = audio_backend_identity(name)
+    output_identity = getattr(runtime, "output_audio_backend_identity", None)
+    if not isinstance(output_identity, AudioBackendIdentity):
+        output_identity = audio_backend_identity(runtime.codec_name)
+    input_identity = getattr(runtime, "input_audio_backend_identity", None)
+    if not isinstance(input_identity, AudioBackendIdentity):
+        input_identity = audio_backend_identity(runtime.input_codec_name)
+    sharing = (
+        "output"
+        if identity == output_identity
+        else "input"
+        if identity == input_identity
+        else "independent"
+    )
+    if sharing == "output":
+        spec = runtime.output_audio_code_spec
+    elif sharing == "input":
+        spec = runtime.input_audio_code_spec
+    else:
+        spec = audio_code_spec(name)
+    return {
+        "name": name,
+        "sharing": sharing,
+        "backend_identity": audio_backend_identity_contract(identity),
+        "code_spec_sha256": contract_sha256(audio_code_spec_contract(spec)),
+    }
+
+
+def audio_backend_identity_contract(
+    identity: AudioBackendIdentity,
+) -> dict[str, object]:
+    return {
+        "preset": identity.preset,
+        "artifact": identity.artifact,
+        "revision": identity.revision,
+    }
+
+
+def audio_code_spec_contract(spec: AudioCodeSpec) -> dict[str, object]:
+    return {
+        "view": spec.view,
+        "schema": spec.schema.value,
+        "sample_rate": spec.sample_rate,
+        "frame_rate": spec.frame_rate,
+        "frame_codebook_sizes": list(spec.frame_codebook_sizes),
+        "semantic_codebook_sizes": list(spec.semantic_codebook_sizes),
+        "acoustic_codebook_sizes": list(spec.acoustic_codebook_sizes),
+        "global_codebook_sizes": list(spec.global_codebook_sizes),
+        "acoustic_layout": (
+            None if spec.acoustic_layout is None else spec.acoustic_layout.value
+        ),
+        "acoustic_unit_length": spec.acoustic_unit_length,
+        "global_unit_length": spec.global_unit_length,
     }
 
 
@@ -891,9 +979,7 @@ def token_space_contract(runtime: TokenModelRuntime) -> dict[str, object]:
     input_block_name = runtime.input_audio_block_name
     if not isinstance(input_block_name, str) or not input_block_name:
         raise TypeError("runtime input_audio_block_name must be a non-empty string.")
-    expected_input_block = (
-        "audio" if sharing == "shared" else "audio_input"
-    )
+    expected_input_block = "audio" if sharing == "shared" else "audio_input"
     if input_block_name != expected_input_block:
         raise ValueError(
             "runtime input audio block does not match audio resource sharing: "
@@ -908,19 +994,24 @@ def token_space_contract(runtime: TokenModelRuntime) -> dict[str, object]:
         raise ValueError(
             "runtime token layout blocks do not match the input/output audio contract."
         )
-    token_blocks = {
-        name: list(token_block(blocks.get(name), name))
-        for name in block_names
-    }
+    token_blocks = {name: list(token_block(blocks.get(name), name)) for name in block_names}
+    text_controls, lexical_text_vocab_size = text_control_contract(
+        runtime,
+        token_blocks[Modality.TEXT.value],
+    )
     sequence_layout = runtime.audio_sequence_layout
     if not isinstance(sequence_layout, AudioSequenceLayout):
         raise TypeError("runtime audio sequence layout must be an AudioSequenceLayout.")
-    input_tokenizer = audio_tokenizer_contract(runtime.input_audio_tokenizer)
-    output_tokenizer = audio_tokenizer_contract(runtime.audio_tokenizer)
-    if sharing == "shared" and input_tokenizer != output_tokenizer:
-        raise ValueError(
-            "shared input/output audio tokenizers must resolve to one contract."
-        )
+    input_schema = input_audio_schema_contract(
+        runtime,
+        token_blocks[input_block_name],
+    )
+    output_schema = output_audio_schema_contract(
+        runtime,
+        token_blocks[Modality.AUDIO.value],
+    )
+    if sharing == "shared" and input_schema != output_schema:
+        raise ValueError("shared input/output audio schemas must resolve identically.")
     return {
         "audio_sequence_layout": sequence_layout.value,
         "blocks": token_blocks,
@@ -964,22 +1055,231 @@ def token_space_contract(runtime: TokenModelRuntime) -> dict[str, object]:
                 ),
             },
         },
+        "text_controls": text_controls,
         "text_tokenizer": text_tokenizer_contract(
             runtime.text_tokenizer,
-            token_blocks["text"],
+            lexical_text_vocab_size,
             configured_chat_template=runtime.backbone_chat_template,
         ),
-        "audio_tokenizers": {
+        "audio_schemas": {
             "sharing": sharing,
-            "input": input_tokenizer,
-            "output": output_tokenizer,
+            "input": input_schema,
+            "output": output_schema,
         },
     }
 
 
+def input_audio_schema_contract(
+    runtime: TokenModelRuntime,
+    audio_block: Sequence[int],
+) -> dict[str, object]:
+    reserved_ids = (
+        (
+            runtime.input_boa_token_id,
+            runtime.input_eoa_token_id,
+        )
+        if runtime.input_audio_decoupled
+        else (
+            runtime.input_boa_token_id,
+            runtime.input_eoa_token_id,
+            runtime.mask_token_id,
+        )
+    )
+    return audio_schema_contract(
+        spec=runtime.input_audio_token_spec,
+        tokenizer=runtime.input_audio_tokenizer,
+        expected_schema_id=runtime.input_audio_schema_id,
+        selector_id=runtime.input_audio_schema_token_id,
+        payload_range=runtime.input_codec_audio_range,
+        audio_block=audio_block,
+        reserved_ids=reserved_ids,
+        side="input",
+        codec_name=runtime.input_codec_name,
+        sequence_layout=runtime.audio_sequence_layout,
+    )
+
+
+def output_audio_schema_contract(
+    runtime: TokenModelRuntime,
+    audio_block: Sequence[int],
+) -> dict[str, object]:
+    return audio_schema_contract(
+        spec=runtime.output_audio_token_spec,
+        tokenizer=runtime.output_audio_tokenizer,
+        expected_schema_id=runtime.output_audio_schema_id,
+        selector_id=runtime.output_audio_schema_token_id,
+        payload_range=runtime.output_codec_audio_range,
+        audio_block=audio_block,
+        reserved_ids=(
+            runtime.output_boa_token_id,
+            runtime.output_eoa_token_id,
+            runtime.output_mask_token_id,
+        ),
+        side="output",
+        codec_name=runtime.output_codec_name,
+        sequence_layout=runtime.audio_sequence_layout,
+    )
+
+
+def audio_schema_contract(
+    *,
+    spec: AudioTokenSpec,
+    tokenizer: AudioTokenizer,
+    expected_schema_id: str,
+    selector_id: int,
+    payload_range: Sequence[int],
+    audio_block: Sequence[int],
+    reserved_ids: Sequence[int],
+    side: str,
+    codec_name: str,
+    sequence_layout: AudioSequenceLayout,
+) -> dict[str, object]:
+    if not isinstance(spec, AudioTokenSpec):
+        raise TypeError(f"runtime {side} audio token spec must be an AudioTokenSpec.")
+    if spec.tokenizer is not tokenizer:
+        raise ValueError(
+            f"runtime {side} audio token spec must own its configured tokenizer."
+        )
+    if not isinstance(expected_schema_id, str) or not expected_schema_id:
+        raise ValueError(f"runtime {side} audio schema id must be non-empty.")
+    if spec.schema_id != expected_schema_id:
+        raise ValueError(
+            f"runtime {side} audio schema id does not match its token spec."
+        )
+    if spec.codec_name != codec_name:
+        raise ValueError(
+            f"runtime {side} audio token spec does not match its codec name."
+        )
+    if spec.sequence_layout != sequence_layout.value:
+        raise ValueError(
+            f"runtime {side} audio token spec does not match its sequence layout."
+        )
+
+    block_start, block_end = token_block(audio_block, f"{side} audio")
+    payload_start, payload_end = token_block(
+        payload_range,
+        f"{side} audio payload",
+    )
+    if payload_start != block_start:
+        raise ValueError(
+            f"runtime {side} audio payload must begin at its layout block start."
+        )
+    tokenizer_contract = audio_tokenizer_contract(tokenizer)
+    tokenizer_vocab_size = positive_int(
+        tokenizer.vocab_size,
+        f"runtime {side} audio tokenizer vocabulary size",
+    )
+    if payload_end - payload_start != tokenizer_vocab_size:
+        raise ValueError(
+            f"runtime {side} audio payload range must match its tokenizer vocabulary."
+        )
+    controls = tuple(
+        non_negative_int(token_id, f"runtime {side} audio reserved token id")
+        for token_id in reserved_ids
+    )
+    expected_controls = tuple(range(payload_end, payload_end + len(controls)))
+    if controls != expected_controls:
+        raise ValueError(
+            f"runtime {side} audio reserved tokens must immediately follow its payload."
+        )
+    resolved_selector_id = non_negative_int(
+        selector_id,
+        f"runtime {side} audio schema selector id",
+    )
+    if resolved_selector_id != payload_end + len(controls):
+        raise ValueError(
+            f"runtime {side} audio schema selector must follow its reserved tokens."
+        )
+    if block_end != resolved_selector_id + 1:
+        raise ValueError(
+            f"runtime {side} audio schema selector must end its layout block."
+        )
+
+    spec_state = contract_state(spec)
+    if spec_state.get("schema_id") != expected_schema_id:
+        raise ValueError(
+            f"runtime {side} audio token spec contract has an inconsistent schema id."
+        )
+    selector = spec_state.get("selector")
+    if not isinstance(selector, str) or not selector:
+        raise ValueError(
+            f"runtime {side} audio token spec contract requires a selector."
+        )
+    tokenizer_state = contract_state(tokenizer)
+    private_grammar = audio_private_grammar_contract(spec)
+    if spec_state.get("tokenizer_grammar") != state_grammar(tokenizer_state):
+        raise ValueError(
+            f"runtime {side} audio token spec tokenizer grammar is inconsistent."
+        )
+    if spec_state.get("codec_grammar") != private_grammar:
+        raise ValueError(
+            f"runtime {side} audio token spec private grammar is inconsistent."
+        )
+    combined_digest = contract_sha256(
+        {
+            "tokenizer": tokenizer_state,
+            "codec_grammar": private_grammar,
+        }
+    )
+    if spec_state.get("tokenizer_state_sha256") != combined_digest:
+        raise ValueError(
+            f"runtime {side} audio token spec digest does not match its contracts."
+        )
+    return {
+        "schema_id": expected_schema_id,
+        "selector": selector,
+        "selector_id": resolved_selector_id,
+        "payload_range": [payload_start, payload_end],
+        "spec": spec_state,
+        "tokenizer": tokenizer_contract,
+        "private_grammar": private_grammar,
+    }
+
+
+def text_control_contract(
+    runtime: TokenModelRuntime,
+    text_block: Sequence[int],
+) -> tuple[dict[str, object], int]:
+    if len(text_block) != 2:
+        raise ValueError("text token block must contain start and end bounds.")
+    text_start, text_end = text_block
+    text_size = text_end - text_start
+    lexical_value = getattr(runtime, "lexical_text_vocab_size", text_size)
+    lexical_size = positive_int(
+        lexical_value,
+        "runtime lexical_text_vocab_size",
+    )
+    if lexical_size > text_size:
+        raise ValueError("runtime lexical text vocabulary exceeds its text block.")
+    control_rows = text_size - lexical_size
+    if control_rows == 0:
+        return {"grammar": "typed-text-control-v1", "tokens": {}}, lexical_size
+    if control_rows != len(ControlToken):
+        raise ValueError(
+            "runtime text control rows must exactly cover the fixed control vocabulary."
+        )
+    ids = runtime.control_token_ids
+    expected_ids = tuple(range(text_start + lexical_size, text_end))
+    if tuple(ids) != expected_ids:
+        raise ValueError("runtime control token ids must occupy the tail of the text block.")
+    tokens: dict[str, int] = {}
+    for token, token_id in zip(ControlToken, ids):
+        resolved = runtime.control_token_id(token)
+        if resolved != token_id:
+            raise ValueError("runtime control token lookup is inconsistent.")
+        tokens[token.value] = non_negative_int(
+            token_id,
+            f"runtime control token {token.value}",
+        )
+    return {
+        "grammar": "typed-text-control-v1",
+        "tokens": tokens,
+    }, lexical_size
+
+
 def text_tokenizer_contract(
     tokenizer: TextTokenizer,
-    text_block: Sequence[int],
+    vocab_size: int,
     *,
     configured_chat_template: str | None,
 ) -> dict[str, object]:
@@ -991,13 +1291,11 @@ def text_tokenizer_contract(
         raise TypeError("text tokenizer chat template must be a string or None.")
     return {
         "implementation": qualified_name(tokenizer),
-        "vocab_size": text_block[1] - text_block[0],
+        "vocab_size": positive_int(vocab_size, "text tokenizer vocabulary size"),
         "state_grammar": state_grammar(state),
         "state_sha256": contract_sha256(state),
         "special_tokens_sha256": contract_sha256(tokenizer.special_tokens_map),
-        "chat_template_sha256": (
-            None if chat_template is None else contract_sha256(chat_template)
-        ),
+        "chat_template_sha256": (None if chat_template is None else contract_sha256(chat_template)),
     }
 
 
@@ -1056,12 +1354,8 @@ def text_tokenizer_behavior(tokenizer: TextTokenizer) -> list[dict[str, object]]
     return [
         {
             "text": text,
-            "plain_ids": tokenizer_probe_ids(
-                tokenizer.encode(text, add_special_tokens=False)
-            ),
-            "special_ids": tokenizer_probe_ids(
-                tokenizer.encode(text, add_special_tokens=True)
-            ),
+            "plain_ids": tokenizer_probe_ids(tokenizer.encode(text, add_special_tokens=False)),
+            "special_ids": tokenizer_probe_ids(tokenizer.encode(text, add_special_tokens=True)),
         }
         for text in (
             "Hello, world!",
@@ -1077,9 +1371,7 @@ def tokenizer_probe_ids(values: object) -> list[int]:
     result: list[int] = []
     for value in values:
         if not isinstance(value, Integral):
-            raise TypeError(
-                "tokenizer encode() contract probe must return integer token ids."
-            )
+            raise TypeError("tokenizer encode() contract probe must return integer token ids.")
         result.append(int(value))
     return result
 
@@ -1088,29 +1380,21 @@ def audio_tokenizer_contract(
     tokenizer: AudioTokenizer,
 ) -> dict[str, object]:
     state = contract_state(tokenizer)
-    result: dict[str, object] = {
+    return {
         "implementation": qualified_name(tokenizer),
-        "grammar": state_grammar(state),
         "vocab_size": positive_int(
             tokenizer.vocab_size,
             "audio tokenizer vocabulary size",
         ),
+        "state_grammar": state_grammar(state),
         "state_sha256": contract_sha256(state),
     }
-    for key in (
-        "codebook_sizes",
-        "semantic_codebook_size",
-        "semantic_vocab_size",
-        "acoustic_codebook_sizes",
-        "acoustic_unit_length",
-        "global_codebook_sizes",
-        "global_unit_length",
-    ):
-        if key in state:
-            result[key] = canonical_value(state[key])
-    return result
 
 
+def audio_private_grammar_contract(
+    spec: AudioTokenSpec,
+) -> dict[str, object]:
+    return contract_state(spec.grammar)
 
 
 def backbone_contract(model: ContractModel) -> dict[str, object]:
@@ -1129,8 +1413,6 @@ def backbone_contract(model: ContractModel) -> dict[str, object]:
     }
 
 
-
-
 def semantic_artifact_sha256(runtime: TokenModelRuntime) -> str | None:
     artifact = runtime.acoustic_generator_artifact
     if artifact is not None and (not isinstance(artifact, str) or not artifact):
@@ -1144,11 +1426,6 @@ def semantic_artifact_sha256(runtime: TokenModelRuntime) -> str | None:
             "acoustic generator artifact path and content digest must be configured together."
         )
     return digest
-
-
-
-
-
 
 
 def flow_acoustic_contract(
@@ -1273,11 +1550,6 @@ def condition_adapter_contract(
         "norm_eps": float(value.norm.eps),
         "projection_bias": value.projection.bias is not None,
     }
-
-
-
-
-
 
 
 def build_model_contract(

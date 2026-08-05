@@ -15,7 +15,11 @@ from anydataset.store.reader import read_store_manifest
 from anydataset.types import Sample
 from torch.utils.data import Dataset
 
-from speech_to_speech.datamodule.streaming import SnapshotFeed, SnapshotLoader
+from speech_to_speech.datamodule.streaming import (
+    SnapshotFeed,
+    SnapshotLoader,
+    directional_codec_sample,
+)
 
 
 _SNAPSHOT_SCHEMA = "speech-to-speech-stream-snapshot-v1"
@@ -75,6 +79,11 @@ class SnapshotPublisher:
                 raise ValueError(
                     "decoupled streaming snapshots require an input codec store "
                     "matching sample_indices."
+                )
+            for index in range(len(indices)):
+                directional_codec_sample(
+                    input_codec_samples[index],
+                    codec_samples[index],
                 )
         elif input_codec_samples is not None:
             raise ValueError(

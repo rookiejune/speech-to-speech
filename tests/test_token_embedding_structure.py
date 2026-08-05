@@ -17,6 +17,7 @@ from speech_to_speech.model.generation import TokenKind
 from speech_to_speech.model.token import TokenInterface
 from speech_to_speech.model.toy import ToyConfig, create_toy_backbone
 from speech_to_speech.runtime import AudioSequenceLayout
+from speech_to_speech.task import ControlToken
 from speech_to_speech.runtime.audio_tokenizer import (
     FlattenedAudioTokenizer,
     NativeAudioTokenizer,
@@ -70,6 +71,31 @@ class _Runtime:
     @property
     def acoustic_side_channel(self) -> bool:
         return False
+
+
+class _ControlRuntime(_Runtime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.lexical_text_vocab_size = 8
+        text_size = self.lexical_text_vocab_size + len(ControlToken)
+        audio_size = self.audio_tokenizer.vocab_size + 4
+        self.layout = Layout(
+            text=(0, text_size),
+            audio=(text_size, text_size + audio_size),
+        )
+        self.control_token_ids = tuple(range(self.lexical_text_vocab_size, text_size))
+        self.boa_token_id = text_size + audio_size - 4
+        self.eoa_token_id = text_size + audio_size - 3
+        self.mask_token_id = text_size + audio_size - 2
+        self.audio_schema_token_id = text_size + audio_size - 1
+
+    def control_token_id(self, token: ControlToken) -> int:
+        return self.control_token_ids[list(ControlToken).index(token)]
+
+    @property
+    def codec_audio_range(self) -> tuple[int, int]:
+        start, _ = self.layout.blocks["audio"]
+        return start, self.boa_token_id
 
 
 class TokenInterfaceStructureTest(unittest.TestCase):
@@ -136,20 +162,68 @@ class TokenInterfaceStructureTest(unittest.TestCase):
 
         state = model.state_dict(keep_vars=True)
         state_keys = set(state)
-        text_state_paths = [
-            name for name, value in state.items() if value is text_embedding.weight
-        ]
+        text_state_paths = [name for name, value in state.items() if value is text_embedding.weight]
         self.assertEqual(text_state_paths, ["backbone.embed_tokens.weight"])
         self.assertIn("backbone.embed_tokens.weight", state_keys)
         self.assertIn("tokens.audio_embedding.weight", state_keys)
-        self.assertTrue(
-            any(key.startswith("tokens.audio_projection.") for key in state_keys)
-        )
+        self.assertTrue(any(key.startswith("tokens.audio_projection.") for key in state_keys))
         self.assertFalse(any(key.startswith("token_embedding.") for key in state_keys))
-        self.assertFalse(
-            any(key.startswith("tokens.text_embedding.") for key in state_keys)
-        )
+        self.assertFalse(any(key.startswith("tokens.text_embedding.") for key in state_keys))
         self.assertFalse(any(module is text_embedding for module in model.tokens.modules()))
+
+    def test_control_tokens_use_a_separate_trainable_text_table(self) -> None:
+        runtime = _ControlRuntime()
+        model = Model(
+            Config(
+                semantic_audio_adapter=AdapterType.LINEAR,
+                audio_output_adapter=AudioOutputAdapterConfig(
+                    type=AudioOutputAdapterType.NONE,
+                ),
+                toy=ToyConfig(
+                    hidden_size=8,
+                    intermediate_size=16,
+                    layers=1,
+                    heads=2,
+                    max_position_embeddings=32,
+                ),
+            ),
+            runtime=cast(Any, runtime),
+        ).eval()
+        control = model.tokens.control_embedding
+        self.assertIsInstance(control, torch.nn.Embedding)
+        assert control is not None
+        self.assertEqual(control.num_embeddings, len(ControlToken))
+        self.assertTrue(control.weight.requires_grad)
+        self.assertFalse(model.text_embedding.weight.requires_grad)
+        self.assertEqual(model.text_embedding.num_embeddings, 8)
+
+        hidden = torch.randn(1, 2, 8)
+        logits = model.text_logits(hidden)
+        expected_rows = torch.cat(
+            (model.text_embedding.weight, control.weight),
+            dim=0,
+        )
+        expected = torch.nn.functional.linear(
+            hidden.to(dtype=expected_rows.dtype),
+            expected_rows,
+        )
+        self.assertEqual(logits.shape[-1], 8 + len(ControlToken))
+        torch.testing.assert_close(logits, expected)
+
+        ids = torch.tensor(
+            [
+                [
+                    runtime.control_token_id(ControlToken.ASR_BEGIN),
+                    runtime.control_token_id(ControlToken.MT_END),
+                ]
+            ]
+        )
+        embedded = model._input_embedding(ids)
+        torch.testing.assert_close(
+            embedded,
+            control(torch.tensor([[0, 3]])),
+        )
+        self.assertIn("tokens.control_embedding.weight", model.state_dict())
 
     def test_toy_backbone_has_no_lm_head_state_alias(self) -> None:
         backbone = create_toy_backbone(

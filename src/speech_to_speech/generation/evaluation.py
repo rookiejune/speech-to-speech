@@ -53,9 +53,8 @@ def evaluate_autoregressive(
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     elapsed = time.perf_counter() - started
-    audio = audio_output(result, "autoregressive evaluation")
+    audio, waveform, _ = waveform_output(result, "autoregressive evaluation")
     features = audio["features"]
-    waveform = audio["waveform"]
     if features is None:
         raise RuntimeError("autoregressive evaluation did not return acoustic features.")
     if waveform.numel() == 0:
@@ -98,9 +97,7 @@ def evaluate(
             attention_mask=batch.attention_mask,
             prediction=batch.prediction_modality,
         )
-        condition = model.target_frame_condition(
-            hidden_states, target_data["token_positions"]
-        )
+        condition = model.target_frame_condition(hidden_states, target_data["token_positions"])
         safe_codes = target_data["codes"].clamp_min(0)
         target = codec.acoustic_codes_to_features(safe_codes)
         mask = batch.acoustic_target_mask
@@ -130,13 +127,9 @@ def evaluate(
                 append(values, name, value)
             append(values, "waveform_rms", waveform.square().mean().sqrt())
             append(values, "waveform_peak", waveform.abs().max())
-            values.setdefault("duration_seconds", []).append(
-                waveform.numel() / sample_rate
-            )
+            values.setdefault("duration_seconds", []).append(waveform.numel() / sample_rate)
             values.setdefault("sampling_seconds", []).append(elapsed)
-            values.setdefault("sampling_rtf", []).append(
-                elapsed / (waveform.numel() / sample_rate)
-            )
+            values.setdefault("sampling_rtf", []).append(elapsed / (waveform.numel() / sample_rate))
         return {name: sum(items) / len(items) for name, items in values.items()}
     finally:
         model.train(was_training)
@@ -166,12 +159,8 @@ def reference_audio(
             attention_mask=batch.attention_mask,
             prediction=batch.prediction_modality,
         )
-        condition = model.target_frame_condition(
-            hidden_states, target_data["token_positions"]
-        )
-        target_features = codec.acoustic_codes_to_features(
-            target_data["codes"].clamp_min(0)
-        )
+        condition = model.target_frame_condition(hidden_states, target_data["token_positions"])
+        target_features = codec.acoustic_codes_to_features(target_data["codes"].clamp_min(0))
         valid = batch.acoustic_target_mask[0]
         semantic = target_data["semantic_codes"][0, valid].unsqueeze(0)
         target_features = target_features[0, valid].unsqueeze(0)
@@ -265,14 +254,11 @@ def evaluate_text(
     max_new_tokens: int,
 ) -> dict[str, TextProbeResult]:
     runtime = model.runtime
-    prompts = {
-        name: _prompt_ids(runtime, probe["instruction"])
-        for name, probe in probes.items()
-    }
+    prompts = {name: _prompt_ids(runtime, probe["instruction"]) for name, probe in probes.items()}
     requests = [
         Request(
             prompt_ids=prompts[name],
-            task=Task.T2TT,
+            task=Task.TEXT_AR,
             audio_input_positions=None,
         )
         for name in probes
@@ -367,9 +353,8 @@ def _reference_nll(
 
 def summary(run_output: dict[str, Any]) -> dict[str, Any]:
     result = run_output["result"]
-    audio = audio_output(result, "generation result")
+    audio, waveform, _ = waveform_output(result, "generation result")
     features = audio["features"]
-    waveform = audio["waveform"]
     if features is None:
         raise RuntimeError("generation smoke requires acoustic features.")
     return {
@@ -379,8 +364,7 @@ def summary(run_output: dict[str, Any]) -> dict[str, Any]:
         "finite": bool(torch.isfinite(features).all() and torch.isfinite(waveform).all()),
         "calls": run_output["calls"],
         "top_logits": [
-            top_logits(values, run_output["allowed_ids"])
-            for values in run_output["allowed_logits"]
+            top_logits(values, run_output["allowed_ids"]) for values in run_output["allowed_logits"]
         ],
         "elapsed_seconds": run_output["elapsed_seconds"],
         "peak_cuda_bytes": run_output["peak_cuda_bytes"],
@@ -390,12 +374,10 @@ def summary(run_output: dict[str, Any]) -> dict[str, Any]:
 def compare(cached_run: dict[str, Any], full_run: dict[str, Any]) -> dict[str, Any]:
     cached = cached_run["result"]
     full = full_run["result"]
-    cached_audio = audio_output(cached, "cached result")
-    full_audio = audio_output(full, "full-recompute result")
+    cached_audio, cached_waveform, _ = waveform_output(cached, "cached result")
+    full_audio, full_waveform, _ = waveform_output(full, "full-recompute result")
     cached_features = cached_audio["features"]
     full_features = full_audio["features"]
-    cached_waveform = cached_audio["waveform"]
-    full_waveform = full_audio["waveform"]
     cached_tokens = cached["response_ids"]
     full_tokens = full["response_ids"]
     if cached_features is None or full_features is None:
@@ -403,16 +385,13 @@ def compare(cached_run: dict[str, Any], full_run: dict[str, Any]) -> dict[str, A
     return {
         "tokens_equal": bool(torch.equal(cached_tokens, full_tokens)),
         "first_token_difference": first_difference(cached_tokens, full_tokens),
-        "logit_steps": compare_logits(
-            cached_run["allowed_logits"], full_run["allowed_logits"]
-        ),
+        "logit_steps": compare_logits(cached_run["allowed_logits"], full_run["allowed_logits"]),
         "acoustic_shapes_equal": cached_features.shape == full_features.shape,
         "waveform_shapes_equal": cached_waveform.shape == full_waveform.shape,
         "acoustic_max_abs": optional_max_abs(cached_features, full_features),
         "waveform_max_abs": optional_max_abs(cached_waveform, full_waveform),
         "cached_finite": bool(
-            torch.isfinite(cached_features).all()
-            and torch.isfinite(cached_waveform).all()
+            torch.isfinite(cached_features).all() and torch.isfinite(cached_waveform).all()
         ),
         "full_finite": bool(
             torch.isfinite(full_features).all() and torch.isfinite(full_waveform).all()
@@ -426,9 +405,7 @@ def optional_max_abs(left: Tensor, right: Tensor) -> float | None:
     return float((left.float() - right.float()).abs().max())
 
 
-def compare_logits(
-    cached: list[Tensor], full: list[Tensor]
-) -> list[dict[str, float | int]]:
+def compare_logits(cached: list[Tensor], full: list[Tensor]) -> list[dict[str, float | int]]:
     if len(cached) != len(full):
         raise ValueError("cached and full generation must contain the same logit steps.")
     return [
@@ -469,9 +446,7 @@ def hidden_layer_max_abs(output: Any, reference: Any) -> list[float]:
     ]
 
 
-def top_logits(
-    values: Tensor, allowed_ids: Sequence[int], count: int = 5
-) -> dict[str, Any]:
+def top_logits(values: Tensor, allowed_ids: Sequence[int], count: int = 5) -> dict[str, Any]:
     top_values, local_ids = values.topk(min(count, values.numel()))
     margin = float(top_values[0] - top_values[1]) if top_values.numel() > 1 else None
     return {
@@ -498,6 +473,18 @@ def audio_output(result: Result, name: str) -> AudioOutput:
     return audio
 
 
+def waveform_output(
+    result: Result,
+    name: str,
+) -> tuple[AudioOutput, Tensor, int]:
+    audio = audio_output(result, name)
+    waveform = audio["waveform"]
+    sample_rate = audio["sample_rate"]
+    if waveform is None or sample_rate is None:
+        raise RuntimeError(f"{name} did not return decoded waveform audio.")
+    return audio, waveform, sample_rate
+
+
 __all__ = [
     "TextProbe",
     "TextProbeResult",
@@ -517,4 +504,5 @@ __all__ = [
     "summary",
     "tensor_max_abs",
     "top_logits",
+    "waveform_output",
 ]

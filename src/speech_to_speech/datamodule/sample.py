@@ -59,6 +59,10 @@ class Language(StrEnum):
     ZH = "Chinese"
     EN = "English"
 
+    @property
+    def code(self) -> str:
+        return self.name.lower()
+
     @classmethod
     def _missing_(cls, value: object) -> Language | None:
         if not isinstance(value, str):
@@ -174,28 +178,19 @@ class SpeechTaskSample:
     source: Union[Speech, Text, RawSpeech, None]
     target: Union[Speech, Text, RawSpeech]
     task: Task
-    prediction: PredictionModality
     trace: str | None = None
     audio_context: Union[Speech, RawSpeech, None] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.task, Task):
             raise TypeError("speech task sample task must be a Task.")
-        if not isinstance(self.prediction, PredictionModality):
-            raise TypeError(
-                "speech task sample prediction must be a PredictionModality."
-            )
-        response = resolve_response(
-            self.task,
-            prediction=self.prediction,
-            trace=self.trace,
-        )
+        response = resolve_response(self.task, trace=self.trace)
         self.trace = response.name
         _validate_source_item(self.source, self.task.source_layout, name="source")
         _validate_target_item(
             self.target,
             self.task,
-            prediction=self.prediction,
+            prediction=response.prediction,
             name="target",
         )
         if self.audio_context is not None and not isinstance(
@@ -203,6 +198,10 @@ class SpeechTaskSample:
             (Speech, RawSpeech),
         ):
             raise TypeError("speech task audio_context must be Speech or RawSpeech.")
+
+    @property
+    def prediction(self) -> PredictionModality:
+        return resolve_response(self.task, trace=self.trace).prediction
 
     @property
     def needs_codec(self) -> bool:
@@ -220,7 +219,6 @@ class SpeechTaskSample:
             source=_pin_task_item(self.source),
             target=target,
             task=self.task,
-            prediction=self.prediction,
             trace=self.trace,
             audio_context=_audio_context(_pin_task_item(self.audio_context)),
         )

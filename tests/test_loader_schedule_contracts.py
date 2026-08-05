@@ -207,7 +207,6 @@ def _token_batch(task: Task, count: int) -> ModelBatch:
         ),
         acoustic_target=None,
         tasks=[task],
-        predictions=[task.prediction_modality],
         pad_token_id=0,
     )
 

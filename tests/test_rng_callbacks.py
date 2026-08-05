@@ -14,7 +14,7 @@ from speech_to_speech.callback.logging.task_sample import TaskSampleLogger
 from speech_to_speech.datamodule.batch import ModelBatch
 from semantic_acoustic_generator.model import AcousticRVQDecoder
 from speech_to_speech.generation import Result
-from speech_to_speech.task import PredictionModality
+from speech_to_speech.task import ControlToken, PredictionModality
 from speech_to_speech.task import Task
 
 
@@ -28,7 +28,20 @@ class _RandomGenerationModule:
         self.draws.append(torch.rand(4))
         if self.use_cuda:
             torch.rand(4, device=torch.device("cuda", torch.cuda.current_device()))
-        return [Result(response_ids=torch.tensor([1]), audio=None)]
+        control_token_ids = tuple(range(4, 4 + len(ControlToken)))
+        return [
+            Result(
+                response_ids=torch.tensor(
+                    [
+                        control_token_ids[list(ControlToken).index(ControlToken.MT_BEGIN)],
+                        control_token_ids[list(ControlToken).index(ControlToken.LANG_EN)],
+                        1,
+                        control_token_ids[list(ControlToken).index(ControlToken.MT_END)],
+                    ]
+                ),
+                audio=None,
+            )
+        ]
 
     def materialize_batch(self, batch: object) -> object:
         return batch
@@ -180,12 +193,16 @@ class RNGCallbackTest(unittest.TestCase):
 
 
 def task_sample_logger_fixture() -> tuple[TaskSampleLogger, object]:
+    lexical_text_vocab_size = 4
+    control_token_ids = tuple(
+        range(lexical_text_vocab_size, lexical_text_vocab_size + len(ControlToken))
+    )
     batch = ModelBatch(
         input_ids=torch.tensor([[1, 2]]),
         token_labels=torch.tensor([[-100, 2]]),
         acoustic_target=None,
         tasks=[Task.T2TT],
-        predictions=[Task.T2TT.prediction_modality],
+        target_languages=["en"],
         pad_token_id=0,
     )
     experiment = SimpleNamespace(add_text=Mock())
@@ -197,6 +214,11 @@ def task_sample_logger_fixture() -> tuple[TaskSampleLogger, object]:
             diagnostic_collator=Mock(return_value=Mock(return_value=batch)),
             runtime=SimpleNamespace(
                 layout=Layout(text=(0, 10), audio=(10, 20)),
+                lexical_text_vocab_size=lexical_text_vocab_size,
+                control_token_ids=control_token_ids,
+                control_token_id=lambda token: control_token_ids[
+                    list(ControlToken).index(token)
+                ],
                 text_tokenizer=SimpleNamespace(decode=Mock(return_value="generated")),
             ),
         ),

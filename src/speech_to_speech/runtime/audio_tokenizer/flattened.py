@@ -5,6 +5,7 @@ from collections.abc import Sequence
 import torch
 from torch import Tensor
 
+from ..audio_schema import AudioGrammarVariant, AudioTokenBlock, AudioTokenGrammar
 from ._common import (
     codebook_size,
     frame_tensor,
@@ -36,6 +37,32 @@ class FlattenedAudioTokenizer:
             self._code_vocab_size + index for index in range(len(sizes))
         )
         self._vocab_size = self._code_vocab_size + len(sizes)
+        block_names = tuple(
+            f"codebook_{index}" for index in range(len(self._codebook_sizes))
+        )
+        self._grammar = AudioTokenGrammar(
+            name="flattened-codebook-blocks-v1",
+            variants=(
+                AudioGrammarVariant(
+                    name="full",
+                    blocks=tuple(
+                        AudioTokenBlock(
+                            name=name,
+                            marker_id=marker,
+                            token_ranges=(bounds,),
+                        )
+                        for name, marker, bounds in zip(
+                            block_names,
+                            self._codebook_token_ids,
+                            self.codebook_ranges,
+                        )
+                    ),
+                    equal_repeat_groups=(block_names,) if len(block_names) > 1 else (),
+                ),
+            ),
+            default_variant="full",
+            generation_variants=("full",),
+        )
 
     @property
     def codec_name(self) -> str:
@@ -55,6 +82,10 @@ class FlattenedAudioTokenizer:
     @property
     def vocab_size(self) -> int:
         return self._vocab_size
+
+    @property
+    def grammar(self) -> AudioTokenGrammar:
+        return self._grammar
 
     @property
     def codebook_token_ids(self) -> tuple[int, ...]:

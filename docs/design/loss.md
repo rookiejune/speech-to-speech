@@ -13,8 +13,8 @@
   acoustic flow matching 和可选 REPA；`RVQObjective`：组合 token CE 与 acoustic RVQ CE。
   三者的 `forward(batch, model)` 都返回含标量总损失的 `Outputs`，直接满足 Lightning
   训练契约。
-- `TokenLoss`：按 `ModelBatch.prediction_modality`（有效 loader prediction，不是
-  `Task.prediction_modality` 默认值）展开监督 head（TEXT / AUDIO / 两者），在对应
+- `TokenLoss`：按 `ModelBatch.prediction_modality`（由 batch 的 task/trace 对应 `ResponseSpec`
+  派生）展开监督 head（TEXT / AUDIO / 两者），在对应
   局部词表上计算 CE，每行必须至少包含一个非 `-100` target；causal shift 在此完成，只把有效
   predictor hidden states 交给 `model.token_logits(hidden, modality)`，text/audio head 不做跨模态
   softmax 竞争。`target_modality` 只是单模态 prediction 的便捷属性，mixed 时为 `None`，不作为
@@ -121,14 +121,11 @@ rvq = self.rvq(logits, target_data["codes"], batch.acoustic_target_mask)
 
 所有 batch 都计算 token CE。是否增加 acoustic objective 只由
 `batch.acoustic_target is not None` 决定，不通过 task modality 猜测 codec
-representation，也不通过模式布尔开关表达组合。BiCodec grammar 的 structured global payload 是
-token objective 的 grouped CE，不是 frame-aligned `acoustic_target`；结构化 target fields 或
-prediction groups 不完整时直接报错。
-
-BiCodec grouped CE 的 candidate group 由 tokenizer 唯一拥有：codec/stream markers 使用 forced
-group，不计算 loss；semantic 首 token 使用 semantic group，后续 semantic tokens 与 sequence
-end 使用 semantic-or-end group；每个 global slot 使用对应 global codebook
-range。`selected_logits()` 返回与该候选集合同序的 logits，target 不在集合内时显式失败。
+representation，也不通过模式布尔开关表达组合。BiCodec structured global payload 仍属于 token
+objective，不是 frame-aligned `acoustic_target`。完整 response trace 使用标准 next-token CE：ASR/MT
+begin/end、language selector、BOA、audio schema selector、codec-private marker/payload 和 EOA 全部
+参与监督。generation grammar 的候选 mask 只约束推理时的合法转移，不改变训练 target，也不把
+singleton marker 位置变成零 loss。
 
 `TokenObjective` 不要求 model 提供 acoustic 能力。`FlowObjective` 固定组合 token CE 与
 flow matching；传入包含正数 `weight` 和 `teacher` 的 `RepaConfig` 时显式加入 REPA。
@@ -142,9 +139,9 @@ teacher features。acoustic-only codec screening 与 oracle artifact 导出由
 
 ## 边界
 
-- 训练侧有效 prediction 以 `ModelSample.prediction` / `ModelBatch.predictions`（`batch.prediction_modality`）
-  为准；`Task.prediction_modality` 只是 loader 未覆写时的默认值。loss、FLOPs、sample/batch 校验都消费
-  有效 prediction，不回退到 task 默认。
+- 训练侧 prediction 只能由每条 sample 的 `(task, trace)` 对应 `ResponseSpec` 派生；
+  `ModelBatch.predictions` / `batch.prediction_modality` 是编译后的内部路由，不是第二个配置入口。
+  loss、FLOPs 和 batch 校验消费该派生值，并验证它与 trace 一致。
 - `TokenObjective`、`FlowObjective` 和 `RVQObjective` 只依赖结构化 Protocol 的
   `layout`、`token_hidden_states()`、`objective_hidden_output()`、`ctc_logits()`、
   `token_logits(hidden, modality)`、`target_frame_condition()`、`acoustic_decoder` 等公开能力，
@@ -174,8 +171,9 @@ teacher features。acoustic-only codec screening 与 oracle artifact 导出由
 - token 行损失是有效 token 的加权平均；`details` 中的 `text_loss` / `audio_loss` 仅供观测，不改变
   训练标量。validation 暴露聚合 `token/loss`（经 `val/` 前缀写入 logger），暂不拆
   `token/text_loss` / `token/audio_loss`。
-- generation 按有效 `Request.prediction`（缺省则 `task.prediction_modality`）分组；训练 bridge
-  会把 `ModelBatch.predictions` 写入 Request。
+- generation 按 `(Request.task, Request.trace, normalized Request.target_language)` 解析 response
+  并分组；训练 bridge 把 resolved trace 与对应 target language 写入 Request，执行 prediction
+  从该 response 派生。
 - BiCodec prompt/output ownership 不改变 Flow/RVQ acoustic objective 的 frame-aligned contract；
   target acoustic stream 不会静默泄漏到 reference prompt，prompt codes 也不作为 token labels。
 - `causal_lm.py` 只实现离散 acoustic RVQ objective，不读取 model/runtime 或重复 condition

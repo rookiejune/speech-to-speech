@@ -186,9 +186,9 @@ FlashAttention 或其他 custom op 也可能不在通用算子计数覆盖范围
   目录、命名、保留数量和触发步数仍由本项目配置拥有。
 - `SpeechToSpeechModule` 把 `model.checkpoint_contract` 保存为必需的
   `speech_to_speech_model_contract`。payload 使用固定 grammar，包含 canonical components 与其
-  SHA-256；加载时先校验 payload 结构和摘要完整性，再逐路径比较当前 model contract。v3 checkpoint
-  缺少该字段时直接失败；旧的独立 `speech_to_speech_audio_sequence_layout` 字段不能替代完整契约，
-  也不做迁移。
+  SHA-256；加载时先校验 payload 结构和摘要完整性，再逐路径比较当前 model contract。v4 checkpoint
+  缺少该字段时直接失败；v3 及更早 schema 在读取 contract 前即明确拒绝，旧的独立
+  `speech_to_speech_audio_sequence_layout` 字段不能替代完整契约，也不做迁移。
 - PEFT 继续使用独立的 `speech_to_speech_peft` / `peft-lora-v2` metadata，不并入 model contract。
   payload 来自完整 `LoraConfig.to_dict()` 与同版本官方默认值，不绑定 `peft_version`。共同字段严格
   比较；版本间新增或缺失字段只有保持官方默认值时才兼容。只有当前未启用 LoRA 时，才允许加载缺少

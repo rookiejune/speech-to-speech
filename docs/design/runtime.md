@@ -6,13 +6,17 @@
 
 `Runtime` 是 frozen dataclass，重资源通过 `cached_property` 惰性加载：
 
-- `codec_name`：dataset 与 runtime 共用的唯一 codec identity；`audio_view` 由它转换。
-- `text_tokenizer` / `audio_tokenizer`：Qwen-compatible text tokenizer 与 Native/CodecBPE audio
-  tokenizer。
-- `codec`：经本地 capability Protocol adapter 暴露当前 backend 实际拥有的 encode/decode、
-  codebook table 或 acoustic feature 能力，不为缺失能力提供占位属性。
+- `input_audio_tokenizer_name` / `output_audio_tokenizer_name` / `output_audio_detokenizer_name`：
+  source encoder、target encoder 与 waveform decoder 的 backend preset identity；
+  `input_audio_view` / `output_audio_view` 及 codebook metadata 由对应 preset 的静态 spec 推导。
+- `text_tokenizer` / `input_audio_tokenizer` / `output_audio_tokenizer`：Qwen-compatible text
+  tokenizer 与两侧 audio tokenizer；耦合配置中两侧 audio tokenizer 共享同一实例。
+- audio backend：按 capability 暴露 `tokenize()` 和/或 `detokenize()`；同一 resolved preset
+  同时被 input tokenizer、output tokenizer、output detokenizer 引用时只构造一个实例，不为缺失能力
+  提供占位属性。
 - `semantic_codec`：semantic token generation 的 waveform decoder。配置
-  `acoustic_generator_artifact` 时惰性加载 `semantic-acoustic-generator` artifact，并复用同一个
+  `runtime.audio_output.acoustic_generator_artifact` 时惰性加载 `semantic-acoustic-generator`
+  artifact，并复用同一个
   structured backend；FrameCodec 不把 semantic-only codes 传给自身 `decode()`。
 - `acoustic_generator_artifact_sha256`：acoustic generator artifact 的内容身份。单文件按字节计算
   SHA-256；目录按排序后的相对文件路径和内容计算，不包含机器相关的 artifact 根路径或文件元数据。
@@ -23,20 +27,84 @@
   semantic-acoustic codec 补齐。Runtime 构造时按该字段派生内部 route，并沿同一运行实例传给
   DataModule、model 与 generation。
 - `backbone`：Qwen-compatible HF causal LM。
-- `layout`：text/audio global token blocks。
-- `pad/bos/eos_token_id` 与 `boa/eoa_token_id`。
+- `layout`：text/audio global token blocks；text block 由 lexical tokenizer rows 加固定 control rows 组成。
+- `input_audio_token_spec` / `output_audio_token_spec`：schema identity、selector 文本、codec tokenizer
+  contract 与可执行的 codec-private marker/range/order grammar；当前每侧 registry 只有一个默认 schema，
+  但序列仍显式携带 selector。
+- `pad/bos/eos_token_id`、`control_token_ids` / `control_token_id()`，以及 audio
+  `boa/eoa/mask/schema_token_id`。
 - `codec_audio_range`、`audio_generation_allowed_ids` 与 modality generation IDs。
 - `flow_matching`：训练 sample 与 generation ODE sampler 的共享 runtime。
 
-`runtime.Config.codec` 是 codec identity 的唯一配置源；`audio_view` 由字符串枚举转换，未知 codec
-显式报错。Hydra runtime preset 直接映射完整 `runtime.Config`，同时选择相互兼容的 codec、FrameCodec
-audio sequence layout、audio tokenizer 与 backbone snapshot。`flattened` 直接把完整
+`runtime.Config.audio_input` 与 `runtime.Config.audio_output` 是两侧 audio 配置源。
+`tokenizer` 选择 waveform→codes capability（例如 `glm4` / `bicodec`），output 的
+`detokenizer` 另选 codes→waveform capability；`bpe` 只是 model-facing token sequence 使用的可选
+CodecBPE artifact 路径。`AudioView`、vocabulary、frame rate 与 codebook layout 都由 preset spec
+唯一推导，不再是 canonical 配置字段；
+legacy `view` 只作校验别名，与推导值不同时直接报错。Hydra runtime preset 直接映射
+完整 `runtime.Config`，同时选择相互兼容的 output backend、FrameCodec audio sequence
+layout、audio tokenization 与 backbone snapshot。`flattened` 直接把完整
 FrameCodec codebooks 编入 token 序列，因此 frame-code codec 不能同时配置 BPE audio tokenizer；
 BiCodec 是例外，它只把 semantic 子流交给 BPE，再与 global slots 组合。structured 顺序固定为
 global-first / semantic-last。ODE method、NFE 与 step 数直接使用 `flow_method`、`flow_nfe` 与
 `flow_num_steps`，不再通过独立 sampler 组转换；`Config` 在构造时校验 method、正 NFE 和至少
 2 个 steps，因此 token/RVQ composition 也不会静默携带无效 runtime。model composition 由
 `model/acoustic` 选择。
+
+### 解耦输入与输出 audio tokenizer
+
+默认 `runtime.audio_input=null`，输入与输出共享 `audio` token block、tokenizer、
+BOA/EOA 和 embedding。`runtime.audio_output.tokenizer` 必填，`runtime.audio_input.tokenizer`
+一旦配置就显式描述 source audio；`runtime.audio_output.detokenizer=null` 明确表示只产出 codes，
+不提供 waveform decode。共享分三层判定：
+
+- input/output tokenizer 与 output detokenizer 解析到同一 preset + revision/artifact 时，复用同一
+  backend 实例和同一 prepared-code view；detokenizer 因而参与 resource tying。
+- 只有 code schema 与 `bpe` identity 都相同时才共享 model-facing audio tokenizer、token block
+  和 embedding；同 backend 但 `bpe` 不同时仍是独立 token space/embedding，但不重复加载
+  backend 或 prepared store。
+- detokenizer 不直接决定 LLM embedding/head tying；它只消费 output tokenizer 恢复出的 raw
+  codes，并要求两侧 code spec 兼容。
+
+`runtime.audio_output` 始终描述 target audio，`audio_sequence_layout` 仍保持在 root。
+GLM-4 source 与 BiCodec target 的 canonical 配置为：
+
+```yaml
+runtime:
+  audio_input:
+    tokenizer: glm4
+    bpe: null
+  audio_output:
+    tokenizer: bicodec
+    detokenizer: bicodec
+    bpe: null             # 可选 semantic CodecBPE artifact 路径
+    acoustic_generator_artifact: null
+audio_sequence_layout: flattened
+```
+
+旧的 `runtime.codec` / `runtime.input_audio` / `runtime.audio_tokenizer` /
+`runtime.acoustic_generator_artifact`，以及两侧的 `codec` / `view` / `vocab_size` /
+`frame_rate` 仅作为边界迁移或静态 spec 一致性校验字段。
+external mapping 入口会迁移到上述
+canonical mapping 并发出 deprecation warning。新旧字段同时出现且值冲突时直接报错，不猜测优先级。
+
+解耦 layout 固定为 `text | audio_input | audio`：`audio_input` 拥有独立 BOA/EOA/schema selector 和 embedding，
+只用于 source lookup；`audio` 仍是唯一输出 head、loss 和 generation candidate space，并继续拥有
+输出 BOA/EOA/MASK/schema selector。dense logits 的 `audio_input` slice 永远为 `-inf`；selected logits 开启
+validation 时显式拒绝 input-only ID，generation allowed IDs 从不包含该 block。
+`input_modalities={AUDIO}` 只是粗粒度性能提示，实际 embedding 始终按 global
+ID block 路由，因此 KV-cache continuation 中新生成的 BiCodec ID 不会误进 GLM-4 embedding。
+
+`audio_input.bpe=null` 时使用 backend native tokenization；包括 GLM-4 在内的 vocabulary、frame
+rate 与 codebook metadata 都来自 preset 静态 spec，配置不重复填写。若当前安装没有 GLM-4
+online tokenizer loader，训练仍可消费按 `AudioView.GLM4` 准备的 store 或外部 producer 持续发布的
+codes，但 waveform fallback 会明确失败。训练的显式 waveform fallback 对具有 tokenize capability
+的 input backend 调用 input tokenizer，绝不用 output backend 伪造 input codes；在线 chat 遵循相同
+规则。BiCodec input 始终保留 global +
+semantic 完整序列；独立 BPE 只改变 semantic 子流的 token space，不丢弃 global units。
+checkpoint contract 分别记录 input/output tokenizer backend、output detokenizer、audio schema、selector、
+payload range、codec-private grammar、blocks、special IDs 和 embedding ownership；
+旧 schema 不做静默迁移。
 
 `backbone_initialization` 显式选择 backbone 权重来源：`pretrained` 使用
 `AutoModel.from_pretrained()` 直接加载不含 LM head 的 backbone body；`random` 仍从 `backbone`
@@ -63,10 +131,11 @@ hidden tensor，支持 `last_hidden_state` 或单层序列索引形如 `last_hid
 `TokenModelRuntime` capability；消费模块不重复声明相同属性。`DataRuntime` 只公开 parser、
 sample builder 和 batch padding 所需资源。
 
-`anytrain.codec` 只提供两种 backend capability：`FrameCodec` 和
-`SemanticAcousticCodec`。S2S 的 `Codec` 只表示完整 frame-code 路径，不能再继承
-semantic-only decoder。`FULL_CODEC_SEQUENCE` 对 `FrameCodec` 展开全部 codebooks，生成后调用
-完整 `decode(codes)`；配置 `acoustic_generator_artifact` 时，S2S 只处理
+`anytrain.codec` 以 `AudioTokenizer` 与 `AudioDetokenizer` 作为正交 capability；同时实现两者的
+backend 也是 `AudioCodec`。现有 `FrameCodec`、`SemanticAcousticCodec` 与
+`SemanticGlobalCodec` 继续作为 code layout adapter/兼容 API，不再要求每个 preset 都同时拥有
+tokenize 与 detokenize。`FULL_CODEC_SEQUENCE` 对 frame-code tokenizer 展开全部 codebooks，生成后
+交给配置的 detokenizer；配置 `runtime.audio_output.acoustic_generator_artifact` 时，S2S 只处理
 `SemanticAcousticCodec` 的 semantic units，waveform 由
 `semantic_acoustic_generator.runtime.GeneratorRuntime` 负责。semantic-only decoder 不放回
 anytrain，也不通过普通 codec 的 `decode()` 伪装。
@@ -81,7 +150,8 @@ codebook sizes 必须是非空正整数 tuple，feature dim 必须是正整数�
 无效时直接暴露错误。只消费采样率或 frame-code codebook metadata 的调用点分别使用
 `codec_sample_rate()` 与 `frame_codebook_sizes()`，不要求无关的完整 encode/decode 能力。
 
-LongCat 的 `DECOUPLED + model/acoustic=none` 必须配置 `acoustic_generator_artifact`；没有 artifact
+LongCat 的 `DECOUPLED + model/acoustic=none` 必须配置
+`runtime.audio_output.acoustic_generator_artifact`；没有 artifact
 时应选择 `FULL_CODEC_SEQUENCE`。`DECOUPLED + Flow/RVQ` 是现有 S2S 内部 acoustic-feature
 训练路径，仍由 `Codec.decode_features()` 消费生成的 features；它不代表 anytrain 提供
 semantic-only decoder。
@@ -89,18 +159,27 @@ semantic-only decoder。
 S2S 使用 `AudioCodes(semantic_codes, global_codes, acoustic_codes)` 作为内部设计语言。
 `SemanticGlobalCodes` 只映射到 semantic/global，`SemanticAcousticCodes` 只映射到
 semantic/frame-aligned acoustic。BiCodec 只使用一套 `flattened`
-self-describing sequence：
+self-describing sequence。所有 codec token 序列统一采用两层协议：
+
+```text
+BOA schema_selector codec-private-markers-and-payload EOA
+```
+
+BOA/selector/EOA 由 Runtime 拥有；中间 grammar 由所选 `AudioTokenSpec` 拥有。四部分都是模型 token，
+response 中全部参与监督；grammar 只提供合法候选 mask 和完整性校验，不替模型写 token。
+BiCodec 的 codec-private 序列为：
 fixed-length global payload 采用 slot-major 布局并排在 semantic payload 之前。response 以
 `<begin_of_global>` 开局时 LLM 生成 global 与 semantic；以 `<begin_of_semantic>` 开局时只生成
 semantic 并复用 prompt global。decode 从 prompt/response marker 解析唯一的 global owner，并要求
 两侧恰好一方拥有 global；不再使用独立 `semantic` route、`audio_context` side channel 或可切换的
-`audio_route`。markers 与 end marker 属于
-内部 grammar，强制位置不作为可训练 payload。LongCat 等非 BiCodec semantic-only 路径仍交给 side
+`audio_route`。BiCodec 不再自造内部 end marker；外层 EOA 是唯一结束符。global/semantic markers
+属于 codec-private grammar 并与 payload 一样由模型生成和监督。LongCat 等非 BiCodec semantic-only 路径仍交给 side
 module 或 semantic-acoustic codec。
 
-BiCodec 配置 `audio_tokenizer` 时，该 artifact 只作为 semantic 子 tokenizer：raw semantic IDs 先经
+BiCodec 配置 `runtime.audio_output.bpe` 时，该 artifact 只作为 semantic 子 tokenizer：raw
+semantic IDs 先经
 `CodecBPE`，然后再进入 `BiCodecAudioTokenizer` 的 structured packing；global IDs 不做 BPE。
-外层 stream order、markers 和终止规则记录为 `bicodec-v2`；contract 只使用 `global_*` keys，
+codec-private stream order 与 markers 记录为 `bicodec-v3`；contract 只使用 `global_*` keys，
 不读取或生成旧 `acoustic_*` BiCodec contract。native/BPE 差异
 记录在嵌套的 `semantic_tokenizer` contract（`native-v1` 或 `codec-bpe-v1`）及 checkpoint hash 中。
 
@@ -165,7 +244,11 @@ HF `apply_chat_template` 只负责对话字符串排版；`pad_token_id` / `eos_
 尝试 `special_tokens_map` 中对应字符串并要求映射为单 token），缺属性时显式报错，不再硬编码
 整表 Qwen special tokens。Qwen3 stock tokenizer 已提供 `pad=<|endoftext|>`、
 `eos=<|im_end|>`，但 `bos` 为 `None`；加载时若 vocab 含 `<|im_start|>` 则绑定为 `bos_token`，
-与旧 chat 边界一致。`boa` / `eoa` / `mask` 属于 audio layout，不在 text special tokens 里。
+与旧 chat 边界一致。Runtime 不调用 tokenizer `add_special_tokens()`：它在 lexical vocabulary 尾部固定
+分配 `<asr>`、`</asr>`、`<mt>`、`</mt>`、`<lang_en>`、`<lang_zh>` 六个 runtime-owned
+control IDs，供 task program framing 使用；这些 ID 不得交给 HF/Kimi tokenizer decode。
+`boa` / `eoa` / `mask` / schema selector 属于 audio layout，不在 text special tokens 里。checkpoint 同时绑定 lexical
+tokenizer 大小、control token→ID 映射和 model 的独立 control embedding。
 
 ## 资源边界
 
@@ -174,7 +257,8 @@ HF `apply_chat_template` 只负责对话字符串排版；`pad_token_id` / `eos_
   `runtime.Config.dtype` 只控制 backbone 加载精度。在线 waveform fallback 的 codec encode 是独立
   FP32 预处理边界，由 materializer 关闭 Trainer autocast，不把 backbone BF16 传播给 codec。
 - backbone snapshot 同时定义 tokenizer 与模型 config；初始化方式只决定是否读取其中的模型权重。
-- layout、backbone/tokenizer vocabulary 与 codec/audio-tokenizer vocabulary 属于同一 snapshot。
+- layout、backbone/tokenizer lexical vocabulary、固定 control vocabulary 与 codec/audio-tokenizer
+  vocabulary 属于同一 snapshot。
 - Runtime 不是 `nn.Module`；optimizer/checkpoint ownership 只由 model 属性决定。
 - LongCat 直接使用 anytrain 的 semantic-acoustic backend；`UnifiedCodec` 只保留给没有独立
   semantic/acoustic capability 的 UniCodec。消费者只依赖所需的最窄 codec capability。

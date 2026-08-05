@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from _config_helpers import *
+from speech_to_speech.runtime import migrate_config_fields
 
 
 @patch.dict(
@@ -15,19 +16,112 @@ from _config_helpers import *
     },
 )
 class ConfigCompositionTest(ConfigTestCase):
-    def test_runtime_input_audio_is_a_regular_override(self):
+    def test_runtime_presets_expose_only_canonical_audio_fields(self):
+        for preset in (
+            "bicodec",
+            "glm4_bicodec",
+            "kimi_audio",
+            "longcat",
+            "longcat_native",
+            "qwen2_5_omni_text",
+            "stable_codec",
+            "unicodec",
+        ):
+            with self.subTest(preset=preset):
+                raw = _compose("overfit", f"runtime={preset}")
+                self.assertNotIn("codec", raw.runtime)
+                self.assertNotIn("audio_tokenizer", raw.runtime)
+                self.assertNotIn("input_audio", raw.runtime)
+                self.assertNotIn("vocab_size", raw.runtime.audio_output)
+                self.assertNotIn("frame_rate", raw.runtime.audio_output)
+                self.assertNotIn("view", raw.runtime.audio_output)
+                self.assertIn("detokenizer", raw.runtime.audio_output)
+
+        glm4 = _compose("overfit", "runtime=glm4_bicodec")
+        self.assertEqual(set(glm4.runtime.audio_input), {"tokenizer", "bpe"})
+
+    def test_runtime_audio_sides_are_regular_overrides(self):
+        config = _overfit(
+            "runtime=glm4_bicodec",
+            "model/acoustic=none",
+            "audio_sequence_layout=flattened",
+        )
+
+        self.assertIsNotNone(config.runtime.audio_input)
+        if config.runtime.audio_input is None:
+            self.fail("configured input audio must be independent")
+        self.assertEqual(config.runtime.audio_input.tokenizer, "glm4")
+        self.assertIsNone(config.runtime.audio_input.bpe)
+        self.assertEqual(config.runtime.audio_output.tokenizer, "bicodec")
+        self.assertEqual(config.runtime.audio_output.detokenizer, "bicodec")
+        self.assertIsNone(config.runtime.audio_output.bpe)
+        self.assertEqual(config.datamodule.codec, "bicodec")
+
+    def test_output_detokenizer_null_is_explicit_codes_only(self):
         config = _overfit(
             "runtime=bicodec",
             "model/acoustic=none",
             "audio_sequence_layout=flattened",
-            "runtime.input_audio.codec=glm4",
-            "runtime.input_audio.vocab_size=16384",
-            "runtime.input_audio.frame_rate=12.5",
+            "runtime.audio_output.detokenizer=null",
         )
 
-        self.assertEqual(config.runtime.input_audio.codec, "glm4")
-        self.assertEqual(config.runtime.input_audio.vocab_size, 16384)
-        self.assertEqual(config.runtime.input_audio.frame_rate, 12.5)
+        self.assertEqual(config.runtime.audio_output.tokenizer, "bicodec")
+        self.assertIsNone(config.runtime.audio_output.detokenizer)
+
+    def test_legacy_runtime_audio_overrides_migrate_to_canonical_sides(self):
+        fields = {
+            "codec": "bicodec",
+            "input_audio": {
+                "codec": "glm4",
+                "vocab_size": 16_384,
+                "frame_rate": 12.5,
+            },
+            "audio_tokenizer": "/tmp/bicodec-tokenizer",
+        }
+        with self.assertWarns(FutureWarning):
+            migrate_config_fields(fields)
+
+        self.assertEqual(
+            fields,
+            {
+                "audio_input": {
+                    "tokenizer": "glm4",
+                    "vocab_size": 16_384,
+                    "frame_rate": 12.5,
+                },
+                "audio_output": {
+                    "tokenizer": "bicodec",
+                    "detokenizer": "bicodec",
+                    "bpe": "/tmp/bicodec-tokenizer",
+                },
+            },
+        )
+
+    def test_legacy_null_audio_tokenizer_is_an_explicit_override(self):
+        fields = {"codec": "longcat", "audio_tokenizer": None}
+        with self.assertWarns(FutureWarning):
+            migrate_config_fields(fields)
+
+        self.assertEqual(
+            fields,
+            {
+                "audio_output": {
+                    "tokenizer": "longcat",
+                    "detokenizer": "longcat",
+                    "bpe": None,
+                }
+            },
+        )
+
+    def test_mixed_runtime_audio_fields_reject_conflicts(self):
+        with self.assertRaisesRegex(ValueError, "conflicting audio_output.tokenizer"):
+            _overfit(
+                "runtime=bicodec",
+                "model/acoustic=none",
+                "audio_sequence_layout=flattened",
+                "+runtime.codec=longcat",
+                "runtime.audio_output.tokenizer=bicodec",
+            )
 
     def test_roots_parse_to_src_aligned_configs(self):
         flow = _overfit()
@@ -48,8 +142,8 @@ class ConfigCompositionTest(ConfigTestCase):
         self.assertIsInstance(flow.model.ctc, CTCDecoderRoutesConfig)
         self.assertIsInstance(flow.pl_module.ctc, CTCConfig)
         self.assertIsInstance(flow.model.acoustic.decoder, DecoderConfig)
-        self.assertEqual(flow.runtime.codec, "longcat")
-        self.assertEqual(token.runtime.codec, "unicodec")
+        self.assertEqual(flow.runtime.audio_output.tokenizer, "longcat")
+        self.assertEqual(token.runtime.audio_output.tokenizer, "unicodec")
         self.assertIs(flow.model.semantic_audio_adapter, AdapterType.LINEAR)
         self.assertFalse(flow.callbacks.performance.enabled)
 
@@ -68,7 +162,7 @@ class ConfigCompositionTest(ConfigTestCase):
 
         self.assertIsInstance(config, OverfitFlowConfig)
         self.assertIsInstance(config.runtime, RuntimeConfig)
-        self.assertEqual(config.runtime.codec, "longcat")
+        self.assertEqual(config.runtime.audio_output.tokenizer, "longcat")
         self.assertEqual(config.runtime.backbone, "Qwen/Qwen3-0.6B")
         self.assertEqual(config.runtime.device, "cpu")
         self.assertIsInstance(config.model.toy, ToyConfig)
@@ -99,7 +193,7 @@ class ConfigCompositionTest(ConfigTestCase):
         )
 
         self.assertIs(config.runtime.backbone_type, BackboneType.QWEN2_5_OMNI_TEXT)
-        self.assertEqual(config.runtime.codec, "bicodec")
+        self.assertEqual(config.runtime.audio_output.tokenizer, "bicodec")
         self.assertEqual(config.runtime.backbone, "Qwen/Qwen2.5-Omni-7B")
         self.assertEqual(config.runtime.backbone_module, "")
         self.assertEqual(config.runtime.backbone_body, "base_model")
@@ -112,7 +206,7 @@ class ConfigCompositionTest(ConfigTestCase):
         )
 
         self.assertIs(config.runtime.backbone_type, BackboneType.KIMI_AUDIO)
-        self.assertEqual(config.runtime.codec, "bicodec")
+        self.assertEqual(config.runtime.audio_output.tokenizer, "bicodec")
         self.assertEqual(config.runtime.backbone, "moonshotai/Kimi-Audio-7B-Instruct")
         self.assertTrue(config.runtime.backbone_trust_remote_code)
         self.assertIn("messages", config.runtime.backbone_chat_template)
@@ -156,7 +250,7 @@ class ConfigCompositionTest(ConfigTestCase):
         config = overfit(_compose("overfit", "experiment=overfit/longcat_flattened_smoke"))
 
         self.assertIsInstance(config, OverfitTokenConfig)
-        self.assertEqual(config.runtime.codec, "longcat")
+        self.assertEqual(config.runtime.audio_output.tokenizer, "longcat")
         self.assertIs(config.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
         self.assertEqual(config.model.acoustic.type, AcousticType.NONE.value)
         self.assertIsInstance(config.model.toy, ToyConfig)
@@ -179,9 +273,9 @@ class ConfigCompositionTest(ConfigTestCase):
             )
 
         self.assertIsInstance(config, OverfitTokenConfig)
-        self.assertEqual(config.runtime.codec, "longcat")
+        self.assertEqual(config.runtime.audio_output.tokenizer, "longcat")
         self.assertEqual(
-            config.runtime.acoustic_generator_artifact,
+            config.runtime.audio_output.acoustic_generator_artifact,
             "/tmp/semantic-codec",
         )
         self.assertEqual(config.runtime.device, "cpu")
@@ -195,7 +289,7 @@ class ConfigCompositionTest(ConfigTestCase):
 
         for config in (reuse, generate):
             self.assertIsInstance(config, OverfitTokenConfig)
-            self.assertEqual(config.runtime.codec, "bicodec")
+            self.assertEqual(config.runtime.audio_output.tokenizer, "bicodec")
             self.assertIs(
                 config.datamodule.dataset.name,
                 DatasetName.QWEN_TTS_SPEAKER,
@@ -211,8 +305,8 @@ class ConfigCompositionTest(ConfigTestCase):
         self.assertEqual(generate.run_name, "bicodec-generate-global")
         self.assertIn("bicodec-input-global-smoke", reuse.output_dir)
         self.assertIn("bicodec-generate-global-smoke", generate.output_dir)
-        self.assertIsNone(reuse.runtime.acoustic_generator_artifact)
-        self.assertIsNone(generate.runtime.acoustic_generator_artifact)
+        self.assertIsNone(reuse.runtime.audio_output.acoustic_generator_artifact)
+        self.assertIsNone(generate.runtime.audio_output.acoustic_generator_artifact)
 
     def test_root_schema_rejects_unknown_and_foreign_fields(self):
         cases = [
@@ -269,8 +363,8 @@ class ConfigCompositionTest(ConfigTestCase):
                 config = _overfit(f"experiment={experiment}")
 
                 self.assertIsInstance(config, OverfitTokenConfig)
-                self.assertEqual(config.runtime.codec, "unicodec")
-                self.assertIsNone(config.runtime.audio_tokenizer)
+                self.assertEqual(config.runtime.audio_output.tokenizer, "unicodec")
+                self.assertIsNone(config.runtime.audio_output.bpe)
                 self.assertEqual(config.train.max_steps, max_steps)
                 self.assertEqual(config.trainer.devices, devices)
                 self.assertEqual(config.trainer.strategy, strategy)
@@ -327,6 +421,14 @@ class ConfigCompositionTest(ConfigTestCase):
 
         self.assertTrue(loader.is_text)
         self.assertEqual(loader.tasks, {Task.TEXT_AR: 1.0})
+
+    def test_loader_prediction_override_is_removed(self):
+        with self.assertRaisesRegex(TypeError, "unexpected keyword argument"):
+            LoaderConfig(
+                weight=1.0,
+                task_weights={"s2st": 1.0},
+                prediction="parallel",  # type: ignore[call-arg]
+            )
 
     def test_pretraining_framing_rejects_non_ar_tasks(self):
         with self.assertRaisesRegex(ValueError, "only supports AUDIO_AR and TEXT_AR"):

@@ -12,7 +12,12 @@ from .._tensor import is_signed_integer_dtype
 from ..audio import AudioCodes
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..runtime.protocol import GenerationRuntime
-from ..task import PredictionModality, Task
+from ..task import (
+    PredictionModality,
+    ResponseSpec,
+    Task,
+    resolve_response,
+)
 from ..task.templates import format_instruction, select_template
 from ..task import Request
 
@@ -29,14 +34,13 @@ def prepare_bicodec_tts_request(
     """Build a BiCodec request whose token sequence owns global generation.
 
     When ``reference_codes`` is present, its global stream is serialized into
-    the prompt and generation starts from the semantic marker. Without a
-    reference, generation starts after BOA and the model produces both global
-    and semantic streams.
+    the prompt. The generated response always predicts BOA, the schema selector,
+    codec-private stream markers, payload, and EOA.
 
     The helper intentionally accepts pre-encoded codes only.  Waveform encoding
     belongs to the runtime/codec boundary and should happen before this API.
     """
-    _validate_tts_arguments(text, language, task)
+    response = _validate_tts_arguments(text, language, task)
     tokenizer = _validate_bicodec_tokenizer(runtime)
     text_ids = _text_prompt_ids(text, language, task, runtime, messages=messages)
     values = [text_ids]
@@ -50,20 +54,25 @@ def prepare_bicodec_tts_request(
         values.extend(
             (
                 text_ids.new_tensor([runtime.boa_token_id]),
+                text_ids.new_tensor([runtime.audio_schema_token_id]),
                 global_audio_ids,
                 text_ids.new_tensor([runtime.eoa_token_id]),
             )
         )
-    values.append(text_ids.new_tensor([runtime.boa_token_id]))
     prompt_ids = torch.cat(values)
     return Request(
         prompt_ids=prompt_ids,
         task=task,
         audio_input_positions=None,
+        trace=response.name,
     )
 
 
-def _validate_tts_arguments(text: str, language: str, task: Task) -> None:
+def _validate_tts_arguments(
+    text: str,
+    language: str,
+    task: Task,
+) -> ResponseSpec:
     if not isinstance(text, str):
         raise TypeError("BiCodec TTS text must be a string.")
     if not text.strip():
@@ -74,11 +83,13 @@ def _validate_tts_arguments(text: str, language: str, task: Task) -> None:
         raise ValueError("BiCodec TTS language must not be empty.")
     if not isinstance(task, Task):
         raise TypeError("BiCodec TTS task must be a Task.")
+    response = resolve_response(task)
     if (
         task.source_modality is not Modality.TEXT
-        or task.prediction_modality is not PredictionModality.AUDIO
+        or response.prediction is not PredictionModality.AUDIO
     ):
         raise ValueError("BiCodec requests require a text-to-audio task.")
+    return response
 
 
 def _validate_bicodec_tokenizer(runtime: GenerationRuntime) -> BiCodecAudioTokenizer:

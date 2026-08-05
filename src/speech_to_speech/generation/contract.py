@@ -18,9 +18,9 @@ from ..task import PredictionModality
 
 class AudioOutput(TypedDict):
     features: Tensor | None
-    codes: AudioCodes | None
-    waveform: Tensor
-    sample_rate: int
+    codes: AudioCodes | Tensor | None
+    waveform: Tensor | None
+    sample_rate: int | None
 
 
 class Result(TypedDict):

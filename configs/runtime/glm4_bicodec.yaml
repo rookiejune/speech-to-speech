@@ -1,14 +1,17 @@
 backbone: Qwen/Qwen3-0.6B
 backbone_initialization: pretrained
-audio_input: null
+audio_input:
+  tokenizer: glm4
+  bpe: null
 audio_output:
-  tokenizer: longcat
-  detokenizer: longcat
+  tokenizer: bicodec
+  detokenizer: bicodec
   bpe: null
   acoustic_generator_artifact: null
 device: cuda
 dtype: bfloat16
 attn_implementation: flash_attention_2
+gradient_checkpointing: true
 flow_method: midpoint
 flow_nfe: 20
 flow_num_steps: 10

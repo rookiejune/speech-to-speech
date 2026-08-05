@@ -38,24 +38,20 @@ loader_plan:
       weight: 7.0
       task_weights:
         text_ar: 1.0
-      prediction: text
       ar_framing: pretraining
     audio_ar:
       weight: 1.0
       task_weights:
         audio_ar: 1.0
-      prediction: audio
       ar_framing: pretraining
     asr:
       weight: 1.0
       task_weights:
         asr: 1.0
-      prediction: text
     tts:
       weight: 1.0
       task_weights:
         tts: 1.0
-      prediction: audio
   accumulate_grad_batches: 10
   step_mode: token_weighted
   fuse_loaders_per_step: false

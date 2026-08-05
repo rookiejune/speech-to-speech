@@ -46,8 +46,9 @@ from speech_to_speech.generation import (
     decode_generated_codes,
 )
 from speech_to_speech.runtime import AudioSequenceLayout
+from speech_to_speech.runtime.audio_schema import AudioTokenSpec
 from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
-from speech_to_speech.task import Task
+from speech_to_speech.task import ControlToken, Task
 
 
 class _TextTokenizer:
@@ -177,22 +178,41 @@ class _Runtime:
         self.text_tokenizer = _TextTokenizer()
         self.audio_tokenizer = NativeAudioTokenizer(vocab_size=8)
         self.input_audio_tokenizer = self.audio_tokenizer
+        spec = AudioTokenSpec.create(
+            codec_name=self.codec_name,
+            sequence_layout=self.audio_sequence_layout.value,
+            tokenizer=self.audio_tokenizer,
+        )
+        self.input_audio_token_spec = spec
+        self.audio_token_spec = spec
+        self.output_audio_token_spec = spec
         self.codec = _Codec()
-        self.layout = Layout(text=(0, 32), audio=(32, 43))
+        self.lexical_text_vocab_size = len(self.text_tokenizer)
+        text_end = self.lexical_text_vocab_size + len(ControlToken)
+        self.control_token_ids = tuple(
+            range(self.lexical_text_vocab_size, text_end)
+        )
+        self.layout = Layout(text=(0, text_end), audio=(text_end, text_end + 12))
         self.flow_matching = _FlowRuntime()
         self.pad_token_id = 0
         self.eos_token_id = 10
-        self.boa_token_id = 40
-        self.eoa_token_id = 41
-        self.mask_token_id = 42
+        self.boa_token_id = text_end + self.audio_tokenizer.vocab_size
+        self.eoa_token_id = self.boa_token_id + 1
+        self.mask_token_id = self.boa_token_id + 2
+        self.audio_schema_token_id = self.boa_token_id + 3
         self.input_audio_block_name = "audio"
         self.input_boa_token_id = self.boa_token_id
         self.input_eoa_token_id = self.eoa_token_id
+        self.input_audio_schema_token_id = self.audio_schema_token_id
         self.input_codec_audio_range = self.codec_audio_range
 
     @property
     def codec_audio_range(self) -> tuple[int, int]:
-        return 32, 40
+        start, _ = self.layout.blocks["audio"]
+        return start, self.boa_token_id
+
+    def control_token_id(self, token: ControlToken) -> int:
+        return self.control_token_ids[list(ControlToken).index(token)]
 
 
 class FakeClosureTest(unittest.TestCase):
@@ -348,14 +368,20 @@ class FakeClosureTest(unittest.TestCase):
         ).eval()
         self.assertIsInstance(model.acoustic_decoder, SharedRVQDecoder)
 
-        def audio_logits(hidden_states: Tensor, local_ids=None) -> Tensor:
-            self.assertIsNone(local_ids)
-            start, end = rt.layout.blocks["audio"]
+        def audio_logits(
+            hidden_states: Tensor,
+            local_ids: Tensor | None = None,
+        ) -> Tensor:
+            self.assertIsNotNone(local_ids)
+            if local_ids is None:
+                self.fail("selected audio logits require local candidate ids")
             logits = hidden_states.new_full(
-                (*hidden_states.shape[:-1], end - start),
+                (*hidden_states.shape[:-1], local_ids.numel()),
                 float("-inf"),
             )
-            logits[..., 0] = 0
+            payload = local_ids.eq(0).nonzero(as_tuple=False)
+            self.assertEqual(payload.numel(), 1)
+            logits[..., int(payload[0, 0])] = 0
             return logits
 
         with patch.object(
@@ -370,8 +396,12 @@ class FakeClosureTest(unittest.TestCase):
                 use_cache=False,
             )
 
+        audio_start, _ = rt.codec_audio_range
         self.assertTrue(
-            torch.equal(generation["sequence"], torch.tensor([[1, 2, 32, 32]]))
+            torch.equal(
+                generation["sequence"],
+                torch.tensor([[1, 2, audio_start, audio_start]]),
+            )
         )
         self.assertEqual(
             generation["features"].shape,
@@ -398,7 +428,11 @@ class FakeClosureTest(unittest.TestCase):
                     first = int(supervised[0])
                     last = int(supervised[-1])
                     self.assertEqual(
-                        int(batch.input_ids[0, first - 1]), rt.boa_token_id
+                        int(batch.input_ids[0, first]), rt.boa_token_id
+                    )
+                    self.assertEqual(
+                        int(batch.input_ids[0, first + 1]),
+                        rt.audio_schema_token_id,
                     )
                     self.assertEqual(int(batch.input_ids[0, last]), rt.eoa_token_id)
 
@@ -520,6 +554,7 @@ def _artifact(
             semantic_embedding_dim=4,
             acoustic_feature_dim=4,
             acoustic_codebook_sizes=(16,),
+            feature_codebooks=1,
             acoustic_layout=AcousticLayout.FRAME_ALIGNED,
             acoustic_unit_length=None,
             feature_mean=(0.0, 0.0, 0.0, 0.0),

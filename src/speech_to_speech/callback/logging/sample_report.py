@@ -18,6 +18,8 @@ from ...datamodule.diagnostic import SampleRef, SampleSplit, source_item, target
 from ...generation.contract import Result
 from ...generation.decode import decode_reference_codes
 from ...generation.evaluation import reference_audio
+from ...generation.request import response_of
+from ...task import ControlToken
 from ...runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ...runtime.backbone.contract import TextTokenizer
 from ...runtime.codec_contract import (
@@ -81,7 +83,19 @@ class LoggingRuntime(Protocol):
     def audio_view(self) -> types.AudioView: ...
 
     @property
+    def output_audio_view(self) -> types.AudioView: ...
+
+    @property
+    def input_audio_view(self) -> types.AudioView: ...
+
+    @property
     def codec(self) -> CodecBackend: ...
+
+    @cached_property
+    def input_audio_tokenizer_backend(self) -> CodecBackend: ...
+
+    @cached_property
+    def output_audio_detokenizer(self) -> CodecBackend | None: ...
 
     @property
     def audio_tokenizer(self) -> object: ...
@@ -95,6 +109,23 @@ class LoggingRuntime(Protocol):
     @cached_property
     def layout(self) -> Layout: ...
 
+    @cached_property
+    def lexical_text_vocab_size(self) -> int: ...
+
+    @cached_property
+    def control_token_ids(self) -> tuple[int, ...]: ...
+
+    @cached_property
+    def eos_token_id(self) -> int: ...
+
+    @cached_property
+    def boa_token_id(self) -> int: ...
+
+    @cached_property
+    def eoa_token_id(self) -> int: ...
+
+    def control_token_id(self, token: ControlToken) -> int: ...
+
 
 def build_request_metadata(
     dataset_index: int,
@@ -102,14 +133,15 @@ def build_request_metadata(
     request: Request,
 ) -> dict[str, Any]:
     task = request["task"]
+    response = response_of(request)
     reference_modality = (
-        task.target_modality
-        if task.target_modality is not None
-        else types.Modality.AUDIO
+        types.Modality.AUDIO if response.prediction.supervises_audio else types.Modality.TEXT
     )
     return {
         "dataset_index": dataset_index,
         "task": task.value,
+        "trace": response.name,
+        "prediction": response.prediction.value,
         "prompt_tokens": int(request["prompt_ids"].numel()),
         "source": modality_metadata(source_item(sample, task), task.source_modality),
         "reference": modality_metadata(target_item(sample, task), reference_modality),
@@ -145,9 +177,7 @@ def sample_log_record(
         response_ids = response_ids.detach().cpu()
         generation["response_ids"] = token_sequence(response_ids)
         decoded = (
-            generated_text
-            if generated_text is not None
-            else decode_text(datamodule, response_ids)
+            generated_text if generated_text is not None else decode_text(datamodule, response_ids)
         )
         if decoded is not None:
             generation["text"] = decoded
@@ -162,10 +192,9 @@ def sample_log_record(
         "prompt_tokens": request_metadata["prompt_tokens"],
         "prompt_ids": token_sequence(prompt_ids),
         "source": request_metadata["source"],
+        "trace": request_metadata["trace"],
+        "prediction": request_metadata["prediction"],
     }
-    prediction = request.get("prediction")
-    if prediction is not None:
-        chat_template["prediction"] = prediction.value
     labels: dict[str, Any] = {
         "token_labels": token_sequence(token_labels),
         "supervised_token_ids": token_sequence(supervised),
@@ -187,14 +216,7 @@ def sample_log_record(
 
 
 def prediction_modality(request: Request) -> PredictionModality:
-    prediction = request.get("prediction")
-    if prediction is None:
-        return request["task"].prediction_modality
-    if not isinstance(prediction, PredictionModality):
-        raise TypeError("generation request prediction must be a PredictionModality.")
-    return prediction
-
-
+    return response_of(request).prediction
 
 
 def decode_chat_template(
@@ -207,6 +229,8 @@ def decode_chat_template(
         runtime = datamodule.runtime
         tokenizer = runtime.text_tokenizer
         start, end = runtime.layout.block(types.Modality.TEXT.value)
+        lexical_end = start + runtime.lexical_text_vocab_size
+        control_tokens = dict(zip(runtime.control_token_ids, ControlToken))
     except (AttributeError, KeyError):
         return None
     pieces: list[str] = []
@@ -225,11 +249,20 @@ def decode_chat_template(
 
     for value in token_ids.detach().cpu().reshape(-1).tolist():
         token_id = int(value)
-        if start <= token_id < end:
+        control = control_tokens.get(token_id)
+        if control is not None:
+            flush_text()
+            if audio_span:
+                pieces.append("<audio>")
+                audio_span = False
+            pieces.append(control.value)
+        elif start <= token_id < lexical_end:
             if audio_span:
                 pieces.append("<audio>")
                 audio_span = False
             text_ids.append(token_id - start)
+        elif start <= token_id < end:
+            flush_text()
         else:
             flush_text()
             audio_span = True
@@ -246,13 +279,14 @@ def decode_text(datamodule: DataModule, token_ids: Tensor) -> str | None:
         runtime = datamodule.runtime
         tokenizer = runtime.text_tokenizer
         start, end = runtime.layout.block(types.Modality.TEXT.value)
+        lexical_end = start + runtime.lexical_text_vocab_size
     except (AttributeError, KeyError):
         return None
     ids = token_ids.detach().cpu()
     inside = (ids >= start) & (ids < end)
     if not bool(inside.all()):
         return None
-    local_ids = (ids - start).tolist()
+    local_ids = (ids[ids < lexical_end] - start).tolist()
     try:
         return tokenizer.decode(local_ids, skip_special_tokens=True)
     except TypeError:
@@ -367,17 +401,35 @@ def build_result_metadata(
     if audio is None:
         metadata["stopped_without_eos"] = reached_max
         return metadata
-    waveform = audio["waveform"]
     features = audio["features"]
+    codes = audio.get("codes")
+    waveform = audio["waveform"]
+    sample_rate = audio["sample_rate"]
+    if waveform is None:
+        if sample_rate is not None:
+            raise ValueError("codes-only audio output must not declare a sample rate.")
+        if codes is None:
+            raise ValueError("audio output requires waveform or codec codes.")
+        return {
+            **metadata,
+            "stopped_without_eoa": reached_max,
+            "codes": codes_metadata(codes),
+            "features": None if features is None else tensor_metadata(features),
+            "waveform": None,
+            "sample_rate": None,
+        }
+    if sample_rate is None:
+        raise ValueError("waveform audio output requires a sample rate.")
     return {
         **metadata,
         "stopped_without_eoa": reached_max,
-        "sample_rate": audio["sample_rate"],
+        "sample_rate": sample_rate,
         "waveform": tensor_metadata(waveform),
         "waveform_samples": int(waveform.size(-1)),
-        "duration_seconds": waveform.size(-1) / audio["sample_rate"],
+        "duration_seconds": waveform.size(-1) / sample_rate,
         "waveform_finite": finite(waveform),
         "features": None if features is None else tensor_metadata(features),
+        "codes": None if codes is None else codes_metadata(codes),
     }
 
 
@@ -397,15 +449,13 @@ def partial_bicodec_metadata(
     audio_mask = ids.ge(start) & ids.lt(end)
     local = ids[audio_mask] - start
     values = [int(value) for value in local.tolist()]
-    expected_global = tokenizer.global_unit_length * len(
-        tokenizer.global_codebook_sizes
-    )
+    expected_global = tokenizer.global_unit_length * len(tokenizer.global_codebook_sizes)
     semantic_start, semantic_end = tokenizer.semantic_token_range
     summary: dict[str, Any] = {
         "expected_global_tokens": expected_global,
         "global_tokens": 0,
         "semantic_tokens": 0,
-        "has_end_marker": tokenizer.end_token_id in values,
+        "has_eoa": bool(ids.eq(runtime.eoa_token_id).any()),
     }
 
     global_marker_index = first_index(values, tokenizer.global_token_id)
@@ -413,10 +463,7 @@ def partial_bicodec_metadata(
         payload_start = global_marker_index + 1
         payload_end = first_marker_index(
             values,
-            (
-                tokenizer.semantic_token_id,
-                tokenizer.end_token_id,
-            ),
+            (tokenizer.semantic_token_id,),
             start=payload_start,
         )
         if payload_end is None:
@@ -427,18 +474,9 @@ def partial_bicodec_metadata(
     semantic_marker_index = first_index(values, tokenizer.semantic_token_id)
     if semantic_marker_index is not None:
         payload_start = semantic_marker_index + 1
-        payload_end = first_marker_index(
-            values,
-            (tokenizer.end_token_id,),
-            start=payload_start,
-        )
-        if payload_end is None:
-            payload_end = len(values)
-        semantic_payload = values[payload_start:payload_end]
+        semantic_payload = values[payload_start:]
         summary["semantic_tokens"] = sum(
-            1
-            for token_id in semantic_payload
-            if semantic_start <= token_id < semantic_end
+            1 for token_id in semantic_payload if semantic_start <= token_id < semantic_end
         )
 
     return summary
@@ -477,14 +515,10 @@ def codes_metadata(
         semantic = codes.get("semantic")
         if view is types.AudioView.BICODEC:
             if set(codes) != {"semantic", "global"}:
-                raise ValueError(
-                    "anydataset BiCodec codes require exactly semantic and global."
-                )
+                raise ValueError("anydataset BiCodec codes require exactly semantic and global.")
             global_codes = codes.get("global")
             if not isinstance(semantic, Tensor) or not isinstance(global_codes, Tensor):
-                raise TypeError(
-                    "anydataset BiCodec codes require Tensor semantic/global fields."
-                )
+                raise TypeError("anydataset BiCodec codes require Tensor semantic/global fields.")
             acoustic = None
         else:
             if set(codes) != {"semantic", "acoustic"}:
@@ -493,26 +527,18 @@ def codes_metadata(
                 )
             acoustic = codes.get("acoustic")
             if not isinstance(semantic, Tensor) or not isinstance(acoustic, Tensor):
-                raise TypeError(
-                    "anydataset semantic-acoustic codes require Tensor fields."
-                )
+                raise TypeError("anydataset semantic-acoustic codes require Tensor fields.")
             global_codes = None
     else:
         semantic = None
         global_codes = None
         acoustic = None
-    if semantic is not None and (global_codes is not None or acoustic is not None):
+    if semantic is not None:
         return {
             "structured": True,
             "semantic": codetensor_metadata(semantic),
-            "global": (
-                None
-                if global_codes is None
-                else codetensor_metadata(global_codes)
-            ),
-            "acoustic": (
-                None if acoustic is None else codetensor_metadata(acoustic)
-            ),
+            "global": (None if global_codes is None else codetensor_metadata(global_codes)),
+            "acoustic": (None if acoustic is None else codetensor_metadata(acoustic)),
         }
     if not isinstance(codes, Tensor):
         raise TypeError("audio sample codes must be a Tensor or structured mapping.")
@@ -649,27 +675,41 @@ def log_target_reference_audio(
     module: Module,
     batch: Any,
     sample: types.Sample,
-    task: Task,
+    request: Request,
     tag: str,
     step: int,
 ) -> tuple[Tensor, int] | None:
-    if not task.prediction_modality.supervises_audio:
+    if not prediction_modality(request).supervises_audio:
         return None
+    task = request["task"]
     if batch.acoustic_target is None:
+        if not _has_raw_audio(sample, task, source=False):
+            backend = _output_audio_detokenizer(datamodule.runtime)
+            if backend is None:
+                return None
+        target, sample_rate = sample_audio(datamodule, sample, task, source=False)
+        if audio_writer is not None:
+            audio_writer.add_audio(f"{tag}/target", target, step, sample_rate=sample_rate)
+        return target, sample_rate
+    backend = _output_audio_detokenizer(datamodule.runtime)
+    if backend is None:
+        if not _has_raw_audio(sample, task, source=False):
+            return None
         target, sample_rate = sample_audio(datamodule, sample, task, source=False)
         if audio_writer is not None:
             audio_writer.add_audio(
-                f"{tag}/target", target, step, sample_rate=sample_rate
+                f"{tag}/target",
+                target,
+                step,
+                sample_rate=sample_rate,
             )
         return target, sample_rate
-    codec = acoustic_codec(datamodule.runtime.codec)
+    codec = acoustic_codec(backend)
     target, reference = reference_audio(module.model, batch, codec, seed=0)
     sample_rate = codec_sample_rate(codec)
     target = target.detach().cpu()
     if audio_writer is not None:
-        audio_writer.add_audio(
-            f"{tag}/target", target, step, sample_rate=sample_rate
-        )
+        audio_writer.add_audio(f"{tag}/target", target, step, sample_rate=sample_rate)
         audio_writer.add_audio(
             f"{tag}/reference_generation",
             reference.detach().cpu(),
@@ -677,6 +717,21 @@ def log_target_reference_audio(
             sample_rate=sample_rate,
         )
     return target, sample_rate
+
+
+def _output_audio_detokenizer(runtime: LoggingRuntime) -> CodecBackend | None:
+    try:
+        return runtime.output_audio_detokenizer
+    except AttributeError:
+        return runtime.codec
+
+
+def _has_raw_audio(sample: types.Sample, task: Task, *, source: bool) -> bool:
+    ref = source_item(sample, task) if source else target_item(sample, task)
+    if ref is None:
+        return False
+    _, item = ref
+    return isinstance(item, types.AudioItem) and types.AudioView.WAVEFORM in item.views
 
 
 def log_source_audio(
@@ -690,9 +745,7 @@ def log_source_audio(
     if task.source_modality is not types.Modality.AUDIO:
         return
     waveform, sample_rate = sample_audio(datamodule, sample, task, source=True)
-    audio_writer.add_audio(
-        f"{tag}/source", waveform, step, sample_rate=sample_rate
-    )
+    audio_writer.add_audio(f"{tag}/source", waveform, step, sample_rate=sample_rate)
 
 
 def log_target_audio(
@@ -740,11 +793,27 @@ def sample_audio(
             raise ValueError("AudioView.WAVEFORM sample_rate must be positive.")
         return waveform.detach().cpu(), sample_rate
     runtime = datamodule.runtime
-    codes = item.views[runtime.audio_view]
-    waveform = decode_reference_codes(codes, codec=runtime.codec)
+    try:
+        view = runtime.input_audio_view if source else runtime.output_audio_view
+    except AttributeError:
+        view = runtime.audio_view
+    codes = item.views[view]
+    if source:
+        try:
+            backend = runtime.input_audio_tokenizer_backend
+        except AttributeError:
+            backend = runtime.codec
+    else:
+        backend = _output_audio_detokenizer(runtime)
+        if backend is None:
+            raise RuntimeError(
+                "target reference waveform decoding requires runtime.audio_output.detokenizer."
+            )
+    waveform = decode_reference_codes(codes, codec=backend)
     if waveform.dim() < 2:
         raise ValueError("codec sample decode must return a batched waveform.")
-    return waveform[0].detach().cpu(), codec_sample_rate(runtime.codec)
+    return waveform[0].detach().cpu(), codec_sample_rate(backend)
+
 
 __all__ = [
     "DataModule",

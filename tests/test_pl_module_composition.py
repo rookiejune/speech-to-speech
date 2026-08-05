@@ -74,6 +74,7 @@ class PlModuleCompositionTest(unittest.TestCase):
     def test_token_closes_model_and_objective(self, model, objective, module):
         runtime = SimpleNamespace(
             layout=SimpleNamespace(blocks={"text": (17, 117)}),
+            lexical_text_vocab_size=100,
             pad_token_id=23,
         )
         ctc = CTCConfig(
@@ -121,6 +122,7 @@ class PlModuleCompositionTest(unittest.TestCase):
             ),
             semantic_codec=Mock(),
             layout=SimpleNamespace(blocks={"text": (11, 111)}),
+            lexical_text_vocab_size=100,
             pad_token_id=18,
             audio_tokenizer=None,
             flow_matching=Mock(),
@@ -167,6 +169,7 @@ class PlModuleCompositionTest(unittest.TestCase):
     def test_rvq_model_receives_only_decoder_options(self, model, objective, module):
         runtime = SimpleNamespace(
             layout=SimpleNamespace(blocks={"text": (5, 105)}),
+            lexical_text_vocab_size=100,
             pad_token_id=14,
             audio_tokenizer=None,
         )
@@ -201,6 +204,7 @@ class PlModuleCompositionTest(unittest.TestCase):
         runtime = SimpleNamespace(
             codec=Mock(),
             layout=SimpleNamespace(blocks={"text": (0, 100)}),
+            lexical_text_vocab_size=100,
             pad_token_id=0,
             audio_tokenizer=None,
             backbone=SimpleNamespace(

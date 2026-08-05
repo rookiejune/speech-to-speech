@@ -9,7 +9,7 @@ import unittest
 from collections.abc import Sequence, Sized
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import cast, overload
 
 import torch
 from anydataset.types import (
@@ -49,7 +49,15 @@ class _FailingSamples(Sequence[Sample]):
     def __len__(self) -> int:
         return 1
 
-    def __getitem__(self, index: int) -> Sample:
+    @overload
+    def __getitem__(self, index: int) -> Sample: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[Sample]: ...
+
+    def __getitem__(self, index: int | slice) -> Sample | Sequence[Sample]:
+        if isinstance(index, slice):
+            return [self[position] for position in range(*index.indices(len(self)))]
         if index != 0:
             raise IndexError(index)
         raise RuntimeError("output codec failed")

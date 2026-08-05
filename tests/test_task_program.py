@@ -12,15 +12,20 @@ from speech_to_speech.datamodule.builder import build_speech_sample
 from speech_to_speech.datamodule.sample import Language, Speech
 from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.task import (
+    ControlToken,
     DIRECT,
     FULL_COT,
     PROGRAMS,
     TARGET_COT,
     FieldRole,
     PredictionModality,
+    ResponseControl,
     ResponseLayout,
+    ResponseSpec,
+    ResponseStep,
     SourceLayout,
     Task,
+    TaskField,
     TaskObjective,
     resolve_response,
     uses_source_ctc,
@@ -32,7 +37,7 @@ class TaskProgramTest(unittest.TestCase):
     def test_programs_cover_every_task(self) -> None:
         self.assertEqual(set(PROGRAMS), set(Task))
 
-    def test_legacy_task_properties_are_derived_without_behavior_changes(self) -> None:
+    def test_task_default_properties_are_derived_from_program(self) -> None:
         expected = {
             Task.AUDIO_AR: (SourceLayout.NONE, PredictionModality.AUDIO, False),
             Task.ASR: (SourceLayout.AUDIO, PredictionModality.TEXT, False),
@@ -90,22 +95,94 @@ class TaskProgramTest(unittest.TestCase):
         )
         self.assertIs(full.prediction, PredictionModality.PARALLEL)
 
-    def test_prediction_override_keeps_legacy_short_cot_default(self) -> None:
-        response = resolve_response(
-            Task.S2ST,
-            prediction=PredictionModality.PARALLEL,
-        )
-        self.assertEqual(response.name, TARGET_COT)
+    def test_response_step_controls_are_explicit_for_every_trace(self) -> None:
+        expected = {
+            (Task.AUDIO_AR, DIRECT): (ResponseControl.AUDIO,),
+            (Task.ASR, DIRECT): (ResponseControl.ASR,),
+            (Task.INTERLEAVED_AR, DIRECT): (
+                ResponseControl.EOS,
+                ResponseControl.AUDIO,
+            ),
+            (Task.MASKED_AR, DIRECT): (
+                ResponseControl.EOS,
+                ResponseControl.AUDIO,
+            ),
+            (Task.MASKED_AR, "interleaved"): (
+                ResponseControl.EOS,
+                ResponseControl.AUDIO,
+            ),
+            (Task.MT, DIRECT): (ResponseControl.MT,),
+            (Task.PARALLEL_AR, DIRECT): (
+                ResponseControl.EOS,
+                ResponseControl.AUDIO,
+            ),
+            (Task.S2ST, DIRECT): (ResponseControl.AUDIO,),
+            (Task.S2ST, TARGET_COT): (
+                ResponseControl.MT,
+                ResponseControl.AUDIO,
+            ),
+            (Task.S2ST, FULL_COT): (
+                ResponseControl.ASR,
+                ResponseControl.MT,
+                ResponseControl.AUDIO,
+            ),
+            (Task.S2TT, DIRECT): (ResponseControl.MT,),
+            (Task.S2TT, FULL_COT): (
+                ResponseControl.ASR,
+                ResponseControl.MT,
+            ),
+            (Task.TEXT_AR, DIRECT): (ResponseControl.EOS,),
+            (Task.T2ST, DIRECT): (ResponseControl.AUDIO,),
+            (Task.T2ST, TARGET_COT): (
+                ResponseControl.MT,
+                ResponseControl.AUDIO,
+            ),
+            (Task.T2TT, DIRECT): (ResponseControl.MT,),
+            (Task.TTS, DIRECT): (ResponseControl.AUDIO,),
+        }
 
-    def test_invalid_trace_or_prediction_combination_fails(self) -> None:
-        with self.assertRaisesRegex(ValueError, "unsupported response trace"):
-            resolve_response(Task.TTS, trace=FULL_COT)
-        with self.assertRaisesRegex(ValueError, "requires prediction=parallel"):
-            resolve_response(
-                Task.S2ST,
-                trace=FULL_COT,
+        actual = {
+            (task, response.name): tuple(
+                step.control for step in response.steps
+            )
+            for task, program in PROGRAMS.items()
+            for response in program.responses
+        }
+        self.assertEqual(actual, expected)
+
+    def test_response_spec_rejects_unsupported_audio_ordering(self) -> None:
+        text = ResponseStep(
+            TaskField(FieldRole.TARGET, Modality.TEXT),
+            ResponseControl.EOS,
+        )
+        audio = ResponseStep(
+            TaskField(FieldRole.TARGET, Modality.AUDIO),
+            ResponseControl.AUDIO,
+        )
+
+        with self.assertRaisesRegex(ValueError, "audio response step must be the final"):
+            ResponseSpec(
+                name="audio_first",
+                steps=(audio, text),
+                prediction=PredictionModality.PARALLEL,
+            )
+        with self.assertRaisesRegex(ValueError, "at most one audio step"):
+            ResponseSpec(
+                name="two_audio_steps",
+                steps=(audio, audio),
                 prediction=PredictionModality.AUDIO,
             )
+
+    def test_prediction_is_not_a_response_selector(self) -> None:
+        with self.assertRaises(TypeError):
+            resolve_response(
+                Task.S2ST,
+                prediction=PredictionModality.PARALLEL,  # type: ignore[call-arg]
+            )
+
+    def test_invalid_trace_fails(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported response trace"):
+            resolve_response(Task.TTS, trace=FULL_COT)
 
     def test_objective_and_ctc_are_derived_from_visibility(self) -> None:
         self.assertIs(Task.TEXT_AR.program.objective, TaskObjective.CAUSAL)
@@ -118,7 +195,8 @@ class TaskProgramTest(unittest.TestCase):
         self.assertTrue(uses_target_ctc(Task.S2ST))
         self.assertTrue(uses_target_ctc(Task.T2ST))
         self.assertFalse(uses_target_ctc(Task.TTS))
-        self.assertFalse(uses_target_ctc(Task.S2ST, PredictionModality.PARALLEL))
+        self.assertFalse(uses_target_ctc(Task.S2ST, trace=TARGET_COT))
+        self.assertFalse(uses_target_ctc(Task.S2ST, trace=FULL_COT))
 
     def test_s2st_full_cot_builder_serializes_the_declared_response(self) -> None:
         runtime = _runtime()
@@ -133,20 +211,26 @@ class TaskProgramTest(unittest.TestCase):
             trace=FULL_COT,
         )
 
-        expected_prompt = torch.tensor([2, 18, 10, 11, 19, 3])
-        expected_response = torch.tensor([4, 5, 9, 6, 7, 9, 18, 12, 13, 19])
-        expected_labels = torch.tensor(
-            [-100, -100, -100, -100, -100, -100, 4, 5, 9, 6, 7, 9, -100, 12, 13, 19]
+        expected_prompt = torch.tensor([2, 24, 27, 16, 17, 25, 3])
+        expected_response = torch.tensor(
+            [10, 4, 5, 11, 12, 14, 6, 7, 13, 24, 27, 18, 19, 25]
+        )
+        expected_labels = torch.cat(
+            (torch.full_like(expected_prompt, -100), expected_response)
         )
         self.assertEqual(sample.trace, FULL_COT)
         self.assertIs(sample.prediction, PredictionModality.PARALLEL)
         self.assertTrue(torch.equal(sample.request["prompt_ids"], expected_prompt))
         self.assertTrue(torch.equal(sample.labels.response_ids, expected_response))
         self.assertTrue(torch.equal(sample.token_labels, expected_labels))
-        self.assertEqual(int(sample.input_ids[12]), runtime.boa_token_id)
-        self.assertEqual(int(sample.token_labels[12]), -100)
+        self.assertEqual(sample.target_language, "en")
+        self.assertEqual(int(sample.labels.response_ids[0]), runtime.control_token_id(ControlToken.ASR_BEGIN))
+        self.assertEqual(int(sample.input_ids[16]), runtime.boa_token_id)
+        self.assertEqual(int(sample.input_ids[17]), runtime.audio_schema_token_id)
+        self.assertEqual(int(sample.token_labels[16]), runtime.boa_token_id)
+        self.assertEqual(int(sample.token_labels[17]), runtime.audio_schema_token_id)
 
-        expected_source_positions = torch.tensor([2, 3])
+        expected_source_positions = torch.tensor([3, 4])
         source_positions = sample.audio_input_positions
         self.assertIsNotNone(source_positions)
         assert source_positions is not None
@@ -167,11 +251,11 @@ class TaskProgramTest(unittest.TestCase):
         self.assertTrue(
             torch.equal(
                 sample.acoustic_target["token_positions"],
-                torch.tensor([13, 14]),
+                torch.tensor([18, 19]),
             )
         )
 
-    def test_s2st_direct_and_short_cot_builder_contracts_do_not_regress(self) -> None:
+    def test_s2st_direct_and_target_cot_builder_contracts(self) -> None:
         runtime = _runtime()
         source, target = _speech_pair()
         prompt = "prefix $$$PLACEHOLDER$$$ suffix"
@@ -185,17 +269,26 @@ class TaskProgramTest(unittest.TestCase):
         )
         self.assertEqual(direct.trace, DIRECT)
         self.assertIs(direct.prediction, PredictionModality.AUDIO)
+        self.assertNotIn("target_language", direct.request)
+        self.assertIsNone(direct.target_language)
         self.assertTrue(
             torch.equal(
                 direct.request["prompt_ids"],
-                torch.tensor([2, 18, 10, 11, 19, 3, 18]),
+                torch.tensor([2, 24, 27, 16, 17, 25, 3]),
             )
         )
-        self.assertTrue(torch.equal(direct.labels.response_ids, torch.tensor([12, 13, 19])))
+        self.assertTrue(
+            torch.equal(
+                direct.labels.response_ids,
+                torch.tensor([24, 27, 18, 19, 25]),
+            )
+        )
         self.assertTrue(
             torch.equal(
                 direct.token_labels,
-                torch.tensor([-100, -100, -100, -100, -100, -100, -100, 12, 13, 19]),
+                torch.tensor(
+                    [-100, -100, -100, -100, -100, -100, -100, 24, 27, 18, 19, 25]
+                ),
             )
         )
         self.assertIsNotNone(direct.source_ctc)
@@ -204,7 +297,7 @@ class TaskProgramTest(unittest.TestCase):
         self.assertTrue(
             torch.equal(
                 direct.target_ctc["token_positions"],
-                torch.tensor([7, 8]),
+                torch.tensor([9, 10]),
             )
         )
         self.assertTrue(torch.equal(direct.target_ctc["text_token_ids"], target.text_token_ids))
@@ -213,7 +306,7 @@ class TaskProgramTest(unittest.TestCase):
         self.assertTrue(
             torch.equal(
                 direct.acoustic_target["token_positions"],
-                torch.tensor([7, 8]),
+                torch.tensor([9, 10]),
             )
         )
 
@@ -223,22 +316,46 @@ class TaskProgramTest(unittest.TestCase):
             Task.S2ST,
             runtime,
             prompt=prompt,
-            prediction=PredictionModality.PARALLEL,
+            trace=TARGET_COT,
         )
         self.assertEqual(short.trace, TARGET_COT)
+        self.assertEqual(short.target_language, "en")
         self.assertTrue(
-            torch.equal(short.request["prompt_ids"], torch.tensor([2, 18, 10, 11, 19, 3]))
+            torch.equal(
+                short.request["prompt_ids"],
+                torch.tensor([2, 24, 27, 16, 17, 25, 3]),
+            )
         )
         self.assertTrue(
             torch.equal(
                 short.labels.response_ids,
-                torch.tensor([6, 7, 9, 18, 12, 13, 19]),
+                torch.tensor([12, 14, 6, 7, 13, 24, 27, 18, 19, 25]),
             )
         )
         self.assertTrue(
             torch.equal(
                 short.token_labels,
-                torch.tensor([-100, -100, -100, -100, -100, -100, 6, 7, 9, -100, 12, 13, 19]),
+                torch.tensor(
+                    [
+                        -100,
+                        -100,
+                        -100,
+                        -100,
+                        -100,
+                        -100,
+                        -100,
+                        12,
+                        14,
+                        6,
+                        7,
+                        13,
+                        24,
+                        27,
+                        18,
+                        19,
+                        25,
+                    ]
+                ),
             )
         )
         self.assertIsNotNone(short.source_ctc)
@@ -248,7 +365,7 @@ class TaskProgramTest(unittest.TestCase):
         self.assertTrue(
             torch.equal(
                 short.acoustic_target["token_positions"],
-                torch.tensor([10, 11]),
+                torch.tensor([14, 15]),
             )
         )
 
@@ -265,17 +382,28 @@ class _PromptTokenizer:
 
 
 def _runtime() -> Any:
+    lexical_text_vocab_size = 10
+    control_token_ids = tuple(
+        range(lexical_text_vocab_size, lexical_text_vocab_size + len(ControlToken))
+    )
+    audio_start = lexical_text_vocab_size + len(ControlToken)
     return SimpleNamespace(
         text_tokenizer=_PromptTokenizer(),
         audio_tokenizer=object(),
-        layout=Layout(text=(0, 10), audio=(10, 21)),
+        layout=Layout(text=(0, audio_start), audio=(audio_start, audio_start + 12)),
+        lexical_text_vocab_size=lexical_text_vocab_size,
+        control_token_ids=control_token_ids,
+        control_token_id=lambda token: control_token_ids[list(ControlToken).index(token)],
         pad_token_id=0,
         eos_token_id=9,
-        boa_token_id=18,
-        eoa_token_id=19,
+        boa_token_id=audio_start + 8,
+        eoa_token_id=audio_start + 9,
+        mask_token_id=audio_start + 10,
+        audio_schema_token_id=audio_start + 11,
         input_audio_block_name="audio",
-        input_boa_token_id=18,
-        input_eoa_token_id=19,
+        input_boa_token_id=audio_start + 8,
+        input_eoa_token_id=audio_start + 9,
+        input_audio_schema_token_id=audio_start + 11,
         acoustic_generator_artifact=None,
         audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
     )

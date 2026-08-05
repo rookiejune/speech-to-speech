@@ -10,12 +10,18 @@ from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 
 from speech_to_speech.generation.service import generate_responses
-from speech_to_speech.generation.text import decode_response_text_steps
+from speech_to_speech.generation.request import target_language_of
+from speech_to_speech.generation.text import (
+    decode_response_text_steps,
+    decode_text_ids,
+)
 from speech_to_speech.model.generation import GenerationStepResult
+from speech_to_speech.runtime.audio_schema import AudioTokenSpec
+from speech_to_speech.runtime.audio_tokenizer import NativeAudioTokenizer
 from speech_to_speech.task import (
+    ControlToken,
     FULL_COT,
     TARGET_COT,
-    PredictionModality,
     Request,
     Task,
     resolve_response,
@@ -29,22 +35,34 @@ class _Tokenizer:
 
 
 class _Runtime:
-    layout = Layout(text=(0, 4), audio=(4, 8))
+    layout = Layout(text=(0, 10), audio=(10, 16))
     text_tokenizer = _Tokenizer()
+    lexical_text_vocab_size = 4
+    control_token_ids = tuple(range(4, 10))
     pad_token_id = 0
     eos_token_id = 3
-    boa_token_id = 6
-    eoa_token_id = 7
-    codec_audio_range = (4, 6)
+    boa_token_id = 12
+    eoa_token_id = 13
+    mask_token_id = 14
+    audio_schema_token_id = 15
+    codec_audio_range = (10, 12)
     input_codec_audio_range = codec_audio_range
-    audio_generation_allowed_ids = (4, 5, 7)
+    audio_generation_allowed_ids = (12, 15, 10, 11, 13)
     acoustic_side_channel = False
     structured_full_sequence = False
+    output_audio_token_spec = AudioTokenSpec.create(
+        codec_name="test",
+        sequence_layout="semantic",
+        tokenizer=NativeAudioTokenizer(vocab_size=2),
+    )
 
     def generation_allowed_ids(self, modality: Modality) -> tuple[int, ...]:
         if modality is not Modality.TEXT:
             raise ValueError("test runtime only exposes text generation ids here.")
-        return (1, 2)
+        return (1, 2, self.eos_token_id)
+
+    def control_token_id(self, token: ControlToken) -> int:
+        return self.control_token_ids[list(ControlToken).index(token)]
 
 
 class _ScriptModel:
@@ -56,6 +74,7 @@ class _ScriptModel:
         self.audio_token_frame_spans = torch.ones(2, dtype=torch.long)
         self._script = script
         self._step = 0
+        self.selected_token_ids: list[tuple[int, ...]] = []
 
     def generation_step(
         self,
@@ -95,6 +114,9 @@ class _ScriptModel:
         )
         logits[:, -1, next_id] = 0.0
         if token_ids is not None:
+            self.selected_token_ids.append(
+                tuple(int(value) for value in token_ids.tolist())
+            )
             logits = logits.index_select(-1, token_ids)
         return GenerationStepResult(
             logits=logits,
@@ -115,27 +137,36 @@ class _ScriptModel:
 
 
 def _request(task: Task, trace: str) -> Request:
-    response = resolve_response(task, trace=trace)
     return Request(
         prompt_ids=torch.tensor([1]),
         task=task,
-        prediction=response.prediction,
-        trace=response.name,
+        trace=trace,
+        target_language="en",
         audio_input_positions=None,
     )
 
 
-def _results(rows, model):
-    del model
+def _results(rows, model, *, requests=None):
+    del model, requests
     return [{"response_ids": row, "audio": None} for row in rows]
 
 
 class TaskProgramGenerationTest(unittest.TestCase):
+    def test_non_mt_request_language_is_ignored_by_control_routing(self) -> None:
+        request = Request(
+            prompt_ids=torch.tensor([1]),
+            task=Task.TEXT_AR,
+            target_language="Esperanto",
+            audio_input_positions=None,
+        )
+
+        self.assertIsNone(target_language_of(request))
+
     def test_full_s2st_advances_through_two_text_steps_then_audio(self) -> None:
-        expected = torch.tensor([1, 3, 2, 3, 6, 4, 7])
+        expected = torch.tensor([4, 1, 5, 6, 8, 2, 7, 12, 15, 10, 13])
         for use_cache in (False, True):
             with self.subTest(use_cache=use_cache):
-                model = _ScriptModel([1, 3, 2, 3, 1, 4, 7])
+                model = _ScriptModel(expected.tolist())
                 with patch(
                     "speech_to_speech.generation.mixed.decode_token_audio_results",
                     side_effect=_results,
@@ -143,7 +174,7 @@ class TaskProgramGenerationTest(unittest.TestCase):
                     result = generate_responses(
                         [_request(Task.S2ST, FULL_COT)],
                         model,
-                        max_new_tokens=10,
+                        max_new_tokens=12,
                         do_sample=False,
                         use_cache=use_cache,
                     )[0]
@@ -151,7 +182,8 @@ class TaskProgramGenerationTest(unittest.TestCase):
                 torch.testing.assert_close(result["response_ids"], expected)
 
     def test_full_s2tt_does_not_stop_at_the_first_eos(self) -> None:
-        model = _ScriptModel([1, 3, 2, 3])
+        expected = torch.tensor([4, 1, 5, 6, 8, 2, 7])
+        model = _ScriptModel(expected.tolist())
         with patch(
             "speech_to_speech.generation.mixed.decode_token_audio_results",
             side_effect=_results,
@@ -165,24 +197,31 @@ class TaskProgramGenerationTest(unittest.TestCase):
 
         torch.testing.assert_close(
             result["response_ids"],
-            torch.tensor([1, 3, 2, 3]),
+            expected,
         )
 
     def test_same_prediction_with_different_traces_is_grouped_separately(self) -> None:
         model = _ScriptModel(
             [
+                6,
+                8,
                 2,
-                3,
-                1,
-                4,
                 7,
-                1,
-                3,
-                2,
-                3,
+                12,
+                15,
+                10,
+                13,
+                4,
                 1,
                 5,
+                6,
+                8,
+                2,
                 7,
+                12,
+                15,
+                11,
+                13,
             ]
         )
         requests = [
@@ -196,32 +235,82 @@ class TaskProgramGenerationTest(unittest.TestCase):
             results = generate_responses(
                 requests,
                 model,
-                max_new_tokens=10,
+                max_new_tokens=12,
                 do_sample=False,
             )
 
         torch.testing.assert_close(
             results[0]["response_ids"],
-            torch.tensor([2, 3, 6, 4, 7]),
+            torch.tensor([6, 8, 2, 7, 12, 15, 10, 13]),
         )
         torch.testing.assert_close(
             results[1]["response_ids"],
-            torch.tensor([1, 3, 2, 3, 6, 5, 7]),
+            torch.tensor([4, 1, 5, 6, 8, 2, 7, 12, 15, 11, 13]),
         )
 
     def test_text_steps_decode_without_merging_source_and_target(self) -> None:
         response = resolve_response(
             Task.S2ST,
-            prediction=PredictionModality.PARALLEL,
             trace=FULL_COT,
         )
         values = decode_response_text_steps(
             _Runtime(),
-            torch.tensor([1, 3, 2, 3, 6, 4, 7]),
+            torch.tensor([4, 1, 5, 6, 8, 2, 7, 12, 15, 10, 13]),
             response,
+            target_language="en",
         )
 
         self.assertEqual(values, ["1", "2", None])
+
+    def test_runtime_control_ids_are_not_passed_to_text_tokenizer(self) -> None:
+        decoded = decode_text_ids(_Runtime(), torch.tensor([4, 1, 5, 6, 8, 2, 7]))
+
+        self.assertEqual(decoded, "1,2")
+
+    def test_direct_mt_uses_typed_end_and_excludes_eos_and_other_controls(self) -> None:
+        model = _ScriptModel([6, 8, 2, 7])
+        result = generate_responses(
+            [_request(Task.T2TT, "direct")],
+            model,
+            max_new_tokens=4,
+            do_sample=False,
+        )[0]
+
+        torch.testing.assert_close(
+            result["response_ids"],
+            torch.tensor([6, 8, 2, 7]),
+        )
+        for selected in model.selected_token_ids:
+            self.assertEqual(set(selected), {1, 2, 6, 7, 8})
+
+    def test_target_language_selects_distinct_mt_control_pairs(self) -> None:
+        model = _ScriptModel([6, 8, 1, 7, 6, 9, 2, 7])
+        requests = [
+            _request(Task.T2TT, "direct"),
+            Request(
+                prompt_ids=torch.tensor([2]),
+                task=Task.T2TT,
+                trace="direct",
+                target_language="Chinese",
+                audio_input_positions=None,
+            ),
+        ]
+
+        results = generate_responses(
+            requests,
+            model,
+            max_new_tokens=4,
+            do_sample=False,
+        )
+
+        torch.testing.assert_close(
+            results[0]["response_ids"],
+            torch.tensor([6, 8, 1, 7]),
+        )
+        torch.testing.assert_close(
+            results[1]["response_ids"],
+            torch.tensor([6, 9, 2, 7]),
+        )
 
 
 if __name__ == "__main__":

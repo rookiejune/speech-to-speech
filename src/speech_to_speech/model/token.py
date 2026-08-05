@@ -21,6 +21,7 @@ class TokenInterface(nn.Module):
     """
 
     audio_embedding: SemanticAudioEmbedding
+    control_embedding: nn.Embedding | None
     input_audio_embedding: nn.Embedding | None
     input_audio_projection: CastOutput | None
 
@@ -28,6 +29,8 @@ class TokenInterface(nn.Module):
         self,
         layout: Layout,
         *,
+        lexical_text_vocab_size: int | None = None,
+        control_embedding: nn.Embedding | None = None,
         audio_embedding: SemanticAudioEmbedding,
         audio_projection: CastOutput,
         audio_head: AudioOutputAdapter,
@@ -42,6 +45,34 @@ class TokenInterface(nn.Module):
             raise ValueError(
                 "token layout must contain text/audio and at most one audio_input block."
             )
+        text_start, text_end = layout.blocks[Modality.TEXT.value]
+        text_size = text_end - text_start
+        lexical_size = (
+            text_size
+            if lexical_text_vocab_size is None
+            else lexical_text_vocab_size
+        )
+        if isinstance(lexical_size, bool) or not isinstance(lexical_size, int):
+            raise TypeError("lexical_text_vocab_size must be an integer.")
+        if lexical_size <= 0 or lexical_size > text_size:
+            raise ValueError(
+                "lexical_text_vocab_size must be positive and fit the text block."
+            )
+        control_size = text_size - lexical_size
+        if control_size:
+            if control_embedding is None:
+                raise ValueError(
+                    "a control-extended text block requires a control embedding."
+                )
+            if (
+                not isinstance(control_embedding, nn.Embedding)
+                or control_embedding.num_embeddings != control_size
+            ):
+                raise ValueError(
+                    "control embedding rows must match the control vocabulary."
+                )
+        elif control_embedding is not None:
+            raise ValueError("control embedding requires control vocabulary rows.")
         audio = require_semantic_audio_embedding(
             audio_embedding,
             "semantic audio embedding",
@@ -61,6 +92,8 @@ class TokenInterface(nn.Module):
             )
 
         self.layout = layout
+        self.lexical_text_vocab_size = lexical_size
+        self.control_embedding = control_embedding
         self.audio_embedding = audio
         self.audio_projection = audio_projection
         self.audio_head = audio_head
@@ -102,7 +135,11 @@ class TokenInterface(nn.Module):
     ) -> Tensor:
         if input_ids.numel() == 0:
             raise ValueError("input_ids must not be empty.")
-        _validate_text_embedding(self.layout, text_embedding)
+        _validate_text_embedding(
+            self.layout,
+            text_embedding,
+            self.lexical_text_vocab_size,
+        )
         selected = _checked_modalities(input_modalities)
         if validate:
             routed = self.selected_modalities(input_ids)
@@ -119,8 +156,15 @@ class TokenInterface(nn.Module):
         )
         text_start, text_end = self.layout.blocks[Modality.TEXT.value]
         if Modality.TEXT in selected:
-            text_mask = input_ids.ge(text_start) & input_ids.lt(text_end)
-            output[text_mask] = text_embedding(input_ids[text_mask] - text_start)
+            lexical_end = text_start + self.lexical_text_vocab_size
+            lexical_mask = input_ids.ge(text_start) & input_ids.lt(lexical_end)
+            output[lexical_mask] = text_embedding(
+                input_ids[lexical_mask] - text_start
+            )
+            control_mask = input_ids.ge(lexical_end) & input_ids.lt(text_end)
+            control = self.control_embedding
+            if control is not None:
+                output[control_mask] = control(input_ids[control_mask] - lexical_end)
 
         if Modality.AUDIO in selected:
             input_embedding = self.input_audio_embedding
@@ -205,12 +249,30 @@ class TokenInterface(nn.Module):
         hidden_state: Tensor,
         local_ids: Tensor | None = None,
     ) -> Tensor:
-        text_rows = _text_rows(self.layout, text_embedding)
+        text_rows = _text_rows(
+            self.layout,
+            text_embedding,
+            self.lexical_text_vocab_size,
+            self.control_embedding,
+        )
         weight = (
             text_rows
             if local_ids is None
             else text_rows.index_select(0, local_ids)
         )
+        return F.linear(hidden_state.to(dtype=weight.dtype), weight)
+
+    def lexical_text_logits(
+        self,
+        text_embedding: nn.Embedding,
+        hidden_state: Tensor,
+    ) -> Tensor:
+        _validate_text_embedding(
+            self.layout,
+            text_embedding,
+            self.lexical_text_vocab_size,
+        )
+        weight = text_embedding.weight[: self.lexical_text_vocab_size]
         return F.linear(hidden_state.to(dtype=weight.dtype), weight)
 
     def semantic_audio_logits(
@@ -309,7 +371,7 @@ class TokenInterface(nn.Module):
         hidden_state: Tensor,
         modality: Modality,
         *,
-        blocked_token_ids: tuple[int, int],
+        blocked_token_ids: tuple[int, ...],
         attention_mask: Tensor | None = None,
         audio_hidden_state: Tensor | None = None,
         past_key_values: object | None = None,
@@ -461,16 +523,31 @@ def _validate_input_audio_block(layout: Layout, embedding: nn.Embedding) -> None
         )
 
 
-def _validate_text_embedding(layout: Layout, embedding: nn.Embedding) -> None:
+def _validate_text_embedding(
+    layout: Layout,
+    embedding: nn.Embedding,
+    lexical_text_vocab_size: int,
+) -> None:
     start, end = layout.blocks[Modality.TEXT.value]
-    if start < 0 or embedding.num_embeddings < end - start:
-        raise ValueError("text embedding does not cover its layout block.")
+    if (
+        start < 0
+        or lexical_text_vocab_size > end - start
+        or embedding.num_embeddings < lexical_text_vocab_size
+    ):
+        raise ValueError("text embedding does not cover the lexical text vocabulary.")
 
 
-def _text_rows(layout: Layout, embedding: nn.Embedding) -> Tensor:
-    _validate_text_embedding(layout, embedding)
-    start, end = layout.blocks[Modality.TEXT.value]
-    return embedding.weight[: end - start]
+def _text_rows(
+    layout: Layout,
+    embedding: nn.Embedding,
+    lexical_text_vocab_size: int,
+    control_embedding: nn.Embedding | None,
+) -> Tensor:
+    _validate_text_embedding(layout, embedding, lexical_text_vocab_size)
+    lexical = embedding.weight[:lexical_text_vocab_size]
+    if control_embedding is None:
+        return lexical
+    return torch.cat((lexical, control_embedding.weight), dim=0)
 
 
 def _selected_token_routing(

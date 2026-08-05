@@ -6,8 +6,11 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
 
 ## 源码模块
 
-- `runtime`：完整映射 `runtime.Config`，统一拥有 codec、backbone、backbone initialization、
-  audio tokenizer、device、dtype、attention backend 与 flow sampling。
+- `runtime`：完整映射 `runtime.Config`，统一拥有 `audio_input` / `audio_output`、
+  backbone、backbone initialization、device、dtype、attention backend 与 flow sampling。两侧
+  audio 都用 `tokenizer` 选 waveform→codes backend，用可选 `bpe` 选 CodecBPE artifact；output
+  另用 `detokenizer` 选择 codes→waveform capability，设为 `null` 即 codes-only。`AudioView`、
+  vocabulary、frame rate 与 codebook layout 均由 preset spec 推导，不在 canonical Hydra 配置中重复声明。
   root-level `audio_sequence_layout=flattened|semantic` 是公开的音频序列轴：`flattened` 把完整 codec
   codes 作为 acoustic-first / semantic-last 的 token 序列训练；`semantic` 的逻辑输入输出仍是
   full codes，但 token sequence 只处理 semantic，acoustic 由 Flow/RVQ side module 或
@@ -24,7 +27,14 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
   production/fixed-sample experiment 默认仍使用 WMT19 TTS prepared data。需要固定正式
   train/dev/test 子集时，通过 `DatasetConfig.split_manifest` 和 `split_label` 显式选择
   manifest 中的索引集合。task template 也在 `datamodule` 上：
-  `datamodule.tasks.<task>.template`（`int` 固定下标，`null` 随机；默认 `0`）。
+  `datamodule.tasks.<task>.template`（`int` 固定下标，`null` 随机；字段默认 `0`，正式
+  train entry 为所有任务显式配置 `null`）。
+  `datamodule.streaming` 是独立的 immutable synthesis snapshot consumer：启用时固定
+  `dataset=streaming_s2st`、pair shape、一个 speech loader、`num_workers=0`、
+  `persistent_workers=false`、关闭 cost batching 与 materialization。它要求 `stream_id`、
+  `expected_samples` 和可选的 `producer_factory=module:attribute`；`producer_options` 属于 factory，
+  不作为 dataset 配置的隐式参数。`streaming.telemetry` 独立控制 scalar cadence 和后台
+  `nvidia-smi` 采样间隔；间隔设为 `0` 只关闭 GPU 采样，不关闭 loader wait/fetch 计数。
 - `callback/parameter_policy`：写入 `callbacks.parameter_policy`，声明可训练参数组、
   冻结参数组和 `backbone_top_fraction`。这是通用训练 callback 能力，由 experiment 显式选择。
   正式 train 的 loader mix 不再是独立 Hydra group，而是由 train experiment 内联的
@@ -160,6 +170,25 @@ experiment 之前，以便非 LoRA experiment 用 `model.lora: null` 覆盖）�
   只通过 `callback/parameter_policy=<name>` 切换冻结策略，不借用正式长跑配置充当策略测试夹具。
 - `toy_smoke`：正式 LongCat runtime 加 tiny model/in-memory dataset 的 CPU 两步训练契约测试；
   不读取真实 backbone 权重或 WMT19 prepared dataset，也不替代真实资源验收。
+- `train/streaming_s2st`：长驻的双向 S2ST teacher-label consumer，固定一个 `s2st`/`parallel`
+  loader、`max_epochs=1`、`train.auto_resume=true` 和 `last.ckpt`。一个 epoch 持续轮询，直到 immutable
+  catalog 被完整 seal；它不是短预算 smoke，也不与 staged-joint loader plan 混用。
+
+流式正式入口是 `scripts/train.py experiment=train/streaming_s2st`。启动环境必须显式提供
+`SPEECH_TO_SPEECH_STREAM_ROOT`、`SPEECH_TO_SPEECH_STREAM_ID`、
+`SPEECH_TO_SPEECH_STREAM_EXPECTED_SAMPLES` 和 JSON string-array 形式的
+`SPEECH_TO_SPEECH_STREAM_PRODUCER_COMMAND`；可用 `SPEECH_TO_SPEECH_STREAM_RUN` 区分输出目录。
+默认 subprocess producer 只在 global rank zero 启动或复用，并把 `S2S_SYNTHESIS_STREAM_ID`、
+`S2S_SYNTHESIS_ROOT`、`S2S_SYNTHESIS_EXPECTED_SAMPLES`、`S2S_SYNTHESIS_CODEC` 和
+`S2S_SYNTHESIS_SPLIT` 传给 child。producer 的退出若尚未 seal 会使训练失败；已 seal 时不再启动 child。
+显式 `train.ckpt_path` 优先于 auto-resume，否则入口从当前 output 的 `checkpoints/last.ckpt` 恢复。
+entry 在 `ModelCheckpoint` 前安装 `StreamingSynthesis`，因此 batch acknowledgement 的 committed cursor
+会随 `last.ckpt` 一起落盘。`callbacks.synthesis_sample` 取代固定 `task_sample`：它仅记录已发布的
+teacher artifact，索引尚未发布时等待后续 cadence，不做 generation。
+入口默认同时安装 `StreamingTelemetryCallback`。TensorBoard 的 `streaming/batch_wait_seconds`、
+`streaming/wait_seconds_total`、`streaming/step_seconds`、`streaming/wait_ratio` 和 cursor scalars
+用于区分等待数据与训练计算；logger 目录内的 `streaming_gpu.csv` 保留独立时间轴上的原始 GPU
+utilization/memory/power 采样，不能用单次 step-end GPU 查询替代。
 
 `jobs/002`、`jobs/005/02_unicodec.sh` 与 `jobs/005/05_unicodec_ddp.sh` 都显式传递对应的
 `experiment=`；002 job 另行选择 TTS/S2ST task。training job 传递 `repo_output_root`、相对
@@ -207,14 +236,27 @@ gradient probe 与 text-retention callback。未索引 CUDA device 的 local-ran
 `runtime.Config`、`model.Config`、`pl_module.Config`、`model.DecoderConfig`、
 `datamodule.config.SpeechConfig`、`DataLoaderConfig` 和 `datamodule.dataset.text.TextConfig` 直接进入 root
 schema，不重复声明字段；`scripts/overfit.py` 与 `scripts/train.py` 都直接把解析后的 datamodule config 交给 `LoaderSpec`，不做
-同构对象转换。`loader_plan.loaders` 使用 `LoaderConfig`：把字符串 task weights 暴露为 `Task` 映射，并根据非零任务
-维护 text-only 与 speech loader 不可混合的不变量；配置解析校验 validation/panel 选择，训练组装不
-重复这些条件。OmegaConf 对字符串枚举只接受成员
+同构对象转换。`loader_plan.loaders` 使用 `LoaderConfig`：把字符串 task weights 暴露为 `Task` 映射，
+只用可选 `trace` 选择具体 response program；执行 head、字段顺序和 layout 都由对应
+`ResponseSpec` 派生。省略 `trace` 时选择 `TaskProgram.default_response`；旧的 `prediction` 字段不再
+接受，也不会被兼容重写。loader 还根据非零任务维护 text-only 与 speech loader 不可混合的不变量；
+配置解析校验 validation/panel 选择，训练组装不重复这些条件。OmegaConf 对字符串枚举只接受成员
 名，入口在合并前把公开的小写 value 转成 enum member name；除此之外不做兼容重写。
 `audio_sequence_layout` 是 root/runtime schema 的公开结构，入口解析后由同一 `Runtime` 派生内部
 route，再传给 DataModule、model 和 generation。Hydra 的字符串表示在入口归一化，再由公开
 dataclass 校验。reference 不是独立 config 轴；需要 prompt-owned acoustic 的路径从输入 full
 codes/reference 中取得 acoustic 并直接序列化进 prompt。
+
+例如 S2ST full CoT 使用独立 loader 配置，不改变同一训练中其他 S2ST loader：
+
+```yaml
+loader_plan:
+  loaders:
+    s2st_full:
+      weight: 1.0
+      task_weights: {s2st: 1.0}
+      trace: full_cot
+```
 
 两个入口分别解析为：
 
@@ -226,6 +268,16 @@ codes/reference 中取得 acoustic 并直接序列化进 prompt。
 
 ## 组合
 
+- audio side 的 canonical 形状为
+  `runtime.audio_input.{tokenizer,bpe}` 和
+  `runtime.audio_output.{tokenizer,detokenizer,bpe,acoustic_generator_artifact}`。例如 GLM-4 input /
+  BiCodec output 选择 `runtime=glm4_bicodec audio_sequence_layout=flattened`；无需另传 `view`、
+  `vocab_size` 或 `frame_rate`。
+  相同 resolved backend 的 tokenizer/detokenizer 共享一个资源实例；input/output 的 code schema 与
+  `bpe` identity 也相同时才共享 model token space、special IDs 和 embedding。同 backend / 不同
+  BPE 复用 backend 与 prepared codes，但保持两套 model-facing token space。detokenizer 参与
+  backend resource tying，不直接决定 LLM weight tying。`audio_output.detokenizer=null` 是显式的
+  codes-only 配置。
 - `model/acoustic=none|flow|rvq` 显式选择下游 acoustic path；`none` 只训练
   audio token，flow/RVQ 才启用 acoustic objective，RVQ schema 不接受 REPA。
 - `audio_sequence_layout=flattened` 切换到完整 codebook 序列化格式，只允许
@@ -234,7 +286,7 @@ codes/reference 中取得 acoustic 并直接序列化进 prompt。
   semantic-last。
 - `audio_sequence_layout=semantic` 保持逻辑输入输出为 full codes，但模型 token sequence
   只预测 semantic。需要 waveform 时，acoustic 由 Flow/RVQ side module 或
-  `runtime.acoustic_generator_artifact` 提供。
+  `runtime.audio_output.acoustic_generator_artifact` 提供。
 - BiCodec 只允许 `audio_sequence_layout=flattened` 的 self-describing structured sequence。
   输入 global 直接序列化进 prompt，response 以 `<begin_of_semantic>` 开局；没有输入 global 时
   response 以 `<begin_of_global>` 开局，由 LLM 生成 global 后继续生成 semantic。global ownership
@@ -251,7 +303,7 @@ codes/reference 中取得 acoustic 并直接序列化进 prompt。
   Qwen/Qwen3 contract。`configs/runtime/kimi_audio.yaml` 使用 Kimi-Audio 的 remote-code
   双分支 readout，并显式配置本项目的单流 Jinja instruction template；这不是 Kimi 官方双流
   PromptManager 格式，后者需要独立的结构化 prompt adapter。
-- `runtime.acoustic_generator_artifact` 为 `semantic-acoustic-generator` 的 semantic-only waveform
+- `runtime.audio_output.acoustic_generator_artifact` 为 `semantic-acoustic-generator` 的 semantic-only waveform
   support artifact；LongCat 的 `semantic` token-only 路径可使用它。BiCodec 不接受该 artifact，
   unified structured sequence 始终恢复完整 `AudioCodes`，在 backend 边界转换后调用 `detokenize()`，
   也不接入 Flow/RVQ composition。两份 BiCodec smoke 都选择
@@ -262,7 +314,7 @@ codes/reference 中取得 acoustic 并直接序列化进 prompt。
   global stream，`bicodec_generate_global_smoke` 从 text 生成 global stream。FrameCodec 的
   token-only full-code baseline 使用 `audio_sequence_layout=flattened`。
 - `model.acoustic.init_artifact` 是 Flow/RVQ 联合训练的 generator 初始化路径，与
-  `runtime.acoustic_generator_artifact` 不同。composition 加载 artifact 后校验 frame-aligned layout、
+  `runtime.audio_output.acoustic_generator_artifact` 不同。composition 加载 artifact 后校验 frame-aligned layout、
   decoder/REPA 配置和 acoustic backend metadata，再把已加载对象交给 model；semantic conditioner 不进入
   S2S。Flow 迁移 decoder 与 feature normalization，RVQ 当前只接受 `codebook_ar` artifact。
 - UniCodec 也是 `FrameCodec`，`runtime=unicodec model/acoustic=none` 使用

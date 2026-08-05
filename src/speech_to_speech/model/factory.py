@@ -111,14 +111,57 @@ def tokens(
         text_embedding,
         hidden_size,
     )
+    lexical_size = lexical_text_vocab_size(runtime)
+    text_start, text_end = runtime.layout.blocks["text"]
+    control_size = text_end - text_start - lexical_size
+    control_embedding = _control_embedding(
+        control_size,
+        text_embedding,
+        hidden_size,
+    )
     return TokenInterface(
         runtime.layout,
+        lexical_text_vocab_size=lexical_size,
+        control_embedding=control_embedding,
         audio_embedding=audio_embedding,
         audio_projection=audio_projection,
         audio_head=audio_head,
         input_audio_embedding=input_audio_embedding,
         input_audio_projection=input_audio_projection,
     )
+
+
+def lexical_text_vocab_size(runtime: TokenModelRuntime) -> int:
+    value = getattr(runtime, "lexical_text_vocab_size", None)
+    if value is None:
+        start, end = runtime.layout.blocks["text"]
+        return end - start
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("runtime lexical_text_vocab_size must be an integer.")
+    if value <= 0:
+        raise ValueError("runtime lexical_text_vocab_size must be positive.")
+    return value
+
+
+def _control_embedding(
+    size: int,
+    text_embedding: nn.Embedding,
+    hidden_size: int,
+) -> nn.Embedding | None:
+    if size < 0:
+        raise ValueError("text control vocabulary cannot exceed the text block.")
+    if size == 0:
+        return None
+    embedding = nn.Embedding(
+        size,
+        hidden_size,
+        device=text_embedding.weight.device,
+        dtype=text_embedding.weight.dtype,
+    )
+    reference = text_embedding.weight.detach().to(dtype=torch.float32)
+    std = float(reference.std().clamp_min(1e-6))
+    nn.init.normal_(embedding.weight, mean=0.0, std=std)
+    return embedding
 
 
 def _input_audio_interface(

@@ -12,15 +12,21 @@ import torch
 from anydataset.types import Sample
 from lightning import LightningDataModule, LightningModule, Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.loggers import TensorBoardLogger
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 from torch import Tensor, nn
 from torch.optim import SGD
 from torch.utils.data import Dataset
 
-from speech_to_speech.callback.streaming import StreamingSynthesis
+from speech_to_speech.callback.streaming import (
+    StreamingSynthesis,
+    StreamingTelemetryCallback,
+)
 from speech_to_speech.datamodule.streaming import (
     SnapshotFeed,
     StreamingDataLoader,
     StreamingSnapshotDataset,
+    StreamingTelemetry,
 )
 
 
@@ -121,6 +127,14 @@ class _StreamingDataModule(LightningDataModule):
     def acknowledge_streaming_batch(self, global_step: int) -> None:
         self._loader().acknowledge(global_step)
 
+    def streaming_telemetry(
+        self,
+        *,
+        loader_name: str | None = None,
+    ) -> StreamingTelemetry:
+        del loader_name
+        return self._loader().telemetry()
+
     def _loader(self) -> _CountingStreamingDataLoader:
         if self.loader is None:
             raise RuntimeError("streaming loader was not created.")
@@ -154,6 +168,40 @@ class _AcknowledgedCheckpoint(ModelCheckpoint):
 
 
 class StreamingLightningResumeTest(unittest.TestCase):
+    def test_telemetry_writes_real_tensorboard_scalars_and_gpu_summary(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_snapshot(root)
+            _write_seal(root)
+            logger = TensorBoardLogger(save_dir=root / "logs", name="stream")
+            data = _StreamingDataModule(root)
+            callback = StreamingTelemetryCallback(
+                gpu_sample_interval_seconds=0,
+                log_every_n_steps=1,
+            )
+
+            _trainer(
+                max_steps=2,
+                callbacks=[StreamingSynthesis(), callback],
+                logger=logger,
+                default_root_dir=root,
+            ).fit(_Module(), datamodule=data)
+
+            accumulator = EventAccumulator(logger.log_dir)
+            accumulator.Reload()
+            tags = set(accumulator.Tags()["scalars"])
+            summary = json.loads(
+                (Path(logger.log_dir) / "streaming_gpu_summary.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertIn("streaming/batch_wait_seconds", tags)
+        self.assertIn("streaming/step_seconds", tags)
+        self.assertIn("streaming/committed_position", tags)
+        self.assertFalse(summary["available"])
+        self.assertEqual(summary["reason"], "disabled")
+
     def test_trains_published_batch_before_waiting_for_the_next_snapshot(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -243,16 +291,18 @@ def _trainer(
     max_steps: int,
     callbacks: list[Any],
     enable_checkpointing: bool = True,
+    logger: Any = False,
+    default_root_dir: str | Path | None = None,
 ) -> Trainer:
     return Trainer(
         accelerator="cpu",
         devices=1,
         callbacks=callbacks,
-        default_root_dir=None,
+        default_root_dir=default_root_dir,
         enable_checkpointing=enable_checkpointing,
         enable_model_summary=False,
         enable_progress_bar=False,
-        logger=False,
+        logger=logger,
         max_steps=max_steps,
         num_sanity_val_steps=0,
     )

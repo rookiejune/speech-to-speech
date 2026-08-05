@@ -31,7 +31,12 @@ from torch.utils.data import Dataset
 
 from ._asset_provider import BiCodecProvider
 from .config import AssetMaterializationConfig
-from .dataset.speech import DatasetConfig, DatasetName, DualAudioDataset
+from .dataset.speech import (
+    DatasetConfig,
+    DatasetName,
+    DualAudioDataset,
+    uses_distinct_audio_assets,
+)
 from .contract import DatasetRuntime
 
 _ASSET_CONTRACT_VERSION = 2
@@ -393,7 +398,7 @@ def resolve_workspace_asset(
         raise ValueError(
             f"asset materialization supports only workspace datasets: {supported}."
         )
-    if getattr(runtime, "input_audio_decoupled", False):
+    if uses_distinct_audio_assets(runtime):
         return _resolve_dual_workspace_asset(config, runtime, materialization)
     return _resolve_coupled_workspace_asset(config, runtime, materialization)
 
@@ -495,12 +500,6 @@ def _resolve_dual_workspace_asset(
     input_view = runtime.input_audio_view
     output_view = runtime.audio_view
     _validate_output_view(output_view, materialization)
-    if input_view is output_view and runtime.input_codec_name != runtime.codec_name:
-        raise ValueError(
-            "distinct decoupled input/output codecs must use distinct audio views; "
-            f"both {runtime.input_codec_name!r} and {runtime.codec_name!r} resolve "
-            f"to {input_view.value!r}."
-        )
 
     source_root = _dataset_root(config.name, config.root).resolve()
     output_root = Path(cast(str, materialization.output_root)).expanduser().resolve()

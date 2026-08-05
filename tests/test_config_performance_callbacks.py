@@ -184,7 +184,6 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
             token_labels=torch.tensor([[-100, 2, -100], [-100, -100, 5]]),
             acoustic_target=None,
             tasks=[Task.MT, Task.MT],
-            predictions=[PredictionModality.TEXT, PredictionModality.TEXT],
             pad_token_id=0,
         )
 
@@ -206,7 +205,6 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
             token_labels=torch.tensor([[-100, 2, -100], [-100, -100, 5]]),
             acoustic_target=None,
             tasks=[Task.MT, Task.MT],
-            predictions=[PredictionModality.TEXT, PredictionModality.TEXT],
             pad_token_id=0,
         )
 

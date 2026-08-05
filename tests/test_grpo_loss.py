@@ -90,8 +90,7 @@ def _batch() -> ModelBatch:
         input_ids=input_ids,
         token_labels=token_labels,
         acoustic_target=None,
-        tasks=(Task.T2TT, Task.T2TT),
-        predictions=(PredictionModality.TEXT, PredictionModality.TEXT),
+        tasks=[Task.T2TT, Task.T2TT],
         pad_token_id=0,
     )
 
@@ -144,7 +143,6 @@ class GRPOLossTest(unittest.TestCase):
             token_labels=token_labels,
             acoustic_target=None,
             tasks=[Task.INTERLEAVED_AR, Task.INTERLEAVED_AR],
-            predictions=[PredictionModality.INTERLEAVED, PredictionModality.INTERLEAVED],
             pad_token_id=9,
         )
         model = _GRPOModel()

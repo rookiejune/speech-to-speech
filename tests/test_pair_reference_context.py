@@ -24,8 +24,9 @@ from speech_to_speech.datamodule.sample import (
     Speech,
 )
 from speech_to_speech.runtime import AudioSequenceLayout
+from speech_to_speech.runtime.audio_schema import AudioTokenSpec
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
-from speech_to_speech.task import Task
+from speech_to_speech.task import ControlToken, Task
 
 
 class PairReferenceContextTest(unittest.TestCase):
@@ -35,7 +36,7 @@ class PairReferenceContextTest(unittest.TestCase):
         self.assertIsNone(parsed.audio_context)
         built = build_task_sample(parsed, cast(object, runtime))
         response = built.labels.response_ids
-        local = response[:-1] - runtime.layout.blocks["audio"][0]
+        local = response[2:-1] - runtime.layout.blocks["audio"][0]
         self.assertEqual(int(local[0]), runtime.audio_tokenizer.global_token_id)
         self.assertNotIn("audio_context", built.request)
 
@@ -51,7 +52,7 @@ class PairReferenceContextTest(unittest.TestCase):
         parsed = parse_task_sample(_pair_sample(), Task.S2ST, cast(object, runtime))
         built = build_task_sample(parsed, cast(object, runtime))
         response = built.labels.response_ids
-        local = response[:-1] - runtime.layout.blocks["audio"][0]
+        local = response[2:-1] - runtime.layout.blocks["audio"][0]
         self.assertEqual(int(local[0]), runtime.audio_tokenizer.semantic_token_id)
         prompt_global = _prompt_global_ids(built.request["prompt_ids"], runtime)
         decoded = runtime.audio_tokenizer.decode_streams(prompt_global)
@@ -80,7 +81,7 @@ class PairReferenceContextTest(unittest.TestCase):
         built = build_task_sample(parsed, cast(object, runtime))
         self.assertNotIn("audio_context", built.request)
         response = built.labels.response_ids
-        local = response[:-1] - runtime.layout.blocks["audio"][0]
+        local = response[2:-1] - runtime.layout.blocks["audio"][0]
         self.assertEqual(int(local[0]), runtime.audio_tokenizer.semantic_token_id)
 
 
@@ -127,8 +128,17 @@ def _bicodec_runtime(audio_sequence_layout: AudioSequenceLayout):
         global_codebook_sizes=(3, 3),
         global_unit_length=2,
     )
-    audio_start = 10
+    lexical_text_vocab_size = 10
+    control_token_ids = tuple(
+        range(lexical_text_vocab_size, lexical_text_vocab_size + len(ControlToken))
+    )
+    audio_start = lexical_text_vocab_size + len(ControlToken)
     boa = audio_start + tokenizer.vocab_size
+    spec = AudioTokenSpec.create(
+        codec_name="bicodec",
+        sequence_layout=audio_sequence_layout.value,
+        tokenizer=tokenizer,
+    )
     runtime = SimpleNamespace(
         input_audio_decoupled=False,
         input_codec_name="bicodec",
@@ -142,15 +152,25 @@ def _bicodec_runtime(audio_sequence_layout: AudioSequenceLayout):
         text_tokenizer=_ChatTokenizer(),
         input_audio_tokenizer=tokenizer,
         audio_tokenizer=tokenizer,
-        layout=Layout(text=(0, 10), audio=(audio_start, boa + 3)),
+        input_audio_token_spec=spec,
+        audio_token_spec=spec,
+        output_audio_token_spec=spec,
+        layout=Layout(text=(0, audio_start), audio=(audio_start, boa + 4)),
+        lexical_text_vocab_size=lexical_text_vocab_size,
+        control_token_ids=control_token_ids,
+        control_token_id=lambda token: control_token_ids[
+            list(ControlToken).index(token)
+        ],
         pad_token_id=0,
         eos_token_id=1,
         boa_token_id=boa,
         eoa_token_id=boa + 1,
         mask_token_id=boa + 2,
+        audio_schema_token_id=boa + 3,
         input_audio_block_name="audio",
         input_boa_token_id=boa,
         input_eoa_token_id=boa + 1,
+        input_audio_schema_token_id=boa + 3,
         input_codec_audio_range=(audio_start, boa),
     )
     return runtime
@@ -181,7 +201,7 @@ def _prompt_global_ids(input_ids: torch.Tensor, runtime) -> torch.Tensor:
         .nonzero(as_tuple=False)[0]
         .item()
     ) + prompt_boa + 1
-    return row[prompt_boa + 1 : prompt_eoa] - runtime.layout.blocks["audio"][0]
+    return row[prompt_boa + 2 : prompt_eoa] - runtime.layout.blocks["audio"][0]
 
 
 if __name__ == "__main__":

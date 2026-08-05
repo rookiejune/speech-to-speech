@@ -8,8 +8,9 @@
 - `base.Model`：接收显式 runtime，提供 text/semantic-audio embedding、token
   logits、structured token generation 与 frame condition 对齐原语；BiCodec global ownership
   由序列 marker 表达，不进入 model route。
-- `token.TokenInterface`：注册 semantic-audio embedding、audio-to-hidden projection 与
-  causal audio output head；text embedding 由 backbone 独占，调用时显式传入。它同时维护
+- `token.TokenInterface`：注册 runtime-owned text control embedding、semantic-audio embedding、
+  audio-to-hidden projection 与 causal audio output head；lexical text embedding 由 backbone 独占，
+  调用时显式传入。它同时维护
   text/audio layout 路由、稀疏候选 logits 和 tied-logit 契约。
 - `generation.GenerationRequest` / `GenerationOptions` / `GenerationEngine`：分别表达输入约束、
   sampling 选项与统一 AR 状态机；model 不再维护第二套私有 generation loop/protocol。
@@ -45,7 +46,8 @@
   `none|linear|mlp|transformer` 配置；后三者字段 `layers/heads/ffn_ratio/dropout` 仅
   `transformer` 使用。
 - `ToyConfig` / `create_toy_backbone()`：构造随机初始化的一层或少层 Qwen backbone，用于 CPU
-  model/data 契约测试；词表大小来自 runtime layout，但不读取 `runtime.backbone`。
+  model/data 契约测试；backbone 词表大小来自 runtime lexical text vocabulary，control rows 仍由
+  `TokenInterface` 独立持有，不读取 `runtime.backbone`。
 - `AcousticType`、`DecoderConfig`、`FlowRepaConfig`：组合入口的严格配置结构。
 
 ## Token 接口
@@ -102,10 +104,12 @@ def generate_tokens(...) -> Tensor: ...
   使用 text=`last_hidden_state[0]`、audio=`last_hidden_state[1]`，homogeneous task batch
   按 prediction modality 路由。配置了按模态 readout 时不接受 mixed prediction batch；不支持
   `cache_position` 的 remote-code backbone 通过 `backbone_supports_cache_position=false` 省略该参数。
-- text logits 对 backbone text embedding 的 layout rows 做 tied linear；audio hidden 先经过
+- lexical text logits 对 backbone text embedding rows 做 tied linear；ASR/MT 的六个可组合 runtime control
+  rows 对独立可训练的 `tokens.control_embedding` 做 tied linear；audio hidden 先经过
   `tokens.audio_head`，再由 `TokenInterface` 按 adapter topology 选择 raw/effective audio rows 做
-  tied logits。layout offset 只负责恢复 global token ID，不保留 LM head bias。text embedding/readout
-  在 model 构造后结构性冻结；parameter policy（包括 `FULL`）不会重新启用它。
+  tied logits。layout offset 只负责恢复 global token ID，不保留 LM head bias。lexical text
+  embedding/readout 在 model 构造后结构性冻结；parameter policy（包括 `FULL`）不会重新启用它，
+  control embedding/readout 则保持可训练。
 - `selected_logits()` 只计算调用方给出的候选 global IDs；默认要求 non-empty 1D signed-integer
   tensor、完整 vocabulary coverage，并校验 `text` / `audio` / `mixed` kind hint 与候选集合一致。
   BiCodec grammar 的 grouped CE 用它避免为每个 marker/codebook 位置计算完整 audio vocabulary。
@@ -113,7 +117,9 @@ def generate_tokens(...) -> Tensor: ...
   每步为同一 token set 做 device-to-host 同步。mixed 结果的非目标槽以 `-inf` 初始化，不暴露
   未初始化 logits。
 - generation 的 text/pointwise 路径只计算最后一个位置；transformer audio 路径先按完整因果上下文
-  更新独立 cache，再统一只返回最后位置 logits。text 屏蔽 PAD/BOS，audio 屏蔽 BOA/MASK。
+  更新独立 cache，再统一只返回最后位置 logits。普通 dense text/audio 路径屏蔽不适用的结构 token；
+  program grammar 通过 `selected_logits()` 显式让 BOA、schema selector 与 codec-private marker 参与
+  自回归预测。
 - token lookup 与 vocabulary head 都由 `TokenInterface` 的有类型方法提供。注册参数路径是
   `tokens.audio_embedding.*`、`tokens.audio_projection.*`、`tokens.audio_head.*` 与 backbone 的
   text embedding ownership path；source tower 独立注册为 `source_audio_encoder.*`，两条 CTC
@@ -212,20 +218,24 @@ DiT/DiT+REPA/RVQ decoder。`model.acoustic.init_artifact` 可在 composition 边
 ```text
 global input_ids
     -> Model.tokens / TokenInterface
-         text rows: backbone.get_input_embeddings()（backbone 独占完整 nn.Embedding）
+         lexical text rows: backbone.get_input_embeddings()（backbone 独占）
+         ASR/MT control rows: tokens.control_embedding（独立、可训练）
          audio rows: tokens.audio_embedding -> tokens.audio_projection
     -> source_audio_encoder（独立；仅 overlay source audio_input_positions）
     -> backbone.base_model(inputs_embeds=...)
     -> TokenInterface text logits / tokens.audio_head -> tied audio logits
 ```
 
-backbone 是完整 text `nn.Embedding` 的唯一注册 owner；该参数同时是冻结的 tied text readout。S2S 不替换 backbone 私有 module tree，也不
+backbone 是 lexical text `nn.Embedding` 的唯一注册 owner；该参数同时是冻结的 tied lexical
+readout。S2S 不替换 backbone 私有 module tree，也不
 创建 text embedding proxy。`Model.text_embedding` 从 backbone 取回同一对象，`TokenInterface` 在
 lookup 与 tied text logits 调用中显式接收它；layout text block 只使用所需的前缀 rows，不截断或复制
-原 embedding。
+原 embedding。`<asr>`、`</asr>`、`<mt>`、`</mt>`、`<lang_en>`、`<lang_zh>` 位于 text
+layout 尾部，但不属于 lexical tokenizer vocabulary；它们由独立 `tokens.control_embedding` 同时承担
+输入 lookup 与 tied readout，因此冻结 backbone text table 不会冻结新控制 token。
 
-`Model.tokens` 注册 `audio_embedding`、`audio_projection` 和 `audio_head`。前两者负责普通 audio
-token 的输入表示，后者负责 backbone hidden 到 semantic-audio logit space 的因果适配；
+`Model.tokens` 注册 `control_embedding`、`audio_embedding`、`audio_projection` 和 `audio_head`。
+后三者负责普通 audio token 的输入表示与 backbone hidden 到 semantic-audio logit space 的因果适配；
 `Model.source_audio_encoder` 是独立的 source-only tower，不属于 token interface。audio projection
 经 `CastOutput` 在边界把当前 adapter compute dtype 的输出 cast 到当前 backbone embedding dtype。
 路由只接受
@@ -237,10 +247,9 @@ overlay 直接稀疏读取对应 audio rows，经过 `source_audio_encoder` 后�
 
 Native/BPE semantic tokenizers 使用 codec codebook 初始化；完整 codec sequence tokenizer
 通常使用随机初始化，因为它的 vocab 同时包含多 codebook offset tokens、BiCodec
-semantic/global ranges 与 codec/stream/end markers。BiCodec 的 semantic payload、各
-global slot 和 marker 共用这一稳定 layout vocabulary；训练 objective
-根据 self-describing marker 解释各位置的监督 groups，普通 generation 仍统一建模，不把这些 group 下推为
-隐式结构约束。
+semantic/global ranges 与 codec/stream markers。BiCodec 的 semantic payload、各
+global slot 和 marker 共用这一稳定 layout vocabulary；BOA、schema selector、codec marker、
+payload 和 EOA 都由相同因果目标监督，grammar 只屏蔽非法转移。
 随机初始化只读取 codec 声明的 semantic feature dimension，并使用 backbone embedding 作为
 device reference，不要求 backend 暴露虚构的 codebook tensor。
 
@@ -252,7 +261,8 @@ first-fastest mixed-radix basis 解包，**默认输出维对齐 backbone `hidde
 并且必须由 codec 显式提供 canonical `fsq_level_values`，不会自行猜测归一化值。
 
 factorized lookup 只解包请求的 ID；完整 logits 先计算各 digit 的 level score，再按 mixed radix 加法展开，
-两条路径都不物化 vocabulary-by-hidden table。marker / BOA/EOA/MASK 使用独立自由行；`.weight` 只用于
+两条路径都不物化 vocabulary-by-hidden table。codec marker 属于 tokenizer rows；
+BOA/EOA/MASK/schema selector 使用独立自由行；`.weight` 只用于
 兼容接口和确实需要完整表的 fallback。初始化目标 RMS 从 backbone text embedding 分块以 FP32 reduction
 测得，code rows 与自由行都对齐该尺度。默认 linear input/output adapter 因维已对齐而退化为
 identity/`none`；codec 上的 `semantic_feature_dim == 1` 仍只表示 FSQ 内在标量维。
@@ -262,18 +272,26 @@ values。strict load 拒绝缺失或不匹配的 codec 事实，model contract �
 当前 first-fastest basis 与 anytrain 的 packed product 约定一致；在 Stable upstream 暴露可对账接口前，
 文档不声称已经完成真实 backend 的 dequantize parity 验证。
 
-Lightning checkpoint 必须包含 `speech_to_speech_model_schema: v3`。v3 state dict 只接受
-`backbone.*`、`tokens.audio_embedding.*`、`tokens.audio_projection.*`、
-`tokens.audio_head.*`、`source_audio_encoder.*` 与具体 acoustic composition 的现行路径；text
-table 只出现在 backbone 原生路径。model/FSQ 都不做旧 key remap，缺失 schema、旧 schema 或旧
-ownership key 由 checkpoint gate/strict load 明确拒绝。
+Lightning checkpoint 必须包含 `speech_to_speech_model_schema: v4`。v4 state dict 只接受
+`backbone.*`、`tokens.control_embedding.*`、`tokens.audio_embedding.*`、`tokens.audio_projection.*`、
+可选的 `tokens.input_audio_embedding.*` / `tokens.input_audio_projection.*`、
+`tokens.audio_head.*`、`source_audio_encoder.*` 与具体 acoustic composition 的现行路径；coupled
+模式不注册独立 input embedding，保持原 state-dict ownership，decoupled 模式必须持有独立 input
+embedding。lexical text table 只出现在 backbone 原生路径。model/FSQ 都不做旧 key remap，缺失 schema、
+旧 schema 或旧 ownership key 由 checkpoint gate/strict load 明确拒绝。
 
-v3 checkpoint 还必须包含 `speech_to_speech_model_contract`。该 contract 从已解析 runtime 与实际
+v4 checkpoint 还必须包含 `speech_to_speech_model_contract`。该 contract 从已解析 runtime 与实际
 module topology 构造，而不是直接序列化一份可能含无效字段的原始 Hydra config；它覆盖 codec
-shape/capability、acoustic generator artifact 内容摘要、token layout 与 special IDs、text/audio
-tokenizer state digest、backbone architecture/readout、semantic audio embedding、input/output tower，
-source/target CTC decoder 的 readout、pooling 与有效 topology，以及 none/Flow/RVQ 的有效 decoder
-topology；CTC loss weight 不属于模型身份。contract 还记录 state dict 的 key、shape 与
+shape/capability、acoustic generator artifact 内容摘要、完整 token layout 与两套 audio special IDs、
+lexical text tokenizer、固定 control token→ID 映射与 control embedding，以及 input/output audio backend、
+audio tokenizer 与 embedding contract。backend sharing 由两侧 `tokenizer` 名是否相同决定；
+model-facing token space/embedding sharing 由完整 `(tokenizer, bpe)` identity 决定。因此同
+backend 但不同 BPE 会复用 codec 与 prepared codes，checkpoint 仍把 tokenizer/block/embedding
+记为 `independent`；只有完整对相同才记为 `shared`。相同 vocab shape 不会掩盖
+tokenizer ownership 变化。contract 还覆盖
+backbone architecture/readout、input/output tower、source/target CTC decoder 的 readout、pooling 与有效
+topology，以及 none/Flow/RVQ 的有效 decoder topology；CTC loss weight 不属于模型身份。contract 还记录
+state dict 的 key、shape 与
 parameter/buffer kind 摘要，但刻意忽略 dtype；因此 ownership 漂移会在 strict load 前失败，而整模
 精度转换不会制造伪不兼容。payload 采用固定 grammar、canonical JSON components 和 SHA-256；加载
 时先验证 payload 完整性，再报告第一个不匹配路径。原始配置中不影响实际 module 的生成参数、初始化
@@ -282,7 +300,7 @@ readout、layout 或 codec topology 变化仍会明确失败。
 
 fast tokenizer 使用完整 backend 序列化状态；Kimi 优先使用 raw tokenizer 的显式 contract，随后才
 退到已知 serialized/tiktoken backend 和固定行为探针。行为探针能发现常见编码变化，但在 opaque
-tokenizer 不暴露内容状态时，不能证明所有输入上的资产身份。`runtime.acoustic_generator_artifact` 是
+tokenizer 不暴露内容状态时，不能证明所有输入上的资产身份。`runtime.audio_output.acoustic_generator_artifact` 是
 本地文件或目录时会按内容摘要，不包含机器相关根路径。其他 Hugging Face / remote-code backbone 或
 codec 若只提供同名路径而没有不可变 revision/content digest，contract 仍只能记录实际实现类型、
 解析后的配置与可见结构；需要供应链级复现时，训练 manifest 仍必须固定外部 revision 或内容摘要。
@@ -328,16 +346,16 @@ RVQ 只接收 `codebook_ar` generator。route、decoder topology、REPA 和 acou
 `generate_audio_features()` 在其上采样对应 acoustic representation，并以结构化结果返回
 sequence、padded features 与每行有效 frame count。通用 cache、sampling、stop state 和
 frame condition 循环由 `model/generation.py` 的 `GenerationEngine` 持有，只通过有类型的
-`generation_step()` 驱动模型。训练和 ordinary AUDIO
-token generation 统一建模，推理原语只调用
-`generate_tokens(generation_modality=AUDIO, stop=EOA)`，不在 token generation 阶段根据
-flattened frame codec 或 BiCodec grammar 强制 marker/range/block-length 结构。
-codec-specific 的 marker、range、block-length 与 route stream ownership 只由推理层解析和
-decode 使用；非法 generated codec span 按行 warning 并跳过 audio decode，model 不重试或
-补齐结构。产品推理可以在 model 外显式使用 codec-specific 策略，但不能改变训练或普通
-generation 的模型契约。mixed prediction 的 TEXT/AUDIO 交替与 force-BOA 规则在
-`generation.mixed`，不进入该通用循环，也不扩展
-`generate_tokens(generation_modality=...)`。
+`generation_step()` 驱动模型。训练和 AUDIO token generation 使用同一完整 response：
+`BOA -> schema selector -> codec-private grammar -> EOA`。BOA、selector、codec marker 和 EOA
+都从模型 logits 中选择；schema grammar 只把每一步候选收窄到合法 marker/range，不能直接写入
+token。生成结束后再次按本次选定的 grammar variant 校验完整 payload；非法或截断的 codec span
+按行 warning 并跳过 audio decode，model 不重试或补齐结构。
+
+普通单模态 cache/sampling/frame-condition 循环仍由 `GenerationEngine` 持有；typed trace 与
+mixed prediction 的逐 step TEXT/AUDIO 状态由 `generation.mixed` 持有。两条路径共享 Runtime 的
+`AudioTokenSpec`，不按 tokenizer 类名猜 codec marker、range、block length 或 BiCodec stream
+ownership。
 
 route 的 prompt 属于调用前已序列化的 token context，model 只生成固定的 output streams；model 不
 从 target labels 推断 prompt 边界，也不允许 request 临时切换 route。`SpeechToSpeechModule` 保存

@@ -5,9 +5,11 @@ from __future__ import annotations
 import subprocess
 import sys
 import unittest
+from dataclasses import fields
 
 from _contracts_helpers import *
 from speech_to_speech.model import Config as ModelConfig
+from speech_to_speech.task import ControlToken
 
 
 class ConfigRuntimeContractTest(unittest.TestCase):
@@ -110,7 +112,7 @@ class ConfigRuntimeContractTest(unittest.TestCase):
 
             with (
                 patch(
-                    "speech_to_speech.runtime.core.load_codec",
+                    "speech_to_speech.runtime.core.load_audio_tokenizer_backend",
                     return_value=backend,
                 ),
                 patch(
@@ -142,13 +144,22 @@ class ConfigRuntimeContractTest(unittest.TestCase):
             )
         )
 
-        with patch("speech_to_speech.runtime.core.load_codec") as load:
+        with patch(
+            "speech_to_speech.runtime.core.load_audio_tokenizer_backend"
+        ) as load:
             self.assertFalse(runtime.acoustic_side_channel)
 
         load.assert_not_called()
 
     def test_worker_runtime_snapshot_excludes_model_and_codec(self):
         tokenizer = NativeAudioTokenizer(vocab_size=8)
+        control_token_ids = tuple(range(10, 10 + len(ControlToken)))
+        text_end = 10 + len(ControlToken)
+        spec = AudioTokenSpec.create(
+            codec_name="longcat",
+            sequence_layout=AudioSequenceLayout.SEMANTIC.value,
+            tokenizer=tokenizer,
+        )
         runtime = SimpleNamespace(
             input_audio_decoupled=False,
             input_codec_name="longcat",
@@ -162,25 +173,71 @@ class ConfigRuntimeContractTest(unittest.TestCase):
             text_tokenizer=_Tokenizer(10),
             input_audio_tokenizer=tokenizer,
             audio_tokenizer=tokenizer,
-            layout=Layout(text=(0, 10), audio=(10, 20)),
+            input_audio_token_spec=spec,
+            output_audio_token_spec=spec,
+            layout=Layout(text=(0, text_end), audio=(text_end, text_end + 12)),
+            lexical_text_vocab_size=10,
+            control_token_ids=control_token_ids,
             pad_token_id=0,
             eos_token_id=1,
-            boa_token_id=18,
-            eoa_token_id=19,
-            mask_token_id=20,
+            boa_token_id=text_end + 8,
+            eoa_token_id=text_end + 9,
+            mask_token_id=text_end + 10,
+            audio_schema_token_id=text_end + 11,
             input_audio_block_name="audio",
-            input_boa_token_id=18,
-            input_eoa_token_id=19,
-            input_codec_audio_range=(10, 18),
+            input_boa_token_id=text_end + 8,
+            input_eoa_token_id=text_end + 9,
+            input_audio_schema_token_id=text_end + 11,
+            input_codec_audio_range=(text_end, text_end + 8),
             codec=object(),
             backbone=object(),
         )
 
         snapshot = pickle.loads(pickle.dumps(DataRuntimeSnapshot.from_runtime(runtime)))
 
+        persisted_fields = {field.name for field in fields(DataRuntimeSnapshot)}
+        self.assertTrue(
+            {
+                "codec_name",
+                "audio_view",
+                "codec_frame_rate",
+                "audio_tokenizer",
+                "boa_token_id",
+                "eoa_token_id",
+                "mask_token_id",
+                "audio_schema_token_id",
+            }.issubset(persisted_fields)
+        )
+        self.assertTrue(
+            {
+                "output_codec_name",
+                "output_audio_view",
+                "output_codec_frame_rate",
+                "output_audio_tokenizer",
+                "output_audio_block_name",
+                "output_boa_token_id",
+                "output_eoa_token_id",
+                "output_mask_token_id",
+            }.isdisjoint(persisted_fields)
+        )
         self.assertFalse(hasattr(snapshot, "codec"))
         self.assertFalse(hasattr(snapshot, "backbone"))
         self.assertEqual(snapshot.codec_frame_rate, 50.0)
+        self.assertEqual(snapshot.output_codec_name, snapshot.codec_name)
+        self.assertIs(snapshot.output_audio_view, snapshot.audio_view)
+        self.assertEqual(
+            snapshot.output_codec_frame_rate,
+            snapshot.codec_frame_rate,
+        )
+        self.assertIs(snapshot.output_audio_tokenizer, snapshot.audio_tokenizer)
+        self.assertEqual(snapshot.output_audio_block_name, "audio")
+        self.assertEqual(snapshot.output_boa_token_id, snapshot.boa_token_id)
+        self.assertEqual(snapshot.output_eoa_token_id, snapshot.eoa_token_id)
+        self.assertEqual(snapshot.output_mask_token_id, snapshot.mask_token_id)
+        self.assertEqual(
+            snapshot.output_audio_schema_token_id,
+            snapshot.audio_schema_token_id,
+        )
         self.assertEqual(snapshot.layout.blocks, runtime.layout.blocks)
         self.assertIs(snapshot.layout, snapshot.layout)
 
@@ -257,7 +314,7 @@ class ConfigRuntimeContractTest(unittest.TestCase):
         base_model_config = OmegaConf.structured(ModelConfig)
         model_config = OmegaConf.structured(TokenModelConfig)
 
-        self.assertIsNone(runtime_config.audio_tokenizer)
+        self.assertIsNone(runtime_config.audio_output.bpe)
         self.assertIsNone(runtime_config.device)
         self.assertNotIn("acoustic", base_model_config)
         self.assertEqual(model_config.semantic_audio_adapter, "linear")
@@ -273,7 +330,7 @@ class ConfigRuntimeContractTest(unittest.TestCase):
         self.assertEqual(flow.model.acoustic.repa.teacher_layer, 9)
         self.assertIn("student_layer", flow.model.acoustic.repa)
         self.assertNotIn("normalize_features", flow.model.acoustic)
-        self.assertEqual(flow.runtime.codec, "longcat")
+        self.assertEqual(flow.runtime.audio_output.tokenizer, "longcat")
         self.assertEqual(flow.model.semantic_audio_adapter, "linear")
         self.assertEqual(rvq.model.acoustic.type, "rvq")
         self.assertNotIn("repa", rvq.model.acoustic)
@@ -356,13 +413,26 @@ class ConfigRuntimeContractTest(unittest.TestCase):
         rt.__dict__["text_tokenizer"] = _Tokenizer(10)
         rt.__dict__["audio_tokenizer"] = SimpleNamespace(vocab_size=3)
 
-        self.assertEqual(rt.audio_head_range, (10, 16))
-        self.assertEqual(rt.codec_audio_range, (10, 13))
-        self.assertEqual(rt.audio_generation_allowed_ids, (10, 11, 12, 14))
-        self.assertEqual(rt.mask_token_id, 15)
-        self.assertNotIn(rt.boa_token_id, rt.audio_generation_allowed_ids)
+        audio_start = rt.layout.blocks[Modality.AUDIO.value][0]
+        self.assertEqual(rt.audio_head_range, (audio_start, audio_start + 7))
+        self.assertEqual(rt.codec_audio_range, (audio_start, audio_start + 3))
+        self.assertEqual(
+            rt.audio_generation_allowed_ids,
+            (
+                audio_start + 3,
+                audio_start + 6,
+                audio_start,
+                audio_start + 1,
+                audio_start + 2,
+                audio_start + 4,
+            ),
+        )
+        self.assertEqual(rt.mask_token_id, audio_start + 5)
+        self.assertEqual(rt.audio_schema_token_id, audio_start + 6)
+        self.assertIn(rt.boa_token_id, rt.audio_generation_allowed_ids)
+        self.assertIn(rt.audio_schema_token_id, rt.audio_generation_allowed_ids)
         self.assertNotIn(rt.mask_token_id, rt.audio_generation_allowed_ids)
-        self.assertTrue(rt.is_codec_audio_id(12))
+        self.assertTrue(rt.is_codec_audio_id(audio_start + 2))
         self.assertFalse(rt.is_codec_audio_id(rt.eoa_token_id))
 
     def test_unified_codec_uses_semantic_codes_without_acoustic_side_channel(self):

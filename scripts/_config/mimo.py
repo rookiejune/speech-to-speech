@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 from omegaconf import DictConfig, OmegaConf
 
@@ -16,11 +16,12 @@ from speech_to_speech.mimo import MimoSpecialTokens
 from speech_to_speech.model.mimo_factory import MimoFactoryConfig
 from speech_to_speech.pl_module.optim import Config as OptimConfig
 from speech_to_speech.runtime import (
+    AudioInputConfig,
+    AudioOutputConfig,
     AudioSequenceLayout,
     BackboneInitialization,
     BackboneType,
     Config as RuntimeConfig,
-    InputAudioConfig,
     migrate_config_fields,
 )
 
@@ -126,7 +127,19 @@ class MimoTrainConfig:
 def parse(config: DictConfig | Mapping[str, Any]) -> MimoTrainConfig:
     """Resolve a Hydra config into validated Python dataclasses."""
 
-    raw = OmegaConf.to_container(config, resolve=True) if isinstance(config, DictConfig) else dict(config)
+    if isinstance(config, DictConfig):
+        normalized = cast(
+            DictConfig,
+            OmegaConf.create(OmegaConf.to_container(config, resolve=False)),
+        )
+        OmegaConf.resolve(normalized)
+        runtime_fields = normalized.get("runtime")
+        if not isinstance(runtime_fields, DictConfig):
+            raise TypeError("runtime must be a mapping.")
+        migrate_config_fields(runtime_fields)
+        raw = OmegaConf.to_container(normalized, resolve=True)
+    else:
+        raw = dict(config)
     if not isinstance(raw, Mapping):
         raise TypeError("MIMO train config must resolve to a mapping.")
     runtime = _runtime(_mapping(raw, "runtime"))
@@ -186,10 +199,15 @@ def validate(config: MimoTrainConfig) -> None:
 def _runtime(value: Mapping[str, Any]) -> RuntimeConfig:
     fields = dict(value)
     migrate_config_fields(fields)
-    input_audio = fields.get("input_audio", {})
-    if not isinstance(input_audio, InputAudioConfig):
-        fields["input_audio"] = InputAudioConfig(
-            **_mapping_value(input_audio, "runtime.input_audio")
+    audio_input = fields.get("audio_input")
+    if audio_input is not None and not isinstance(audio_input, AudioInputConfig):
+        fields["audio_input"] = AudioInputConfig(
+            **_mapping_value(audio_input, "runtime.audio_input")
+        )
+    audio_output = fields.get("audio_output", {})
+    if not isinstance(audio_output, AudioOutputConfig):
+        fields["audio_output"] = AudioOutputConfig(
+            **_mapping_value(audio_output, "runtime.audio_output")
         )
     fields["backbone_type"] = BackboneType(str(fields.get("backbone_type", "hf_causal_lm")))
     fields["backbone_initialization"] = BackboneInitialization(

@@ -32,7 +32,7 @@ class KimiARPretrainConfigTest(unittest.TestCase):
         config = _train("experiment=train/kimi_audio/ar_pretrain")
 
         self.assertIs(config.runtime.backbone_type, BackboneType.KIMI_AUDIO)
-        self.assertEqual(config.runtime.codec, "bicodec")
+        self.assertEqual(config.runtime.audio_output.tokenizer, "bicodec")
         self.assertIs(config.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
         self.assertEqual(config.model.acoustic.type, AcousticType.NONE.value)
         self.assertIs(config.callbacks.parameter_policy.name, ParameterPolicyName.FULL)

@@ -25,7 +25,7 @@ class RuntimeConfigContractTest(ConfigTestCase):
         with patch.dict("os.environ", {"LOCAL_RANK": "1"}):
             runtime = runtime_config(config.runtime)
 
-        self.assertEqual(runtime.codec, "longcat")
+        self.assertEqual(runtime.audio_output.tokenizer, "longcat")
         self.assertEqual(runtime.device, "cuda:1")
         self.assertEqual(runtime.flow_method, "euler")
         self.assertEqual(runtime.flow_nfe, 4)
@@ -105,12 +105,12 @@ class RuntimeConfigContractTest(ConfigTestCase):
                 "overfit",
                 "runtime=longcat_native",
                 "model/acoustic=none",
-                "runtime.acoustic_generator_artifact=/tmp/semantic-codec",
+                "runtime.audio_output.acoustic_generator_artifact=/tmp/semantic-codec",
             )
         )
 
         self.assertEqual(
-            token.runtime.acoustic_generator_artifact,
+            token.runtime.audio_output.acoustic_generator_artifact,
             "/tmp/semantic-codec",
         )
         with self.assertRaisesRegex(ValueError, "acoustic_generator_artifact"):
@@ -126,7 +126,7 @@ class RuntimeConfigContractTest(ConfigTestCase):
                 _compose(
                     "overfit",
                     "runtime=longcat_native",
-                    "runtime.acoustic_generator_artifact=/tmp/semantic-codec",
+                    "runtime.audio_output.acoustic_generator_artifact=/tmp/semantic-codec",
                 )
             )
         with self.assertRaisesRegex(ValueError, "acoustic generator artifacts"):
@@ -135,7 +135,7 @@ class RuntimeConfigContractTest(ConfigTestCase):
                     "overfit",
                     "runtime=unicodec",
                     "model/acoustic=none",
-                    "runtime.acoustic_generator_artifact=/tmp/semantic-codec",
+                    "runtime.audio_output.acoustic_generator_artifact=/tmp/semantic-codec",
                 )
             )
         with self.assertRaisesRegex(ValueError, "audio_sequence_layout=semantic"):
@@ -145,7 +145,7 @@ class RuntimeConfigContractTest(ConfigTestCase):
                     "runtime=longcat_native",
                     "audio_sequence_layout=flattened",
                     "model/acoustic=none",
-                    "runtime.acoustic_generator_artifact=/tmp/semantic-codec",
+                    "runtime.audio_output.acoustic_generator_artifact=/tmp/semantic-codec",
                 )
             )
 

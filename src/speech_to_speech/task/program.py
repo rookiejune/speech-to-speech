@@ -5,8 +5,10 @@ from anydataset.types import Modality
 from .contract import (
     FieldRole,
     PredictionModality,
+    ResponseControl,
     ResponseLayout,
     ResponseSpec,
+    ResponseStep,
     Task,
     TaskField,
     TaskObjective,
@@ -23,20 +25,24 @@ _SOURCE_AUDIO = TaskField(FieldRole.SOURCE, Modality.AUDIO)
 _TARGET_TEXT = TaskField(FieldRole.TARGET, Modality.TEXT)
 _TARGET_AUDIO = TaskField(FieldRole.TARGET, Modality.AUDIO)
 
+_SOURCE_ASR = ResponseStep(_SOURCE_TEXT, ResponseControl.ASR)
+_TARGET_ASR = ResponseStep(_TARGET_TEXT, ResponseControl.ASR)
+_TARGET_MT = ResponseStep(_TARGET_TEXT, ResponseControl.MT)
+_TARGET_TEXT_EOS = ResponseStep(_TARGET_TEXT, ResponseControl.EOS)
+_TARGET_AUDIO_STEP = ResponseStep(_TARGET_AUDIO, ResponseControl.AUDIO)
+
 
 def _response(
     name: str,
-    *fields: TaskField,
+    *steps: ResponseStep,
     prediction: PredictionModality,
     layout: ResponseLayout = ResponseLayout.SEQUENTIAL,
-    default_for_prediction: bool = True,
 ) -> ResponseSpec:
     return ResponseSpec(
         name=name,
-        fields=fields,
+        steps=steps,
         prediction=prediction,
         layout=layout,
-        default_for_prediction=default_for_prediction,
     )
 
 
@@ -44,14 +50,14 @@ PROGRAMS: dict[Task, TaskProgram] = {
     Task.AUDIO_AR: TaskProgram(
         context=(),
         responses=(
-            _response(DIRECT, _TARGET_AUDIO, prediction=PredictionModality.AUDIO),
+            _response(DIRECT, _TARGET_AUDIO_STEP, prediction=PredictionModality.AUDIO),
         ),
         supports_pretraining=True,
     ),
     Task.ASR: TaskProgram(
         context=(_TARGET_AUDIO,),
         responses=(
-            _response(DIRECT, _TARGET_TEXT, prediction=PredictionModality.TEXT),
+            _response(DIRECT, _TARGET_ASR, prediction=PredictionModality.TEXT),
         ),
     ),
     Task.INTERLEAVED_AR: TaskProgram(
@@ -59,8 +65,8 @@ PROGRAMS: dict[Task, TaskProgram] = {
         responses=(
             _response(
                 DIRECT,
-                _TARGET_TEXT,
-                _TARGET_AUDIO,
+                _TARGET_TEXT_EOS,
+                _TARGET_AUDIO_STEP,
                 prediction=PredictionModality.INTERLEAVED,
                 layout=ResponseLayout.INTERLEAVED,
             ),
@@ -71,15 +77,15 @@ PROGRAMS: dict[Task, TaskProgram] = {
         responses=(
             _response(
                 DIRECT,
-                _TARGET_TEXT,
-                _TARGET_AUDIO,
+                _TARGET_TEXT_EOS,
+                _TARGET_AUDIO_STEP,
                 prediction=PredictionModality.PARALLEL,
                 layout=ResponseLayout.MASKED,
             ),
             _response(
                 "interleaved",
-                _TARGET_TEXT,
-                _TARGET_AUDIO,
+                _TARGET_TEXT_EOS,
+                _TARGET_AUDIO_STEP,
                 prediction=PredictionModality.INTERLEAVED,
                 layout=ResponseLayout.MASKED,
             ),
@@ -89,7 +95,7 @@ PROGRAMS: dict[Task, TaskProgram] = {
     Task.MT: TaskProgram(
         context=(_SOURCE_TEXT,),
         responses=(
-            _response(DIRECT, _TARGET_TEXT, prediction=PredictionModality.TEXT),
+            _response(DIRECT, _TARGET_MT, prediction=PredictionModality.TEXT),
         ),
     ),
     Task.PARALLEL_AR: TaskProgram(
@@ -97,8 +103,8 @@ PROGRAMS: dict[Task, TaskProgram] = {
         responses=(
             _response(
                 DIRECT,
-                _TARGET_TEXT,
-                _TARGET_AUDIO,
+                _TARGET_TEXT_EOS,
+                _TARGET_AUDIO_STEP,
                 prediction=PredictionModality.PARALLEL,
                 layout=ResponseLayout.BLOCKWISE,
             ),
@@ -107,53 +113,51 @@ PROGRAMS: dict[Task, TaskProgram] = {
     Task.S2ST: TaskProgram(
         context=(_SOURCE_AUDIO,),
         responses=(
-            _response(DIRECT, _TARGET_AUDIO, prediction=PredictionModality.AUDIO),
+            _response(DIRECT, _TARGET_AUDIO_STEP, prediction=PredictionModality.AUDIO),
             _response(
                 TARGET_COT,
-                _TARGET_TEXT,
-                _TARGET_AUDIO,
+                _TARGET_MT,
+                _TARGET_AUDIO_STEP,
                 prediction=PredictionModality.PARALLEL,
                 layout=ResponseLayout.BLOCKWISE,
             ),
             _response(
                 FULL_COT,
-                _SOURCE_TEXT,
-                _TARGET_TEXT,
-                _TARGET_AUDIO,
+                _SOURCE_ASR,
+                _TARGET_MT,
+                _TARGET_AUDIO_STEP,
                 prediction=PredictionModality.PARALLEL,
                 layout=ResponseLayout.BLOCKWISE,
-                default_for_prediction=False,
             ),
         ),
     ),
     Task.S2TT: TaskProgram(
         context=(_SOURCE_AUDIO,),
         responses=(
-            _response(DIRECT, _TARGET_TEXT, prediction=PredictionModality.TEXT),
+            _response(DIRECT, _TARGET_MT, prediction=PredictionModality.TEXT),
             _response(
                 FULL_COT,
-                _SOURCE_TEXT,
-                _TARGET_TEXT,
+                _SOURCE_ASR,
+                _TARGET_MT,
                 prediction=PredictionModality.TEXT,
-                default_for_prediction=False,
             ),
         ),
     ),
     Task.TEXT_AR: TaskProgram(
         context=(),
         responses=(
-            _response(DIRECT, _TARGET_TEXT, prediction=PredictionModality.TEXT),
+            _response(DIRECT, _TARGET_TEXT_EOS, prediction=PredictionModality.TEXT),
         ),
         supports_pretraining=True,
     ),
     Task.T2ST: TaskProgram(
         context=(_SOURCE_TEXT,),
         responses=(
-            _response(DIRECT, _TARGET_AUDIO, prediction=PredictionModality.AUDIO),
+            _response(DIRECT, _TARGET_AUDIO_STEP, prediction=PredictionModality.AUDIO),
             _response(
                 TARGET_COT,
-                _TARGET_TEXT,
-                _TARGET_AUDIO,
+                _TARGET_MT,
+                _TARGET_AUDIO_STEP,
                 prediction=PredictionModality.PARALLEL,
                 layout=ResponseLayout.BLOCKWISE,
             ),
@@ -162,13 +166,13 @@ PROGRAMS: dict[Task, TaskProgram] = {
     Task.T2TT: TaskProgram(
         context=(_SOURCE_TEXT,),
         responses=(
-            _response(DIRECT, _TARGET_TEXT, prediction=PredictionModality.TEXT),
+            _response(DIRECT, _TARGET_MT, prediction=PredictionModality.TEXT),
         ),
     ),
     Task.TTS: TaskProgram(
         context=(_TARGET_TEXT,),
         responses=(
-            _response(DIRECT, _TARGET_AUDIO, prediction=PredictionModality.AUDIO),
+            _response(DIRECT, _TARGET_AUDIO_STEP, prediction=PredictionModality.AUDIO),
         ),
     ),
 }

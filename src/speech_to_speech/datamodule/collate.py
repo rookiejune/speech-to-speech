@@ -40,7 +40,6 @@ class Collator:
         interleave_audio_frames: int = 25,
         mask_text_ratio: float = 0.5,
         mask_audio_ratio: float = 0.5,
-        prediction: PredictionModality | None = None,
         trace: str | None = None,
         ar_framing: ARFraming = ARFraming.INSTRUCTION,
         tasks: Mapping[Task, TaskConfig] | None = None,
@@ -55,17 +54,12 @@ class Collator:
         validate_ar_framing(ar_framing, _positive_tasks(task_weights))
         self._task_weights = TaskWeights(
             task_weights,
-            prediction=prediction,
             trace=trace,
         )
 
     @property
     def tasks(self) -> list[Task]:
         return self._task_weights.tasks
-
-    @property
-    def prediction(self) -> PredictionModality | None:
-        return self._task_weights.prediction
 
     @property
     def trace(self) -> str | None:
@@ -77,7 +71,6 @@ class Collator:
         for sample, task in zip(samples, tasks):
             response = resolve_response(
                 task,
-                prediction=self.prediction,
                 trace=self.trace,
             )
             task_samples.append(
@@ -86,7 +79,6 @@ class Collator:
                     task,
                     self.runtime,
                     encode_missing_codes=self.encode_missing_codes,
-                    prediction=response.prediction,
                     trace=response.name,
                 )
             )
@@ -127,7 +119,6 @@ class TextCollator:
         runtime: TextRuntime,
         task_weights: Mapping[Task, float],
         *,
-        prediction: PredictionModality | None = None,
         trace: str | None = None,
         ar_framing: ARFraming = ARFraming.INSTRUCTION,
         tasks: Mapping[Task, TaskConfig] | None = None,
@@ -145,7 +136,6 @@ class TextCollator:
         self.pack_documents = pack_documents or self.max_tokens is not None
         _validate_text_tasks(
             _positive_tasks(task_weights),
-            prediction=prediction,
             trace=trace,
         )
         validate_ar_framing(ar_framing, _positive_tasks(task_weights))
@@ -162,17 +152,12 @@ class TextCollator:
                 )
         self._task_weights = TaskWeights(
             task_weights,
-            prediction=prediction,
             trace=trace,
         )
 
     @property
     def tasks(self) -> list[Task]:
         return self._task_weights.tasks
-
-    @property
-    def prediction(self) -> PredictionModality | None:
-        return self._task_weights.prediction
 
     @property
     def trace(self) -> str | None:
@@ -187,7 +172,6 @@ class TextCollator:
                 self.runtime,
                 ar_framing=self.ar_framing,
                 tasks=self.task_configs,
-                prediction=self.prediction,
                 trace=self.trace,
             )
             for sample, task in zip(samples, tasks)
@@ -214,7 +198,6 @@ class PackedTextCollator(TextCollator):
         task_weights: Mapping[Task, float],
         *,
         max_tokens: int,
-        prediction: PredictionModality | None = None,
         trace: str | None = None,
         ar_framing: ARFraming = ARFraming.PRETRAINING,
         tasks: Mapping[Task, TaskConfig] | None = None,
@@ -222,7 +205,6 @@ class PackedTextCollator(TextCollator):
         super().__init__(
             runtime,
             task_weights,
-            prediction=prediction,
             trace=trace,
             ar_framing=ar_framing,
             tasks=tasks,
@@ -252,7 +234,7 @@ def pack_text_samples(samples: list[ModelSample], max_tokens: int) -> list[Model
     if prompt.numel() != 1:
         raise ValueError("packed TEXT_AR samples require a one-token BOS prompt.")
 
-    chunks: list[tuple[torch.Tensor, torch.Tensor]] = []
+    chunks: list[tuple[torch.Tensor, torch.Tensor, str | None]] = []
     for index, sample in enumerate(samples):
         if sample.task is not task or sample.prediction is not prediction:
             raise ValueError("packed text samples must share task and prediction.")
@@ -266,7 +248,7 @@ def pack_text_samples(samples: list[ModelSample], max_tokens: int) -> list[Model
         if response.numel() == 0:
             raise ValueError(f"text sample {index} has an empty response.")
         if response.numel() <= budget - 1:
-            chunks.append((response, labels))
+            chunks.append((response, labels, sample.target_language))
             continue
         # The final response token is EOS.  Reserve one slot for it in each
         # chunk to preserve a document boundary after splitting.
@@ -281,7 +263,7 @@ def pack_text_samples(samples: list[ModelSample], max_tokens: int) -> list[Model
                 "the budget must leave room for content and EOS."
             )
         if content.numel() == 0:
-            chunks.append((eos, eos_labels))
+            chunks.append((eos, eos_labels, sample.target_language))
             continue
         for start in range(0, content.numel(), capacity):
             end = min(start + capacity, content.numel())
@@ -289,6 +271,7 @@ def pack_text_samples(samples: list[ModelSample], max_tokens: int) -> list[Model
                 (
                     torch.cat((content[start:end], eos)),
                     torch.cat((content_labels[start:end], eos_labels)),
+                    sample.target_language,
                 )
             )
 
@@ -296,9 +279,10 @@ def pack_text_samples(samples: list[ModelSample], max_tokens: int) -> list[Model
     current_responses: list[torch.Tensor] = []
     current_labels: list[torch.Tensor] = []
     current_length = prompt.numel()
+    current_language: str | None = None
 
     def flush() -> None:
-        nonlocal current_length
+        nonlocal current_language, current_length
         if not current_responses:
             return
         response = torch.cat(current_responses)
@@ -314,18 +298,25 @@ def pack_text_samples(samples: list[ModelSample], max_tokens: int) -> list[Model
                 response_ids=response,
                 token_labels=labels,
                 task=task,
-                prediction=prediction,
+                trace=samples[0].trace,
+                target_language=current_language,
             )
         )
         current_responses.clear()
         current_labels.clear()
         current_length = prompt.numel()
+        current_language = None
 
-    for response, labels in chunks:
-        if current_responses and current_length + response.numel() > budget:
+    for response, labels, target_language in chunks:
+        if current_responses and (
+            current_length + response.numel() > budget
+            or target_language != current_language
+        ):
             flush()
         if current_length + response.numel() > budget:
             raise ValueError("text packing produced a sequence larger than max_tokens.")
+        if not current_responses:
+            current_language = target_language
         current_responses.append(response)
         current_labels.append(labels)
         current_length += response.numel()
@@ -346,7 +337,6 @@ def _validate_max_tokens(value: int | None) -> int | None:
 def _validate_text_tasks(
     tasks: list[Task],
     *,
-    prediction: PredictionModality | None = None,
     trace: str | None = None,
 ) -> None:
     for task in tasks:
@@ -354,7 +344,6 @@ def _validate_text_tasks(
             raise ValueError("text-only task weights must not require audio input.")
         effective = resolve_response(
             task,
-            prediction=prediction,
             trace=trace,
         ).prediction
         if effective is not PredictionModality.TEXT:
@@ -370,14 +359,12 @@ class TaskWeights:
         self,
         values: Mapping[Task, float],
         *,
-        prediction: PredictionModality | None = None,
         trace: str | None = None,
     ) -> None:
         weights = dict(values)
         positive = [task for task, weight in weights.items() if weight > 0]
-        _validate_tasks(positive, prediction=prediction, trace=trace)
+        _validate_tasks(positive, trace=trace)
         _validate_weights(list(weights.values()))
-        self._prediction = prediction
         self._trace = trace
         self._tasks = tuple(positive)
         self._weights = tuple(
@@ -392,10 +379,6 @@ class TaskWeights:
     @property
     def tasks(self) -> list[Task]:
         return list(self._tasks)
-
-    @property
-    def prediction(self) -> PredictionModality | None:
-        return self._prediction
 
     @property
     def trace(self) -> str | None:
@@ -418,7 +401,6 @@ class TaskWeights:
         with self._credits.get_lock():
             credits = [self._credits[index] for index in range(len(self._tasks))]
         return {
-            "prediction": self._prediction,
             "trace": self._trace,
             "tasks": self._tasks,
             "weights": self._weights,
@@ -426,9 +408,11 @@ class TaskWeights:
         }
 
     def __setstate__(self, state: Mapping[str, object]) -> None:
-        prediction = state["prediction"]
-        if prediction is not None and not isinstance(prediction, PredictionModality):
-            raise TypeError("pickled task weights prediction is invalid.")
+        if "prediction" in state:
+            raise ValueError(
+                "pickled task weights use the removed prediction override; "
+                "rebuild the loader with trace."
+            )
         trace = state.get("trace")
         if trace is not None and (not isinstance(trace, str) or not trace):
             raise TypeError("pickled task weights trace is invalid.")
@@ -449,13 +433,11 @@ class TaskWeights:
             raise TypeError("pickled task weights credits are invalid.")
         if len(tasks) != len(weights) or len(tasks) != len(credits):
             raise ValueError("pickled task weights state lengths must match.")
-        self._prediction = prediction
         self._trace = cast(Optional[str], trace)
         self._tasks = cast(tuple[Task, ...], tasks)
         self._weights = cast(tuple[float, ...], weights)
         _validate_tasks(
             list(self._tasks),
-            prediction=self._prediction,
             trace=self._trace,
         )
         _validate_weights(list(self._weights))
@@ -471,14 +453,13 @@ def allocate_tasks(
     weights: list[float],
     batch_size: int,
     *,
-    prediction: PredictionModality | None = None,
     trace: str | None = None,
 ) -> list[Task]:
     _validate_batch_size(batch_size)
     if len(tasks) != len(weights):
         raise ValueError("tasks and weights must have the same length.")
     _validate_weights(weights)
-    _validate_tasks(tasks, prediction=prediction, trace=trace)
+    _validate_tasks(tasks, trace=trace)
     return _allocate_tasks(tasks, weights, batch_size, [0.0] * len(tasks))
 
 
@@ -512,16 +493,15 @@ def _validate_batch_size(batch_size: int) -> None:
 def _validate_tasks(
     tasks: list[Task],
     *,
-    prediction: PredictionModality | None = None,
     trace: str | None = None,
 ) -> None:
     if not tasks:
         raise ValueError("task weights must contain at least one task.")
-    first = resolve_response(tasks[0], prediction=prediction, trace=trace)
-    signature = execution_signature(tasks[0], prediction=first.prediction)
+    first = resolve_response(tasks[0], trace=trace)
+    signature = execution_signature(tasks[0], trace=first.name)
     for task in tasks:
-        response = resolve_response(task, prediction=prediction, trace=trace)
-        if execution_signature(task, prediction=response.prediction) != signature:
+        response = resolve_response(task, trace=trace)
+        if execution_signature(task, trace=response.name) != signature:
             raise ValueError(
                 "all weighted tasks must use the same execution signature "
                 "(source layout and prediction modality)."

@@ -55,9 +55,10 @@ class AudioEmbeddingTest(unittest.TestCase):
             _RandomCodec(4),
             tokenizer,
             reference=reference,
+            num_embeddings=tokenizer.vocab_size + 4,
         )
 
-        self.assertEqual(audio.weight.shape, (10, 4))
+        self.assertEqual(audio.weight.shape, (11, 4))
         self.assertEqual(audio.weight.dtype, reference.dtype)
         self.assertEqual(audio.weight.device, reference.device)
         self.assertEqual(tokenizer.decode_batch_sizes, [])
@@ -71,6 +72,7 @@ class AudioEmbeddingTest(unittest.TestCase):
                 _RandomCodec(4),
                 tokenizer,
                 reference=torch.empty(1),
+                num_embeddings=tokenizer.vocab_size + 4,
             )
 
     def test_random_initialization_requires_valid_feature_metadata(self):
@@ -85,7 +87,12 @@ class AudioEmbeddingTest(unittest.TestCase):
             (_Codec(torch.zeros(2, 3, 0)), ValueError, "positive"),
         ):
             with self.subTest(codec=codec), self.assertRaisesRegex(error, message):
-                embedding(codec, tokenizer, reference=torch.empty(1))
+                embedding(
+                    codec,
+                    tokenizer,
+                    reference=torch.empty(1),
+                    num_embeddings=tokenizer.vocab_size + 4,
+                )
 
 
 def _reference_merge(embeddings: torch.Tensor) -> torch.Tensor:

@@ -5,6 +5,8 @@ from inspect import getattr_static
 from typing import Any, Protocol, cast, runtime_checkable
 
 import torch
+from anydataset.types import Modality
+from anytrain.module.idspace import Layout
 from torch import Tensor, nn
 
 from ...runtime.codec_contract import (
@@ -48,6 +50,9 @@ class _Runtime(Protocol):
     @cached_property
     def codec(self) -> object: ...
 
+    @cached_property
+    def layout(self) -> Layout: ...
+
 
 @runtime_checkable
 class _CodebookTokenizer(Protocol):
@@ -65,6 +70,8 @@ def create_semantic_audio_embedding(
     embedding_dim: int | None = None,
     fsq: FsqEmbeddingConfig | None = None,
 ) -> SemanticAudioEmbedding:
+    audio_start, audio_end = runtime.layout.blocks[Modality.AUDIO.value]
+    audio_rows = audio_end - audio_start
     levels = fsq_levels(runtime.codec)
     if levels is not None:
         if embedding_dim is None:
@@ -82,7 +89,7 @@ def create_semantic_audio_embedding(
         return FsqEmbedding(
             codebook_sizes=tuple(int(size) for size in tokenizer.codebook_sizes),
             fsq_levels=levels,
-            num_embeddings=tokenizer.vocab_size + 3,
+            num_embeddings=audio_rows,
             embedding_dim=embedding_dim,
             target_rms=reference_rms(reference),
             config=fsq,
@@ -92,6 +99,7 @@ def create_semantic_audio_embedding(
         runtime.codec,
         runtime.audio_tokenizer,
         reference=reference,
+        num_embeddings=audio_rows,
     )
 
 
@@ -249,10 +257,11 @@ def embedding(
     tokenizer: AudioTokenizer,
     *,
     reference: Tensor,
+    num_embeddings: int,
 ) -> nn.Embedding:
     """Build a lookup initialized from the codec codebook.
 
-    The final three rows are reserved for BOA, EOA, and MASK.
+    Rows after the codec tokenizer vocabulary are runtime-owned audio controls.
     """
     initialization = tokenizer.embedding_initialization
     if initialization == "codec":
@@ -265,8 +274,11 @@ def embedding(
         )
     else:
         raise ValueError(f"unsupported audio embedding initialization: {initialization}")
+    control_rows = num_embeddings - tokenizer.vocab_size
+    if control_rows < 1:
+        raise ValueError("audio token block must reserve runtime control rows.")
     special = torch.empty(
-        (3, base.size(1)),
+        (control_rows, base.size(1)),
         device=base.device,
         dtype=base.dtype,
     )

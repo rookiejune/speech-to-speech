@@ -6,27 +6,45 @@ from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
-from ..task import PredictionModality, Request, ResponseSpec, Task, resolve_response
+from ..task import (
+    PredictionModality,
+    Request,
+    ResponseSpec,
+    Task,
+    normalize_language_code,
+    resolve_response,
+)
 from .audio import has_semantic_decode_options, validate_audio_request
 from .contract import TokenGenerator
 
 
-def prediction_of(request: Request) -> PredictionModality:
-    return response_of(request).prediction
-
-
 def response_of(request: Request) -> ResponseSpec:
-    prediction = request.get("prediction")
-    if prediction is not None and not isinstance(prediction, PredictionModality):
-        raise TypeError("generation request prediction must be a PredictionModality.")
+    if "prediction" in request:
+        raise ValueError(
+            "generation request prediction override is not supported; "
+            "select a task response with trace."
+        )
     trace = request.get("trace")
     if trace is not None and (not isinstance(trace, str) or not trace):
         raise TypeError("generation request trace must be a non-empty string.")
-    return resolve_response(
-        request["task"],
-        prediction=prediction,
-        trace=trace,
-    )
+    return resolve_response(request["task"], trace=trace)
+
+
+def target_language_of(
+    request: Request,
+    *,
+    response: ResponseSpec | None = None,
+) -> str | None:
+    """Return the normalized language that selects MT response controls."""
+    response = response_of(request) if response is None else response
+    if not response.requires_target_language:
+        return None
+    value = request.get("target_language")
+    if value is None:
+        raise ValueError(
+            "generation request target_language is required for MT response steps."
+        )
+    return normalize_language_code(value)
 
 
 def validate(request: Request, model: TokenGenerator) -> None:
@@ -38,7 +56,9 @@ def validate(request: Request, model: TokenGenerator) -> None:
     task = request["task"]
     if not isinstance(task, Task):
         raise TypeError("generation request task must be a Task.")
-    prediction = response_of(request).prediction
+    response = response_of(request)
+    prediction = response.prediction
+    target_language_of(request, response=response)
     prompt = _integer_tensor(request["prompt_ids"], "prompt ids", dimensions=1)
     if prompt.numel() == 0:
         raise ValueError("generation prompt must contain at least one token.")
@@ -96,7 +116,7 @@ def validate(request: Request, model: TokenGenerator) -> None:
                 "INTERLEAVED generation does not support structured BiCodec audio sequences."
             )
         return
-    validate_audio_request(request, model)
+    validate_audio_request(request, model, prediction=prediction)
 
 
 def _integer_tensor(value: object, name: str, *, dimensions: int) -> Tensor:

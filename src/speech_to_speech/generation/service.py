@@ -7,12 +7,12 @@ import torch
 from torch import Tensor
 
 from ..datamodule.batch import ModelBatch
-from ..task import PredictionModality, Request
+from ..task import PredictionModality, Request, Task
 from .audio import generate_audio_responses
 from .contract import Result
 from .contract import TokenGenerator
-from .mixed import generate_mixed_responses
-from .request import response_of, validate
+from .mixed import generate_program_responses
+from .request import response_of, target_language_of, validate
 
 
 @torch.no_grad()
@@ -29,24 +29,37 @@ def generate_responses(
     """Generate batched responses grouped by resolved task response."""
     results: list[Result | None] = [None] * len(requests)
     device = model.backbone.get_input_embeddings().weight.device
-    groups: dict[tuple[object, str, PredictionModality], list[tuple[int, Request]]] = {}
+    groups: dict[tuple[Task, str, str | None], list[tuple[int, Request]]] = {}
     for index, request in enumerate(requests):
         validate(request, model)
         response = response_of(request)
         groups.setdefault(
-            (request["task"], response.name, response.prediction),
+            (
+                request["task"],
+                response.name,
+                target_language_of(request, response=response),
+            ),
             [],
         ).append((index, request))
 
-    for (_, _, prediction), group in groups.items():
+    for group in groups.values():
+        response = response_of(group[0][1])
+        prediction = response.prediction
         prompt, prompt_mask, audio_input_positions = _inputs(
             [request for _, request in group],
             model,
             device,
         )
-        response = response_of(group[0][1])
-        if prediction.is_mixed or len(response.fields) > 1:
-            mixed_results = generate_mixed_responses(
+        program_response = (
+            prediction.is_mixed
+            or len(response.steps) > 1
+            or response.uses_control_tokens
+        )
+        if program_response and not (
+            prediction is PredictionModality.AUDIO
+            and model.runtime.acoustic_side_channel
+        ):
+            program_results = generate_program_responses(
                 [request for _, request in group],
                 model,
                 prompt,
@@ -58,7 +71,7 @@ def generate_responses(
                 do_sample=do_sample,
                 use_cache=use_cache,
             )
-            for result, (result_index, _) in zip(mixed_results, group):
+            for result, (result_index, _) in zip(program_results, group):
                 results[result_index] = result
             continue
         if prediction is PredictionModality.AUDIO:
@@ -159,23 +172,25 @@ def requests_from_batch(batch: ModelBatch) -> list[Request]:
     prompt_lengths = batch.generation_prompt_lengths
     audio_input_positions = batch.audio_input_positions
     traces = batch.response_traces
-    if prompt_lengths is None:
+    target_languages = batch.target_languages
+    if prompt_lengths is None or target_languages is None:
         raise RuntimeError("model batch generation fields are unavailable.")
-    for index, (task, prediction) in enumerate(zip(batch.tasks, batch.predictions)):
+    for index, task in enumerate(batch.tasks):
         prompt_end = int(prompt_lengths[index].item())
-        requests.append(
-            Request(
-                prompt_ids=batch.input_ids[index, :prompt_end],
-                task=task,
-                prediction=prediction,
-                trace=traces[index],
-                audio_input_positions=(
-                    None
-                    if audio_input_positions is None
-                    else audio_input_positions[index][
-                        audio_input_positions[index].ge(0)
-                    ]
-                ),
-            )
+        request = Request(
+            prompt_ids=batch.input_ids[index, :prompt_end],
+            task=task,
+            trace=traces[index],
+            audio_input_positions=(
+                None
+                if audio_input_positions is None
+                else audio_input_positions[index][
+                    audio_input_positions[index].ge(0)
+                ]
+            ),
         )
+        target_language = target_languages[index]
+        if target_language is not None:
+            request["target_language"] = target_language
+        requests.append(request)
     return requests

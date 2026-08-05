@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
+from anytrain.module.idspace import Layout
 
 from speech_to_speech.model import AdapterType
 from speech_to_speech.model.factory import (
@@ -26,6 +27,8 @@ from speech_to_speech.model.embedding.fsq import (
     _product_level_indices,
     reference_rms,
 )
+from speech_to_speech.runtime import AudioSequenceLayout
+from speech_to_speech.runtime.audio_schema import AudioTokenSpec
 from speech_to_speech.runtime.audio_tokenizer import FlattenedAudioTokenizer
 from speech_to_speech.runtime.codec import StableCodec
 from speech_to_speech.runtime.codec_contract import (
@@ -295,7 +298,7 @@ class FsqEmbeddingTest(unittest.TestCase):
         self.assertIsInstance(embed, FsqEmbedding)
         fsq = cast(FsqEmbedding, embed)
         self.assertIs(fsq.config.feature, FsqFeature.DIGIT_ONEHOT)
-        self.assertEqual(fsq.num_embeddings, tokenizer.vocab_size + 3)
+        self.assertEqual(fsq.num_embeddings, tokenizer.vocab_size + 4)
         self.assertAlmostEqual(
             float(fsq.weight.detach().square().mean().sqrt()),
             0.25,
@@ -376,6 +379,20 @@ class _Runtime:
     def __init__(self, codec: object, tokenizer: FlattenedAudioTokenizer) -> None:
         self.codec = codec
         self.audio_tokenizer = tokenizer
+        self.audio_sequence_layout = AudioSequenceLayout.FLATTENED
+        self.output_audio_token_spec = AudioTokenSpec.create(
+            codec_name="stable_codec",
+            sequence_layout=self.audio_sequence_layout.value,
+            tokenizer=tokenizer,
+        )
+        audio_start = 8
+        audio_end = audio_start + tokenizer.vocab_size + 4
+        self.layout = Layout(text=(0, audio_start), audio=(audio_start, audio_end))
+        self.boa_token_id = audio_end - 4
+        self.eoa_token_id = audio_end - 3
+        self.mask_token_id = audio_end - 2
+        self.audio_schema_token_id = audio_end - 1
+        self.output_audio_schema_id = self.output_audio_token_spec.schema_id
 
 
 def _embedding(

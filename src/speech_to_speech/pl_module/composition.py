@@ -243,8 +243,10 @@ def _initialization(
 
 
 def _ctc_blank_token_id(runtime: Runtime) -> int:
-    text_start, text_end = runtime.layout.blocks["text"]
+    text_start, _ = runtime.layout.blocks["text"]
     blank = runtime.pad_token_id - text_start
-    if not 0 <= blank < text_end - text_start:
-        raise ValueError("runtime pad token must belong to the text vocabulary for CTC.")
+    if not 0 <= blank < runtime.lexical_text_vocab_size:
+        raise ValueError(
+            "runtime pad token must belong to the lexical text vocabulary for CTC."
+        )
     return blank

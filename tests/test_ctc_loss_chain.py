@@ -30,7 +30,6 @@ from speech_to_speech.model.ctc import (
     CTCRoute,
     ObjectiveHiddenOutput,
 )
-from speech_to_speech.task import PredictionModality
 from speech_to_speech.task import Task
 
 
@@ -280,7 +279,6 @@ class CTCLossChainTest(unittest.TestCase):
             token_labels=torch.tensor([[-100, -100, 1], [-100, -100, 1]]),
             acoustic_target=None,
             tasks=[Task.ASR, Task.ASR],
-            predictions=[PredictionModality.TEXT, PredictionModality.TEXT],
             pad_token_id=99,
             source_ctc={
                 "token_positions": torch.tensor([[0, 1], [-1, -1]]),
@@ -316,7 +314,6 @@ class CTCLossChainTest(unittest.TestCase):
             token_labels=torch.tensor([[-100, 3, 4]]),
             acoustic_target=None,
             tasks=[Task.TTS],
-            predictions=[PredictionModality.AUDIO],
             pad_token_id=99,
         )
 
@@ -331,7 +328,6 @@ class CTCLossChainTest(unittest.TestCase):
             token_labels=torch.tensor([[-100, 3, 4]]),
             acoustic_target=None,
             tasks=[Task.T2ST],
-            predictions=[PredictionModality.AUDIO],
             pad_token_id=99,
             target_ctc={
                 "token_positions": torch.tensor([[1, 2]]),
@@ -455,7 +451,6 @@ def _source_batch() -> ModelBatch:
                 torch.tensor([3, 4, 1]),
                 torch.tensor([-100, -100, 1]),
                 task=Task.ASR,
-                prediction=PredictionModality.TEXT,
                 source_ctc={
                     "token_positions": torch.tensor([0, 1]),
                     "text_token_ids": torch.tensor([1]),
@@ -473,7 +468,6 @@ def _mt_batch() -> ModelBatch:
                 torch.tensor([0, 1]),
                 torch.tensor([-100, 1]),
                 task=Task.MT,
-                prediction=PredictionModality.TEXT,
             )
         ],
         pad_token_id=99,
@@ -487,7 +481,6 @@ def _s2st_batch() -> ModelBatch:
                 torch.tensor([3, 4, 3, 4]),
                 torch.tensor([-100, -100, 3, 4]),
                 task=Task.S2ST,
-                prediction=PredictionModality.AUDIO,
                 source_ctc={
                     "token_positions": torch.tensor([0, 1]),
                     "text_token_ids": torch.tensor([1]),
@@ -509,13 +502,11 @@ def _mixed_target_batch() -> ModelBatch:
                 torch.tensor([0, 3, 4]),
                 torch.tensor([-100, 3, 4]),
                 task=Task.TTS,
-                prediction=PredictionModality.AUDIO,
             ),
             ModelSample.from_sequence(
                 torch.tensor([0, 3, 4]),
                 torch.tensor([-100, 3, 4]),
                 task=Task.T2ST,
-                prediction=PredictionModality.AUDIO,
                 target_ctc={
                     "token_positions": torch.tensor([1, 2]),
                     "text_token_ids": torch.tensor([1]),

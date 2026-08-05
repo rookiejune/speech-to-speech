@@ -13,7 +13,7 @@ import torch
 from anydataset.types import Lang, Modality, Role, TextItem, TextMeta, TextView
 from anytrain.module.idspace import Layout
 
-from _contracts_helpers import _ChatTokenizer
+from _contracts_helpers import ControlTokenLookup, _ChatTokenizer
 from _config_helpers import _train
 from speech_to_speech.datamodule.collate import TextCollator, pack_text_samples
 from speech_to_speech.datamodule.config import DataLoaderConfig
@@ -32,8 +32,7 @@ from speech_to_speech.datamodule.batch import (
     ModelBatch,
     ModelSample,
 )
-from speech_to_speech.task import PredictionModality
-from speech_to_speech.task import Task
+from speech_to_speech.task import ControlToken, Task
 
 
 class _PackingTokenizer(_ChatTokenizer):
@@ -146,15 +145,7 @@ class GeneralTextDatasetTest(unittest.TestCase):
             path.write_text('"one"\n"two"\n', encoding="utf-8")
             dataset = JsonlTextDataset(path)
             tokenizer = _PackingTokenizer(64)
-            runtime = cast(
-                TextRuntime,
-                SimpleNamespace(
-                    text_tokenizer=tokenizer,
-                    layout=Layout(text=(0, 64), audio=(64, 68)),
-                    pad_token_id=0,
-                    eos_token_id=63,
-                ),
-            )
+            runtime = _text_runtime(tokenizer)
 
             batch = TextCollator(
                 runtime,
@@ -177,15 +168,7 @@ class GeneralTextDatasetTest(unittest.TestCase):
             path = Path(root) / "corpus.jsonl"
             path.write_text('"one"\n"two"\n', encoding="utf-8")
             tokenizer = _PackingTokenizer(64)
-            runtime = cast(
-                TextRuntime,
-                SimpleNamespace(
-                    text_tokenizer=tokenizer,
-                    layout=Layout(text=(0, 64), audio=(64, 68)),
-                    pad_token_id=0,
-                    eos_token_id=63,
-                ),
-            )
+            runtime = _text_runtime(tokenizer)
             config = TextConfig(
                 dataloader=DataLoaderConfig(batch_size=2, num_workers=0),
                 dataset=TextDatasetConfig(
@@ -202,7 +185,6 @@ class GeneralTextDatasetTest(unittest.TestCase):
                     "text": LoaderSpec.text(
                         config,
                         {Task.TEXT_AR: 1.0},
-                        prediction=PredictionModality.TEXT,
                         ar_framing=ARFraming.PRETRAINING,
                     )
                 },
@@ -219,7 +201,7 @@ class GeneralTextDatasetTest(unittest.TestCase):
             torch.tensor([3, 10, 11, 12, 13, 63]),
             torch.tensor([-100, 10, 11, 12, 13, 63]),
             task=Task.TEXT_AR,
-            prediction=PredictionModality.TEXT,
+            target_language="English",
             generation_prompt_length=1,
         )
 
@@ -229,6 +211,26 @@ class GeneralTextDatasetTest(unittest.TestCase):
         self.assertEqual([row.input_ids.numel() for row in packed], [4, 4])
         self.assertTrue(all(int(row.input_ids[-1]) == 63 for row in packed))
         self.assertTrue(all(int(row.token_labels[0]) == -100 for row in packed))
+        self.assertTrue(all(row.target_language == "en" for row in packed))
+
+
+def _text_runtime(tokenizer: _PackingTokenizer) -> TextRuntime:
+    lexical_text_vocab_size = 64
+    controls = ControlTokenLookup(lexical_text_vocab_size)
+    text_end = lexical_text_vocab_size + len(ControlToken)
+    return cast(
+        TextRuntime,
+        SimpleNamespace(
+            text_tokenizer=tokenizer,
+            layout=Layout(text=(0, text_end), audio=(text_end, text_end + 4)),
+            lexical_text_vocab_size=lexical_text_vocab_size,
+            control_token_ids=controls.ids,
+            control_token_id=controls,
+            pad_token_id=0,
+            bos_token_id=tokenizer.bos_token_id,
+            eos_token_id=63,
+        ),
+    )
 
 
 if __name__ == "__main__":

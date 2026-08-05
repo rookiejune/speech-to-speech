@@ -159,6 +159,33 @@ class AssetMaterializationConfig:
 
 
 @dataclass
+class StreamingTelemetryConfig:
+    """Runtime observability controls for a streaming training loader."""
+
+    enabled: bool = True
+    gpu_sample_interval_seconds: float = 1.0
+    log_every_n_steps: int = 1
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise TypeError("streaming telemetry enabled must be a boolean.")
+        interval = self.gpu_sample_interval_seconds
+        if isinstance(interval, bool) or not isinstance(interval, (float, int)):
+            raise TypeError(
+                "streaming telemetry gpu_sample_interval_seconds must be numeric."
+            )
+        if interval < 0:
+            raise ValueError(
+                "streaming telemetry gpu_sample_interval_seconds must be non-negative."
+            )
+        self.gpu_sample_interval_seconds = float(interval)
+        _positive_integer(
+            "streaming telemetry log_every_n_steps",
+            self.log_every_n_steps,
+        )
+
+
+@dataclass
 class StreamingConfig:
     """Consume immutable synthesis snapshots as one resumable logical epoch."""
 
@@ -170,6 +197,7 @@ class StreamingConfig:
     status_seconds: float = 60.0
     producer_factory: Optional[str] = None
     producer_options: Dict[str, Any] = field(default_factory=dict)
+    telemetry: StreamingTelemetryConfig = field(default_factory=StreamingTelemetryConfig)
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -189,6 +217,8 @@ class StreamingConfig:
             setattr(self, name, float(value))
         if not isinstance(self.producer_options, dict):
             raise TypeError("streaming producer_options must be a dictionary.")
+        if not isinstance(self.telemetry, StreamingTelemetryConfig):
+            raise TypeError("streaming telemetry must be a StreamingTelemetryConfig.")
         if self.producer_factory is not None:
             module, separator, attribute = self.producer_factory.partition(":")
             if not separator or not module or not attribute:
@@ -359,6 +389,7 @@ __all__ = [
     "DataLoaderCostsConfig",
     "SpeechConfig",
     "StreamingConfig",
+    "StreamingTelemetryConfig",
     "TaskConfig",
     "task_template_index",
 ]

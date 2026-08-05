@@ -457,6 +457,7 @@ class DualAudioDataset(MapStyleABC):
 def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Sample]:
     if config.name is DatasetName.TOY:
         _reject_speaker(config)
+        distinct_audio_assets = uses_distinct_audio_assets(runtime)
         return _apply_split_manifest(
             ToyDataset(
                 runtime.codec_name,
@@ -465,17 +466,17 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
                 frames=config.toy_frames,
                 input_view=(
                     runtime.input_audio_view
-                    if runtime.input_audio_decoupled
+                    if distinct_audio_assets
                     else None
                 ),
                 input_vocab_size=(
                     runtime.input_audio_tokenizer.vocab_size
-                    if runtime.input_audio_decoupled
+                    if distinct_audio_assets
                     else None
                 ),
                 input_frame_rate=(
                     runtime.input_codec_frame_rate
-                    if runtime.input_audio_decoupled
+                    if distinct_audio_assets
                     else None
                 ),
             ),
@@ -545,10 +546,7 @@ def _with_input_audio_dataset(
     runtime: DatasetRuntime,
     output: Dataset[Sample],
 ) -> Dataset[Sample]:
-    if (
-        not runtime.input_audio_decoupled
-        or runtime.input_audio_view is runtime.audio_view
-    ):
+    if not uses_distinct_audio_assets(runtime):
         return output
     root = _workspace_dataset_root(config)
     store = root / _codec_store_dir(runtime.input_audio_view)
@@ -564,6 +562,22 @@ def _with_input_audio_dataset(
         output,
         input_view=runtime.input_audio_view,
     )
+
+
+def uses_distinct_audio_assets(runtime: DatasetRuntime) -> bool:
+    """Whether input/output require separate prepared codec stores."""
+
+    input_codec = runtime.input_codec_name
+    output_codec = runtime.codec_name
+    input_view = runtime.input_audio_view
+    output_view = runtime.audio_view
+    if input_codec != output_codec and input_view is output_view:
+        raise ValueError(
+            "distinct input/output codecs must use distinct audio views; "
+            f"both {input_codec!r} and {output_codec!r} resolve to "
+            f"{input_view.value!r}."
+        )
+    return input_codec != output_codec or input_view is not output_view
 
 
 def _workspace_dataset_root(config: DatasetConfig) -> Path:
@@ -774,4 +788,5 @@ __all__ = [
     "SplitManifestDataset",
     "ToyDataset",
     "load_dataset",
+    "uses_distinct_audio_assets",
 ]

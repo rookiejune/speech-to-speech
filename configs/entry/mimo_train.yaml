@@ -9,7 +9,6 @@ output_subdir: mimo/${run_name}
 output_dir: ${repo_output_root}/${output_subdir}
 
 runtime:
-  codec: longcat
   backbone_type: hf_causal_lm
   backbone: Qwen/Qwen3-0.6B
   backbone_initialization: pretrained
@@ -19,13 +18,12 @@ runtime:
   backbone_supports_cache_position: true
   backbone_module: ""
   backbone_body: base_model
-  audio_tokenizer:
-  input_audio:
-    codec:
-    tokenizer:
-    vocab_size:
-    frame_rate:
-  acoustic_generator_artifact:
+  audio_input: null
+  audio_output:
+    tokenizer: longcat
+    detokenizer: longcat
+    bpe: null
+    acoustic_generator_artifact: null
   device:
   dtype:
   attn_implementation:

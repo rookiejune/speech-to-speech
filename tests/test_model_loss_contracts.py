@@ -379,7 +379,6 @@ class ModelLossContractTest(unittest.TestCase):
         batch = _batch(
             Task.PARALLEL_AR,
             token_labels=torch.tensor([[-100, 1, 4]]),
-            prediction=PredictionModality.PARALLEL,
         )
 
         outputs = TokenObjective(layout)(batch, model)
@@ -400,7 +399,6 @@ class ModelLossContractTest(unittest.TestCase):
         batch = _batch(
             Task.INTERLEAVED_AR,
             token_labels=torch.tensor([[-100, 4, 1, 5]]),
-            prediction=PredictionModality.INTERLEAVED,
         )
 
         outputs = TokenObjective(layout)(batch, model)
@@ -424,7 +422,6 @@ class ModelLossContractTest(unittest.TestCase):
             token_labels=case.labels,
             acoustic_target=None,
             tasks=[Task.TTS],
-            predictions=[PredictionModality.AUDIO],
             pad_token_id=99,
         )
 
@@ -483,7 +480,6 @@ class ModelLossContractTest(unittest.TestCase):
             token_labels=torch.tensor([[-100, 4]]),
             acoustic_target=None,
             tasks=[Task.TTS],
-            predictions=[Task.TTS.prediction_modality],
             pad_token_id=99,
         )
 
@@ -825,6 +821,7 @@ class ModelLossContractTest(unittest.TestCase):
         runtime = SimpleNamespace(
             text_tokenizer=tokenizer,
             layout=Layout(text=(0, 32), audio=(32, 36)),
+            lexical_text_vocab_size=32,
             pad_token_id=0,
             eos_token_id=31,
         )
@@ -1322,7 +1319,6 @@ def _raw_tts_batch() -> RawSpeechBatch:
                     language=Language.ZH,
                 ),
                 task=Task.TTS,
-                prediction=Task.TTS.prediction_modality,
             ),
         ),
         pad_token_id=99,
@@ -1335,11 +1331,7 @@ def _batch(
     token_labels: Tensor,
     target_acoustic_codes: Tensor | None = None,
     target_audio_token_positions: Tensor | None = None,
-    prediction: PredictionModality | None = None,
 ) -> ModelBatch:
-    resolved = (
-        task.prediction_modality if prediction is None else prediction
-    )
     batch = ModelBatch(
         input_ids=token_labels.masked_fill(token_labels.eq(-100), 0),
         token_labels=token_labels,
@@ -1353,7 +1345,6 @@ def _batch(
             }
         ),
         tasks=[task] * token_labels.size(0),
-        predictions=[resolved] * token_labels.size(0),
         pad_token_id=99,
     )
     return batch

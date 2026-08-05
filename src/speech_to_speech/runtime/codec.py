@@ -4,12 +4,22 @@ from math import prod
 from typing import Protocol, cast
 
 import torch
-from anytrain.codec import load_frame, load_semantic_acoustic, load_semantic_global
+from anytrain.codec import (
+    AudioBackendIdentity,
+    AudioCapability,
+    AudioCodeSpec,
+    audio_backend_identity as registered_audio_backend_identity,
+    audio_capabilities,
+    audio_spec as registered_audio_spec,
+    can_load_audio_detokenizer,
+    can_load_audio_tokenizer,
+    load_audio_detokenizer,
+    load_audio_tokenizer,
+)
 from torch import Tensor
 
 from .codec_contract import (
     CodecBackend,
-    GlobalCodec,
 )
 
 # Stable posthoc / native FSQ layouts keyed by product codebook sizes.
@@ -193,26 +203,80 @@ class StableCodec:
         return self.codec.decode(codes)
 
 
-def load_codec(name: str, device: str | None) -> CodecBackend:
-    if name == "longcat":
+_RUNTIME_BACKENDS = frozenset({"longcat", "bicodec", "unicodec", "stable_codec"})
+
+
+def audio_code_spec(name: str) -> AudioCodeSpec:
+    """Return preset code metadata without loading model weights."""
+
+    return registered_audio_spec(name)
+
+
+def audio_backend_identity(name: str) -> AudioBackendIdentity:
+    """Return the resource identity used for tokenizer/detokenizer tying."""
+
+    return registered_audio_backend_identity(name)
+
+
+def has_codec_loader(name: str) -> bool:
+    """Whether S2S can construct this preset's online tokenizer backend."""
+
+    return name in _RUNTIME_BACKENDS and can_load_audio_tokenizer(name)
+
+
+def has_audio_tokenizer_capability(name: str) -> bool:
+    return AudioCapability.TOKENIZER in audio_capabilities(name)
+
+
+def has_audio_detokenizer_capability(name: str) -> bool:
+    return AudioCapability.DETOKENIZER in audio_capabilities(name)
+
+
+def has_detokenizer_loader(name: str) -> bool:
+    """Whether S2S can construct this preset's online detokenizer backend."""
+
+    return name in _RUNTIME_BACKENDS and can_load_audio_detokenizer(name)
+
+
+def _adapt_backend(name: str, backend: object) -> CodecBackend:
+    if name == "unicodec":
         return cast(
             CodecBackend,
-            cast(object, load_semantic_acoustic("longcat", device=device)),
+            UnifiedCodec(cast(UnifiedCodecSource, backend)),
         )
-    if name == "bicodec":
-        return cast(
-            GlobalCodec,
-            cast(object, load_semantic_global("bicodec", device=device)),
-        )
-    if name == "unicodec":
-        source = cast(
-            UnifiedCodecSource,
-            cast(object, load_frame("unicodec", device=device)),
-        )
-        return cast(CodecBackend, UnifiedCodec(source))
     if name == "stable_codec":
         return cast(
             CodecBackend,
-            StableCodec(cast(StableCodecSource, load_frame("stable_codec", device=device))),
+            StableCodec(cast(StableCodecSource, backend)),
         )
-    raise NotImplementedError(f"unsupported codec: {name}")
+    return cast(CodecBackend, backend)
+
+
+def load_codec(name: str, device: str | None) -> CodecBackend:
+    """Deprecated alias for loading an output tokenizer backend."""
+
+    return load_audio_tokenizer_backend(name, device)
+
+
+def load_audio_tokenizer_backend(
+    name: str,
+    device: str | None,
+) -> CodecBackend:
+    """Load the waveform-to-codes capability for an audio backend."""
+
+    if not has_codec_loader(name):
+        raise NotImplementedError(f"unsupported codec: {name}") from None
+    view = load_audio_tokenizer(name, device=device)
+    return _adapt_backend(name, view.backend)
+
+
+def load_audio_detokenizer_backend(
+    name: str,
+    device: str | None,
+) -> CodecBackend:
+    """Load the codes-to-waveform capability for an audio backend."""
+
+    if not has_detokenizer_loader(name):
+        raise NotImplementedError(f"unsupported audio detokenizer: {name}") from None
+    view = load_audio_detokenizer(name, device=device)
+    return _adapt_backend(name, view.backend)

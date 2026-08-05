@@ -7,6 +7,7 @@ import unittest
 from _contracts_helpers import *
 from speech_to_speech.datamodule.asset import AssetPhase, AssetResolution
 from speech_to_speech.datamodule.config import AssetMaterializationConfig
+from speech_to_speech.datamodule.dataset.speech import uses_distinct_audio_assets
 
 
 class DataModuleContractTest(unittest.TestCase):
@@ -204,6 +205,40 @@ class DataModuleContractTest(unittest.TestCase):
         )
         loader = cast(Any, datamodule.train_dataloader())
         self.assertEqual(loader.batch_sampler.max_batch_samples, 1)
+
+    def test_toy_dataset_reuses_prepared_codes_for_same_codec_view_bpe_split(self):
+        runtime = _data_runtime()
+        runtime.input_audio_decoupled = True
+        runtime.input_audio_tokenizer = NativeAudioTokenizer(vocab_size=4)
+
+        dataset = cast(
+            ToyDataset,
+            load_dataset(
+                DatasetConfig(
+                    name=DatasetName.TOY,
+                    toy_samples=2,
+                    toy_frames=3,
+                ),
+                runtime,
+            ),
+        )
+
+        self.assertFalse(uses_distinct_audio_assets(runtime))
+        self.assertIsNone(dataset.input_view)
+        source = cast(AudioItem, dataset[0][Role.SOURCE, Modality.AUDIO])
+        self.assertEqual(set(source.views), {AudioView.LONGCAT})
+
+    def test_dataset_rejects_distinct_codecs_with_the_same_audio_view(self):
+        runtime = _data_runtime()
+        runtime.input_audio_decoupled = True
+        runtime.input_codec_name = "other-longcat"
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "distinct input/output codecs must use distinct audio views",
+        ):
+            load_dataset(DatasetConfig(name=DatasetName.TOY), runtime)
+
     def test_wmt19_loader_uses_default_filter(self):
         loaded, dataset, moss_tts, filtered, view = _load_wmt19_dataset(
             DatasetConfig()

@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader, Dataset, Subset
 from .._compat import StrEnum, auto
 from .asset import AssetJob, resolve_workspace_asset
 from .loader.contract import ARFraming, validate_ar_framing
-from ..task import PredictionModality, Task, resolve_response
+from ..task import Task, resolve_response
 from .collate import Collator
 from .config import TaskConfig
 from .config import DataLoaderConfig, SpeechConfig
@@ -43,6 +43,7 @@ from .streaming import (
     SnapshotFeed,
     StreamingDataLoader,
     StreamingSnapshotDataset,
+    StreamingTelemetry,
     SynthesisController,
     SynthesisRequest,
     WorkspaceSnapshotLoader,
@@ -66,7 +67,6 @@ class LoaderSpec:
     speech_config: SpeechConfig | None = None
     text_config: TextConfig | None = None
     sample_index: int | None = None
-    prediction: PredictionModality | None = None
     trace: str | None = None
     ar_framing: ARFraming = ARFraming.INSTRUCTION
     max_samples: int | None = None
@@ -77,11 +77,6 @@ class LoaderSpec:
             raise TypeError("loader kind must be a LoaderKind.")
         if not isinstance(self.task_weights, Mapping):
             raise TypeError("loader task_weights must be a mapping.")
-        if self.prediction is not None and not isinstance(
-            self.prediction,
-            PredictionModality,
-        ):
-            raise TypeError("loader prediction must be a PredictionModality or None.")
         if self.trace is not None and (
             not isinstance(self.trace, str) or not self.trace
         ):
@@ -94,7 +89,6 @@ class LoaderSpec:
             if weight > 0:
                 resolve_response(
                     task,
-                    prediction=self.prediction,
                     trace=self.trace,
                 )
         _validate_max_samples(self.max_samples)
@@ -121,7 +115,6 @@ class LoaderSpec:
         task_weights: Mapping[Task, float],
         *,
         sample_index: int | None = None,
-        prediction: PredictionModality | None = None,
         trace: str | None = None,
         ar_framing: ARFraming = ARFraming.INSTRUCTION,
     ) -> LoaderSpec:
@@ -130,7 +123,6 @@ class LoaderSpec:
             task_weights=task_weights,
             speech_config=config,
             sample_index=sample_index,
-            prediction=prediction,
             trace=trace,
             ar_framing=ar_framing,
         )
@@ -141,7 +133,6 @@ class LoaderSpec:
         config: TextConfig,
         task_weights: Mapping[Task, float],
         *,
-        prediction: PredictionModality | None = None,
         trace: str | None = None,
         ar_framing: ARFraming = ARFraming.INSTRUCTION,
         max_samples: int | None = None,
@@ -152,7 +143,6 @@ class LoaderSpec:
             task_weights=task_weights,
             text_config=config,
             max_samples=max_samples,
-            prediction=prediction,
             trace=trace,
             ar_framing=ar_framing,
             task_configs=tasks,
@@ -188,7 +178,6 @@ class _SpeechLoader:
         task_weights: Mapping[Task, float],
         sample_index: int | None = None,
         *,
-        prediction: PredictionModality | None = None,
         trace: str | None = None,
         ar_framing: ARFraming = ARFraming.INSTRUCTION,
     ) -> None:
@@ -202,7 +191,6 @@ class _SpeechLoader:
             interleave_audio_frames=config.interleave_audio_frames,
             mask_text_ratio=config.mask_text_ratio,
             mask_audio_ratio=config.mask_audio_ratio,
-            prediction=prediction,
             trace=trace,
             ar_framing=ar_framing,
             tasks=config.tasks,
@@ -331,6 +319,12 @@ class _SpeechLoader:
             return []
         return dataset.feed.published(indices)
 
+    def streaming_telemetry(self) -> StreamingTelemetry | None:
+        loader = self._streaming_loader
+        if loader is None:
+            return None
+        return loader.telemetry()
+
     def streaming_state_dict(self) -> dict[str, object] | None:
         loader = self._streaming_loader
         if loader is not None:
@@ -407,7 +401,6 @@ class _SpeechLoader:
             interleave_audio_frames=self.config.interleave_audio_frames,
             mask_text_ratio=self.config.mask_text_ratio,
             mask_audio_ratio=self.config.mask_audio_ratio,
-            prediction=self.collator.prediction,
             trace=self.collator.trace,
             ar_framing=self.collator.ar_framing,
             tasks=self.config.tasks,
@@ -678,6 +671,30 @@ class DataModule(LightningDataModule):
             raise ValueError("streaming samples require a speech loader.")
         return loader.published_samples(indices)
 
+    def streaming_telemetry(self, *, loader_name: str | None = None) -> StreamingTelemetry | None:
+        if loader_name is not None:
+            try:
+                loader = self._loaders[loader_name]
+            except KeyError as error:
+                raise ValueError(f"unknown loader {loader_name!r}.") from error
+            if not isinstance(loader, _SpeechLoader):
+                raise ValueError("streaming telemetry requires a speech loader.")
+            return loader.streaming_telemetry()
+
+        streaming = [
+            loader
+            for loader in self._speech_loaders(include_validation=False)
+            if loader.config.streaming.enabled
+        ]
+        if not streaming:
+            return None
+        if len(streaming) != 1:
+            raise RuntimeError(
+                "streaming telemetry requires exactly one streaming loader when "
+                "loader_name is omitted."
+            )
+        return streaming[0].streaming_telemetry()
+
     def train_dataloader(self) -> Iterable[TrainBatch]:
         loaders = {
             name: loader.train_dataloader() for name, loader in self._loaders.items()
@@ -754,7 +771,6 @@ def _build_loader(
             cast(DatasetRuntime, runtime),
             spec.task_weights,
             sample_index=spec.sample_index,
-            prediction=spec.prediction,
             trace=spec.trace,
             ar_framing=spec.ar_framing,
         )
@@ -763,7 +779,6 @@ def _build_loader(
         spec.text_config,
         cast(TextRuntime, runtime),
         spec.task_weights,
-        prediction=spec.prediction,
         trace=spec.trace,
         ar_framing=spec.ar_framing,
         max_samples=spec.max_samples,
@@ -782,7 +797,6 @@ def _build_validation_loader(
             cast(DatasetRuntime, runtime),
             spec.task_weights,
             sample_index=spec.sample_index,
-            prediction=spec.prediction,
             trace=spec.trace,
             ar_framing=spec.ar_framing,
         )
@@ -791,7 +805,6 @@ def _build_validation_loader(
         spec.text_config,
         cast(TextRuntime, runtime),
         spec.task_weights,
-        prediction=spec.prediction,
         trace=spec.trace,
         ar_framing=spec.ar_framing,
         max_samples=spec.max_samples,
@@ -1081,7 +1094,6 @@ def _collator(
     interleave_audio_frames: int = 25,
     mask_text_ratio: float = 0.5,
     mask_audio_ratio: float = 0.5,
-    prediction: PredictionModality | None = None,
     trace: str | None = None,
     ar_framing: ARFraming = ARFraming.INSTRUCTION,
     tasks: Mapping[Task, TaskConfig] | None = None,
@@ -1094,7 +1106,6 @@ def _collator(
             interleave_audio_frames=interleave_audio_frames,
             mask_text_ratio=mask_text_ratio,
             mask_audio_ratio=mask_audio_ratio,
-            prediction=prediction,
             trace=trace,
             ar_framing=ar_framing,
             tasks=tasks,
@@ -1107,7 +1118,6 @@ def _collator(
             interleave_audio_frames=interleave_audio_frames,
             mask_text_ratio=mask_text_ratio,
             mask_audio_ratio=mask_audio_ratio,
-            prediction=prediction,
             trace=trace,
             ar_framing=ar_framing,
             tasks=tasks,

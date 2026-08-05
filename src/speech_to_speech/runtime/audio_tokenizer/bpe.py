@@ -7,6 +7,7 @@ import torch
 from anytrain.tokenizer import CodecBPE
 from torch import Tensor
 
+from ..audio_schema import AudioGrammarVariant, AudioTokenBlock, AudioTokenGrammar
 from ._common import validate_ids
 
 
@@ -14,6 +15,26 @@ class TorchCodecBPE(CodecBPE):
     """CodecBPE with tensor conveniences for model/runtime integration."""
 
     embedding_initialization = "codec"
+
+    @property
+    def grammar(self) -> AudioTokenGrammar:
+        return AudioTokenGrammar(
+            name="codec-bpe-audio-payload-v1",
+            variants=(
+                AudioGrammarVariant(
+                    name="payload",
+                    blocks=(
+                        AudioTokenBlock(
+                            name="payload",
+                            marker_id=None,
+                            token_ranges=((0, int(self.vocab_size)),),
+                        ),
+                    ),
+                ),
+            ),
+            default_variant="payload",
+            generation_variants=("payload",),
+        )
 
     @classmethod
     def wrap(cls, tokenizer: CodecBPE) -> TorchCodecBPE:

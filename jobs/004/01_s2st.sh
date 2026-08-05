@@ -9,7 +9,7 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 cd "${SPEECH_TO_SPEECH_ROOT}"
 
 HYDRA_ARGS=(
-  "runtime.audio_tokenizer=${SPEECH_TO_SPEECH_AUDIO_TOKENIZER}"
+  "runtime.audio_output.bpe=${SPEECH_TO_SPEECH_AUDIO_TOKENIZER}"
   "repo_output_root=${SPEECH_TO_SPEECH_TRAIN_ROOT}"
 )
 if [[ -n "${SPEECH_TO_SPEECH_STAGE_DATA_ROOT:-}" ]]; then

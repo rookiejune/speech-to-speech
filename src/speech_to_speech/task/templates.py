@@ -3,12 +3,16 @@ from __future__ import annotations
 import random
 from typing import Optional
 
-from anydataset.types import Modality
-
-from .contract import FieldRole, ResponseSpec, Task
+from .contract import (
+    FieldRole,
+    ResponseControl,
+    ResponseSpec,
+    ResponseStep,
+    Task,
+    response_control_tokens,
+)
 
 TEMPLATES_PER_TASK = 30
-CANONICAL_TEMPLATES_PER_TASK = 1
 
 TEMPLATES: dict[Task, tuple[str, ...]] = {
     Task.AUDIO_AR: (
@@ -398,28 +402,6 @@ TEMPLATES: dict[Task, tuple[str, ...]] = {
 }
 
 
-CANONICAL_TEMPLATES: dict[Task, tuple[str, ...]] = {
-    Task.AUDIO_AR: ("Continue the {language} speech.",),
-    Task.ASR: ("Transcribe the {language} speech: {source}",),
-    Task.INTERLEAVED_AR: ("Continue the interleaved {language} text and speech.",),
-    Task.MASKED_AR: ("Reconstruct masked {language} text and speech.",),
-    Task.MT: ("Translate the following text into {language}: {source}",),
-    Task.PARALLEL_AR: ("Continue the parallel {language} text and speech tracks.",),
-    Task.S2ST: (
-        "Translate the following speech into {language} speech: {source}",
-    ),
-    Task.S2TT: (
-        "Translate the following speech into {language} text: {source}",
-    ),
-    Task.TEXT_AR: ("Continue the following text.",),
-    Task.T2ST: (
-        "Translate the following text into {language} speech: {source}",
-    ),
-    Task.T2TT: ("Translate the following text into {language}: {source}",),
-    Task.TTS: ("Synthesize speech from the following text: {source}",),
-}
-
-
 def select_template(task: Task, index: Optional[int] = 0) -> str:
     values = TEMPLATES[task]
     if len(values) != TEMPLATES_PER_TASK:
@@ -475,38 +457,59 @@ def format_response_instruction(
     *,
     language: str,
 ) -> str:
-    """Append an explicit ordered response schema for non-direct traces."""
+    """Append the exact typed response schema required by the task program."""
     if not isinstance(instruction, str) or not instruction:
         raise ValueError("response instruction base must be a non-empty string.")
     if not isinstance(response, ResponseSpec):
         raise TypeError("response instruction requires a ResponseSpec.")
     if not isinstance(language, str) or not language:
         raise ValueError("response instruction language must be a non-empty string.")
-    if response.name == "direct":
+    controlled = any(
+        step.control in {ResponseControl.ASR, ResponseControl.MT}
+        for step in response.steps
+    )
+    if response.name == "direct" and not controlled:
         return instruction
+    if response.name == "direct":
+        return (
+            instruction
+            + "\nRespond in this exact format:\n"
+            + _step_format(response.steps[0], language)
+        )
     steps = [
-        f"{index}. {_field_instruction(field.role, field.modality, language)}"
-        for index, field in enumerate(response.fields, start=1)
+        f"{index}. {_step_format(step, language)}"
+        for index, step in enumerate(response.steps, start=1)
     ]
     return instruction + "\nRespond in this exact order:\n" + "\n".join(steps)
 
 
-def _field_instruction(
-    role: FieldRole,
-    modality: Modality,
-    language: str,
-) -> str:
-    if role is FieldRole.SOURCE and modality is Modality.TEXT:
-        return "transcribe the source speech as text"
-    if role is FieldRole.TARGET and modality is Modality.TEXT:
-        return f"produce the {language} translation as text"
-    if role is FieldRole.TARGET and modality is Modality.AUDIO:
-        return f"generate the corresponding {language} speech"
-    if role is FieldRole.SOURCE and modality is Modality.AUDIO:
-        return "reproduce the source audio"
-    raise ValueError(
-        f"unsupported response field: role={role.value}, modality={modality.value}."
+def _step_format(step: ResponseStep, language: str) -> str:
+    description = _control_instruction(step, language)
+    control = response_control_tokens(
+        step.control,
+        target_language=language,
     )
+    if control is None:
+        return description
+    prefix = "".join(token.value for token in control.prefix)
+    return f"{description} as {prefix}...{control.end.value}"
+
+
+def _control_instruction(step: ResponseStep, language: str) -> str:
+    if step.control is ResponseControl.ASR:
+        if step.role is FieldRole.SOURCE:
+            return "transcribe the source speech as text"
+        return "transcribe the speech as text"
+    if step.control is ResponseControl.MT:
+        return f"produce the {language} translation as text"
+    if step.control is ResponseControl.EOS:
+        return "produce the text response"
+    if step.control is ResponseControl.AUDIO:
+        if step.role is FieldRole.TARGET:
+            return f"generate the corresponding {language} speech"
+        if step.role is FieldRole.SOURCE:
+            return "reproduce the source audio"
+    raise ValueError(f"unsupported response control: {step.control.value}.")
 
 
 def _index(value: object, *, name: str) -> Optional[int]:
@@ -520,8 +523,6 @@ def _index(value: object, *, name: str) -> Optional[int]:
 
 
 __all__ = [
-    "CANONICAL_TEMPLATES",
-    "CANONICAL_TEMPLATES_PER_TASK",
     "TEMPLATES",
     "TEMPLATES_PER_TASK",
     "evaluation_template_index",

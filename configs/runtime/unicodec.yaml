@@ -1,13 +1,11 @@
-codec: unicodec
 backbone: Qwen/Qwen3-0.6B
 backbone_initialization: pretrained
-audio_tokenizer:
-input_audio:
-  codec:
-  tokenizer:
-  vocab_size:
-  frame_rate:
-acoustic_generator_artifact:
+audio_input: null
+audio_output:
+  tokenizer: unicodec
+  detokenizer: unicodec
+  bpe: null
+  acoustic_generator_artifact: null
 device: cuda
 dtype: bfloat16
 attn_implementation: flash_attention_2

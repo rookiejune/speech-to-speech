@@ -6,12 +6,112 @@ import unittest
 
 from _contracts_helpers import *
 from speech_to_speech.audio import AudioCodes
-from speech_to_speech.datamodule.builder import build_speech_sample
-from speech_to_speech.datamodule.sample import Speech
+from speech_to_speech.datamodule.builder import build_speech_sample, ctc_target
+from speech_to_speech.datamodule.sample import Speech, SpeechTaskSample
 from speech_to_speech.datamodule.loader import ARFraming
+from speech_to_speech.runtime.audio_schema import AudioTokenSpec
+from speech_to_speech.task import TARGET_COT, PredictionModality, resolve_response
+
+
+_base_data_runtime = _data_runtime
+_base_bicodec_data_runtime = _bicodec_data_runtime
+
+
+def _with_audio_schema(runtime):
+    codec_name = getattr(runtime, "codec_name", None)
+    if codec_name is None:
+        codec_name = runtime.input_codec_name
+    runtime.codec_name = codec_name
+    runtime.input_audio_decoupled = getattr(runtime, "input_audio_decoupled", False)
+    runtime.input_codec_name = getattr(runtime, "input_codec_name", codec_name)
+    runtime.input_audio_view = getattr(runtime, "input_audio_view", runtime.audio_view)
+    runtime.input_codec_frame_rate = getattr(
+        runtime,
+        "input_codec_frame_rate",
+        runtime.codec_frame_rate,
+    )
+    runtime.input_audio_tokenizer = getattr(
+        runtime,
+        "input_audio_tokenizer",
+        runtime.audio_tokenizer,
+    )
+    runtime.bos_token_id = getattr(runtime, "bos_token_id", 2)
+    runtime.audio_schema_token_id = runtime.mask_token_id + 1
+    runtime.input_audio_block_name = getattr(
+        runtime,
+        "input_audio_block_name",
+        Modality.AUDIO.value,
+    )
+    runtime.input_boa_token_id = getattr(
+        runtime,
+        "input_boa_token_id",
+        runtime.boa_token_id,
+    )
+    runtime.input_eoa_token_id = getattr(
+        runtime,
+        "input_eoa_token_id",
+        runtime.eoa_token_id,
+    )
+    runtime.input_audio_schema_token_id = (
+        runtime.audio_schema_token_id
+        if not runtime.input_audio_decoupled
+        else runtime.input_eoa_token_id + 1
+    )
+    runtime.input_codec_audio_range = getattr(
+        runtime,
+        "input_codec_audio_range",
+        (runtime.layout.blocks[runtime.input_audio_block_name][0], runtime.input_boa_token_id),
+    )
+    blocks = dict(runtime.layout.blocks)
+    audio_start, audio_end = blocks[Modality.AUDIO.value]
+    blocks[Modality.AUDIO.value] = (
+        audio_start,
+        max(audio_end, runtime.audio_schema_token_id + 1),
+    )
+    if runtime.input_audio_decoupled:
+        input_start, input_end = blocks[runtime.input_audio_block_name]
+        blocks[runtime.input_audio_block_name] = (
+            input_start,
+            max(input_end, runtime.input_audio_schema_token_id + 1),
+        )
+    runtime.layout = Layout(**blocks)
+    output_spec = AudioTokenSpec.create(
+        codec_name=runtime.codec_name,
+        sequence_layout=runtime.audio_sequence_layout.value,
+        tokenizer=runtime.audio_tokenizer,
+    )
+    input_spec = (
+        output_spec
+        if not runtime.input_audio_decoupled
+        else AudioTokenSpec.create(
+            codec_name=runtime.input_codec_name,
+            sequence_layout=runtime.audio_sequence_layout.value,
+            tokenizer=runtime.input_audio_tokenizer,
+        )
+    )
+    runtime.audio_token_spec = output_spec
+    runtime.output_audio_token_spec = output_spec
+    runtime.input_audio_token_spec = input_spec
+    return runtime
+
+
+def _data_runtime():
+    return _with_audio_schema(_base_data_runtime())
+
+
+def _bicodec_data_runtime():
+    return _with_audio_schema(_base_bicodec_data_runtime())
 
 
 class SpeechSampleContractTest(unittest.TestCase):
+    def test_ctc_rejects_runtime_control_rows(self):
+        runtime = _data_runtime()
+        speech = parse_sample(_raw_sample(), runtime).source
+        speech.text_token_ids = torch.tensor([runtime.lexical_text_vocab_size])
+
+        with self.assertRaisesRegex(ValueError, "lexical text vocabulary"):
+            ctc_target(torch.tensor([0, 1]), speech, runtime)
+
     def test_raw_text_is_encoded_at_the_datamodule_boundary(self):
         tokenizer = _Tokenizer(10)
         audio_tokenizer = NativeAudioTokenizer(vocab_size=8)
@@ -61,6 +161,19 @@ class SpeechSampleContractTest(unittest.TestCase):
         self.assertEqual(pair.source.duration_seconds, 0.04)
         self.assertEqual(pair.target.duration_seconds, 0.04)
 
+    def test_speech_task_prediction_is_derived_from_trace(self):
+        pair = parse_sample(_raw_sample(), _data_runtime())
+
+        sample = SpeechTaskSample(
+            source=pair.source,
+            target=pair.target,
+            task=Task.S2ST,
+            trace=TARGET_COT,
+        )
+
+        self.assertNotIn("prediction", vars(sample))
+        self.assertIs(sample.prediction, PredictionModality.PARALLEL)
+
     def test_build_sample_uses_inferred_audio_seconds_for_audio_tasks(self):
         runtime = _data_runtime()
         runtime.text_tokenizer = _ChatTokenizer(10)
@@ -71,6 +184,8 @@ class SpeechSampleContractTest(unittest.TestCase):
 
         self.assertEqual(tts.audio_seconds, 0.04)
         self.assertEqual(s2st.audio_seconds, 0.08)
+        self.assertNotIn("target_language", tts.request)
+        self.assertNotIn("target_language", s2st.request)
 
     def test_audio_spans_emit_ctc_only_when_their_transcript_is_not_visible(self):
         runtime = _data_runtime()
@@ -88,6 +203,14 @@ class SpeechSampleContractTest(unittest.TestCase):
         for task, (source_expected, target_expected) in expected.items():
             with self.subTest(task=task):
                 sample = build_sample(pair, task, runtime)
+                expected_language = (
+                    "en" if resolve_response(task).requires_target_language else None
+                )
+                self.assertEqual(sample.target_language, expected_language)
+                self.assertEqual(
+                    "target_language" in sample.request,
+                    expected_language is not None,
+                )
                 self.assertEqual(sample.source_ctc is not None, source_expected)
                 self.assertEqual(sample.target_ctc is not None, target_expected)
                 if sample.source_ctc is not None:
@@ -127,10 +250,17 @@ class SpeechSampleContractTest(unittest.TestCase):
         batch = SingleCollator(runtime, {Task.TTS: 1.0})([_raw_single_sample()])
 
         self.assertEqual(sample.task, Task.TTS)
+        self.assertNotIn("target_language", sample.request)
         self.assertEqual(batch.tasks, [Task.TTS])
+        self.assertEqual(batch.target_languages, [None])
         self.assertIsNotNone(batch.acoustic_target)
         supervised = batch.token_labels[batch.token_labels.ne(-100)]
-        self.assertTrue(torch.equal(supervised, torch.tensor([10, 11, 19])))
+        self.assertTrue(
+            torch.equal(
+                supervised,
+                torch.tensor([24, 27, 16, 17, 25]),
+            )
+        )
         self.assertAlmostEqual(float(batch.audio_seconds[0].item()), 0.04)
 
     def test_single_collator_builds_asr_from_the_same_utterance_shape(self):
@@ -140,9 +270,10 @@ class SpeechSampleContractTest(unittest.TestCase):
         batch = SingleCollator(runtime, {Task.ASR: 1.0})([_raw_single_sample()])
 
         self.assertEqual(batch.tasks, [Task.ASR])
+        self.assertEqual(batch.target_languages, [None])
         self.assertIsNone(batch.acoustic_target)
         supervised = batch.token_labels[batch.token_labels.ne(-100)]
-        self.assertTrue(torch.equal(supervised, torch.tensor([1, 2, 1])))
+        self.assertTrue(torch.equal(supervised, torch.tensor([10, 1, 2, 11])))
 
     def test_single_text_task_does_not_require_or_encode_audio(self):
         runtime = _data_runtime()
@@ -157,9 +288,10 @@ class SpeechSampleContractTest(unittest.TestCase):
 
         self.assertIsInstance(batch, ModelBatch)
         self.assertEqual(batch.tasks, [Task.TEXT_AR])
+        self.assertEqual(batch.target_languages, [None])
         self.assertEqual(runtime.codec.calls, [])
 
-    def test_single_audio_ar_pretraining_collator_uses_boa_prompt(self):
+    def test_single_audio_ar_pretraining_supervises_the_full_audio_envelope(self):
         runtime = _data_runtime()
         tokenizer = _ChatTokenizer(10)
         tokenizer.apply_chat_template = Mock(
@@ -175,12 +307,20 @@ class SpeechSampleContractTest(unittest.TestCase):
 
         self.assertIsInstance(batch, ModelBatch)
         self.assertEqual(int(batch.generation_prompt_lengths[0]), 1)
-        self.assertEqual(int(batch.input_ids[0, 0]), runtime.boa_token_id)
+        self.assertEqual(int(batch.input_ids[0, 0]), runtime.bos_token_id)
         self.assertEqual(int(batch.token_labels[0, 0]), -100)
         self.assertTrue(
             torch.equal(
                 batch.token_labels[0, 1:],
-                torch.tensor([10, 11, runtime.eoa_token_id]),
+                torch.tensor(
+                    [
+                        runtime.boa_token_id,
+                        runtime.audio_schema_token_id,
+                        16,
+                        17,
+                        runtime.eoa_token_id,
+                    ]
+                ),
             )
         )
         tokenizer.apply_chat_template.assert_not_called()
@@ -201,10 +341,12 @@ class SpeechSampleContractTest(unittest.TestCase):
 
         self.assertIsInstance(batch, ModelBatch)
         self.assertEqual(int(batch.generation_prompt_lengths[0]), 1)
-        self.assertEqual(int(batch.input_ids[0, 0]), runtime.boa_token_id)
+        self.assertEqual(int(batch.input_ids[0, 0]), runtime.bos_token_id)
         supervised = batch.token_labels[0][batch.token_labels[0].ne(-100)]
         audio_start, _ = runtime.layout.blocks[Modality.AUDIO.value]
-        self.assertTrue(supervised[:-1].ge(audio_start).all())
+        self.assertEqual(int(supervised[0]), runtime.boa_token_id)
+        self.assertEqual(int(supervised[1]), runtime.audio_schema_token_id)
+        self.assertTrue(supervised[2:-1].ge(audio_start).all())
         self.assertEqual(int(supervised[-1]), runtime.eoa_token_id)
         tokenizer.apply_chat_template.assert_not_called()
 
@@ -271,7 +413,7 @@ class SpeechSampleContractTest(unittest.TestCase):
         self.assertIsInstance(raw, RawSpeechBatch)
         self.assertIs(raw.ar_framing, ARFraming.PRETRAINING)
         self.assertEqual(int(batch.generation_prompt_lengths[0]), 1)
-        self.assertEqual(int(batch.input_ids[0, 0]), runtime.boa_token_id)
+        self.assertEqual(int(batch.input_ids[0, 0]), runtime.bos_token_id)
         self.assertEqual(int(batch.token_labels[0, 0]), -100)
 
     def test_bicodec_online_tokenize_stays_fp32_outside_autocast(self):
@@ -434,9 +576,11 @@ class SpeechSampleContractTest(unittest.TestCase):
             codebook_sizes=(8, 10),
             codec_name="longcat",
         )
-        audio_start = 10
+        lexical_text_vocab_size = 10
+        controls = ControlTokenLookup(lexical_text_vocab_size)
+        audio_start = lexical_text_vocab_size + len(ControlToken)
         boa_token_id = audio_start + tokenizer.vocab_size
-        runtime = SimpleNamespace(
+        runtime = _with_audio_schema(SimpleNamespace(
             input_audio_decoupled=False,
             input_codec_name="longcat",
             input_audio_view=AudioView.LONGCAT,
@@ -452,6 +596,9 @@ class SpeechSampleContractTest(unittest.TestCase):
                 text=(0, audio_start),
                 audio=(audio_start, boa_token_id + 3),
             ),
+            lexical_text_vocab_size=lexical_text_vocab_size,
+            control_token_ids=controls.ids,
+            control_token_id=controls,
             pad_token_id=0,
             eos_token_id=1,
             boa_token_id=boa_token_id,
@@ -461,7 +608,7 @@ class SpeechSampleContractTest(unittest.TestCase):
             input_boa_token_id=boa_token_id,
             input_eoa_token_id=boa_token_id + 1,
             input_codec_audio_range=(audio_start, boa_token_id),
-        )
+        ))
         raw = _raw_sample()
 
         pair = parse_sample(raw, runtime)
@@ -480,6 +627,9 @@ class SpeechSampleContractTest(unittest.TestCase):
         supervised = sample.token_labels[sample.token_labels.ne(-100)]
         expected = torch.cat(
             [
+                torch.tensor(
+                    [runtime.boa_token_id, runtime.audio_schema_token_id]
+                ),
                 pair.target.audio_token_ids + audio_start,
                 torch.tensor([runtime.eoa_token_id]),
             ]
@@ -523,7 +673,7 @@ class SpeechSampleContractTest(unittest.TestCase):
         self.assertTrue(torch.equal(local_ids, serialized))
         self.assertEqual(int(local_ids[0]), tokenizer.global_token_id)
         self.assertTrue(local_ids.eq(tokenizer.semantic_token_id).any())
-        self.assertEqual(int(local_ids[-1]), tokenizer.end_token_id)
+        runtime.audio_token_spec.validate_complete(local_ids)
 
 
 

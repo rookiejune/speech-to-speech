@@ -6,7 +6,7 @@ import unittest
 
 from _contracts_helpers import *
 from speech_to_speech.task import (
-    PredictionModality,
+    TARGET_COT,
     uses_source_ctc,
     uses_target_ctc,
 )
@@ -25,7 +25,7 @@ class TaskPolicyContractTest(unittest.TestCase):
 
         self.assertTrue(
             uses_source_ctc(Task.S2ST)
-            and not uses_target_ctc(Task.S2ST, PredictionModality.PARALLEL)
+            and not uses_target_ctc(Task.S2ST, trace=TARGET_COT)
         )
         self.assertFalse(uses_target_ctc(Task.TTS))
 
@@ -49,7 +49,6 @@ class TaskPolicyContractTest(unittest.TestCase):
         restored = pickle.loads(pickle.dumps(weights))
 
         self.assertEqual(restored.tasks, [Task.T2ST, Task.TTS])
-        self.assertEqual(restored.prediction, None)
         self.assertIsInstance(restored.allocate(1)[0], Task)
 
     def test_parameter_policy_freezes_explicit_parameter_groups(self):

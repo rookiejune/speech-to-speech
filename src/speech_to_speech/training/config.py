@@ -357,33 +357,39 @@ def _validate_audio_sequence_layout(config: _EntryConfig) -> None:
             "because full codec codes are trained as sequence tokens."
         )
     if (
-        config.runtime.acoustic_generator_artifact is not None
+        config.runtime.audio_output.acoustic_generator_artifact is not None
         and config.audio_sequence_layout is AudioSequenceLayout.FLATTENED
     ):
         raise ValueError(
-            "runtime.acoustic_generator_artifact requires audio_sequence_layout=semantic."
+            "runtime.audio_output.acoustic_generator_artifact requires "
+            "audio_sequence_layout=semantic."
         )
     if (
-        config.runtime.acoustic_generator_artifact is not None
+        config.runtime.audio_output.acoustic_generator_artifact is not None
         and acoustic is not AcousticType.NONE
     ):
         raise ValueError(
-            "runtime.acoustic_generator_artifact requires model/acoustic=none."
+            "runtime.audio_output.acoustic_generator_artifact requires "
+            "model/acoustic=none."
         )
-    if config.runtime.audio_view is AudioView.BICODEC and acoustic is not AcousticType.NONE:
+    if (
+        config.runtime.audio_output.audio_view is AudioView.BICODEC
+        and acoustic is not AcousticType.NONE
+    ):
         raise ValueError(
             "BiCodec global units require model/acoustic=none and "
             "audio_sequence_layout=flattened."
         )
     if (
         acoustic is AcousticType.NONE
-        and config.runtime.audio_view is AudioView.LONGCAT
+        and config.runtime.audio_output.audio_view is AudioView.LONGCAT
         and config.audio_sequence_layout is AudioSequenceLayout.SEMANTIC
-        and config.runtime.acoustic_generator_artifact is None
+        and config.runtime.audio_output.acoustic_generator_artifact is None
     ):
         raise ValueError(
             "audio_sequence_layout=semantic with model/acoustic=none requires "
-            "runtime.acoustic_generator_artifact; use audio_sequence_layout=flattened "
+            "runtime.audio_output.acoustic_generator_artifact; use "
+            "audio_sequence_layout=flattened "
             "for token-only training."
         )
 

@@ -96,6 +96,7 @@ from speech_to_speech.runtime.audio_tokenizer import (
     NativeAudioTokenizer,
     TorchCodecBPE,
 )
+from speech_to_speech.runtime.audio_schema import AudioTokenSpec
 from speech_to_speech.training.parameter_policy import (
     PARAMETER_POLICY_SPECS,
     ParameterGroup,
@@ -103,7 +104,7 @@ from speech_to_speech.training.parameter_policy import (
     ParameterPolicyTrainability,
     default_parameter_policy_config,
 )
-from speech_to_speech.task import Task
+from speech_to_speech.task import ControlToken, Task
 
 
 from scripts._config.overfit import overfit as parse_overfit
@@ -159,6 +160,18 @@ class _ChatTokenizer(_Tokenizer):
         return f"<user>{conversation[0]['content']}</user><assistant>"
 
 
+class ControlTokenLookup:
+    def __init__(self, lexical_vocab_size: int) -> None:
+        self.ids = tuple(
+            range(lexical_vocab_size, lexical_vocab_size + len(ControlToken))
+        )
+
+    def __call__(self, token: ControlToken) -> int:
+        if not isinstance(token, ControlToken):
+            raise TypeError("control token lookup requires a ControlToken")
+        return self.ids[list(ControlToken).index(token)]
+
+
 class _StageBackbone(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -201,7 +214,6 @@ def _sample(task: Task) -> ModelSample:
         torch.tensor([1, 2]),
         torch.tensor([-100, 2]),
         task=task,
-        prediction=task.prediction_modality,
     )
 
 
@@ -224,7 +236,6 @@ def _target_sample(
             "token_positions": torch.ones(frames, dtype=torch.long),
         },
         task=Task.TTS,
-        prediction=Task.TTS.prediction_modality,
     )
 
 
@@ -349,6 +360,14 @@ def _compose(*overrides: str, config_name: str = "overfit") -> DictConfig:
 
 def _data_runtime():
     tokenizer = NativeAudioTokenizer(vocab_size=8)
+    lexical_text_vocab_size = 10
+    controls = ControlTokenLookup(lexical_text_vocab_size)
+    audio_start = lexical_text_vocab_size + len(ControlToken)
+    spec = AudioTokenSpec.create(
+        codec_name="longcat",
+        sequence_layout=AudioSequenceLayout.SEMANTIC.value,
+        tokenizer=tokenizer,
+    )
     return SimpleNamespace(
         input_audio_decoupled=False,
         input_codec_name="longcat",
@@ -362,16 +381,28 @@ def _data_runtime():
         text_tokenizer=_Tokenizer(10),
         input_audio_tokenizer=tokenizer,
         audio_tokenizer=tokenizer,
-        layout=Layout(text=(0, 10), audio=(10, 20)),
+        output_audio_tokenizer=tokenizer,
+        input_audio_token_spec=spec,
+        audio_token_spec=spec,
+        output_audio_token_spec=spec,
+        input_audio_schema_id=spec.schema_id,
+        output_audio_schema_id=spec.schema_id,
+        layout=Layout(text=(0, audio_start), audio=(audio_start, audio_start + 12)),
+        lexical_text_vocab_size=lexical_text_vocab_size,
+        control_token_ids=controls.ids,
+        control_token_id=controls,
         pad_token_id=0,
+        bos_token_id=1,
         eos_token_id=1,
-        boa_token_id=18,
-        eoa_token_id=19,
-        mask_token_id=20,
+        boa_token_id=audio_start + 8,
+        eoa_token_id=audio_start + 9,
+        mask_token_id=audio_start + 10,
+        audio_schema_token_id=audio_start + 11,
         input_audio_block_name="audio",
-        input_boa_token_id=18,
-        input_eoa_token_id=19,
-        input_codec_audio_range=(10, 18),
+        input_boa_token_id=audio_start + 8,
+        input_eoa_token_id=audio_start + 9,
+        input_audio_schema_token_id=audio_start + 11,
+        input_codec_audio_range=(audio_start, audio_start + 8),
         codec=_longcat_codec(),
     )
 
@@ -382,22 +413,50 @@ def _bicodec_data_runtime():
         global_codebook_sizes=(3,),
         global_unit_length=2,
     )
-    audio_start = 10
+    lexical_text_vocab_size = 10
+    controls = ControlTokenLookup(lexical_text_vocab_size)
+    audio_start = lexical_text_vocab_size + len(ControlToken)
     boa_token_id = audio_start + tokenizer.vocab_size
+    spec = AudioTokenSpec.create(
+        codec_name="bicodec",
+        sequence_layout=AudioSequenceLayout.FLATTENED.value,
+        tokenizer=tokenizer,
+    )
     return SimpleNamespace(
+        input_audio_decoupled=False,
+        input_codec_name="bicodec",
+        input_audio_view=AudioView.BICODEC,
+        input_codec_frame_rate=50.0,
         codec_name="bicodec",
         audio_view=AudioView.BICODEC,
         codec_frame_rate=50.0,
         audio_sequence_layout=AudioSequenceLayout.FLATTENED,
         acoustic_generator_artifact=None,
         text_tokenizer=_ChatTokenizer(10),
+        input_audio_tokenizer=tokenizer,
         audio_tokenizer=tokenizer,
-        layout=Layout(text=(0, 10), audio=(audio_start, boa_token_id + 3)),
+        output_audio_tokenizer=tokenizer,
+        input_audio_token_spec=spec,
+        audio_token_spec=spec,
+        output_audio_token_spec=spec,
+        input_audio_schema_id=spec.schema_id,
+        output_audio_schema_id=spec.schema_id,
+        layout=Layout(text=(0, audio_start), audio=(audio_start, boa_token_id + 4)),
+        lexical_text_vocab_size=lexical_text_vocab_size,
+        control_token_ids=controls.ids,
+        control_token_id=controls,
         pad_token_id=0,
+        bos_token_id=1,
         eos_token_id=1,
         boa_token_id=boa_token_id,
         eoa_token_id=boa_token_id + 1,
         mask_token_id=boa_token_id + 2,
+        audio_schema_token_id=boa_token_id + 3,
+        input_audio_block_name="audio",
+        input_boa_token_id=boa_token_id,
+        input_eoa_token_id=boa_token_id + 1,
+        input_audio_schema_token_id=boa_token_id + 3,
+        input_codec_audio_range=(audio_start, boa_token_id),
         codec=_GlobalEncodingCodec(),
     )
 

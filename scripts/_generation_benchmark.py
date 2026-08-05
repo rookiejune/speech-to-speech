@@ -7,7 +7,7 @@ from typing import Any
 import torch
 
 from speech_to_speech.generation import Request, Result, generate_responses
-from speech_to_speech.generation.evaluation import audio_output
+from speech_to_speech.generation.evaluation import waveform_output
 from speech_to_speech.model.acoustic.flow import FlowModel
 
 
@@ -98,6 +98,6 @@ def _model_device(model: FlowModel) -> torch.device:
 
 def _finite(results: Sequence[Result], name: str) -> bool:
     return all(
-        bool(torch.isfinite(audio_output(result, name)["waveform"]).all())
+        bool(torch.isfinite(waveform_output(result, name)[1]).all())
         for result in results
     )

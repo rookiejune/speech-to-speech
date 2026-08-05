@@ -145,7 +145,7 @@ class QwenOmniTextBackboneTest(unittest.TestCase):
         path = Path(__file__).resolve().parents[1] / "configs/runtime/qwen2_5_omni_text.yaml"
         config = OmegaConf.load(path)
 
-        self.assertEqual(config.codec, "bicodec")
+        self.assertEqual(config.audio_output.tokenizer, "bicodec")
         self.assertEqual(config.backbone_type, "qwen2_5_omni_text")
         self.assertEqual(config.backbone_module, "")
         self.assertEqual(config.backbone_body, "base_model")

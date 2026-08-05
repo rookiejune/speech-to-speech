@@ -70,7 +70,6 @@ class OOMDiagnosticsTest(unittest.TestCase):
                         language=Language.EN,
                     ),
                     task=Task.TTS,
-                    prediction=Task.TTS.prediction_modality,
                 ),
             ),
             pad_token_id=0,
@@ -304,7 +303,6 @@ def _model_batch() -> ModelBatch:
             "token_positions": torch.tensor([[3, 4]]),
         },
         tasks=[Task.S2ST],
-        predictions=[Task.S2ST.prediction_modality],
         pad_token_id=0,
         audio_input_positions=torch.tensor([[1, 2]]),
     )

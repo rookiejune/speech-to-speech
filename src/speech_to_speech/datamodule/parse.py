@@ -21,10 +21,10 @@ from .sample import (
     TextPair,
     seconds,
 )
-from ..runtime import AudioSequenceLayout
-from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
+from ..runtime.audio_tokenizer import BiCodecAudioTokenizer, FlattenedAudioTokenizer
+from ..runtime.codec import has_codec_loader
 from ..audio import AudioCodes
-from ..task import PredictionModality, SourceLayout, Task, resolve_response
+from ..task import SourceLayout, Task, resolve_response
 
 
 def from_frames(
@@ -81,11 +81,9 @@ def parse_task_sample(
     runtime: DataRuntime,
     *,
     encode_missing_codes: bool = False,
-    prediction: PredictionModality | None = None,
     trace: str | None = None,
 ) -> SpeechTaskSample:
-    response = resolve_response(task, prediction=prediction, trace=trace)
-    prediction = response.prediction
+    response = resolve_response(task, trace=trace)
     if task.source_layout is SourceLayout.TEXT_AUDIO and runtime.input_audio_decoupled:
         raise ValueError(
             "MASKED_AR does not support different input and output audio tokenizers."
@@ -110,13 +108,11 @@ def parse_task_sample(
             encode_missing_codes=encode_missing_codes,
             input_audio=task.source_modality is types.Modality.AUDIO,
         )
-    target_modality = task.target_modality
-    if target_modality is None:
-        if not prediction.supervises_audio:
-            raise ValueError(
-                f"{task.value} mixed prediction without audio cannot use pair parser."
-            )
-        target_modality = types.Modality.AUDIO
+    target_modality = (
+        types.Modality.AUDIO
+        if response.prediction.supervises_audio
+        else types.Modality.TEXT
+    )
     if task.source_layout is SourceLayout.TEXT_AUDIO:
         if not isinstance(source, (Speech, RawSpeech)):
             raise TypeError("MASKED_AR source must be Speech or RawSpeech.")
@@ -139,7 +135,6 @@ def parse_task_sample(
         source=source,
         target=target,
         task=task,
-        prediction=prediction,
         trace=response.name,
         audio_context=audio_context,
     )
@@ -190,9 +185,9 @@ def parse_audio_codes(
 ) -> AudioCodes:
     view = runtime.input_audio_view if input_audio else runtime.audio_view
     parsed = _split_audio_codes(codes, view)
+    tokenizer = runtime.input_audio_tokenizer if input_audio else runtime.audio_tokenizer
     if (
-        _uses_output_audio_contract(runtime, input_audio=input_audio)
-        and runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED
+        isinstance(tokenizer, FlattenedAudioTokenizer)
         and view is not types.AudioView.BICODEC
     ):
         if not isinstance(codes, Tensor):
@@ -214,23 +209,13 @@ def speech_from_codes(
     semantic_codes = parsed.semantic_codes
     if semantic_codes is None:
         raise ValueError("prepared speech codes require semantic_codes.")
-    if (
-        _uses_output_audio_contract(runtime, input_audio=input_audio)
-        and runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED
-        and runtime.audio_view is types.AudioView.BICODEC
-    ):
-        tokenizer = runtime.audio_tokenizer
-        if not isinstance(tokenizer, BiCodecAudioTokenizer):
-            raise TypeError("BiCodec full sequence requires BiCodecAudioTokenizer.")
+    tokenizer = runtime.input_audio_tokenizer if input_audio else runtime.audio_tokenizer
+    if isinstance(tokenizer, BiCodecAudioTokenizer):
         if parsed.global_codes is None:
             raise ValueError("BiCodec full sequence requires global codes.")
         audio_token_ids = tokenizer.encode_full(parsed)
     else:
-        tokenizer = (
-            runtime.input_audio_tokenizer if input_audio else runtime.audio_tokenizer
-        )
         audio_token_ids = _as_tensor(tokenizer.encode(semantic_codes))
-    tokenizer = runtime.input_audio_tokenizer if input_audio else runtime.audio_tokenizer
     audio_token_spans = _as_tensor(
         tokenizer.frame_spans(audio_token_ids)
     ).to(dtype=torch.long)
@@ -244,14 +229,6 @@ def speech_from_codes(
         duration_seconds=duration_seconds,
         global_codes=parsed.global_codes,
     )
-
-
-def _uses_output_audio_contract(
-    runtime: DataRuntime,
-    *,
-    input_audio: bool,
-) -> bool:
-    return not input_audio or not runtime.input_audio_decoupled
 
 
 def _split_audio_codes(
@@ -421,9 +398,16 @@ def _parse_task_item(
             runtime,
             input_audio=input_audio,
         )
-    if input_audio and runtime.input_audio_decoupled and encode_missing_codes:
+    if (
+        input_audio
+        and runtime.input_audio_decoupled
+        and runtime.input_codec_name != runtime.codec_name
+        and encode_missing_codes
+        and not has_codec_loader(runtime.input_codec_name)
+    ):
         raise ValueError(
-            "decoupled input audio cannot use the output codec waveform fallback; "
+            f"input audio tokenizer {runtime.input_codec_name!r} has no runtime "
+            "codec backend for waveform fallback; "
             f"materialize the {view.value!r} input view before training."
         )
     if not encode_missing_codes:

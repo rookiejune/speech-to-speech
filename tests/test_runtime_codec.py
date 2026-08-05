@@ -12,8 +12,11 @@ from anydataset.types import AudioView
 from anytrain.codec import AcousticLayout
 
 from speech_to_speech.runtime import (
+    AudioInputConfig,
+    AudioOutputConfig,
     AudioSequenceLayout,
     Config,
+    InputAudioConfig,
     Runtime,
     migrate_config_fields,
     runtime_for_sequence_layout,
@@ -22,7 +25,7 @@ from speech_to_speech.runtime.audio_tokenizer import (
     BiCodecAudioTokenizer,
     FlattenedAudioTokenizer,
 )
-from speech_to_speech.runtime.codec import load_codec
+from speech_to_speech.runtime.codec import has_codec_loader, load_codec
 from speech_to_speech.runtime.codec_contract import (
     frame_codec,
     supports_acoustic,
@@ -32,6 +35,14 @@ from speech_to_speech.runtime.codec_contract import (
 
 
 class RuntimeCodecTest(unittest.TestCase):
+    def test_codec_loader_capability_matches_runtime_dispatch(self) -> None:
+        for name in ("longcat", "bicodec", "stable_codec", "unicodec"):
+            with self.subTest(name=name):
+                self.assertTrue(has_codec_loader(name))
+        for name in ("glm4", "dac"):
+            with self.subTest(name=name):
+                self.assertFalse(has_codec_loader(name))
+
     def test_legacy_generator_artifact_config_field_is_migrated_explicitly(self) -> None:
         fields = {"semantic_codec_artifact": "/tmp/legacy-generator"}
 
@@ -40,7 +51,11 @@ class RuntimeCodecTest(unittest.TestCase):
 
         self.assertEqual(
             fields,
-            {"acoustic_generator_artifact": "/tmp/legacy-generator"},
+            {
+                "audio_output": {
+                    "acoustic_generator_artifact": "/tmp/legacy-generator"
+                }
+            },
         )
 
     def test_legacy_generator_artifact_config_field_rejects_conflicts(self) -> None:
@@ -51,6 +66,323 @@ class RuntimeCodecTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "conflicting"):
             migrate_config_fields(fields)
+
+    def test_canonical_and_legacy_audio_configs_resolve_identically(self) -> None:
+        with self.assertWarns(FutureWarning):
+            legacy = Config(
+                codec="bicodec",
+                input_audio=InputAudioConfig(
+                    codec="glm4",
+                    vocab_size=16_384,
+                    frame_rate=12.5,
+                ),
+            )
+        canonical = Config(
+            audio_input=AudioInputConfig(
+                tokenizer="glm4",
+            ),
+            audio_output=AudioOutputConfig(
+                tokenizer="bicodec",
+                detokenizer="bicodec",
+            ),
+        )
+
+        legacy_runtime = Runtime(
+            legacy,
+            audio_sequence_layout=AudioSequenceLayout.FLATTENED,
+        )
+        canonical_runtime = Runtime(
+            canonical,
+            audio_sequence_layout=AudioSequenceLayout.FLATTENED,
+        )
+
+        self.assertEqual(legacy_runtime.codec_name, canonical_runtime.codec_name)
+        self.assertEqual(
+            legacy_runtime.input_codec_name,
+            canonical_runtime.input_codec_name,
+        )
+        self.assertIs(legacy_runtime.audio_view, canonical_runtime.audio_view)
+        self.assertIs(
+            legacy_runtime.input_audio_view,
+            canonical_runtime.input_audio_view,
+        )
+        self.assertEqual(
+            legacy_runtime.input_codec_frame_rate,
+            canonical_runtime.input_codec_frame_rate,
+        )
+
+    def test_audio_view_is_derived_or_strictly_validated(self) -> None:
+        self.assertIs(
+            AudioOutputConfig(tokenizer="stable_codec").audio_view,
+            AudioView.STABLE,
+        )
+        self.assertIs(
+            AudioInputConfig(tokenizer="glm4").audio_view,
+            AudioView.GLM4,
+        )
+        with self.assertRaisesRegex(ValueError, "must match tokenizer"):
+            AudioOutputConfig(tokenizer="bicodec", view=AudioView.GLM4)
+        with self.assertRaisesRegex(ValueError, "must match tokenizer"):
+            AudioInputConfig(tokenizer="glm4", view=AudioView.BICODEC)
+
+    def test_glm4_input_uses_preset_metadata_without_config_overrides(self) -> None:
+        input_ = AudioInputConfig(tokenizer="glm4")
+        runtime = Runtime(
+            Config(
+                audio_input=input_,
+                audio_output=AudioOutputConfig(
+                    tokenizer="bicodec",
+                    detokenizer="bicodec",
+                ),
+            ),
+            audio_sequence_layout=AudioSequenceLayout.FLATTENED,
+        )
+
+        self.assertIs(runtime.config.audio_input, input_)
+        self.assertIs(runtime.input_audio_view, AudioView.GLM4)
+        self.assertEqual(runtime.input_codec_frame_rate, 12.5)
+        self.assertEqual(runtime.input_audio_tokenizer.vocab_size, 16_384)
+
+    def test_glm4_codes_only_output_does_not_require_a_detokenizer(self) -> None:
+        output = AudioOutputConfig(tokenizer="glm4", detokenizer=None)
+
+        self.assertEqual(output.tokenizer, "glm4")
+        self.assertIsNone(output.detokenizer)
+
+    def test_bicodec_codes_only_output_does_not_load_a_detokenizer(self) -> None:
+        runtime = Runtime(
+            Config(
+                audio_output=AudioOutputConfig(
+                    tokenizer="bicodec",
+                    detokenizer=None,
+                )
+            ),
+            audio_sequence_layout=AudioSequenceLayout.FLATTENED,
+        )
+
+        self.assertIsNone(runtime.output_audio_detokenizer_name)
+        self.assertIsNone(runtime.output_audio_detokenizer)
+        self.assertNotIn("output_audio_tokenizer_backend", runtime.__dict__)
+
+    def test_same_output_tokenizer_and_detokenizer_load_one_backend(self) -> None:
+        backend = SimpleNamespace(name="bicodec")
+        with (
+            patch(
+                "speech_to_speech.runtime.core.load_audio_tokenizer_backend",
+                return_value=backend,
+            ) as load_tokenizer,
+            patch(
+                "speech_to_speech.runtime.core.load_audio_detokenizer_backend"
+            ) as load_detokenizer,
+        ):
+            runtime = Runtime(
+                Config(
+                    audio_output=AudioOutputConfig(
+                        tokenizer="bicodec",
+                        detokenizer="bicodec",
+                    )
+                ),
+                audio_sequence_layout=AudioSequenceLayout.FLATTENED,
+            )
+
+            self.assertIs(runtime.output_audio_detokenizer, backend)
+            self.assertIs(runtime.output_audio_tokenizer_backend, backend)
+
+        load_tokenizer.assert_called_once_with("bicodec", None)
+        load_detokenizer.assert_not_called()
+
+    def test_explicit_same_token_space_input_collapses_to_shared(self) -> None:
+        runtime = Runtime(
+            Config(
+                audio_input=AudioInputConfig(tokenizer="longcat"),
+                audio_output=AudioOutputConfig(tokenizer="longcat"),
+            )
+        )
+
+        self.assertIsNone(runtime.config.audio_input)
+        self.assertFalse(runtime.input_audio_decoupled)
+        self.assertEqual(runtime.input_codec_name, runtime.output_codec_name)
+        self.assertIs(runtime.input_audio_view, runtime.output_audio_view)
+
+    def test_distinct_input_backend_uses_registered_static_metadata(self) -> None:
+        runtime = Runtime(
+            Config(
+                audio_input=AudioInputConfig(tokenizer="unicodec"),
+                audio_output=AudioOutputConfig(tokenizer="longcat"),
+            )
+        )
+        self.assertTrue(has_codec_loader("unicodec"))
+        self.assertFalse(has_codec_loader("glm4"))
+        self.assertEqual(runtime.input_codec_frame_rate, 75.0)
+        self.assertEqual(runtime.input_audio_tokenizer.vocab_size, 16_384)
+        self.assertNotIn("input_audio_tokenizer_backend", runtime.__dict__)
+
+    def test_legacy_input_metadata_must_match_registered_preset(self) -> None:
+        with self.assertWarns(FutureWarning), self.assertRaisesRegex(
+            ValueError,
+            "frame_rate does not match",
+        ):
+            AudioInputConfig(tokenizer="unicodec", frame_rate=50.0)
+
+        with self.assertWarns(FutureWarning), self.assertRaisesRegex(
+            ValueError,
+            "vocab_size does not match",
+        ):
+            AudioInputConfig(tokenizer="unicodec", vocab_size=5)
+
+    def test_shared_backend_frame_rate_resolves_to_backend_value(self) -> None:
+        with self.assertWarns(FutureWarning):
+            runtime = Runtime(
+                Config(
+                    audio_input=AudioInputConfig(
+                        tokenizer="longcat",
+                        bpe="/tmp/input-bpe",
+                        frame_rate=16_000 / 960,
+                    ),
+                    audio_output=AudioOutputConfig(tokenizer="longcat"),
+                )
+            )
+        self.assertEqual(runtime.input_codec_frame_rate, 16_000 / 960)
+
+    def test_direct_config_rejects_canonical_legacy_conflicts(self) -> None:
+        same = Config(
+            codec="bicodec",
+            audio_output=AudioOutputConfig(tokenizer="bicodec"),
+        )
+        self.assertEqual(same.audio_output.tokenizer, "bicodec")
+        with self.assertRaisesRegex(ValueError, "conflicting audio_output.tokenizer"):
+            Config(
+                codec="longcat",
+                audio_output=AudioOutputConfig(tokenizer="bicodec"),
+            )
+
+    def test_equal_codec_and_tokenizer_aliases_do_not_create_a_bpe(self) -> None:
+        with self.assertWarns(FutureWarning):
+            output = AudioOutputConfig(
+                codec="bicodec",
+                tokenizer="bicodec",
+                detokenizer="bicodec",
+            )
+        with self.assertWarns(FutureWarning):
+            input_ = AudioInputConfig(
+                codec="glm4",
+                tokenizer="glm4",
+                vocab_size=16_384,
+                frame_rate=12.5,
+            )
+
+        self.assertEqual(output.tokenizer, "bicodec")
+        self.assertIsNone(output.bpe)
+        self.assertEqual(input_.tokenizer, "glm4")
+        self.assertIsNone(input_.bpe)
+
+    def test_mapping_migration_accepts_equal_values_and_rejects_conflicts(self) -> None:
+        fields = {
+            "codec": "bicodec",
+            "audio_output": {"codec": "bicodec"},
+        }
+        with self.assertWarns(FutureWarning):
+            migrate_config_fields(fields)
+        self.assertEqual(
+            fields,
+            {
+                "audio_output": {
+                    "tokenizer": "bicodec",
+                    "detokenizer": "bicodec",
+                }
+            },
+        )
+
+        conflicting = {
+            "codec": "longcat",
+            "audio_output": {"codec": "bicodec"},
+        }
+        with self.assertRaisesRegex(ValueError, "conflicting audio_output.tokenizer"):
+            migrate_config_fields(conflicting)
+
+    def test_nested_codec_tokenizer_schema_migrates_to_tokenizer_bpe(self) -> None:
+        fields = {
+            "audio_input": {
+                "codec": "glm4",
+                "tokenizer": "/tmp/glm4-bpe",
+                "vocab_size": 16,
+                "frame_rate": 12.5,
+            },
+            "audio_output": {
+                "codec": "bicodec",
+                "tokenizer": "/tmp/bicodec-bpe",
+            },
+        }
+
+        with self.assertWarns(FutureWarning):
+            migrate_config_fields(fields)
+
+        self.assertEqual(
+            fields,
+            {
+                "audio_input": {
+                    "tokenizer": "glm4",
+                    "bpe": "/tmp/glm4-bpe",
+                    "vocab_size": 16,
+                    "frame_rate": 12.5,
+                },
+                "audio_output": {
+                    "tokenizer": "bicodec",
+                    "detokenizer": "bicodec",
+                    "bpe": "/tmp/bicodec-bpe",
+                },
+            },
+        )
+
+    def test_nested_equal_codec_and_tokenizer_migrate_to_one_backend(self) -> None:
+        fields = {
+            "audio_input": {
+                "codec": "glm4",
+                "tokenizer": "glm4",
+                "vocab_size": 16,
+                "frame_rate": 12.5,
+            },
+            "audio_output": {
+                "codec": "bicodec",
+                "tokenizer": "bicodec",
+            },
+        }
+
+        with self.assertWarns(FutureWarning):
+            migrate_config_fields(fields)
+
+        self.assertEqual(
+            fields,
+            {
+                "audio_input": {
+                    "tokenizer": "glm4",
+                    "vocab_size": 16,
+                    "frame_rate": 12.5,
+                },
+                "audio_output": {
+                    "tokenizer": "bicodec",
+                    "detokenizer": "bicodec",
+                },
+            },
+        )
+
+    def test_mapping_migration_treats_legacy_null_input_leaves_as_explicit(
+        self,
+    ) -> None:
+        for name, canonical, conflict_name in (
+            ("tokenizer", "/tmp/glm4-tokenizer", "bpe"),
+            ("frame_rate", 12.5, "frame_rate"),
+        ):
+            fields = {
+                "audio_input": {"codec": "glm4", name: canonical},
+                "input_audio": {"codec": "glm4", name: None},
+            }
+
+            with self.subTest(name=name), self.assertRaisesRegex(
+                ValueError,
+                f"conflicting audio_input.{conflict_name}",
+            ):
+                migrate_config_fields(fields)
 
     def test_acoustic_generator_artifact_file_digest_is_cached_per_runtime(self) -> None:
         with TemporaryDirectory() as directory:
@@ -119,8 +451,8 @@ class RuntimeCodecTest(unittest.TestCase):
         backend = SimpleNamespace(name="longcat")
 
         with patch(
-            "speech_to_speech.runtime.codec.load_semantic_acoustic",
-            return_value=backend,
+            "speech_to_speech.runtime.codec.load_audio_tokenizer",
+            return_value=SimpleNamespace(backend=backend),
         ) as load_codec_backend:
             codec = load_codec("longcat", device="cuda")
 
@@ -131,8 +463,8 @@ class RuntimeCodecTest(unittest.TestCase):
         backend = SimpleNamespace(name="bicodec")
 
         with patch(
-            "speech_to_speech.runtime.codec.load_semantic_global",
-            return_value=backend,
+            "speech_to_speech.runtime.codec.load_audio_tokenizer",
+            return_value=SimpleNamespace(backend=backend),
         ) as load_codec_backend:
             codec = load_codec("bicodec", device="cuda")
 
@@ -143,8 +475,8 @@ class RuntimeCodecTest(unittest.TestCase):
         backend = _StableSource()
 
         with patch(
-            "speech_to_speech.runtime.codec.load_frame",
-            return_value=backend,
+            "speech_to_speech.runtime.codec.load_audio_tokenizer",
+            return_value=SimpleNamespace(backend=backend),
         ) as load_codec_backend:
             codec = load_codec("stable_codec", device="cuda")
 
@@ -164,8 +496,8 @@ class RuntimeCodecTest(unittest.TestCase):
         backend = _UnifiedSource()
 
         with patch(
-            "speech_to_speech.runtime.codec.load_frame",
-            return_value=backend,
+            "speech_to_speech.runtime.codec.load_audio_tokenizer",
+            return_value=SimpleNamespace(backend=backend),
         ) as load_codec_backend:
             codec = load_codec("unicodec", device="cuda")
 
@@ -206,7 +538,7 @@ class RuntimeCodecTest(unittest.TestCase):
             config,
             audio_sequence_layout=AudioSequenceLayout.FLATTENED,
         )
-        runtime.__dict__["codec"] = _global_codec()
+        runtime.__dict__["output_audio_tokenizer_backend"] = _global_codec()
         semantic_tokenizer = Mock()
         outer_tokenizer = Mock()
 
@@ -225,9 +557,9 @@ class RuntimeCodecTest(unittest.TestCase):
         self.assertIs(loaded, outer_tokenizer)
         load_tokenizer.assert_called_once_with("/tmp/bicodec-semantic-bpe")
         build_tokenizer.assert_called_once_with(
-            semantic_codebook_size=8,
-            global_codebook_sizes=(5, 7),
-            global_unit_length=3,
+            semantic_codebook_size=8192,
+            global_codebook_sizes=(4096,),
+            global_unit_length=32,
             semantic_tokenizer=semantic_tokenizer,
         )
 
@@ -400,7 +732,7 @@ def _runtime(codec_name: str, codec: object) -> Runtime:
         Config(codec=codec_name),
         audio_sequence_layout=AudioSequenceLayout.FLATTENED,
     )
-    runtime.__dict__["codec"] = codec
+    runtime.__dict__["output_audio_tokenizer_backend"] = codec
     return runtime
 
 

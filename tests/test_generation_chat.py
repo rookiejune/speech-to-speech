@@ -19,7 +19,9 @@ from speech_to_speech.generation.chat import (
     to_request,
 )
 from speech_to_speech.generation.contract import TokenGenerator
+from speech_to_speech.model.generation import GenerationStepResult
 from speech_to_speech.runtime import AudioSequenceLayout
+from speech_to_speech.runtime.audio_schema import AudioTokenSpec
 from speech_to_speech.runtime.audio_tokenizer import (
     BiCodecAudioTokenizer,
     NativeAudioTokenizer,
@@ -27,6 +29,7 @@ from speech_to_speech.runtime.audio_tokenizer import (
 from speech_to_speech.runtime.protocol import GenerationRuntime
 from speech_to_speech.runtime.backbone.contract import Backbone
 from speech_to_speech.task import (
+    ControlToken,
     DIRECT,
     FULL_COT,
     TARGET_COT,
@@ -122,30 +125,65 @@ def _runtime(
         global_unit_length=2,
     )
     input_tokenizer = NativeAudioTokenizer(vocab_size=16)
-    input_size = input_tokenizer.vocab_size + 2 if decoupled else 0
-    audio_start = 8 + input_size
+    input_size = input_tokenizer.vocab_size + 3 if decoupled else 0
+    lexical_text_vocab_size = 8
+    control_token_ids = tuple(range(8, 14))
+    text_vocab_size = lexical_text_vocab_size + len(control_token_ids)
+    audio_start = text_vocab_size + input_size
     layout = (
         Layout(
-            text=(0, 8),
-            audio_input=(8, audio_start),
-            audio=(audio_start, audio_start + tokenizer.vocab_size + 3),
+            text=(0, text_vocab_size),
+            audio_input=(text_vocab_size, audio_start),
+            audio=(audio_start, audio_start + tokenizer.vocab_size + 4),
         )
         if decoupled
         else Layout(
-            text=(0, 8),
-            audio=(8, 8 + tokenizer.vocab_size + 3),
+            text=(0, text_vocab_size),
+            audio=(audio_start, audio_start + tokenizer.vocab_size + 4),
         )
+    )
+    def control_token_id(token: ControlToken) -> int:
+        return control_token_ids[list(ControlToken).index(token)]
+
+    def generation_allowed_ids(modality: Modality) -> tuple[int, ...]:
+        if modality is not Modality.TEXT:
+            raise ValueError("chat test runtime only exposes lexical text ids.")
+        return tuple(range(1, lexical_text_vocab_size))
+
+    output_spec = AudioTokenSpec.create(
+        codec_name=codec_name,
+        sequence_layout=audio_sequence_layout.value,
+        tokenizer=tokenizer,
+    )
+    input_spec = (
+        AudioTokenSpec.create(
+            codec_name="glm4",
+            sequence_layout=audio_sequence_layout.value,
+            tokenizer=input_tokenizer,
+        )
+        if decoupled
+        else output_spec
     )
     runtime = SimpleNamespace(
         audio_sequence_layout=audio_sequence_layout,
         audio_tokenizer=tokenizer,
+        output_audio_tokenizer=tokenizer,
         input_audio_tokenizer=(input_tokenizer if decoupled else tokenizer),
+        output_audio_token_spec=output_spec,
+        input_audio_token_spec=input_spec,
         text_tokenizer=_TextTokenizer(),
         layout=layout,
+        lexical_text_vocab_size=lexical_text_vocab_size,
+        control_token_ids=control_token_ids,
+        control_token_id=control_token_id,
+        generation_allowed_ids=generation_allowed_ids,
         boa_token_id=audio_start + tokenizer.vocab_size,
         eoa_token_id=audio_start + tokenizer.vocab_size + 1,
-        input_boa_token_id=(8 + input_tokenizer.vocab_size if decoupled else 8 + tokenizer.vocab_size),
-        input_eoa_token_id=(8 + input_tokenizer.vocab_size + 1 if decoupled else 8 + tokenizer.vocab_size + 1),
+        mask_token_id=audio_start + tokenizer.vocab_size + 2,
+        audio_schema_token_id=audio_start + tokenizer.vocab_size + 3,
+        input_boa_token_id=(text_vocab_size + input_tokenizer.vocab_size if decoupled else audio_start + tokenizer.vocab_size),
+        input_eoa_token_id=(text_vocab_size + input_tokenizer.vocab_size + 1 if decoupled else audio_start + tokenizer.vocab_size + 1),
+        input_audio_schema_token_id=(text_vocab_size + input_tokenizer.vocab_size + 2 if decoupled else audio_start + tokenizer.vocab_size + 3),
         input_audio_block_name=("audio_input" if decoupled else "audio"),
         input_audio_decoupled=decoupled,
         input_codec_name=("glm4" if decoupled else codec_name),
@@ -154,9 +192,9 @@ def _runtime(
         pad_token_id=0,
         codec_audio_range=(audio_start, audio_start + tokenizer.vocab_size),
         input_codec_audio_range=(
-            (8, 8 + input_tokenizer.vocab_size)
+            (text_vocab_size, text_vocab_size + input_tokenizer.vocab_size)
             if decoupled
-            else (8, 8 + tokenizer.vocab_size)
+            else (audio_start, audio_start + tokenizer.vocab_size)
         ),
         structured_full_sequence=True,
         acoustic_side_channel=False,
@@ -256,10 +294,60 @@ class _TextModel:
             ),
         )
         self.audio_token_frame_spans = torch.ones(1, dtype=torch.long)
+        self._step = 0
 
-    def generation_step(self, *args, **kwargs):
-        del args, kwargs
-        raise AssertionError("text model should use generate_tokens")
+    def generation_step(
+        self,
+        input_ids: Tensor,
+        *,
+        attention_mask: Tensor,
+        output_hidden_states: bool,
+        token_ids: Tensor | None,
+        token_kind: str | None = None,
+        modality: Modality | None,
+        past_key_values=None,
+        use_cache: bool = False,
+        audio_input_positions: Tensor | None = None,
+        audio_head_past: object | None = None,
+        input_modalities: frozenset[Modality] | None = None,
+        validate_input: bool = True,
+        validate_audio_input_positions: bool = True,
+    ) -> GenerationStepResult:
+        del (
+            attention_mask,
+            token_kind,
+            modality,
+            past_key_values,
+            audio_input_positions,
+            audio_head_past,
+            input_modalities,
+            validate_input,
+            validate_audio_input_positions,
+        )
+        script = [
+            self.runtime.control_token_id(ControlToken.MT_BEGIN),
+            self.runtime.control_token_id(ControlToken.LANG_EN),
+            4,
+            5,
+            self.runtime.control_token_id(ControlToken.MT_END),
+        ]
+        next_id = script[self._step]
+        self._step += 1
+        logits = torch.full(
+            (*input_ids.shape, self.runtime.layout.vocab_size),
+            float("-inf"),
+        )
+        logits[:, -1, next_id] = 0.0
+        if token_ids is not None:
+            logits = logits.index_select(-1, token_ids)
+        return GenerationStepResult(
+            logits=logits,
+            past_key_values=SimpleNamespace() if use_cache else None,
+            audio_head_past=None,
+            hidden_states=(torch.zeros(*input_ids.shape, 1),)
+            if output_hidden_states
+            else None,
+        )
 
     def select_audio_head_cache(self, past_key_values, indices):
         del past_key_values, indices
@@ -309,7 +397,6 @@ class ChatAdapterTest(unittest.TestCase):
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "hello"},
                             {
                                 "type": "codec_codes",
                                 "codec": "glm4",
@@ -331,9 +418,10 @@ class ChatAdapterTest(unittest.TestCase):
         input_start, input_end = runtime.input_codec_audio_range
         self.assertTrue(bool(selected.ge(input_start).all()))
         self.assertTrue(bool(selected.lt(input_end).all()))
-        self.assertEqual(int(prompt[-1]), runtime.boa_token_id)
+        self.assertNotEqual(int(prompt[-1]), runtime.boa_token_id)
         self.assertIn(runtime.input_boa_token_id, prompt.tolist())
         self.assertIn(runtime.input_eoa_token_id, prompt.tolist())
+        self.assertNotEqual(int(prompt[-1]), runtime.input_eoa_token_id)
 
     def test_decoupled_audio_source_rejects_output_codec_and_waveform_fallback(self) -> None:
         runtime = _runtime(decoupled=True)
@@ -386,8 +474,15 @@ class ChatAdapterTest(unittest.TestCase):
         }
         private = to_request(request, runtime)
         self.assertIs(private["task"], Task.T2TT)
-        self.assertIs(private["prediction"], PredictionModality.TEXT)
+        self.assertNotIn("prediction", private)
         self.assertEqual(private["trace"], DIRECT)
+        self.assertEqual(private["target_language"], "en")
+        self.assertFalse(
+            any(
+                token_id in private["prompt_ids"].tolist()
+                for token_id in runtime.control_token_ids
+            )
+        )
         self.assertNotIn("audio_context", private)
         self.assertGreater(private["prompt_ids"].numel(), 0)
 
@@ -409,19 +504,64 @@ class ChatAdapterTest(unittest.TestCase):
                     }
                 ],
                 "task": Task.S2TT,
-                "prediction": PredictionModality.TEXT,
                 "trace": FULL_COT,
             },
             runtime,
         )
 
-        self.assertIs(private["prediction"], PredictionModality.TEXT)
+        self.assertNotIn("prediction", private)
         self.assertEqual(private["trace"], FULL_COT)
+        self.assertNotIn(
+            runtime.control_token_id(ControlToken.ASR_BEGIN),
+            private["prompt_ids"].tolist(),
+        )
         tokenizer = cast(_TextTokenizer, runtime.text_tokenizer)
         self.assertIn(
             "Respond in this exact order",
             tokenizer.conversations[0][-1]["content"],
         )
+
+    def test_asr_does_not_bind_non_mt_language_to_control_vocabulary(self) -> None:
+        runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
+        private = to_request(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "codec_codes",
+                                "codec": "bicodec",
+                                "codes": _codes(),
+                            }
+                        ],
+                    }
+                ],
+                "task": Task.ASR,
+                "language": "Esperanto",
+            },
+            runtime,
+        )
+
+        self.assertNotIn("target_language", private)
+        self.assertNotIn(
+            runtime.control_token_id(ControlToken.ASR_BEGIN),
+            private["prompt_ids"].tolist(),
+        )
+
+    def test_prediction_override_is_rejected(self) -> None:
+        runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
+        request = cast(
+            ChatRequest,
+            {
+                "messages": [{"role": "user", "content": "hello world"}],
+                "task": Task.T2TT,
+                "prediction": PredictionModality.TEXT,
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "prediction override"):
+            to_request(request, runtime)
 
     def test_bicodec_rejects_mixed_response_trace(self) -> None:
         runtime = _runtime()
@@ -433,7 +573,6 @@ class ChatAdapterTest(unittest.TestCase):
                 {
                     "messages": [{"role": "user", "content": "hello world"}],
                     "task": Task.T2ST,
-                    "prediction": PredictionModality.PARALLEL,
                     "trace": TARGET_COT,
                 },
                 runtime,
@@ -459,7 +598,6 @@ class ChatAdapterTest(unittest.TestCase):
                         }
                     ],
                     "task": Task.S2ST,
-                    "prediction": PredictionModality.PARALLEL,
                     "trace": FULL_COT,
                 },
                 runtime,
@@ -521,15 +659,17 @@ class ChatAdapterTest(unittest.TestCase):
         }
         private = to_request(request, runtime)
         self.assertNotIn("audio_context", private)
+        self.assertNotIn("target_language", private)
         self.assertIs(private["task"], Task.TTS)
-        self.assertIs(private["prediction"], PredictionModality.AUDIO)
+        self.assertNotIn("prediction", private)
         self.assertEqual(private["trace"], DIRECT)
         local_global = runtime.audio_tokenizer.encode_global(codes)
         expected_suffix = torch.cat(
             (
                 torch.tensor([runtime.boa_token_id]),
+                torch.tensor([runtime.audio_schema_token_id]),
                 runtime.layout.to_global(Modality.AUDIO.value, local_global),
-                torch.tensor([runtime.eoa_token_id, runtime.boa_token_id]),
+                torch.tensor([runtime.eoa_token_id]),
             )
         )
         torch.testing.assert_close(
@@ -588,7 +728,7 @@ class ChatAdapterTest(unittest.TestCase):
                 "task": Task.T2TT,
             },
             model,
-            max_new_tokens=4,
+            max_new_tokens=6,
             do_sample=False,
         )
         self.assertEqual(len(completion["choices"]), 1)
@@ -601,13 +741,24 @@ class ChatAdapterTest(unittest.TestCase):
         runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
         audio_start, _ = runtime.codec_audio_range
         cases = (
-            (Task.T2TT, [4, 5], "decoded:4,5"),
+            (
+                Task.T2TT,
+                [
+                    runtime.control_token_id(ControlToken.MT_BEGIN),
+                    runtime.control_token_id(ControlToken.LANG_EN),
+                    4,
+                    5,
+                    runtime.control_token_id(ControlToken.MT_END),
+                ],
+                "decoded:4,5",
+            ),
             (
                 Task.PARALLEL_AR,
                 [
                     4,
                     runtime.eos_token_id,
                     runtime.boa_token_id,
+                    runtime.audio_schema_token_id,
                     audio_start,
                     runtime.eoa_token_id,
                 ],
@@ -618,6 +769,7 @@ class ChatAdapterTest(unittest.TestCase):
                 [
                     4,
                     runtime.boa_token_id,
+                    runtime.audio_schema_token_id,
                     audio_start,
                     runtime.eoa_token_id,
                     5,
@@ -657,11 +809,15 @@ class ChatAdapterTest(unittest.TestCase):
             {
                 "response_ids": torch.tensor(
                     [
+                        runtime.control_token_id(ControlToken.ASR_BEGIN),
                         4,
-                        runtime.eos_token_id,
+                        runtime.control_token_id(ControlToken.ASR_END),
+                        runtime.control_token_id(ControlToken.MT_BEGIN),
+                        runtime.control_token_id(ControlToken.LANG_EN),
                         5,
-                        runtime.eos_token_id,
+                        runtime.control_token_id(ControlToken.MT_END),
                         runtime.boa_token_id,
+                        runtime.audio_schema_token_id,
                         audio_start,
                         runtime.eoa_token_id,
                     ]
@@ -671,7 +827,6 @@ class ChatAdapterTest(unittest.TestCase):
             {
                 "messages": [{"role": "user", "content": "hello world"}],
                 "task": Task.S2ST,
-                "prediction": PredictionModality.PARALLEL,
                 "trace": FULL_COT,
             },
             runtime,
@@ -700,7 +855,15 @@ class ChatAdapterTest(unittest.TestCase):
 
         completion = completion_from_result(
             {
-                "response_ids": torch.tensor([4, 5]),
+                "response_ids": torch.tensor(
+                    [
+                        runtime.control_token_id(ControlToken.MT_BEGIN),
+                        runtime.control_token_id(ControlToken.LANG_EN),
+                        4,
+                        5,
+                        runtime.control_token_id(ControlToken.MT_END),
+                    ]
+                ),
                 "audio": None,
                 "decode_error": decode_error,
             },
@@ -714,6 +877,32 @@ class ChatAdapterTest(unittest.TestCase):
         self.assertEqual(
             completion["choices"][0]["message"]["decode_error"],
             decode_error,
+        )
+
+    def test_asr_completion_does_not_normalize_non_mt_language(self) -> None:
+        runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
+        completion = completion_from_result(
+            {
+                "response_ids": torch.tensor(
+                    [
+                        runtime.control_token_id(ControlToken.ASR_BEGIN),
+                        4,
+                        runtime.control_token_id(ControlToken.ASR_END),
+                    ]
+                ),
+                "audio": None,
+            },
+            {
+                "messages": [{"role": "user", "content": "audio"}],
+                "task": Task.ASR,
+                "language": "Esperanto",
+            },
+            runtime,
+        )
+
+        self.assertEqual(
+            completion["choices"][0]["message"]["content"],
+            "decoded:4",
         )
 
 

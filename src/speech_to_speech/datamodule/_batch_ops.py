@@ -24,8 +24,8 @@ class _PaddedSamples:
     source_ctc: CTCTarget | None
     target_ctc: CTCTarget | None
     tasks: list[Task]
-    predictions: list[PredictionModality]
     traces: list[str]
+    target_languages: list[str | None]
     audio_seconds: Tensor
     generation_prompt_lengths: Tensor
     audio_input_positions: Tensor | None
@@ -82,11 +82,6 @@ def _validate_batch_tasks(
         raise TypeError(
             "ModelBatch predictions must contain PredictionModality values."
         )
-    for task, prediction in zip(tasks, predictions):
-        if prediction not in task.allowed_predictions:
-            raise ValueError(
-                f"{task.value} does not allow prediction={prediction.value}."
-            )
     signatures = {
         (task.source_layout, prediction) for task, prediction in zip(tasks, predictions)
     }
@@ -162,8 +157,8 @@ def _padded_samples(
             samples,
         ),
         tasks=[sample.request["task"] for sample in samples],
-        predictions=[sample.prediction for sample in samples],
         traces=[sample.trace for sample in samples],
+        target_languages=[sample.target_language for sample in samples],
         audio_seconds=_audio_seconds(samples),
         generation_prompt_lengths=_sample_prompt_lengths(samples),
         audio_input_positions=_optional_tensor(
@@ -530,7 +525,6 @@ def _validate_sample(
         causal=True,
         allowed=uses_target_ctc(
             sample.task,
-            sample.prediction,
             trace=sample.trace,
         ),
     )
@@ -539,13 +533,15 @@ def _validate_sample(
 def _validate_sample_supervised_ids(sample: ModelSample, layout: Layout) -> None:
     labels = sample.labels.token_labels
     valid = labels.ne(-100)
+    supervised = {
+        modality.value for modality in sample.prediction.supervised_modalities()
+    }
     allowed = torch.zeros_like(valid)
-    modalities = sample.prediction.supervised_modalities()
-    for modality in modalities:
-        start, end = layout.blocks[modality.value]
+    for name in supervised:
+        start, end = layout.blocks[name]
         allowed |= labels.ge(start) & labels.lt(end)
     if bool((valid & ~allowed).any()):
-        names = ", ".join(sorted(modality.value for modality in modalities))
+        names = ", ".join(sorted(supervised))
         raise ValueError(
             "sample labels contain an id outside the supervised layout blocks: "
             f"{names}."

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cached_property
@@ -7,8 +8,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from anydataset.types import AudioView, Modality
+from anytrain.codec import AudioBackendIdentity, AudioCodeSchema, AudioCodeSpec
 from anytrain.module.idspace import Layout
 
+from ..task import ControlToken
 from ._artifact import content_sha256
 from .audio_tokenizer import (
     AudioTokenizer,
@@ -16,6 +19,7 @@ from .audio_tokenizer import (
     FlattenedAudioTokenizer,
     NativeAudioTokenizer,
 )
+from .audio_schema import AudioTokenRegistry, AudioTokenSpec
 from .backbone import (
     AdapterConfig as BackboneAdapterConfig,
     Backbone,
@@ -23,23 +27,20 @@ from .backbone import (
     TextTokenizer,
     create as create_backbone_adapter,
 )
-from .codec import load_codec
+from .codec import (
+    audio_backend_identity,
+    audio_code_spec,
+    load_audio_detokenizer_backend,
+    load_audio_tokenizer_backend,
+)
 from .codec_contract import (
     CodecBackend,
     SemanticCodec,
     acoustic_codec,
-    codec_frame_rate as validated_codec_frame_rate,
-    frame_codec,
-    global_codec,
-    structured_codec,
-    supports_acoustic,
-    supports_global,
-    supports_structured,
 )
 from .config import (
     AudioSequenceLayout,
     Config,
-    codec_audio_view,
     validate_sequence_layout_config,
 )
 from .tokenizer_factory import (
@@ -51,6 +52,40 @@ from .tokenizer_factory import (
 if TYPE_CHECKING:
     from anytrain.codec import SemanticAcousticCodec
     from anytrain.framework.flow_matching import ContinuousFlowRuntime
+
+
+def _audio_tokens(
+    *,
+    name: str,
+    view: AudioView,
+    spec: AudioCodeSpec,
+    bpe: str | Path | None,
+    flattened: bool,
+) -> AudioTokenizer:
+    if view is AudioView.BICODEC:
+        if spec.schema is not AudioCodeSchema.SEMANTIC_GLOBAL:
+            raise ValueError("BiCodec audio tokens require a semantic-global code spec.")
+        if spec.global_unit_length is None:
+            raise ValueError("BiCodec audio code spec requires global_unit_length.")
+        semantic = None if bpe is None else audio_tokenizer(bpe)
+        return BiCodecAudioTokenizer(
+            semantic_codebook_size=spec.semantic_codebook_sizes[0],
+            global_codebook_sizes=spec.global_codebook_sizes,
+            global_unit_length=spec.global_unit_length,
+            semantic_tokenizer=semantic,
+        )
+    if flattened:
+        if not spec.frame_codebook_sizes:
+            raise ValueError(
+                f"flattened audio tokenizer {name!r} requires frame codebook metadata."
+            )
+        return FlattenedAudioTokenizer(
+            codebook_sizes=spec.frame_codebook_sizes,
+            codec_name=name,
+        )
+    if bpe is not None:
+        return cast(AudioTokenizer, cast(object, audio_tokenizer(bpe)))
+    return NativeAudioTokenizer(vocab_size=int(spec.primary_codebook_sizes[0]))
 
 
 @dataclass(frozen=True)
@@ -65,7 +100,15 @@ class Runtime:
 
     @property
     def codec_name(self) -> str:
-        return self.config.codec
+        return self.config.audio_output.tokenizer
+
+    @property
+    def output_audio_tokenizer_name(self) -> str:
+        return self.config.audio_output.tokenizer
+
+    @property
+    def output_audio_detokenizer_name(self) -> str | None:
+        return self.config.audio_output.detokenizer
 
     @property
     def output_codec_name(self) -> str:
@@ -73,15 +116,57 @@ class Runtime:
 
     @property
     def input_audio_decoupled(self) -> bool:
-        return self.config.input_audio.codec is not None
+        """Legacy name for whether input/output use distinct model token spaces."""
+
+        return not self.input_audio_token_space_shared
+
+    @property
+    def input_audio_backend_shared(self) -> bool:
+        return self.input_audio_backend_identity == self.output_audio_backend_identity
+
+    @property
+    def input_audio_backend_identity(self) -> AudioBackendIdentity:
+        return audio_backend_identity(self.input_audio_tokenizer_name)
+
+    @property
+    def output_audio_backend_identity(self) -> AudioBackendIdentity:
+        return audio_backend_identity(self.output_audio_tokenizer_name)
+
+    @property
+    def output_audio_detokenizer_identity(self) -> AudioBackendIdentity | None:
+        name = self.output_audio_detokenizer_name
+        return None if name is None else audio_backend_identity(name)
+
+    @property
+    def output_audio_detokenizer_backend_shared(self) -> bool:
+        identity = self.output_audio_detokenizer_identity
+        return identity is not None and identity in {
+            self.input_audio_backend_identity,
+            self.output_audio_backend_identity,
+        }
+
+    @property
+    def input_audio_token_space_shared(self) -> bool:
+        config = self.config.audio_input
+        return (
+            config is None
+            or config.token_space_identity == self.config.audio_output.token_space_identity
+        )
 
     @property
     def input_codec_name(self) -> str:
-        return self.config.input_audio.codec or self.codec_name
+        config = self.config.audio_input
+        if config is None or config.tokenizer is None:
+            return self.codec_name
+        return config.tokenizer
+
+    @property
+    def input_audio_tokenizer_name(self) -> str:
+        return self.input_codec_name
 
     @property
     def audio_view(self) -> AudioView:
-        return self.config.audio_view
+        return AudioView(self.output_audio_code_spec.view)
 
     @property
     def output_audio_view(self) -> AudioView:
@@ -89,11 +174,24 @@ class Runtime:
 
     @property
     def input_audio_view(self) -> AudioView:
-        return codec_audio_view(self.input_codec_name)
+        config = self.config.audio_input
+        if config is None or config.tokenizer is None:
+            return self.audio_view
+        return AudioView(self.input_audio_code_spec.view)
+
+    @cached_property
+    def output_audio_code_spec(self) -> AudioCodeSpec:
+        return audio_code_spec(self.output_audio_tokenizer_name)
+
+    @cached_property
+    def input_audio_code_spec(self) -> AudioCodeSpec:
+        if self.input_audio_backend_shared:
+            return self.output_audio_code_spec
+        return audio_code_spec(self.input_audio_tokenizer_name)
 
     @property
     def codec_frame_rate(self) -> float:
-        return validated_codec_frame_rate(self.codec)
+        return self.output_audio_code_spec.frame_rate
 
     @property
     def output_codec_frame_rate(self) -> float:
@@ -101,20 +199,23 @@ class Runtime:
 
     @property
     def input_codec_frame_rate(self) -> float:
-        configured = self.config.input_audio.frame_rate
+        input_config = self.config.audio_input
+        configured = None if input_config is None else input_config.frame_rate
+        backend_rate = self.input_audio_code_spec.frame_rate
         if configured is not None:
-            return float(configured)
-        if self.input_codec_name == self.codec_name:
-            return self.codec_frame_rate
-        raise RuntimeError("input audio frame rate was not configured.")
+            if not math.isclose(float(configured), backend_rate):
+                raise ValueError(
+                    "runtime.audio_input frame_rate does not match the audio tokenizer preset."
+                )
+        return backend_rate
 
     @property
     def acoustic_generator_artifact(self) -> str | None:
-        return self.config.acoustic_generator_artifact
+        return self.config.audio_output.acoustic_generator_artifact
 
     @cached_property
     def acoustic_generator_artifact_sha256(self) -> str | None:
-        artifact = self.config.acoustic_generator_artifact
+        artifact = self.config.audio_output.acoustic_generator_artifact
         if artifact is None:
             return None
         return content_sha256(Path(artifact).expanduser())
@@ -123,15 +224,15 @@ class Runtime:
     def acoustic_side_channel(self) -> bool:
         return (
             self.audio_sequence_layout is AudioSequenceLayout.SEMANTIC
-            and self.config.acoustic_generator_artifact is None
-            and supports_acoustic(self.codec)
+            and self.config.audio_output.acoustic_generator_artifact is None
+            and self.output_audio_code_spec.schema is AudioCodeSchema.SEMANTIC_ACOUSTIC
         )
 
     @property
     def structured_full_sequence(self) -> bool:
         return (
             self.audio_sequence_layout is AudioSequenceLayout.FLATTENED
-            and supports_global(self.codec)
+            and self.output_audio_code_spec.schema is AudioCodeSchema.SEMANTIC_GLOBAL
         )
 
     @property
@@ -198,21 +299,66 @@ class Runtime:
         return self.backbone_adapter.model
 
     @cached_property
+    def output_audio_tokenizer_backend(self) -> CodecBackend:
+        return load_audio_tokenizer_backend(
+            self.output_audio_tokenizer_name,
+            self.config.device,
+        )
+
+    @cached_property
     def codec(self) -> CodecBackend:
-        return load_codec(self.config.codec, self.config.device)
+        """Deprecated output-tokenizer backend alias."""
+
+        return self.output_audio_tokenizer_backend
+
+    @cached_property
+    def output_codec(self) -> CodecBackend:
+        """Deprecated output-tokenizer backend alias."""
+
+        return self.output_audio_tokenizer_backend
+
+    @cached_property
+    def input_audio_tokenizer_backend(self) -> CodecBackend:
+        if self.input_audio_backend_shared:
+            return self.output_audio_tokenizer_backend
+        return load_audio_tokenizer_backend(
+            self.input_audio_tokenizer_name,
+            self.config.device,
+        )
+
+    @cached_property
+    def input_codec(self) -> CodecBackend:
+        """Deprecated input-tokenizer backend alias."""
+
+        return self.input_audio_tokenizer_backend
+
+    @cached_property
+    def output_audio_detokenizer(self) -> CodecBackend | None:
+        name = self.output_audio_detokenizer_name
+        if name is None:
+            return None
+        identity = cast(AudioBackendIdentity, self.output_audio_detokenizer_identity)
+        if identity == self.output_audio_backend_identity:
+            return self.output_audio_tokenizer_backend
+        if identity == self.input_audio_backend_identity:
+            return self.input_audio_tokenizer_backend
+        return load_audio_detokenizer_backend(name, self.config.device)
 
     @property
     def semantic_codebook_sizes(self) -> tuple[int, ...]:
-        if supports_structured(self.codec):
-            return tuple(structured_codec(self.codec).semantic_codebook_sizes)
-        return tuple(frame_codec(self.codec).codebook_sizes)
+        return self.output_audio_code_spec.primary_codebook_sizes
+
+    @property
+    def input_semantic_codebook_sizes(self) -> tuple[int, ...]:
+        return self.input_audio_code_spec.primary_codebook_sizes
 
     @cached_property
     def semantic_codec(self) -> SemanticCodec:
-        artifact = self.config.acoustic_generator_artifact
+        artifact = self.config.audio_output.acoustic_generator_artifact
         if artifact is None:
             raise RuntimeError(
-                "semantic-only waveform decoding requires runtime.acoustic_generator_artifact; "
+                "semantic-only waveform decoding requires "
+                "runtime.audio_output.acoustic_generator_artifact; "
                 "use audio_sequence_layout=flattened for token-only generation."
             )
         if self.acoustic_generator_artifact_sha256 is None:
@@ -220,42 +366,30 @@ class Runtime:
         from semantic_acoustic_generator.runtime import GeneratorRuntime
         from semantic_acoustic_generator.runtime.artifact import load_artifact
 
+        backend = self.output_audio_detokenizer
+        if backend is None:
+            raise RuntimeError(
+                "semantic-only waveform decoding requires runtime.audio_output.detokenizer."
+            )
         support = load_artifact(
             Path(artifact).expanduser(),
             device=self.config.device,
         )
-        backend = acoustic_codec(self.codec)
+        codec = acoustic_codec(backend)
         runtime = GeneratorRuntime(
             support,
-            cast("SemanticAcousticCodec", cast(object, backend)),
+            cast("SemanticAcousticCodec", cast(object, codec)),
         )
         return cast(SemanticCodec, cast(object, runtime))
 
     @cached_property
     def audio_tokenizer(self) -> AudioTokenizer:
-        if self.audio_view is AudioView.BICODEC:
-            codec = global_codec(self.codec)
-            semantic_tokenizer = (
-                None
-                if self.config.audio_tokenizer is None
-                else audio_tokenizer(self.config.audio_tokenizer)
-            )
-            return BiCodecAudioTokenizer(
-                semantic_codebook_size=self.semantic_codebook_sizes[0],
-                global_codebook_sizes=codec.global_codebook_sizes,
-                global_unit_length=codec.global_unit_length,
-                semantic_tokenizer=semantic_tokenizer,
-            )
-        if self.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
-            return FlattenedAudioTokenizer(
-                codebook_sizes=frame_codec(self.codec).codebook_sizes,
-                codec_name=self.codec_name,
-            )
-        if self.config.audio_tokenizer is None:
-            return NativeAudioTokenizer(vocab_size=int(self.semantic_codebook_sizes[0]))
-        return cast(
-            AudioTokenizer,
-            cast(object, audio_tokenizer(self.config.audio_tokenizer)),
+        return _audio_tokens(
+            name=self.output_audio_tokenizer_name,
+            view=self.output_audio_view,
+            spec=self.output_audio_code_spec,
+            bpe=self.config.audio_output.bpe,
+            flattened=self.audio_sequence_layout is AudioSequenceLayout.FLATTENED,
         )
 
     @cached_property
@@ -263,33 +397,76 @@ class Runtime:
         return self.audio_tokenizer
 
     @cached_property
+    def output_audio_token_spec(self) -> AudioTokenSpec:
+        return AudioTokenSpec.create(
+            codec_name=self.output_codec_name,
+            sequence_layout=self.audio_sequence_layout.value,
+            tokenizer=self.output_audio_tokenizer,
+        )
+
+    @cached_property
+    def output_audio_token_registry(self) -> AudioTokenRegistry:
+        spec = self.output_audio_token_spec
+        return AudioTokenRegistry(
+            specs=(spec,),
+            default_schema_id=spec.schema_id,
+        )
+
+    @cached_property
     def input_audio_tokenizer(self) -> AudioTokenizer:
-        config = self.config.input_audio
-        if config.codec is None:
-            return self.audio_tokenizer
-        if config.tokenizer is not None:
-            tokenizer = cast(
-                AudioTokenizer,
-                cast(object, audio_tokenizer(config.tokenizer)),
-            )
-            if config.vocab_size is not None and tokenizer.vocab_size != config.vocab_size:
+        config = self.config.audio_input
+        if config is None or self.input_audio_token_space_shared:
+            if (
+                config is not None
+                and config.vocab_size is not None
+                and config.vocab_size != self.audio_tokenizer.vocab_size
+            ):
                 raise ValueError(
-                    "runtime.input_audio tokenizer vocabulary does not match "
-                    "vocab_size."
+                    "shared runtime.audio_input vocab_size does not match the "
+                    "output audio token vocabulary."
                 )
-            return tokenizer
-        if config.vocab_size is not None:
-            return NativeAudioTokenizer(vocab_size=config.vocab_size)
-        if config.codec == self.codec_name:
             return self.audio_tokenizer
-        raise RuntimeError("input audio tokenizer metadata was not configured.")
+        tokenizer = _audio_tokens(
+            name=self.input_audio_tokenizer_name,
+            view=self.input_audio_view,
+            spec=self.input_audio_code_spec,
+            bpe=config.bpe,
+            flattened=(
+                config.bpe is None
+                and self.audio_sequence_layout is AudioSequenceLayout.FLATTENED
+                and len(self.input_audio_code_spec.frame_codebook_sizes) > 1
+            ),
+        )
+        if config.vocab_size is not None and tokenizer.vocab_size != config.vocab_size:
+            raise ValueError("runtime.audio_input token vocabulary does not match vocab_size.")
+        return tokenizer
+
+    @cached_property
+    def input_audio_token_spec(self) -> AudioTokenSpec:
+        if self.input_audio_token_space_shared:
+            return self.output_audio_token_spec
+        return AudioTokenSpec.create(
+            codec_name=self.input_codec_name,
+            sequence_layout=self.audio_sequence_layout.value,
+            tokenizer=self.input_audio_tokenizer,
+        )
+
+    @cached_property
+    def input_audio_token_registry(self) -> AudioTokenRegistry:
+        if self.input_audio_token_space_shared:
+            return self.output_audio_token_registry
+        spec = self.input_audio_token_spec
+        return AudioTokenRegistry(
+            specs=(spec,),
+            default_schema_id=spec.schema_id,
+        )
 
     @cached_property
     def layout(self) -> Layout:
-        text_vocab_size = text_tokenizer_vocab_size(self.text_tokenizer)
-        audio_vocab_size = self.audio_tokenizer.vocab_size + 3
+        text_vocab_size = self.lexical_text_vocab_size + len(ControlToken)
+        audio_vocab_size = self.audio_tokenizer.vocab_size + 4
         if self.input_audio_decoupled:
-            input_audio_vocab_size = self.input_audio_tokenizer.vocab_size + 2
+            input_audio_vocab_size = self.input_audio_tokenizer.vocab_size + 3
             input_end = text_vocab_size + input_audio_vocab_size
             return Layout(
                 text=(0, text_vocab_size),
@@ -300,6 +477,21 @@ class Runtime:
             text=(0, text_vocab_size),
             audio=(text_vocab_size, text_vocab_size + audio_vocab_size),
         )
+
+    @cached_property
+    def lexical_text_vocab_size(self) -> int:
+        return text_tokenizer_vocab_size(self.text_tokenizer)
+
+    @cached_property
+    def control_token_ids(self) -> tuple[int, ...]:
+        start, _ = self.layout.blocks[Modality.TEXT.value]
+        first = start + self.lexical_text_vocab_size
+        return tuple(range(first, first + len(ControlToken)))
+
+    def control_token_id(self, token: ControlToken) -> int:
+        if not isinstance(token, ControlToken):
+            raise TypeError("control token lookup requires a ControlToken.")
+        return self.control_token_ids[list(ControlToken).index(token)]
 
     @cached_property
     def flow_matching(self) -> ContinuousFlowRuntime:
@@ -340,6 +532,34 @@ class Runtime:
         return self.boa_token_id + 2
 
     @property
+    def audio_schema_token_id(self) -> int:
+        return self.boa_token_id + 3
+
+    @property
+    def output_audio_schema_token_id(self) -> int:
+        return self.audio_schema_token_id
+
+    @property
+    def output_audio_schema_id(self) -> str:
+        return self.output_audio_token_spec.schema_id
+
+    @property
+    def output_audio_block_name(self) -> str:
+        return Modality.AUDIO.value
+
+    @property
+    def output_boa_token_id(self) -> int:
+        return self.boa_token_id
+
+    @property
+    def output_eoa_token_id(self) -> int:
+        return self.eoa_token_id
+
+    @property
+    def output_mask_token_id(self) -> int:
+        return self.mask_token_id
+
+    @property
     def input_audio_block_name(self) -> str:
         return "audio_input" if self.input_audio_decoupled else Modality.AUDIO.value
 
@@ -357,13 +577,31 @@ class Runtime:
         return self.input_boa_token_id + 1
 
     @property
+    def input_audio_schema_token_id(self) -> int:
+        if not self.input_audio_decoupled:
+            return self.audio_schema_token_id
+        return self.input_boa_token_id + 2
+
+    @property
+    def input_audio_schema_id(self) -> str:
+        return self.input_audio_token_spec.schema_id
+
+    @property
     def audio_head_range(self) -> tuple[int, int]:
         return self.layout.blocks[Modality.AUDIO.value]
+
+    @property
+    def output_audio_head_range(self) -> tuple[int, int]:
+        return self.audio_head_range
 
     @property
     def codec_audio_range(self) -> tuple[int, int]:
         start, _ = self.audio_head_range
         return start, self.boa_token_id
+
+    @property
+    def output_codec_audio_range(self) -> tuple[int, int]:
+        return self.codec_audio_range
 
     @property
     def input_codec_audio_range(self) -> tuple[int, int]:
@@ -375,11 +613,21 @@ class Runtime:
     @cached_property
     def audio_generation_allowed_ids(self) -> tuple[int, ...]:
         start, end = self.codec_audio_range
-        return (*range(start, end), self.eoa_token_id)
+        return (
+            self.boa_token_id,
+            self.audio_schema_token_id,
+            *range(start, end),
+            self.eoa_token_id,
+        )
+
+    @cached_property
+    def output_audio_generation_allowed_ids(self) -> tuple[int, ...]:
+        return self.audio_generation_allowed_ids
 
     @cached_property
     def text_generation_allowed_ids(self) -> tuple[int, ...]:
-        start, end = self.layout.blocks[Modality.TEXT.value]
+        start, _ = self.layout.blocks[Modality.TEXT.value]
+        end = start + self.lexical_text_vocab_size
         blocked = {self.pad_token_id, self.bos_token_id}
         return tuple(token_id for token_id in range(start, end) if token_id not in blocked)
 

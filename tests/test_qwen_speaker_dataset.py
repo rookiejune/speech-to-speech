@@ -37,6 +37,7 @@ from speech_to_speech.datamodule.module import _sample_audio_frame_cost
 from speech_to_speech.datamodule.batch import ModelBatch
 from speech_to_speech.datamodule.sample import AudioContextCostRow
 from speech_to_speech.runtime import AudioSequenceLayout
+from speech_to_speech.runtime.audio_schema import AudioTokenSpec
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.task import Task
 
@@ -278,7 +279,8 @@ class BiCodecSpeakerCellTest(unittest.TestCase):
             .nonzero(as_tuple=False)[0]
             .item()
         ) + prompt_boa + 1
-        local_prompt = row[prompt_boa + 1 : prompt_eoa] - 10
+        audio_start, _ = runtime.layout.blocks["audio"]
+        local_prompt = row[prompt_boa + 2 : prompt_eoa] - audio_start
         decoded = runtime.audio_tokenizer.decode_streams(
             local_prompt,
         )
@@ -312,7 +314,7 @@ class BiCodecSpeakerCellTest(unittest.TestCase):
                     torch.tensor(runtime.audio_tokenizer.global_token_id),
                 )
                 if not with_audio_context:
-                    self.assertEqual(int(response[0]), int(global_marker))
+                    self.assertEqual(int(response[2]), int(global_marker))
                     global_index = (response == global_marker).nonzero(
                         as_tuple=False,
                     )[0].item()
@@ -321,7 +323,7 @@ class BiCodecSpeakerCellTest(unittest.TestCase):
                     )[0].item()
                     self.assertLess(global_index, semantic_index)
                 else:
-                    self.assertEqual(int(response[0]), int(semantic_marker))
+                    self.assertEqual(int(response[2]), int(semantic_marker))
                     boa_positions = (
                         batch.input_ids[0] == runtime.boa_token_id
                     ).nonzero(as_tuple=False)
@@ -504,6 +506,13 @@ def _runtime(audio_sequence_layout: AudioSequenceLayout):
         global_codebook_sizes=(5, 7),
         global_unit_length=3,
     )
+    audio_start = 10
+    boa_token_id = audio_start + tokenizer.vocab_size
+    spec = AudioTokenSpec.create(
+        codec_name="bicodec",
+        sequence_layout=audio_sequence_layout.value,
+        tokenizer=tokenizer,
+    )
     return SimpleNamespace(
         codec_name="bicodec",
         audio_view=AudioView.BICODEC,
@@ -517,11 +526,17 @@ def _runtime(audio_sequence_layout: AudioSequenceLayout):
         global_unit_length=3,
         text_tokenizer=_TextTokenizer(),
         audio_tokenizer=tokenizer,
-        layout=Layout(text=(0, 10), audio=(10, 10 + tokenizer.vocab_size)),
+        input_audio_tokenizer=tokenizer,
+        input_audio_token_spec=spec,
+        audio_token_spec=spec,
+        output_audio_token_spec=spec,
+        layout=Layout(text=(0, audio_start), audio=(audio_start, boa_token_id + 4)),
         pad_token_id=0,
         eos_token_id=1,
-        boa_token_id=10 + tokenizer.vocab_size,
-        eoa_token_id=11 + tokenizer.vocab_size,
+        boa_token_id=boa_token_id,
+        eoa_token_id=boa_token_id + 1,
+        mask_token_id=boa_token_id + 2,
+        audio_schema_token_id=boa_token_id + 3,
     )
 
 

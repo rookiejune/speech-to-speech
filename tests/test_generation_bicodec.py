@@ -16,14 +16,21 @@ from speech_to_speech.generation import (
     Request,
     generate_responses,
 )
+from speech_to_speech.generation.audio import decode_token_audio_results
 from speech_to_speech.generation.bicodec import prepare_bicodec_tts_request
 from speech_to_speech.generation.request import validate
 from speech_to_speech.model.generation import GenerationStepResult
-from speech_to_speech.runtime import AudioSequenceLayout
+from speech_to_speech.runtime import (
+    AudioOutputConfig,
+    AudioSequenceLayout,
+    Config,
+    Runtime,
+)
+from speech_to_speech.runtime.audio_schema import AudioTokenSpec
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.runtime.protocol import GenerationRuntime
 from speech_to_speech.runtime.backbone.contract import Backbone
-from speech_to_speech.task import Task
+from speech_to_speech.task import ControlToken, DIRECT, Task
 
 
 class _TextTokenizer:
@@ -36,8 +43,7 @@ class _TextTokenizer:
         normalized = [dict(message) for message in conversation]
         self.conversations.append(normalized)
         body = "".join(
-            f"<{message['role']}>{message['content']}</{message['role']}>"
-            for message in normalized
+            f"<{message['role']}>{message['content']}</{message['role']}>" for message in normalized
         )
         return f"{body}<assistant>"
 
@@ -48,28 +54,66 @@ class _TextTokenizer:
             return [2, 3]
         return [1]
 
+
 def _runtime() -> GenerationRuntime:
     tokenizer = BiCodecAudioTokenizer(
         semantic_codebook_size=8,
         global_codebook_sizes=(3,),
         global_unit_length=2,
     )
+    lexical_text_vocab_size = 8
+    control_token_ids = tuple(
+        range(lexical_text_vocab_size, lexical_text_vocab_size + len(ControlToken))
+    )
+    audio_start = lexical_text_vocab_size + len(ControlToken)
+    boa_token_id = audio_start + tokenizer.vocab_size
+    spec = AudioTokenSpec.create(
+        codec_name="bicodec",
+        sequence_layout=AudioSequenceLayout.FLATTENED.value,
+        tokenizer=tokenizer,
+    )
     runtime = SimpleNamespace(
         audio_sequence_layout=AudioSequenceLayout.FLATTENED,
         audio_tokenizer=tokenizer,
+        output_audio_tokenizer=tokenizer,
+        input_audio_tokenizer=tokenizer,
+        output_audio_token_spec=spec,
+        input_audio_token_spec=spec,
         text_tokenizer=_TextTokenizer(),
         layout=Layout(
-            text=(0, 8),
-            audio=(8, 8 + tokenizer.vocab_size + 3),
+            text=(0, audio_start),
+            audio=(audio_start, audio_start + tokenizer.vocab_size + 4),
         ),
-        boa_token_id=8 + tokenizer.vocab_size,
-        eoa_token_id=8 + tokenizer.vocab_size + 1,
+        lexical_text_vocab_size=lexical_text_vocab_size,
+        control_token_ids=control_token_ids,
+        control_token_id=lambda token: control_token_ids[list(ControlToken).index(token)],
+        boa_token_id=boa_token_id,
+        eoa_token_id=boa_token_id + 1,
+        mask_token_id=boa_token_id + 2,
+        audio_schema_token_id=boa_token_id + 3,
         eos_token_id=7,
         pad_token_id=0,
-        codec_audio_range=(8, 8 + tokenizer.vocab_size),
+        codec_audio_range=(audio_start, boa_token_id),
+        input_codec_audio_range=(audio_start, boa_token_id),
+        input_audio_decoupled=False,
+        input_audio_block_name=Modality.AUDIO.value,
+        input_boa_token_id=boa_token_id,
+        input_eoa_token_id=boa_token_id + 1,
+        input_audio_schema_token_id=boa_token_id + 3,
         structured_full_sequence=True,
         acoustic_side_channel=False,
         codec=None,
+    )
+    runtime.audio_generation_allowed_ids = (
+        boa_token_id,
+        boa_token_id + 3,
+        *range(audio_start, boa_token_id),
+        boa_token_id + 1,
+    )
+    runtime.generation_allowed_ids = lambda modality: (
+        tuple(range(lexical_text_vocab_size))
+        if modality is Modality.TEXT
+        else runtime.audio_generation_allowed_ids
     )
     return cast(GenerationRuntime, runtime)
 
@@ -94,7 +138,9 @@ class BiCodecRequestInputTest(unittest.TestCase):
         )
 
         self.assertNotIn("audio_context", request)
+        self.assertNotIn("prediction", request)
         self.assertIs(request["task"], Task.TTS)
+        self.assertEqual(request["trace"], DIRECT)
         self.assertEqual(len(runtime.text_tokenizer.encoded), 1)
         self.assertIn("hello world", runtime.text_tokenizer.encoded[0])
         local_audio = runtime.audio_tokenizer.encode_streams(
@@ -104,8 +150,9 @@ class BiCodecRequestInputTest(unittest.TestCase):
         expected_suffix = torch.cat(
             (
                 torch.tensor([runtime.boa_token_id]),
+                torch.tensor([runtime.audio_schema_token_id]),
                 runtime.layout.to_global(Modality.AUDIO.value, local_audio),
-                torch.tensor([runtime.eoa_token_id, runtime.boa_token_id]),
+                torch.tensor([runtime.eoa_token_id]),
             )
         )
         torch.testing.assert_close(
@@ -119,10 +166,12 @@ class BiCodecRequestInputTest(unittest.TestCase):
         request = prepare_bicodec_tts_request("hello world", runtime)
 
         self.assertNotIn("audio_context", request)
+        self.assertNotIn("prediction", request)
         self.assertIs(request["task"], Task.TTS)
+        self.assertEqual(request["trace"], DIRECT)
         torch.testing.assert_close(
             request["prompt_ids"],
-            torch.tensor([2, 3, runtime.boa_token_id]),
+            torch.tensor([2, 3]),
         )
         self.assertEqual(len(runtime.text_tokenizer.encoded), 1)
 
@@ -220,6 +269,30 @@ class BiCodecRequestInputTest(unittest.TestCase):
         )
         torch.testing.assert_close(audio["codes"].global_codes, output.global_codes)
 
+    def test_parallel_codes_only_generation_returns_structured_codes(self) -> None:
+        runtime = _runtime()
+        output = AudioCodes(
+            semantic_codes=torch.tensor([[4], [5]], dtype=torch.long),
+            global_codes=torch.tensor([[2], [1]], dtype=torch.long),
+        )
+        cast(SimpleNamespace, cast(object, runtime)).output_audio_detokenizer = None
+
+        result = generate_responses(
+            [Request(prompt_ids=torch.tensor([1]), task=Task.PARALLEL_AR)],
+            _MixedRouteModel(runtime, output),
+            max_new_tokens=16,
+            do_sample=False,
+        )[0]
+
+        audio = result["audio"]
+        codes = None if audio is None else audio["codes"]
+        if not isinstance(codes, AudioCodes):
+            self.fail("codes-only parallel generation did not return AudioCodes")
+        torch.testing.assert_close(codes.semantic_codes, output.semantic_codes)
+        torch.testing.assert_close(codes.global_codes, output.global_codes)
+        self.assertIsNone(audio["waveform"])
+        self.assertIsNone(audio["sample_rate"])
+
     def test_reference_request_generates_semantic_and_reuses_prompt_global(self) -> None:
         runtime = _runtime()
         context = _codes()
@@ -239,7 +312,7 @@ class BiCodecRequestInputTest(unittest.TestCase):
                 )
             ],
             _RouteModel(runtime, output, streams=(AudioStream.SEMANTIC,)),
-            max_new_tokens=4,
+            max_new_tokens=8,
             do_sample=False,
         )[0]
 
@@ -274,7 +347,7 @@ class BiCodecRequestInputTest(unittest.TestCase):
         result = generate_responses(
             [prepare_bicodec_tts_request("hello", runtime)],
             _RouteModel(runtime, output),
-            max_new_tokens=8,
+            max_new_tokens=12,
             do_sample=False,
         )[0]
 
@@ -286,6 +359,68 @@ class BiCodecRequestInputTest(unittest.TestCase):
             output.semantic_codes,
         )
         torch.testing.assert_close(audio["codes"].global_codes, output.global_codes)
+
+    def test_unconditioned_codes_only_generation_skips_detokenizer(self) -> None:
+        runtime = _runtime()
+        output = AudioCodes(
+            semantic_codes=torch.tensor([[4], [5]], dtype=torch.long),
+            global_codes=torch.tensor([[2], [1]], dtype=torch.long),
+        )
+        cast(SimpleNamespace, cast(object, runtime)).output_audio_detokenizer = None
+
+        result = generate_responses(
+            [prepare_bicodec_tts_request("hello", runtime)],
+            _RouteModel(runtime, output),
+            max_new_tokens=12,
+            do_sample=False,
+        )[0]
+
+        audio = result["audio"]
+        codes = None if audio is None else audio["codes"]
+        if not isinstance(codes, AudioCodes):
+            self.fail("codes-only BiCodec generation did not return AudioCodes")
+        torch.testing.assert_close(codes.semantic_codes, output.semantic_codes)
+        torch.testing.assert_close(codes.global_codes, output.global_codes)
+        self.assertIsNone(audio["waveform"])
+        self.assertIsNone(audio["sample_rate"])
+
+    def test_canonical_codes_only_decode_does_not_load_output_backend(self) -> None:
+        runtime = Runtime(
+            Config(
+                audio_output=AudioOutputConfig(
+                    tokenizer="bicodec",
+                    detokenizer=None,
+                )
+            ),
+            audio_sequence_layout=AudioSequenceLayout.FLATTENED,
+        )
+        runtime.__dict__["text_tokenizer"] = SimpleNamespace(vocab_size=8)
+        codes = AudioCodes(
+            semantic_codes=torch.tensor([[1], [2]], dtype=torch.long),
+            global_codes=torch.zeros(32, 1, dtype=torch.long),
+        )
+        local_ids = runtime.audio_tokenizer.encode_full(codes)
+        global_ids = runtime.layout.to_global(Modality.AUDIO.value, local_ids)
+        response = torch.cat(
+            (
+                global_ids.new_tensor(
+                    [runtime.boa_token_id, runtime.audio_schema_token_id]
+                ),
+                global_ids,
+                global_ids.new_tensor([runtime.eoa_token_id]),
+            )
+        )
+
+        result = decode_token_audio_results(
+            [response],
+            _RouteModel(runtime, codes),
+        )[0]
+
+        audio = result["audio"]
+        self.assertIsNotNone(audio)
+        if audio is None or not isinstance(audio["codes"], AudioCodes):
+            self.fail("canonical codes-only decode did not return AudioCodes")
+        self.assertNotIn("output_audio_tokenizer_backend", runtime.__dict__)
 
 
 class _GlobalCodec:
@@ -348,6 +483,7 @@ class _RouteModel:
         )
         self.response = torch.cat(
             (
+                torch.tensor([runtime.boa_token_id, runtime.audio_schema_token_id]),
                 runtime.layout.to_global(Modality.AUDIO.value, local_ids),
                 torch.tensor([runtime.eoa_token_id]),
             )
@@ -357,9 +493,37 @@ class _RouteModel:
             dtype=torch.long,
         )
 
-    def generation_step(self, *args, **kwargs) -> GenerationStepResult:
-        del args, kwargs
-        raise AssertionError("structured route should use generate_tokens")
+        self._script = self.response.tolist()
+        self._step = 0
+
+    def generation_step(
+        self,
+        input_ids: Tensor,
+        *,
+        token_ids: Tensor | None,
+        use_cache: bool,
+        **kwargs,
+    ) -> GenerationStepResult:
+        del kwargs
+        if self._step >= len(self._script):
+            raise RuntimeError("structured generation script exhausted")
+        next_id = self._script[self._step]
+        self._step += 1
+        if token_ids is None:
+            raise AssertionError("structured generation must provide candidate ids")
+        match = token_ids.eq(next_id).nonzero(as_tuple=False)
+        if match.numel() == 0:
+            raise AssertionError(f"scripted token {next_id} is outside candidates")
+        logits = torch.full(
+            (input_ids.size(0), input_ids.size(1), token_ids.numel()),
+            float("-inf"),
+        )
+        logits[:, -1, int(match[0, 0])] = 0.0
+        return GenerationStepResult(
+            logits=logits,
+            past_key_values=SimpleNamespace() if use_cache else None,
+            audio_head_past=None,
+        )
 
     def select_audio_head_cache(self, past_key_values, indices):
         del past_key_values, indices
@@ -380,23 +544,10 @@ class _RouteModel:
         do_sample: bool = True,
         use_cache: bool = True,
     ) -> Tensor:
-        del (
-            max_new_tokens,
-            temperature,
-            top_p,
-            prompt_attention_mask,
-            audio_input_positions,
-            stop_token_id,
-            generation_modality,
-            allowed_token_ids,
-            do_sample,
-            use_cache,
-        )
-        response = self.response.to(device=prompt_ids.device).expand(
-            prompt_ids.size(0),
-            -1,
-        )
-        return torch.cat((prompt_ids, response), dim=1)
+        del prompt_ids, max_new_tokens, temperature, top_p, prompt_attention_mask
+        del audio_input_positions, stop_token_id, generation_modality, allowed_token_ids
+        del do_sample, use_cache
+        raise AssertionError("controlled audio response must use generation_step")
 
 
 class _MixedRouteModel(_RouteModel):
@@ -406,18 +557,7 @@ class _MixedRouteModel(_RouteModel):
         output: AudioCodes,
     ) -> None:
         super().__init__(runtime, output)
-        runtime_object = cast(SimpleNamespace, cast(object, runtime))
-        start, end = runtime.codec_audio_range
-        runtime_object.audio_generation_allowed_ids = (
-            *range(start, end),
-            runtime.eoa_token_id,
-        )
-        runtime_object.generation_allowed_ids = lambda modality: (
-            tuple(range(8))
-            if modality is Modality.TEXT
-            else runtime_object.audio_generation_allowed_ids
-        )
-        self._script = [2, runtime.eos_token_id, 2, *self.response.tolist()]
+        self._script = [2, runtime.eos_token_id, *self.response.tolist()]
         self._step = 0
 
     def generation_step(
@@ -442,11 +582,7 @@ class _MixedRouteModel(_RouteModel):
             device=input_ids.device,
         )
         logits[:, -1, int(match[0, 0])] = 0.0
-        cache = (
-            SimpleNamespace(batch_select_indices=lambda indices: None)
-            if use_cache
-            else None
-        )
+        cache = SimpleNamespace(batch_select_indices=lambda indices: None) if use_cache else None
         return GenerationStepResult(
             logits=logits,
             past_key_values=cache,

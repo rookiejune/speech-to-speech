@@ -372,12 +372,16 @@ def _generate_bicodec_row(
         row.step(token_ids.token(tokenizer.semantic_token_id))
         semantic_ids = token_ids.range(*tokenizer.semantic_token_range)
         row.step(semantic_ids)
-        end = token_ids.token(tokenizer.end_token_id)
+        end = prompt_ids.new_tensor(
+            [model.runtime.eoa_token_id],
+            dtype=torch.long,
+        )
         while row.step(torch.cat((semantic_ids, end))) != int(end.item()):
             pass
     else:
-        row.step(token_ids.token(tokenizer.end_token_id))
-    row.step(prompt_ids.new_tensor([model.runtime.eoa_token_id], dtype=torch.long))
+        row.step(
+            prompt_ids.new_tensor([model.runtime.eoa_token_id], dtype=torch.long)
+        )
     return row.sequence
 
 

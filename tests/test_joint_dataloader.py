@@ -446,7 +446,6 @@ def _batch(task: Task) -> ModelBatch:
         token_labels=torch.tensor([[-100, 2]], dtype=torch.long),
         acoustic_target=None,
         tasks=[task],
-        predictions=[task.prediction_modality],
         pad_token_id=0,
     )
 

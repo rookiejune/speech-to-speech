@@ -14,8 +14,9 @@ from typing_extensions import NotRequired
 from .._tensor import is_signed_integer_dtype
 from ..audio import AudioCodes
 from ..datamodule.parse import parse_audio_codes
-from ..runtime.codec_contract import frame_codec, global_codec, supports_global
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
+from ..runtime.codec import has_codec_loader
+from ..runtime.codec_contract import frame_codec, global_codec, supports_global
 from ..runtime.protocol import GenerationRuntime
 from ..task import (
     FieldRole,
@@ -23,6 +24,7 @@ from ..task import (
     Request,
     ResponseSpec,
     Task,
+    normalize_language_code,
     resolve_response,
 )
 from ..task.templates import (
@@ -34,6 +36,8 @@ from .bicodec import prepare_bicodec_tts_request
 from .contract import AudioOutput, Result, TokenGenerator
 from .service import generate_responses
 from .text import ResponseStepRuntime, decode_response_text_steps
+
+_AUDIO_SOURCE_PLACEHOLDER = "$$$AUDIO_SOURCE$$$"
 
 
 class TextPart(TypedDict):
@@ -65,7 +69,6 @@ class ChatRequest(TypedDict):
     messages: list[Message]
     task: Task
     language: NotRequired[str]
-    prediction: NotRequired[PredictionModality | None]
     trace: NotRequired[str | None]
 
 
@@ -126,13 +129,14 @@ def to_request(request: ChatRequest, runtime: GenerationRuntime) -> Request:
     response = _response(request, task)
     language = _language(request)
     messages = _messages(request)
+    media = _media(messages)
     prompt_messages, source_text = _prompt_messages(
         messages,
         task,
         language,
         response,
+        allow_empty_user=task.source_modality is Modality.AUDIO and media is not None,
     )
-    media = _media(messages)
     codes = (
         None
         if media is None
@@ -175,13 +179,12 @@ def _materialize_input_codes(
         return _validated_input_codes(part, runtime)
     if part["type"] != "audio":
         raise TypeError(f"unsupported media part type: {part.get('type')!r}")
-    if runtime.input_codec_name != runtime.codec_name:
+    if not has_codec_loader(runtime.input_codec_name):
         raise ValueError(
-            "decoupled audio-source chat requires precomputed input codec_codes "
-            f"for {runtime.input_codec_name!r}; the output runtime does not own "
-            "that input codec encoder."
+            f"input audio tokenizer {runtime.input_codec_name!r} has no runtime "
+            "codec backend; pass precomputed input codec_codes."
         )
-    return _encode_audio(part, runtime)
+    return _encode_audio(part, runtime, input_audio=True)
 
 
 def completion_from_result(
@@ -195,6 +198,11 @@ def completion_from_result(
         cast(ResponseStepRuntime, runtime),
         result["response_ids"],
         response,
+        target_language=(
+            normalize_language_code(_language(request))
+            if response.requires_target_language
+            else None
+        ),
     )
     target_text_indices = [
         index
@@ -237,6 +245,11 @@ def _build_request(
     language: str,
     runtime: GenerationRuntime,
 ) -> Request:
+    target_language = (
+        normalize_language_code(language)
+        if response.requires_target_language
+        else None
+    )
     if task.source_modality is Modality.AUDIO:
         if codes is None:
             raise ValueError("audio-source chat requests require audio or codec_codes.")
@@ -245,18 +258,22 @@ def _build_request(
             codes,
             task=task,
             response=response,
+            target_language=target_language,
             runtime=runtime,
         )
     if response.prediction is PredictionModality.TEXT:
         if codes is not None:
             raise ValueError("text prediction chat requests cannot include audio media.")
-        return Request(
-            prompt_ids=_prompt_ids(prompt_messages, runtime),
+        prompt_ids = _prompt_ids(prompt_messages, runtime)
+        private = Request(
+            prompt_ids=prompt_ids,
             task=task,
             audio_input_positions=None,
-            prediction=response.prediction,
             trace=response.name,
         )
+        if target_language is not None:
+            private["target_language"] = target_language
+        return private
 
     tokenizer = runtime.audio_tokenizer
     if isinstance(tokenizer, BiCodecAudioTokenizer):
@@ -272,8 +289,9 @@ def _build_request(
             messages=prompt_messages,
             task=task,
         )
-        private["prediction"] = response.prediction
         private["trace"] = response.name
+        if target_language is not None:
+            private["target_language"] = target_language
         return private
 
     if codes is not None:
@@ -282,17 +300,15 @@ def _build_request(
             "audio_sequence_layout."
         )
     prompt_ids = _prompt_ids(prompt_messages, runtime)
-    if response.prediction is PredictionModality.AUDIO:
-        prompt_ids = torch.cat(
-            (prompt_ids, prompt_ids.new_tensor([runtime.boa_token_id]))
-        )
-    return Request(
+    private = Request(
         prompt_ids=prompt_ids,
         task=task,
         audio_input_positions=None,
-        prediction=response.prediction,
         trace=response.name,
     )
+    if target_language is not None:
+        private["target_language"] = target_language
+    return private
 
 
 def _build_audio_source_request(
@@ -301,6 +317,7 @@ def _build_audio_source_request(
     *,
     task: Task,
     response: ResponseSpec,
+    target_language: str | None,
     runtime: GenerationRuntime,
 ) -> Request:
     if response.prediction.is_mixed and isinstance(
@@ -313,20 +330,30 @@ def _build_audio_source_request(
     if semantic is None:
         raise ValueError("audio-source chat codes require semantic units.")
     tokenizer = runtime.input_audio_tokenizer
-    if not runtime.input_audio_decoupled and isinstance(
-        tokenizer,
-        BiCodecAudioTokenizer,
-    ):
+    if isinstance(tokenizer, BiCodecAudioTokenizer):
         if parsed.global_codes is None:
-            raise ValueError("shared BiCodec audio input requires global codes.")
+            raise ValueError("BiCodec audio input requires global codes.")
         local_ids = torch.as_tensor(tokenizer.encode_full(parsed), dtype=torch.long)
     else:
         local_ids = torch.as_tensor(tokenizer.encode(semantic), dtype=torch.long)
     if local_ids.dim() != 1 or local_ids.numel() == 0:
         raise ValueError("input audio tokenizer must return a non-empty 1D sequence.")
     payload = runtime.layout.to_global(runtime.input_audio_block_name, local_ids)
-    prompt_ids = _prompt_ids(prompt_messages, runtime)
-    start = prompt_ids.numel() + 1
+    rendered = _render_prompt(prompt_messages, runtime)
+    pieces = rendered.split(_AUDIO_SOURCE_PLACEHOLDER)
+    if len(pieces) != 2:
+        raise ValueError(
+            "audio-source chat prompt must contain exactly one source placeholder."
+        )
+    prefix = runtime.layout.to_global(
+        Modality.TEXT.value,
+        _token_ids(pieces[0], runtime),
+    )
+    suffix = runtime.layout.to_global(
+        Modality.TEXT.value,
+        _token_ids(pieces[1], runtime),
+    )
+    start = prefix.numel() + 2
     positions = torch.arange(
         start,
         start + payload.numel(),
@@ -335,29 +362,42 @@ def _build_audio_source_request(
     )
     prompt_ids = torch.cat(
         (
-            prompt_ids,
+            prefix,
             payload.new_tensor([runtime.input_boa_token_id]),
+            payload.new_tensor([runtime.input_audio_schema_token_id]),
             payload,
             payload.new_tensor([runtime.input_eoa_token_id]),
+            suffix,
         )
     )
-    if response.prediction is PredictionModality.AUDIO:
-        prompt_ids = torch.cat(
-            (prompt_ids, prompt_ids.new_tensor([runtime.boa_token_id]))
-        )
-    return Request(
+    private = Request(
         prompt_ids=prompt_ids,
         task=task,
         audio_input_positions=positions,
-        prediction=response.prediction,
         trace=response.name,
     )
+    if target_language is not None:
+        private["target_language"] = target_language
+    return private
 
 
 def _prompt_ids(
     messages: Sequence[Mapping[str, str]],
     runtime: GenerationRuntime,
 ) -> Tensor:
+    rendered = _render_prompt(messages, runtime)
+    local_ids = _token_ids(rendered, runtime)
+    if local_ids.numel() == 0:
+        raise ValueError("chat text prompt must contain at least one token.")
+    if local_ids.dim() != 1:
+        raise ValueError("chat text prompt token ids must be one-dimensional.")
+    return runtime.layout.to_global(Modality.TEXT.value, local_ids)
+
+
+def _render_prompt(
+    messages: Sequence[Mapping[str, str]],
+    runtime: GenerationRuntime,
+) -> str:
     rendered = runtime.text_tokenizer.apply_chat_template(
         list(messages),
         tokenize=False,
@@ -367,12 +407,7 @@ def _prompt_ids(
     )
     if not isinstance(rendered, str):
         raise TypeError("text tokenizer chat template must return a string.")
-    local_ids = _token_ids(rendered, runtime)
-    if local_ids.numel() == 0:
-        raise ValueError("chat text prompt must contain at least one token.")
-    if local_ids.dim() != 1:
-        raise ValueError("chat text prompt token ids must be one-dimensional.")
-    return runtime.layout.to_global(Modality.TEXT.value, local_ids)
+    return rendered
 
 
 def _prompt_messages(
@@ -380,12 +415,16 @@ def _prompt_messages(
     task: Task,
     language: str,
     response: ResponseSpec,
+    *,
+    allow_empty_user: bool = False,
 ) -> tuple[list[dict[str, str]], str]:
     prompt_messages: list[dict[str, str]] = []
     source_index: int | None = None
     for message in messages:
         content = _message_text(message)
-        if not content:
+        if not content and not (
+            allow_empty_user and message["role"] == "user"
+        ):
             continue
         prompt_messages.append(
             {
@@ -398,8 +437,13 @@ def _prompt_messages(
     if source_index is None:
         raise ValueError("chat request requires user text content.")
     source_text = prompt_messages[source_index]["content"]
+    instruction_source = (
+        _AUDIO_SOURCE_PLACEHOLDER
+        if task.source_modality is Modality.AUDIO
+        else source_text
+    )
     prompt_messages[source_index]["content"] = _task_instruction(
-        source_text,
+        instruction_source,
         task,
         language,
         response,
@@ -439,7 +483,12 @@ def _token_ids(text: str, runtime: GenerationRuntime) -> Tensor:
     return values
 
 
-def _encode_audio(part: AudioPart, runtime: GenerationRuntime) -> AudioCodes | Tensor:
+def _encode_audio(
+    part: AudioPart,
+    runtime: GenerationRuntime,
+    *,
+    input_audio: bool = False,
+) -> AudioCodes | Tensor:
     waveform = part["waveform"]
     sample_rate = part["sample_rate"]
     if not isinstance(waveform, Tensor):
@@ -450,11 +499,13 @@ def _encode_audio(part: AudioPart, runtime: GenerationRuntime) -> AudioCodes | T
         raise ValueError("audio sample_rate must be positive.")
     waveform = waveform.to(dtype=torch.float32)
     batched = _batched_waveform(waveform)
+    view = runtime.input_audio_view if input_audio else runtime.audio_view
+    backend = runtime.input_codec if input_audio else runtime.codec
     with torch.autocast(device_type=batched.device.type, enabled=False):
-        if runtime.audio_view is AudioView.BICODEC:
-            if not supports_global(runtime.codec):
+        if view is AudioView.BICODEC:
+            if not supports_global(backend):
                 raise TypeError("BiCodec audio parts require a semantic-global codec.")
-            encoded = global_codec(runtime.codec).tokenize(batched, sample_rate)
+            encoded = global_codec(backend).tokenize(batched, sample_rate)
             if not isinstance(encoded, SemanticGlobalCodes):
                 raise TypeError(
                     "BiCodec tokenize must return SemanticGlobalCodes."
@@ -467,7 +518,7 @@ def _encode_audio(part: AudioPart, runtime: GenerationRuntime) -> AudioCodes | T
                     global_codes=encoded.global_codes[0].detach(),
                 )
             )
-        codes = frame_codec(runtime.codec).encode(batched, sample_rate)
+        codes = frame_codec(backend).encode(batched, sample_rate)
     if not isinstance(codes, Tensor):
         raise TypeError("codec encode must return a Tensor.")
     if codes.dim() == 3:
@@ -536,6 +587,14 @@ def _validated_input_codes(
             raise ValueError(
                 "input AudioCodes must contain 2D semantic_codes."
             )
+        if runtime.input_audio_view is AudioView.BICODEC:
+            if codes.global_codes is None or codes.acoustic_codes is not None:
+                raise ValueError(
+                    "BiCodec input AudioCodes require semantic_codes and "
+                    "global_codes only."
+                )
+            _validate_structured_codes(codes)
+            return codes
         if codes.acoustic_codes is not None or codes.global_codes is not None:
             raise ValueError(
                 "decoupled input AudioCodes must contain semantic_codes only."
@@ -590,16 +649,18 @@ def _task(request: ChatRequest) -> Task:
 
 
 def _response(request: ChatRequest, task: Task) -> ResponseSpec:
-    prediction = request.get("prediction")
-    if prediction is not None and not isinstance(prediction, PredictionModality):
-        raise TypeError("chat request prediction must be a PredictionModality or None.")
+    if "prediction" in request:
+        raise ValueError(
+            "chat request prediction override is not supported; "
+            "select a task response with trace."
+        )
     trace = request.get("trace")
     if trace is not None:
         if not isinstance(trace, str):
             raise TypeError("chat request trace must be a string or None.")
         if not trace:
             raise ValueError("chat request trace must be a non-empty string or None.")
-    return resolve_response(task, prediction=prediction, trace=trace)
+    return resolve_response(task, trace=trace)
 
 
 def _language(request: ChatRequest) -> str:

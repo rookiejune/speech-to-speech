@@ -20,14 +20,12 @@ class AudioInputContractTest(unittest.TestCase):
                     torch.tensor([1, 8, 9, 11, 2]),
                     torch.tensor([-100, -100, -100, -100, 2]),
                     task=Task.S2ST,
-                    prediction=Task.S2ST.prediction_modality,
                     audio_input_positions=torch.tensor([1, 2]),
                 ),
                 ModelSample.from_sequence(
                     torch.tensor([1, 8, 11, 2]),
                     torch.tensor([-100, -100, -100, 2]),
                     task=Task.S2ST,
-                    prediction=Task.S2ST.prediction_modality,
                     audio_input_positions=torch.tensor([1]),
                 ),
             ],
@@ -57,14 +55,13 @@ class AudioInputContractTest(unittest.TestCase):
                 int(request["prompt_ids"].numel()),
                 int(prompt_length.item()),
             )
-            self.assertEqual(request.get("prediction"), Task.S2ST.prediction_modality)
+            self.assertEqual(request.get("trace"), "direct")
 
     def test_source_positions_reject_duplicates_and_out_of_range_values(self):
         sample = ModelSample.from_sequence(
             torch.tensor([1, 2]),
             torch.tensor([-100, 2]),
             task=Task.S2ST,
-            prediction=Task.S2ST.prediction_modality,
             audio_input_positions=torch.tensor([1, 1]),
         )
         with self.assertRaisesRegex(ValueError, "must not repeat"):
@@ -74,7 +71,6 @@ class AudioInputContractTest(unittest.TestCase):
             torch.tensor([1, 2]),
             torch.tensor([-100, 2]),
             task=Task.S2ST,
-            prediction=Task.S2ST.prediction_modality,
             audio_input_positions=torch.tensor([2]),
         )
         with self.assertRaisesRegex(ValueError, "valid sequence positions"):

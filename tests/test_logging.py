@@ -374,13 +374,11 @@ class LoggingTest(unittest.TestCase):
                     torch.tensor([1, 2]),
                     torch.tensor([-100, 2]),
                     task=Task.TTS,
-                    prediction=Task.TTS.prediction_modality,
                 ),
                 ModelSample.from_sequence(
                     torch.tensor([1, 2, 3]),
                     torch.tensor([-100, 2, 3]),
                     task=Task.TTS,
-                    prediction=Task.TTS.prediction_modality,
                 ),
             ],
             pad_token_id=0,
@@ -451,7 +449,6 @@ def _batch(task: Task, audio_seconds: float = 0.0) -> ModelBatch:
                 torch.tensor([1, 2]),
                 torch.tensor([-100, 2]),
                 task=task,
-                prediction=task.prediction_modality,
                 audio_seconds=audio_seconds,
             )
         ],
@@ -471,7 +468,6 @@ def _acoustic_batch(task: Task) -> ModelBatch:
                     "token_positions": torch.tensor([1]),
                 },
                 task=task,
-                prediction=task.prediction_modality,
             )
         ],
         pad_token_id=0,

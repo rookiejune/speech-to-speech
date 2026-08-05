@@ -27,7 +27,7 @@
   PARALLEL_AR、INTERLEAVED_AR 共用该 path；AR 序列由 `datamodule.build.ar` 组装。pair
   translation path 不再承载 single-only 数据契约。
 - `build.sample.build_sample()`：根据 `Task` 把 `SpeechPair` 组装成 `ModelSample`，负责 chat
-  template、BOA/EOA/EOS、global ID 映射、source token prompt、token labels 和 target frame
+  template、typed ASR/MT controls、BOA/EOA/EOS、global ID 映射、source token prompt、token labels 和 target frame
   positions。
 - `build.single.build_single_sample()`：复用同一 `ModelSample` / `ModelBatch` 输出契约，把 single
   utterance 组装成 text->audio 或 audio->text 序列；`pl_module` 不区分 batch 来源。
@@ -37,20 +37,21 @@
 - `batch.ModelSample` / `batch.ModelBatch`：单条和 batch 级模型输入；
   `ModelBatch.from_samples(..., pad_token_id=...)` 完成校验与 padding，mask 由 padding 字段
   派生并缓存。
-- `task.Task` / `prediction.PredictionModality` / `source.SourceLayout`：`Task` 拥有
-  `source_layout`、默认 `prediction_modality`、`allowed_predictions`、`uses_source_role` 和
-  instruction template。loader 可对白名单任务覆写 `prediction`（如 T2ST/S2ST 的
-  `audio|parallel`）。同构 batch 比较 `(source_layout, prediction)`。`MASKED_AR` 使用
-  `TEXT_AUDIO` source（mask 后）与 mixed prediction。instruction 文案在
+- `task.TaskProgram` / `ResponseSpec` / `ResponseStep`：声明 task 的可见 context、有序 response
+  fields 及其 control framing、序列 layout、内部 prediction route 和 objective；`Task` 继续作为稳定的配置/指标 ID，
+  loader 只通过 `trace` 选择一个 `ResponseSpec`，prediction 由该 response 派生，不再接受独立
+  override。同构 batch 比较解析后的 `(source_layout, response.prediction)`；`MASKED_AR` 使用
+  `TEXT_AUDIO` context 与 reconstruction objective。instruction 文案在
   `speech_to_speech.task.templates` 的每任务 paraphrase 池中；`SpeechConfig.tasks.<task>.template`
-  为每 task 的 `int|null`（`null`=该 task 池内随机，整数=固定下标；默认 `0`）。loader
+  为每 task 的 `int|null`（`null`=该 task 池内随机，整数=固定下标；字段默认 `0`，正式
+  train entry 显式使用 `null`）。loader
   schedule（`loaders` / `step_mode` / `accumulate_grad_batches`）同属
   `SpeechConfig`。训练构建调用 `sample_template(index)`；generation 要求固定下标，可用
   `evaluation_template_index()`（把 `null` 钉成 `0`）。`datamodule.tasks=null` 表示所有任务
   使用模板 `0`；显式提供 task 映射时，所有正权重 loader task 都必须在该映射中声明。
-- `Collator(runtime, task_weights, prediction=...)`：按任务权重为 raw samples 选择任务，依次调用
-  parser、sample builder 和 batch padding；可选 loader 级 prediction override 写入
-  `SpeechTaskSample.prediction`。
+- `Collator(runtime, task_weights, trace=...)`：按任务权重为 raw samples 选择任务，依次调用 parser、
+  sample builder 和 batch padding；loader 级 trace 会解析为明确的 `ResponseSpec`，其 prediction
+  只作为 loss/generation 的内部执行路由。
 - `LoaderSpec.text(...)` / `TextCollator`：纯文本 MT loader，只读取 source/target text，当前可
   配置为 anydataset `WMT19` preset 或 deterministic toy text samples，不消费 codec/audio
   tokenizer。
@@ -130,6 +131,9 @@ checkpoint 的收敛和生成音质仍需单独验收。
 
 `SpeechConfig.materialization` 为 prepared workspace 增加 request-scoped read-through 路径。开启时
 必须同时设置 `encode_missing_codes=true`，并让可选的 `codec_view` 与 runtime `AudioView` 完全一致。
+runtime 的 input/output `AudioView` 都从对应 `audio_input.tokenizer` /
+`audio_output.tokenizer` 推导；`materialization.codec_view` 只是针对 output 推导值的可选
+防错校验，不是另一个表示选择轴。
 `DatasetName.WMT19_TTS` 继续读取原 `moss_tts` 资源及其 selection；双向边合成边训练使用独立的
 `DatasetName.STREAMING_S2ST`（Hydra: `datamodule/dataset=streaming_s2st`），通过 workspace
 `streaming_s2st` wrapper 读取 waveform 和 ready codec view，并要求 `dataset.filter=null`。
@@ -155,12 +159,27 @@ checkpoint 的收敛和生成音质仍需单独验收。
    `TextView.TEXT` 和 `TextMeta.LANG`。frame-code view 使用 anydataset `CodecProvider.encode()`；
    BiCodec 使用 structured `tokenize()`，并支持同一 WMT19 sample 内 source/target 两个 audio reference。
 
+两侧 backend/derived view 不同时，resolver 会分别查 input/output store，再按同一
+sample index 合并。同 backend 但 BPE 不同时虽然 model token space 独立，prepared
+codec codes 仍只读同一份 store。GLM-4 input / BiCodec output 的边界是：
+
+- GLM-4 prepared store 通过 `AnyDataset.from_store(.../glm4)` 直接加载，并复用与 output
+  相同的 WMT19 filter selection 索引；两侧 store 都 ready 时直接返回合并数据，不启动
+  waveform fallback 或后台 job。
+- GLM-4 input ready 但 BiCodec output 缺失时，fallback 把 ready GLM-4 view 合入同一
+  waveform sample。训练 batch 只在 output 侧调 BiCodec online materializer，后台也只补产
+  BiCodec store；到 epoch 边界仍要重载并验证两侧等长后才切 ready dataset。
+- GLM-4 input store 缺失时，内置 workspace materializer 没有 GLM-4 provider/backend，会明确
+  要求先发布该 prepared store 或扩展显式 provider；绝不复用 BiCodec output provider
+  伪造 input codes。
+
 `streaming_s2st` 的 source factory 返回上游 `translation_seed` 对应的双向 waveform dataset。方向
 展开只发生在 seed 层：若 filtered WMT19 有 `N` 个 pair，fallback、后台 codec store 和刷新后的
 训练 dataset 都必须是 `2N`。codec materializer 只编码已有 sample，不交换角色或二次展开成 `4N`。
 
 补产结果保持 workspace codec dataset 的读取格式，但它本身已经是过滤后的 composite store，因此
-ready store 加载时不再二次应用 filter。逻辑请求由 dataset/source root、split、codec、codec view、
+ready store 加载时不再二次应用 filter。逻辑请求由 dataset/source root、split、backend
+tokenizer identity、由它推导的 codec view、
 filter、`input_id`、`provider_id` 和 source factory 共同确定 request ID，写入目录为
 `<output_root>/<request-id>/<codec-store-dir>`。这样不同过滤规则、输入版本或 codec provider 不会共用
 同一补产目录；manifest provenance 必须精确匹配 `input_id` 和 `provider_id` 才能复用。这两个 ID 是
@@ -199,7 +218,170 @@ cell 和 `speaker_grid_manifest.jsonl` 契约，不能沿用 WMT19 pair material
 进程；布局/吞吐字段 `max_shard_samples`、`max_shard_bytes`、`batch_size`、`commit_samples`、
 `write_workers` 和 `write_prefetch` 不属于逻辑 request identity。
 
+## 流式 S2ST 合成消费
+
+`StreamingConfig` 与 `DatasetName.STREAMING_S2ST` 是独立于 read-through materialization 的长驻
+消费路径。上游 filtered `translation_seed` 有 `N` 个 pair 时，producer 在 seed 层恰好展开为 `2N`
+个有方向的 pair：正向与反向各一条；训练不再交换 role 或再次展开。每个 published sample 都是
+`Task.S2ST` 的 `trace=target_cot` teacher-forcing 样本，生成的 target text 和 target audio/code
+sequence 都是 backbone label，而不是训练时重新调用 teacher 的结果。
+
+producer 只通过原子发布的 immutable snapshot 交给训练端。每个
+`snapshots/<sequence>-<snapshot_id>/snapshot.json` 声明 stream identity、全局 sample membership、连续
+sequence、sample count 与自身 manifest digest；`SnapshotFeed` 只接受不重叠且不可改写的 append-only
+catalog prefix。最终 `sealed.json` 绑定 snapshot count、完整 `2N` membership 与 catalog digest；只有
+seal 与 catalog 完全一致时，逻辑 epoch 才结束。因而已观察到的 chunk、seal 或 checkpoint 前 catalog
+prefix 被删除、改写或分叉都会明确失败，不会把它当作可重采样的数据源。
+
+解耦 audio runtime 时，一个 snapshot 仍是单个原子 sample batch，不允许 input/output backend 各自推进。
+publisher 先在同一临时目录写完 `base/`、input derived-view store（例如 `glm4/`）和
+output derived-view store（例如 `bicodec/`），逐一校验 sample count 后只做一次目录
+`os.replace`。loader 按相同 index 打开两套 store，
+把 input view 与 output view 合并回一个完整 `Sample`；snapshot、seal、producer metadata、failure marker
+和 cursor checkpoint 都绑定 input/output backend tokenizer identity。这样恢复时既不会观察
+半个 snapshot，也不能
+把旧 cursor 静默切换到另一套 tokenizer。coupled runtime 继续使用原来的单 codec store/API。
+
+`StreamingSnapshotDataset` 区分已 delivered 与已 committed 的全局 position。`StreamingDataLoader`
+把 delivered batch 暂存到 optimizer 边界；`StreamingSynthesis` 仅在成功的 train batch end 确认它，
+并在 global step 前进时提交连续 span。checkpoint 同时保存 DataModule 的 loader state 和 Lightning
+fit-loop 的 stateful loader state：committed position/batches、world size、next snapshot identity、consumed
+catalog prefix digest 和 last global step。恢复会把 read position 回退到 committed position，因此未确认
+batch 可以重放，已确认 sample 不会重放；重复载入两份同一 state 是幂等的。该契约要求一个 speech
+loader、`accumulate_grad_batches=1`、`num_workers=0`、`persistent_workers=false`、关闭 cost batching、
+关闭 distributed sampler，且 `expected_samples` 必须能被 DDP world size 整除。
+
+流式 dataset 不接受 validation 或 split manifest；validation 必须在另一个已 sealed 的 immutable
+dataset 上运行。`published_streaming_samples()` 只暴露已经发布的 teacher artifacts：
+`SynthesisSampleLogger` 在 rank zero 按 optimizer-step cadence 写入其 source/target text、audio 与
+snapshot metadata，不运行 backbone 或 teacher，也不会要求固定样本在 fit 开始前就存在。
+
+`StreamingSnapshotDataset` 同时累计连续等待事件、poll 次数和实际 wall-clock wait seconds；
+`StreamingDataLoader` 按 batch 区分包含等待的 fetch time、等待部分和 snapshot load/collate 部分，
+这些累计值也随 cursor checkpoint 恢复。`StreamingTelemetryCallback` 把 batch/累计时间、read/committed/
+published position 和 wait ratio 写入 `streaming/*` scalar；DDP 的时间 scalar 取各 rank 最大值以表示
+实际瓶颈，而不是用平均值掩盖慢 rank。rank zero 另以配置的采样间隔后台调用
+`nvidia-smi`，原始样本追加到 logger 目录的 `streaming_gpu.csv`，结束摘要写到
+`streaming_gpu_summary.json`。producer 可用 `speech_to_speech.synthesis.telemetry.stage()` 输出带统一
+timestamp、stage elapsed、sample count、device 和 GPU ids 的 JSON 事件，与 GPU CSV 按时间对齐；
+`nvidia-smi` 不可用只在摘要中记录原因，不使训练失败。
+
 ## 输入输出
+
+### 任务程序与响应 trace
+
+response trace 是 loader 级数据课程配置，同一次训练可以用多个 homogeneous loader 分别采样 direct、
+target CoT 和 full CoT。`trace` 是唯一 response 选择轴；未指定时使用 program 的
+`default_response`，旧 `prediction` 配置会作为未知字段失败。S2ST 的三个逻辑序列为（`|` 左侧属于
+prompt，右侧属于完整、自回归监督的 response）：
+
+```text
+direct:     ... | BOA output_schema target-codec-sequence EOA
+target_cot: ... | <mt><lang_en> target text </mt> BOA output_schema target-codec-sequence EOA
+full_cot:   ... | <asr> source text </asr> <mt><lang_en> target text </mt> BOA output_schema target-codec-sequence EOA
+```
+
+中文目标把 `<lang_en>` 换成 `<lang_zh>`。S2TT 的 `full_cot` 同理为
+`... | <asr> source text </asr> <mt><lang_en> target text </mt>`。ASR/MT 不再借用通用 EOS：Runtime
+在 lexical tokenizer 词表之后固定追加 `<asr>`、`</asr>`、`<mt>`、`</mt>`、`<lang_en>`、
+`<lang_zh>` 六个可组合控制 ID；它们不写入或扩充 HF/Kimi tokenizer。普通 `TEXT_AR` 仍使用
+tokenizer 自己的 EOS。audio 使用通用 BOA/EOA 包络，并在 BOA 后显式生成当前 output schema
+selector；selector 之后才是 codec tokenizer 自己的 marker/order/payload grammar。
+
+prompt 只包含 instruction 和 source/context，不包含任何 response begin。builder 按 resolved
+response steps 编译完整 trace；从第一个 `<asr>`、`<mt>` 或 BOA 到最后一个 end token 都是普通
+teacher-forcing target。grammar 可以把某一步候选收窄为一个合法 token，但不能替模型插入该 token。
+
+一条具体的 S2ST full CoT 样本如下。正式训练直接从已 materialize 的 `anydataset` codec store
+读取 tensor。以 LongCat 的第 0 条样本为例，source/target codec payload 分别位于对应 audio view
+的 tar shard 中；同名 `.pt` 是两个不同 view 下的成员：
+
+```text
+<snapshot>/longcat/
+  samples.parquet
+  source/audio/longcat/
+    manifest.parquet
+    shards/000000.tar :: 000000000000.pt  # source codec Tensor
+  source/text/text/
+    manifest.parquet
+    shards/000000.tar :: 000000000000.txt # "今天天气很好。"
+  target/audio/longcat/
+    manifest.parquet
+    shards/000000.tar :: 000000000000.pt  # target codec Tensor
+  target/text/text/
+    manifest.parquet
+    shards/000000.tar :: 000000000000.txt # "The weather is nice today."
+```
+
+loader 解包后交给 collator 的逻辑样本等价于：
+
+```python
+{
+    (Role.SOURCE, Modality.AUDIO): AudioItem(
+        views={AudioView.LONGCAT: source_codec_codes},
+    ),
+    (Role.SOURCE, Modality.TEXT): TextItem(
+        views={TextView.TEXT: "今天天气很好。"},
+        meta={TextMeta.LANG: Lang.ZH},
+    ),
+    (Role.TARGET, Modality.AUDIO): AudioItem(
+        views={AudioView.LONGCAT: target_codec_codes},
+    ),
+    (Role.TARGET, Modality.TEXT): TextItem(
+        views={TextView.TEXT: "The weather is nice today."},
+        meta={TextMeta.LANG: Lang.EN},
+    ),
+}
+```
+
+该样本由 loader 的 `task + trace` 选择 full CoT，不在 sample 中额外保存 task/prediction：
+
+```yaml
+loader_plan:
+  loaders:
+    s2st_full:
+      weight: 1.0
+      task_weights: {s2st: 1.0}
+      trace: full_cot
+```
+
+这里 `source_codec_codes` 和 `target_codec_codes` 就是对应 `.pt` payload 经 CPU 上的安全
+`torch.load` 得到的 tensor。任务 context 只暴露 source audio；source text、target text 和 target
+audio 按 program 声明的顺序成为 response。正式配置保持 `encode_missing_codes=false`；只有显式开启
+debug/materialization fallback 时才允许从 `AudioView.WAVEFORM` 现场生成缺失 codes。
+
+该实例的逻辑 prompt 与 teacher-forcing 序列为：
+
+```text
+prompt:
+  Translate the following speech into English speech: <source_audio>
+  Respond in this exact order:
+  1. transcribe the source speech as text as <asr>...</asr>
+  2. produce the English translation as text as <mt><lang_en>...</mt>
+  3. generate the corresponding English speech
+  BOA input_schema <source .pt codec tokens> EOA
+
+response:
+  <asr> 今天天气很好。 </asr>
+  <mt> <lang_en> The weather is nice today. </mt>
+  BOA output_schema <target .pt codec tokens> EOA
+
+labels:
+  prompt（含 source BOA/input_schema/source .pt payload/EOA）全部为 -100
+  response 全部监督：所有 begin/end、language selector、BOA、output_schema、
+  codec-private marker/payload 和 EOA 的 label 都等于自身 token ID
+```
+
+上面的 source/target audio payload 直接来自各自 tar shard 内的 `.pt` tensor；正常路径不会先还原
+WAV，也不会重新调用 codec encoder。WAV 只属于显式开启的缺失-code materialization/debug fallback。
+
+AR 任务也使用同一个 program contract：`TEXT_AR` / `AUDIO_AR` 是空 context 的单字段 causal
+continuation，`PARALLEL_AR` / `INTERLEAVED_AR` 声明多模态 response layout，`MASKED_AR` 使用独立
+reconstruction objective。新增仍属于 causal serialized-sequence 的 AR 变体时，优先增加 program /
+response preset；如果需要新的训练目标或执行算法（例如不同的 masked、diffusion executor），则必须
+增加明确 objective/executor，不能只靠 prompt 假装成同一任务。
+当前 serialized response grammar 支持 audio-only，或若干 text step 后跟至多一个末尾 audio step；
+多个独立 audio step 必须先增加对应 executor，`ResponseSpec` 会在定义处拒绝这类未实现布局。
 
 输入是 `anydataset.types.Sample`，包含 source/target 两个 role 及 audio/text modality。
 内部转换顺序为：
@@ -232,19 +414,27 @@ structured `tokenize()`；LongCat、Stable Codec 与 UniCodec frame view 走完�
 LongCat 同时暴露 structured capability 就改变数据表示。同一 batch 可以混合 prepared-code item
 和 raw waveform item。
 
+解耦模式不允许缺失 input view 时调用 output codec waveform fallback。普通显式 debug
+fallback 若处理 raw input waveform，必须调用可加载的 `runtime.input_codec`；workspace read-through
+则遵循上述 provider 边界，GLM-4 input 必须先 prepared。若 input store 已 ready、output store
+尚在后台补产，composite fallback 会把 ready input view
+合入 waveform sample，只让缺失的 output target/audio context 进入现有 output codec materializer，
+并在 epoch 边界等两侧 store 都严格可加载且等长后再切换到 ready dataset。
+
 `ModelSample` 拆成与 generation 共用的输入侧 `Request`，以及仅训练使用的 `Labels`；collate
 再导出 teacher-forcing 视图供 loss / backbone 消费：
 
 ```python
 @dataclass
 class ModelSample:
-    request: Request   # task.io.Request
+    request: Request   # task.contract.Request
     labels: Labels
 
 # Request（与推理共用）
 prompt_ids: Tensor
 task: Task
-prediction: PredictionModality | None   # 训练必填；推理可空=用 task 默认
+trace: str | None                       # 训练保存 resolved name；推理可空=用 program default
+target_language: str | None             # 含 MT step 时必填；其余 response 为空/省略
 audio_input_positions: Tensor | None
 
 # Labels（仅训练）
@@ -260,8 +450,8 @@ audio_seconds: float
 `ModelBatch.from_samples` 分别 pad request / labels，再令
 `input_ids = cat(prompt_ids, response_ids)`，并令 `generation_prompt_lengths = len(prompt_ids)`。
 batch 仍暴露对齐的 `input_ids` / `token_labels` / `token_groups` / `acoustic_target` /
-`source_ctc` / `target_ctc` / `audio_input_positions` / `predictions`，供现有 loss
-与 bridge 使用。
+`source_ctc` / `target_ctc` / `audio_input_positions`，并由每行 `task + trace` 派生只读的
+`predictions` 属性，供 loss 使用。
 
 `AcousticTarget` 包含 `semantic_codes`、`codes`、`token_positions`。分组使必须共同存在的 tensor
 不能形成半完整状态。
@@ -270,21 +460,23 @@ batch 仍暴露对齐的 `input_ids` / `token_labels` / `token_groups` / `acoust
 输入在 parser/构造边界归入 `global_codes`，frame-aligned 输入才进入 `acoustic_codes`。
 
 BiCodec sample builder 先按“task 实际可见的 audio source 或显式 reference”是否提供 global stream
-决定序列开局。prompt 已有 global 时，response 以 `<begin_of_semantic>` 开局；prompt 没有 global
-时，response 以 `<begin_of_global>` 开局并按 global-first / semantic-last 生成两者。装配完成后
-不再另存一份 context codes 给 model batch 或 decode，target semantic 也不会被放进 prompt。
-`token_groups` 只标记实际预测的 semantic、semantic-or-end 或各 global codebook payload；forced
-codec/stream marker 与外层 EOA 不进入监督。
+决定 codec-private 序列。prompt 已有 global 时，response payload 从 `<begin_of_semantic>` 开始；
+prompt 没有 global 时，payload 从 `<begin_of_global>` 开始并按 global-first / semantic-last 生成两者。
+两种 payload 外面都包 `BOA + schema selector + ... + EOA`。装配完成后不再另存一份 context codes
+给 model batch 或 decode，target semantic 也不会被放进 prompt。外层控制 token、codec-private
+marker 与 payload 全部属于 response 监督；`token_groups` 只负责为不同位置选择合法候选范围，
+不负责代写 marker。
 
-`ModelBatch` 额外保存 `tasks: list[Task]`、`predictions: list[PredictionModality]` 和
-`pad_token_id`，并公开 `attention_mask` 与 `acoustic_target_mask`。speech batch 还保存
+`ModelBatch` 额外保存 `tasks: list[Task]`、`traces: list[str]`、
+`target_languages: list[str | None]` 和 `pad_token_id`，并公开
+`predictions`（从 task/trace 派生）、`attention_mask` 与 `acoustic_target_mask`。speech batch 还保存
 `audio_seconds: Tensor[B]`，表示每条训练样本按当前 task 实际消费的 source/target 音频秒数之和；
 纯文本样本为 0。batch padding 把单条 prompt 边界聚合为 `generation_prompt_lengths`；raw sample
 的显式 `audio_context` 已在装配阶段消费，不进入 batch。
-teacher-forcing generation bridge（`requests_from_batch`）切出 `prompt_ids` 并带上同批
-`prediction`，不从第一个非 `-100` label 反推。BiCodec reference global stream 已在该 prompt
-边界内；audio-target 路径把结构 BOA 写入 `prompt_ids`，因此即使后续 codec marker
-不受监督，真实生成仍从相同状态开始。
+teacher-forcing generation bridge（`requests_from_batch`）切出 `prompt_ids`，并带上同批
+resolved `trace` 与对应的 `target_language`，不从第一个非 `-100` label 反推。BiCodec reference
+global stream 已在该 prompt 边界内；audio-target BOA/schema 不在 prompt，真实生成必须从 BOA 开始
+预测完整 response trace。
 
 `audio_input_positions` 是每条序列中 source audio payload token 的位置，按 `[frames]` 保存，batch
 padding 后为 `[batch, frames]`，右侧填充 `-1`。sample builder 只为
@@ -295,10 +487,11 @@ backbone input tower；BiCodec decode ownership 完全由 prompt/response token 
 `source_ctc` / `target_ctc` 各自包含 audio span 的完整序列 `token_positions` 与 tokenizer-local
 `text_token_ids`。sample builder 不按“任务输出是否为 audio”这一条粗规则决定 CTC，而是按 transcript
 visibility 编译：ASR/S2TT/S2ST 有 source CTC；T2ST/S2ST 的纯 audio prediction 与 AUDIO_AR 有
-target CTC；TTS、MT、parallel/interleaved output 没有 target CTC。source positions 交给 non-causal
+target CTC；这里的 prediction 来自 resolved response，而不是独立配置。TTS、MT、
+parallel/interleaved output 没有 target CTC。source positions 交给 non-causal
 route 读取 `h[p]`，target positions 保留 token 自身位置并由 loss 读取 `h[p-1]`。audio span 指
-tokenizer 序列化 payload：BiCodec 内部 stream/end marker 也保留为可预测 blank 的 CTC step，外层
-BOA/EOA 则排除。
+tokenizer 序列化 payload：BiCodec stream marker 也可保留为 blank CTC step；外层
+BOA/schema selector/EOA 则排除。
 
 ## 边界
 
@@ -335,8 +528,8 @@ BOA/EOA 则排除。
 - chat template 先渲染为字符串并在字符串层切分 source placeholder，再分别 tokenize
   prefix/suffix；不能在 token IDs 中搜索单独编码的 placeholder，因为 BPE 分词受相邻文本
   影响。
-- target 为 audio 时，BOA 是结构性 response prefix，不参与监督：
-  `token_labels[len(input_ids) + 1:] = response_ids[1:]`，只监督 audio tokens 和 EOA。
+- target 为 audio 时，完整 `BOA + schema selector + codec-private sequence + EOA` 都属于 response，
+  `token_labels[len(input_ids):] == response_ids`；prompt 段才全部为 `-100`。
 - `acoustic_target` 内各 tensor 共享 frame 轴；`token_positions` 将每个 acoustic frame
   对齐到 target audio token。它只表达
   codec target，不保存或预计算 REPA teacher features。unified-token codec 没有独立
@@ -361,8 +554,9 @@ BOA/EOA 则排除。
   该元数据；缺失时用当前 codec view 的 frame count 除以 `runtime.codec_frame_rate` 推导
   `Speech.duration_seconds`。task sample builder 按 source/target modality 决定哪些角色计入
   `ModelBatch.audio_seconds`；不能把真实音频静默计为 0。
-- 同一 `task_weights` 中的任务必须具有相同 `(source_layout, prediction)` 执行签名，保证 DDP 各 rank 走相同
-  模型路径。0 权重任务不会参与 batch 分配；每项权重必须有限且非负，总和必须有限且为正；
+- 同一 `task_weights` 中的任务必须在当前 trace 下具有相同
+  `(source_layout, response.prediction)` 执行签名，保证 DDP 各 rank 走相同模型路径。0 权重任务不会
+  参与 batch 分配；每项权重必须有限且非负，总和必须有限且为正；
   task allocator 把 weighted round-robin credit 跨 collate 调用保存在进程共享状态中。小 batch
   可以暂时不含某个低权重 task，但不会丢弃尾批样本，并会在后续 batch 归还配额。DataModule
   构造时必须提供 task weights，collator 构造后不可修改；切换任务组合必须构造新的 loader。

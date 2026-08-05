@@ -18,7 +18,7 @@ from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.runtime import AudioSequenceLayout, Config as RuntimeConfig
 from speech_to_speech.training.parameter_policy import ParameterPolicyConfig
-from speech_to_speech.task import PredictionModality, Task
+from speech_to_speech.task import TARGET_COT, Task, resolve_response
 
 from speech_to_speech.training.config import (
     FlowModelConfig,
@@ -233,11 +233,12 @@ def _validate_streaming(config: StagedTrainConfig) -> None:
     if active_tasks != {Task.S2ST}:
         raise ValueError(
             "streaming synthesis requires exactly the s2st task so every one of "
-            "the 2N teacher samples contributes one direct translation example."
+            "the 2N teacher samples contributes one target-CoT translation example."
         )
-    if loader.prediction_modality is not PredictionModality.PARALLEL:
+    response = resolve_response(Task.S2ST, trace=loader.trace)
+    if response.name != TARGET_COT:
         raise ValueError(
-            "streaming s2st requires prediction=parallel so the teacher-generated "
+            "streaming s2st requires trace=target_cot so the teacher-generated "
             "target text and target audio are both backbone labels."
         )
     if config.loader_plan.accumulate_grad_batches != 1:

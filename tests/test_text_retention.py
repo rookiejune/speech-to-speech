@@ -53,6 +53,8 @@ class _Model(nn.Module):
         self.runtime = SimpleNamespace(
             text_tokenizer=_Tokenizer(),
             layout=Layout(text=(0, 8), audio=(8, 10)),
+            lexical_text_vocab_size=8,
+            control_token_ids=(),
             eos_token_id=7,
         )
         self.token_modalities: list[Modality] = []
@@ -192,7 +194,10 @@ class TextRetentionTest(unittest.TestCase):
 
         self.assertTrue(module.training)
         requests = generate_responses.call_args.args[0]
-        self.assertEqual([request["task"] for request in requests], [Task.T2TT] * 2)
+        self.assertEqual(
+            [request["task"] for request in requests],
+            [Task.TEXT_AR] * 2,
+        )
         self.assertEqual(generate_responses.call_args.kwargs["max_new_tokens"], 16)
         self.assertFalse(generate_responses.call_args.kwargs["do_sample"])
         self.assertEqual(results["zh_en"]["generated"], "5 6")

@@ -5,10 +5,60 @@ from __future__ import annotations
 import unittest
 
 from _contracts_helpers import *
-from speech_to_speech.task import PredictionModality
 
 
 class ModelBatchContractTest(unittest.TestCase):
+    def test_model_batch_preserves_normalized_target_languages(self):
+        samples = [
+            ModelSample.from_sequence(
+                torch.tensor([1, 2]),
+                torch.tensor([-100, 2]),
+                task=Task.MT,
+                target_language="EN-US",
+            ),
+            ModelSample.from_sequence(
+                torch.tensor([1, 3]),
+                torch.tensor([-100, 3]),
+                task=Task.MT,
+                target_language="Chinese",
+            ),
+        ]
+
+        batch = ModelBatch.from_samples(samples, pad_token_id=99)
+
+        self.assertEqual(batch.target_languages, ["en", "zh"])
+        self.assertEqual(batch.row(1).target_languages, ["zh"])
+        self.assertEqual(
+            batch.to(torch.device("cpu")).target_languages,
+            ["en", "zh"],
+        )
+
+    def test_model_batch_rejects_misaligned_target_languages(self):
+        with self.assertRaisesRegex(ValueError, "one value per row"):
+            ModelBatch(
+                input_ids=torch.ones(2, 2, dtype=torch.long),
+                token_labels=torch.ones(2, 2, dtype=torch.long),
+                acoustic_target=None,
+                tasks=[Task.ASR, Task.ASR],
+                target_languages=["en"],
+                pad_token_id=99,
+                generation_prompt_lengths=torch.ones(2, dtype=torch.long),
+            )
+
+    def test_model_batch_rejects_supervision_outside_layout(self):
+        sample = ModelSample.from_sequence(
+            torch.tensor([1, 999]),
+            torch.tensor([-100, 999]),
+            task=Task.ASR,
+        )
+
+        with self.assertRaisesRegex(ValueError, "outside the supervised layout"):
+            ModelBatch.from_samples(
+                [sample],
+                pad_token_id=0,
+                layout=Layout(text=(0, 10), audio=(10, 20)),
+            )
+
     def test_model_batch_preserves_typed_input_hints_across_transfer(self):
         batch = ModelBatch.from_samples([_sample(Task.ASR)], pad_token_id=99)
         modalities = frozenset({Modality.TEXT, Modality.AUDIO})
@@ -58,20 +108,11 @@ class ModelBatchContractTest(unittest.TestCase):
 
     def test_model_batch_direct_constructor_maintains_batch_task_invariants(self):
         def batch(tasks: list[Task]) -> ModelBatch:
-            predictions = [
-                (
-                    task.prediction_modality
-                    if isinstance(task, Task)
-                    else cast(object, task)
-                )
-                for task in tasks
-            ]
             return ModelBatch(
                 input_ids=torch.ones(2, 2, dtype=torch.long),
                 token_labels=torch.ones(2, 2, dtype=torch.long),
                 acoustic_target=None,
                 tasks=tasks,
-                predictions=predictions,  # type: ignore[arg-type]
                 pad_token_id=99,
                 generation_prompt_lengths=torch.ones(2, dtype=torch.long),
             )
@@ -99,7 +140,6 @@ class ModelBatchContractTest(unittest.TestCase):
                 token_labels=torch.empty(0, 2, dtype=torch.long),
                 acoustic_target=None,
                 tasks=[],
-                predictions=[],
                 pad_token_id=99,
             )
 
@@ -109,7 +149,6 @@ class ModelBatchContractTest(unittest.TestCase):
                 token_labels=torch.ones(1, 2, dtype=torch.long),
                 acoustic_target=None,
                 tasks=[Task.ASR],
-                predictions=[Task.ASR.prediction_modality],
                 pad_token_id=99,
             )
 
@@ -132,7 +171,6 @@ class ModelBatchContractTest(unittest.TestCase):
                     "text_token_ids": torch.tensor([2]),
                 },
                 task=Task.S2ST,
-                prediction=PredictionModality.AUDIO,
             ),
             ModelSample.from_sequence(
                 torch.tensor([10, 11, 12, 13, 14, 15, 16]),
@@ -146,7 +184,6 @@ class ModelBatchContractTest(unittest.TestCase):
                     "text_token_ids": torch.tensor([2, 3]),
                 },
                 task=Task.S2ST,
-                prediction=PredictionModality.AUDIO,
             ),
         ]
 
@@ -190,7 +227,6 @@ class ModelBatchContractTest(unittest.TestCase):
                     "text_token_ids": torch.tensor(labels),
                 },
                 task=Task.T2ST,
-                prediction=PredictionModality.AUDIO,
             )
 
         with self.assertRaisesRegex(ValueError, "positive valid sequence positions"):
@@ -215,7 +251,6 @@ class ModelBatchContractTest(unittest.TestCase):
                             "text_token_ids": torch.tensor([1]),
                         },
                         task=Task.TTS,
-                        prediction=PredictionModality.AUDIO,
                     )
                 ],
                 pad_token_id=99,
@@ -232,7 +267,6 @@ class ModelBatchContractTest(unittest.TestCase):
                             "text_token_ids": torch.tensor([1]),
                         },
                         task=Task.T2ST,
-                        prediction=PredictionModality.AUDIO,
                     )
                 ],
                 pad_token_id=99,
@@ -274,7 +308,6 @@ class ModelBatchContractTest(unittest.TestCase):
                     "token_positions": torch.tensor([[position]]),
                 },
                 tasks=[Task.TTS],
-                predictions=[Task.TTS.prediction_modality],
                 pad_token_id=99,
             )
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from typing import cast
 
 import torch
 from anydataset.types import Modality
@@ -17,7 +18,7 @@ from speech_to_speech.datamodule.sample import (
     Text,
 )
 from speech_to_speech.loss.supervised import TokenLoss
-from speech_to_speech.task import PredictionModality
+from speech_to_speech.task import ControlToken, TARGET_COT, PredictionModality
 from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.task import Task
 
@@ -48,11 +49,26 @@ def _speech(*, frames: int, text_ids: list[int], acoustic: bool) -> Speech:
 
 class AutoregressiveLayoutTest(unittest.TestCase):
     def setUp(self) -> None:
+        lexical_text_vocab_size = 8
+        control_token_ids = tuple(
+            range(
+                lexical_text_vocab_size,
+                lexical_text_vocab_size + len(ControlToken),
+            )
+        )
+        audio_start = lexical_text_vocab_size + len(ControlToken)
         self.runtime = SimpleNamespace(
             text_tokenizer=_Tokenizer(),
-            layout=Layout(text=(0, 8), audio=(8, 20)),
-            boa_token_id=18,
-            eoa_token_id=19,
+            layout=Layout(text=(0, audio_start), audio=(audio_start, audio_start + 13)),
+            lexical_text_vocab_size=lexical_text_vocab_size,
+            control_token_ids=control_token_ids,
+            control_token_id=lambda token: control_token_ids[
+                list(ControlToken).index(token)
+            ],
+            boa_token_id=audio_start + 10,
+            eoa_token_id=audio_start + 11,
+            audio_schema_token_id=audio_start + 12,
+            bos_token_id=6,
             eos_token_id=7,
             pad_token_id=0,
             acoustic_generator_artifact=None,
@@ -71,8 +87,24 @@ class AutoregressiveLayoutTest(unittest.TestCase):
         self.assertTrue(torch.equal(sample.token_labels[:1], torch.tensor([-100])))
         self.assertTrue(torch.equal(sample.token_labels[1:], sample.input_ids[1:]))
         self.assertIsNone(sample.acoustic_target)
+        self.assertNotIn("target_language", sample.request)
 
-    def test_audio_ar_uses_boa_as_unsupervised_generation_prompt(self):
+    def test_text_ar_does_not_normalize_unrelated_language(self):
+        target = Text(
+            text_token_ids=torch.tensor([2, 3]),
+            language=cast(Language, SimpleNamespace(code="ja")),
+        )
+
+        sample = build_pretraining_ar_sample(
+            target,
+            Task.TEXT_AR,
+            self.runtime,
+        )
+
+        self.assertNotIn("target_language", sample.request)
+        self.assertIsNone(sample.target_language)
+
+    def test_audio_ar_supervises_model_native_audio_envelope(self):
         speech = _speech(frames=3, text_ids=[2, 3], acoustic=True)
         sample = build_ar_sample(
             speech,
@@ -85,14 +117,20 @@ class AutoregressiveLayoutTest(unittest.TestCase):
         audio_start, _ = self.runtime.layout.blocks[Modality.AUDIO.value]
         expected_audio = speech.audio_token_ids + audio_start
         expected_response = torch.cat(
-            [expected_audio, torch.tensor([self.runtime.eoa_token_id])]
+            [
+                torch.tensor(
+                    [
+                        self.runtime.boa_token_id,
+                        self.runtime.audio_schema_token_id,
+                    ]
+                ),
+                expected_audio,
+                torch.tensor([self.runtime.eoa_token_id]),
+            ]
         )
 
-        self.assertEqual(prompt_length, 2)
-        self.assertEqual(
-            int(sample.request["prompt_ids"][-1]),
-            self.runtime.boa_token_id,
-        )
+        self.assertEqual(prompt_length, 1)
+        self.assertTrue(torch.equal(sample.request["prompt_ids"], torch.tensor([1])))
         self.assertTrue(sample.token_labels[:prompt_length].eq(-100).all())
         self.assertTrue(torch.equal(sample.labels.response_ids, expected_response))
         self.assertTrue(
@@ -101,8 +139,8 @@ class AutoregressiveLayoutTest(unittest.TestCase):
         self.assertIsNotNone(sample.acoustic_target)
         assert sample.acoustic_target is not None
         expected_positions = torch.arange(
-            prompt_length,
-            prompt_length + speech.audio_token_ids.numel(),
+            prompt_length + 2,
+            prompt_length + 2 + speech.audio_token_ids.numel(),
             dtype=torch.long,
         )
         self.assertTrue(
@@ -148,7 +186,7 @@ class AutoregressiveLayoutTest(unittest.TestCase):
         )
         self.assertIsNone(sample.acoustic_target)
 
-    def test_pretraining_audio_ar_uses_boa_prompt(self):
+    def test_pretraining_audio_ar_uses_bos_and_supervises_audio_envelope(self):
         speech = _speech(frames=3, text_ids=[2, 3], acoustic=True)
         sample = build_pretraining_ar_sample(
             speech,
@@ -159,12 +197,21 @@ class AutoregressiveLayoutTest(unittest.TestCase):
         audio_start, _ = self.runtime.layout.blocks[Modality.AUDIO.value]
         expected_audio = speech.audio_token_ids + audio_start
         expected_response = torch.cat(
-            [expected_audio, torch.tensor([self.runtime.eoa_token_id])]
+            [
+                torch.tensor(
+                    [
+                        self.runtime.boa_token_id,
+                        self.runtime.audio_schema_token_id,
+                    ]
+                ),
+                expected_audio,
+                torch.tensor([self.runtime.eoa_token_id]),
+            ]
         )
         self.assertTrue(
             torch.equal(
                 sample.request["prompt_ids"],
-                torch.tensor([self.runtime.boa_token_id]),
+                torch.tensor([self.runtime.bos_token_id]),
             )
         )
         self.assertTrue(torch.equal(sample.labels.response_ids, expected_response))
@@ -179,7 +226,7 @@ class AutoregressiveLayoutTest(unittest.TestCase):
         self.assertTrue(
             torch.equal(
                 sample.acoustic_target["token_positions"],
-                torch.arange(1, 4, dtype=torch.long),
+                torch.arange(3, 6, dtype=torch.long),
             )
         )
         self.assertIsNotNone(sample.target_ctc)
@@ -187,7 +234,7 @@ class AutoregressiveLayoutTest(unittest.TestCase):
         self.assertTrue(
             torch.equal(
                 sample.target_ctc["token_positions"],
-                torch.arange(1, 4, dtype=torch.long),
+                torch.arange(3, 6, dtype=torch.long),
             )
         )
 
@@ -293,7 +340,7 @@ class AutoregressiveLayoutTest(unittest.TestCase):
         self.assertEqual(sample.prediction, PredictionModality.PARALLEL)
         self.assertTrue(sample.token_labels[:prompt_len].eq(-100).all())
 
-    def test_translation_parallel_override(self):
+    def test_translation_target_cot_trace(self):
         from speech_to_speech.datamodule.builder import build_speech_sample
 
         sample = build_speech_sample(
@@ -302,7 +349,7 @@ class AutoregressiveLayoutTest(unittest.TestCase):
             Task.T2ST,
             self.runtime,
             prompt="marker $$$PLACEHOLDER$$$ end",
-            prediction=PredictionModality.PARALLEL,
+            trace=TARGET_COT,
         )
         self.assertEqual(sample.prediction, PredictionModality.PARALLEL)
         text_start, text_end = self.runtime.layout.blocks[Modality.TEXT.value]

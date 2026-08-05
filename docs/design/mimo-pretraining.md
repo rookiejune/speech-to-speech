@@ -3,8 +3,9 @@
 This repository exposes two autoregressive paths:
 
 - `ARFraming.PRETRAINING` keeps the existing single-stream model and builds
-  `BOS | text | EOS` or `BOA | audio | EOA` samples without an instruction
-  template.
+  `BOS | text EOS` or `BOS | BOA schema codec-sequence EOA` samples without an
+  instruction template. Only the seed BOS is prompt/ignored; the complete
+  response framing is supervised.
 - MIMO keeps text and semantic-audio ids on one aligned time axis.  The body is
   called once on `text_embedding + audio_embedding`; separate readouts and
   local-vocabulary heads compute the two causal losses.

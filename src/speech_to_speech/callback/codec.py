@@ -86,9 +86,13 @@ class OnDeviceCodecMaterializer:
         *,
         device: torch.device | None,
     ) -> SpeechTaskSample:
-        source = self._item(sample.source, device=device)
-        target = self._item(sample.target, device=device)
-        audio_context = self._item(sample.audio_context, device=device)
+        source = self._item(sample.source, device=device, input_audio=True)
+        target = self._item(sample.target, device=device, input_audio=False)
+        audio_context = self._item(
+            sample.audio_context,
+            device=device,
+            input_audio=False,
+        )
         if target is None:
             raise AssertionError("speech task target must not be None.")
         if isinstance(audio_context, Text):
@@ -97,7 +101,6 @@ class OnDeviceCodecMaterializer:
             source=source,
             target=target,
             task=sample.task,
-            prediction=sample.prediction,
             trace=sample.trace,
             audio_context=audio_context,
         )
@@ -107,16 +110,18 @@ class OnDeviceCodecMaterializer:
         item: Speech | Text | RawSpeech | None,
         *,
         device: torch.device | None,
+        input_audio: bool,
     ) -> Speech | Text | None:
         if not isinstance(item, RawSpeech):
             return item
-        codes = self._encode(item, device=device)
+        codes = self._encode(item, device=device, input_audio=input_audio)
         return speech_from_codes(
             codes,
             text_token_ids=item.text_token_ids.cpu(),
             language=item.language,
             duration_seconds=item.duration_seconds,
             runtime=self.runtime,
+            input_audio=input_audio,
         )
 
     def _encode(
@@ -124,6 +129,7 @@ class OnDeviceCodecMaterializer:
         sample: RawSpeech,
         *,
         device: torch.device | None,
+        input_audio: bool,
     ) -> object:
         # Codec backends are materialization dependencies, not part of the model's
         # mixed-precision graph. Keep their input and internal kernels in FP32.
@@ -135,12 +141,22 @@ class OnDeviceCodecMaterializer:
             device_type=batched_waveform.device.type,
             enabled=False,
         ):
-            if self.runtime.audio_view is AudioView.BICODEC:
-                if not supports_global(self.runtime.codec):
+            view = (
+                self.runtime.input_audio_view
+                if input_audio
+                else self.runtime.audio_view
+            )
+            backend = (
+                self.runtime.input_codec
+                if input_audio and self.runtime.input_audio_decoupled
+                else self.runtime.codec
+            )
+            if view is AudioView.BICODEC:
+                if not supports_global(backend):
                     raise TypeError(
                         "BiCodec waveform fallback requires a semantic-global codec."
                     )
-                codec = global_codec(self.runtime.codec)
+                codec = global_codec(backend)
                 encoded = codec.tokenize(
                     batched_waveform,
                     sample.sample_rate,
@@ -161,7 +177,7 @@ class OnDeviceCodecMaterializer:
                     )
                 )
             return _encoded_codes(
-                frame_codec(self.runtime.codec).encode(
+                frame_codec(backend).encode(
                     batched_waveform,
                     sample.sample_rate,
                 )

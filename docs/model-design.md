@@ -13,7 +13,7 @@ anydataset raw sample
     -> model + loss
     -> callback / validation
 
-task.io.Request
+task.contract.Request
     -> generation service
     -> model generation protocol
     -> generation.result.Result

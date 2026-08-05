@@ -10,7 +10,7 @@ output_subdir: train/${run_name}
 output_dir: ${repo_output_root}/${output_subdir}
 
 datamodule:
-  codec: ${runtime.codec}
+  codec: ${runtime.audio_output.tokenizer}
   materialization:
     enabled: false
     codec_view:
@@ -33,6 +33,10 @@ datamodule:
     status_seconds: 60.0
     producer_factory:
     producer_options: {}
+    telemetry:
+      enabled: true
+      gpu_sample_interval_seconds: 1.0
+      log_every_n_steps: 1
   dataloader:
     batch_size: 8
     num_workers: 4
@@ -43,18 +47,18 @@ datamodule:
       max_batch_frames: 4800
       planning_window: 256
   tasks:
-    audio_ar: { template: 0 }
-    asr: { template: 0 }
-    interleaved_ar: { template: 0 }
-    masked_ar: { template: 0 }
-    mt: { template: 0 }
-    parallel_ar: { template: 0 }
-    s2st: { template: 0 }
-    s2tt: { template: 0 }
-    text_ar: { template: 0 }
-    t2st: { template: 0 }
-    t2tt: { template: 0 }
-    tts: { template: 0 }
+    audio_ar: { template: null }
+    asr: { template: null }
+    interleaved_ar: { template: null }
+    masked_ar: { template: null }
+    mt: { template: null }
+    parallel_ar: { template: null }
+    s2st: { template: null }
+    s2tt: { template: null }
+    text_ar: { template: null }
+    t2st: { template: null }
+    t2tt: { template: null }
+    tts: { template: null }
 
 text_datamodule:
   dataloader:

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from torch import Tensor
+
+if TYPE_CHECKING:
+    from ..audio_schema import AudioTokenGrammar
 
 
 class AudioTokenizer(Protocol):
@@ -11,6 +14,9 @@ class AudioTokenizer(Protocol):
 
     @property
     def vocab_size(self) -> int: ...
+
+    @property
+    def grammar(self) -> AudioTokenGrammar: ...
 
     def encode(
         self,

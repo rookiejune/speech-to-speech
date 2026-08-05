@@ -158,21 +158,14 @@ def build_mimo_model(
     if not isinstance(source_embedding, nn.Embedding):
         raise TypeError("runtime backbone input embeddings must be nn.Embedding.")
     text_vocab = (
-        options.text_vocab_size
-        if options.text_vocab_size is not None
-        else _text_vocab(runtime)
+        options.text_vocab_size if options.text_vocab_size is not None else _text_vocab(runtime)
     )
     _positive_int(text_vocab, "text vocabulary size")
     if source_embedding.num_embeddings < text_vocab:
-        raise ValueError(
-            "runtime backbone input embeddings do not cover the text vocabulary."
-        )
+        raise ValueError("runtime backbone input embeddings do not cover the text vocabulary.")
 
     hidden_size = _hidden_size(adapter, source_embedding)
-    if (
-        options.audio_embedding_dim is not None
-        and options.audio_embedding_dim != hidden_size
-    ):
+    if options.audio_embedding_dim is not None and options.audio_embedding_dim != hidden_size:
         raise ValueError("audio_embedding_dim must match the runtime hidden size.")
     _, audio_vocab = _mimo_audio_vocab(runtime, options.audio_vocab_size)
     local_audio = audio_embedding or _audio_embedding(
@@ -212,12 +205,10 @@ def build_mimo_model(
     )
     readouts = runtime.backbone_readouts
     text_readout = BackboneReadout(
-        options.text_readout
-        or readouts.get("text", runtime.backbone_readout)
+        options.text_readout or readouts.get("text", runtime.backbone_readout)
     )
     audio_readout = BackboneReadout(
-        options.audio_readout
-        or readouts.get("audio", runtime.backbone_readout)
+        options.audio_readout or readouts.get("audio", runtime.backbone_readout)
     )
     supports_cache_position = (
         runtime.backbone_supports_cache_position
@@ -345,7 +336,16 @@ def _text_vocab(runtime: MimoRuntime) -> int:
         raise TypeError("runtime layout must expose a text vocabulary block.") from error
     if isinstance(start, bool) or isinstance(end, bool) or end <= start:
         raise ValueError("runtime text vocabulary block must be non-empty.")
-    return int(end - start)
+    block_size = int(end - start)
+    lexical_size = getattr(runtime, "lexical_text_vocab_size", block_size)
+    if (
+        isinstance(lexical_size, bool)
+        or not isinstance(lexical_size, int)
+        or lexical_size <= 0
+        or lexical_size > block_size
+    ):
+        raise ValueError("runtime lexical text vocabulary must be positive and fit its text block.")
+    return lexical_size
 
 
 def _hidden_size(adapter: object, embedding: nn.Embedding) -> int:
@@ -415,16 +415,10 @@ def _mimo_audio_payload_vocab(runtime: MimoRuntime) -> int:
             or not isinstance(semantic_size, int)
             or semantic_size <= 0
         ):
-            raise ValueError(
-                "semantic audio payload vocabulary size must be a positive integer."
-            )
+            raise ValueError("semantic audio payload vocabulary size must be a positive integer.")
         return semantic_size
     payload_size = getattr(tokenizer, "vocab_size", None)
-    if (
-        isinstance(payload_size, bool)
-        or not isinstance(payload_size, int)
-        or payload_size <= 0
-    ):
+    if isinstance(payload_size, bool) or not isinstance(payload_size, int) or payload_size <= 0:
         raise ValueError("audio tokenizer vocabulary size must be a positive integer.")
     return payload_size
 

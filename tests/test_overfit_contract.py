@@ -40,7 +40,10 @@ class OverfitContractTest(unittest.TestCase):
         config = overfit(_compose("overfit", "experiment=overfit/toy_smoke"))
 
         self.assertIsInstance(config.datamodule, SpeechConfig)
-        self.assertEqual(config.datamodule.codec, config.runtime.codec)
+        self.assertEqual(
+            config.datamodule.codec,
+            config.runtime.audio_output.tokenizer,
+        )
         self.assertEqual(config.datamodule.dataloader.batch_size, 1)
         self.assertEqual(config.datamodule.dataloader.num_workers, 0)
         self.assertFalse(config.datamodule.dataloader.pin_memory)

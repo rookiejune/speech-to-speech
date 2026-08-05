@@ -6,6 +6,7 @@ from numbers import Integral
 import torch
 from torch import Tensor
 
+from ..audio_schema import AudioGrammarVariant, AudioTokenBlock, AudioTokenGrammar
 from ._common import validate_ids, validate_range
 
 
@@ -20,10 +21,31 @@ class NativeAudioTokenizer:
         if vocab_size < 1:
             raise ValueError("native audio tokenizer vocab size must be positive.")
         self._vocab_size = int(vocab_size)
+        self._grammar = AudioTokenGrammar(
+            name="native-audio-payload-v1",
+            variants=(
+                AudioGrammarVariant(
+                    name="payload",
+                    blocks=(
+                        AudioTokenBlock(
+                            name="payload",
+                            marker_id=None,
+                            token_ranges=((0, self._vocab_size),),
+                        ),
+                    ),
+                ),
+            ),
+            default_variant="payload",
+            generation_variants=("payload",),
+        )
 
     @property
     def vocab_size(self) -> int:
         return self._vocab_size
+
+    @property
+    def grammar(self) -> AudioTokenGrammar:
+        return self._grammar
 
     def contract_state(self) -> dict[str, object]:
         """Return the effective token-ID grammar used by checkpoints."""

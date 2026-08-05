@@ -54,14 +54,10 @@ def _decode_audio(
 ) -> Tensor:
     rows = [semantic_codes_from_audio_tokens(audio_tokenizer, row) for row in local_ids]
     if not rows or len({tuple(row.shape) for row in rows}) != 1:
-        raise ValueError(
-            "audio token rows must expand to the same frame and codebook shape."
-        )
+        raise ValueError("audio token rows must expand to the same frame and codebook shape.")
     semantic_codes = torch.stack(rows)
     if semantic_codes.shape[:2] != acoustic_features.shape[:2]:
-        raise ValueError(
-            "semantic codes and acoustic features must align on [batch, frame]."
-        )
+        raise ValueError("semantic codes and acoustic features must align on [batch, frame].")
     return codec.decode_features(semantic_codes, acoustic_features)
 
 
@@ -76,9 +72,15 @@ def decode_generated_semantic(
     semantic_decode_generator: Generator | None = None,
 ) -> Tensor:
     """Decode semantic-only codec tokens directly into waveforms."""
-    local_ids = _local_ids(audio_token_ids, audio_token_range)
     semantic_codes = torch.stack(
-        [semantic_codes_from_audio_tokens(audio_tokenizer, row) for row in local_ids]
+        [
+            decode_generated_semantic_code_row(
+                row,
+                audio_tokenizer=audio_tokenizer,
+                audio_token_range=audio_token_range,
+            )
+            for row in audio_token_ids
+        ]
     )
     return codec.decode(
         semantic_codes,
@@ -96,13 +98,39 @@ def decode_generated_frame_codes(
     audio_token_range: tuple[int, int],
 ) -> Tensor:
     """Decode generated full frame-code tokens with a ``FrameCodec`` backend."""
-    local_ids = _local_ids(audio_token_ids, audio_token_range)
-    rows = [_decoded_frames(audio_tokenizer, row) for row in local_ids]
-    if not rows or len({tuple(row.shape) for row in rows}) != 1:
-        raise ValueError(
-            "full codec token rows must expand to the same frame and codebook shape."
+    rows = [
+        decode_generated_frame_code_row(
+            row,
+            audio_tokenizer=audio_tokenizer,
+            audio_token_range=audio_token_range,
         )
+        for row in audio_token_ids
+    ]
+    if not rows or len({tuple(row.shape) for row in rows}) != 1:
+        raise ValueError("full codec token rows must expand to the same frame and codebook shape.")
     return codec.decode(torch.stack(rows))
+
+
+def decode_generated_semantic_code_row(
+    audio_token_ids: Tensor,
+    *,
+    audio_tokenizer: AudioTokenizer,
+    audio_token_range: tuple[int, int],
+) -> Tensor:
+    """Restore one generated semantic payload to raw codec codes."""
+    local_ids = _local_code_row(audio_token_ids, audio_token_range)
+    return semantic_codes_from_audio_tokens(audio_tokenizer, local_ids)
+
+
+def decode_generated_frame_code_row(
+    audio_token_ids: Tensor,
+    *,
+    audio_tokenizer: AudioTokenizer,
+    audio_token_range: tuple[int, int],
+) -> Tensor:
+    """Restore one generated flattened payload to raw frame codes."""
+    local_ids = _local_code_row(audio_token_ids, audio_token_range)
+    return _decoded_frames(audio_tokenizer, local_ids)
 
 
 def decode_generated_bicodec_full(
@@ -137,40 +165,17 @@ def decode_generated_bicodec_row(
     audio_token_range: tuple[int, int],
     boa_token_id: int,
     eoa_token_id: int,
+    audio_schema_token_id: int,
 ) -> tuple[Tensor, AudioCodes]:
     """Resolve one self-describing BiCodec response against its prompt."""
-    if audio_token_ids.dim() != 1:
-        raise ValueError("BiCodec decode expects one generated token row.")
-    local_ids = _local_ids(audio_token_ids[None], audio_token_range)[0]
-    output = audio_tokenizer.decode_streams(local_ids)
-    if output.semantic_codes is None:
-        raise ValueError("BiCodec generated output is missing semantic codes.")
-    prompt_global = _prompt_bicodec_global(
+    resolved = decode_generated_bicodec_codes_row(
+        audio_token_ids,
         prompt_ids,
         audio_tokenizer=audio_tokenizer,
         audio_token_range=audio_token_range,
         boa_token_id=boa_token_id,
         eoa_token_id=eoa_token_id,
-    )
-    if (prompt_global is None) == (output.global_codes is None):
-        raise ValueError(
-            "BiCodec decode requires exactly one global stream owner across "
-            "prompt and generated output."
-        )
-    global_codes = (
-        output.global_codes if output.global_codes is not None else prompt_global
-    )
-    if global_codes is None:
-        raise AssertionError("BiCodec global stream ownership was not resolved.")
-    resolved = AudioCodes(
-        semantic_codes=output.semantic_codes.to(
-            device=audio_token_ids.device,
-            dtype=torch.long,
-        ),
-        global_codes=global_codes.to(
-            device=audio_token_ids.device,
-            dtype=torch.long,
-        ),
+        audio_schema_token_id=audio_schema_token_id,
     )
     resolved_semantic = cast(Tensor, resolved.semantic_codes)
     waveform = codec.detokenize(
@@ -184,6 +189,52 @@ def decode_generated_bicodec_row(
     return waveform[0], resolved
 
 
+def decode_generated_bicodec_codes_row(
+    audio_token_ids: Tensor,
+    prompt_ids: Tensor | None,
+    *,
+    audio_tokenizer: BiCodecAudioTokenizer,
+    audio_token_range: tuple[int, int],
+    boa_token_id: int,
+    eoa_token_id: int,
+    audio_schema_token_id: int,
+) -> AudioCodes:
+    """Resolve generated and prompt-owned BiCodec streams without a decoder."""
+    if audio_token_ids.dim() != 1:
+        raise ValueError("BiCodec decode expects one generated token row.")
+    local_ids = _local_ids(audio_token_ids[None], audio_token_range)[0]
+    output = audio_tokenizer.decode_streams(local_ids)
+    if output.semantic_codes is None:
+        raise ValueError("BiCodec generated output is missing semantic codes.")
+    prompt_global = _prompt_bicodec_global(
+        prompt_ids,
+        audio_tokenizer=audio_tokenizer,
+        audio_token_range=audio_token_range,
+        boa_token_id=boa_token_id,
+        eoa_token_id=eoa_token_id,
+        audio_schema_token_id=audio_schema_token_id,
+    )
+    if (prompt_global is None) == (output.global_codes is None):
+        raise ValueError(
+            "BiCodec decode requires exactly one global stream owner across "
+            "prompt and generated output."
+        )
+    global_codes = output.global_codes if output.global_codes is not None else prompt_global
+    if global_codes is None:
+        raise AssertionError("BiCodec global stream ownership was not resolved.")
+    resolved = AudioCodes(
+        semantic_codes=output.semantic_codes.to(
+            device=audio_token_ids.device,
+            dtype=torch.long,
+        ),
+        global_codes=global_codes.to(
+            device=audio_token_ids.device,
+            dtype=torch.long,
+        ),
+    )
+    return resolved
+
+
 def _prompt_bicodec_global(
     prompt_ids: Tensor | None,
     *,
@@ -191,6 +242,7 @@ def _prompt_bicodec_global(
     audio_token_range: tuple[int, int],
     boa_token_id: int,
     eoa_token_id: int,
+    audio_schema_token_id: int,
 ) -> Tensor | None:
     if prompt_ids is None:
         return None
@@ -203,7 +255,13 @@ def _prompt_bicodec_global(
         starts = prompt_ids[cursor:].eq(boa_token_id).nonzero(as_tuple=False)
         if starts.numel() == 0:
             break
-        span_start = cursor + int(starts[0].item()) + 1
+        schema_position = cursor + int(starts[0].item()) + 1
+        if (
+            schema_position >= prompt_ids.numel()
+            or int(prompt_ids[schema_position].item()) != audio_schema_token_id
+        ):
+            raise ValueError("BiCodec prompt audio span has the wrong schema selector.")
+        span_start = schema_position + 1
         stops = prompt_ids[span_start:].eq(eoa_token_id).nonzero(as_tuple=False)
         if stops.numel() == 0:
             break
@@ -274,20 +332,27 @@ def _local_ids(audio_token_ids: Tensor, audio_token_range: tuple[int, int]) -> T
     if not isinstance(audio_token_ids, Tensor):
         raise TypeError("audio token ids must be a Tensor.")
     if not is_signed_integer_dtype(audio_token_ids.dtype):
-        raise TypeError(
-            "audio token ids must contain integer ids using a signed dtype."
-        )
+        raise TypeError("audio token ids must contain integer ids using a signed dtype.")
     if audio_token_ids.dim() != 2:
         raise ValueError("audio token ids must have shape [batch, tokens].")
     if audio_token_ids.size(0) < 1 or audio_token_ids.size(1) < 1:
         raise ValueError("audio token ids must contain at least one token row.")
 
     global_start, global_end = audio_token_range
-    if bool((audio_token_ids < global_start).any()) or bool(
-        (audio_token_ids >= global_end).any()
-    ):
+    if bool((audio_token_ids < global_start).any()) or bool((audio_token_ids >= global_end).any()):
         raise ValueError("audio token ids must be codec-decodable global audio ids.")
     return audio_token_ids.to(dtype=torch.long) - global_start
+
+
+def _local_code_row(
+    audio_token_ids: Tensor,
+    audio_token_range: tuple[int, int],
+) -> Tensor:
+    if not isinstance(audio_token_ids, Tensor):
+        raise TypeError("audio token ids must be a Tensor.")
+    if audio_token_ids.dim() != 1:
+        raise ValueError("generated audio code row must have shape [tokens].")
+    return _local_ids(audio_token_ids.unsqueeze(0), audio_token_range)[0]
 
 
 def _decoded_frames(tokenizer: AudioTokenizer, token_ids: Tensor) -> Tensor:
@@ -354,8 +419,7 @@ def _acoustic_codes(value: object) -> AudioCodes:
     acoustic = codes.acoustic_codes
     if semantic is None or acoustic is None or codes.global_codes is not None:
         raise ValueError(
-            "semantic-acoustic reference codes require semantic_codes and "
-            "acoustic_codes only."
+            "semantic-acoustic reference codes require semantic_codes and acoustic_codes only."
         )
     _reference_code_tensor(semantic)
     _reference_code_tensor(acoustic)

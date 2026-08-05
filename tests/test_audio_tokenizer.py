@@ -7,6 +7,7 @@ import torch
 
 from anytrain.tokenizer import CodecBPE
 
+from speech_to_speech.runtime.audio_schema import AudioTokenSpec
 from speech_to_speech.runtime.audio_tokenizer import (
     FlattenedAudioTokenizer,
     NativeAudioTokenizer,
@@ -66,6 +67,33 @@ class NativeAudioTokenizerTest(unittest.TestCase):
             },
         )
         json.dumps(state)
+
+    def test_schema_grammar_has_no_private_marker_and_rejects_early_eoa(self):
+        spec = AudioTokenSpec.create(
+            codec_name="longcat",
+            sequence_layout="semantic",
+            tokenizer=self.tokenizer,
+        )
+
+        self.assertEqual(spec.grammar.private_marker_ids, ())
+        self.assertFalse(spec.allows_eoa([]))
+        with self.assertRaisesRegex(ValueError, "EOA.*before"):
+            spec.validate_next([], 99, eoa_token_id=99)
+
+        spec.validate_next([], 1, eoa_token_id=99)
+        self.assertTrue(spec.allows_eoa([1]))
+        spec.validate_next([1], 99, eoa_token_id=99)
+        with self.assertRaisesRegex(ValueError, r"\[0, 4\)"):
+            spec.validate_prefix([4])
+
+        first = spec.next_candidates([])
+        self.assertEqual(first.marker_ids, ())
+        self.assertEqual(first.token_ranges, ((0, 4),))
+        self.assertFalse(first.allows_eoa)
+        continued = spec.next_candidates([1])
+        self.assertEqual(continued.token_ranges, ((0, 4),))
+        self.assertTrue(continued.allows_eoa)
+        self.assertEqual(spec.generation_variant(()), "payload")
 
     def test_rejects_non_integer_ids(self):
         for value in (True, 1.5, 1 + 0j):
@@ -168,6 +196,62 @@ class FlattenedAudioTokenizerTest(unittest.TestCase):
             state["codebook_sizes"],
             self.tokenizer.contract_state()["codebook_sizes"],
         )
+
+    def test_schema_grammar_declares_marker_range_order_and_eoa_gate(self):
+        spec = AudioTokenSpec.create(
+            codec_name="longcat",
+            sequence_layout="flattened",
+            tokenizer=self.tokenizer,
+        )
+
+        self.assertEqual(spec.grammar.private_marker_ids, (14, 15))
+        blocks = spec.grammar.variants[0].blocks
+        self.assertEqual(
+            [
+                (block.marker_id, block.token_ranges)
+                for block in blocks
+            ],
+            [(14, ((0, 4),)), (15, ((4, 14),))],
+        )
+        incomplete = [14, 1, 2, 15, 9]
+        spec.validate_prefix(incomplete)
+        self.assertFalse(spec.allows_eoa(incomplete))
+        with self.assertRaisesRegex(ValueError, "EOA.*before"):
+            spec.validate_next(incomplete, 99, eoa_token_id=99)
+
+        complete = [*incomplete, 10]
+        self.assertTrue(spec.allows_eoa(complete))
+        spec.validate_next(complete, 99, eoa_token_id=99)
+        for invalid in ([15], [14, 1, 15, 9, 10, 11]):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                spec.validate_prefix(invalid)
+
+        first = spec.next_candidates([])
+        self.assertEqual(first.marker_ids, (14,))
+        after_first_frame = spec.next_candidates([14, 1])
+        self.assertEqual(after_first_frame.marker_ids, (15,))
+        self.assertEqual(after_first_frame.token_ranges, ((0, 4),))
+        complete_candidates = spec.next_candidates([14, 1, 15, 9])
+        self.assertEqual(complete_candidates.token_ranges, ())
+        self.assertTrue(complete_candidates.allows_eoa)
+
+    def test_single_codebook_flattened_grammar_has_one_generation_variant(self):
+        tokenizer = FlattenedAudioTokenizer(
+            codebook_sizes=(4,),
+            codec_name="single",
+        )
+        spec = AudioTokenSpec.create(
+            codec_name="single",
+            sequence_layout="flattened",
+            tokenizer=tokenizer,
+        )
+        marker = tokenizer.codebook_token_ids[0]
+
+        self.assertEqual(spec.grammar.generation_variants, ("full",))
+        self.assertEqual(spec.next_candidates([]).marker_ids, (marker,))
+        candidates = spec.next_candidates([marker, 1])
+        self.assertEqual(candidates.token_ranges, ((0, 4),))
+        self.assertTrue(candidates.allows_eoa)
 
     def test_round_trip_preserves_full_codec_frames(self):
         frames = torch.tensor([[1, 5], [2, 6]], dtype=torch.int32)

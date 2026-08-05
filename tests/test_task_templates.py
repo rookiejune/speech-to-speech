@@ -8,14 +8,19 @@ from omegaconf import OmegaConf
 
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.dataset.text import TextConfig
-from speech_to_speech.task import PredictionModality, SourceLayout, Task
+from speech_to_speech.task import (
+    FULL_COT,
+    PredictionModality,
+    SourceLayout,
+    Task,
+    resolve_response,
+)
 from speech_to_speech.task.templates import (
-    CANONICAL_TEMPLATES,
-    CANONICAL_TEMPLATES_PER_TASK,
     TEMPLATES,
     TEMPLATES_PER_TASK,
     evaluation_template_index,
     format_instruction,
+    format_response_instruction,
     select_template,
 )
 
@@ -41,54 +46,34 @@ _FORBIDDEN = {
     Task.PARALLEL_AR: {"source"},
     Task.TEXT_AR: {"language", "source"},
 }
-_ORIGINALS = {
-    Task.AUDIO_AR: "Continue the {language} speech.",
-    Task.ASR: "Transcribe the {language} speech: {source}",
-    Task.MT: "Translate the following text into {language}: {source}",
-    Task.S2ST: "Translate the following speech into {language} speech: {source}",
-    Task.S2TT: "Translate the following speech into {language} text: {source}",
-    Task.TEXT_AR: "Continue the following text.",
-    Task.T2ST: "Translate the following text into {language} speech: {source}",
-    Task.T2TT: "Translate the following text into {language}: {source}",
-    Task.TTS: "Synthesize speech from the following text: {source}",
-}
 
 
 class TaskTemplateTest(unittest.TestCase):
     def test_templates_cover_every_task_exactly_once(self):
         self.assertEqual(set(TEMPLATES), set(Task))
-        self.assertEqual(set(CANONICAL_TEMPLATES), set(Task))
         for task in Task:
             self.assertEqual(len(task.templates), TEMPLATES_PER_TASK)
             self.assertEqual(len(set(task.templates)), TEMPLATES_PER_TASK)
-            self.assertEqual(
-                len(CANONICAL_TEMPLATES[task]),
-                CANONICAL_TEMPLATES_PER_TASK,
-            )
-            if task in _ORIGINALS:
-                self.assertNotIn(_ORIGINALS[task], task.templates)
-                self.assertEqual(CANONICAL_TEMPLATES[task], (_ORIGINALS[task],))
 
     def test_template_placeholders_match_task_contract(self):
-        for mapping in (TEMPLATES, CANONICAL_TEMPLATES):
-            for task in Task:
-                required = _REQUIRED[task]
-                forbidden = _FORBIDDEN.get(task, set())
-                for template in mapping[task]:
-                    keys = set(_PLACEHOLDER_RE.findall(template))
-                    self.assertTrue(
-                        required.issubset(keys),
-                        msg=(task, template),
-                    )
-                    self.assertFalse(
-                        keys & forbidden,
-                        msg=(task, template),
-                    )
-                    self.assertFalse(
-                        keys - {"language", "source"},
-                        msg=(task, template),
-                    )
-                    template.format(language="en", source="<source>")
+        for task in Task:
+            required = _REQUIRED[task]
+            forbidden = _FORBIDDEN.get(task, set())
+            for template in TEMPLATES[task]:
+                keys = set(_PLACEHOLDER_RE.findall(template))
+                self.assertTrue(
+                    required.issubset(keys),
+                    msg=(task, template),
+                )
+                self.assertFalse(
+                    keys & forbidden,
+                    msg=(task, template),
+                )
+                self.assertFalse(
+                    keys - {"language", "source"},
+                    msg=(task, template),
+                )
+                template.format(language="en", source="<source>")
 
     def test_sample_template_defaults_to_index_zero(self):
         task = Task.TTS
@@ -119,6 +104,82 @@ class TaskTemplateTest(unittest.TestCase):
         self.assertIn("hello", text)
         with self.assertRaisesRegex(ValueError, "fixed template index"):
             format_instruction(Task.TTS, source="hello", index=None)
+
+    def test_full_cot_instruction_declares_the_exact_response_order(self):
+        base = format_instruction(
+            Task.S2ST,
+            source="<audio>",
+            language="English",
+            index=0,
+        )
+        direct = format_response_instruction(
+            base,
+            resolve_response(Task.S2ST),
+            language="English",
+        )
+        full = format_response_instruction(
+            base,
+            resolve_response(Task.S2ST, trace=FULL_COT),
+            language="English",
+        )
+
+        self.assertEqual(direct, base)
+        self.assertLess(
+            full.index("1. transcribe the source speech as text"),
+            full.index("2. produce the English translation as text"),
+        )
+        self.assertLess(
+            full.index("2. produce the English translation as text"),
+            full.index("3. generate the corresponding English speech"),
+        )
+        self.assertIn("<asr>...</asr>", full)
+        self.assertIn("<mt><lang_en>...</mt>", full)
+
+    def test_direct_text_tasks_describe_their_control_semantics(self):
+        cases = (
+            (
+                Task.ASR,
+                "English",
+                "transcribe the speech as text as <asr>...</asr>",
+            ),
+            (
+                Task.MT,
+                "English",
+                "produce the English translation as text as <mt><lang_en>...</mt>",
+            ),
+            (
+                Task.S2TT,
+                "Chinese",
+                "produce the Chinese translation as text as <mt><lang_zh>...</mt>",
+            ),
+            (
+                Task.T2TT,
+                "English",
+                "produce the English translation as text as <mt><lang_en>...</mt>",
+            ),
+        )
+        for task, language, expected in cases:
+            with self.subTest(task=task, language=language):
+                base = format_instruction(
+                    task,
+                    source="<source>",
+                    language=language,
+                    index=0,
+                )
+                formatted = format_response_instruction(
+                    base,
+                    resolve_response(task),
+                    language=language,
+                )
+
+                self.assertTrue(formatted.endswith(expected))
+
+        asr = format_response_instruction(
+            "Transcribe this speech.",
+            resolve_response(Task.ASR),
+            language="English",
+        )
+        self.assertNotIn("translation as text", asr)
 
     def test_speech_config_accepts_per_task_templates(self):
         from scripts._config.normalization import prepare
@@ -171,8 +232,11 @@ class TaskTemplateTest(unittest.TestCase):
         )
         self.assertIs(Task.MASKED_AR.prediction_modality, PredictionModality.PARALLEL)
         self.assertEqual(
-            Task.MASKED_AR.allowed_predictions,
-            frozenset({PredictionModality.PARALLEL, PredictionModality.INTERLEAVED}),
+            {
+                response.prediction
+                for response in Task.MASKED_AR.program.responses
+            },
+            {PredictionModality.PARALLEL, PredictionModality.INTERLEAVED},
         )
         self.assertIs(Task.MASKED_AR.source_layout, SourceLayout.TEXT_AUDIO)
         self.assertIsNone(Task.MASKED_AR.target_modality)

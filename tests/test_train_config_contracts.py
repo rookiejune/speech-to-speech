@@ -35,6 +35,12 @@ class TrainConfigContractTest(ConfigTestCase):
         self.assertTrue(default.datamodule.dataloader.costs.enabled)
         self.assertEqual(default.datamodule.dataloader.costs.max_batch_frames, 4800)
         self.assertEqual(default.datamodule.dataloader.costs.planning_window, 256)
+        if default.datamodule.tasks is None:
+            self.fail("default train config must declare per-task template sampling")
+        self.assertTrue(default.datamodule.tasks)
+        self.assertTrue(
+            all(config.template is None for config in default.datamodule.tasks.values())
+        )
         self.assertFalse(default.trainer.use_distributed_sampler)
         self.assertEqual(
             default.trainer.strategy,
@@ -268,9 +274,9 @@ class TrainConfigContractTest(ConfigTestCase):
 
         self.assertEqual(config.train.max_steps, 1_000_000)
         self.assertEqual(config.output_subdir, "stable-codec/stage_1/token")
-        self.assertEqual(config.runtime.codec, "stable_codec")
+        self.assertEqual(config.runtime.audio_output.tokenizer, "stable_codec")
         self.assertIs(config.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
-        self.assertIsNone(config.runtime.audio_tokenizer)
+        self.assertIsNone(config.runtime.audio_output.bpe)
         self.assertEqual(config.pl_module.ctc.source.weight, 1.0)
         self.assertEqual(config.pl_module.ctc.target.weight, 0.0)
         self.assertIs(

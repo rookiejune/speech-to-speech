@@ -6,6 +6,7 @@ import torch
 from torch import Tensor
 
 from ...audio import AudioCodes, AudioStream
+from ..audio_schema import AudioGrammarVariant, AudioTokenBlock, AudioTokenGrammar
 from ._common import (
     codebook_size,
     token_tensor,
@@ -58,12 +59,44 @@ class BiCodecAudioTokenizer:
         marker_base = sum((self._semantic_vocab_size, *self._global_codebook_sizes))
         self._semantic_token_id = marker_base
         self._global_token_id = marker_base + 1
-        self._end_token_id = marker_base + 2
-        self._vocab_size = marker_base + 3
+        self._vocab_size = marker_base + 2
+        global_block = AudioTokenBlock(
+            name="global",
+            marker_id=self._global_token_id,
+            token_ranges=self.global_token_ranges,
+            min_repeats=self._global_unit_length,
+            max_repeats=self._global_unit_length,
+        )
+        semantic_block = AudioTokenBlock(
+            name="semantic",
+            marker_id=self._semantic_token_id,
+            token_ranges=(self.semantic_token_range,),
+        )
+        self._grammar = AudioTokenGrammar(
+            name="bicodec-streams-v1",
+            variants=(
+                AudioGrammarVariant(
+                    name="global_semantic",
+                    blocks=(global_block, semantic_block),
+                ),
+                AudioGrammarVariant(name="global", blocks=(global_block,)),
+                AudioGrammarVariant(name="semantic", blocks=(semantic_block,)),
+            ),
+            default_variant="global_semantic",
+            generation_variants=("global_semantic", "semantic"),
+            prompt_continuations=(
+                ("global", "semantic"),
+                ("global_semantic", "semantic"),
+            ),
+        )
 
     @property
     def vocab_size(self) -> int:
         return self._vocab_size
+
+    @property
+    def grammar(self) -> AudioTokenGrammar:
+        return self._grammar
 
     @property
     def semantic_vocab_size(self) -> int:
@@ -98,10 +131,6 @@ class BiCodecAudioTokenizer:
         return self._global_token_id
 
     @property
-    def end_token_id(self) -> int:
-        return self._end_token_id
-
-    @property
     def semantic_token_range(self) -> tuple[int, int]:
         return 0, self._semantic_vocab_size
 
@@ -122,7 +151,7 @@ class BiCodecAudioTokenizer:
     def contract_state(self) -> dict[str, object]:
         """Return the effective structured token-ID grammar used by checkpoints."""
         return {
-            "grammar": "bicodec-v2",
+            "grammar": "bicodec-v3",
             "semantic_codebook_size": self.semantic_codebook_size,
             "semantic_vocab_size": self.semantic_vocab_size,
             "semantic_tokenizer": dict(self.semantic_tokenizer.contract_state()),
@@ -135,7 +164,6 @@ class BiCodecAudioTokenizer:
             "global_unit_length": self.global_unit_length,
             "semantic_token_id": self.semantic_token_id,
             "global_token_id": self.global_token_id,
-            "end_token_id": self.end_token_id,
             "vocab_size": self.vocab_size,
         }
 
@@ -205,7 +233,6 @@ class BiCodecAudioTokenizer:
                     semantic.to(dtype=torch.long),
                 )
             )
-        values.append(anchor.new_tensor([self._end_token_id]))
         return torch.cat(values).to(dtype=torch.long)
 
     def decode(
@@ -234,8 +261,6 @@ class BiCodecAudioTokenizer:
         tensor = token_tensor(token_ids)
         if tensor.numel() < 2:
             raise ValueError("BiCodec stream sequence is too short.")
-        if int(tensor[-1]) != self._end_token_id:
-            raise ValueError("BiCodec stream sequence must end with a sequence marker.")
 
         cursor = 0
         semantic: Tensor | None = None
@@ -267,9 +292,9 @@ class BiCodecAudioTokenizer:
             global_codes = torch.stack(values, dim=0)
             cursor += payload_length
 
-        if cursor < tensor.numel() - 1 and int(tensor[cursor]) == self._semantic_token_id:
+        if cursor < tensor.numel() and int(tensor[cursor]) == self._semantic_token_id:
             cursor += 1
-            semantic = tensor[cursor:-1]
+            semantic = tensor[cursor:]
             if semantic.numel() < 1 or bool((semantic < 0).any()) or bool(
                 (semantic >= self._semantic_vocab_size).any()
             ):
@@ -278,13 +303,13 @@ class BiCodecAudioTokenizer:
             if not isinstance(decoded, Tensor):
                 raise AssertionError("Tensor semantic tokens must decode to a Tensor.")
             semantic = _semantic_tensor(decoded, self._semantic_codebook_size)
-            cursor = tensor.numel() - 1
+            cursor = tensor.numel()
 
         if global_codes is None and semantic is None:
             raise ValueError(
                 "BiCodec stream sequence must begin with a global or semantic marker."
             )
-        if cursor != tensor.numel() - 1:
+        if cursor != tensor.numel():
             raise ValueError("BiCodec stream sequence contains unexpected tokens.")
         decoded_streams = AudioCodes(
             semantic_codes=semantic,

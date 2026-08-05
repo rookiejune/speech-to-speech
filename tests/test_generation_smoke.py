@@ -8,7 +8,7 @@ from unittest.mock import call, patch
 
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
-from omegaconf.errors import ValidationError
+from omegaconf.errors import InterpolationResolutionError, ValidationError
 import torch
 
 from scripts import _generation_benchmark as benchmark
@@ -25,7 +25,7 @@ from speech_to_speech.task import Task
 
 class GenerationSmokeTest(unittest.TestCase):
     def test_hydra_config_accepts_smoke_overrides(self) -> None:
-        with initialize_config_dir(
+        with patch.dict("os.environ", {}, clear=True), initialize_config_dir(
             config_dir=str(Path(__file__).resolve().parents[1] / "configs"),
             version_base=None,
         ):
@@ -33,7 +33,7 @@ class GenerationSmokeTest(unittest.TestCase):
                 config_name="generation_smoke",
                 overrides=[
                     "repo_output_root=/tmp/generation-smoke-test",
-                    "runtime.audio_tokenizer=/tmp/audio-tokenizer",
+                    "runtime.audio_output.bpe=/tmp/audio-tokenizer",
                     "runtime.device=cpu",
                     "batch_sizes=[1]",
                     "datamodule.dataset.filter=null",
@@ -44,14 +44,14 @@ class GenerationSmokeTest(unittest.TestCase):
                 config_name="generation_smoke",
                 overrides=[
                     "repo_output_root=/tmp/generation-smoke-test",
-                    "runtime.audio_tokenizer=/tmp/audio-tokenizer",
+                    "runtime.audio_output.bpe=/tmp/audio-tokenizer",
                     "runtime.device=cpu",
                     "experiment=generation/online_encode_smoke",
                 ],
             )
 
-        parsed = generation_smoke(config)
-        experiment = generation_smoke(experiment_config)
+            parsed = generation_smoke(config)
+            experiment = generation_smoke(experiment_config)
 
         self.assertEqual(parsed.sample_index, 0)
         self.assertEqual(parsed.batch_sizes, [1])
@@ -61,6 +61,25 @@ class GenerationSmokeTest(unittest.TestCase):
         self.assertEqual(experiment.batch_sizes, [1])
         self.assertIsNone(experiment.datamodule.dataset.filter)
         self.assertTrue(experiment.datamodule.encode_missing_codes)
+
+    def test_longcat_default_requires_audio_tokenizer_environment(self) -> None:
+        with patch.dict("os.environ", {}, clear=True), initialize_config_dir(
+            config_dir=str(Path(__file__).resolve().parents[1] / "configs"),
+            version_base=None,
+        ):
+            config = compose(
+                config_name="generation_smoke",
+                overrides=[
+                    "repo_output_root=/tmp/generation-smoke-test",
+                    "runtime.device=cpu",
+                ],
+            )
+
+            with self.assertRaisesRegex(
+                InterpolationResolutionError,
+                "SPEECH_TO_SPEECH_AUDIO_TOKENIZER",
+            ):
+                generation_smoke(config)
 
     def test_config_validates_entry_budgets_before_execution(self) -> None:
         parsed = generation_smoke(_config())

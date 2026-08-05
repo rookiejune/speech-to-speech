@@ -342,7 +342,6 @@ def _has_ctc_target(batch: TrainInput) -> bool:
             uses_source_ctc(sample.task)
             or uses_target_ctc(
                 sample.task,
-                sample.prediction,
                 trace=sample.trace,
             )
             for sample in batch.samples

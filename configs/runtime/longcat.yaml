@@ -1,13 +1,11 @@
-codec: longcat
 backbone: Qwen/Qwen3-0.6B
 backbone_initialization: pretrained
-audio_tokenizer: ${oc.env:SPEECH_TO_SPEECH_AUDIO_TOKENIZER}
-input_audio:
-  codec:
-  tokenizer:
-  vocab_size:
-  frame_rate:
-acoustic_generator_artifact:
+audio_input: null
+audio_output:
+  tokenizer: longcat
+  detokenizer: longcat
+  bpe: ${oc.env:SPEECH_TO_SPEECH_AUDIO_TOKENIZER}
+  acoustic_generator_artifact: null
 device: cuda
 dtype: bfloat16
 attn_implementation: flash_attention_2

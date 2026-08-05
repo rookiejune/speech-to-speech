@@ -42,8 +42,7 @@ from speech_to_speech.model.embedding.audio import SemanticAudioEmbedding
 from speech_to_speech.model.embedding.fsq import FsqEmbedding, FsqFeature
 from speech_to_speech.training.performance import TrainingFlops
 from speech_to_speech.pl_module import Config as ModuleConfig, SpeechToSpeechModule
-from speech_to_speech.task import PredictionModality
-from speech_to_speech.task import Task
+from speech_to_speech.task import TARGET_COT, Task
 
 
 class TrainingFlopsTest(unittest.TestCase):
@@ -104,7 +103,7 @@ class TrainingFlopsTest(unittest.TestCase):
 
         self.assertEqual(_flops(module, batch), expected)
 
-    def test_token_head_uses_batch_prediction_not_task_default(self):
+    def test_token_head_uses_response_trace(self):
         model = _token_model()
         module = _module(model, TokenObjective(_layout()))
         mixed_labels = torch.tensor([[-100, 2, 8]])
@@ -112,7 +111,6 @@ class TrainingFlopsTest(unittest.TestCase):
             input_ids=torch.tensor([[1, 2, 8]]),
             labels=mixed_labels,
             tasks=[Task.T2ST],
-            predictions=[PredictionModality.AUDIO],
         )
         with self.assertRaisesRegex(ValueError, "outside supervised blocks"):
             _flops(module, audio_default)
@@ -121,13 +119,13 @@ class TrainingFlopsTest(unittest.TestCase):
             input_ids=torch.tensor([[1, 2, 8]]),
             labels=mixed_labels,
             tasks=[Task.T2ST],
-            predictions=[PredictionModality.PARALLEL],
+            trace=TARGET_COT,
         )
         parallel_audio_only = _batch(
             input_ids=torch.tensor([[1, 8, 0]]),
             labels=torch.tensor([[-100, 8, -100]]),
             tasks=[Task.T2ST],
-            predictions=[PredictionModality.PARALLEL],
+            trace=TARGET_COT,
         )
         self.assertGreater(
             _flops(module, parallel_mixed),
@@ -537,19 +535,15 @@ def _batch(
     tasks: list[Task],
     acoustic_target: AcousticTarget | None = None,
     audio_input_positions: Tensor | None = None,
-    predictions: list[PredictionModality] | None = None,
+    trace: str | None = None,
 ) -> ModelBatch:
     return ModelBatch(
         input_ids=input_ids,
         token_labels=labels,
         acoustic_target=acoustic_target,
         tasks=tasks,
-        predictions=(
-            [task.prediction_modality for task in tasks]
-            if predictions is None
-            else predictions
-        ),
         pad_token_id=0,
+        traces=None if trace is None else [trace] * len(tasks),
         audio_input_positions=audio_input_positions,
     )
 

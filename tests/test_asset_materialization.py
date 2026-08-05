@@ -136,6 +136,18 @@ class AssetMaterializationTest(unittest.TestCase):
             "s2s-asset-3b8fa7f4109fa6d9533c585cd5eb8971"
             "5ddf2015181fd986aa7de66786473e12",
         )
+        self.assertNotEqual(
+            request.id,
+            replace(
+                request,
+                codec="unicodec",
+                codec_view=AudioView.UNICODEC,
+            ).id,
+        )
+        self.assertNotEqual(
+            request.id,
+            replace(request, provider_id="provider-v2").id,
+        )
 
     def test_unsupported_codec_view_is_rejected(self) -> None:
         with self.assertRaisesRegex(
@@ -178,6 +190,51 @@ class AssetMaterializationTest(unittest.TestCase):
             filter_policy="speech_translation_v1",
             missing_ok=True,
         )
+
+    def test_same_codec_view_with_independent_bpe_reuses_workspace_asset(self) -> None:
+        existing = _TaggedDataset("shared-longcat")
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "workspace"
+            with (
+                _workspace(root),
+                patch.object(asset, "_load_codec_dataset", return_value=existing) as load,
+                patch.object(asset, "WorkspaceWaveformFactory") as waveform_factory,
+            ):
+                resolution = resolve_workspace_asset(
+                    DatasetConfig(root=str(root), filter="speech_translation_v1"),
+                    _same_codec_decoupled_runtime(input_bpe="input-bpe-v1"),
+                    _materialization(Path(directory) / "output"),
+                )
+
+        self.assertIs(resolution.dataset, existing)
+        self.assertIsNone(resolution.request_id)
+        self.assertIsNone(resolution.job)
+        load.assert_called_once_with(
+            DatasetName.WMT19_TTS,
+            root.resolve(),
+            split="train",
+            view=AudioView.LONGCAT,
+            filter_policy="speech_translation_v1",
+            missing_ok=True,
+        )
+        waveform_factory.assert_not_called()
+
+    def test_distinct_codecs_cannot_share_one_audio_view(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "distinct input/output codecs must use distinct audio views",
+        ):
+            resolve_workspace_asset(
+                DatasetConfig(),
+                _decoupled_runtime(
+                    input_codec_name="other-bicodec",
+                    input_audio_view=AudioView.BICODEC,
+                ),
+                _materialization(
+                    Path("/tmp/output"),
+                    codec_view=AudioView.BICODEC.value,
+                ),
+            )
 
     def test_decoupled_workspace_hits_return_dual_dataset_without_job(self) -> None:
         input_dataset = _TaggedDataset("workspace-glm4")
@@ -394,6 +451,48 @@ class AssetMaterializationTest(unittest.TestCase):
             split="train",
             filter_policy="speech_translation_v1",
         )
+
+    def test_bpe_change_keeps_one_background_asset_job_and_request_id(self) -> None:
+        fallback = _TaggedDataset("waveform")
+        source = Mock(return_value=fallback)
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "workspace"
+            materialization = _materialization(Path(directory) / "output")
+            with (
+                _workspace(root),
+                patch.object(asset, "_load_codec_dataset", return_value=None) as load,
+                patch.object(
+                    asset,
+                    "WorkspaceWaveformFactory",
+                    return_value=source,
+                ),
+                patch.object(
+                    asset,
+                    "_workspace_input_id",
+                    return_value="workspace-input-v1",
+                ),
+                patch.object(asset, "_load_materialized_dataset", return_value=None),
+            ):
+                first = resolve_workspace_asset(
+                    DatasetConfig(root=str(root), filter="speech_translation_v1"),
+                    _same_codec_decoupled_runtime(input_bpe="input-bpe-v1"),
+                    materialization,
+                )
+                second = resolve_workspace_asset(
+                    DatasetConfig(root=str(root), filter="speech_translation_v1"),
+                    _same_codec_decoupled_runtime(input_bpe="input-bpe-v2"),
+                    materialization,
+                )
+
+        first_job = cast(BackgroundAssetJob, first.job)
+        second_job = cast(BackgroundAssetJob, second.job)
+        self.assertIsInstance(first_job, BackgroundAssetJob)
+        self.assertIsInstance(second_job, BackgroundAssetJob)
+        self.assertNotIsInstance(first_job, BackgroundDualAssetJob)
+        self.assertNotIsInstance(second_job, BackgroundDualAssetJob)
+        self.assertEqual(first.request_id, second.request_id)
+        self.assertEqual(first_job.request.id, second_job.request.id)
+        self.assertEqual(load.call_count, 2)
 
     def test_partial_dual_hit_keeps_input_codes_in_waveform_fallback(self) -> None:
         input_dataset = _TaggedDataset("workspace-glm4")
@@ -1062,8 +1161,26 @@ def _runtime(
     return cast(
         DatasetRuntime,
         SimpleNamespace(
+            input_audio_decoupled=False,
+            input_codec_name=codec_name,
+            input_audio_view=audio_view,
             codec_name=codec_name,
             audio_view=audio_view,
+        ),
+    )
+
+
+def _same_codec_decoupled_runtime(*, input_bpe: str) -> DatasetRuntime:
+    return cast(
+        DatasetRuntime,
+        SimpleNamespace(
+            input_audio_decoupled=True,
+            input_codec_name="longcat",
+            input_audio_view=AudioView.LONGCAT,
+            input_audio_tokenizer=SimpleNamespace(identity=input_bpe),
+            codec_name="longcat",
+            audio_view=AudioView.LONGCAT,
+            audio_tokenizer=SimpleNamespace(identity="output-bpe"),
         ),
     )
 

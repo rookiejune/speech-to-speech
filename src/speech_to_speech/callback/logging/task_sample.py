@@ -339,9 +339,7 @@ def log_result_row(
     metrics.update(
         {
             "generation/response_tokens": float(result_metadata["response_tokens"]),
-            "generation/reached_max_new_tokens": float(
-                result_metadata["reached_max_new_tokens"]
-            ),
+            "generation/reached_max_new_tokens": float(result_metadata["reached_max_new_tokens"]),
         }
     )
     if context.audio_writer is not None:
@@ -381,13 +379,13 @@ def log_generation_payload(
         context.datamodule.runtime,
         context.result["response_ids"],
         response,
+        target_language=context.request.get("target_language"),
     )
     generated_text = next(
         (
             value
             for field, value in reversed(list(zip(response.fields, text_steps)))
-            if field.role is FieldRole.TARGET
-            and field.modality is types.Modality.TEXT
+            if field.role is FieldRole.TARGET and field.modality is types.Modality.TEXT
         ),
         None,
     )
@@ -408,9 +406,19 @@ def log_generation_payload(
             decode_error,
             generated_text,
         )
-    metrics["generation/stopped_without_eoa"] = float(
-        result_metadata["stopped_without_eoa"]
-    )
+    waveform = audio["waveform"]
+    sample_rate = audio["sample_rate"]
+    if waveform is None:
+        if sample_rate is not None:
+            raise ValueError("codes-only audio output must not declare a sample rate.")
+        metrics["generation/stopped_without_eoa"] = float(result_metadata["stopped_without_eoa"])
+        metrics["generation/audio_available"] = 0.0
+        metrics["generation/audio_codes_available"] = 1.0
+        metrics["generation/audio_decode_failed"] = 0.0
+        return generated_text
+    if sample_rate is None:
+        raise ValueError("waveform audio output requires a sample rate.")
+    metrics["generation/stopped_without_eoa"] = float(result_metadata["stopped_without_eoa"])
     metrics["generation/audio_available"] = 1.0
     metrics["generation/audio_decode_failed"] = 0.0
     target_audio = log_target_reference_audio(
@@ -419,18 +427,16 @@ def log_generation_payload(
         context.module,
         context.row_batch,
         context.sample,
-        context.request["task"],
+        context.request,
         context.tag,
         context.step,
     )
     metrics.update(
         audio_metrics(
-            audio["waveform"],
-            audio["sample_rate"],
+            waveform,
+            sample_rate,
             target_duration=(
-                None
-                if target_audio is None
-                else target_audio[0].size(-1) / target_audio[1]
+                None if target_audio is None else target_audio[0].size(-1) / target_audio[1]
             ),
         )
     )
@@ -446,9 +452,7 @@ def log_text_or_partial_audio(
     generated_text: str | None,
 ) -> str | None:
     if prediction.supervises_audio:
-        metrics["generation/stopped_without_eoa"] = float(
-            result_metadata["stopped_without_eoa"]
-        )
+        metrics["generation/stopped_without_eoa"] = float(result_metadata["stopped_without_eoa"])
         metrics["generation/audio_available"] = 0.0
         if decode_error is not None:
             metrics["generation/audio_decode_failed"] = 1.0
@@ -459,16 +463,14 @@ def log_text_or_partial_audio(
                 context.module,
                 context.row_batch,
                 context.sample,
-                context.request["task"],
+                context.request,
                 context.tag,
                 context.step,
             )
         return generated_text
     if not prediction.supervises_text:
         return None
-    metrics["generation/stopped_without_eos"] = float(
-        result_metadata["stopped_without_eos"]
-    )
+    metrics["generation/stopped_without_eos"] = float(result_metadata["stopped_without_eos"])
     return generated_text
 
 
@@ -508,18 +510,22 @@ def write_row_outputs(
             context.step,
         )
     audio = context.result["audio"]
-    if audio is not None and context.audio_writer is not None:
+    waveform = None if audio is None else audio["waveform"]
+    sample_rate = None if audio is None else audio["sample_rate"]
+    if waveform is not None and sample_rate is None:
+        raise ValueError("waveform audio output requires a sample rate.")
+    if waveform is not None and context.audio_writer is not None:
         context.audio_writer.add_audio(
             f"{context.tag}/generated",
-            audio["waveform"].detach().cpu(),
+            waveform.detach().cpu(),
             context.step,
-            sample_rate=audio["sample_rate"],
+            sample_rate=sample_rate,
         )
     if context.text_writer is not None:
         write_text_outputs(
             context,
             generated_text,
-            include_ids=audio is None,
+            include_ids=audio is None or waveform is None,
         )
 
 

@@ -13,7 +13,7 @@ from anydataset.types import Lang, Modality, Role, Sample, TextItem, TextMeta, T
 from torch.utils.data import DataLoader, Dataset, IterableDataset, Subset
 
 from ..._compat import StrEnum, auto
-from ...task import PredictionModality, Task
+from ...task import Task
 from ..batch import ModelBatch
 from ..collate import TextCollator
 from ..config import DataLoaderConfig
@@ -429,7 +429,6 @@ class TextLoader:
         runtime: TextRuntime,
         task_weights: Mapping[Task, float],
         *,
-        prediction: PredictionModality | None = None,
         trace: str | None = None,
         ar_framing: ARFraming = ARFraming.INSTRUCTION,
         max_samples: int | None = None,
@@ -441,7 +440,6 @@ class TextLoader:
         self.collator = TextCollator(
             runtime,
             task_weights,
-            prediction=prediction,
             trace=trace,
             ar_framing=ar_framing,
             tasks=tasks,
@@ -467,7 +465,6 @@ class TextLoader:
         return TextCollator(
             self.runtime,
             {task: 1.0},
-            prediction=self.collator.prediction,
             trace=self.collator.trace,
             ar_framing=self.collator.ar_framing,
             tasks=self.task_configs,

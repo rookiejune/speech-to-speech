@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import json
 import logging
+import math
 import time
 from bisect import bisect_right
 from collections import deque
@@ -111,6 +112,25 @@ class BatchSpan:
 
 
 @dataclass(frozen=True)
+class StreamingTelemetry:
+    """Timing and cursor counters for one streaming loader."""
+
+    batch_fetch_seconds: float
+    batch_wait_seconds: float
+    batch_load_seconds: float
+    total_fetch_seconds: float
+    total_wait_seconds: float
+    total_load_seconds: float
+    wait_events: int
+    poll_count: int
+    read_position: int
+    committed_position: int
+    committed_batches: int
+    published_samples: int
+    expected_samples: int
+
+
+@dataclass(frozen=True)
 class WorkspaceSnapshotLoader:
     codec: str
     split: str
@@ -164,25 +184,34 @@ class _DirectionalCodecDataset(Dataset[Sample]):
     def __getitem__(self, index: int) -> Sample:
         input_sample = self.input_dataset[index]
         output_sample = self.output_dataset[index]
-        source_audio = (Role.SOURCE, Modality.AUDIO)
-        target_audio = (Role.TARGET, Modality.AUDIO)
-        if source_audio not in input_sample:
-            raise KeyError("streaming input codec sample is missing source audio.")
-        if target_audio not in output_sample:
-            raise KeyError("streaming output codec sample is missing target audio.")
-        for role in (Role.SOURCE, Role.TARGET):
-            reference = (role, Modality.TEXT)
-            if reference not in input_sample or reference not in output_sample:
-                raise KeyError(
-                    "streaming input/output codec samples must both contain aligned text."
-                )
-            if input_sample.get(reference) != output_sample.get(reference):
-                raise ValueError(
-                    "streaming input/output codec stores disagree on aligned text."
-                )
-        merged = dict(output_sample)
-        merged[source_audio] = input_sample[source_audio]
-        return cast(Sample, merged)
+        return directional_codec_sample(input_sample, output_sample)
+
+
+def directional_codec_sample(
+    input_sample: Sample,
+    output_sample: Sample,
+) -> Sample:
+    """Keep only input-source and output-target audio after strict alignment."""
+
+    source_audio = (Role.SOURCE, Modality.AUDIO)
+    target_audio = (Role.TARGET, Modality.AUDIO)
+    if source_audio not in input_sample:
+        raise KeyError("streaming input codec sample is missing source audio.")
+    if target_audio not in output_sample:
+        raise KeyError("streaming output codec sample is missing target audio.")
+    for role in (Role.SOURCE, Role.TARGET):
+        reference = (role, Modality.TEXT)
+        if reference not in input_sample or reference not in output_sample:
+            raise KeyError(
+                "streaming input/output codec samples must both contain aligned text."
+            )
+        if input_sample.get(reference) != output_sample.get(reference):
+            raise ValueError(
+                "streaming input/output codec stores disagree on aligned text."
+            )
+    merged = dict(output_sample)
+    merged[source_audio] = input_sample[source_audio]
+    return cast(Sample, merged)
 
 
 def _workspace_codec_dataset(
@@ -474,6 +503,10 @@ class StreamingSnapshotDataset(IterableDataset[Sample]):
         self._committed_batches = 0
         self._world_size: int | None = None
         self._checkpoint_catalog: Mapping[str, object] | None = None
+        self._waiting_since: float | None = None
+        self._wait_seconds = 0.0
+        self._wait_events = 0
+        self._poll_count = 0
 
     @property
     def read_position(self) -> int:
@@ -482,6 +515,22 @@ class StreamingSnapshotDataset(IterableDataset[Sample]):
     @property
     def committed_position(self) -> int:
         return self._committed_position
+
+    @property
+    def committed_batches(self) -> int:
+        return self._committed_batches
+
+    @property
+    def wait_seconds(self) -> float:
+        return self._wait_seconds
+
+    @property
+    def wait_events(self) -> int:
+        return self._wait_events
+
+    @property
+    def poll_count(self) -> int:
+        return self._poll_count
 
     def logical_batch_count(self) -> int:
         rank, world_size = self._rank_world()
@@ -518,39 +567,68 @@ class StreamingSnapshotDataset(IterableDataset[Sample]):
         status = self.feed.status()
         self._validate_checkpoint_catalog(status.catalog)
         next_status = 0.0
-        while True:
-            catalog = status.catalog
-            next_position = self._read_position + world_size
-            final_group = next_position == self.feed.expected_samples
-            if (
-                next_position <= catalog.sample_count
-                and (not final_group or status.seal is not None)
-            ):
-                position = self._read_position + rank
-                _snapshot, _offset, sample = self.feed.sample_at(position, catalog)
-                self._read_position = next_position
-                yield sample
-                continue
-            if status.seal is not None:
-                if self._read_position == self.feed.expected_samples:
-                    return
-                raise RuntimeError(
-                    "streaming cursor cannot assign the sealed tail without repeats."
-                )
-            now = time.monotonic()
-            if now >= next_status:
-                _LOGGER.info(
-                    "waiting for streaming synthesis: stream=%s read=%d committed=%d "
-                    "published=%d expected=%d",
-                    self.feed.stream_id,
-                    self._read_position,
-                    self._committed_position,
-                    catalog.sample_count,
-                    self.feed.expected_samples,
-                )
-                next_status = now + self.status_seconds
-            time.sleep(self.poll_seconds)
-            status = self.feed.status()
+        try:
+            while True:
+                catalog = status.catalog
+                next_position = self._read_position + world_size
+                final_group = next_position == self.feed.expected_samples
+                if (
+                    next_position <= catalog.sample_count
+                    and (not final_group or status.seal is not None)
+                ):
+                    self._finish_wait()
+                    position = self._read_position + rank
+                    _snapshot, _offset, sample = self.feed.sample_at(position, catalog)
+                    self._read_position = next_position
+                    yield sample
+                    continue
+                if status.seal is not None:
+                    self._finish_wait()
+                    if self._read_position == self.feed.expected_samples:
+                        return
+                    raise RuntimeError(
+                        "streaming cursor cannot assign the sealed tail without repeats."
+                    )
+                self._start_wait()
+                now = time.monotonic()
+                if now >= next_status:
+                    waiting_since = self._waiting_since
+                    if waiting_since is None:
+                        raise RuntimeError("streaming wait timer was not started.")
+                    _LOGGER.info(
+                        "waiting for streaming synthesis: stream=%s read=%d committed=%d "
+                        "published=%d expected=%d wait_seconds=%.3f wait_events=%d polls=%d",
+                        self.feed.stream_id,
+                        self._read_position,
+                        self._committed_position,
+                        catalog.sample_count,
+                        self.feed.expected_samples,
+                        self._wait_seconds + (time.perf_counter() - waiting_since),
+                        self._wait_events,
+                        self._poll_count,
+                    )
+                    next_status = now + self.status_seconds
+                time.sleep(self.poll_seconds)
+                self._poll_count += 1
+                status = self.feed.status()
+        except BaseException:
+            self._finish_wait()
+            raise
+
+    def _start_wait(self) -> None:
+        if self._waiting_since is None:
+            self._waiting_since = time.perf_counter()
+
+    def _finish_wait(self) -> None:
+        started = self._waiting_since
+        if started is None:
+            return
+        elapsed = time.perf_counter() - started
+        if elapsed < 0 or not math.isfinite(elapsed):
+            raise RuntimeError("streaming wait timer returned an invalid duration.")
+        self._wait_seconds += elapsed
+        self._wait_events += 1
+        self._waiting_since = None
 
     def commit(self, span: BatchSpan, *, batches: int) -> None:
         if span.start != self._committed_position:
@@ -590,6 +668,9 @@ class StreamingSnapshotDataset(IterableDataset[Sample]):
                 None if next_snapshot is None else next_snapshot.manifest_sha256
             ),
             "consumed_catalog_sha256": catalog.prefix_sha256[sequence],
+            "wait_seconds": self._wait_seconds,
+            "wait_events": self._wait_events,
+            "poll_count": self._poll_count,
         }
 
     def load_state_dict(self, state: Mapping[str, object]) -> None:
@@ -629,6 +710,10 @@ class StreamingSnapshotDataset(IterableDataset[Sample]):
         self._read_position = committed
         self._committed_batches = _state_int(state, "committed_batches")
         self._world_size = world_size
+        self._waiting_since = None
+        self._wait_seconds = _state_float(state, "wait_seconds", default=0.0)
+        self._wait_events = _state_int(state, "wait_events", default=0)
+        self._poll_count = _state_int(state, "poll_count", default=0)
         self._checkpoint_catalog = {
             name: state.get(name)
             for name in (
@@ -695,6 +780,12 @@ class StreamingDataLoader:
         self._delivered: deque[BatchSpan] = deque()
         self._pending: list[BatchSpan] = []
         self._last_global_step = 0
+        self._batch_fetch_seconds = 0.0
+        self._batch_wait_seconds = 0.0
+        self._batch_load_seconds = 0.0
+        self._total_fetch_seconds = 0.0
+        self._total_wait_seconds = 0.0
+        self._total_load_seconds = 0.0
 
     def __len__(self) -> int:
         return self.dataset.logical_batch_count()
@@ -703,15 +794,46 @@ class StreamingDataLoader:
         iterator = iter(self.loader)
         while True:
             start = self.dataset.read_position
+            wait_before = self.dataset.wait_seconds
+            started = time.perf_counter()
             try:
                 batch = next(iterator)
             except StopIteration:
                 return
+            fetch_seconds = time.perf_counter() - started
+            wait_seconds = self.dataset.wait_seconds - wait_before
+            if wait_seconds < 0 or not math.isfinite(wait_seconds):
+                raise RuntimeError("streaming batch wait timer moved backwards.")
+            load_seconds = max(0.0, fetch_seconds - wait_seconds)
+            self._batch_fetch_seconds = fetch_seconds
+            self._batch_wait_seconds = wait_seconds
+            self._batch_load_seconds = load_seconds
+            self._total_fetch_seconds += fetch_seconds
+            self._total_wait_seconds += wait_seconds
+            self._total_load_seconds += load_seconds
             stop = self.dataset.read_position
             if stop <= start:
                 raise RuntimeError("streaming DataLoader delivered an empty cursor span.")
             self._delivered.append(BatchSpan(start, stop))
             yield batch
+
+    def telemetry(self) -> StreamingTelemetry:
+        status = self.dataset.feed.status()
+        return StreamingTelemetry(
+            batch_fetch_seconds=self._batch_fetch_seconds,
+            batch_wait_seconds=self._batch_wait_seconds,
+            batch_load_seconds=self._batch_load_seconds,
+            total_fetch_seconds=self._total_fetch_seconds,
+            total_wait_seconds=self.dataset.wait_seconds,
+            total_load_seconds=self._total_load_seconds,
+            wait_events=self.dataset.wait_events,
+            poll_count=self.dataset.poll_count,
+            read_position=self.dataset.read_position,
+            committed_position=self.dataset.committed_position,
+            committed_batches=self.dataset.committed_batches,
+            published_samples=status.catalog.sample_count,
+            expected_samples=self.dataset.feed.expected_samples,
+        )
 
     def set_global_step(self, step: int) -> None:
         if type(step) is not int or step < 0:
@@ -735,6 +857,9 @@ class StreamingDataLoader:
         return {
             "schema": _LOADER_SCHEMA,
             "last_global_step": self._last_global_step,
+            "total_fetch_seconds": self._total_fetch_seconds,
+            "total_wait_seconds": self._total_wait_seconds,
+            "total_load_seconds": self._total_load_seconds,
             "dataset": self.dataset.state_dict(),
         }
 
@@ -748,6 +873,12 @@ class StreamingDataLoader:
             raise TypeError("streaming loader dataset state must be a mapping.")
         self.dataset.load_state_dict(cast(Mapping[str, object], dataset))
         self._last_global_step = _state_int(state, "last_global_step")
+        self._batch_fetch_seconds = 0.0
+        self._batch_wait_seconds = 0.0
+        self._batch_load_seconds = 0.0
+        self._total_fetch_seconds = _state_float(state, "total_fetch_seconds", default=0.0)
+        self._total_wait_seconds = _state_float(state, "total_wait_seconds", default=0.0)
+        self._total_load_seconds = _state_float(state, "total_load_seconds", default=0.0)
         self._delivered.clear()
         self._pending.clear()
 
@@ -950,13 +1081,37 @@ def _manifest_int(
     return value
 
 
-def _state_int(state: Mapping[str, object], name: str) -> int:
-    value = state.get(name)
+def _state_int(
+    state: Mapping[str, object],
+    name: str,
+    *,
+    default: int | None = None,
+) -> int:
+    value = state.get(name, default)
+    if value is None and default is not None:
+        return default
     if type(value) is not int:
         raise TypeError(f"streaming cursor {name} must be an integer.")
     if value < 0:
         raise ValueError(f"streaming cursor {name} must be non-negative.")
     return value
+
+
+def _state_float(
+    state: Mapping[str, object],
+    name: str,
+    *,
+    default: float | None = None,
+) -> float:
+    value = state.get(name, default)
+    if value is None and default is not None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (float, int)):
+        raise TypeError(f"streaming cursor {name} must be numeric.")
+    result = float(value)
+    if result < 0 or not math.isfinite(result):
+        raise ValueError(f"streaming cursor {name} must be finite and non-negative.")
+    return result
 
 
 def _digest_json(value: object) -> str:
@@ -1013,9 +1168,11 @@ __all__ = [
     "SnapshotFeed",
     "StreamingDataLoader",
     "StreamingSnapshotDataset",
+    "StreamingTelemetry",
     "SynthesisController",
     "SynthesisRequest",
     "WorkspaceSnapshotLoader",
+    "directional_codec_sample",
     "synthesis_controller",
     "workspace_stream_root",
 ]

@@ -23,7 +23,7 @@ loader_plan:
       weight: 1.0
       task_weights:
         s2st: 1.0
-      prediction: parallel
+      trace: target_cot
   accumulate_grad_batches: 1
   step_mode: weighted_window
 
@@ -44,6 +44,10 @@ datamodule:
     producer_factory: speech_to_speech.synthesis.process:controller
     producer_options:
       command: ${oc.env:SPEECH_TO_SPEECH_STREAM_PRODUCER_COMMAND}
+    telemetry:
+      enabled: true
+      gpu_sample_interval_seconds: 1.0
+      log_every_n_steps: 1
 
 pl_module:
   ctc:
