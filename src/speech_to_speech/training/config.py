@@ -77,6 +77,7 @@ class LoggingConfig:
     name: str = MISSING
     save_dir: str = MISSING
     run_name: str = MISSING
+    version: Optional[Union[int, str]] = None
 
 
 @dataclass

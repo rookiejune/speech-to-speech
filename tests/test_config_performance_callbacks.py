@@ -3,6 +3,7 @@ from __future__ import annotations
 # ruff: noqa: F403,F405
 
 import unittest
+from dataclasses import replace
 
 from _config_helpers import *
 
@@ -125,6 +126,19 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
 
         self.assertIs(built, logger.return_value)
         logger.assert_called_once_with(save_dir=csv.save_dir, name=csv.run_name)
+
+        resumed = replace(tensorboard, version=0)
+        with patch(
+            "speech_to_speech.training.composition.TensorBoardLogger"
+        ) as logger:
+            built = build_logger(resumed)
+
+        self.assertIs(built, logger.return_value)
+        logger.assert_called_once_with(
+            save_dir=resumed.save_dir,
+            name=resumed.run_name,
+            version=0,
+        )
 
     def test_train_uses_async_checkpoint(self):
         config = _train()

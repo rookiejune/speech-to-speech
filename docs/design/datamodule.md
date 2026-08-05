@@ -256,9 +256,10 @@ loader、`accumulate_grad_batches=1`、`num_workers=0`、`persistent_workers=fal
 关闭 distributed sampler，且 `expected_samples` 必须能被 DDP world size 整除。
 
 流式 dataset 不接受 validation 或 split manifest；validation 必须在另一个已 sealed 的 immutable
-dataset 上运行。`published_streaming_samples()` 只暴露已经发布的 teacher artifacts：
-`SynthesisSampleLogger` 在 rank zero 按 optimizer-step cadence 写入其 source/target text、audio 与
-snapshot metadata，不运行 backbone 或 teacher，也不会要求固定样本在 fit 开始前就存在。
+dataset 上运行。`published_streaming_samples()` 只暴露已经发布的 teacher artifacts 和独立保存的
+dataset translation reference；`SynthesisSampleLogger` 在 rank zero 按 optimizer-step cadence 写入
+source text、model/dataset translation 对照、audio 与 snapshot metadata，不运行 backbone 或 teacher，
+也不会要求固定样本在 fit 开始前就存在。
 
 `StreamingSnapshotDataset` 同时累计连续等待事件、poll 次数和实际 wall-clock wait seconds；
 `StreamingDataLoader` 按 batch 区分包含等待的 fetch time、等待部分和 snapshot load/collate 部分，
@@ -269,6 +270,58 @@ published position 和 wait ratio 写入 `streaming/*` scalar；DDP 的时间 sc
 `streaming_gpu_summary.json`。producer 可用 `speech_to_speech.synthesis.telemetry.stage()` 输出带统一
 timestamp、stage elapsed、sample count、device 和 GPU ids 的 JSON 事件，与 GPU CSV 按时间对齐；
 `nvidia-smi` 不可用只在摘要中记录原因，不使训练失败。
+
+### 可恢复 producer 与流式训练观测
+
+streaming snapshot v2 在 `base`/codec store 之外保存
+`translation_references.jsonl`。每条记录以 direction-aware `sample_index` 对齐一条训练 sample，内容只含
+原数据集的参考译文；sidecar 的 schema 与 SHA256 写进 `snapshot.json`，重复发布同一 snapshot 时
+reference 内容也必须完全一致。训练迭代器仍只返回 store 中的 `Sample`：其 target
+`TextView.TEXT` 是翻译模型生成的译文，也是 backbone 实际消费的标签；dataset reference 不进入
+`Sample`、collate 或 checkpoint cursor。只有诊断入口 `published_streaming_samples()` 按需读取并校验
+sidecar。旧 snapshot v1 仍可继续训练，但请求 published diagnostics 时会明确报告没有 reference，
+不会把模型译文冒充数据集译文。
+
+`SynthesisSampleLogger` 在 rank zero 为选定样本写入 `source_text`、`model_translation`、
+`dataset_translation` 和三行 Markdown `translation_comparison`，metadata JSON 也使用这两个无歧义的
+translation 字段；source/target audio 继续来自同一条已发布的模型合成 sample，不重新运行 backbone。
+
+producer 对当前未发布 batch 维护 `.stage-cache`：`source_tts`、`translation`、`target_tts`、`codec`
+分别原子发布自己的标准 store。重启先尝试最高可复用阶段；例如已有 `target_tts` cache 时直接恢复完整
+base waveform 和模型译文，只重跑 codec。snapshot 原子发布后删除该 batch cache；如果恰好在 publish
+之后、cache 清理之前退出，下次会根据连续 snapshot prefix 清理冗余 cache。stage cache 绑定
+`producer_identity.json` 的 SHA256，生产语义变化会明确失败，不会把不同模型 revision 或生成参数混入
+同一 stream。
+
+`StreamingSnapshotDataset` 累计真实 wall-clock 等待时间、等待事件和 poll 次数；
+`StreamingDataLoader` 进一步拆分每 batch 的 fetch、wait 与 load/collate 时间，并把累计值随
+cursor checkpoint 恢复。`StreamingTelemetryCallback` 将这些时间、train step 时间、read/committed/
+published position 和 wait ratio 写入 `streaming/*` TensorBoard scalar。DDP 的时间指标取各 rank
+最大值，以暴露最慢 rank 的实际瓶颈。
+
+Lightning 的 SIGTERM 标记由 `StreamingSynthesis` 绑定为 dataset stop request。snapshot poll sleep
+最多每 0.5 秒检查一次；收到停止请求时抛出 Lightning 的 `SIGTERMException`，使阻塞在同步
+`next()` 内的 rank 也进入标准 exception teardown，而不是等新 snapshot 才释放 GPU。cursor 仍只以
+最近成功 checkpoint 的 committed position 为恢复边界。每个 rank 在 train start 后用 one-shot guard
+包装 Lightning 已注册的 SIGTERM handler；同一进程收到重复或重入信号时只执行第一次，避免进程组
+投递与 Lightning launcher fan-out 同时发生时重复进入 distributed signal collective。
+
+rank zero 同时把可见 GPU 的 utilization、memory 和 power 原始采样追加到 logger 目录下的
+`streaming_gpu.csv`；固定 streaming logger version 后，该 CSV 和 TensorBoard event 会跨 auto-resume
+启动继续追加。结束时覆盖写入的 `streaming_gpu_summary.json` 只概括当前进程，本次运行之外的完整
+时间轴以 CSV/TensorBoard 为准。producer 可用
+`speech_to_speech.synthesis.telemetry.stage()` 输出带 wall-clock timestamp、elapsed、sample count、
+device 与 GPU ids 的 JSON start/finish/failure 事件；这些事件可以与 GPU CSV 对齐。`nvidia-smi`
+不可用时只记录原因，不使训练失败。stage helper 只观测 producer 显式包裹的调用，不会自动发现
+AS/TT/AT/codec 阶段；本仓库当前提供外部 producer 的生命周期和发布边界，不包含具体模型 DAG。
+训练侧 CSV 也只采样训练进程 `CUDA_VISIBLE_DEVICES` 中的卡。producer 使用独立 GPU 时，应在
+producer 内单独采样并按 stage timestamp 汇总，不能把训练卡的利用率当作 producer 阶段利用率。
+
+正式 producer 明确记录 `source_tts`（源文本合成语音）、`translation`（模型翻译）、
+`target_tts`（模型译文在源语音条件下合成目标语音）、`codec` 和 `snapshot_publish`，并把
+`source_tts_join` / `translation_join` 作为独立等待事件。这里不使用 AS/TT/AT 缩写，避免把模型阶段
+和数据模态混在一起。每次重新进入正式 streaming job 都以已有连续 snapshot prefix 为起点；配置中的
+`retry=true` 只在这次人工重启时清理旧进程失败标记，不会在同一次进程内无限重试模型错误。
 
 ## 输入输出
 

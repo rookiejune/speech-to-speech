@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import hydra
 import torch
@@ -362,7 +362,7 @@ def _checkpoint_callback(
     return ModelCheckpoint(
         dirpath=output_dir / "checkpoints",
         filename=checkpoint.filename,
-        save_last=checkpoint.save_last,
+        save_last=cast("bool | Literal['link']", checkpoint.save_last),
         save_top_k=checkpoint.save_top_k,
         every_n_train_steps=checkpoint.every_n_train_steps,
         auto_insert_metric_name=False,

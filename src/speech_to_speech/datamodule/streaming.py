@@ -15,14 +15,18 @@ from typing import Any, Protocol, cast
 
 import torch.distributed as dist
 from anydataset.types import Modality, Role, Sample
+from lightning.pytorch.utilities.exceptions import SIGTERMException
 from torch.utils.data import DataLoader, Dataset, IterableDataset
 
 
-_SNAPSHOT_SCHEMA = "speech-to-speech-stream-snapshot-v1"
+_SNAPSHOT_SCHEMA_V1 = "speech-to-speech-stream-snapshot-v1"
+_SNAPSHOT_SCHEMA = "speech-to-speech-stream-snapshot-v2"
 _SEAL_SCHEMA = "speech-to-speech-stream-seal-v1"
 _FAILURE_SCHEMA = "speech-to-speech-stream-failure-v1"
 _CURSOR_SCHEMA = "speech-to-speech-stream-cursor-v1"
 _LOADER_SCHEMA = "speech-to-speech-stream-loader-v1"
+_TRANSLATION_REFERENCE_SCHEMA = "speech-to-speech-translation-references-v1"
+_TRANSLATION_REFERENCE_FILE = "translation_references.jsonl"
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -66,6 +70,7 @@ class Snapshot:
     sequence: int
     sample_indices: tuple[int, ...]
     manifest_sha256: str
+    translation_references_sha256: str | None
 
     @property
     def sample_count(self) -> int:
@@ -103,6 +108,7 @@ class PublishedSample:
     index: int
     snapshot_id: str
     sample: Sample
+    reference_translation: str
 
 
 @dataclass(frozen=True)
@@ -274,6 +280,10 @@ class SnapshotFeed:
             raise TypeError("snapshot loader must be callable.")
         self.loader = loader
         self._datasets: dict[str, Dataset[Sample]] = {}
+        self._reference_cache: dict[
+            str,
+            tuple[int, int, tuple[str, ...]],
+        ] = {}
         self._known: dict[Path, tuple[int, int, Snapshot]] = {}
         self._catalog_signature: tuple[
             tuple[Path, str, int, int, str], ...
@@ -372,10 +382,52 @@ class SnapshotFeed:
                 continue
             sequence, offset = location
             snapshot = catalog.snapshots[sequence]
+            references = self._translation_references(snapshot)
             result.append(
-                PublishedSample(index, snapshot.snapshot_id, self.load(snapshot)[offset])
+                PublishedSample(
+                    index,
+                    snapshot.snapshot_id,
+                    self.load(snapshot)[offset],
+                    references[offset],
+                )
             )
         return result
+
+    def _translation_references(self, snapshot: Snapshot) -> tuple[str, ...]:
+        expected_sha256 = snapshot.translation_references_sha256
+        if expected_sha256 is None:
+            raise RuntimeError(
+                "published streaming snapshot has no dataset translation references: "
+                f"{snapshot.root}."
+            )
+        path = snapshot.root / _TRANSLATION_REFERENCE_FILE
+        try:
+            stat = path.stat()
+        except FileNotFoundError as error:
+            raise RuntimeError(
+                f"streaming translation reference sidecar is missing: {path}."
+            ) from error
+        cached = self._reference_cache.get(snapshot.snapshot_id)
+        identity = (stat.st_mtime_ns, stat.st_size)
+        if cached is not None:
+            if cached[:2] != identity:
+                raise RuntimeError(
+                    f"published translation reference sidecar was modified: {path}."
+                )
+            return cached[2]
+        data = path.read_bytes()
+        actual_sha256 = hashlib.sha256(data).hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise ValueError(
+                f"streaming translation reference sidecar digest mismatch: {path}."
+            )
+        references = _translation_reference_texts(
+            data,
+            indices=snapshot.sample_indices,
+            path=path,
+        )
+        self._reference_cache[snapshot.snapshot_id] = (*identity, references)
+        return references
 
     def cursor(self, position: int, catalog: Catalog) -> tuple[int, int]:
         if position < 0 or position > catalog.sample_count:
@@ -507,6 +559,7 @@ class StreamingSnapshotDataset(IterableDataset[Sample]):
         self._wait_seconds = 0.0
         self._wait_events = 0
         self._poll_count = 0
+        self._stop_requested: Callable[[], bool] | None = None
 
     @property
     def read_position(self) -> int:
@@ -531,6 +584,11 @@ class StreamingSnapshotDataset(IterableDataset[Sample]):
     @property
     def poll_count(self) -> int:
         return self._poll_count
+
+    def set_stop_requested(self, requested: Callable[[], bool]) -> None:
+        if not callable(requested):
+            raise TypeError("streaming stop request must be callable.")
+        self._stop_requested = requested
 
     def logical_batch_count(self) -> int:
         rank, world_size = self._rank_world()
@@ -569,6 +627,7 @@ class StreamingSnapshotDataset(IterableDataset[Sample]):
         next_status = 0.0
         try:
             while True:
+                self._check_stop_requested()
                 catalog = status.catalog
                 next_position = self._read_position + world_size
                 final_group = next_position == self.feed.expected_samples
@@ -608,7 +667,8 @@ class StreamingSnapshotDataset(IterableDataset[Sample]):
                         self._poll_count,
                     )
                     next_status = now + self.status_seconds
-                time.sleep(self.poll_seconds)
+                self._interruptible_sleep()
+                self._check_stop_requested()
                 self._poll_count += 1
                 status = self.feed.status()
         except BaseException:
@@ -618,6 +678,23 @@ class StreamingSnapshotDataset(IterableDataset[Sample]):
     def _start_wait(self) -> None:
         if self._waiting_since is None:
             self._waiting_since = time.perf_counter()
+
+    def _interruptible_sleep(self) -> None:
+        if self._stop_requested is None:
+            time.sleep(self.poll_seconds)
+            return
+        deadline = time.monotonic() + self.poll_seconds
+        while True:
+            self._check_stop_requested()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(remaining, 0.5))
+
+    def _check_stop_requested(self) -> None:
+        requested = self._stop_requested
+        if requested is not None and requested():
+            raise SIGTERMException()
 
     def _finish_wait(self) -> None:
         started = self._waiting_since
@@ -784,7 +861,6 @@ class StreamingDataLoader:
         self._batch_wait_seconds = 0.0
         self._batch_load_seconds = 0.0
         self._total_fetch_seconds = 0.0
-        self._total_wait_seconds = 0.0
         self._total_load_seconds = 0.0
 
     def __len__(self) -> int:
@@ -809,7 +885,6 @@ class StreamingDataLoader:
             self._batch_wait_seconds = wait_seconds
             self._batch_load_seconds = load_seconds
             self._total_fetch_seconds += fetch_seconds
-            self._total_wait_seconds += wait_seconds
             self._total_load_seconds += load_seconds
             stop = self.dataset.read_position
             if stop <= start:
@@ -858,7 +933,6 @@ class StreamingDataLoader:
             "schema": _LOADER_SCHEMA,
             "last_global_step": self._last_global_step,
             "total_fetch_seconds": self._total_fetch_seconds,
-            "total_wait_seconds": self._total_wait_seconds,
             "total_load_seconds": self._total_load_seconds,
             "dataset": self.dataset.state_dict(),
         }
@@ -877,7 +951,6 @@ class StreamingDataLoader:
         self._batch_wait_seconds = 0.0
         self._batch_load_seconds = 0.0
         self._total_fetch_seconds = _state_float(state, "total_fetch_seconds", default=0.0)
-        self._total_wait_seconds = _state_float(state, "total_wait_seconds", default=0.0)
         self._total_load_seconds = _state_float(state, "total_load_seconds", default=0.0)
         self._delivered.clear()
         self._pending.clear()
@@ -911,7 +984,10 @@ def _snapshot(
     codec: str | None,
     input_codec: str | None,
 ) -> Snapshot:
-    payload, digest = _manifest(path, schema=_SNAPSHOT_SCHEMA)
+    payload, digest = _manifest(
+        path,
+        schema=(_SNAPSHOT_SCHEMA_V1, _SNAPSHOT_SCHEMA),
+    )
     _identity(
         payload,
         path=path,
@@ -948,12 +1024,16 @@ def _snapshot(
             f"streaming snapshot sample_count mismatch at {path}: "
             f"{declared} != {len(indices)}."
         )
+    references_sha256 = None
+    if payload.get("schema") == _SNAPSHOT_SCHEMA:
+        references_sha256 = _translation_reference_digest(payload, path=path)
     return Snapshot(
         root=path.parent,
         snapshot_id=snapshot_id,
         sequence=sequence,
         sample_indices=tuple(indices),
         manifest_sha256=digest,
+        translation_references_sha256=references_sha256,
     )
 
 
@@ -1002,7 +1082,11 @@ def _catalog(snapshots: tuple[Snapshot, ...], *, expected: int) -> Catalog:
     )
 
 
-def _manifest(path: Path, *, schema: str) -> tuple[Mapping[str, object], str]:
+def _manifest(
+    path: Path,
+    *,
+    schema: str | tuple[str, ...],
+) -> tuple[Mapping[str, object], str]:
     data = path.read_bytes()
     try:
         value = json.loads(data)
@@ -1010,9 +1094,87 @@ def _manifest(path: Path, *, schema: str) -> tuple[Mapping[str, object], str]:
         raise ValueError(f"streaming manifest is invalid JSON: {path}.") from error
     if not isinstance(value, Mapping):
         raise TypeError(f"streaming manifest must contain one object: {path}.")
-    if value.get("schema") != schema:
+    schemas = (schema,) if isinstance(schema, str) else schema
+    if value.get("schema") not in schemas:
         raise ValueError(f"streaming manifest schema is incompatible: {path}.")
     return cast(Mapping[str, object], value), hashlib.sha256(data).hexdigest()
+
+
+def _translation_reference_digest(
+    payload: Mapping[str, object],
+    *,
+    path: Path,
+) -> str:
+    raw = payload.get("translation_references")
+    if not isinstance(raw, Mapping):
+        raise TypeError(
+            f"streaming snapshot translation_references must be an object: {path}."
+        )
+    values = cast(Mapping[str, object], raw)
+    fields = set(values)
+    expected_fields = {"schema", "file", "sha256"}
+    if fields != expected_fields:
+        raise ValueError(
+            "streaming snapshot translation_references must contain exactly "
+            f"{sorted(expected_fields)}: {path}."
+        )
+    if values.get("schema") != _TRANSLATION_REFERENCE_SCHEMA:
+        raise ValueError(
+            f"streaming translation reference schema is incompatible: {path}."
+        )
+    if values.get("file") != _TRANSLATION_REFERENCE_FILE:
+        raise ValueError(
+            f"streaming translation reference file is incompatible: {path}."
+        )
+    return _manifest_digest(values, "sha256", path=path)
+
+
+def _translation_reference_texts(
+    data: bytes,
+    *,
+    indices: tuple[int, ...],
+    path: Path,
+) -> tuple[str, ...]:
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(
+            f"streaming translation reference sidecar is not UTF-8: {path}."
+        ) from error
+    lines = text.splitlines()
+    if len(lines) != len(indices):
+        raise ValueError(
+            "streaming translation reference sidecar sample count mismatch at "
+            f"{path}: {len(lines)} != {len(indices)}."
+        )
+    references: list[str] = []
+    for position, (line, expected_index) in enumerate(zip(lines, indices)):
+        try:
+            raw = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                "streaming translation reference sidecar contains invalid JSON at "
+                f"line {position + 1}: {path}."
+            ) from error
+        if not isinstance(raw, Mapping) or set(raw) != {"sample_index", "text"}:
+            raise ValueError(
+                "streaming translation reference records must contain exactly "
+                f"sample_index and text at line {position + 1}: {path}."
+            )
+        sample_index = raw.get("sample_index")
+        if sample_index != expected_index or type(sample_index) is not int:
+            raise ValueError(
+                "streaming translation reference index is not aligned with the "
+                f"snapshot at line {position + 1}: {path}."
+            )
+        reference = raw.get("text")
+        if not isinstance(reference, str) or not reference:
+            raise ValueError(
+                "streaming translation reference text must be non-empty at "
+                f"line {position + 1}: {path}."
+            )
+        references.append(reference)
+    return tuple(references)
 
 
 def _identity(

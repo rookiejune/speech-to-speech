@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import unittest
 from collections.abc import Mapping
@@ -9,6 +10,7 @@ from typing import cast
 from unittest.mock import patch
 
 from anydataset.types import Sample
+from lightning.pytorch.utilities.exceptions import SIGTERMException
 from torch.utils.data import Dataset
 
 from speech_to_speech.datamodule.streaming import (
@@ -19,7 +21,10 @@ from speech_to_speech.datamodule.streaming import (
 )
 
 
-_SNAPSHOT_SCHEMA = "speech-to-speech-stream-snapshot-v1"
+_SNAPSHOT_SCHEMA_V1 = "speech-to-speech-stream-snapshot-v1"
+_SNAPSHOT_SCHEMA = "speech-to-speech-stream-snapshot-v2"
+_TRANSLATION_REFERENCE_SCHEMA = "speech-to-speech-translation-references-v1"
+_TRANSLATION_REFERENCE_FILE = "translation_references.jsonl"
 _SEAL_SCHEMA = "speech-to-speech-stream-seal-v1"
 _FAILURE_SCHEMA = "speech-to-speech-stream-failure-v1"
 _STREAM_ID = "wmt19-bidirectional-v1"
@@ -114,11 +119,12 @@ def _write_snapshot(
     revision: str | None = None,
     codec: str | None = None,
     input_codec: str | None = None,
+    schema: str = _SNAPSHOT_SCHEMA,
 ) -> Path:
     directory = root / "snapshots" / f"{sequence:06d}-{snapshot_id}"
     directory.mkdir(parents=True)
     payload: dict[str, object] = {
-        "schema": _SNAPSHOT_SCHEMA,
+        "schema": schema,
         "stream_id": stream_id,
         "expected_samples": expected,
         "sequence": sequence,
@@ -131,6 +137,28 @@ def _write_snapshot(
         payload["input_codec"] = codec if input_codec is None else input_codec
     if revision is not None:
         payload["revision"] = revision
+    if schema == _SNAPSHOT_SCHEMA:
+        reference_payload = (
+            "\n".join(
+                json.dumps(
+                    {
+                        "sample_index": index,
+                        "text": f"dataset translation {index}",
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                for index in indices
+            )
+            + "\n"
+        ).encode("utf-8")
+        (directory / _TRANSLATION_REFERENCE_FILE).write_bytes(reference_payload)
+        payload["translation_references"] = {
+            "schema": _TRANSLATION_REFERENCE_SCHEMA,
+            "file": _TRANSLATION_REFERENCE_FILE,
+            "sha256": hashlib.sha256(reference_payload).hexdigest(),
+        }
     path = directory / "snapshot.json"
     path.write_text(
         json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
@@ -250,6 +278,67 @@ class SnapshotFeedTest(unittest.TestCase):
             [(item.index, item.snapshot_id, _sample_index(item.sample)) for item in published],
             [(1, "chunk-b", 1), (3, "chunk-a", 3)],
         )
+        self.assertEqual(
+            [item.reference_translation for item in published],
+            ["dataset translation 1", "dataset translation 3"],
+        )
+
+    def test_reference_sidecar_is_validated_only_for_published_diagnostics(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot_path = _write_snapshot(
+                root,
+                0,
+                "chunk-a",
+                [0],
+                expected=1,
+            )
+            sidecar = snapshot_path.parent / _TRANSLATION_REFERENCE_FILE
+            reference_payload = b'{"sample_index":1,"text":"misaligned"}\n'
+            sidecar.write_bytes(reference_payload)
+            manifest = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            manifest["translation_references"]["sha256"] = hashlib.sha256(
+                reference_payload
+            ).hexdigest()
+            snapshot_path.write_text(
+                json.dumps(
+                    manifest,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            feed = _feed(root, expected=1)
+            catalog = feed.status().catalog
+
+            _snapshot, _offset, sample = feed.sample_at(0, catalog)
+            self.assertEqual(_sample_index(sample), 0)
+            with self.assertRaisesRegex(ValueError, "not aligned with the snapshot"):
+                feed.published([0])
+
+    def test_v1_snapshot_remains_trainable_but_has_no_reference_diagnostics(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_snapshot(
+                root,
+                0,
+                "chunk-a",
+                [0],
+                expected=1,
+                schema=_SNAPSHOT_SCHEMA_V1,
+            )
+            feed = _feed(root, expected=1)
+            catalog = feed.status().catalog
+
+            _snapshot, _offset, sample = feed.sample_at(0, catalog)
+            self.assertEqual(_sample_index(sample), 0)
+            with self.assertRaisesRegex(RuntimeError, "no dataset translation references"):
+                feed.published([0])
 
     def test_catalog_rejects_overlapping_chunk_membership(self) -> None:
         with TemporaryDirectory() as directory:
@@ -396,6 +485,7 @@ class SnapshotFeedTest(unittest.TestCase):
                 [0, 1],
                 expected=2,
                 codec="longcat",
+                schema=_SNAPSHOT_SCHEMA_V1,
             )
             snapshot_payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
             snapshot_payload.pop("input_codec")
@@ -477,6 +567,29 @@ class SnapshotFeedTest(unittest.TestCase):
 
 
 class StreamingSnapshotDatasetTest(unittest.TestCase):
+    def test_stop_request_interrupts_snapshot_polling(self) -> None:
+        with TemporaryDirectory() as directory:
+            feed = _feed(Path(directory), expected=4)
+            dataset = _dataset(feed)
+            requested = False
+
+            def stop() -> bool:
+                return requested
+
+            def request_stop(_seconds: float) -> None:
+                nonlocal requested
+                requested = True
+
+            dataset.set_stop_requested(stop)
+            with patch(
+                "speech_to_speech.datamodule.streaming.time.sleep",
+                side_effect=request_stop,
+            ), self.assertRaises(SIGTERMException):
+                next(iter(dataset))
+
+        self.assertEqual(dataset.wait_events, 1)
+        self.assertEqual(dataset.poll_count, 0)
+
     def test_iterator_waits_for_new_chunk_and_for_seal(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -569,14 +682,24 @@ class StreamingDataLoaderTest(unittest.TestCase):
             self.assertEqual(telemetry.batch_wait_seconds, 0.0)
             self.assertEqual(telemetry.batch_load_seconds, 0.5)
 
+            state = loader.state_dict()
+            dataset_state = cast(dict[str, object], state["dataset"])
+            self.assertEqual(dataset_state["wait_seconds"], 0.0)
+            self.assertEqual(dataset_state["wait_events"], 0)
+            self.assertEqual(dataset_state["poll_count"], 0)
+            dataset_state["wait_seconds"] = 2.5
+            dataset_state["wait_events"] = 2
+            dataset_state["poll_count"] = 7
             restored = _loader(_dataset(_feed(root, expected=4)))
-            restored.load_state_dict(loader.state_dict())
+            restored.load_state_dict(state)
             resumed = restored.telemetry()
 
         self.assertEqual(resumed.batch_fetch_seconds, 0.0)
         self.assertEqual(resumed.total_fetch_seconds, 0.5)
-        self.assertEqual(resumed.total_wait_seconds, 0.0)
+        self.assertEqual(resumed.total_wait_seconds, 2.5)
         self.assertEqual(resumed.total_load_seconds, 0.5)
+        self.assertEqual(resumed.wait_events, 2)
+        self.assertEqual(resumed.poll_count, 7)
 
     def test_length_is_the_per_rank_logical_batch_count(self) -> None:
         with TemporaryDirectory() as directory:

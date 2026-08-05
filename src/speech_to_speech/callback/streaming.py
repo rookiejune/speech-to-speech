@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import signal
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Protocol, cast
+from types import FrameType
+from typing import Any, Optional, Protocol, cast
 
 import torch
 from anydataset import types
@@ -17,6 +19,9 @@ from ..datamodule.streaming import PublishedSample, StreamingTelemetry
 from ..task import Task
 from .interval import TrainInterval
 from .gpu import GpuTelemetrySampler
+
+
+_SignalHandler = Callable[[int, Optional[FrameType]], Any]
 
 
 class _StreamingDataModule(Protocol):
@@ -35,6 +40,8 @@ class _StreamingDataModule(Protocol):
 
     def acknowledge_streaming_batch(self, global_step: int) -> None: ...
 
+    def set_streaming_stop_requested(self, requested: Callable[[], bool]) -> None: ...
+
     def streaming_telemetry(
         self,
         *,
@@ -49,21 +56,60 @@ class _StreamingDataModule(Protocol):
     ) -> list[PublishedSample]: ...
 
 
+class _OnceSignalHandler:
+    """Delegate only the first signal, including re-entrant delivery."""
+
+    def __init__(
+        self,
+        handler: _SignalHandler,
+    ) -> None:
+        self._handler = handler
+        self._handled = False
+
+    def __call__(self, signum: int, frame: FrameType | None) -> None:
+        if self._handled:
+            return
+        self._handled = True
+        self._handler(signum, frame)
+
+
 class StreamingSynthesis(Callback):
     """Resume the producer and commit the training cursor at optimizer boundaries."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._sigterm_guard: _OnceSignalHandler | None = None
 
     def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         del pl_module
         datamodule = _datamodule(trainer)
         if not datamodule.streaming_enabled:
             return
+        datamodule.set_streaming_stop_requested(
+            lambda: bool(trainer.received_sigterm)
+        )
         self._owner_call(trainer, "start", datamodule.start_streaming_synthesis)
 
     def on_train_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         del pl_module
         datamodule = _datamodule(trainer)
         if datamodule.streaming_enabled:
+            self._install_sigterm_guard()
             datamodule.set_streaming_global_step(int(trainer.global_step))
+
+    def _install_sigterm_guard(self) -> None:
+        current = signal.getsignal(signal.SIGTERM)
+        if current is self._sigterm_guard:
+            return
+        if not callable(current):
+            raise RuntimeError(
+                "Lightning must register its SIGTERM handler before streaming starts."
+            )
+        guard = _OnceSignalHandler(cast(_SignalHandler, current))
+        # Lightning owns restoration; keeping the guard through teardown prevents a
+        # second process-group SIGTERM from re-entering its distributed handler.
+        signal.signal(signal.SIGTERM, guard)
+        self._sigterm_guard = guard
 
     def on_train_batch_start(
         self,
@@ -291,7 +337,7 @@ class StreamingTelemetryCallback(Callback):
 
 
 class SynthesisSampleLogger(Callback):
-    """Log persisted teacher artifacts without running the backbone again."""
+    """Log generated artifacts alongside their dataset translation references."""
 
     def __init__(
         self,
@@ -381,10 +427,29 @@ class SynthesisSampleLogger(Callback):
     ) -> None:
         tag = f"synthesis/{published.index}"
         source_text = _text(published.sample, types.Role.SOURCE)
-        target_text = _text(published.sample, types.Role.TARGET)
+        model_translation = _text(published.sample, types.Role.TARGET)
+        dataset_translation = published.reference_translation
         if text_writer is not None:
             text_writer.add_text(f"{tag}/source_text", source_text, step)
-            text_writer.add_text(f"{tag}/target_text", target_text, step)
+            text_writer.add_text(
+                f"{tag}/model_translation",
+                model_translation,
+                step,
+            )
+            text_writer.add_text(
+                f"{tag}/dataset_translation",
+                dataset_translation,
+                step,
+            )
+            text_writer.add_text(
+                f"{tag}/translation_comparison",
+                _translation_comparison(
+                    source_text,
+                    model_translation,
+                    dataset_translation,
+                ),
+                step,
+            )
             text_writer.add_text(
                 f"{tag}/metadata",
                 json.dumps(
@@ -392,7 +457,8 @@ class SynthesisSampleLogger(Callback):
                         "dataset_index": published.index,
                         "snapshot_id": published.snapshot_id,
                         "source_text": source_text,
-                        "target_text": target_text,
+                        "model_translation": model_translation,
+                        "dataset_translation": dataset_translation,
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -520,6 +586,29 @@ def _text(sample: types.Sample, role: types.Role) -> str:
             f"synthesis sample {role.value} TextView.TEXT must be non-empty."
         )
     return value
+
+
+def _translation_comparison(
+    source_text: str,
+    model_translation: str,
+    dataset_translation: str,
+) -> str:
+    rows = (
+        ("source", source_text),
+        ("model translation", model_translation),
+        ("dataset translation", dataset_translation),
+    )
+    return "\n".join(
+        (
+            "| artifact | text |",
+            "| --- | --- |",
+            *(f"| {name} | {_markdown_cell(value)} |" for name, value in rows),
+        )
+    )
+
+
+def _markdown_cell(value: str) -> str:
+    return value.replace("|", "\\|").replace("\r\n", "<br>").replace("\n", "<br>")
 
 
 __all__ = [

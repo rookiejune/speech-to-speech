@@ -74,9 +74,21 @@ class EntryConfig(Protocol):
 
 def build_logger(config: LoggingConfig) -> TensorBoardLogger | CSVLogger:
     if config.name == "tensorboard":
-        return TensorBoardLogger(save_dir=config.save_dir, name=config.run_name)
+        if config.version is None:
+            return TensorBoardLogger(save_dir=config.save_dir, name=config.run_name)
+        return TensorBoardLogger(
+            save_dir=config.save_dir,
+            name=config.run_name,
+            version=config.version,
+        )
     if config.name == "csv":
-        return CSVLogger(save_dir=config.save_dir, name=config.run_name)
+        if config.version is None:
+            return CSVLogger(save_dir=config.save_dir, name=config.run_name)
+        return CSVLogger(
+            save_dir=config.save_dir,
+            name=config.run_name,
+            version=config.version,
+        )
     raise ValueError("logging.name must be tensorboard or csv.")
 
 

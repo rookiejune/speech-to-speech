@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import signal
 import unittest
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 from anydataset.types import Sample
@@ -127,6 +128,9 @@ class _StreamingDataModule(LightningDataModule):
     def acknowledge_streaming_batch(self, global_step: int) -> None:
         self._loader().acknowledge(global_step)
 
+    def set_streaming_stop_requested(self, requested: Callable[[], bool]) -> None:
+        self._loader().dataset.set_stop_requested(requested)
+
     def streaming_telemetry(
         self,
         *,
@@ -168,6 +172,26 @@ class _AcknowledgedCheckpoint(ModelCheckpoint):
 
 
 class StreamingLightningResumeTest(unittest.TestCase):
+    def test_sigterm_guard_delegates_reentrant_signal_once(self) -> None:
+        callback = StreamingSynthesis()
+        delegate = Mock()
+        with (
+            patch(
+                "speech_to_speech.callback.streaming.signal.getsignal",
+                return_value=delegate,
+            ),
+            patch("speech_to_speech.callback.streaming.signal.signal") as register,
+        ):
+            callback._install_sigterm_guard()
+
+        guard = register.call_args.args[1]
+        delegate.side_effect = guard
+        guard(signal.SIGTERM, None)
+        guard(signal.SIGTERM, None)
+
+        register.assert_called_once_with(signal.SIGTERM, guard)
+        delegate.assert_called_once_with(signal.SIGTERM, None)
+
     def test_telemetry_writes_real_tensorboard_scalars_and_gpu_summary(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -224,9 +248,10 @@ class StreamingLightningResumeTest(unittest.TestCase):
                 _write_seal(root)
                 published = True
 
-            with patch(
-                "speech_to_speech.datamodule.streaming.time.sleep",
-                side_effect=publish,
+            with patch.object(
+                StreamingSnapshotDataset,
+                "_interruptible_sleep",
+                side_effect=lambda: publish(0.0),
             ):
                 _trainer(
                     max_steps=2,

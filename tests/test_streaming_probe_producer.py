@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from pathlib import Path
@@ -38,6 +39,21 @@ class StreamingProbeProducerTest(unittest.TestCase):
             self.assertEqual(
                 target_text.views[TextView.TEXT],
                 "streaming probe generated translation 0",
+            )
+            reference = json.loads(
+                (
+                    status.catalog.snapshots[0].root
+                    / "translation_references.jsonl"
+                )
+                .read_text(encoding="utf-8")
+                .splitlines()[0]
+            )
+            self.assertEqual(
+                reference,
+                {
+                    "sample_index": 0,
+                    "text": "streaming probe dataset translation 0",
+                },
             )
             codes = cast(torch.Tensor, target_audio.views[AudioView.LONGCAT])
             self.assertEqual(tuple(codes.shape), (4, 4))

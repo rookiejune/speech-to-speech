@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import uuid
 from collections.abc import Mapping, Sequence, Sized
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
@@ -22,8 +24,24 @@ from speech_to_speech.datamodule.streaming import (
 )
 
 
-_SNAPSHOT_SCHEMA = "speech-to-speech-stream-snapshot-v1"
+_SNAPSHOT_SCHEMA = "speech-to-speech-stream-snapshot-v2"
 _SEAL_SCHEMA = "speech-to-speech-stream-seal-v1"
+_TRANSLATION_REFERENCE_SCHEMA = "speech-to-speech-translation-references-v1"
+_TRANSLATION_REFERENCE_FILE = "translation_references.jsonl"
+
+
+@dataclass(frozen=True)
+class TranslationReference:
+    """Dataset translation retained for comparison, never as a training label."""
+
+    sample_index: int
+    text: str
+
+    def __post_init__(self) -> None:
+        if type(self.sample_index) is not int or self.sample_index < 0:
+            raise ValueError("translation reference sample_index must be non-negative.")
+        if not isinstance(self.text, str) or not self.text:
+            raise ValueError("translation reference text must be non-empty.")
 
 
 class SnapshotPublisher:
@@ -63,6 +81,7 @@ class SnapshotPublisher:
         *,
         snapshot_id: str,
         sample_indices: Sequence[int],
+        translation_references: Sequence[TranslationReference],
         base_samples: Sequence[Sample],
         codec_samples: Sequence[Sample],
         input_codec_samples: Sequence[Sample] | None = None,
@@ -71,6 +90,9 @@ class SnapshotPublisher:
 
         snapshot_id = _segment(snapshot_id, "snapshot_id")
         indices = _indices(sample_indices, expected=self.expected_samples)
+        references = _translation_references(translation_references, indices=indices)
+        reference_payload = _translation_reference_payload(references)
+        reference_sha256 = hashlib.sha256(reference_payload).hexdigest()
         if len(base_samples) != len(indices) or len(codec_samples) != len(indices):
             raise ValueError("streaming snapshot stores must each match sample_indices.")
         decoupled = self.input_codec != self.codec
@@ -99,6 +121,11 @@ class SnapshotPublisher:
             if existing is not None:
                 if existing.sample_indices != indices:
                     raise ValueError("streaming snapshot id was already published with other indices.")
+                if existing.translation_references_sha256 != reference_sha256:
+                    raise ValueError(
+                        "streaming snapshot id was already published with other "
+                        "translation references."
+                    )
                 _validate_store(existing.root / "base", count=len(indices))
                 if decoupled:
                     _validate_store(existing.root / self.input_codec, count=len(indices))
@@ -140,6 +167,9 @@ class SnapshotPublisher:
                     dataset_id=f"{self.stream_id}-{self.codec}",
                     split=self.split,
                 ).write(codec_samples)
+                (temporary / _TRANSLATION_REFERENCE_FILE).write_bytes(
+                    reference_payload
+                )
                 _validate_store(temporary / "base", count=len(indices))
                 if decoupled:
                     _validate_store(temporary / self.input_codec, count=len(indices))
@@ -156,6 +186,11 @@ class SnapshotPublisher:
                         "snapshot_id": snapshot_id,
                         "sample_indices": list(indices),
                         "sample_count": len(indices),
+                        "translation_references": {
+                            "schema": _TRANSLATION_REFERENCE_SCHEMA,
+                            "file": _TRANSLATION_REFERENCE_FILE,
+                            "sha256": reference_sha256,
+                        },
                     },
                 )
                 if decoupled:
@@ -227,6 +262,38 @@ def _indices(values: Sequence[int], *, expected: int) -> tuple[int, ...]:
     if len(set(result)) != len(result):
         raise ValueError("streaming snapshot sample_indices must be unique.")
     return result
+
+
+def _translation_references(
+    values: Sequence[TranslationReference],
+    *,
+    indices: tuple[int, ...],
+) -> tuple[TranslationReference, ...]:
+    result = tuple(values)
+    if any(not isinstance(value, TranslationReference) for value in result):
+        raise TypeError(
+            "streaming translation_references must contain TranslationReference values."
+        )
+    if tuple(value.sample_index for value in result) != indices:
+        raise ValueError(
+            "streaming translation reference indices must exactly match sample_indices."
+        )
+    return result
+
+
+def _translation_reference_payload(
+    values: Sequence[TranslationReference],
+) -> bytes:
+    lines = (
+        json.dumps(
+            {"sample_index": value.sample_index, "text": value.text},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        for value in values
+    )
+    return ("\n".join(lines) + "\n").encode("utf-8")
 
 
 def _string(value: object, name: str) -> str:

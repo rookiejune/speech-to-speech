@@ -61,6 +61,18 @@ class _GpuRow:
     power_limit_w: float | None
 
 
+@dataclass(frozen=True)
+class GpuTelemetryMark:
+    """Constant-size sampler state used to summarize an overlapping time span."""
+
+    sampled_at_unix: float
+    samples: int
+    sums: tuple[float, ...]
+    counts: tuple[int, ...]
+    gpu_sums: tuple[tuple[str, tuple[float, ...]], ...]
+    gpu_counts: tuple[tuple[str, tuple[int, ...]], ...]
+
+
 class GpuTelemetrySampler:
     """Sample visible GPUs without making the training loop depend on NVML."""
 
@@ -89,6 +101,8 @@ class GpuTelemetrySampler:
         self._latest: dict[str, float] = {}
         self._sums = {field: 0.0 for field in _METRIC_FIELDS}
         self._counts = {field: 0 for field in _METRIC_FIELDS}
+        self._gpu_sums: dict[str, dict[str, float]] = {}
+        self._gpu_counts: dict[str, dict[str, int]] = {}
 
     def start(self) -> None:
         if self._started_at is not None:
@@ -137,6 +151,114 @@ class GpuTelemetrySampler:
         with self._lock:
             return dict(self._latest)
 
+    def mark(self) -> GpuTelemetryMark:
+        """Capture cumulative counters without retaining individual samples."""
+
+        with self._lock:
+            return GpuTelemetryMark(
+                sampled_at_unix=time.time(),
+                samples=self._sample_count,
+                sums=tuple(self._sums[field] for field in _METRIC_FIELDS),
+                counts=tuple(self._counts[field] for field in _METRIC_FIELDS),
+                gpu_sums=tuple(
+                    (
+                        gpu_id,
+                        tuple(values[field] for field in _METRIC_FIELDS),
+                    )
+                    for gpu_id, values in sorted(self._gpu_sums.items())
+                ),
+                gpu_counts=tuple(
+                    (
+                        gpu_id,
+                        tuple(values[field] for field in _METRIC_FIELDS),
+                    )
+                    for gpu_id, values in sorted(self._gpu_counts.items())
+                ),
+            )
+
+    def summary_since(
+        self,
+        mark: GpuTelemetryMark,
+        *,
+        gpu_ids: Iterable[int | str] | None = None,
+    ) -> dict[str, object]:
+        """Return mean GPU metrics collected since ``mark``.
+
+        Cumulative counter deltas make this safe for overlapping producer
+        stages without keeping a multi-month run in memory.
+        """
+
+        if not isinstance(mark, GpuTelemetryMark):
+            raise TypeError("GPU telemetry summary mark must be a GpuTelemetryMark.")
+        selected = None if gpu_ids is None else frozenset(str(value) for value in gpu_ids)
+        with self._lock:
+            if mark.samples > self._sample_count:
+                raise ValueError("GPU telemetry mark is ahead of the sampler state.")
+            means = self._means_since(mark, selected)
+            samples = self._sample_count - mark.samples
+        return {
+            "scope": "time_span",
+            "available": self._available,
+            "reason": self._reason,
+            "gpu_ids": None if selected is None else sorted(selected),
+            "samples": samples,
+            "started_at_unix": mark.sampled_at_unix,
+            "ended_at_unix": time.time(),
+            "duration_seconds": max(0.0, time.time() - mark.sampled_at_unix),
+            **means,
+        }
+
+    def _means_since(
+        self,
+        mark: GpuTelemetryMark,
+        selected: frozenset[str] | None,
+    ) -> dict[str, float]:
+        if selected is None:
+            current_sums = tuple(self._sums[field] for field in _METRIC_FIELDS)
+            current_counts = tuple(self._counts[field] for field in _METRIC_FIELDS)
+            previous_sums = mark.sums
+            previous_counts = mark.counts
+        else:
+            previous_gpu_sums = dict(mark.gpu_sums)
+            previous_gpu_counts = dict(mark.gpu_counts)
+            current_sums = tuple(
+                sum(
+                    self._gpu_sums.get(gpu_id, {}).get(field, 0.0)
+                    for gpu_id in selected
+                )
+                for field in _METRIC_FIELDS
+            )
+            current_counts = tuple(
+                sum(
+                    self._gpu_counts.get(gpu_id, {}).get(field, 0)
+                    for gpu_id in selected
+                )
+                for field in _METRIC_FIELDS
+            )
+            previous_sums = tuple(
+                sum(
+                    previous_gpu_sums.get(gpu_id, (0.0,) * len(_METRIC_FIELDS))[position]
+                    for gpu_id in selected
+                )
+                for position in range(len(_METRIC_FIELDS))
+            )
+            previous_counts = tuple(
+                sum(
+                    previous_gpu_counts.get(gpu_id, (0,) * len(_METRIC_FIELDS))[position]
+                    for gpu_id in selected
+                )
+                for position in range(len(_METRIC_FIELDS))
+            )
+        means: dict[str, float] = {}
+        for position, field in enumerate(_METRIC_FIELDS):
+            count = current_counts[position] - previous_counts[position]
+            total = current_sums[position] - previous_sums[position]
+            if count < 0 or total < 0:
+                raise ValueError("GPU telemetry mark does not belong to this sampler.")
+            if count:
+                means[field] = total / count
+        return means
+
     def summary(self) -> dict[str, object]:
         with self._lock:
             means = {
@@ -148,6 +270,7 @@ class GpuTelemetrySampler:
         started = self._started_at
         ended = self._ended_at
         return {
+            "scope": "current_process",
             "available": self._available,
             "reason": self._reason,
             "path": str(self.path),
@@ -205,6 +328,16 @@ class GpuTelemetrySampler:
                         latest[field].append(value)
                         self._sums[field] += value
                         self._counts[field] += 1
+                        gpu_sums = self._gpu_sums.setdefault(
+                            row.index,
+                            {name: 0.0 for name in _METRIC_FIELDS},
+                        )
+                        gpu_counts = self._gpu_counts.setdefault(
+                            row.index,
+                            {name: 0 for name in _METRIC_FIELDS},
+                        )
+                        gpu_sums[field] += value
+                        gpu_counts[field] += 1
             if self._file is not None:
                 self._file.flush()
             self._latest = {
@@ -284,4 +417,4 @@ def _visible_gpu_indices(value: str | None) -> frozenset[str] | None:
     return None if not indexes else frozenset(str(int(item)) for item in indexes)
 
 
-__all__ = ["GpuTelemetrySampler"]
+__all__ = ["GpuTelemetryMark", "GpuTelemetrySampler"]

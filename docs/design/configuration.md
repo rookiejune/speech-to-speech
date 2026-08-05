@@ -34,7 +34,9 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
   `persistent_workers=false`、关闭 cost batching 与 materialization。它要求 `stream_id`、
   `expected_samples` 和可选的 `producer_factory=module:attribute`；`producer_options` 属于 factory，
   不作为 dataset 配置的隐式参数。`streaming.telemetry` 独立控制 scalar cadence 和后台
-  `nvidia-smi` 采样间隔；间隔设为 `0` 只关闭 GPU 采样，不关闭 loader wait/fetch 计数。
+  `nvidia-smi` 采样间隔；间隔设为 `0` 只关闭 GPU 采样，不关闭 loader wait/fetch/load 计数。
+  正式 streaming experiment 固定 `logging.version=0` 以便跨 auto-resume 追加同一时间线，并使用
+  `callbacks.checkpoint.save_last=link` 避免在共享存储重复复制多 GB checkpoint。
 - `callback/parameter_policy`：写入 `callbacks.parameter_policy`，声明可训练参数组、
   冻结参数组和 `backbone_top_fraction`。这是通用训练 callback 能力，由 experiment 显式选择。
   正式 train 的 loader mix 不再是独立 Hydra group，而是由 train experiment 内联的

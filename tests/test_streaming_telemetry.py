@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +12,7 @@ from unittest.mock import Mock, patch
 from speech_to_speech.callback.gpu import GpuTelemetrySampler
 from speech_to_speech.callback.streaming import StreamingTelemetryCallback
 from speech_to_speech.datamodule.streaming import StreamingTelemetry
-from speech_to_speech.synthesis.telemetry import stage
+from speech_to_speech.synthesis.telemetry import SynthesisTelemetry, stage
 
 
 class GpuTelemetrySamplerTest(unittest.TestCase):
@@ -36,19 +37,31 @@ class GpuTelemetrySamplerTest(unittest.TestCase):
         ):
             path = Path(directory) / "gpu.csv"
             sampler = GpuTelemetrySampler(path, interval_seconds=60.0)
+            mark = sampler.mark()
             sampler.start()
             latest = sampler.latest()
+            interval = sampler.summary_since(mark)
+            gpu_interval = sampler.summary_since(mark, gpu_ids=[5])
             sampler.stop()
             summary = sampler.summary()
+            resumed = GpuTelemetrySampler(path, interval_seconds=60.0)
+            resumed.start()
+            resumed.stop()
             with path.open(encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle))
 
-        self.assertEqual([row["index"] for row in rows], ["5", "6"])
+        self.assertEqual([row["index"] for row in rows], ["5", "6", "5", "6"])
         self.assertEqual(latest["utilization_gpu_percent"], 50.0)
         self.assertEqual(latest["memory_used_mb"], 200.0)
+        self.assertEqual(summary["scope"], "current_process")
         self.assertTrue(summary["available"])
         self.assertEqual(summary["samples"], 1)
         self.assertEqual(summary["utilization_gpu_percent"], 50.0)
+        self.assertEqual(interval["scope"], "time_span")
+        self.assertEqual(interval["samples"], 1)
+        self.assertEqual(interval["utilization_gpu_percent"], 50.0)
+        self.assertEqual(gpu_interval["gpu_ids"], ["5"])
+        self.assertEqual(gpu_interval["utilization_gpu_percent"], 20.0)
 
 
 class StreamingTelemetryCallbackTest(unittest.TestCase):
@@ -144,6 +157,51 @@ class SynthesisStageTelemetryTest(unittest.TestCase):
         self.assertEqual(events[0]["sample_count"], 4)
         self.assertEqual(events[0]["gpu_ids"], [1])
         self.assertEqual(events[1]["elapsed_seconds"], 3.5)
+
+    def test_session_persists_stage_wait_and_gpu_interval_events(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            with SynthesisTelemetry(
+                root,
+                gpu_sample_interval_seconds=0,
+            ) as telemetry:
+                with telemetry.stage(
+                    "translation",
+                    sample_count=2,
+                    device="cuda:1",
+                    gpu_ids=[1],
+                ):
+                    pass
+                with telemetry.wait("target_tts_join", sample_count=2):
+                    pass
+
+            events = [
+                json.loads(line)
+                for line in (root / "producer_telemetry.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            summary = json.loads(
+                (root / "producer_gpu_summary.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(
+            [event["event"] for event in events],
+            [
+                "producer_telemetry_started",
+                "stage_started",
+                "stage_finished",
+                "stage_gpu_summary",
+                "wait_started",
+                "wait_finished",
+                "wait_gpu_summary",
+                "producer_telemetry_finished",
+            ],
+        )
+        self.assertEqual(events[1]["stage"], "translation")
+        self.assertEqual(events[4]["wait"], "target_tts_join")
+        self.assertEqual(events[3]["samples"], 0)
+        self.assertEqual(summary["reason"], "disabled")
 
 
 if __name__ == "__main__":

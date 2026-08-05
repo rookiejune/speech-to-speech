@@ -17,6 +17,11 @@ audio_sequence_layout: flattened
 run_name: ${oc.env:SPEECH_TO_SPEECH_STREAM_RUN,streaming-s2st}
 output_subdir: streaming-s2st/${run_name}
 
+# Keep TensorBoard and streaming_gpu.csv in one append-only directory across
+# auto-resume invocations of the same logical stream run.
+logging:
+  version: 0
+
 loader_plan:
   loaders:
     s2st:
@@ -43,7 +48,15 @@ datamodule:
     expected_samples: ${oc.decode:${oc.env:SPEECH_TO_SPEECH_STREAM_EXPECTED_SAMPLES}}
     producer_factory: speech_to_speech.synthesis.process:controller
     producer_options:
-      command: ${oc.env:SPEECH_TO_SPEECH_STREAM_PRODUCER_COMMAND}
+      command:
+        - ${oc.env:WORKSPACE_ROOT}/jobs/streaming_s2st/producer.sh
+      # A new invocation is an explicit request to continue the immutable
+      # published prefix after a previous process or host failure.
+      retry: true
+      environment:
+        # Empty inherits the trainer visibility.  The production job requires
+        # an explicit producer allocation so independent model cards are visible.
+        CUDA_VISIBLE_DEVICES: ${oc.env:SPEECH_TO_SPEECH_PRODUCER_CUDA_VISIBLE_DEVICES,''}
     telemetry:
       enabled: true
       gpu_sample_interval_seconds: 1.0
@@ -85,6 +98,7 @@ callbacks:
     enabled: false
   checkpoint:
     filename: step-{step:08d}
-    save_last: true
+    # Keep the resume pointer without duplicating multi-GB checkpoints on NAS.
+    save_last: link
     save_top_k: -1
     every_n_train_steps: 1000

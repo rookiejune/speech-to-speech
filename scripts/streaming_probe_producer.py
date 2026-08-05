@@ -32,7 +32,10 @@ from anydataset.types import (
 )
 
 from speech_to_speech.datamodule.streaming import StreamStatus, WorkspaceSnapshotLoader
-from speech_to_speech.synthesis.publisher import SnapshotPublisher
+from speech_to_speech.synthesis.publisher import (
+    SnapshotPublisher,
+    TranslationReference,
+)
 from speech_to_speech.synthesis.telemetry import emit_event, stage
 
 
@@ -123,6 +126,10 @@ def run(
             publisher.publish(
                 snapshot_id=batch.snapshot_id,
                 sample_indices=batch.indices,
+                translation_references=[
+                    TranslationReference(index, _reference_translation(index))
+                    for index in batch.indices
+                ],
                 base_samples=[_sample(index, AudioView.WAVEFORM) for index in batch.indices],
                 codec_samples=[_sample(index, AudioView.LONGCAT) for index in batch.indices],
             )
@@ -222,6 +229,13 @@ def _translation(index: int) -> tuple[str, Lang, str, Lang]:
         f"流式探针生成译文 {pair}",
         Lang.ZH,
     )
+
+
+def _reference_translation(index: int) -> str:
+    pair = index // 2
+    if index % 2 == 0:
+        return f"streaming probe dataset translation {pair}"
+    return f"流式探针数据集译文 {pair}"
 
 
 def _audio(index: int, *, target: bool, view: AudioView) -> object:

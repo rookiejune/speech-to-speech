@@ -91,7 +91,7 @@ class SynthesisSampleCallbackConfig:
 @dataclass
 class CheckpointCallbackConfig:
     filename: str = MISSING
-    save_last: bool = MISSING
+    save_last: Union[bool, str] = MISSING
     save_top_k: int = MISSING
     every_n_train_steps: int = MISSING
 
@@ -217,8 +217,10 @@ def _validate_streaming(config: StagedTrainConfig) -> None:
         )
     if not config.trainer.enable_checkpointing:
         raise ValueError("streaming synthesis requires checkpointing for resume.")
-    if not config.callbacks.checkpoint.save_last:
-        raise ValueError("streaming synthesis requires checkpoint.save_last=true.")
+    if config.callbacks.checkpoint.save_last not in (True, "link"):
+        raise ValueError(
+            "streaming synthesis requires checkpoint.save_last=true or 'link'."
+        )
     if not config.train.auto_resume and config.train.ckpt_path is None:
         raise ValueError(
             "streaming synthesis requires train.auto_resume=true or an explicit "
@@ -360,6 +362,11 @@ def _validate_task_samples(config: StagedTrainConfig) -> None:
 
 
 def _validate_callback_cadences(config: StagedCallbacksConfig) -> None:
+    save_last = config.checkpoint.save_last
+    if not isinstance(save_last, bool) and save_last != "link":
+        raise ValueError(
+            "callbacks.checkpoint.save_last must be a boolean or 'link'."
+        )
     positive_integer(
         config.gradient_probe.every_n_steps,
         "callbacks.gradient_probe.every_n_steps",
