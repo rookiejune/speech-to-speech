@@ -220,7 +220,10 @@ rank zero 同时把可见 GPU 的 utilization、memory 和 power 原始采样追
 时间轴以 CSV/TensorBoard 为准。producer 可用
 `speech_to_speech.synthesis.telemetry.stage()` 输出带 wall-clock timestamp、elapsed、sample count、
 device 与 GPU ids 的 JSON start/finish/failure 事件；这些事件可以与 GPU CSV 对齐。`nvidia-smi`
-不可用时只记录原因，不使训练失败。
+不可用时只记录原因，不使训练失败。stage helper 只观测 producer 显式包裹的调用，不会自动发现
+AS/TT/AT/codec 阶段；本仓库当前提供外部 producer 的生命周期和发布边界，不包含具体模型 DAG。
+训练侧 CSV 也只采样训练进程 `CUDA_VISIBLE_DEVICES` 中的卡。producer 使用独立 GPU 时，应在
+producer 内单独采样并按 stage timestamp 汇总，不能把训练卡的利用率当作 producer 阶段利用率。
 
 ## 输入输出
 
