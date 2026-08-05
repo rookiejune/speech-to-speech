@@ -130,6 +130,9 @@ checkpoint 的收敛和生成音质仍需单独验收。
 
 `SpeechConfig.materialization` 为 prepared workspace 增加 request-scoped read-through 路径。开启时
 必须同时设置 `encode_missing_codes=true`，并让可选的 `codec_view` 与 runtime `AudioView` 完全一致。
+`DatasetName.WMT19_TTS` 继续读取原 `moss_tts` 资源及其 selection；双向边合成边训练使用独立的
+`DatasetName.STREAMING_S2ST`（Hydra: `datamodule/dataset=streaming_s2st`），通过 workspace
+`streaming_s2st` wrapper 读取 waveform 和 ready codec view，并要求 `dataset.filter=null`。
 解析顺序固定为：
 
 1. 先按 workspace root、split、codec view 和 `DatasetConfig.filter` 读取现有 codec store；命中后
@@ -151,6 +154,10 @@ checkpoint 的收敛和生成音质仍需单独验收。
    codec provider 所需的 waveform/file audio，以及 workspace pair schema 所需的 source/target text、
    `TextView.TEXT` 和 `TextMeta.LANG`。frame-code view 使用 anydataset `CodecProvider.encode()`；
    BiCodec 使用 structured `tokenize()`，并支持同一 WMT19 sample 内 source/target 两个 audio reference。
+
+`streaming_s2st` 的 source factory 返回上游 `translation_seed` 对应的双向 waveform dataset。方向
+展开只发生在 seed 层：若 filtered WMT19 有 `N` 个 pair，fallback、后台 codec store 和刷新后的
+训练 dataset 都必须是 `2N`。codec materializer 只编码已有 sample，不交换角色或二次展开成 `4N`。
 
 补产结果保持 workspace codec dataset 的读取格式，但它本身已经是过滤后的 composite store，因此
 ready store 加载时不再二次应用 filter。逻辑请求由 dataset/source root、split、codec、codec view、

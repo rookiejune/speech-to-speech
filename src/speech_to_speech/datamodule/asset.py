@@ -44,6 +44,12 @@ _FRAME_CODEC_VIEWS = frozenset(
     }
 )
 _BUILTIN_CODEC_VIEWS = _FRAME_CODEC_VIEWS | frozenset({AudioView.BICODEC})
+_ASSET_DATASETS = frozenset(
+    {
+        DatasetName.STREAMING_S2ST,
+        DatasetName.WMT19_TTS,
+    }
+)
 
 
 AssetPhase = MaterializationPhase
@@ -137,30 +143,45 @@ class AssetResolution:
 
 @dataclass(frozen=True)
 class WorkspaceWaveformFactory:
+    dataset: DatasetName
     root: Path
     split: str
     filter_policy: str | None
 
     def __call__(self) -> Dataset[Sample]:
-        from zhuyin.datasets.wmt19 import moss_tts
-
         store = self.root / "base"
         if not store.exists():
             raise _WorkspaceSourceMissing(store)
         read_store_manifest(store)
-        try:
-            dataset = (
-                moss_tts.waveform(
-                    root=self.root,
-                    split=self.split,
+        if self.dataset is DatasetName.WMT19_TTS:
+            from zhuyin.datasets.wmt19 import moss_tts
+
+            try:
+                dataset = (
+                    moss_tts.waveform(
+                        root=self.root,
+                        split=self.split,
+                    )
+                    .filter(self.filter_policy)
+                    .load()
                 )
-                .filter(self.filter_policy)
-                .load()
+            except FileNotFoundError as error:
+                if _missing_selection(error):
+                    raise _WorkspaceFilterMissing(self.filter_policy) from error
+                raise
+        elif self.dataset is DatasetName.STREAMING_S2ST:
+            if self.filter_policy is not None:
+                raise ValueError("streaming_s2st waveform assets do not accept a filter.")
+            from zhuyin.datasets.wmt19 import streaming_s2st
+
+            dataset = streaming_s2st.waveform(
+                root=self.root,
+                split=self.split,
+            ).load()
+        else:
+            raise ValueError(
+                f"workspace waveform loading does not support {self.dataset.value!r}."
             )
-        except FileNotFoundError as error:
-            if _missing_selection(error):
-                raise _WorkspaceFilterMissing(self.filter_policy) from error
-            raise
         _materialize_length(dataset)
         return cast(Dataset[Sample], cast(object, dataset))
 
@@ -257,8 +278,11 @@ def resolve_workspace_asset(
 
     if not materialization.enabled:
         raise ValueError("disabled asset materialization must not call its resolver.")
-    if config.name is not DatasetName.WMT19_TTS:
-        raise ValueError("asset materialization currently supports only wmt19_tts.")
+    if config.name not in _ASSET_DATASETS:
+        supported = ", ".join(sorted(name.value for name in _ASSET_DATASETS))
+        raise ValueError(
+            f"asset materialization supports only workspace datasets: {supported}."
+        )
     view = runtime.audio_view
     if materialization.codec_view is not None:
         configured_view = AudioView(materialization.codec_view)
@@ -275,11 +299,10 @@ def resolve_workspace_asset(
             "Extend the provider/backend before materializing another representation."
         )
 
-    from zhuyin.datasets.wmt19 import moss_tts
-
-    source_root = moss_tts.dataset_root(config.root).resolve()
+    source_root = _dataset_root(config.name, config.root).resolve()
     output_root = Path(cast(str, materialization.output_root)).expanduser().resolve()
     existing = _load_codec_dataset(
+        config.name,
         source_root,
         split=config.split,
         view=view,
@@ -290,6 +313,7 @@ def resolve_workspace_asset(
         return AssetResolution(existing)
 
     workspace_source = WorkspaceWaveformFactory(
+        config.name,
         source_root,
         config.split,
         config.filter,
@@ -332,6 +356,7 @@ def resolve_workspace_asset(
         input_id = materialization.input_id or _workspace_input_id(
             source_root / "base",
             fallback,
+            dataset_name=config.name,
             split=config.split,
             filter_policy=config.filter,
         )
@@ -366,7 +391,7 @@ def _request(
     source_factory: str | None,
 ) -> AssetRequest:
     return AssetRequest(
-        dataset=DatasetName.WMT19_TTS.value,
+        dataset=config.name.value,
         source_root=source_root,
         output_root=output_root,
         split=config.split,
@@ -395,6 +420,7 @@ def _source_factory(request: AssetRequest) -> DatasetFactory:
     path = request.source_factory
     if path is None:
         return WorkspaceWaveformFactory(
+            DatasetName(request.dataset),
             request.source_root,
             request.split,
             request.filter_policy,
@@ -418,6 +444,7 @@ def _symbol(path: str) -> SourceFactoryBuilder:
 
 
 def _load_codec_dataset(
+    dataset_name: DatasetName,
     root: Path,
     *,
     split: str,
@@ -425,28 +452,43 @@ def _load_codec_dataset(
     filter_policy: str | None,
     missing_ok: bool,
 ) -> Dataset[Sample] | None:
-    from zhuyin.datasets.wmt19 import moss_tts
-
     store = root / _store_dir(view)
     if not store.exists():
         if missing_ok:
             return None
         raise FileNotFoundError(store)
     read_store_manifest(store)
-    try:
-        dataset = (
-            moss_tts.codec(
-                view.value,
-                root=root,
-                split=split,
+    if dataset_name is DatasetName.WMT19_TTS:
+        from zhuyin.datasets.wmt19 import moss_tts
+
+        try:
+            dataset = (
+                moss_tts.codec(
+                    view.value,
+                    root=root,
+                    split=split,
+                )
+                .filter(filter_policy)
+                .load()
             )
-            .filter(filter_policy)
-            .load()
+        except FileNotFoundError as error:
+            if missing_ok and _missing_selection(error):
+                return None
+            raise
+    elif dataset_name is DatasetName.STREAMING_S2ST:
+        if filter_policy is not None:
+            raise ValueError("streaming_s2st codec assets do not accept a filter.")
+        from zhuyin.datasets.wmt19 import streaming_s2st
+
+        dataset = streaming_s2st.codec(
+            view.value,
+            root=root,
+            split=split,
+        ).load()
+    else:
+        raise ValueError(
+            f"workspace codec loading does not support {dataset_name.value!r}."
         )
-    except FileNotFoundError as error:
-        if missing_ok and _missing_selection(error):
-            return None
-        raise
     _materialize_length(dataset)
     return cast(Dataset[Sample], cast(object, dataset))
 
@@ -478,6 +520,7 @@ def _load_materialized_dataset(
             f"{actual!r} != {expected!r}."
         )
     return _load_codec_dataset(
+        DatasetName(request.dataset),
         request.asset_root,
         split=request.split,
         view=request.codec_view,
@@ -496,6 +539,7 @@ def _workspace_input_id(
     root: Path,
     dataset: Dataset[Sample],
     *,
+    dataset_name: DatasetName,
     split: str,
     filter_policy: str | None,
 ) -> str:
@@ -514,7 +558,20 @@ def _workspace_input_id(
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
-    return f"wmt19-source-{hashlib.sha256(payload).hexdigest()}"
+    prefix = "wmt19" if dataset_name is DatasetName.WMT19_TTS else dataset_name.value
+    return f"{prefix}-source-{hashlib.sha256(payload).hexdigest()}"
+
+
+def _dataset_root(dataset: DatasetName, root: str | None) -> Path:
+    if dataset is DatasetName.WMT19_TTS:
+        from zhuyin.datasets.wmt19 import moss_tts
+
+        return moss_tts.dataset_root(root)
+    if dataset is DatasetName.STREAMING_S2ST:
+        from zhuyin.datasets.wmt19 import streaming_s2st
+
+        return streaming_s2st.dataset_root(root)
+    raise ValueError(f"workspace assets do not support dataset {dataset.value!r}.")
 
 
 def _selection_id(

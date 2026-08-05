@@ -1,0 +1,9 @@
+name: streaming_s2st
+root:
+split: train
+filter:
+split_manifest:
+split_label: train
+speaker:
+toy_samples: 8
+toy_frames: 4

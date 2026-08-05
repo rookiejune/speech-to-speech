@@ -230,6 +230,22 @@ class DataModuleContractTest(unittest.TestCase):
         )
         view.filter.assert_called_once_with(None)
         filtered.load.assert_called_once_with()
+    def test_streaming_s2st_loader_uses_unfiltered_codec_resource(self):
+        loaded, dataset, streaming_s2st, view = _load_streaming_s2st_dataset(
+            DatasetConfig(name=DatasetName.STREAMING_S2ST, filter=None)
+        )
+
+        self.assertIs(loaded, dataset)
+        self.assertEqual(len(loaded), 4)
+        streaming_s2st.codec.assert_called_once_with(
+            "longcat",
+            root=None,
+            split="train",
+        )
+        view.load.assert_called_once_with()
+    def test_streaming_s2st_rejects_wmt19_filter(self):
+        with self.assertRaisesRegex(ValueError, "does not accept a filter"):
+            DatasetConfig(name=DatasetName.STREAMING_S2ST)
     def test_toy_settings_reject_invalid_dimensions(self):
         with self.assertRaisesRegex(ValueError, "divisible"):
             ToyConfig(hidden_size=7, heads=2)

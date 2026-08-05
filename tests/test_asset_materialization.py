@@ -26,7 +26,7 @@ from speech_to_speech.datamodule.config import (
     DataLoaderConfig,
     SpeechConfig,
 )
-from speech_to_speech.datamodule.dataset.speech import DatasetConfig
+from speech_to_speech.datamodule.dataset.speech import DatasetConfig, DatasetName
 from speech_to_speech.datamodule.contract import DatasetRuntime
 
 
@@ -144,6 +144,7 @@ class AssetMaterializationTest(unittest.TestCase):
         self.assertIs(resolution.dataset, existing)
         self.assertIsNone(resolution.job)
         load.assert_called_once_with(
+            DatasetName.WMT19_TTS,
             root.resolve(),
             split="train",
             view=AudioView.BICODEC,
@@ -197,6 +198,7 @@ class AssetMaterializationTest(unittest.TestCase):
         self.assertIsNone(resolution.job)
         moss_tts.dataset_root.assert_called_once_with(str(root))
         load.assert_called_once_with(
+            DatasetName.WMT19_TTS,
             root.resolve(),
             split="train",
             view=AudioView.LONGCAT,
@@ -245,6 +247,7 @@ class AssetMaterializationTest(unittest.TestCase):
             output.resolve() / cast(str, resolution.request_id) / "longcat",
         )
         waveform_factory.assert_called_once_with(
+            DatasetName.WMT19_TTS,
             root.resolve(),
             "train",
             "speech_translation_v1",
@@ -253,6 +256,7 @@ class AssetMaterializationTest(unittest.TestCase):
         input_id.assert_called_once_with(
             root.resolve() / "base",
             fallback,
+            dataset_name=DatasetName.WMT19_TTS,
             split="train",
             filter_policy="speech_translation_v1",
         )
@@ -369,6 +373,7 @@ class AssetMaterializationTest(unittest.TestCase):
                     )
 
         waveform_factory.assert_called_once_with(
+            DatasetName.WMT19_TTS,
             root.resolve(),
             "train",
             "missing-filter",
@@ -412,6 +417,7 @@ class AssetMaterializationTest(unittest.TestCase):
         source_factory.assert_called_once_with(job.request)
         source.assert_called_once_with()
         waveform_factory.assert_called_once_with(
+            DatasetName.WMT19_TTS,
             root.resolve(),
             "train",
             "stream-filter",
@@ -453,6 +459,108 @@ class AssetMaterializationTest(unittest.TestCase):
         self.assertIsNone(resolution.job)
         source_factory.assert_not_called()
         workspace_source.assert_called_once_with()
+
+    def test_streaming_s2st_hit_uses_its_own_codec_resource(self) -> None:
+        existing = _TaggedDataset("streaming-codec", samples=4)
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "streaming"
+            with (
+                _streaming_workspace(root) as streaming_s2st,
+                patch.object(asset, "_load_codec_dataset", return_value=existing) as load,
+            ):
+                resolution = resolve_workspace_asset(
+                    DatasetConfig(
+                        name=DatasetName.STREAMING_S2ST,
+                        root=str(root),
+                        filter=None,
+                    ),
+                    _runtime(),
+                    _materialization(Path(directory) / "output"),
+                )
+
+        self.assertIs(resolution.dataset, existing)
+        self.assertIsNone(resolution.job)
+        streaming_s2st.dataset_root.assert_called_once_with(str(root))
+        load.assert_called_once_with(
+            DatasetName.STREAMING_S2ST,
+            root.resolve(),
+            split="train",
+            view=AudioView.LONGCAT,
+            filter_policy=None,
+            missing_ok=True,
+        )
+
+    def test_streaming_s2st_source_factory_preserves_bidirectional_length(self) -> None:
+        fallback = _TaggedDataset("bidirectional-waveform", samples=4)
+        source = Mock(return_value=fallback)
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "streaming"
+            materialization = _materialization(
+                Path(directory) / "output",
+                source_factory="fixture.streaming_s2st:build",
+                input_id="wmt19-bidirectional-v1",
+            )
+            with (
+                _streaming_workspace(root),
+                patch.object(asset, "_load_codec_dataset", return_value=None),
+                patch.object(asset, "_source_factory", return_value=source),
+                patch.object(asset, "_load_materialized_dataset", return_value=None),
+            ):
+                resolution = resolve_workspace_asset(
+                    DatasetConfig(
+                        name=DatasetName.STREAMING_S2ST,
+                        root=str(root),
+                        filter=None,
+                    ),
+                    _runtime(),
+                    materialization,
+                )
+
+        job = cast(BackgroundAssetJob, resolution.job)
+        self.assertEqual(len(resolution.dataset), 4)
+        self.assertEqual(job.request.dataset, DatasetName.STREAMING_S2ST.value)
+        self.assertIsNone(job.request.filter_policy)
+        self.assertEqual(job.request.input_id, "wmt19-bidirectional-v1")
+        self.assertEqual(job.request.source_factory, "fixture.streaming_s2st:build")
+        source.assert_called_once_with()
+
+    def test_ready_streaming_asset_reopens_with_streaming_codec_resource(self) -> None:
+        ready = _TaggedDataset("ready-bidirectional-codec", samples=4)
+        with TemporaryDirectory() as directory:
+            request = AssetRequest(
+                dataset=DatasetName.STREAMING_S2ST.value,
+                source_root=Path(directory) / "source",
+                output_root=Path(directory) / "output",
+                split="train",
+                codec="longcat",
+                codec_view=AudioView.LONGCAT,
+                filter_policy=None,
+                input_id="wmt19-bidirectional-v1",
+                provider_id="longcat-v1",
+            )
+            output = request.asset_root / "longcat"
+            output.mkdir(parents=True)
+            (output / ".ready").touch()
+            manifest = SimpleNamespace(
+                provenance={
+                    "input_id": request.input_id,
+                    "provider_id": request.provider_id,
+                }
+            )
+            with (
+                _streaming_workspace(request.asset_root) as streaming_s2st,
+                patch.object(asset, "read_store_manifest", return_value=manifest),
+            ):
+                streaming_s2st.codec.return_value.load.return_value = ready
+                loaded = asset._load_materialized_dataset(request, missing_ok=False)
+
+        self.assertIs(loaded, ready)
+        self.assertEqual(len(cast(_TaggedDataset, loaded)), 4)
+        streaming_s2st.codec.assert_called_once_with(
+            "longcat",
+            root=request.asset_root,
+            split="train",
+        )
 
     def test_background_job_finishes_and_loads_ready_dataset(self) -> None:
         fallback = _TaggedDataset("fallback")
@@ -600,6 +708,23 @@ def _workspace(root: Path) -> Iterator[Mock]:
         },
     ):
         yield moss_tts
+
+
+@contextmanager
+def _streaming_workspace(root: Path) -> Iterator[Mock]:
+    streaming_s2st = Mock()
+    streaming_s2st.dataset_root.return_value = root
+    wmt19 = ModuleType("zhuyin.datasets.wmt19")
+    wmt19.__dict__["streaming_s2st"] = streaming_s2st
+    with patch.dict(
+        sys.modules,
+        {
+            "zhuyin": ModuleType("zhuyin"),
+            "zhuyin.datasets": ModuleType("zhuyin.datasets"),
+            "zhuyin.datasets.wmt19": wmt19,
+        },
+    ):
+        yield streaming_s2st
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ from ..sample import AudioContextCostRow, AudioContextSample
 
 class DatasetName(StrEnum):
     QWEN_TTS_SPEAKER = auto()
+    STREAMING_S2ST = auto()
     WMT19_TTS = auto()
     TOY = auto()
 
@@ -65,6 +66,8 @@ class DatasetConfig:
             raise TypeError("dataset filter must be a string or None.")
         if self.filter == "":
             raise ValueError("dataset filter must not be empty.")
+        if self.name is DatasetName.STREAMING_S2ST and self.filter is not None:
+            raise ValueError("streaming_s2st is already materialized and does not accept a filter.")
         if self.split_manifest is not None and not isinstance(
             self.split_manifest,
             str,
@@ -423,6 +426,22 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
             split=config.split,
         ).filter(config.filter)
 
+        return _apply_split_manifest(
+            cast(Dataset[Sample], cast(object, view.load())),
+            config,
+        )
+    if config.name is DatasetName.STREAMING_S2ST:
+        _reject_speaker(config)
+        from zhuyin.datasets.wmt19 import streaming_s2st
+
+        codec_name = (
+            "stable" if runtime.codec_name == "stable_codec" else runtime.codec_name
+        )
+        view = streaming_s2st.codec(
+            codec_name,
+            root=None if config.root is None else Path(config.root).expanduser(),
+            split=config.split,
+        )
         return _apply_split_manifest(
             cast(Dataset[Sample], cast(object, view.load())),
             config,

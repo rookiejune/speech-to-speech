@@ -74,6 +74,10 @@ class ConfigCompositionTest(ConfigTestCase):
         self.assertIsInstance(selected.model.toy, ToyConfig)
         self.assertIs(selected.datamodule.dataset.name, DatasetName.TOY)
 
+        streaming = _overfit("datamodule/dataset=streaming_s2st")
+        self.assertIs(streaming.datamodule.dataset.name, DatasetName.STREAMING_S2ST)
+        self.assertIsNone(streaming.datamodule.dataset.filter)
+
     def test_qwen2_5_omni_text_runtime_uses_text_adapter(self):
         config = _overfit(
             "runtime=qwen2_5_omni_text",

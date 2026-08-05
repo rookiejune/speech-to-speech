@@ -317,6 +317,27 @@ def _load_wmt19_dataset(config: DatasetConfig):
     return loaded, dataset, moss_tts, filtered, view
 
 
+def _load_streaming_s2st_dataset(config: DatasetConfig):
+    dataset = [Mock(), Mock(), Mock(), Mock()]
+    view = Mock()
+    view.load.return_value = dataset
+    streaming_s2st = SimpleNamespace(codec=Mock(return_value=view))
+    wmt19 = ModuleType("zhuyin.datasets.wmt19")
+    wmt19.streaming_s2st = streaming_s2st
+
+    with patch.dict(
+        sys.modules,
+        {
+            "zhuyin": ModuleType("zhuyin"),
+            "zhuyin.datasets": ModuleType("zhuyin.datasets"),
+            "zhuyin.datasets.wmt19": wmt19,
+        },
+    ):
+        loaded = load_dataset(config, _data_runtime())
+
+    return loaded, dataset, streaming_s2st, view
+
+
 def _compose(*overrides: str, config_name: str = "overfit") -> DictConfig:
     root = Path(__file__).parents[1]
     with initialize_config_dir(
