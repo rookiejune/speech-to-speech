@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
 
 import torch
+from anytrain.module.idspace import Layout
 from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
 
@@ -24,6 +25,7 @@ class _PaddedSamples:
     target_ctc: CTCTarget | None
     tasks: list[Task]
     predictions: list[PredictionModality]
+    traces: list[str]
     audio_seconds: Tensor
     generation_prompt_lengths: Tensor
     audio_input_positions: Tensor | None
@@ -137,11 +139,16 @@ def _checked_batch_generation_fields(
     )
 
 
-def _padded_samples(samples: list[ModelSample], pad_token_id: int) -> _PaddedSamples:
+def _padded_samples(
+    samples: list[ModelSample],
+    pad_token_id: int,
+    *,
+    layout: Layout | None = None,
+) -> _PaddedSamples:
     if not samples:
         raise ValueError("ModelBatch requires at least one sample.")
     for sample in samples:
-        _validate_sample(sample, pad_token_id)
+        _validate_sample(sample, pad_token_id, layout=layout)
     return _PaddedSamples(
         input_ids=_pad([sample.input_ids for sample in samples], pad_token_id),
         token_labels=_pad([sample.labels.token_labels for sample in samples], -100),
@@ -156,6 +163,7 @@ def _padded_samples(samples: list[ModelSample], pad_token_id: int) -> _PaddedSam
         ),
         tasks=[sample.request["task"] for sample in samples],
         predictions=[sample.prediction for sample in samples],
+        traces=[sample.trace for sample in samples],
         audio_seconds=_audio_seconds(samples),
         generation_prompt_lengths=_sample_prompt_lengths(samples),
         audio_input_positions=_optional_tensor(
@@ -440,7 +448,12 @@ def _present(values: list[T | None]) -> list[T] | None:
     return present
 
 
-def _validate_sample(sample: ModelSample, pad_token_id: int) -> None:
+def _validate_sample(
+    sample: ModelSample,
+    pad_token_id: int,
+    *,
+    layout: Layout | None,
+) -> None:
     prompt_ids = sample.request["prompt_ids"]
     response_ids = sample.labels.response_ids
     input_ids = torch.cat([prompt_ids, response_ids])
@@ -455,6 +468,8 @@ def _validate_sample(sample: ModelSample, pad_token_id: int) -> None:
         raise ValueError(
             "sample input ids and token labels must be aligned 1D tensors."
         )
+    if layout is not None:
+        _validate_sample_supervised_ids(sample, layout)
     positions = sample.request["audio_input_positions"]
     if positions is not None:
         if positions.dim() != 1:
@@ -513,8 +528,28 @@ def _validate_sample(sample: ModelSample, pad_token_id: int) -> None:
         sample.labels.target_ctc,
         name="target CTC target",
         causal=True,
-        allowed=uses_target_ctc(sample.task, sample.prediction),
+        allowed=uses_target_ctc(
+            sample.task,
+            sample.prediction,
+            trace=sample.trace,
+        ),
     )
+
+
+def _validate_sample_supervised_ids(sample: ModelSample, layout: Layout) -> None:
+    labels = sample.labels.token_labels
+    valid = labels.ne(-100)
+    allowed = torch.zeros_like(valid)
+    modalities = sample.prediction.supervised_modalities()
+    for modality in modalities:
+        start, end = layout.blocks[modality.value]
+        allowed |= labels.ge(start) & labels.lt(end)
+    if bool((valid & ~allowed).any()):
+        names = ", ".join(sorted(modality.value for modality in modalities))
+        raise ValueError(
+            "sample labels contain an id outside the supervised layout blocks: "
+            f"{names}."
+        )
 
 
 def _validate_batch_acoustic(

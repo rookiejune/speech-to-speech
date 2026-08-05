@@ -2,6 +2,11 @@ codec: longcat
 backbone: Qwen/Qwen3-0.6B
 backbone_initialization: pretrained
 audio_tokenizer:
+input_audio:
+  codec:
+  tokenizer:
+  vocab_size:
+  frame_rate:
 acoustic_generator_artifact:
 device: cuda
 dtype: bfloat16

@@ -11,7 +11,7 @@ from torch import Tensor
 
 from ..model.generation import GenerationOutput
 from ..task import PredictionModality
-from .request import prediction_of, validate
+from .request import response_of, validate
 from ..task import Request
 
 
@@ -62,9 +62,13 @@ def generate_rollouts(
 ) -> list[RolloutRow]:
     rows: list[RolloutRow] = []
     for request in requests:
-        prediction = prediction_of(request)
-        if prediction is not PredictionModality.TEXT:
+        response = response_of(request)
+        if response.prediction is not PredictionModality.TEXT:
             raise ValueError("rollout logprobs currently support text prediction only.")
+        if len(response.fields) != 1:
+            raise ValueError(
+                "rollout logprobs currently support single-step text responses only."
+            )
         validate(request, model)  # type: ignore[arg-type]
     if not requests:
         return rows

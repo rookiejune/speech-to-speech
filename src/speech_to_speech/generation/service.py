@@ -12,7 +12,7 @@ from .audio import generate_audio_responses
 from .contract import Result
 from .contract import TokenGenerator
 from .mixed import generate_mixed_responses
-from .request import prediction_of, validate
+from .request import response_of, validate
 
 
 @torch.no_grad()
@@ -26,21 +26,26 @@ def generate_responses(
     do_sample: bool = True,
     use_cache: bool = True,
 ) -> list[Result]:
-    """Generate batched responses grouped by prediction modality."""
+    """Generate batched responses grouped by resolved task response."""
     results: list[Result | None] = [None] * len(requests)
     device = model.backbone.get_input_embeddings().weight.device
-    groups: dict[PredictionModality, list[tuple[int, Request]]] = {}
+    groups: dict[tuple[object, str, PredictionModality], list[tuple[int, Request]]] = {}
     for index, request in enumerate(requests):
         validate(request, model)
-        groups.setdefault(prediction_of(request), []).append((index, request))
+        response = response_of(request)
+        groups.setdefault(
+            (request["task"], response.name, response.prediction),
+            [],
+        ).append((index, request))
 
-    for prediction, group in groups.items():
+    for (_, _, prediction), group in groups.items():
         prompt, prompt_mask, audio_input_positions = _inputs(
             [request for _, request in group],
             model,
             device,
         )
-        if prediction.is_mixed:
+        response = response_of(group[0][1])
+        if prediction.is_mixed or len(response.fields) > 1:
             mixed_results = generate_mixed_responses(
                 [request for _, request in group],
                 model,
@@ -153,6 +158,7 @@ def requests_from_batch(batch: ModelBatch) -> list[Request]:
     requests: list[Request] = []
     prompt_lengths = batch.generation_prompt_lengths
     audio_input_positions = batch.audio_input_positions
+    traces = batch.response_traces
     if prompt_lengths is None:
         raise RuntimeError("model batch generation fields are unavailable.")
     for index, (task, prediction) in enumerate(zip(batch.tasks, batch.predictions)):
@@ -162,6 +168,7 @@ def requests_from_batch(batch: ModelBatch) -> list[Request]:
                 prompt_ids=batch.input_ids[index, :prompt_end],
                 task=task,
                 prediction=prediction,
+                trace=traces[index],
                 audio_input_positions=(
                     None
                     if audio_input_positions is None

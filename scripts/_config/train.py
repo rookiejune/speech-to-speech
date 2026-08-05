@@ -18,7 +18,7 @@ from speech_to_speech.model.acoustic import AcousticType
 from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.runtime import AudioSequenceLayout, Config as RuntimeConfig
 from speech_to_speech.training.parameter_policy import ParameterPolicyConfig
-from speech_to_speech.task import Task
+from speech_to_speech.task import PredictionModality, Task
 
 from speech_to_speech.training.config import (
     FlowModelConfig,
@@ -45,6 +45,7 @@ from .normalization import parse, peft_lora, prepare
 @dataclass
 class ResumableTrainConfig(TrainConfig):
     ckpt_path: Optional[str] = None
+    auto_resume: bool = False
 
 
 @dataclass
@@ -80,6 +81,14 @@ class StagedTaskSampleCallbackConfig:
 
 
 @dataclass
+class SynthesisSampleCallbackConfig:
+    enabled: bool = False
+    every_n_steps: int = 100
+    loader: str = "s2st"
+    indices: list[int] = field(default_factory=list)
+
+
+@dataclass
 class CheckpointCallbackConfig:
     filename: str = MISSING
     save_last: bool = MISSING
@@ -102,6 +111,9 @@ class StagedCallbacksConfig:
     )
     task_sample: StagedTaskSampleCallbackConfig = field(
         default_factory=StagedTaskSampleCallbackConfig
+    )
+    synthesis_sample: SynthesisSampleCallbackConfig = field(
+        default_factory=SynthesisSampleCallbackConfig
     )
     text_retention: TextRetentionCallbackConfig = field(
         default_factory=TextRetentionCallbackConfig
@@ -182,9 +194,100 @@ def train(config: DictConfig) -> StagedTrainConfig:
     _validate_loader_schedule(result)
     _validate_validation(result)
     _validate_task_samples(result)
+    _validate_synthesis_samples(result)
+    _validate_streaming(result)
     _validate_callback_cadences(result.callbacks)
     _validate_gradient_probe(result)
     return result
+
+
+def _validate_streaming(config: StagedTrainConfig) -> None:
+    if not isinstance(config.train.auto_resume, bool):
+        raise TypeError("train.auto_resume must be a boolean.")
+    if not config.datamodule.streaming.enabled:
+        return
+    if config.trainer.max_epochs != 1:
+        raise ValueError(
+            "streaming synthesis requires trainer.max_epochs=1; the one epoch "
+            "continues across checkpoints until the dataset is sealed."
+        )
+    if config.trainer.use_distributed_sampler:
+        raise ValueError(
+            "streaming synthesis requires trainer.use_distributed_sampler=false."
+        )
+    if not config.trainer.enable_checkpointing:
+        raise ValueError("streaming synthesis requires checkpointing for resume.")
+    if not config.callbacks.checkpoint.save_last:
+        raise ValueError("streaming synthesis requires checkpoint.save_last=true.")
+    if not config.train.auto_resume and config.train.ckpt_path is None:
+        raise ValueError(
+            "streaming synthesis requires train.auto_resume=true or an explicit "
+            "train.ckpt_path."
+        )
+    if len(config.loader_plan.loaders) != 1:
+        raise ValueError("streaming synthesis requires exactly one training loader.")
+    loader = next(iter(config.loader_plan.loaders.values()))
+    if loader.is_text:
+        raise ValueError("streaming synthesis requires one speech loader.")
+    active_tasks = {task for task, weight in loader.tasks.items() if weight > 0}
+    if active_tasks != {Task.S2ST}:
+        raise ValueError(
+            "streaming synthesis requires exactly the s2st task so every one of "
+            "the 2N teacher samples contributes one direct translation example."
+        )
+    if loader.prediction_modality is not PredictionModality.PARALLEL:
+        raise ValueError(
+            "streaming s2st requires prediction=parallel so the teacher-generated "
+            "target text and target audio are both backbone labels."
+        )
+    if config.loader_plan.accumulate_grad_batches != 1:
+        raise ValueError(
+            "streaming synthesis initially requires accumulate_grad_batches=1 "
+            "for an unambiguous optimizer-boundary cursor."
+        )
+    if config.validation.enabled:
+        raise ValueError(
+            "streaming synthesis validation must run from a sealed immutable dataset."
+        )
+    if config.callbacks.task_sample.enabled:
+        raise ValueError(
+            "streaming synthesis uses callbacks.synthesis_sample for artifacts; "
+            "task_sample requires fixed samples available at fit start."
+        )
+
+
+def _validate_synthesis_samples(config: StagedTrainConfig) -> None:
+    callback = config.callbacks.synthesis_sample
+    positive_integer(
+        callback.every_n_steps,
+        "callbacks.synthesis_sample.every_n_steps",
+    )
+    if not isinstance(callback.loader, str) or not callback.loader:
+        raise TypeError("callbacks.synthesis_sample.loader must be a non-empty string.")
+    if not callback.enabled:
+        return
+    if not config.datamodule.streaming.enabled:
+        raise ValueError(
+            "callbacks.synthesis_sample requires datamodule.streaming.enabled=true."
+        )
+    if callback.loader not in config.loader_plan.loaders:
+        raise ValueError(
+            "callbacks.synthesis_sample references unknown loader "
+            f"{callback.loader!r}."
+        )
+    if not callback.indices:
+        raise ValueError("enabled synthesis sample logging requires indices.")
+    if any(
+        isinstance(index, bool) or not isinstance(index, int) or index < 0
+        for index in callback.indices
+    ):
+        raise ValueError(
+            "callbacks.synthesis_sample.indices must be non-negative integers."
+        )
+    if config.callbacks.performance.enabled:
+        raise ValueError(
+            "train performance requires callbacks.synthesis_sample.enabled=false."
+        )
 
 
 def _validate_task_samples(config: StagedTrainConfig) -> None:

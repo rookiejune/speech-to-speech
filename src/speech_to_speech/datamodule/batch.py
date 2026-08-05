@@ -7,12 +7,14 @@ from typing import Union
 
 import torch
 from anydataset.types import Modality
+from anytrain.module.idspace import Layout
 from torch import Tensor
 
 from ..task import (
     PredictionModality,
     Request,
     Task,
+    resolve_response,
     uses_source_ctc,
     uses_target_ctc,
 )
@@ -58,10 +60,12 @@ class ModelSample:
         prediction = self.request.get("prediction")
         if not isinstance(prediction, PredictionModality):
             raise TypeError("ModelSample prediction must be a PredictionModality.")
-        if prediction not in self.request["task"].allowed_predictions:
-            raise ValueError(
-                f"{self.request['task'].value} does not allow prediction={prediction.value}."
-            )
+        response = resolve_response(
+            self.request["task"],
+            prediction=prediction,
+            trace=self.request.get("trace"),
+        )
+        self.request["trace"] = response.name
         full = torch.cat([self.request["prompt_ids"], self.labels.response_ids])
         if self.labels.token_labels.shape != full.shape:
             raise ValueError(
@@ -77,6 +81,7 @@ class ModelSample:
         token_labels: Tensor,
         task: Task,
         prediction: PredictionModality,
+        trace: str | None = None,
         acoustic_target: AcousticTarget | None = None,
         source_ctc: CTCTarget | None = None,
         target_ctc: CTCTarget | None = None,
@@ -88,6 +93,11 @@ class ModelSample:
                 prompt_ids=prompt_ids,
                 task=task,
                 prediction=prediction,
+                trace=resolve_response(
+                    task,
+                    prediction=prediction,
+                    trace=trace,
+                ).name,
                 audio_input_positions=audio_input_positions,
             ),
             labels=Labels(
@@ -108,6 +118,7 @@ class ModelSample:
         *,
         task: Task,
         prediction: PredictionModality,
+        trace: str | None = None,
         generation_prompt_length: int | None = None,
         acoustic_target: AcousticTarget | None = None,
         source_ctc: CTCTarget | None = None,
@@ -138,6 +149,7 @@ class ModelSample:
             token_labels=token_labels,
             task=task,
             prediction=prediction,
+            trace=trace,
             acoustic_target=acoustic_target,
             source_ctc=source_ctc,
             target_ctc=target_ctc,
@@ -177,6 +189,13 @@ class ModelSample:
         return prediction
 
     @property
+    def trace(self) -> str:
+        trace = self.request.get("trace")
+        if not isinstance(trace, str) or not trace:
+            raise TypeError("ModelSample trace must be a non-empty string.")
+        return trace
+
+    @property
     def audio_seconds(self) -> float:
         return self.labels.audio_seconds
 
@@ -197,6 +216,7 @@ class ModelBatch:
     tasks: list[Task]
     predictions: list[PredictionModality]
     pad_token_id: int
+    traces: list[str] | None = None
     source_ctc: CTCTarget | None = None
     target_ctc: CTCTarget | None = None
     audio_seconds: Tensor | None = None
@@ -222,6 +242,12 @@ class ModelBatch:
         prediction = _validate_batch_tasks(
             self.tasks,
             self.predictions,
+            batch_size,
+        )
+        self.traces = _resolved_traces(
+            self.tasks,
+            self.predictions,
+            self.traces,
             batch_size,
         )
         fields = _complete_batch_generation_fields(
@@ -258,8 +284,12 @@ class ModelBatch:
             name="target CTC target",
             causal=True,
             allowed=[
-                uses_target_ctc(task, prediction)
-                for task, prediction in zip(self.tasks, self.predictions)
+                uses_target_ctc(task, prediction, trace=trace)
+                for task, prediction, trace in zip(
+                    self.tasks,
+                    self.predictions,
+                    self._traces(),
+                )
             ],
         )
         self._unit_counts = _batch_unit_counts(
@@ -273,14 +303,19 @@ class ModelBatch:
     def prediction_modality(self) -> PredictionModality:
         return self.predictions[0]
 
+    @property
+    def response_traces(self) -> list[str]:
+        return list(self._traces())
+
     @classmethod
     def from_samples(
         cls,
         samples: list[ModelSample],
         *,
         pad_token_id: int,
+        layout: Layout | None = None,
     ) -> ModelBatch:
-        padded = _padded_samples(samples, pad_token_id)
+        padded = _padded_samples(samples, pad_token_id, layout=layout)
         return cls(
             input_ids=padded.input_ids,
             token_labels=padded.token_labels,
@@ -288,6 +323,7 @@ class ModelBatch:
             tasks=padded.tasks,
             predictions=padded.predictions,
             pad_token_id=pad_token_id,
+            traces=padded.traces,
             source_ctc=padded.source_ctc,
             target_ctc=padded.target_ctc,
             audio_seconds=padded.audio_seconds,
@@ -416,6 +452,7 @@ class ModelBatch:
             target_ctc=_ctc_target_row(self.target_ctc, index),
             tasks=[self.tasks[index]],
             predictions=[self.predictions[index]],
+            traces=[self._traces()[index]],
             fields=_BatchGenerationFields(
                 audio_seconds=fields.audio_seconds[index : index + 1],
                 generation_prompt_lengths=fields.generation_prompt_lengths[
@@ -435,6 +472,11 @@ class ModelBatch:
             self.audio_input_positions,
         )
 
+    def _traces(self) -> list[str]:
+        if self.traces is None:
+            raise RuntimeError("ModelBatch traces are unavailable after validation.")
+        return self.traces
+
     def _replace(
         self,
         *,
@@ -446,6 +488,7 @@ class ModelBatch:
         fields: _BatchGenerationFields,
         tasks: list[Task] | None = None,
         predictions: list[PredictionModality] | None = None,
+        traces: list[str] | None = None,
     ) -> ModelBatch:
         result = ModelBatch.__new__(ModelBatch)
         result.input_ids = input_ids
@@ -457,11 +500,12 @@ class ModelBatch:
         result.predictions = (
             list(self.predictions) if predictions is None else predictions
         )
+        result.traces = list(self._traces()) if traces is None else traces
         result.pad_token_id = self.pad_token_id
         result.audio_seconds = fields.audio_seconds
         result.generation_prompt_lengths = fields.generation_prompt_lengths
         result.audio_input_positions = fields.audio_input_positions
-        if tasks is None and predictions is None:
+        if tasks is None and predictions is None and traces is None:
             result._unit_counts = self._unit_counts
             result._input_modalities = self._input_modalities
             result._audio_input_positions_validated = (
@@ -477,6 +521,29 @@ class ModelBatch:
             result._input_modalities = None
             result._audio_input_positions_validated = False
         return result
+
+
+def _resolved_traces(
+    tasks: list[Task],
+    predictions: list[PredictionModality],
+    traces: list[str] | None,
+    batch_size: int,
+) -> list[str]:
+    if traces is not None and len(traces) != batch_size:
+        raise ValueError("ModelBatch traces must provide one value per row.")
+    values = traces if traces is not None else [None] * batch_size
+    resolved: list[str] = []
+    for task, prediction, trace in zip(tasks, predictions, values):
+        if trace is not None and (not isinstance(trace, str) or not trace):
+            raise TypeError("ModelBatch traces must contain non-empty strings.")
+        resolved.append(
+            resolve_response(
+                task,
+                prediction=prediction,
+                trace=trace,
+            ).name
+        )
+    return resolved
 
 
 TrainInput = Union[ModelBatch, RawSpeechBatch]

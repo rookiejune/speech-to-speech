@@ -3,13 +3,19 @@ from __future__ import annotations
 import math
 import multiprocessing
 from collections.abc import Mapping
-from typing import cast
+from typing import Optional, cast
 
 import torch
 from anydataset.types import Sample as RawSample
 
 from .loader.contract import ARFraming, validate_ar_framing
-from ..task import PredictionModality, Task, execution_signature, resolve_prediction
+from ..task import (
+    PredictionModality,
+    SourceLayout,
+    Task,
+    execution_signature,
+    resolve_response,
+)
 from .config import TaskConfig
 from .parse import parse_task_sample, parse_text_sample
 from .contract import DataRuntime, TextRuntime
@@ -35,6 +41,7 @@ class Collator:
         mask_text_ratio: float = 0.5,
         mask_audio_ratio: float = 0.5,
         prediction: PredictionModality | None = None,
+        trace: str | None = None,
         ar_framing: ARFraming = ARFraming.INSTRUCTION,
         tasks: Mapping[Task, TaskConfig] | None = None,
     ) -> None:
@@ -46,7 +53,11 @@ class Collator:
         self.ar_framing = ar_framing
         self.task_configs = tasks
         validate_ar_framing(ar_framing, _positive_tasks(task_weights))
-        self._task_weights = TaskWeights(task_weights, prediction=prediction)
+        self._task_weights = TaskWeights(
+            task_weights,
+            prediction=prediction,
+            trace=trace,
+        )
 
     @property
     def tasks(self) -> list[Task]:
@@ -56,18 +67,30 @@ class Collator:
     def prediction(self) -> PredictionModality | None:
         return self._task_weights.prediction
 
+    @property
+    def trace(self) -> str | None:
+        return self._task_weights.trace
+
     def _task_samples(self, samples: list[RawSample]) -> list[SpeechTaskSample]:
         tasks = self._task_weights.allocate(len(samples))
-        return [
-            parse_task_sample(
-                sample,
+        task_samples: list[SpeechTaskSample] = []
+        for sample, task in zip(samples, tasks):
+            response = resolve_response(
                 task,
-                self.runtime,
-                encode_missing_codes=self.encode_missing_codes,
                 prediction=self.prediction,
+                trace=self.trace,
             )
-            for sample, task in zip(samples, tasks)
-        ]
+            task_samples.append(
+                parse_task_sample(
+                    sample,
+                    task,
+                    self.runtime,
+                    encode_missing_codes=self.encode_missing_codes,
+                    prediction=response.prediction,
+                    trace=response.name,
+                )
+            )
+        return task_samples
 
     def __call__(self, samples: list[RawSample]) -> ModelBatch | RawSpeechBatch:
         task_samples = self._task_samples(samples)
@@ -94,6 +117,7 @@ class Collator:
                 for sample in task_samples
             ],
             pad_token_id=self.runtime.pad_token_id,
+            layout=self.runtime.layout,
         )
 
 
@@ -104,6 +128,7 @@ class TextCollator:
         task_weights: Mapping[Task, float],
         *,
         prediction: PredictionModality | None = None,
+        trace: str | None = None,
         ar_framing: ARFraming = ARFraming.INSTRUCTION,
         tasks: Mapping[Task, TaskConfig] | None = None,
         max_tokens: int | None = None,
@@ -118,7 +143,11 @@ class TextCollator:
         # A budget alone is a useful shorthand; the explicit flag is retained
         # for configs where the batching intent should be visible.
         self.pack_documents = pack_documents or self.max_tokens is not None
-        _validate_text_tasks(_positive_tasks(task_weights), prediction=prediction)
+        _validate_text_tasks(
+            _positive_tasks(task_weights),
+            prediction=prediction,
+            trace=trace,
+        )
         validate_ar_framing(ar_framing, _positive_tasks(task_weights))
         if self.pack_documents:
             if self.max_tokens is None:
@@ -131,7 +160,11 @@ class TextCollator:
                 raise ValueError(
                     "text document packing requires pretraining AR framing."
                 )
-        self._task_weights = TaskWeights(task_weights, prediction=prediction)
+        self._task_weights = TaskWeights(
+            task_weights,
+            prediction=prediction,
+            trace=trace,
+        )
 
     @property
     def tasks(self) -> list[Task]:
@@ -140,6 +173,10 @@ class TextCollator:
     @property
     def prediction(self) -> PredictionModality | None:
         return self._task_weights.prediction
+
+    @property
+    def trace(self) -> str | None:
+        return self._task_weights.trace
 
     def _model_samples(self, samples: list[RawSample]) -> list[ModelSample]:
         tasks = self._task_weights.allocate(len(samples))
@@ -150,6 +187,8 @@ class TextCollator:
                 self.runtime,
                 ar_framing=self.ar_framing,
                 tasks=self.task_configs,
+                prediction=self.prediction,
+                trace=self.trace,
             )
             for sample, task in zip(samples, tasks)
         ]
@@ -162,6 +201,7 @@ class TextCollator:
         return ModelBatch.from_samples(
             model_samples,
             pad_token_id=self.runtime.pad_token_id,
+            layout=self.runtime.layout,
         )
 
 
@@ -175,6 +215,7 @@ class PackedTextCollator(TextCollator):
         *,
         max_tokens: int,
         prediction: PredictionModality | None = None,
+        trace: str | None = None,
         ar_framing: ARFraming = ARFraming.PRETRAINING,
         tasks: Mapping[Task, TaskConfig] | None = None,
     ) -> None:
@@ -182,6 +223,7 @@ class PackedTextCollator(TextCollator):
             runtime,
             task_weights,
             prediction=prediction,
+            trace=trace,
             ar_framing=ar_framing,
             tasks=tasks,
             max_tokens=max_tokens,
@@ -305,16 +347,16 @@ def _validate_text_tasks(
     tasks: list[Task],
     *,
     prediction: PredictionModality | None = None,
+    trace: str | None = None,
 ) -> None:
-    from ..task import resolve_prediction
-
     for task in tasks:
-        if (
-            task.source_modality is not None
-            and task.source_modality is not Task.MT.source_modality
-        ):
+        if task.source_layout not in {SourceLayout.NONE, SourceLayout.TEXT}:
             raise ValueError("text-only task weights must not require audio input.")
-        effective = resolve_prediction(task, prediction)
+        effective = resolve_response(
+            task,
+            prediction=prediction,
+            trace=trace,
+        ).prediction
         if effective is not PredictionModality.TEXT:
             raise ValueError("text-only task weights must use text prediction.")
 
@@ -322,21 +364,21 @@ def _validate_text_tasks(
 def _positive_tasks(values: Mapping[Task, float]) -> list[Task]:
     return [task for task, weight in values.items() if weight > 0]
 
+
 class TaskWeights:
     def __init__(
         self,
         values: Mapping[Task, float],
         *,
         prediction: PredictionModality | None = None,
+        trace: str | None = None,
     ) -> None:
         weights = dict(values)
         positive = [task for task, weight in weights.items() if weight > 0]
-        if prediction is not None:
-            for task in positive:
-                resolve_prediction(task, prediction)
-        _validate_tasks(positive, prediction=prediction)
+        _validate_tasks(positive, prediction=prediction, trace=trace)
         _validate_weights(list(weights.values()))
         self._prediction = prediction
+        self._trace = trace
         self._tasks = tuple(positive)
         self._weights = tuple(
             float(weight) for weight in weights.values() if weight > 0
@@ -354,6 +396,10 @@ class TaskWeights:
     @property
     def prediction(self) -> PredictionModality | None:
         return self._prediction
+
+    @property
+    def trace(self) -> str | None:
+        return self._trace
 
     def allocate(self, batch_size: int) -> list[Task]:
         _validate_batch_size(batch_size)
@@ -373,6 +419,7 @@ class TaskWeights:
             credits = [self._credits[index] for index in range(len(self._tasks))]
         return {
             "prediction": self._prediction,
+            "trace": self._trace,
             "tasks": self._tasks,
             "weights": self._weights,
             "credits": credits,
@@ -382,6 +429,9 @@ class TaskWeights:
         prediction = state["prediction"]
         if prediction is not None and not isinstance(prediction, PredictionModality):
             raise TypeError("pickled task weights prediction is invalid.")
+        trace = state.get("trace")
+        if trace is not None and (not isinstance(trace, str) or not trace):
+            raise TypeError("pickled task weights trace is invalid.")
         tasks = state["tasks"]
         weights = state["weights"]
         credits = state["credits"]
@@ -400,9 +450,14 @@ class TaskWeights:
         if len(tasks) != len(weights) or len(tasks) != len(credits):
             raise ValueError("pickled task weights state lengths must match.")
         self._prediction = prediction
+        self._trace = cast(Optional[str], trace)
         self._tasks = cast(tuple[Task, ...], tasks)
         self._weights = cast(tuple[float, ...], weights)
-        _validate_tasks(list(self._tasks), prediction=self._prediction)
+        _validate_tasks(
+            list(self._tasks),
+            prediction=self._prediction,
+            trace=self._trace,
+        )
         _validate_weights(list(self._weights))
         self._credits = multiprocessing.Array(
             "d",
@@ -417,12 +472,13 @@ def allocate_tasks(
     batch_size: int,
     *,
     prediction: PredictionModality | None = None,
+    trace: str | None = None,
 ) -> list[Task]:
     _validate_batch_size(batch_size)
     if len(tasks) != len(weights):
         raise ValueError("tasks and weights must have the same length.")
     _validate_weights(weights)
-    _validate_tasks(tasks, prediction=prediction)
+    _validate_tasks(tasks, prediction=prediction, trace=trace)
     return _allocate_tasks(tasks, weights, batch_size, [0.0] * len(tasks))
 
 
@@ -457,12 +513,15 @@ def _validate_tasks(
     tasks: list[Task],
     *,
     prediction: PredictionModality | None = None,
+    trace: str | None = None,
 ) -> None:
     if not tasks:
         raise ValueError("task weights must contain at least one task.")
-    signature = execution_signature(tasks[0], prediction=prediction)
+    first = resolve_response(tasks[0], prediction=prediction, trace=trace)
+    signature = execution_signature(tasks[0], prediction=first.prediction)
     for task in tasks:
-        if execution_signature(task, prediction=prediction) != signature:
+        response = resolve_response(task, prediction=prediction, trace=trace)
+        if execution_signature(task, prediction=response.prediction) != signature:
             raise ValueError(
                 "all weighted tasks must use the same execution signature "
                 "(source layout and prediction modality)."

@@ -82,7 +82,7 @@ class ModelCheckpointContractTest(unittest.TestCase):
 
         module.on_save_checkpoint(checkpoint)
 
-        self.assertEqual(checkpoint["speech_to_speech_model_schema"], "v3")
+        self.assertEqual(checkpoint["speech_to_speech_model_schema"], "v4")
         self.assertEqual(
             checkpoint["speech_to_speech_model_contract"],
             contract.checkpoint_payload(),
@@ -90,10 +90,10 @@ class ModelCheckpointContractTest(unittest.TestCase):
         self.assertNotIn("speech_to_speech_audio_sequence_layout", checkpoint)
         module.on_load_checkpoint(checkpoint)
 
-    def test_checkpoint_requires_model_v3_schema_before_other_contracts(self) -> None:
+    def test_checkpoint_requires_model_v4_schema_before_other_contracts(self) -> None:
         module = _module(_contract(1), lora_config=LoraConfig())
 
-        for schema in (None, "v2", 3):
+        for schema in (None, "v2", "v3", 4):
             with self.subTest(schema=schema):
                 checkpoint: dict[str, Any] = {
                     "speech_to_speech_model_contract": "invalid",
@@ -106,10 +106,22 @@ class ModelCheckpointContractTest(unittest.TestCase):
                 ):
                     module.on_load_checkpoint(checkpoint)
 
-    def test_old_v3_checkpoint_without_model_contract_is_rejected(self) -> None:
+    def test_old_v3_checkpoint_is_rejected_before_contract_validation(self) -> None:
         checkpoint = {
             "speech_to_speech_model_schema": "v3",
-            "speech_to_speech_audio_sequence_layout": "semantic",
+            "speech_to_speech_model_contract": "legacy-v3-contract",
+            "speech_to_speech_peft": None,
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "expected 'v4', got 'v3'",
+        ):
+            _module(_contract(1)).on_load_checkpoint(checkpoint)
+
+    def test_v4_checkpoint_without_model_contract_is_rejected(self) -> None:
+        checkpoint = {
+            "speech_to_speech_model_schema": "v4",
             "speech_to_speech_peft": None,
         }
 
@@ -120,7 +132,7 @@ class ModelCheckpointContractTest(unittest.TestCase):
         module = _module(_contract(1))
         checkpoint = _saved_checkpoint(module)
         payload = _model_payload(checkpoint)
-        payload["grammar"] = "s2s-model-v3-contract-v1"
+        payload["grammar"] = "s2s-model-v3-contract-v3"
 
         with self.assertRaisesRegex(
             ValueError,
@@ -251,7 +263,7 @@ class ModelCheckpointContractTest(unittest.TestCase):
             (
                 _contract_runtime(audio_tokenizer_state="audio-v1"),
                 _contract_runtime(audio_tokenizer_state="audio-v2"),
-                "components.runtime.token_space.audio_tokenizer.state_sha256",
+                "components.runtime.token_space.audio_tokenizers.input.state_sha256",
             ),
         )
 
@@ -309,7 +321,7 @@ class ModelCheckpointContractTest(unittest.TestCase):
             self,
             checkpoint_model,
             current_model,
-            "components.runtime.codec.semantic_artifact_sha256",
+            "components.runtime.audio_codecs.output.semantic_artifact_sha256",
         )
 
     def test_real_model_contract_rejects_invalid_semantic_artifact_digest(self) -> None:
@@ -326,7 +338,8 @@ class ModelCheckpointContractTest(unittest.TestCase):
             _component(
                 _token_model(runtime=_GlobalContractRuntime()),
                 "runtime",
-                "codec",
+                "audio_codecs",
+                "output",
             ),
         )
 
@@ -338,6 +351,143 @@ class ModelCheckpointContractTest(unittest.TestCase):
                 "codebook_sizes": [5, 7],
                 "unit_length": 2,
             },
+        )
+
+    def test_coupled_audio_contract_records_shared_resources(self) -> None:
+        model = _token_model()
+        audio_codecs = cast(
+            Mapping[str, object],
+            _component(model, "runtime", "audio_codecs"),
+        )
+        tokenizers = cast(
+            Mapping[str, object],
+            _component(model, "runtime", "token_space", "audio_tokenizers"),
+        )
+        embeddings = cast(
+            Mapping[str, object],
+            _component(model, "interface", "audio_embeddings"),
+        )
+
+        self.assertEqual(audio_codecs["sharing"], "shared")
+        self.assertEqual(tokenizers["sharing"], "shared")
+        self.assertEqual(tokenizers["input"], tokenizers["output"])
+        self.assertEqual(embeddings["sharing"], "shared")
+        self.assertEqual(embeddings["input"], embeddings["output"])
+        self.assertNotIn("tokens.input_audio_embedding.weight", model.state_dict())
+
+        restored = _token_model()
+        incompatible = restored.load_state_dict(model.state_dict(), strict=True)
+        self.assertEqual(incompatible.missing_keys, [])
+        self.assertEqual(incompatible.unexpected_keys, [])
+
+    def test_decoupled_audio_contract_records_glm4_input_and_bicodec_output(
+        self,
+    ) -> None:
+        runtime = _DecoupledContractRuntime()
+        model = _token_model(runtime=runtime)
+        audio_codecs = cast(
+            Mapping[str, object],
+            _component(model, "runtime", "audio_codecs"),
+        )
+        token_space = cast(
+            Mapping[str, object],
+            _component(model, "runtime", "token_space"),
+        )
+        tokenizers = cast(
+            Mapping[str, object],
+            token_space["audio_tokenizers"],
+        )
+        embeddings = cast(
+            Mapping[str, object],
+            _component(model, "interface", "audio_embeddings"),
+        )
+
+        self.assertEqual(audio_codecs["sharing"], "independent")
+        self.assertEqual(
+            audio_codecs["input"],
+            {
+                "name": "glm4",
+                "audio_view": "glm4",
+                "frame_rate": 12.5,
+            },
+        )
+        self.assertEqual(
+            cast(Mapping[str, object], audio_codecs["output"])["name"],
+            "bicodec",
+        )
+        self.assertEqual(
+            token_space["blocks"],
+            {
+                name: list(bounds)
+                for name, bounds in runtime.layout.blocks.items()
+            },
+        )
+        self.assertEqual(tokenizers["sharing"], "independent")
+        self.assertEqual(
+            cast(Mapping[str, object], tokenizers["input"])["vocab_size"],
+            runtime.input_audio_tokenizer.vocab_size,
+        )
+        self.assertEqual(
+            cast(Mapping[str, object], tokenizers["output"])["vocab_size"],
+            runtime.audio_tokenizer.vocab_size,
+        )
+        self.assertEqual(embeddings["sharing"], "independent")
+        self.assertEqual(
+            cast(Mapping[str, object], embeddings["input"])["rows"],
+            runtime.input_audio_tokenizer.vocab_size + 2,
+        )
+        self.assertEqual(
+            cast(Mapping[str, object], embeddings["output"])["rows"],
+            runtime.audio_tokenizer.vocab_size + 3,
+        )
+        self.assertEqual(
+            _component(model, "interface", "input_audio_projection"),
+            {
+                "sharing": "independent",
+                "adapter": {"family": "identity-v1"},
+            },
+        )
+        self.assertIn("tokens.input_audio_embedding.weight", model.state_dict())
+
+    def test_decoupled_audio_state_dict_requires_input_embedding(self) -> None:
+        model = _token_model(runtime=_DecoupledContractRuntime())
+        state = dict(model.state_dict())
+        state.pop("tokens.input_audio_embedding.weight")
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "tokens.input_audio_embedding.weight",
+        ):
+            model.load_state_dict(state, strict=True)
+
+    def test_decoupled_contract_rejects_input_tokenizer_state_mismatch(self) -> None:
+        checkpoint_model = _token_model(
+            runtime=_DecoupledContractRuntime(input_tokenizer_state="glm4-v1")
+        )
+        current_model = _token_model(
+            runtime=_DecoupledContractRuntime(input_tokenizer_state="glm4-v2")
+        )
+
+        _assert_contract_mismatch(
+            self,
+            checkpoint_model,
+            current_model,
+            "components.runtime.token_space.audio_tokenizers.input.state_sha256",
+        )
+
+    def test_decoupled_contract_rejects_input_codec_identity_mismatch(self) -> None:
+        checkpoint_model = _token_model(
+            runtime=_DecoupledContractRuntime(input_codec_name="glm4")
+        )
+        current_model = _token_model(
+            runtime=_DecoupledContractRuntime(input_codec_name="glm4-audio")
+        )
+
+        _assert_contract_mismatch(
+            self,
+            checkpoint_model,
+            current_model,
+            "components.runtime.audio_codecs.input.name",
         )
 
     def test_real_model_contract_rejects_backbone_readout_mismatch(self) -> None:
@@ -984,12 +1134,28 @@ class _ContractRuntime:
         return "fixture-codec"
 
     @property
+    def input_audio_decoupled(self) -> bool:
+        return False
+
+    @property
+    def input_codec_name(self) -> str:
+        return self.codec_name
+
+    @property
     def audio_view(self) -> AudioView:
         return AudioView.LONGCAT
 
     @property
+    def input_audio_view(self) -> AudioView:
+        return self.audio_view
+
+    @property
     def codec_frame_rate(self) -> float:
         return self._codec.frame_rate
+
+    @property
+    def input_codec_frame_rate(self) -> float:
+        return self.codec_frame_rate
 
     @property
     def audio_sequence_layout(self) -> AudioSequenceLayout:
@@ -1018,6 +1184,10 @@ class _ContractRuntime:
         return self._audio_tokenizer
 
     @cached_property
+    def input_audio_tokenizer(self) -> AudioTokenizer:
+        return self.audio_tokenizer
+
+    @cached_property
     def layout(self) -> Layout:
         return self._layout
 
@@ -1040,6 +1210,18 @@ class _ContractRuntime:
     @property
     def mask_token_id(self) -> int:
         return self._mask_token_id
+
+    @property
+    def input_audio_block_name(self) -> str:
+        return Modality.AUDIO.value
+
+    @property
+    def input_boa_token_id(self) -> int:
+        return self.boa_token_id
+
+    @property
+    def input_eoa_token_id(self) -> int:
+        return self.eoa_token_id
 
     @cached_property
     def codec(self) -> CodecBackend:
@@ -1118,6 +1300,10 @@ class _ContractRuntime:
     def codec_audio_range(self) -> tuple[int, int]:
         start, _ = self.audio_head_range
         return start, self.boa_token_id
+
+    @property
+    def input_codec_audio_range(self) -> tuple[int, int]:
+        return self.codec_audio_range
 
     @cached_property
     def audio_generation_allowed_ids(self) -> tuple[int, ...]:
@@ -1212,6 +1398,74 @@ class _GlobalContractRuntime(_ContractRuntime):
     @property
     def structured_full_sequence(self) -> bool:
         return True
+
+
+class _DecoupledContractRuntime(_GlobalContractRuntime):
+    def __init__(
+        self,
+        *,
+        input_codec_name: str = "glm4",
+        input_tokenizer_state: str = "glm4-v1",
+        input_vocab_size: int = 11,
+        input_frame_rate: float = 12.5,
+    ) -> None:
+        super().__init__()
+        self._input_codec_name = input_codec_name
+        self._input_codec_frame_rate = input_frame_rate
+        self._input_audio_tokenizer = _StatefulNativeAudioTokenizer(
+            vocab_size=input_vocab_size,
+            state=input_tokenizer_state,
+        )
+        text_end = len(self._text_tokenizer)
+        input_end = text_end + self._input_audio_tokenizer.vocab_size + 2
+        output_end = input_end + self._audio_tokenizer.vocab_size + 3
+        self._layout = Layout(
+            text=(0, text_end),
+            audio_input=(text_end, input_end),
+            audio=(input_end, output_end),
+        )
+        self._input_boa_token_id = input_end - 2
+        self._input_eoa_token_id = input_end - 1
+        self._boa_token_id = output_end - 3
+        self._eoa_token_id = output_end - 2
+        self._mask_token_id = output_end - 1
+
+    @property
+    def input_audio_decoupled(self) -> bool:
+        return True
+
+    @property
+    def input_codec_name(self) -> str:
+        return self._input_codec_name
+
+    @property
+    def input_audio_view(self) -> AudioView:
+        return AudioView.GLM4
+
+    @property
+    def input_codec_frame_rate(self) -> float:
+        return self._input_codec_frame_rate
+
+    @cached_property
+    def input_audio_tokenizer(self) -> AudioTokenizer:
+        return self._input_audio_tokenizer
+
+    @property
+    def input_audio_block_name(self) -> str:
+        return "audio_input"
+
+    @property
+    def input_boa_token_id(self) -> int:
+        return self._input_boa_token_id
+
+    @property
+    def input_eoa_token_id(self) -> int:
+        return self._input_eoa_token_id
+
+    @property
+    def input_codec_audio_range(self) -> tuple[int, int]:
+        start, _ = self.layout.blocks[self.input_audio_block_name]
+        return start, self.input_boa_token_id
 
 
 def _contract_runtime(

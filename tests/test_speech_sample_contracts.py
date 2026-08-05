@@ -14,13 +14,31 @@ from speech_to_speech.datamodule.loader import ARFraming
 class SpeechSampleContractTest(unittest.TestCase):
     def test_raw_text_is_encoded_at_the_datamodule_boundary(self):
         tokenizer = _Tokenizer(10)
+        audio_tokenizer = NativeAudioTokenizer(vocab_size=8)
+        audio_start = 10
+        boa_token_id = audio_start + audio_tokenizer.vocab_size
         runtime = SimpleNamespace(
+            input_audio_decoupled=False,
+            input_codec_name="longcat",
+            input_audio_view=AudioView.LONGCAT,
+            input_codec_frame_rate=50.0,
             audio_view=AudioView.LONGCAT,
             codec_frame_rate=50.0,
             audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
             acoustic_generator_artifact=None,
             text_tokenizer=tokenizer,
-            audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
+            input_audio_tokenizer=audio_tokenizer,
+            audio_tokenizer=audio_tokenizer,
+            layout=Layout(text=(0, audio_start), audio=(audio_start, boa_token_id + 3)),
+            pad_token_id=0,
+            eos_token_id=1,
+            boa_token_id=boa_token_id,
+            eoa_token_id=boa_token_id + 1,
+            mask_token_id=boa_token_id + 2,
+            input_audio_block_name="audio",
+            input_boa_token_id=boa_token_id,
+            input_eoa_token_id=boa_token_id + 1,
+            input_codec_audio_range=(audio_start, boa_token_id),
         )
         raw = _raw_sample()
 
@@ -417,22 +435,32 @@ class SpeechSampleContractTest(unittest.TestCase):
             codec_name="longcat",
         )
         audio_start = 10
+        boa_token_id = audio_start + tokenizer.vocab_size
         runtime = SimpleNamespace(
+            input_audio_decoupled=False,
+            input_codec_name="longcat",
+            input_audio_view=AudioView.LONGCAT,
+            input_codec_frame_rate=50.0,
             audio_view=AudioView.LONGCAT,
             codec_frame_rate=50.0,
             audio_sequence_layout=AudioSequenceLayout.FLATTENED,
             acoustic_generator_artifact=None,
             text_tokenizer=_ChatTokenizer(10),
+            input_audio_tokenizer=tokenizer,
             audio_tokenizer=tokenizer,
             layout=Layout(
                 text=(0, audio_start),
-                audio=(audio_start, audio_start + tokenizer.vocab_size + 3),
+                audio=(audio_start, boa_token_id + 3),
             ),
             pad_token_id=0,
             eos_token_id=1,
-            boa_token_id=audio_start + tokenizer.vocab_size,
-            eoa_token_id=audio_start + tokenizer.vocab_size + 1,
-            mask_token_id=audio_start + tokenizer.vocab_size + 2,
+            boa_token_id=boa_token_id,
+            eoa_token_id=boa_token_id + 1,
+            mask_token_id=boa_token_id + 2,
+            input_audio_block_name="audio",
+            input_boa_token_id=boa_token_id,
+            input_eoa_token_id=boa_token_id + 1,
+            input_codec_audio_range=(audio_start, boa_token_id),
         )
         raw = _raw_sample()
 

@@ -75,7 +75,7 @@ class ModuleModel(TextEvaluationModel, TokenObjectiveModel, Protocol):
 
 ModelT = TypeVar("ModelT", bound=ModuleModel)
 _MODEL_SCHEMA_KEY = "speech_to_speech_model_schema"
-_MODEL_SCHEMA = "v3"
+_MODEL_SCHEMA = "v4"
 _MODEL_CONTRACT_KEY = "speech_to_speech_model_contract"
 _PEFT_KEY = "speech_to_speech_peft"
 

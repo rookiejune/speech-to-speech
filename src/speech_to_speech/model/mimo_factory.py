@@ -139,6 +139,12 @@ def build_mimo_model(
     )
     if any(not hasattr(runtime, name) for name in required):
         raise TypeError("build_mimo_model expects a runtime with backbone/layout capabilities.")
+    layout_blocks = getattr(runtime.layout, "blocks", None)
+    if isinstance(layout_blocks, Mapping) and "audio_input" in layout_blocks:
+        raise ValueError(
+            "MIMO currently requires one shared audio token space; use the token model "
+            "for decoupled input/output audio tokenizers."
+        )
     options = MimoFactoryConfig() if config is None else config
     if not isinstance(options, MimoFactoryConfig):
         raise TypeError("config must be a MimoFactoryConfig or None.")

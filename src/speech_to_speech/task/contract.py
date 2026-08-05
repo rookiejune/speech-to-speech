@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional, TypedDict
 
 from anydataset.types import Modality
@@ -79,6 +80,177 @@ class SourceLayout(StrEnum):
         return None
 
 
+class FieldRole(StrEnum):
+    """Dataset role bound to one model-visible or supervised task field."""
+
+    SOURCE = auto()
+    TARGET = auto()
+
+
+class ResponseLayout(StrEnum):
+    """How response fields are serialized into the causal token sequence."""
+
+    SEQUENTIAL = auto()
+    BLOCKWISE = auto()
+    INTERLEAVED = auto()
+    MASKED = auto()
+
+
+class TaskObjective(StrEnum):
+    """Training rule applied after a task program is compiled."""
+
+    CAUSAL = auto()
+    RECONSTRUCTION = auto()
+
+
+@dataclass(frozen=True)
+class TaskField:
+    """One typed dataset field referenced by a task program."""
+
+    role: FieldRole
+    modality: Modality
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.role, FieldRole):
+            raise TypeError("task field role must be a FieldRole.")
+        if not isinstance(self.modality, Modality):
+            raise TypeError("task field modality must be a Modality.")
+
+
+@dataclass(frozen=True)
+class ResponseSpec:
+    """One named response trace supported by a task program."""
+
+    name: str
+    fields: tuple[TaskField, ...]
+    prediction: PredictionModality
+    layout: ResponseLayout = ResponseLayout.SEQUENTIAL
+    default_for_prediction: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("response spec name must be a non-empty string.")
+        if not self.fields:
+            raise ValueError("response spec must contain at least one field.")
+        if any(not isinstance(field, TaskField) for field in self.fields):
+            raise TypeError("response spec fields must contain TaskField values.")
+        if not isinstance(self.prediction, PredictionModality):
+            raise TypeError("response spec prediction must be a PredictionModality.")
+        if not isinstance(self.layout, ResponseLayout):
+            raise TypeError("response spec layout must be a ResponseLayout.")
+        if not isinstance(self.default_for_prediction, bool):
+            raise TypeError("response default_for_prediction must be a boolean.")
+        modalities = frozenset(field.modality for field in self.fields)
+        if modalities != self.prediction.supervised_modalities():
+            raise ValueError(
+                "response fields must exactly match the prediction modalities."
+            )
+
+
+@dataclass(frozen=True)
+class TaskProgram:
+    """Declarative input, response-trace, layout, and objective contract."""
+
+    context: tuple[TaskField, ...]
+    responses: tuple[ResponseSpec, ...]
+    default_response: str = "direct"
+    objective: TaskObjective = TaskObjective.CAUSAL
+    supports_pretraining: bool = False
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(field, TaskField) for field in self.context):
+            raise TypeError("task program context must contain TaskField values.")
+        if not self.responses:
+            raise ValueError("task program must provide at least one response.")
+        if any(not isinstance(response, ResponseSpec) for response in self.responses):
+            raise TypeError("task program responses must contain ResponseSpec values.")
+        names = [response.name for response in self.responses]
+        if len(names) != len(set(names)):
+            raise ValueError("task program response names must be unique.")
+        if self.default_response not in names:
+            raise ValueError("task program default response must name a response spec.")
+        if not isinstance(self.objective, TaskObjective):
+            raise TypeError("task program objective must be a TaskObjective.")
+        if not isinstance(self.supports_pretraining, bool):
+            raise TypeError("task program supports_pretraining must be a boolean.")
+        for prediction in self.allowed_predictions:
+            defaults = [
+                response
+                for response in self.responses
+                if response.prediction is prediction
+                and response.default_for_prediction
+            ]
+            if len(defaults) != 1:
+                raise ValueError(
+                    "task program must provide exactly one default response for "
+                    f"prediction={prediction.value}."
+                )
+
+    @property
+    def source_layout(self) -> SourceLayout:
+        modalities = frozenset(field.modality for field in self.context)
+        if not modalities:
+            return SourceLayout.NONE
+        if modalities == {Modality.TEXT}:
+            return SourceLayout.TEXT
+        if modalities == {Modality.AUDIO}:
+            return SourceLayout.AUDIO
+        if modalities == {Modality.TEXT, Modality.AUDIO}:
+            return SourceLayout.TEXT_AUDIO
+        raise ValueError("task program context contains unsupported modalities.")
+
+    @property
+    def default(self) -> ResponseSpec:
+        return self.response(self.default_response)
+
+    @property
+    def allowed_predictions(self) -> frozenset[PredictionModality]:
+        return frozenset(response.prediction for response in self.responses)
+
+    def response(
+        self,
+        name: str | None = None,
+        *,
+        prediction: PredictionModality | None = None,
+    ) -> ResponseSpec:
+        if name is not None:
+            if not isinstance(name, str) or not name:
+                raise ValueError("response trace must be a non-empty string or None.")
+            matches = [response for response in self.responses if response.name == name]
+            if not matches:
+                available = ", ".join(response.name for response in self.responses)
+                raise ValueError(
+                    f"unsupported response trace {name!r}; available: {available}."
+                )
+            response = matches[0]
+            if prediction is not None and response.prediction is not prediction:
+                raise ValueError(
+                    f"response trace {name!r} requires "
+                    f"prediction={response.prediction.value}, got {prediction.value}."
+                )
+            return response
+        if prediction is None:
+            return next(
+                response
+                for response in self.responses
+                if response.name == self.default_response
+            )
+        matches = [
+            response
+            for response in self.responses
+            if response.prediction is prediction and response.default_for_prediction
+        ]
+        if not matches:
+            allowed = ", ".join(
+                sorted(value.value for value in self.allowed_predictions)
+            )
+            raise ValueError(
+                f"task program does not allow prediction={prediction.value}; "
+                f"allowed: {allowed}."
+            )
+        return matches[0]
+
+
 class Request(TypedDict):
     """Task-level tensor request shared by data and generation services."""
 
@@ -86,6 +258,7 @@ class Request(TypedDict):
     task: Task
     audio_input_positions: Tensor | None
     prediction: NotRequired[PredictionModality | None]
+    trace: NotRequired[str]
     semantic_reference_features: NotRequired[Tensor | None]
     semantic_reference_mask: NotRequired[Tensor | None]
     semantic_decode_generator: NotRequired[Generator | None]
@@ -105,19 +278,14 @@ class Task(StrEnum):
     TTS = auto()
 
     @property
+    def program(self) -> TaskProgram:
+        from .program import program_for
+
+        return program_for(self)
+
+    @property
     def source_layout(self) -> SourceLayout:
-        if self is Task.MASKED_AR:
-            return SourceLayout.TEXT_AUDIO
-        if self in {
-            Task.AUDIO_AR,
-            Task.INTERLEAVED_AR,
-            Task.PARALLEL_AR,
-            Task.TEXT_AR,
-        }:
-            return SourceLayout.NONE
-        if self in {Task.ASR, Task.S2ST, Task.S2TT}:
-            return SourceLayout.AUDIO
-        return SourceLayout.TEXT
+        return self.program.source_layout
 
     @property
     def source_modality(self) -> Modality | None:
@@ -132,25 +300,11 @@ class Task(StrEnum):
         ``ModelBatch.prediction_modality`` (resolved via
         ``resolve_prediction``), not this default.
         """
-        if self in {Task.ASR, Task.MT, Task.S2TT, Task.TEXT_AR, Task.T2TT}:
-            return PredictionModality.TEXT
-        if self in {Task.PARALLEL_AR, Task.MASKED_AR}:
-            return PredictionModality.PARALLEL
-        if self is Task.INTERLEAVED_AR:
-            return PredictionModality.INTERLEAVED
-        return PredictionModality.AUDIO
+        return self.program.default.prediction
 
     @property
     def allowed_predictions(self) -> frozenset[PredictionModality]:
-        if self in {Task.T2ST, Task.S2ST}:
-            return frozenset(
-                {PredictionModality.AUDIO, PredictionModality.PARALLEL}
-            )
-        if self is Task.MASKED_AR:
-            return frozenset(
-                {PredictionModality.PARALLEL, PredictionModality.INTERLEAVED}
-            )
-        return frozenset({self.prediction_modality})
+        return self.program.allowed_predictions
 
     @property
     def target_modality(self) -> Modality | None:
@@ -169,7 +323,7 @@ class Task(StrEnum):
 
     @property
     def uses_source_role(self) -> bool:
-        return self in {Task.MT, Task.S2ST, Task.S2TT, Task.T2ST, Task.T2TT}
+        return any(field.role is FieldRole.SOURCE for field in self.program.context)
 
     @property
     def templates(self) -> tuple[str, ...]:
@@ -191,15 +345,24 @@ def resolve_prediction(
 
     ``override`` must be in ``task.allowed_predictions`` when provided.
     """
-    if override is None:
-        return task.prediction_modality
-    if override not in task.allowed_predictions:
-        allowed = ", ".join(sorted(value.value for value in task.allowed_predictions))
-        raise ValueError(
-            f"{task.value} does not allow prediction={override.value}; "
-            f"allowed: {allowed}."
-        )
-    return override
+    return resolve_response(task, prediction=override).prediction
+
+
+def resolve_response(
+    task: Task,
+    *,
+    prediction: PredictionModality | None = None,
+    trace: str | None = None,
+) -> ResponseSpec:
+    """Resolve one concrete response trace for a task invocation."""
+    if not isinstance(task, Task):
+        raise TypeError("response resolution requires a Task.")
+    if prediction is not None and not isinstance(prediction, PredictionModality):
+        raise TypeError("response prediction must be a PredictionModality or None.")
+    try:
+        return task.program.response(trace, prediction=prediction)
+    except ValueError as error:
+        raise ValueError(f"{task.value} {error}") from error
 
 
 def execution_signature(
@@ -222,6 +385,8 @@ def uses_source_ctc(task: Task) -> bool:
 def uses_target_ctc(
     task: Task,
     prediction: PredictionModality | None = None,
+    *,
+    trace: str | None = None,
 ) -> bool:
     """Whether a causal audio response lacks its own transcript as context.
 
@@ -229,17 +394,27 @@ def uses_target_ctc(
     transcript is already the visible source. Mixed text/audio responses also
     expose target text before or alongside audio and are excluded.
     """
-    resolved = resolve_prediction(task, prediction)
-    return resolved is PredictionModality.AUDIO and task is not Task.TTS
+    response = resolve_response(task, prediction=prediction, trace=trace)
+    if response.prediction is not PredictionModality.AUDIO:
+        return False
+    target_text = TaskField(FieldRole.TARGET, Modality.TEXT)
+    return target_text not in task.program.context and target_text not in response.fields
 
 
 __all__ = [
+    "FieldRole",
     "PredictionModality",
     "Request",
+    "ResponseLayout",
+    "ResponseSpec",
     "SourceLayout",
     "Task",
+    "TaskField",
+    "TaskObjective",
+    "TaskProgram",
     "execution_signature",
     "resolve_prediction",
+    "resolve_response",
     "uses_source_ctc",
     "uses_target_ctc",
 ]

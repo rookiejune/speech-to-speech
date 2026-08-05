@@ -1,0 +1,86 @@
+# @package _global_
+defaults:
+  - /runtime: longcat_native
+  - /model: default
+  - /model/acoustic@model.acoustic: none
+  - /datamodule/dataset@datamodule.dataset: streaming_s2st
+  - /callback/parameter_policy@callbacks.parameter_policy: full
+  - /pl_module: sft
+  - /trainer: staged_static_ddp
+  - /logging: tensorboard
+  - _self_
+
+# Every published sample directly supervises the backbone with the generated
+# target text followed by the generated target audio/code sequence.
+audio_sequence_layout: flattened
+
+run_name: ${oc.env:SPEECH_TO_SPEECH_STREAM_RUN,streaming-s2st}
+output_subdir: streaming-s2st/${run_name}
+
+loader_plan:
+  loaders:
+    s2st:
+      weight: 1.0
+      task_weights:
+        s2st: 1.0
+      prediction: parallel
+  accumulate_grad_batches: 1
+  step_mode: weighted_window
+
+datamodule:
+  encode_missing_codes: false
+  dataloader:
+    batch_size: 8
+    num_workers: 0
+    pin_memory: true
+    persistent_workers: false
+    costs:
+      enabled: false
+  streaming:
+    enabled: true
+    root: ${oc.env:SPEECH_TO_SPEECH_STREAM_ROOT}
+    stream_id: ${oc.env:SPEECH_TO_SPEECH_STREAM_ID}
+    expected_samples: ${oc.decode:${oc.env:SPEECH_TO_SPEECH_STREAM_EXPECTED_SAMPLES}}
+    producer_factory: speech_to_speech.synthesis.process:controller
+    producer_options:
+      command: ${oc.env:SPEECH_TO_SPEECH_STREAM_PRODUCER_COMMAND}
+
+pl_module:
+  ctc:
+    source:
+      weight: 1.0
+    target:
+      weight: 0.0
+
+model:
+  lora: null
+
+train:
+  max_steps: -1
+  auto_resume: true
+
+validation:
+  enabled: false
+
+trainer:
+  max_epochs: 1
+  use_distributed_sampler: false
+  enable_checkpointing: true
+
+callbacks:
+  synthesis_sample:
+    enabled: true
+    every_n_steps: 100
+    loader: s2st
+    indices: [0, 1, 2]
+  task_sample:
+    enabled: false
+  text_retention:
+    enabled: false
+  performance:
+    enabled: false
+  checkpoint:
+    filename: step-{step:08d}
+    save_last: true
+    save_top_k: -1
+    every_n_train_steps: 1000

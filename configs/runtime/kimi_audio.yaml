@@ -13,6 +13,11 @@ backbone_module: ""
 backbone_body: base_model
 backbone_supports_cache_position: false
 audio_tokenizer:
+input_audio:
+  codec:
+  tokenizer:
+  vocab_size:
+  frame_rate:
 acoustic_generator_artifact:
 device: cuda
 dtype: bfloat16

@@ -72,7 +72,11 @@ class OnDeviceCodecMaterializer:
             for sample in batch.samples
         ]
         return _move_model_batch(
-            ModelBatch.from_samples(samples, pad_token_id=batch.pad_token_id),
+            ModelBatch.from_samples(
+                samples,
+                pad_token_id=batch.pad_token_id,
+                layout=self.runtime.layout,
+            ),
             device,
         )
 
@@ -94,6 +98,7 @@ class OnDeviceCodecMaterializer:
             target=target,
             task=sample.task,
             prediction=sample.prediction,
+            trace=sample.trace,
             audio_context=audio_context,
         )
 

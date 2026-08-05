@@ -130,12 +130,17 @@ def _bicodec_runtime(audio_sequence_layout: AudioSequenceLayout):
     audio_start = 10
     boa = audio_start + tokenizer.vocab_size
     runtime = SimpleNamespace(
+        input_audio_decoupled=False,
+        input_codec_name="bicodec",
+        input_audio_view=AudioView.BICODEC,
+        input_codec_frame_rate=50.0,
         codec_name="bicodec",
         audio_view=AudioView.BICODEC,
         codec_frame_rate=50.0,
         audio_sequence_layout=audio_sequence_layout,
         acoustic_generator_artifact=None,
         text_tokenizer=_ChatTokenizer(),
+        input_audio_tokenizer=tokenizer,
         audio_tokenizer=tokenizer,
         layout=Layout(text=(0, 10), audio=(audio_start, boa + 3)),
         pad_token_id=0,
@@ -143,6 +148,10 @@ def _bicodec_runtime(audio_sequence_layout: AudioSequenceLayout):
         boa_token_id=boa,
         eoa_token_id=boa + 1,
         mask_token_id=boa + 2,
+        input_audio_block_name="audio",
+        input_boa_token_id=boa,
+        input_eoa_token_id=boa + 1,
+        input_codec_audio_range=(audio_start, boa),
     )
     return runtime
 

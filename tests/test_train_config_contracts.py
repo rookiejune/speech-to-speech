@@ -346,6 +346,49 @@ class TrainConfigContractTest(ConfigTestCase):
                 task_weights={"mt": 1.0, "tts": 1.0},
             )
 
+    def test_s2st_full_cot_trace_flows_from_loader_plan_to_collator(self):
+        from omegaconf import OmegaConf
+
+        from speech_to_speech.datamodule import SampleSplit
+        from speech_to_speech.datamodule.collate import Collator
+        from speech_to_speech.datamodule.loader import LoaderPlanConfig
+        from speech_to_speech.task import FULL_COT
+
+        raw = OmegaConf.create(
+            {
+                "loaders": {
+                    "s2st": {
+                        "weight": 1.0,
+                        "task_weights": {"s2st": 1.0},
+                        "trace": FULL_COT,
+                    }
+                }
+            }
+        )
+        plan = OmegaConf.to_object(
+            OmegaConf.merge(OmegaConf.structured(LoaderPlanConfig), raw)
+        )
+
+        self.assertIsInstance(plan, LoaderPlanConfig)
+        self.assertEqual(plan.loaders["s2st"].trace, FULL_COT)
+        self.assertFalse(plan.loaders["s2st"].is_text)
+
+        config = _train(
+            "experiment=train/staged_joint/stage_3",
+            "+loader_plan.loaders.s2st.trace=full_cot",
+        )
+        datamodule = build_train_datamodule(config, object())
+        collator = datamodule.diagnostic_collator(
+            Task.S2ST,
+            split=SampleSplit.TRAIN,
+            loader_name="s2st",
+        )
+
+        self.assertEqual(config.loader_plan.loaders["s2st"].trace, FULL_COT)
+        self.assertEqual(datamodule.loader_specs["s2st"].trace, FULL_COT)
+        self.assertIsInstance(collator, Collator)
+        self.assertEqual(collator.trace, FULL_COT)
+
     def test_train_datamodule_clones_the_selected_loader_for_validation(self):
         config = _train(
             "experiment=train/staged_joint/stage_1",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from anydataset.types import AudioView
 
@@ -159,6 +159,55 @@ class AssetMaterializationConfig:
 
 
 @dataclass
+class StreamingConfig:
+    """Consume immutable synthesis snapshots as one resumable logical epoch."""
+
+    enabled: bool = False
+    root: Optional[str] = None
+    stream_id: Optional[str] = None
+    expected_samples: Optional[int] = None
+    poll_seconds: float = 30.0
+    status_seconds: float = 60.0
+    producer_factory: Optional[str] = None
+    producer_options: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise TypeError("streaming enabled must be a boolean.")
+        for name in ("root", "stream_id", "producer_factory"):
+            value = getattr(self, name)
+            if value is not None:
+                _non_empty_string(f"streaming {name}", value)
+        if self.expected_samples is not None:
+            _positive_integer("streaming expected_samples", self.expected_samples)
+        for name in ("poll_seconds", "status_seconds"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (float, int)):
+                raise TypeError(f"streaming {name} must be numeric.")
+            if value <= 0:
+                raise ValueError(f"streaming {name} must be positive.")
+            setattr(self, name, float(value))
+        if not isinstance(self.producer_options, dict):
+            raise TypeError("streaming producer_options must be a dictionary.")
+        if self.producer_factory is not None:
+            module, separator, attribute = self.producer_factory.partition(":")
+            if not separator or not module or not attribute:
+                raise ValueError(
+                    "streaming producer_factory must use 'module:attribute' syntax."
+                )
+        elif self.producer_options:
+            raise ValueError(
+                "streaming producer_options require producer_factory."
+            )
+        if not self.enabled:
+            return
+        if self.stream_id is None:
+            raise ValueError("enabled streaming requires stream_id.")
+        if self.expected_samples is None:
+            raise ValueError("enabled streaming requires expected_samples.")
+
+
+@dataclass
 class SpeechConfig:
     codec: str
     dataloader: DataLoaderConfig
@@ -172,6 +221,7 @@ class SpeechConfig:
     materialization: AssetMaterializationConfig = field(
         default_factory=AssetMaterializationConfig
     )
+    streaming: StreamingConfig = field(default_factory=StreamingConfig)
 
     def __post_init__(self) -> None:
         if not isinstance(self.dataloader, DataLoaderConfig):
@@ -184,11 +234,49 @@ class SpeechConfig:
             raise TypeError(
                 "materialization must be an AssetMaterializationConfig."
             )
+        if not isinstance(self.streaming, StreamingConfig):
+            raise TypeError("streaming must be a StreamingConfig.")
         if self.materialization.enabled and not self.encode_missing_codes:
             raise ValueError(
                 "enabled asset materialization requires encode_missing_codes=true "
                 "for the first-epoch waveform fallback."
             )
+        if self.streaming.enabled:
+            if self.dataset.name is not DatasetName.STREAMING_S2ST:
+                raise ValueError(
+                    "enabled streaming requires dataset streaming_s2st."
+                )
+            if self.shape is not DataShape.PAIR:
+                raise ValueError("streaming synthesis requires pair-shaped samples.")
+            if self.dataset.split_manifest is not None:
+                raise ValueError(
+                    "streaming synthesis owns the complete 2N membership and does "
+                    "not accept split_manifest."
+                )
+            if self.dataset.speaker is not None:
+                raise ValueError("streaming synthesis does not accept dataset speaker.")
+            if self.materialization.enabled:
+                raise ValueError(
+                    "streaming synthesis consumption and asset materialization "
+                    "are mutually exclusive."
+                )
+            if self.encode_missing_codes:
+                raise ValueError(
+                    "streaming synthesis snapshots must already contain codec views; "
+                    "encode_missing_codes must be false."
+                )
+            if self.dataloader.num_workers != 0:
+                raise ValueError(
+                    "streaming checkpoint cursors require dataloader num_workers=0."
+                )
+            if self.dataloader.persistent_workers:
+                raise ValueError(
+                    "streaming checkpoint cursors require persistent_workers=false."
+                )
+            if self.dataloader.costs.enabled:
+                raise ValueError(
+                    "streaming snapshot consumption does not support cost batching."
+                )
         if (
             isinstance(self.interleave_audio_frames, bool)
             or not isinstance(self.interleave_audio_frames, int)
@@ -270,6 +358,7 @@ __all__ = [
     "DataLoaderConfig",
     "DataLoaderCostsConfig",
     "SpeechConfig",
+    "StreamingConfig",
     "TaskConfig",
     "task_template_index",
 ]

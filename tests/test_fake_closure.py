@@ -165,6 +165,10 @@ class _Teacher:
 class _Runtime:
     def __init__(self) -> None:
         self.config = SimpleNamespace(audio_view=AudioView.LONGCAT)
+        self.input_audio_decoupled = False
+        self.input_codec_name = "longcat"
+        self.input_audio_view = AudioView.LONGCAT
+        self.input_codec_frame_rate = 50.0
         self.codec_name = "longcat"
         self.audio_view = AudioView.LONGCAT
         self.codec_frame_rate = 50.0
@@ -172,6 +176,7 @@ class _Runtime:
         self.acoustic_generator_artifact = None
         self.text_tokenizer = _TextTokenizer()
         self.audio_tokenizer = NativeAudioTokenizer(vocab_size=8)
+        self.input_audio_tokenizer = self.audio_tokenizer
         self.codec = _Codec()
         self.layout = Layout(text=(0, 32), audio=(32, 43))
         self.flow_matching = _FlowRuntime()
@@ -180,6 +185,10 @@ class _Runtime:
         self.boa_token_id = 40
         self.eoa_token_id = 41
         self.mask_token_id = 42
+        self.input_audio_block_name = "audio"
+        self.input_boa_token_id = self.boa_token_id
+        self.input_eoa_token_id = self.eoa_token_id
+        self.input_codec_audio_range = self.codec_audio_range
 
     @property
     def codec_audio_range(self) -> tuple[int, int]:

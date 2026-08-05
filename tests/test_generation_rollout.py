@@ -14,8 +14,7 @@ from speech_to_speech.generation.rollout import (
     write_rollouts_jsonl,
 )
 from speech_to_speech.model.generation import GenerationOutput
-from speech_to_speech.task import PredictionModality
-from speech_to_speech.task import Task
+from speech_to_speech.task import FULL_COT, PredictionModality, Task
 
 
 class _Runtime:
@@ -113,7 +112,10 @@ class GenerationRolloutTest(unittest.TestCase):
         self.assertEqual(json.loads(lines[0]), rows[0])
 
     def test_generate_rollouts_rejects_non_text_prediction(self):
-        with self.assertRaisesRegex(ValueError, "text prediction only"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "task program does not allow prediction=audio; allowed: text",
+        ):
             generate_rollouts(
                 [
                     {
@@ -121,6 +123,24 @@ class GenerationRolloutTest(unittest.TestCase):
                         "task": Task.T2TT,
                         "audio_input_positions": None,
                         "prediction": PredictionModality.AUDIO,
+                    }
+                ],
+                _RolloutModel(),
+                max_new_tokens=1,
+            )
+
+    def test_generate_rollouts_rejects_multi_step_text_trace(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "single-step text responses only",
+        ):
+            generate_rollouts(
+                [
+                    {
+                        "prompt_ids": torch.tensor([1]),
+                        "task": Task.S2TT,
+                        "trace": FULL_COT,
+                        "audio_input_positions": None,
                     }
                 ],
                 _RolloutModel(),

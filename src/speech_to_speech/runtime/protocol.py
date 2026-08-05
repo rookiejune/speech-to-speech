@@ -18,6 +18,18 @@ from .codec_contract import (
 
 class DataRuntime(Protocol):
     @property
+    def input_audio_decoupled(self) -> bool: ...
+
+    @property
+    def input_codec_name(self) -> str: ...
+
+    @property
+    def input_audio_view(self) -> AudioView: ...
+
+    @property
+    def input_codec_frame_rate(self) -> float: ...
+
+    @property
     def codec_name(self) -> str: ...
 
     @property
@@ -39,6 +51,9 @@ class DataRuntime(Protocol):
     def audio_tokenizer(self) -> AudioTokenizer: ...
 
     @cached_property
+    def input_audio_tokenizer(self) -> AudioTokenizer: ...
+
+    @cached_property
     def layout(self) -> Layout: ...
 
     @cached_property
@@ -55,6 +70,18 @@ class DataRuntime(Protocol):
 
     @property
     def mask_token_id(self) -> int: ...
+
+    @property
+    def input_audio_block_name(self) -> str: ...
+
+    @property
+    def input_boa_token_id(self) -> int: ...
+
+    @property
+    def input_eoa_token_id(self) -> int: ...
+
+    @property
+    def input_codec_audio_range(self) -> tuple[int, int]: ...
 
 
 class GenerationRuntime(DataRuntime, Protocol):

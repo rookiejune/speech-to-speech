@@ -24,7 +24,7 @@ from .sample import (
 from ..runtime import AudioSequenceLayout
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
 from ..audio import AudioCodes
-from ..task import PredictionModality, SourceLayout, Task, resolve_prediction
+from ..task import PredictionModality, SourceLayout, Task, resolve_response
 
 
 def from_frames(
@@ -70,8 +70,8 @@ def from_samples(
 
 def parse_sample(sample: types.Sample, runtime: DataRuntime) -> SpeechPair:
     return SpeechPair(
-        _parse_role(sample, types.Role.SOURCE, runtime),
-        _parse_role(sample, types.Role.TARGET, runtime),
+        _parse_role(sample, types.Role.SOURCE, runtime, input_audio=True),
+        _parse_role(sample, types.Role.TARGET, runtime, input_audio=False),
     )
 
 
@@ -82,8 +82,14 @@ def parse_task_sample(
     *,
     encode_missing_codes: bool = False,
     prediction: PredictionModality | None = None,
+    trace: str | None = None,
 ) -> SpeechTaskSample:
-    prediction = resolve_prediction(task, prediction)
+    response = resolve_response(task, prediction=prediction, trace=trace)
+    prediction = response.prediction
+    if task.source_layout is SourceLayout.TEXT_AUDIO and runtime.input_audio_decoupled:
+        raise ValueError(
+            "MASKED_AR does not support different input and output audio tokenizers."
+        )
     source = None
     if task.source_layout is SourceLayout.TEXT_AUDIO:
         source = _parse_task_item(
@@ -92,6 +98,7 @@ def parse_task_sample(
             types.Modality.AUDIO,
             runtime,
             encode_missing_codes=encode_missing_codes,
+            input_audio=True,
         )
     elif task.source_modality is not None:
         source_role = types.Role.SOURCE if task.uses_source_role else types.Role.TARGET
@@ -101,6 +108,7 @@ def parse_task_sample(
             task.source_modality,
             runtime,
             encode_missing_codes=encode_missing_codes,
+            input_audio=task.source_modality is types.Modality.AUDIO,
         )
     target_modality = task.target_modality
     if target_modality is None:
@@ -120,6 +128,7 @@ def parse_task_sample(
             target_modality,
             runtime,
             encode_missing_codes=encode_missing_codes,
+            input_audio=False,
         )
     audio_context = _parse_audio_context(
         sample,
@@ -131,6 +140,7 @@ def parse_task_sample(
         target=target,
         task=task,
         prediction=prediction,
+        trace=response.name,
         audio_context=audio_context,
     )
 
@@ -150,6 +160,7 @@ def _parse_audio_context(
         types.Modality.AUDIO,
         runtime,
         encode_missing_codes=encode_missing_codes,
+        input_audio=False,
     )
     if isinstance(context, Text):
         raise AssertionError("audio context parser returned text.")
@@ -174,11 +185,15 @@ def _parse_audio_item(
 def parse_audio_codes(
     codes: object,
     runtime: DataRuntime,
+    *,
+    input_audio: bool = False,
 ) -> AudioCodes:
-    parsed = _split_audio_codes(codes, runtime.audio_view)
+    view = runtime.input_audio_view if input_audio else runtime.audio_view
+    parsed = _split_audio_codes(codes, view)
     if (
-        runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED
-        and runtime.audio_view is not types.AudioView.BICODEC
+        _uses_output_audio_contract(runtime, input_audio=input_audio)
+        and runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED
+        and view is not types.AudioView.BICODEC
     ):
         if not isinstance(codes, Tensor):
             raise ValueError("frame codec views must contain a Tensor.")
@@ -193,13 +208,15 @@ def speech_from_codes(
     language: Language,
     duration_seconds: float | None,
     runtime: DataRuntime,
+    input_audio: bool = False,
 ) -> Speech:
-    parsed = parse_audio_codes(codes, runtime)
+    parsed = parse_audio_codes(codes, runtime, input_audio=input_audio)
     semantic_codes = parsed.semantic_codes
     if semantic_codes is None:
         raise ValueError("prepared speech codes require semantic_codes.")
     if (
-        runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED
+        _uses_output_audio_contract(runtime, input_audio=input_audio)
+        and runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED
         and runtime.audio_view is types.AudioView.BICODEC
     ):
         tokenizer = runtime.audio_tokenizer
@@ -209,9 +226,13 @@ def speech_from_codes(
             raise ValueError("BiCodec full sequence requires global codes.")
         audio_token_ids = tokenizer.encode_full(parsed)
     else:
-        audio_token_ids = _as_tensor(runtime.audio_tokenizer.encode(semantic_codes))
+        tokenizer = (
+            runtime.input_audio_tokenizer if input_audio else runtime.audio_tokenizer
+        )
+        audio_token_ids = _as_tensor(tokenizer.encode(semantic_codes))
+    tokenizer = runtime.input_audio_tokenizer if input_audio else runtime.audio_tokenizer
     audio_token_spans = _as_tensor(
-        runtime.audio_tokenizer.frame_spans(audio_token_ids)
+        tokenizer.frame_spans(audio_token_ids)
     ).to(dtype=torch.long)
     return Speech(
         semantic_codes=semantic_codes,
@@ -223,6 +244,14 @@ def speech_from_codes(
         duration_seconds=duration_seconds,
         global_codes=parsed.global_codes,
     )
+
+
+def _uses_output_audio_contract(
+    runtime: DataRuntime,
+    *,
+    input_audio: bool,
+) -> bool:
+    return not input_audio or not runtime.input_audio_decoupled
 
 
 def _split_audio_codes(
@@ -271,7 +300,11 @@ def _split_audio_codes(
             semantic_codes=_frame_codes(codes[:, :1]),
             acoustic_codes=_frame_codes(codes[:, 1:]),
         )
-    if view in {types.AudioView.STABLE, types.AudioView.UNICODEC}:
+    if view in {
+        types.AudioView.GLM4,
+        types.AudioView.STABLE,
+        types.AudioView.UNICODEC,
+    }:
         return AudioCodes(semantic_codes=_frame_codes(codes))
     raise ValueError(f"unsupported codec audio view: {view.value}")
 
@@ -280,20 +313,25 @@ def _parse_role(
     sample: types.Sample,
     role: types.Role,
     runtime: DataRuntime,
+    *,
+    input_audio: bool,
 ) -> Speech:
     audio_item = _audio_item(sample, role)
     text_item = _text_item(sample, role)
-    return _speech(audio_item, text_item, runtime)
+    return _speech(audio_item, text_item, runtime, input_audio=input_audio)
 
 
 def _speech(
     audio_item: types.AudioItem,
     text_item: types.TextItem,
     runtime: DataRuntime,
+    *,
+    input_audio: bool,
 ) -> Speech:
     text = text_item.views[types.TextView.TEXT]
-    codes = audio_item.views[runtime.audio_view]
-    semantic_codes = _split_audio_codes(codes, runtime.audio_view).semantic_codes
+    view = runtime.input_audio_view if input_audio else runtime.audio_view
+    codes = audio_item.views[view]
+    semantic_codes = _split_audio_codes(codes, view).semantic_codes
     if semantic_codes is None:
         raise ValueError("prepared speech codes require semantic_codes.")
     return speech_from_codes(
@@ -303,9 +341,14 @@ def _speech(
         duration_seconds=from_frames(
             audio_item.meta.get(types.AudioMeta.DURATION),
             frames=semantic_codes.size(0),
-            frame_rate=runtime.codec_frame_rate,
+            frame_rate=(
+                runtime.input_codec_frame_rate
+                if input_audio
+                else runtime.codec_frame_rate
+            ),
         ),
         runtime=runtime,
+        input_audio=input_audio,
     )
 
 
@@ -362,6 +405,7 @@ def _parse_task_item(
     runtime: DataRuntime,
     *,
     encode_missing_codes: bool,
+    input_audio: bool,
 ) -> Speech | Text | RawSpeech:
     if modality is types.Modality.TEXT:
         return _parse_text_role(sample, role, runtime)
@@ -369,11 +413,22 @@ def _parse_task_item(
         raise ValueError(f"unsupported speech task modality: {modality.value}")
     audio_item = _audio_item(sample, role)
     text_item = _text_item(sample, role)
-    if runtime.audio_view in audio_item.views:
-        return _speech(audio_item, text_item, runtime)
+    view = runtime.input_audio_view if input_audio else runtime.audio_view
+    if view in audio_item.views:
+        return _speech(
+            audio_item,
+            text_item,
+            runtime,
+            input_audio=input_audio,
+        )
+    if input_audio and runtime.input_audio_decoupled and encode_missing_codes:
+        raise ValueError(
+            "decoupled input audio cannot use the output codec waveform fallback; "
+            f"materialize the {view.value!r} input view before training."
+        )
     if not encode_missing_codes:
         raise ValueError(
-            f"{role.value} audio sample is missing {runtime.audio_view.value!r} codec "
+            f"{role.value} audio sample is missing {view.value!r} codec "
             "codes; materialize codec views before training or enable explicit "
             "waveform fallback."
         )

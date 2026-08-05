@@ -11,6 +11,7 @@ from .chat import (
     AudioPart,
     ChatCompletion,
     ChatRequest,
+    ChatTraceStep,
     CodecCodesPart,
     Message,
     TextPart,
@@ -26,7 +27,12 @@ from .mimo import (
 )
 from .rollout import RolloutRow, generate_rollouts, write_rollouts_jsonl
 from .evaluation import TextProbe, TextProbeResult, evaluate_text
-from .text import decode_response_text, decode_text_ids, response_text_ids
+from .text import (
+    decode_response_text,
+    decode_response_text_steps,
+    decode_text_ids,
+    response_text_ids,
+)
 from ..mimo import MimoGenerationStep
 from ..model.generation import AcousticGeneration
 from ..task import Request
@@ -38,6 +44,7 @@ __all__ = [
     "AudioPart",
     "ChatCompletion",
     "ChatRequest",
+    "ChatTraceStep",
     "CodecCodesPart",
     "Message",
     "MimoGenerationModel",
@@ -52,6 +59,7 @@ __all__ = [
     "TextProbeResult",
     "create",
     "decode_response_text",
+    "decode_response_text_steps",
     "decode_text_ids",
     "decode_generated_audio",
     "decode_generated_bicodec_full",

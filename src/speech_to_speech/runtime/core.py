@@ -36,7 +36,12 @@ from .codec_contract import (
     supports_global,
     supports_structured,
 )
-from .config import AudioSequenceLayout, Config, validate_sequence_layout_config
+from .config import (
+    AudioSequenceLayout,
+    Config,
+    codec_audio_view,
+    validate_sequence_layout_config,
+)
 from .tokenizer_factory import (
     audio_tokenizer,
     text_special_id,
@@ -63,12 +68,45 @@ class Runtime:
         return self.config.codec
 
     @property
+    def output_codec_name(self) -> str:
+        return self.codec_name
+
+    @property
+    def input_audio_decoupled(self) -> bool:
+        return self.config.input_audio.codec is not None
+
+    @property
+    def input_codec_name(self) -> str:
+        return self.config.input_audio.codec or self.codec_name
+
+    @property
     def audio_view(self) -> AudioView:
         return self.config.audio_view
 
     @property
+    def output_audio_view(self) -> AudioView:
+        return self.audio_view
+
+    @property
+    def input_audio_view(self) -> AudioView:
+        return codec_audio_view(self.input_codec_name)
+
+    @property
     def codec_frame_rate(self) -> float:
         return validated_codec_frame_rate(self.codec)
+
+    @property
+    def output_codec_frame_rate(self) -> float:
+        return self.codec_frame_rate
+
+    @property
+    def input_codec_frame_rate(self) -> float:
+        configured = self.config.input_audio.frame_rate
+        if configured is not None:
+            return float(configured)
+        if self.input_codec_name == self.codec_name:
+            return self.codec_frame_rate
+        raise RuntimeError("input audio frame rate was not configured.")
 
     @property
     def acoustic_generator_artifact(self) -> str | None:
@@ -221,9 +259,43 @@ class Runtime:
         )
 
     @cached_property
+    def output_audio_tokenizer(self) -> AudioTokenizer:
+        return self.audio_tokenizer
+
+    @cached_property
+    def input_audio_tokenizer(self) -> AudioTokenizer:
+        config = self.config.input_audio
+        if config.codec is None:
+            return self.audio_tokenizer
+        if config.tokenizer is not None:
+            tokenizer = cast(
+                AudioTokenizer,
+                cast(object, audio_tokenizer(config.tokenizer)),
+            )
+            if config.vocab_size is not None and tokenizer.vocab_size != config.vocab_size:
+                raise ValueError(
+                    "runtime.input_audio tokenizer vocabulary does not match "
+                    "vocab_size."
+                )
+            return tokenizer
+        if config.vocab_size is not None:
+            return NativeAudioTokenizer(vocab_size=config.vocab_size)
+        if config.codec == self.codec_name:
+            return self.audio_tokenizer
+        raise RuntimeError("input audio tokenizer metadata was not configured.")
+
+    @cached_property
     def layout(self) -> Layout:
         text_vocab_size = text_tokenizer_vocab_size(self.text_tokenizer)
         audio_vocab_size = self.audio_tokenizer.vocab_size + 3
+        if self.input_audio_decoupled:
+            input_audio_vocab_size = self.input_audio_tokenizer.vocab_size + 2
+            input_end = text_vocab_size + input_audio_vocab_size
+            return Layout(
+                text=(0, text_vocab_size),
+                audio_input=(text_vocab_size, input_end),
+                audio=(input_end, input_end + audio_vocab_size),
+            )
         return Layout(
             text=(0, text_vocab_size),
             audio=(text_vocab_size, text_vocab_size + audio_vocab_size),
@@ -256,7 +328,8 @@ class Runtime:
 
     @property
     def boa_token_id(self) -> int:
-        return text_tokenizer_vocab_size(self.text_tokenizer) + self.audio_tokenizer.vocab_size
+        start, _ = self.layout.blocks[Modality.AUDIO.value]
+        return start + self.audio_tokenizer.vocab_size
 
     @property
     def eoa_token_id(self) -> int:
@@ -267,6 +340,23 @@ class Runtime:
         return self.boa_token_id + 2
 
     @property
+    def input_audio_block_name(self) -> str:
+        return "audio_input" if self.input_audio_decoupled else Modality.AUDIO.value
+
+    @property
+    def input_boa_token_id(self) -> int:
+        if not self.input_audio_decoupled:
+            return self.boa_token_id
+        start, _ = self.layout.blocks[self.input_audio_block_name]
+        return start + self.input_audio_tokenizer.vocab_size
+
+    @property
+    def input_eoa_token_id(self) -> int:
+        if not self.input_audio_decoupled:
+            return self.eoa_token_id
+        return self.input_boa_token_id + 1
+
+    @property
     def audio_head_range(self) -> tuple[int, int]:
         return self.layout.blocks[Modality.AUDIO.value]
 
@@ -274,6 +364,13 @@ class Runtime:
     def codec_audio_range(self) -> tuple[int, int]:
         start, _ = self.audio_head_range
         return start, self.boa_token_id
+
+    @property
+    def input_codec_audio_range(self) -> tuple[int, int]:
+        if not self.input_audio_decoupled:
+            return self.codec_audio_range
+        start, _ = self.layout.blocks[self.input_audio_block_name]
+        return start, self.input_boa_token_id
 
     @cached_property
     def audio_generation_allowed_ids(self) -> tuple[int, ...]:

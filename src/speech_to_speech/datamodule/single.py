@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from anydataset import types
 
-from ..task import PredictionModality, SourceLayout, Task, resolve_prediction
+from ..task import PredictionModality, SourceLayout, Task, resolve_response
 from .batch import (
     ModelBatch,
     ModelSample,
@@ -32,19 +32,6 @@ from .sample import (
     Text,
 )
 
-_SINGLE_TASKS = frozenset(
-    {
-        Task.ASR,
-        Task.AUDIO_AR,
-        Task.INTERLEAVED_AR,
-        Task.MASKED_AR,
-        Task.PARALLEL_AR,
-        Task.TEXT_AR,
-        Task.TTS,
-    }
-)
-
-
 class SingleCollator:
     def __init__(
         self,
@@ -56,6 +43,7 @@ class SingleCollator:
         mask_text_ratio: float = 0.5,
         mask_audio_ratio: float = 0.5,
         prediction: PredictionModality | None = None,
+        trace: str | None = None,
         ar_framing: ARFraming = ARFraming.INSTRUCTION,
         tasks: Mapping[Task, TaskConfig] | None = None,
     ) -> None:
@@ -69,7 +57,11 @@ class SingleCollator:
         active_tasks = _positive_tasks(task_weights)
         _validate_single_tasks(active_tasks)
         validate_ar_framing(ar_framing, active_tasks)
-        self._task_weights = TaskWeights(task_weights, prediction=prediction)
+        self._task_weights = TaskWeights(
+            task_weights,
+            prediction=prediction,
+            trace=trace,
+        )
 
     @property
     def tasks(self) -> list[Task]:
@@ -78,6 +70,10 @@ class SingleCollator:
     @property
     def prediction(self) -> PredictionModality | None:
         return self._task_weights.prediction
+
+    @property
+    def trace(self) -> str | None:
+        return self._task_weights.trace
 
     def _items(self, samples: list[types.Sample]) -> list[SpeechTaskSample]:
         tasks = self._task_weights.allocate(len(samples))
@@ -88,6 +84,7 @@ class SingleCollator:
                 self.runtime,
                 encode_missing_codes=self.encode_missing_codes,
                 prediction=self.prediction,
+                trace=self.trace,
             )
             for sample, task in zip(samples, tasks)
         ]
@@ -117,6 +114,7 @@ class SingleCollator:
                 for item in items
             ],
             pad_token_id=self.runtime.pad_token_id,
+            layout=self.runtime.layout,
         )
 
 
@@ -149,12 +147,14 @@ def build_single_sample(
     mask_text_ratio: float = 0.5,
     mask_audio_ratio: float = 0.5,
     prediction: PredictionModality | None = None,
+    trace: str | None = None,
     ar_framing: ARFraming = ARFraming.INSTRUCTION,
     tasks: Mapping[Task, TaskConfig] | None = None,
 ) -> ModelSample:
     _validate_single_tasks([task])
     validate_ar_framing(ar_framing, [task])
-    prediction = resolve_prediction(task, prediction)
+    response = resolve_response(task, prediction=prediction, trace=trace)
+    prediction = response.prediction
     if task is Task.MASKED_AR:
         return build_masked_sample(
             utterance,
@@ -165,6 +165,8 @@ def build_single_sample(
                 task,
                 runtime,
                 tasks=tasks,
+                prediction=prediction,
+                trace=response.name,
             ),
             prediction=prediction,
             interleave_audio_frames=interleave_audio_frames,
@@ -196,6 +198,8 @@ def build_single_sample(
                 task,
                 runtime,
                 tasks=tasks,
+                prediction=prediction,
+                trace=response.name,
             ),
             prediction=prediction,
             interleave_audio_frames=interleave_audio_frames,
@@ -205,6 +209,8 @@ def build_single_sample(
         task,
         runtime,
         tasks=tasks,
+        prediction=prediction,
+        trace=response.name,
     )
     return build_speech_sample(
         utterance,
@@ -213,6 +219,7 @@ def build_single_sample(
         runtime,
         prompt=prompt,
         prediction=prediction,
+        trace=response.name,
     )
 
 
@@ -223,9 +230,11 @@ def _build_item(
     *,
     encode_missing_codes: bool,
     prediction: PredictionModality | None,
+    trace: str | None,
 ) -> SpeechTaskSample:
     _validate_single_tasks([task])
-    prediction = resolve_prediction(task, prediction)
+    response = resolve_response(task, prediction=prediction, trace=trace)
+    prediction = response.prediction
     audio_item, text_item = _single_items(sample)
     text = Text(
         text_token_ids=token_ids(
@@ -243,6 +252,7 @@ def _build_item(
             target=text,
             task=task,
             prediction=prediction,
+            trace=response.name,
         )
     utterance = _utterance(
         sample,
@@ -264,6 +274,7 @@ def _build_item(
         text,
         task,
         prediction=prediction,
+        trace=response.name,
         audio_context=audio_context,
     )
 
@@ -300,6 +311,7 @@ def _task_sample(
     task: Task,
     *,
     prediction: PredictionModality,
+    trace: str,
     audio_context: Speech | RawSpeech | None = None,
 ) -> SpeechTaskSample:
     source = None
@@ -318,6 +330,7 @@ def _task_sample(
         target=target,
         task=task,
         prediction=prediction,
+        trace=trace,
         audio_context=audio_context,
     )
 
@@ -355,7 +368,7 @@ def _language(text_item: types.TextItem):
 
 def _validate_single_tasks(tasks: list[Task]) -> None:
     for task in tasks:
-        if task not in _SINGLE_TASKS:
+        if task.uses_source_role:
             raise ValueError(f"{task.value} is not supported by the single data path.")
 
 

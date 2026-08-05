@@ -279,6 +279,10 @@ def parameter_group(name: str) -> ParameterGroup:
         return ParameterGroup.SEMANTIC_AUDIO_EMBEDDING
     if name.startswith("tokens.audio_projection."):
         return ParameterGroup.SEMANTIC_AUDIO_ADAPTER
+    if name.startswith(
+        ("tokens.input_audio_embedding.", "tokens.input_audio_projection.")
+    ):
+        return ParameterGroup.AUDIO_INPUT_ADAPTER
     if name.startswith("source_audio_encoder."):
         return ParameterGroup.AUDIO_INPUT_ADAPTER
     if name.startswith("tokens.audio_head."):

@@ -2,6 +2,7 @@ from .backbone import BackboneInitialization, BackboneType
 from .config import (
     AudioSequenceLayout,
     Config,
+    InputAudioConfig,
     config_for_local_rank,
     migrate_config_fields,
 )
@@ -12,6 +13,7 @@ __all__ = [
     "BackboneInitialization",
     "BackboneType",
     "Config",
+    "InputAudioConfig",
     "Runtime",
     "config_for_local_rank",
     "migrate_config_fields",

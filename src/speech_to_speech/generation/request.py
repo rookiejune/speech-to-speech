@@ -6,18 +6,27 @@ from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
-from ..task import PredictionModality, Request, Task
+from ..task import PredictionModality, Request, ResponseSpec, Task, resolve_response
 from .audio import has_semantic_decode_options, validate_audio_request
 from .contract import TokenGenerator
 
 
 def prediction_of(request: Request) -> PredictionModality:
+    return response_of(request).prediction
+
+
+def response_of(request: Request) -> ResponseSpec:
     prediction = request.get("prediction")
-    if prediction is None:
-        return request["task"].prediction_modality
-    if not isinstance(prediction, PredictionModality):
+    if prediction is not None and not isinstance(prediction, PredictionModality):
         raise TypeError("generation request prediction must be a PredictionModality.")
-    return prediction
+    trace = request.get("trace")
+    if trace is not None and (not isinstance(trace, str) or not trace):
+        raise TypeError("generation request trace must be a non-empty string.")
+    return resolve_response(
+        request["task"],
+        prediction=prediction,
+        trace=trace,
+    )
 
 
 def validate(request: Request, model: TokenGenerator) -> None:
@@ -29,11 +38,7 @@ def validate(request: Request, model: TokenGenerator) -> None:
     task = request["task"]
     if not isinstance(task, Task):
         raise TypeError("generation request task must be a Task.")
-    prediction = prediction_of(request)
-    if prediction not in task.allowed_predictions:
-        raise ValueError(
-            f"{task.value} does not allow prediction={prediction.value}."
-        )
+    prediction = response_of(request).prediction
     prompt = _integer_tensor(request["prompt_ids"], "prompt ids", dimensions=1)
     if prompt.numel() == 0:
         raise ValueError("generation prompt must contain at least one token.")
@@ -59,7 +64,11 @@ def validate(request: Request, model: TokenGenerator) -> None:
             raise ValueError("audio input positions must be valid prompt positions.")
         if positions.numel() != torch.unique(positions).numel():
             raise ValueError("audio input positions must not repeat positions.")
-        codec_start, codec_end = model.runtime.codec_audio_range
+        codec_start, codec_end = getattr(
+            model.runtime,
+            "input_codec_audio_range",
+            model.runtime.codec_audio_range,
+        )
         selected = prompt.index_select(0, positions.to(device=prompt.device))
         if bool((selected < codec_start).any()) or bool(
             (selected >= codec_end).any()

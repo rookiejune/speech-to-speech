@@ -238,7 +238,14 @@ class _EntryConfig(Protocol):
 
 def validate_training(config: _EntryConfig) -> None:
     non_negative_integer(config.train.seed, "train.seed")
-    positive_integer(config.train.max_steps, "train.max_steps")
+    if config.datamodule.streaming.enabled:
+        if config.train.max_steps != -1:
+            raise ValueError(
+                "streaming synthesis requires train.max_steps=-1 so only the "
+                "sealed logical epoch can stop training."
+            )
+    else:
+        positive_integer(config.train.max_steps, "train.max_steps")
     positive_integer(
         config.trainer.log_every_n_steps,
         "trainer.log_every_n_steps",

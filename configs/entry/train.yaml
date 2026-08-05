@@ -24,6 +24,15 @@ datamodule:
     commit_samples:
     write_workers: 1
     write_prefetch:
+  streaming:
+    enabled: false
+    root:
+    stream_id:
+    expected_samples:
+    poll_seconds: 30.0
+    status_seconds: 60.0
+    producer_factory:
+    producer_options: {}
   dataloader:
     batch_size: 8
     num_workers: 4
@@ -76,6 +85,7 @@ train:
   seed: 0
   max_steps: 1000000
   ckpt_path:
+  auto_resume: false
 
 validation:
   enabled: false
@@ -87,6 +97,11 @@ validation:
   sanity_steps: -1
 
 callbacks:
+  synthesis_sample:
+    enabled: false
+    every_n_steps: 100
+    loader: s2st
+    indices: []
   task_sample:
     enabled: false
     every_n_steps: 10000

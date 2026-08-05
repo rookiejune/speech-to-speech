@@ -9,8 +9,8 @@ from anydataset.types import Modality
 from torch import Tensor
 from transformers.cache_utils import Cache
 
-from ..task import PredictionModality, Task
-from .request import prediction_of
+from ..task import PredictionModality, ResponseSpec
+from .request import response_of
 from .audio import decode_token_audio_results
 from .contract import TokenGenerator
 from ..task import Request
@@ -46,6 +46,7 @@ class _MixedLoopState:
     positions: Tensor | None
     length: int
     states: Tensor
+    step_indices: Tensor
     active_mask: Tensor
     past: Cache | None = None
     audio_head_past: object | None = None
@@ -73,9 +74,10 @@ def generate_mixed_responses(
     do_sample: bool,
     use_cache: bool,
 ) -> list[Result]:
-    prediction = _validate_mixed_batch(requests)
-    if prediction is None:
+    response = _validate_mixed_batch(requests)
+    if response is None:
         return []
+    prediction = response.prediction
     device = prompt.device
     tokens = _token_sets(model, device)
     state = _initial_state(
@@ -83,6 +85,7 @@ def generate_mixed_responses(
         prompt_mask,
         audio_input_positions,
         max_new_tokens,
+        response=response,
         pad_token_id=tokens.pad_id,
     )
 
@@ -106,6 +109,7 @@ def generate_mixed_responses(
             state,
             next_ids,
             prediction=prediction,
+            response=response,
             tokens=tokens,
             use_cache=use_cache,
         )
@@ -120,15 +124,17 @@ def generate_mixed_responses(
 
 def _validate_mixed_batch(
     requests: Sequence[Request],
-) -> PredictionModality | None:
+) -> ResponseSpec | None:
     if not requests:
         return None
-    prediction = prediction_of(requests[0])
-    if not prediction.is_mixed:
-        raise ValueError("mixed generation requires PARALLEL or INTERLEAVED prediction.")
-    if any(prediction_of(request) is not prediction for request in requests):
-        raise ValueError("mixed generation batch must share prediction modality.")
-    return prediction
+    response = response_of(requests[0])
+    if not response.prediction.is_mixed and len(response.fields) < 2:
+        raise ValueError(
+            "program generation requires a mixed or multi-step response."
+        )
+    if any(response_of(request) != response for request in requests):
+        raise ValueError("program generation batch must share one response spec.")
+    return response
 
 
 def _token_sets(model: TokenGenerator, device: torch.device) -> _TokenSets:
@@ -168,8 +174,11 @@ def _initial_state(
     audio_input_positions: Tensor | None,
     max_new_tokens: int,
     *,
+    response: ResponseSpec,
     pad_token_id: int,
 ) -> _MixedLoopState:
+    if response.fields[0].modality is not Modality.TEXT:
+        raise ValueError("multi-step generation must currently start with text.")
     capacity = prompt.size(1) + max_new_tokens
     generated = prompt.new_full((prompt.size(0), capacity), pad_token_id)
     generated[:, : prompt.size(1)] = prompt
@@ -185,6 +194,11 @@ def _initial_state(
             (prompt.size(0),),
             _State.TEXT.value,
             dtype=torch.int8,
+            device=prompt.device,
+        ),
+        step_indices=torch.zeros(
+            prompt.size(0),
+            dtype=torch.long,
             device=prompt.device,
         ),
         active_mask=torch.ones(prompt.size(0), dtype=torch.bool, device=prompt.device),
@@ -243,9 +257,9 @@ def _mixed_next_ids(
     audio_rows = states.eq(_State.AUDIO.value)
     sampled_rows = text_rows | audio_rows
     text_mask = (
-        tokens.parallel_text_mask
-        if prediction is PredictionModality.PARALLEL
-        else tokens.interleaved_text_mask
+        tokens.interleaved_text_mask
+        if prediction is PredictionModality.INTERLEAVED
+        else tokens.parallel_text_mask
     )
     row_logits = logits[sampled_rows]
     allowed = torch.where(
@@ -273,24 +287,32 @@ def _mixed_next_ids(
 
 def _next_states(
     states: Tensor,
+    step_indices: Tensor,
     next_ids: Tensor,
     prediction: PredictionModality,
+    response: ResponseSpec,
     tokens: _TokenSets,
-) -> Tensor:
+) -> tuple[Tensor, Tensor]:
     text_rows = states.eq(_State.TEXT.value)
     audio_rows = states.eq(_State.AUDIO.value)
     next_states = states.clone()
     next_states.masked_fill_(states.eq(_State.FORCE_BOA.value), _State.AUDIO.value)
     if prediction is PredictionModality.PARALLEL:
-        next_states.masked_fill_(
+        return _advance_response_steps(
+            next_states,
+            step_indices,
             text_rows & next_ids.eq(tokens.eos_id),
-            _State.FORCE_BOA.value,
-        )
-        next_states.masked_fill_(
             audio_rows & next_ids.eq(tokens.eoa_id),
-            _State.DONE.value,
+            response,
         )
-        return next_states
+    if prediction is PredictionModality.TEXT:
+        return _advance_response_steps(
+            next_states,
+            step_indices,
+            text_rows & next_ids.eq(tokens.eos_id),
+            torch.zeros_like(audio_rows),
+            response,
+        )
     next_states.masked_fill_(
         text_rows & next_ids.eq(tokens.eos_id),
         _State.DONE.value,
@@ -303,7 +325,37 @@ def _next_states(
         audio_rows & next_ids.eq(tokens.eoa_id),
         _State.TEXT.value,
     )
-    return next_states
+    return next_states, step_indices
+
+
+def _advance_response_steps(
+    states: Tensor,
+    step_indices: Tensor,
+    text_done: Tensor,
+    audio_done: Tensor,
+    response: ResponseSpec,
+) -> tuple[Tensor, Tensor]:
+    completed = text_done | audio_done
+    next_indices = step_indices + completed.to(dtype=step_indices.dtype)
+    finished = completed & next_indices.ge(len(response.fields))
+    states.masked_fill_(finished, _State.DONE.value)
+    continuing = completed & ~finished
+    field_states = states.new_tensor(
+        [
+            (
+                _State.TEXT.value
+                if field.modality is Modality.TEXT
+                else _State.FORCE_BOA.value
+            )
+            for field in response.fields
+        ]
+    )
+    selected = field_states.index_select(
+        0,
+        next_indices.clamp_max(len(response.fields) - 1),
+    )
+    states = torch.where(continuing, selected, states)
+    return states, next_indices
 
 
 def _advance_loop(
@@ -311,6 +363,7 @@ def _advance_loop(
     next_ids: Tensor,
     *,
     prediction: PredictionModality,
+    response: ResponseSpec,
     tokens: _TokenSets,
     use_cache: bool,
 ) -> None:
@@ -318,7 +371,14 @@ def _advance_loop(
     next_ids = torch.where(emitted, next_ids, tokens.pad_id)
     state.generated[:, state.length] = next_ids
     state.attention[:, state.length] = emitted
-    state.states = _next_states(state.states, next_ids, prediction, tokens)
+    state.states, state.step_indices = _next_states(
+        state.states,
+        state.step_indices,
+        next_ids,
+        prediction,
+        response,
+        tokens,
+    )
     state.active_mask = state.states.ne(_State.DONE.value)
     state.length += 1
     if use_cache:
@@ -373,8 +433,4 @@ def _top_p(logits: Tensor, top_p: float) -> Tensor:
     return result
 
 
-def supports_mixed(task: Task) -> bool:
-    return task.prediction_modality.is_mixed
-
-
-__all__ = ["generate_mixed_responses", "supports_mixed"]
+__all__ = ["generate_mixed_responses"]

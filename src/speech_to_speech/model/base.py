@@ -115,7 +115,7 @@ class Model(nn.Module):
             factory.frame_span_lookup(self.runtime).to(device=backbone_weight.device),
             persistent=False,
         )
-        semantic_audio_dim = self.tokens.semantic_audio_embedding.embedding_dim
+        semantic_audio_dim = self.tokens.input_audio_embedding_dim
         self.source_audio_encoder = factory.audio_input_adapter(
             self.config,
             semantic_audio_dim,
@@ -479,7 +479,7 @@ class Model(nn.Module):
         _validate_audio_input_positions(
             input_ids,
             audio_input_positions,
-            self.runtime.codec_audio_range,
+            _input_codec_audio_range(self.runtime),
         )
         return modalities, True
 
@@ -689,7 +689,7 @@ class Model(nn.Module):
                 _validate_audio_input_positions(
                     input_ids,
                     audio_input_positions,
-                    self.runtime.codec_audio_range,
+                    _input_codec_audio_range(self.runtime),
                 )
             override_mask = _audio_override_mask(input_ids, audio_input_positions)
         output = self.tokens.embed(
@@ -719,12 +719,19 @@ class Model(nn.Module):
         valid = positions.ge(0)
         safe_positions = positions.clamp(0, input_ids.size(1) - 1)
         selected_ids = input_ids.gather(1, safe_positions)
-        audio_start, _ = self.layout.blocks["audio"]
+        block_name = getattr(self.runtime, "input_audio_block_name", "audio")
+        audio_start, _ = self.layout.blocks[block_name]
+        input_embedding = self.tokens.input_audio_embedding
+        rows = (
+            self.tokens.semantic_audio_embedding.num_embeddings
+            if input_embedding is None
+            else input_embedding.num_embeddings
+        )
         local_ids = (selected_ids - audio_start).clamp(
             0,
-            self.tokens.semantic_audio_embedding.num_embeddings - 1,
+            rows - 1,
         )
-        features = self.tokens.audio_rows(local_ids)
+        features = self.tokens.input_audio_rows(local_ids)
         adapter = self.source_audio_encoder
         if adapter is None:
             raise RuntimeError("audio input adapter is unavailable.")
@@ -750,6 +757,13 @@ def _audio_override_mask(
     rows = rows.expand_as(safe_positions)
     override[rows[valid], safe_positions[valid]] = True
     return override
+
+
+def _input_codec_audio_range(runtime: TokenModelRuntime) -> tuple[int, int]:
+    value = getattr(runtime, "input_codec_audio_range", None)
+    if value is None:
+        return runtime.codec_audio_range
+    return value
 
 
 def _validate_audio_input_positions(

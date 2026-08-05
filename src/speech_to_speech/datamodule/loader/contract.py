@@ -8,7 +8,7 @@ from typing import Optional
 from anydataset.types import Modality
 
 from ..._compat import StrEnum, auto
-from ...task import PredictionModality, Task
+from ...task import PredictionModality, Task, resolve_response
 
 
 class LoaderStepMode(StrEnum):
@@ -28,6 +28,7 @@ class LoaderConfig:
     weight: float
     task_weights: dict[str, float]
     prediction: Optional[str] = None
+    trace: Optional[str] = None
     ar_framing: str = ARFraming.INSTRUCTION.value
 
     def __post_init__(self) -> None:
@@ -45,6 +46,11 @@ class LoaderConfig:
                     "loader plan prediction must be a string or None."
                 )
             PredictionModality(self.prediction)
+        if self.trace is not None:
+            if not isinstance(self.trace, str):
+                raise TypeError("loader plan trace must be a string or None.")
+            if not self.trace:
+                raise ValueError("loader plan trace must not be empty.")
         if not isinstance(self.ar_framing, str):
             raise TypeError("loader plan ar_framing must be a string.")
         try:
@@ -55,6 +61,13 @@ class LoaderConfig:
             ) from error
         self.ar_framing = framing.value
         validate_ar_framing(framing, self.tasks)
+        for task, weight in self.tasks.items():
+            if weight > 0:
+                resolve_response(
+                    task,
+                    prediction=self.prediction_modality,
+                    trace=self.trace,
+                )
         self.is_text
 
     @property
@@ -73,12 +86,14 @@ class LoaderConfig:
 
     @property
     def is_text(self) -> bool:
-        from ...task import resolve_prediction
-
         active = [task for task, weight in self.tasks.items() if weight > 0]
         text = [
             task.source_modality is not Modality.AUDIO
-            and resolve_prediction(task, self.prediction_modality)
+            and resolve_response(
+                task,
+                prediction=self.prediction_modality,
+                trace=self.trace,
+            ).prediction
             is PredictionModality.TEXT
             for task in active
         ]
@@ -199,7 +214,7 @@ def validate_ar_framing(
     unsupported = sorted(
         task.value
         for task in tasks
-        if task not in {Task.AUDIO_AR, Task.TEXT_AR}
+        if not task.program.supports_pretraining
     )
     if unsupported:
         raise ValueError(

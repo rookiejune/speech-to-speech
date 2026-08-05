@@ -21,6 +21,8 @@ class TokenInterface(nn.Module):
     """
 
     audio_embedding: SemanticAudioEmbedding
+    input_audio_embedding: nn.Embedding | None
+    input_audio_projection: CastOutput | None
 
     def __init__(
         self,
@@ -29,13 +31,17 @@ class TokenInterface(nn.Module):
         audio_embedding: SemanticAudioEmbedding,
         audio_projection: CastOutput,
         audio_head: AudioOutputAdapter,
+        input_audio_embedding: nn.Embedding | None = None,
+        input_audio_projection: CastOutput | None = None,
     ) -> None:
         super().__init__()
-        if frozenset(layout.block_names) != {
-            Modality.TEXT.value,
-            Modality.AUDIO.value,
-        }:
-            raise ValueError("token layout must contain exactly text and audio blocks.")
+        expected = {Modality.TEXT.value, Modality.AUDIO.value}
+        if "audio_input" in layout.blocks:
+            expected.add("audio_input")
+        if frozenset(layout.block_names) != expected:
+            raise ValueError(
+                "token layout must contain text/audio and at most one audio_input block."
+            )
         audio = require_semantic_audio_embedding(
             audio_embedding,
             "semantic audio embedding",
@@ -43,17 +49,42 @@ class TokenInterface(nn.Module):
         if not isinstance(audio, nn.Module):
             raise TypeError("semantic audio embedding must also be an nn.Module.")
         _validate_audio_block(layout, audio.num_embeddings)
+        if "audio_input" in layout.blocks:
+            if input_audio_embedding is None or input_audio_projection is None:
+                raise ValueError(
+                    "audio_input layouts require an input embedding and projection."
+                )
+            _validate_input_audio_block(layout, input_audio_embedding)
+        elif input_audio_embedding is not None or input_audio_projection is not None:
+            raise ValueError(
+                "input audio embedding/projection require an audio_input layout block."
+            )
 
         self.layout = layout
         self.audio_embedding = audio
         self.audio_projection = audio_projection
         self.audio_head = audio_head
+        self.input_audio_embedding = input_audio_embedding
+        self.input_audio_projection = input_audio_projection
 
     @property
     def semantic_audio_embedding(self) -> SemanticAudioEmbedding:
         return require_semantic_audio_embedding(
             self.audio_embedding,
             "semantic audio embedding",
+        )
+
+    @property
+    def output_audio_embedding(self) -> SemanticAudioEmbedding:
+        return self.semantic_audio_embedding
+
+    @property
+    def input_audio_embedding_dim(self) -> int:
+        embedding = self.input_audio_embedding
+        return (
+            self.semantic_audio_embedding.embedding_dim
+            if embedding is None
+            else embedding.embedding_dim
         )
 
     @property
@@ -91,8 +122,20 @@ class TokenInterface(nn.Module):
             text_mask = input_ids.ge(text_start) & input_ids.lt(text_end)
             output[text_mask] = text_embedding(input_ids[text_mask] - text_start)
 
-        audio_start, audio_end = self.layout.blocks[Modality.AUDIO.value]
         if Modality.AUDIO in selected:
+            input_embedding = self.input_audio_embedding
+            input_projection = self.input_audio_projection
+            if input_embedding is not None:
+                if input_projection is None:
+                    raise RuntimeError("input audio projection is unavailable.")
+                input_start, input_end = self.layout.blocks["audio_input"]
+                input_mask = input_ids.ge(input_start) & input_ids.lt(input_end)
+                if override is not None:
+                    input_mask &= ~override
+                rows = input_embedding(input_ids[input_mask] - input_start)
+                output[input_mask] = input_projection(rows)
+
+            audio_start, audio_end = self.layout.blocks[Modality.AUDIO.value]
             audio_mask = input_ids.ge(audio_start) & input_ids.lt(audio_end)
             if override is not None:
                 audio_mask &= ~override
@@ -104,13 +147,14 @@ class TokenInterface(nn.Module):
         """Validate global IDs and return the exact routed modalities in one sync."""
         if input_ids.numel() == 0:
             raise ValueError("input_ids must not be empty.")
-        covered = torch.zeros_like(input_ids, dtype=torch.bool)
-        hits: list[Tensor] = []
-        for name in (Modality.TEXT.value, Modality.AUDIO.value):
-            start, end = self.layout.blocks[name]
-            mask = input_ids.ge(start) & input_ids.lt(end)
-            hits.append(mask.any())
-            covered |= mask
+        text_start, text_end = self.layout.blocks[Modality.TEXT.value]
+        text_mask = input_ids.ge(text_start) & input_ids.lt(text_end)
+        audio_start, audio_end = self.layout.blocks[Modality.AUDIO.value]
+        audio_mask = input_ids.ge(audio_start) & input_ids.lt(audio_end)
+        if "audio_input" in self.layout.blocks:
+            input_start, input_end = self.layout.blocks["audio_input"]
+            audio_mask |= input_ids.ge(input_start) & input_ids.lt(input_end)
+        covered = text_mask | audio_mask
 
         first_uncovered = (~covered).reshape(-1).to(dtype=torch.int64).argmax()
         first_uncovered_id = input_ids.reshape(-1).gather(
@@ -119,7 +163,9 @@ class TokenInterface(nn.Module):
         )
         summary = torch.cat(
             (
-                torch.stack((*hits, covered.all())).to(dtype=torch.int64),
+                torch.stack((text_mask.any(), audio_mask.any(), covered.all())).to(
+                    dtype=torch.int64
+                ),
                 first_uncovered_id.to(dtype=torch.int64),
             )
         ).detach().cpu().tolist()
@@ -134,6 +180,12 @@ class TokenInterface(nn.Module):
             )
             if hit
         )
+
+    def input_audio_rows(self, local_ids: Tensor) -> Tensor:
+        embedding = self.input_audio_embedding
+        if embedding is None:
+            return self.audio_rows(local_ids)
+        return embedding(local_ids)
 
     def audio_rows(self, local_ids: Tensor) -> Tensor:
         embedding = self.semantic_audio_embedding
@@ -304,7 +356,7 @@ class TokenInterface(nn.Module):
             _selected_token_routing(self.layout, token_ids, token_kind)
             if validate
             else (
-                _trusted_selected_token_kind(token_ids, token_kind),
+                _trusted_selected_token_kind(self.layout, token_ids, token_kind),
                 None,
                 None,
             )
@@ -401,6 +453,14 @@ def _validate_audio_block(layout: Layout, rows: int) -> None:
         raise ValueError("audio embedding rows must match its layout block size.")
 
 
+def _validate_input_audio_block(layout: Layout, embedding: nn.Embedding) -> None:
+    start, end = layout.blocks["audio_input"]
+    if embedding.num_embeddings != end - start:
+        raise ValueError(
+            "input audio embedding rows must match its layout block size."
+        )
+
+
 def _validate_text_embedding(layout: Layout, embedding: nn.Embedding) -> None:
     start, end = layout.blocks[Modality.TEXT.value]
     if start < 0 or embedding.num_embeddings < end - start:
@@ -453,6 +513,7 @@ def _selected_token_routing(
 
 
 def _trusted_selected_token_kind(
+    layout: Layout,
     token_ids: Tensor,
     hinted_kind: TokenKind | None,
 ) -> TokenKind:
@@ -463,6 +524,15 @@ def _trusted_selected_token_kind(
         )
     if hinted_kind not in {"text", "audio", "mixed"}:
         raise ValueError(f"unsupported selected token kind: {hinted_kind!r}")
+    text_mask, audio_mask = _selected_token_masks(layout, token_ids)
+    if hinted_kind == "text":
+        covered = text_mask
+    elif hinted_kind == "audio":
+        covered = audio_mask
+    else:
+        covered = text_mask | audio_mask
+    if not bool(covered.all()):
+        raise ValueError("selected token ids contain an invalid vocabulary id.")
     return hinted_kind
 
 

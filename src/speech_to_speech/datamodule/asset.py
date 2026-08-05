@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
-from anydataset.dataset import IndexSelection
+from anydataset.dataset import AnyDataset, IndexSelection
 from anydataset.provider import CodecProvider
 from anydataset.store import ViewMaterializer
 from anydataset.store.reader import read_store_manifest
@@ -31,10 +31,11 @@ from torch.utils.data import Dataset
 
 from ._asset_provider import BiCodecProvider
 from .config import AssetMaterializationConfig
-from .dataset.speech import DatasetConfig, DatasetName
+from .dataset.speech import DatasetConfig, DatasetName, DualAudioDataset
 from .contract import DatasetRuntime
 
 _ASSET_CONTRACT_VERSION = 2
+_DUAL_ASSET_CONTRACT_VERSION = 1
 _FRAME_CODEC_VIEWS = frozenset(
     {
         AudioView.DAC,
@@ -105,6 +106,55 @@ class AssetRequest:
         """Workspace-shaped root dedicated to this exact logical request."""
 
         return self.output_root / self.id
+
+
+@dataclass(frozen=True)
+class DualAssetRequest:
+    """One aligned input/output codec asset requested by training."""
+
+    input: AssetRequest
+    output: AssetRequest
+
+    def __post_init__(self) -> None:
+        input_source = (
+            self.input.dataset,
+            self.input.source_root,
+            self.input.output_root,
+            self.input.split,
+            self.input.filter_policy,
+            self.input.input_id,
+            self.input.provider_id,
+            self.input.source_factory,
+        )
+        output_source = (
+            self.output.dataset,
+            self.output.source_root,
+            self.output.output_root,
+            self.output.split,
+            self.output.filter_policy,
+            self.output.input_id,
+            self.output.provider_id,
+            self.output.source_factory,
+        )
+        if input_source != output_source:
+            raise ValueError(
+                "dual codec requests must share one dataset, source identity, "
+                "selection, provider identity, and output root."
+            )
+
+    @property
+    def id(self) -> str:
+        payload = json.dumps(
+            {
+                "contract_version": _DUAL_ASSET_CONTRACT_VERSION,
+                "input_request_id": self.input.id,
+                "output_request_id": self.output.id,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return f"s2s-dual-asset-{hashlib.sha256(payload).hexdigest()}"
 
 
 class DatasetFactory(Protocol):
@@ -249,6 +299,46 @@ class WorkspaceCodecProducer:
         return dataset
 
 
+@dataclass(frozen=True)
+class DualWorkspaceCodecProducer:
+    """Publish every missing side, then validate the aligned pair atomically."""
+
+    request: DualAssetRequest
+    source: DatasetFactory
+    config: AssetMaterializationConfig
+    input_from_workspace: bool
+    output_from_workspace: bool
+
+    def __call__(self) -> None:
+        if not self.input_from_workspace:
+            WorkspaceCodecProducer(
+                self.request.input,
+                self.source,
+                self.config,
+            )()
+        if not self.output_from_workspace:
+            WorkspaceCodecProducer(
+                self.request.output,
+                self.source,
+                self.config,
+            )()
+        # BackgroundMaterialization marks the job READY as soon as this method
+        # returns. Strictly reopen both stores here so a partial or misaligned
+        # publication never crosses that boundary.
+        self.load()
+
+    def load(self) -> Dataset[Sample]:
+        dataset = _load_dual_request_dataset(
+            self.request,
+            input_from_workspace=self.input_from_workspace,
+            output_from_workspace=self.output_from_workspace,
+            missing_ok=False,
+        )
+        if dataset is None:
+            raise AssertionError("materialized dual codec dataset was not loaded.")
+        return dataset
+
+
 class BackgroundAssetJob(BackgroundMaterialization[Dataset[Sample]]):
     """Run one complete materializer on the global owner during epoch zero."""
 
@@ -269,6 +359,26 @@ class BackgroundAssetJob(BackgroundMaterialization[Dataset[Sample]]):
         )
 
 
+class BackgroundDualAssetJob(BackgroundMaterialization[Dataset[Sample]]):
+    """Publish one aligned input/output codec pair during epoch zero."""
+
+    def __init__(
+        self,
+        request: DualAssetRequest,
+        fallback: Dataset[Sample],
+        producer: AssetProducer,
+    ) -> None:
+        self.request = request
+        self.fallback = fallback
+        super().__init__(
+            request.id,
+            producer,
+            worker_name="s2s-dual-asset-materializer",
+            label="dual asset materialization",
+            daemon=False,
+        )
+
+
 def resolve_workspace_asset(
     config: DatasetConfig,
     runtime: DatasetRuntime,
@@ -283,21 +393,18 @@ def resolve_workspace_asset(
         raise ValueError(
             f"asset materialization supports only workspace datasets: {supported}."
         )
+    if getattr(runtime, "input_audio_decoupled", False):
+        return _resolve_dual_workspace_asset(config, runtime, materialization)
+    return _resolve_coupled_workspace_asset(config, runtime, materialization)
+
+
+def _resolve_coupled_workspace_asset(
+    config: DatasetConfig,
+    runtime: DatasetRuntime,
+    materialization: AssetMaterializationConfig,
+) -> AssetResolution:
     view = runtime.audio_view
-    if materialization.codec_view is not None:
-        configured_view = AudioView(materialization.codec_view)
-        if configured_view is not view:
-            raise ValueError(
-                "materialization codec_view must match the runtime audio view: "
-                f"{configured_view.value!r} != {view.value!r}."
-            )
-    if view not in _BUILTIN_CODEC_VIEWS:
-        frame_views = ", ".join(sorted(entry.value for entry in _FRAME_CODEC_VIEWS))
-        raise ValueError(
-            "the built-in materializer supports BiCodec structured units and "
-            f"frame-code codec views ({frame_views}); got {view.value!r}. "
-            "Extend the provider/backend before materializing another representation."
-        )
+    _validate_output_view(view, materialization)
 
     source_root = _dataset_root(config.name, config.root).resolve()
     output_root = Path(cast(str, materialization.output_root)).expanduser().resolve()
@@ -380,6 +487,177 @@ def resolve_workspace_asset(
     return AssetResolution(fallback, request_id=request.id, job=job)
 
 
+def _resolve_dual_workspace_asset(
+    config: DatasetConfig,
+    runtime: DatasetRuntime,
+    materialization: AssetMaterializationConfig,
+) -> AssetResolution:
+    input_view = runtime.input_audio_view
+    output_view = runtime.audio_view
+    _validate_output_view(output_view, materialization)
+    if input_view is output_view and runtime.input_codec_name != runtime.codec_name:
+        raise ValueError(
+            "distinct decoupled input/output codecs must use distinct audio views; "
+            f"both {runtime.input_codec_name!r} and {runtime.codec_name!r} resolve "
+            f"to {input_view.value!r}."
+        )
+
+    source_root = _dataset_root(config.name, config.root).resolve()
+    output_root = Path(cast(str, materialization.output_root)).expanduser().resolve()
+    input_workspace = _load_codec_dataset(
+        config.name,
+        source_root,
+        split=config.split,
+        view=input_view,
+        filter_policy=config.filter,
+        missing_ok=True,
+    )
+    output_workspace = _load_codec_dataset(
+        config.name,
+        source_root,
+        split=config.split,
+        view=output_view,
+        filter_policy=config.filter,
+        missing_ok=True,
+    )
+    workspace_ready = _join_dual_dataset(
+        input_workspace,
+        output_workspace,
+        input_view=input_view,
+    )
+    if workspace_ready is not None:
+        return AssetResolution(workspace_ready)
+
+    input_from_workspace = input_workspace is not None
+    output_from_workspace = output_workspace is not None
+    workspace_source = WorkspaceWaveformFactory(
+        config.name,
+        source_root,
+        config.split,
+        config.filter,
+    )
+    try:
+        fallback = workspace_source()
+    except (_WorkspaceFilterMissing, _WorkspaceSourceMissing) as error:
+        if materialization.source_factory is None:
+            if isinstance(error, _WorkspaceFilterMissing):
+                raise FileNotFoundError(
+                    f"workspace filter {config.filter!r} is not published for the "
+                    "waveform source and no materialization.source_factory was "
+                    "configured; register the stream/filter route instead of "
+                    "falling back to unfiltered data."
+                ) from error
+            raise FileNotFoundError(
+                f"workspace waveform source is not published at {source_root / 'base'} "
+                "and no materialization.source_factory was configured."
+            ) from error
+        if materialization.input_id is None:
+            raise ValueError(
+                "materialization.source_factory requires an explicit input_id; "
+                "the stream/filter source identity cannot be inferred safely."
+            )
+        request = _dual_request(
+            config,
+            runtime,
+            materialization,
+            source_root=source_root,
+            output_root=output_root,
+            input_id=materialization.input_id,
+            source_factory=materialization.source_factory,
+        )
+        input_ready, output_ready = _load_dual_request_sides(
+            request,
+            input_from_workspace=input_from_workspace,
+            output_from_workspace=output_from_workspace,
+            missing_ok=True,
+        )
+        ready = _join_dual_dataset(
+            input_ready,
+            output_ready,
+            input_view=input_view,
+        )
+        if ready is not None:
+            return AssetResolution(ready)
+        source = _source_factory(request.output)
+        fallback = source()
+    else:
+        input_id = materialization.input_id or _workspace_input_id(
+            source_root / "base",
+            fallback,
+            dataset_name=config.name,
+            split=config.split,
+            filter_policy=config.filter,
+        )
+        request = _dual_request(
+            config,
+            runtime,
+            materialization,
+            source_root=source_root,
+            output_root=output_root,
+            input_id=input_id,
+            source_factory=None,
+        )
+        source = workspace_source
+
+    _materialize_length(fallback)
+    input_ready, output_ready = _load_dual_request_sides(
+        request,
+        input_from_workspace=input_from_workspace,
+        output_from_workspace=output_from_workspace,
+        missing_ok=True,
+    )
+    ready = _join_dual_dataset(
+        input_ready,
+        output_ready,
+        input_view=input_view,
+    )
+    if ready is not None:
+        return AssetResolution(ready)
+    if input_ready is None:
+        _provider_factory(request.input)
+    if output_ready is None:
+        _provider_factory(request.output)
+
+    producer = DualWorkspaceCodecProducer(
+        request,
+        source,
+        materialization,
+        input_from_workspace=input_from_workspace,
+        output_from_workspace=output_from_workspace,
+    )
+    hybrid_fallback = _dual_fallback_dataset(
+        fallback,
+        input_ready=input_ready,
+        input_view=input_view,
+    )
+    job = BackgroundDualAssetJob(request, hybrid_fallback, producer)
+    return AssetResolution(
+        hybrid_fallback,
+        request_id=request.id,
+        job=job,
+    )
+
+
+def _validate_output_view(
+    view: AudioView,
+    materialization: AssetMaterializationConfig,
+) -> None:
+    if materialization.codec_view is not None:
+        configured_view = AudioView(materialization.codec_view)
+        if configured_view is not view:
+            raise ValueError(
+                "materialization codec_view must match the runtime audio view: "
+                f"{configured_view.value!r} != {view.value!r}."
+            )
+    if view not in _BUILTIN_CODEC_VIEWS:
+        frame_views = ", ".join(sorted(entry.value for entry in _FRAME_CODEC_VIEWS))
+        raise ValueError(
+            "the built-in materializer supports BiCodec structured units and "
+            f"frame-code codec views ({frame_views}); got {view.value!r}. "
+            "Extend the provider/backend before materializing another representation."
+        )
+
+
 def _request(
     config: DatasetConfig,
     runtime: DatasetRuntime,
@@ -390,13 +668,70 @@ def _request(
     input_id: str,
     source_factory: str | None,
 ) -> AssetRequest:
+    return _codec_request(
+        config,
+        materialization,
+        codec=runtime.codec_name,
+        codec_view=runtime.audio_view,
+        source_root=source_root,
+        output_root=output_root,
+        input_id=input_id,
+        source_factory=source_factory,
+    )
+
+
+def _dual_request(
+    config: DatasetConfig,
+    runtime: DatasetRuntime,
+    materialization: AssetMaterializationConfig,
+    *,
+    source_root: Path,
+    output_root: Path,
+    input_id: str,
+    source_factory: str | None,
+) -> DualAssetRequest:
+    return DualAssetRequest(
+        input=_codec_request(
+            config,
+            materialization,
+            codec=runtime.input_codec_name,
+            codec_view=runtime.input_audio_view,
+            source_root=source_root,
+            output_root=output_root,
+            input_id=input_id,
+            source_factory=source_factory,
+        ),
+        output=_codec_request(
+            config,
+            materialization,
+            codec=runtime.codec_name,
+            codec_view=runtime.audio_view,
+            source_root=source_root,
+            output_root=output_root,
+            input_id=input_id,
+            source_factory=source_factory,
+        ),
+    )
+
+
+def _codec_request(
+    config: DatasetConfig,
+    materialization: AssetMaterializationConfig,
+    *,
+    codec: str,
+    codec_view: AudioView,
+    source_root: Path,
+    output_root: Path,
+    input_id: str,
+    source_factory: str | None,
+) -> AssetRequest:
     return AssetRequest(
         dataset=config.name.value,
         source_root=source_root,
         output_root=output_root,
         split=config.split,
-        codec=runtime.codec_name,
-        codec_view=runtime.audio_view,
+        codec=codec,
+        codec_view=codec_view,
         filter_policy=config.filter,
         input_id=input_id,
         provider_id=cast(str, materialization.provider_id),
@@ -412,7 +747,10 @@ def _provider_factory(
     if request.codec_view in _FRAME_CODEC_VIEWS:
         return FrameCodecProviderFactory(request.codec, request.codec_view)
     raise ValueError(
-        f"unsupported workspace codec materialization view: {request.codec_view.value!r}."
+        "no built-in workspace codec provider/backend is registered for "
+        f"codec {request.codec!r} with view {request.codec_view.value!r}; publish "
+        "that prepared store first or register an explicit provider. An input "
+        "codec request never reuses the output codec provider."
     )
 
 
@@ -458,6 +796,15 @@ def _load_codec_dataset(
             return None
         raise FileNotFoundError(store)
     read_store_manifest(store)
+    if view is AudioView.GLM4:
+        return _load_direct_codec_dataset(
+            dataset_name,
+            store,
+            root=root,
+            split=split,
+            filter_policy=filter_policy,
+            missing_ok=missing_ok,
+        )
     if dataset_name is DatasetName.WMT19_TTS:
         from zhuyin.datasets.wmt19 import moss_tts
 
@@ -486,6 +833,45 @@ def _load_codec_dataset(
             split=split,
         ).load()
     else:
+        raise ValueError(
+            f"workspace codec loading does not support {dataset_name.value!r}."
+        )
+    _materialize_length(dataset)
+    return cast(Dataset[Sample], cast(object, dataset))
+
+
+def _load_direct_codec_dataset(
+    dataset_name: DatasetName,
+    store: Path,
+    *,
+    root: Path,
+    split: str,
+    filter_policy: str | None,
+    missing_ok: bool,
+) -> Dataset[Sample] | None:
+    dataset = AnyDataset.from_store(store, split=split)
+    if dataset_name is DatasetName.WMT19_TTS and filter_policy is not None:
+        from zhuyin.datasets.wmt19 import moss_tts
+
+        try:
+            selection = (
+                moss_tts.text(root=root, split=split)
+                .filter(filter_policy)
+                .load()
+            )
+        except FileNotFoundError as error:
+            if missing_ok and _missing_selection(error):
+                return None
+            raise
+        if not isinstance(selection, IndexSelection):
+            raise TypeError(
+                "filtered direct codec stores require an index-selected text view."
+            )
+        dataset = IndexSelection(dataset, selection.indices)
+    elif dataset_name is DatasetName.STREAMING_S2ST:
+        if filter_policy is not None:
+            raise ValueError("streaming_s2st codec assets do not accept a filter.")
+    elif dataset_name is not DatasetName.WMT19_TTS:
         raise ValueError(
             f"workspace codec loading does not support {dataset_name.value!r}."
         )
@@ -526,6 +912,95 @@ def _load_materialized_dataset(
         view=request.codec_view,
         filter_policy=None,
         missing_ok=missing_ok,
+    )
+
+
+def _load_dual_request_sides(
+    request: DualAssetRequest,
+    *,
+    input_from_workspace: bool,
+    output_from_workspace: bool,
+    missing_ok: bool,
+) -> tuple[Dataset[Sample] | None, Dataset[Sample] | None]:
+    return (
+        _load_request_side(
+            request.input,
+            from_workspace=input_from_workspace,
+            missing_ok=missing_ok,
+        ),
+        _load_request_side(
+            request.output,
+            from_workspace=output_from_workspace,
+            missing_ok=missing_ok,
+        ),
+    )
+
+
+def _load_request_side(
+    request: AssetRequest,
+    *,
+    from_workspace: bool,
+    missing_ok: bool,
+) -> Dataset[Sample] | None:
+    if from_workspace:
+        return _load_codec_dataset(
+            DatasetName(request.dataset),
+            request.source_root,
+            split=request.split,
+            view=request.codec_view,
+            filter_policy=request.filter_policy,
+            missing_ok=missing_ok,
+        )
+    return _load_materialized_dataset(request, missing_ok=missing_ok)
+
+
+def _load_dual_request_dataset(
+    request: DualAssetRequest,
+    *,
+    input_from_workspace: bool,
+    output_from_workspace: bool,
+    missing_ok: bool,
+) -> Dataset[Sample] | None:
+    input_dataset, output_dataset = _load_dual_request_sides(
+        request,
+        input_from_workspace=input_from_workspace,
+        output_from_workspace=output_from_workspace,
+        missing_ok=missing_ok,
+    )
+    return _join_dual_dataset(
+        input_dataset,
+        output_dataset,
+        input_view=request.input.codec_view,
+    )
+
+
+def _join_dual_dataset(
+    input_dataset: Dataset[Sample] | None,
+    output_dataset: Dataset[Sample] | None,
+    *,
+    input_view: AudioView,
+) -> Dataset[Sample] | None:
+    if input_dataset is None or output_dataset is None:
+        return None
+    return DualAudioDataset(
+        input_dataset,
+        output_dataset,
+        input_view=input_view,
+    )
+
+
+def _dual_fallback_dataset(
+    fallback: Dataset[Sample],
+    *,
+    input_ready: Dataset[Sample] | None,
+    input_view: AudioView,
+) -> Dataset[Sample]:
+    if input_ready is None:
+        return fallback
+    return DualAudioDataset(
+        input_ready,
+        fallback,
+        input_view=input_view,
     )
 
 
@@ -618,5 +1093,8 @@ __all__ = [
     "AssetRequest",
     "AssetResolution",
     "BackgroundAssetJob",
+    "BackgroundDualAssetJob",
+    "DualAssetRequest",
+    "DualWorkspaceCodecProducer",
     "resolve_workspace_asset",
 ]

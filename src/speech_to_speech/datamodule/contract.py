@@ -90,12 +90,17 @@ class TextRuntimeSnapshot:
 class DataRuntimeSnapshot:
     """Pickleable worker view of the data-only runtime capabilities."""
 
+    input_audio_decoupled: bool
+    input_codec_name: str
+    input_audio_view: AudioView
+    input_codec_frame_rate: float
     codec_name: str
     audio_view: AudioView
     codec_frame_rate: float
     audio_sequence_layout: AudioSequenceLayout
     acoustic_generator_artifact: str | None
     text_tokenizer: TextTokenizer
+    input_audio_tokenizer: AudioTokenizer
     audio_tokenizer: AudioTokenizer
     layout_blocks: tuple[tuple[str, tuple[int, int]], ...]
     pad_token_id: int
@@ -103,16 +108,25 @@ class DataRuntimeSnapshot:
     boa_token_id: int
     eoa_token_id: int
     mask_token_id: int
+    input_audio_block_name: str
+    input_boa_token_id: int
+    input_eoa_token_id: int
+    input_codec_audio_range: tuple[int, int]
 
     @classmethod
     def from_runtime(cls, runtime: DataRuntime) -> DataRuntimeSnapshot:
         return cls(
+            input_audio_decoupled=runtime.input_audio_decoupled,
+            input_codec_name=runtime.input_codec_name,
+            input_audio_view=runtime.input_audio_view,
+            input_codec_frame_rate=runtime.input_codec_frame_rate,
             codec_name=runtime.codec_name,
             audio_view=runtime.audio_view,
             codec_frame_rate=runtime.codec_frame_rate,
             audio_sequence_layout=runtime.audio_sequence_layout,
             acoustic_generator_artifact=runtime.acoustic_generator_artifact,
             text_tokenizer=runtime.text_tokenizer,
+            input_audio_tokenizer=runtime.input_audio_tokenizer,
             audio_tokenizer=runtime.audio_tokenizer,
             layout_blocks=tuple(runtime.layout.blocks.items()),
             pad_token_id=runtime.pad_token_id,
@@ -120,6 +134,10 @@ class DataRuntimeSnapshot:
             boa_token_id=runtime.boa_token_id,
             eoa_token_id=runtime.eoa_token_id,
             mask_token_id=runtime.mask_token_id,
+            input_audio_block_name=runtime.input_audio_block_name,
+            input_boa_token_id=runtime.input_boa_token_id,
+            input_eoa_token_id=runtime.input_eoa_token_id,
+            input_codec_audio_range=runtime.input_codec_audio_range,
         )
 
     @cached_property

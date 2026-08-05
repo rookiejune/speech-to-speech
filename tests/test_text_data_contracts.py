@@ -48,6 +48,33 @@ class TextDataContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "text-only"):
             TextCollator(runtime, {Task.TTS: 1.0})
 
+    @patch("speech_to_speech.datamodule.collate.build_text_sample")
+    @patch("speech_to_speech.datamodule.collate.parse_text_sample")
+    def test_text_collator_forwards_explicit_trace(self, parse, build):
+        runtime = SimpleNamespace()
+        raw = Mock()
+        parsed = Mock()
+        built = Mock()
+        parse.return_value = parsed
+        build.return_value = built
+        collator = TextCollator(
+            runtime,
+            {Task.TEXT_AR: 1.0},
+            trace="direct",
+        )
+
+        self.assertEqual(collator._model_samples([raw]), [built])
+        parse.assert_called_once_with(raw, runtime)
+        build.assert_called_once_with(
+            parsed,
+            Task.TEXT_AR,
+            runtime,
+            ar_framing=ARFraming.INSTRUCTION,
+            tasks=None,
+            prediction=None,
+            trace="direct",
+        )
+
     def test_text_ar_pretraining_collator_uses_bos_without_chat_template(self):
         tokenizer = _ChatTokenizer(32)
         tokenizer.bos_token_id = 3

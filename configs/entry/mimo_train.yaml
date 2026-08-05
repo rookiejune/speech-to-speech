@@ -20,6 +20,11 @@ runtime:
   backbone_module: ""
   backbone_body: base_model
   audio_tokenizer:
+  input_audio:
+    codec:
+    tokenizer:
+    vocab_size:
+    frame_rate:
   acoustic_generator_artifact:
   device:
   dtype:

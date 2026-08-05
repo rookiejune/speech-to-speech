@@ -15,6 +15,20 @@ from _config_helpers import *
     },
 )
 class ConfigCompositionTest(ConfigTestCase):
+    def test_runtime_input_audio_is_a_regular_override(self):
+        config = _overfit(
+            "runtime=bicodec",
+            "model/acoustic=none",
+            "audio_sequence_layout=flattened",
+            "runtime.input_audio.codec=glm4",
+            "runtime.input_audio.vocab_size=16384",
+            "runtime.input_audio.frame_rate=12.5",
+        )
+
+        self.assertEqual(config.runtime.input_audio.codec, "glm4")
+        self.assertEqual(config.runtime.input_audio.vocab_size, 16384)
+        self.assertEqual(config.runtime.input_audio.frame_rate, 12.5)
+
     def test_roots_parse_to_src_aligned_configs(self):
         flow = _overfit()
         rvq = _overfit("model/acoustic=rvq")

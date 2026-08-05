@@ -340,7 +340,11 @@ def _has_ctc_target(batch: TrainInput) -> bool:
     if isinstance(batch, RawSpeechBatch):
         return any(
             uses_source_ctc(sample.task)
-            or uses_target_ctc(sample.task, sample.prediction)
+            or uses_target_ctc(
+                sample.task,
+                sample.prediction,
+                trace=sample.trace,
+            )
             for sample in batch.samples
         )
     raise TypeError("training batch must be ModelBatch or RawSpeechBatch.")

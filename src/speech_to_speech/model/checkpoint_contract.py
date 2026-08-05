@@ -13,10 +13,11 @@ from numbers import Integral
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast, runtime_checkable
 
 import torch
-from anydataset.types import Modality
+from anydataset.types import AudioView, Modality
 from torch import Tensor, nn
 
 from ..runtime import AudioSequenceLayout
+from ..runtime.audio_tokenizer.contract import AudioTokenizer
 from ..runtime.backbone import BackboneEncoder
 from ..runtime.backbone.contract import Backbone, TextTokenizer
 from ..runtime.codec_contract import (
@@ -54,25 +55,41 @@ class _HiddenConditionAdapter(Protocol):
     projection: nn.Linear
 
 
-MODEL_CONTRACT_GRAMMAR = "s2s-model-v3-contract-v3"
+MODEL_CONTRACT_GRAMMAR = "s2s-model-v4-contract-v4"
 _MODEL_CONTRACT_FIELDS = frozenset({"grammar", "components", "sha256"})
 _MISSING = "<missing>"
 _DIFFERENCE_KEY_ORDER = {
     "components": ("runtime", "interface", "acoustic", "state_dict"),
-    "components.runtime": ("token_space", "codec", "backbone"),
+    "components.runtime": ("token_space", "audio_codecs", "backbone"),
     "components.runtime.token_space": (
         "audio_sequence_layout",
         "blocks",
         "special_ids",
         "text_tokenizer",
-        "audio_tokenizer",
+        "audio_tokenizers",
+    ),
+    "components.runtime.token_space.audio_tokenizers": (
+        "sharing",
+        "input",
+        "output",
+    ),
+    "components.runtime.audio_codecs": (
+        "sharing",
+        "input",
+        "output",
     ),
     "components.interface": (
-        "audio_embedding",
+        "audio_embeddings",
+        "input_audio_projection",
         "audio_projection",
         "audio_head",
         "source_audio_encoder",
         "ctc_decoders",
+    ),
+    "components.interface.audio_embeddings": (
+        "sharing",
+        "input",
+        "output",
     ),
     "components.interface.ctc_decoders": ("source", "target"),
     "components.state_dict": (
@@ -461,18 +478,18 @@ def semantic_config_key(value: object) -> str:
 
 def token_block(
     value: object,
-    modality: Modality,
+    name: str,
 ) -> tuple[int, int]:
     if (
         not isinstance(value, Sequence)
         or isinstance(value, (str, bytes))
         or len(value) != 2
     ):
-        raise TypeError(f"token layout block {modality.value!r} must contain two ids.")
-    start = non_negative_int(value[0], f"{modality.value} token block start")
-    end = positive_int(value[1], f"{modality.value} token block end")
+        raise TypeError(f"token layout block {name!r} must contain two ids.")
+    start = non_negative_int(value[0], f"{name} token block start")
+    end = positive_int(value[1], f"{name} token block end")
     if end <= start:
-        raise ValueError(f"{modality.value} token block must be non-empty.")
+        raise ValueError(f"{name} token block must be non-empty.")
     return start, end
 
 
@@ -507,6 +524,15 @@ def non_negative_int(value: object, name: str) -> int:
     if value < 0:
         raise ValueError(f"{name} must be non-negative.")
     return value
+
+
+def positive_float(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be numeric.")
+    result = float(value)
+    if not math.isfinite(result) or result <= 0:
+        raise ValueError(f"{name} must be finite and positive.")
+    return result
 
 
 def optional_sha256(value: object, name: str) -> str | None:
@@ -573,14 +599,68 @@ def state_dict_contract(model: nn.Module) -> dict[str, object]:
     }
 
 
+def audio_resource_sharing(runtime: TokenModelRuntime) -> str:
+    decoupled = runtime.input_audio_decoupled
+    if not isinstance(decoupled, bool):
+        raise TypeError("runtime input_audio_decoupled must be a bool.")
+    return "independent" if decoupled else "shared"
+
+
 def interface_contract(model: ContractModel) -> dict[str, object]:
     tokens = model.tokens
     return {
-        "audio_embedding": audio_embedding_contract(tokens.audio_embedding),
+        "audio_embeddings": audio_embeddings_contract(model),
+        "input_audio_projection": input_audio_projection_contract(model),
         "audio_projection": adapter_contract(tokens.audio_projection),
         "audio_head": audio_head_contract(tokens.audio_head),
         "source_audio_encoder": source_audio_contract(model.source_audio_encoder),
         "ctc_decoders": ctc_decoders_contract(model.ctc_decoders),
+    }
+
+
+def input_audio_projection_contract(model: ContractModel) -> dict[str, object]:
+    sharing = audio_resource_sharing(model.runtime)
+    projection = model.tokens.input_audio_projection
+    if sharing == "shared":
+        if projection is not None:
+            raise ValueError(
+                "shared input/output audio token spaces must not register a separate "
+                "input audio projection."
+            )
+        return {"sharing": "shared"}
+    if projection is None:
+        raise ValueError(
+            "independent input/output audio token spaces require an input audio "
+            "projection."
+        )
+    return {
+        "sharing": "independent",
+        "adapter": adapter_contract(projection),
+    }
+
+
+def audio_embeddings_contract(model: ContractModel) -> dict[str, object]:
+    sharing = audio_resource_sharing(model.runtime)
+    output = audio_embedding_contract(model.tokens.audio_embedding)
+    input_embedding = model.tokens.input_audio_embedding
+    if sharing == "shared":
+        if input_embedding is not None:
+            raise ValueError(
+                "shared input/output audio token spaces must not register a separate "
+                "input audio embedding."
+            )
+        input_ = output
+    else:
+        if input_embedding is None:
+            raise ValueError(
+                "independent input/output audio token spaces require an input audio "
+                "embedding."
+            )
+        input_ = audio_embedding_contract(input_embedding)
+    return {
+        "sharing": sharing,
+        "input": input_,
+        "output": output,
     }
 
 
@@ -713,9 +793,47 @@ def source_audio_contract(
 
 def runtime_contract(model: ContractModel) -> dict[str, object]:
     return {
-        "codec": codec_contract(model.runtime),
         "token_space": token_space_contract(model.runtime),
+        "audio_codecs": audio_codecs_contract(model.runtime),
         "backbone": backbone_contract(model),
+    }
+
+
+def audio_codecs_contract(runtime: TokenModelRuntime) -> dict[str, object]:
+    sharing = audio_resource_sharing(runtime)
+    input_ = input_codec_contract(runtime)
+    output = codec_contract(runtime)
+    if sharing == "shared":
+        shared_fields = {
+            "name": output["name"],
+            "audio_view": output["audio_view"],
+            "frame_rate": output["frame_rate"],
+        }
+        if input_ != shared_fields:
+            raise ValueError(
+                "shared input/output audio codec metadata must resolve identically."
+            )
+    return {
+        "sharing": sharing,
+        "input": input_,
+        "output": output,
+    }
+
+
+def input_codec_contract(runtime: TokenModelRuntime) -> dict[str, object]:
+    name = runtime.input_codec_name
+    if not isinstance(name, str) or not name:
+        raise TypeError("runtime input_codec_name must be a non-empty string.")
+    view = runtime.input_audio_view
+    if not isinstance(view, AudioView):
+        raise TypeError("runtime input_audio_view must be an AudioView.")
+    return {
+        "name": name,
+        "audio_view": view.value,
+        "frame_rate": positive_float(
+            runtime.input_codec_frame_rate,
+            "input audio codec frame rate",
+        ),
     }
 
 
@@ -745,8 +863,12 @@ def codec_contract(runtime: TokenModelRuntime) -> dict[str, object]:
     name = runtime.codec_name
     if not isinstance(name, str) or not name:
         raise TypeError("runtime codec_name must be a non-empty string.")
+    view = runtime.audio_view
+    if not isinstance(view, AudioView):
+        raise TypeError("runtime audio_view must be an AudioView.")
     return {
         "name": name,
+        "audio_view": view.value,
         "implementation": qualified_name(codec),
         "semantic_artifact_sha256": semantic_artifact_sha256(runtime),
         "sample_rate": codec_sample_rate(codec),
@@ -765,33 +887,93 @@ def token_space_contract(runtime: TokenModelRuntime) -> dict[str, object]:
     blocks = runtime.layout.blocks
     if not isinstance(blocks, Mapping):
         raise TypeError("runtime token layout blocks must be a mapping.")
+    sharing = audio_resource_sharing(runtime)
+    input_block_name = runtime.input_audio_block_name
+    if not isinstance(input_block_name, str) or not input_block_name:
+        raise TypeError("runtime input_audio_block_name must be a non-empty string.")
+    expected_input_block = (
+        "audio" if sharing == "shared" else "audio_input"
+    )
+    if input_block_name != expected_input_block:
+        raise ValueError(
+            "runtime input audio block does not match audio resource sharing: "
+            f"expected {expected_input_block!r}, got {input_block_name!r}."
+        )
+    block_names = (
+        (Modality.TEXT.value, Modality.AUDIO.value)
+        if sharing == "shared"
+        else (Modality.TEXT.value, input_block_name, Modality.AUDIO.value)
+    )
+    if set(blocks) != set(block_names):
+        raise ValueError(
+            "runtime token layout blocks do not match the input/output audio contract."
+        )
     token_blocks = {
-        modality.value: list(token_block(blocks.get(modality.value), modality))
-        for modality in (Modality.TEXT, Modality.AUDIO)
+        name: list(token_block(blocks.get(name), name))
+        for name in block_names
     }
     sequence_layout = runtime.audio_sequence_layout
     if not isinstance(sequence_layout, AudioSequenceLayout):
         raise TypeError("runtime audio sequence layout must be an AudioSequenceLayout.")
+    input_tokenizer = audio_tokenizer_contract(runtime.input_audio_tokenizer)
+    output_tokenizer = audio_tokenizer_contract(runtime.audio_tokenizer)
+    if sharing == "shared" and input_tokenizer != output_tokenizer:
+        raise ValueError(
+            "shared input/output audio tokenizers must resolve to one contract."
+        )
     return {
         "audio_sequence_layout": sequence_layout.value,
         "blocks": token_blocks,
         "special_ids": {
-            "pad": non_negative_int(runtime.pad_token_id, "runtime pad_token_id"),
-            "bos": non_negative_int(runtime.bos_token_id, "runtime bos_token_id"),
-            "eos": non_negative_int(runtime.eos_token_id, "runtime eos_token_id"),
-            "boa": non_negative_int(runtime.boa_token_id, "runtime boa_token_id"),
-            "eoa": non_negative_int(runtime.eoa_token_id, "runtime eoa_token_id"),
-            "mask": non_negative_int(
-                runtime.mask_token_id,
-                "runtime mask_token_id",
-            ),
+            "text": {
+                "pad": non_negative_int(
+                    runtime.pad_token_id,
+                    "runtime pad_token_id",
+                ),
+                "bos": non_negative_int(
+                    runtime.bos_token_id,
+                    "runtime bos_token_id",
+                ),
+                "eos": non_negative_int(
+                    runtime.eos_token_id,
+                    "runtime eos_token_id",
+                ),
+            },
+            "input_audio": {
+                "boa": non_negative_int(
+                    runtime.input_boa_token_id,
+                    "runtime input_boa_token_id",
+                ),
+                "eoa": non_negative_int(
+                    runtime.input_eoa_token_id,
+                    "runtime input_eoa_token_id",
+                ),
+            },
+            "output_audio": {
+                "boa": non_negative_int(
+                    runtime.boa_token_id,
+                    "runtime boa_token_id",
+                ),
+                "eoa": non_negative_int(
+                    runtime.eoa_token_id,
+                    "runtime eoa_token_id",
+                ),
+                "mask": non_negative_int(
+                    runtime.mask_token_id,
+                    "runtime mask_token_id",
+                ),
+            },
         },
         "text_tokenizer": text_tokenizer_contract(
             runtime.text_tokenizer,
             token_blocks["text"],
             configured_chat_template=runtime.backbone_chat_template,
         ),
-        "audio_tokenizer": audio_tokenizer_contract(runtime),
+        "audio_tokenizers": {
+            "sharing": sharing,
+            "input": input_tokenizer,
+            "output": output_tokenizer,
+        },
     }
 
 
@@ -903,9 +1085,8 @@ def tokenizer_probe_ids(values: object) -> list[int]:
 
 
 def audio_tokenizer_contract(
-    runtime: TokenModelRuntime,
+    tokenizer: AudioTokenizer,
 ) -> dict[str, object]:
-    tokenizer = runtime.audio_tokenizer
     state = contract_state(tokenizer)
     result: dict[str, object] = {
         "implementation": qualified_name(tokenizer),

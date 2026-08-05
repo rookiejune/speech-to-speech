@@ -12,10 +12,11 @@ from lightning.pytorch.callbacks import Callback
 
 from ...datamodule.batch import ModelBatch
 from ...datamodule.diagnostic import SampleSplit
-from ...generation import decode_response_text
+from ...generation.request import response_of
 from ...generation.service import requests_from_batch
 from ...generation.contract import Result
-from ...task import PredictionModality, Request, Task
+from ...generation.text import decode_response_text_steps
+from ...task import FieldRole, PredictionModality, Request, Task
 from .._oom import batch_report, generation_report, report_oom
 from ..interval import TrainInterval
 from .sample_report import (
@@ -375,10 +376,20 @@ def log_generation_payload(
 ) -> str | None:
     audio = context.result["audio"]
     decode_error = context.result.get("decode_error")
-    generated_text = decode_response_text(
+    response = response_of(context.request)
+    text_steps = decode_response_text_steps(
         context.datamodule.runtime,
         context.result["response_ids"],
-        prediction=prediction,
+        response,
+    )
+    generated_text = next(
+        (
+            value
+            for field, value in reversed(list(zip(response.fields, text_steps)))
+            if field.role is FieldRole.TARGET
+            and field.modality is types.Modality.TEXT
+        ),
+        None,
     )
     if generated_text is not None:
         target_text = reference_text(

@@ -20,6 +20,7 @@ from speech_to_speech.runtime import (
     BackboneInitialization,
     BackboneType,
     Config as RuntimeConfig,
+    InputAudioConfig,
     migrate_config_fields,
 )
 
@@ -185,6 +186,11 @@ def validate(config: MimoTrainConfig) -> None:
 def _runtime(value: Mapping[str, Any]) -> RuntimeConfig:
     fields = dict(value)
     migrate_config_fields(fields)
+    input_audio = fields.get("input_audio", {})
+    if not isinstance(input_audio, InputAudioConfig):
+        fields["input_audio"] = InputAudioConfig(
+            **_mapping_value(input_audio, "runtime.input_audio")
+        )
     fields["backbone_type"] = BackboneType(str(fields.get("backbone_type", "hf_causal_lm")))
     fields["backbone_initialization"] = BackboneInitialization(
         str(fields.get("backbone_initialization", "pretrained"))

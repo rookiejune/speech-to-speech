@@ -348,20 +348,30 @@ def _compose(*overrides: str, config_name: str = "overfit") -> DictConfig:
 
 
 def _data_runtime():
+    tokenizer = NativeAudioTokenizer(vocab_size=8)
     return SimpleNamespace(
+        input_audio_decoupled=False,
+        input_codec_name="longcat",
+        input_audio_view=AudioView.LONGCAT,
+        input_codec_frame_rate=50.0,
         codec_name="longcat",
         audio_view=AudioView.LONGCAT,
         codec_frame_rate=50.0,
         audio_sequence_layout=AudioSequenceLayout.SEMANTIC,
         acoustic_generator_artifact=None,
         text_tokenizer=_Tokenizer(10),
-        audio_tokenizer=NativeAudioTokenizer(vocab_size=8),
+        input_audio_tokenizer=tokenizer,
+        audio_tokenizer=tokenizer,
         layout=Layout(text=(0, 10), audio=(10, 20)),
         pad_token_id=0,
         eos_token_id=1,
         boa_token_id=18,
         eoa_token_id=19,
         mask_token_id=20,
+        input_audio_block_name="audio",
+        input_boa_token_id=18,
+        input_eoa_token_id=19,
+        input_codec_audio_range=(10, 18),
         codec=_longcat_codec(),
     )
 

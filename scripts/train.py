@@ -19,6 +19,8 @@ from omegaconf import DictConfig
 from speech_to_speech.callback import (
     AssetMaterialization,
     OnDeviceCodecMaterializer,
+    StreamingSynthesis,
+    SynthesisSampleLogger,
     build_unit_schedule,
 )
 from speech_to_speech.callback.logging import (
@@ -90,7 +92,11 @@ def run(config: StagedTrainConfig) -> None:
     )
 
     trainer = build_trainer(config, output_dir, callbacks)
-    trainer.fit(module, datamodule=datamodule, ckpt_path=config.train.ckpt_path)
+    trainer.fit(
+        module,
+        datamodule=datamodule,
+        ckpt_path=_resume_checkpoint(config, output_dir),
+    )
 
     if not trainer.is_global_zero:
         return
@@ -156,6 +162,7 @@ def _loader_spec(
             config.text_datamodule,
             loader.tasks,
             prediction=loader.prediction_modality,
+            trace=loader.trace,
             ar_framing=loader.framing,
             tasks=config.datamodule.tasks,
         )
@@ -163,6 +170,7 @@ def _loader_spec(
         config.datamodule,
         loader.tasks,
         prediction=loader.prediction_modality,
+        trace=loader.trace,
         ar_framing=loader.framing,
     )
 
@@ -178,6 +186,7 @@ def _validation_spec(config: StagedTrainConfig) -> LoaderSpec:
             replace(config.text_datamodule, dataset=dataset),
             loader.tasks,
             prediction=loader.prediction_modality,
+            trace=loader.trace,
             ar_framing=loader.framing,
             max_samples=config.validation.max_samples,
         )
@@ -189,6 +198,7 @@ def _validation_spec(config: StagedTrainConfig) -> LoaderSpec:
         replace(config.datamodule, dataset=dataset),
         loader.tasks,
         prediction=loader.prediction_modality,
+        trace=loader.trace,
         ar_framing=loader.framing,
     )
 
@@ -248,13 +258,12 @@ def training_callbacks(
         schedule_runtime,
         active_ctc_routes=config.pl_module.ctc.active_routes,
         before_schedule=(
-            (AssetMaterialization(),)
-            if config.datamodule.materialization.enabled
-            else ()
+            _lifecycle_callbacks(config)
         ),
     )
     callbacks.extend(_logging_callbacks(summary, validation_history))
     callbacks.extend(_task_sample_loggers(config))
+    callbacks.extend(_synthesis_sample_loggers(config))
     text_retention = text_retention_logger(config.callbacks.text_retention)
     if text_retention is not None:
         callbacks.append(text_retention)
@@ -265,6 +274,24 @@ def training_callbacks(
     if checkpoint is not None:
         callbacks.append(checkpoint)
     return callbacks
+
+
+def _lifecycle_callbacks(config: StagedTrainConfig) -> tuple[Callback, ...]:
+    callbacks: list[Callback] = []
+    if config.datamodule.materialization.enabled:
+        callbacks.append(AssetMaterialization())
+    if config.datamodule.streaming.enabled:
+        callbacks.append(StreamingSynthesis())
+    return tuple(callbacks)
+
+
+def _resume_checkpoint(config: StagedTrainConfig, output_dir: Path) -> str | None:
+    if config.train.ckpt_path is not None:
+        return config.train.ckpt_path
+    if not config.train.auto_resume:
+        return None
+    path = output_dir / "checkpoints" / "last.ckpt"
+    return str(path) if path.is_file() else None
 
 
 def _logging_callbacks(
@@ -296,6 +323,19 @@ def _task_sample_loggers(config: StagedTrainConfig) -> list[Callback]:
             use_cache=task_sample.use_cache,
         )
         for panel in task_sample.panels
+    ]
+
+
+def _synthesis_sample_loggers(config: StagedTrainConfig) -> list[Callback]:
+    callback = config.callbacks.synthesis_sample
+    if not callback.enabled:
+        return []
+    return [
+        SynthesisSampleLogger(
+            callback.indices,
+            callback.every_n_steps,
+            loader_name=callback.loader,
+        )
     ]
 
 

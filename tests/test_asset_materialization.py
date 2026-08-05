@@ -4,13 +4,14 @@ import sys
 import time
 import unittest
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import ModuleType, SimpleNamespace
 from typing import Iterator, cast
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
-from anydataset.dataset import MapStyleABC
+from anydataset.dataset import IndexSelection, MapStyleABC
 from anydataset.types import AudioView, Sample
 
 from speech_to_speech.datamodule import asset
@@ -18,6 +19,9 @@ from speech_to_speech.datamodule.asset import (
     AssetPhase,
     AssetRequest,
     BackgroundAssetJob,
+    BackgroundDualAssetJob,
+    DualAssetRequest,
+    DualWorkspaceCodecProducer,
     WorkspaceCodecProducer,
     resolve_workspace_asset,
 )
@@ -26,7 +30,11 @@ from speech_to_speech.datamodule.config import (
     DataLoaderConfig,
     SpeechConfig,
 )
-from speech_to_speech.datamodule.dataset.speech import DatasetConfig, DatasetName
+from speech_to_speech.datamodule.dataset.speech import (
+    DatasetConfig,
+    DatasetName,
+    DualAudioDataset,
+)
 from speech_to_speech.datamodule.contract import DatasetRuntime
 
 
@@ -110,6 +118,25 @@ class AssetMaterializationTest(unittest.TestCase):
                 ),
             )
 
+    def test_coupled_asset_request_id_remains_contract_v2(self) -> None:
+        request = AssetRequest(
+            dataset="wmt19_tts",
+            source_root=Path("/source"),
+            output_root=Path("/output"),
+            split="train",
+            codec="longcat",
+            codec_view=AudioView.LONGCAT,
+            filter_policy="speech_translation_v1",
+            input_id="input-v1",
+            provider_id="provider-v1",
+        )
+
+        self.assertEqual(
+            request.id,
+            "s2s-asset-3b8fa7f4109fa6d9533c585cd5eb8971"
+            "5ddf2015181fd986aa7de66786473e12",
+        )
+
     def test_unsupported_codec_view_is_rejected(self) -> None:
         with self.assertRaisesRegex(
             ValueError,
@@ -151,6 +178,113 @@ class AssetMaterializationTest(unittest.TestCase):
             filter_policy="speech_translation_v1",
             missing_ok=True,
         )
+
+    def test_decoupled_workspace_hits_return_dual_dataset_without_job(self) -> None:
+        input_dataset = _TaggedDataset("workspace-glm4")
+        output_dataset = _TaggedDataset("workspace-bicodec")
+
+        def load_codec(
+            dataset_name: DatasetName,
+            root: Path,
+            *,
+            split: str,
+            view: AudioView,
+            filter_policy: str | None,
+            missing_ok: bool,
+        ) -> _TaggedDataset:
+            del dataset_name, root, split, filter_policy, missing_ok
+            if view is AudioView.GLM4:
+                return input_dataset
+            if view is AudioView.BICODEC:
+                return output_dataset
+            raise AssertionError(view)
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "workspace"
+            with (
+                _workspace(root),
+                patch.object(asset, "_load_codec_dataset", side_effect=load_codec) as load,
+                patch.object(asset, "WorkspaceWaveformFactory") as waveform_factory,
+                patch.object(asset, "_load_materialized_dataset") as materialized,
+                patch.object(asset, "_provider_factory") as provider,
+            ):
+                resolution = resolve_workspace_asset(
+                    DatasetConfig(root=str(root), filter="speech_translation_v1"),
+                    _decoupled_runtime(),
+                    _materialization(
+                        Path(directory) / "output",
+                        codec_view=AudioView.BICODEC.value,
+                    ),
+                )
+
+        dual = cast(DualAudioDataset, resolution.dataset)
+        self.assertIsInstance(dual, DualAudioDataset)
+        self.assertIs(dual.input_dataset, input_dataset)
+        self.assertIs(dual.output_dataset, output_dataset)
+        self.assertIs(dual.input_view, AudioView.GLM4)
+        self.assertIsNone(resolution.request_id)
+        self.assertIsNone(resolution.job)
+        self.assertEqual(
+            load.call_args_list,
+            [
+                call(
+                    DatasetName.WMT19_TTS,
+                    root.resolve(),
+                    split="train",
+                    view=AudioView.GLM4,
+                    filter_policy="speech_translation_v1",
+                    missing_ok=True,
+                ),
+                call(
+                    DatasetName.WMT19_TTS,
+                    root.resolve(),
+                    split="train",
+                    view=AudioView.BICODEC,
+                    filter_policy="speech_translation_v1",
+                    missing_ok=True,
+                ),
+            ],
+        )
+        waveform_factory.assert_not_called()
+        materialized.assert_not_called()
+        provider.assert_not_called()
+
+    def test_glm4_workspace_store_uses_direct_anydataset_loader(self) -> None:
+        base = _TaggedDataset("glm4", samples=3)
+        selection = IndexSelection(_TaggedDataset("text", samples=3), [0, 2])
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "workspace"
+            store = root / AudioView.GLM4.value
+            store.mkdir(parents=True)
+            with (
+                _workspace(root) as moss_tts,
+                patch.object(asset, "read_store_manifest"),
+                patch.object(
+                    asset.AnyDataset,
+                    "from_store",
+                    return_value=base,
+                ) as from_store,
+            ):
+                moss_tts.text.return_value.filter.return_value.load.return_value = selection
+                loaded = asset._load_codec_dataset(
+                    DatasetName.WMT19_TTS,
+                    root,
+                    split="train",
+                    view=AudioView.GLM4,
+                    filter_policy="speech_translation_v1",
+                    missing_ok=False,
+                )
+
+        selected = cast(IndexSelection, loaded)
+        self.assertIsInstance(selected, IndexSelection)
+        self.assertIs(selected.dataset, base)
+        self.assertEqual(selected.indices, (0, 2))
+        from_store.assert_called_once_with(store, split="train")
+        moss_tts.text.assert_called_once_with(root=root, split="train")
+        moss_tts.text.return_value.filter.assert_called_once_with(
+            "speech_translation_v1"
+        )
+        moss_tts.codec.assert_not_called()
 
     def test_bicodec_request_uses_structured_provider_factory(self) -> None:
         request = AssetRequest(
@@ -261,6 +395,76 @@ class AssetMaterializationTest(unittest.TestCase):
             filter_policy="speech_translation_v1",
         )
 
+    def test_partial_dual_hit_keeps_input_codes_in_waveform_fallback(self) -> None:
+        input_dataset = _TaggedDataset("workspace-glm4")
+        fallback = _TaggedDataset("waveform")
+        source = Mock(return_value=fallback)
+
+        def load_codec(
+            dataset_name: DatasetName,
+            root: Path,
+            *,
+            split: str,
+            view: AudioView,
+            filter_policy: str | None,
+            missing_ok: bool,
+        ) -> _TaggedDataset | None:
+            del dataset_name, root, split, filter_policy, missing_ok
+            return input_dataset if view is AudioView.GLM4 else None
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "workspace"
+            output = Path(directory) / "output"
+            with (
+                _workspace(root),
+                patch.object(asset, "_load_codec_dataset", side_effect=load_codec),
+                patch.object(
+                    asset,
+                    "WorkspaceWaveformFactory",
+                    return_value=source,
+                ),
+                patch.object(
+                    asset,
+                    "_workspace_input_id",
+                    return_value="workspace-input-v1",
+                ),
+                patch.object(asset, "_load_materialized_dataset", return_value=None),
+                patch.object(
+                    asset,
+                    "_provider_factory",
+                    wraps=asset._provider_factory,
+                ) as provider,
+            ):
+                resolution = resolve_workspace_asset(
+                    DatasetConfig(root=str(root), filter="speech_translation_v1"),
+                    _decoupled_runtime(),
+                    _materialization(
+                        output,
+                        codec_view=AudioView.BICODEC.value,
+                    ),
+                )
+
+        fallback_dataset = cast(DualAudioDataset, resolution.dataset)
+        self.assertIsInstance(fallback_dataset, DualAudioDataset)
+        self.assertIs(fallback_dataset.input_dataset, input_dataset)
+        self.assertIs(fallback_dataset.output_dataset, fallback)
+        self.assertIs(fallback_dataset.input_view, AudioView.GLM4)
+        job = cast(BackgroundDualAssetJob, resolution.job)
+        self.assertIsInstance(job, BackgroundDualAssetJob)
+        self.assertIs(job.fallback, fallback_dataset)
+        self.assertEqual(job.request.input.codec, "glm4")
+        self.assertIs(job.request.input.codec_view, AudioView.GLM4)
+        self.assertEqual(job.request.output.codec, "bicodec")
+        self.assertIs(job.request.output.codec_view, AudioView.BICODEC)
+        self.assertEqual(job.request.input.input_id, "workspace-input-v1")
+        self.assertEqual(job.request.output.input_id, "workspace-input-v1")
+        producer = cast(DualWorkspaceCodecProducer, job.producer)
+        self.assertTrue(producer.input_from_workspace)
+        self.assertFalse(producer.output_from_workspace)
+        self.assertIs(producer.source, source)
+        provider.assert_called_once_with(job.request.output)
+        source.assert_called_once_with()
+
     def test_corrupt_workspace_codec_is_not_treated_as_a_miss(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory) / "workspace"
@@ -348,6 +552,129 @@ class AssetMaterializationTest(unittest.TestCase):
 
         self.assertEqual(load.call_count, 2)
 
+    def test_dual_producer_validates_both_sides_before_publish(self) -> None:
+        request = _dual_asset_request()
+        input_dataset = _TaggedDataset("input")
+        output_dataset: _TaggedDataset | None = None
+
+        def load_materialized(
+            child: AssetRequest,
+            *,
+            missing_ok: bool,
+        ) -> _TaggedDataset | None:
+            dataset = (
+                input_dataset
+                if child.codec_view is AudioView.GLM4
+                else output_dataset
+            )
+            if dataset is None and not missing_ok:
+                raise FileNotFoundError(child.codec_view.value)
+            return dataset
+
+        producer = DualWorkspaceCodecProducer(
+            request,
+            Mock(return_value=_TaggedDataset("source")),
+            _materialization(Path("/output")),
+            input_from_workspace=False,
+            output_from_workspace=False,
+        )
+        with (
+            patch.object(asset, "WorkspaceCodecProducer") as child_producer,
+            patch.object(
+                asset,
+                "_load_materialized_dataset",
+                side_effect=load_materialized,
+            ),
+        ):
+            with self.assertRaisesRegex(FileNotFoundError, "bicodec"):
+                producer()
+
+            output_dataset = _TaggedDataset("output")
+            producer()
+            loaded = producer.load()
+
+        self.assertEqual(child_producer.call_count, 4)
+        dual = cast(DualAudioDataset, loaded)
+        self.assertIs(dual.input_dataset, input_dataset)
+        self.assertIs(dual.output_dataset, output_dataset)
+
+    def test_dual_producer_rejects_misaligned_store_lengths(self) -> None:
+        request = _dual_asset_request()
+        producer = DualWorkspaceCodecProducer(
+            request,
+            Mock(return_value=_TaggedDataset("source")),
+            _materialization(Path("/output")),
+            input_from_workspace=False,
+            output_from_workspace=False,
+        )
+
+        def load_materialized(
+            child: AssetRequest,
+            *,
+            missing_ok: bool,
+        ) -> _TaggedDataset:
+            del missing_ok
+            if child.codec_view is AudioView.GLM4:
+                return _TaggedDataset("input", samples=2)
+            return _TaggedDataset("output", samples=3)
+
+        with patch.object(
+            asset,
+            "_load_materialized_dataset",
+            side_effect=load_materialized,
+        ):
+            with self.assertRaisesRegex(ValueError, "equal lengths"):
+                producer.load()
+
+    def test_missing_glm4_input_requires_explicit_provider_backend(self) -> None:
+        output_dataset = _TaggedDataset("workspace-bicodec")
+        fallback = _TaggedDataset("waveform")
+
+        def load_codec(
+            dataset_name: DatasetName,
+            root: Path,
+            *,
+            split: str,
+            view: AudioView,
+            filter_policy: str | None,
+            missing_ok: bool,
+        ) -> _TaggedDataset | None:
+            del dataset_name, root, split, filter_policy, missing_ok
+            return output_dataset if view is AudioView.BICODEC else None
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "workspace"
+            with (
+                _workspace(root),
+                patch.object(asset, "_load_codec_dataset", side_effect=load_codec),
+                patch.object(
+                    asset,
+                    "WorkspaceWaveformFactory",
+                    return_value=Mock(return_value=fallback),
+                ),
+                patch.object(
+                    asset,
+                    "_workspace_input_id",
+                    return_value="workspace-input-v1",
+                ),
+                patch.object(asset, "_load_materialized_dataset", return_value=None),
+                patch.object(asset, "BiCodecProviderFactory") as output_provider,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "provider/backend.*glm4.*never reuses the output codec provider",
+                ):
+                    resolve_workspace_asset(
+                        DatasetConfig(root=str(root)),
+                        _decoupled_runtime(),
+                        _materialization(
+                            Path(directory) / "output",
+                            codec_view=AudioView.BICODEC.value,
+                        ),
+                    )
+
+        output_provider.assert_not_called()
+
     def test_missing_workspace_filter_does_not_fall_back_to_unfiltered_data(self) -> None:
         source = Mock(side_effect=asset._WorkspaceFilterMissing("selection missing"))
         with TemporaryDirectory() as directory:
@@ -423,6 +750,72 @@ class AssetMaterializationTest(unittest.TestCase):
             "stream-filter",
         )
         workspace_source.assert_called_once_with()
+
+    def test_dual_source_factory_is_opened_once_and_shared(self) -> None:
+        fallback = _TaggedDataset("stream")
+        source = Mock(return_value=fallback)
+        workspace_source = Mock(
+            side_effect=asset._WorkspaceSourceMissing("base missing")
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "workspace"
+            materialization = _materialization(
+                Path(directory) / "output",
+                source_factory="fixture.stream:build",
+                input_id="stream-filter-v1",
+                codec_view=AudioView.BICODEC.value,
+            )
+            with (
+                _workspace(root),
+                patch.object(asset, "_load_codec_dataset", return_value=None),
+                patch.object(asset, "_load_materialized_dataset", return_value=None),
+                patch.object(asset, "_source_factory", return_value=source) as builder,
+                patch.object(
+                    asset,
+                    "WorkspaceWaveformFactory",
+                    return_value=workspace_source,
+                ),
+            ):
+                resolution = resolve_workspace_asset(
+                    DatasetConfig(root=str(root), filter="stream-filter"),
+                    _decoupled_runtime(
+                        input_codec_name="longcat",
+                        input_audio_view=AudioView.LONGCAT,
+                    ),
+                    materialization,
+                )
+
+        job = cast(BackgroundDualAssetJob, resolution.job)
+        producer = cast(DualWorkspaceCodecProducer, job.producer)
+        builder.assert_called_once_with(job.request.output)
+        source.assert_called_once_with()
+        self.assertIs(producer.source, source)
+        input_request = job.request.input
+        output_request = job.request.output
+        self.assertEqual(input_request.source_root, output_request.source_root)
+        self.assertEqual(input_request.split, output_request.split)
+        self.assertEqual(input_request.filter_policy, output_request.filter_policy)
+        self.assertEqual(input_request.input_id, output_request.input_id)
+        self.assertEqual(input_request.source_factory, output_request.source_factory)
+
+        changed_input = DualAssetRequest(
+            replace(
+                input_request,
+                codec="unicodec",
+                codec_view=AudioView.UNICODEC,
+            ),
+            output_request,
+        )
+        changed_output = DualAssetRequest(
+            input_request,
+            replace(
+                output_request,
+                codec="longcat",
+                codec_view=AudioView.LONGCAT,
+            ),
+        )
+        self.assertNotEqual(job.request.id, changed_input.id)
+        self.assertNotEqual(job.request.id, changed_output.id)
 
     def test_ready_stream_asset_does_not_reopen_its_source(self) -> None:
         ready = _TaggedDataset("ready")
@@ -517,7 +910,7 @@ class AssetMaterializationTest(unittest.TestCase):
                 )
 
         job = cast(BackgroundAssetJob, resolution.job)
-        self.assertEqual(len(resolution.dataset), 4)
+        self.assertEqual(len(cast(_TaggedDataset, resolution.dataset)), 4)
         self.assertEqual(job.request.dataset, DatasetName.STREAMING_S2ST.value)
         self.assertIsNone(job.request.filter_policy)
         self.assertEqual(job.request.input_id, "wmt19-bidirectional-v1")
@@ -671,6 +1064,49 @@ def _runtime(
         SimpleNamespace(
             codec_name=codec_name,
             audio_view=audio_view,
+        ),
+    )
+
+
+def _decoupled_runtime(
+    *,
+    input_codec_name: str = "glm4",
+    input_audio_view: AudioView = AudioView.GLM4,
+    codec_name: str = "bicodec",
+    audio_view: AudioView = AudioView.BICODEC,
+) -> DatasetRuntime:
+    return cast(
+        DatasetRuntime,
+        SimpleNamespace(
+            input_audio_decoupled=True,
+            input_codec_name=input_codec_name,
+            input_audio_view=input_audio_view,
+            codec_name=codec_name,
+            audio_view=audio_view,
+        ),
+    )
+
+
+def _dual_asset_request() -> DualAssetRequest:
+    common = {
+        "dataset": "wmt19_tts",
+        "source_root": Path("/source"),
+        "output_root": Path("/output"),
+        "split": "train",
+        "filter_policy": "speech_translation_v1",
+        "input_id": "input-v1",
+        "provider_id": "provider-v1",
+    }
+    return DualAssetRequest(
+        input=AssetRequest(
+            **common,
+            codec="glm4",
+            codec_view=AudioView.GLM4,
+        ),
+        output=AssetRequest(
+            **common,
+            codec="bicodec",
+            codec_view=AudioView.BICODEC,
         ),
     )
 

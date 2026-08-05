@@ -3,7 +3,9 @@ from __future__ import annotations
 import random
 from typing import Optional
 
-from .contract import Task
+from anydataset.types import Modality
+
+from .contract import FieldRole, ResponseSpec, Task
 
 TEMPLATES_PER_TASK = 30
 CANONICAL_TEMPLATES_PER_TASK = 1
@@ -467,6 +469,46 @@ def format_instruction(
     return text.format(**kwargs)
 
 
+def format_response_instruction(
+    instruction: str,
+    response: ResponseSpec,
+    *,
+    language: str,
+) -> str:
+    """Append an explicit ordered response schema for non-direct traces."""
+    if not isinstance(instruction, str) or not instruction:
+        raise ValueError("response instruction base must be a non-empty string.")
+    if not isinstance(response, ResponseSpec):
+        raise TypeError("response instruction requires a ResponseSpec.")
+    if not isinstance(language, str) or not language:
+        raise ValueError("response instruction language must be a non-empty string.")
+    if response.name == "direct":
+        return instruction
+    steps = [
+        f"{index}. {_field_instruction(field.role, field.modality, language)}"
+        for index, field in enumerate(response.fields, start=1)
+    ]
+    return instruction + "\nRespond in this exact order:\n" + "\n".join(steps)
+
+
+def _field_instruction(
+    role: FieldRole,
+    modality: Modality,
+    language: str,
+) -> str:
+    if role is FieldRole.SOURCE and modality is Modality.TEXT:
+        return "transcribe the source speech as text"
+    if role is FieldRole.TARGET and modality is Modality.TEXT:
+        return f"produce the {language} translation as text"
+    if role is FieldRole.TARGET and modality is Modality.AUDIO:
+        return f"generate the corresponding {language} speech"
+    if role is FieldRole.SOURCE and modality is Modality.AUDIO:
+        return "reproduce the source audio"
+    raise ValueError(
+        f"unsupported response field: role={role.value}, modality={modality.value}."
+    )
+
+
 def _index(value: object, *, name: str) -> Optional[int]:
     if value is None:
         return None
@@ -484,5 +526,6 @@ __all__ = [
     "TEMPLATES_PER_TASK",
     "evaluation_template_index",
     "format_instruction",
+    "format_response_instruction",
     "select_template",
 ]

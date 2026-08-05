@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence, Sized
+from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -14,7 +15,7 @@ from torch.utils.data import DataLoader, Dataset, Subset
 from .._compat import StrEnum, auto
 from .asset import AssetJob, resolve_workspace_asset
 from .loader.contract import ARFraming, validate_ar_framing
-from ..task import PredictionModality, Task
+from ..task import PredictionModality, Task, resolve_response
 from .collate import Collator
 from .config import TaskConfig
 from .config import DataLoaderConfig, SpeechConfig
@@ -37,6 +38,17 @@ from .sample import (
     AudioContextCostRow,
     DataShape,
 )
+from .streaming import (
+    PublishedSample,
+    SnapshotFeed,
+    StreamingDataLoader,
+    StreamingSnapshotDataset,
+    SynthesisController,
+    SynthesisRequest,
+    WorkspaceSnapshotLoader,
+    synthesis_controller,
+    workspace_stream_root,
+)
 
 if TYPE_CHECKING:
     from .dataset.text import TextConfig
@@ -55,6 +67,7 @@ class LoaderSpec:
     text_config: TextConfig | None = None
     sample_index: int | None = None
     prediction: PredictionModality | None = None
+    trace: str | None = None
     ar_framing: ARFraming = ARFraming.INSTRUCTION
     max_samples: int | None = None
     task_configs: Mapping[Task, TaskConfig] | None = None
@@ -69,10 +82,21 @@ class LoaderSpec:
             PredictionModality,
         ):
             raise TypeError("loader prediction must be a PredictionModality or None.")
+        if self.trace is not None and (
+            not isinstance(self.trace, str) or not self.trace
+        ):
+            raise TypeError("loader trace must be a non-empty string or None.")
         validate_ar_framing(
             self.ar_framing,
             [task for task, weight in self.task_weights.items() if weight > 0],
         )
+        for task, weight in self.task_weights.items():
+            if weight > 0:
+                resolve_response(
+                    task,
+                    prediction=self.prediction,
+                    trace=self.trace,
+                )
         _validate_max_samples(self.max_samples)
         if self.kind is LoaderKind.SPEECH:
             if self.speech_config is None or self.text_config is not None:
@@ -98,6 +122,7 @@ class LoaderSpec:
         *,
         sample_index: int | None = None,
         prediction: PredictionModality | None = None,
+        trace: str | None = None,
         ar_framing: ARFraming = ARFraming.INSTRUCTION,
     ) -> LoaderSpec:
         return cls(
@@ -106,6 +131,7 @@ class LoaderSpec:
             speech_config=config,
             sample_index=sample_index,
             prediction=prediction,
+            trace=trace,
             ar_framing=ar_framing,
         )
 
@@ -116,6 +142,7 @@ class LoaderSpec:
         task_weights: Mapping[Task, float],
         *,
         prediction: PredictionModality | None = None,
+        trace: str | None = None,
         ar_framing: ARFraming = ARFraming.INSTRUCTION,
         max_samples: int | None = None,
         tasks: Mapping[Task, TaskConfig] | None = None,
@@ -126,6 +153,7 @@ class LoaderSpec:
             text_config=config,
             max_samples=max_samples,
             prediction=prediction,
+            trace=trace,
             ar_framing=ar_framing,
             task_configs=tasks,
         )
@@ -161,6 +189,7 @@ class _SpeechLoader:
         sample_index: int | None = None,
         *,
         prediction: PredictionModality | None = None,
+        trace: str | None = None,
         ar_framing: ARFraming = ARFraming.INSTRUCTION,
     ) -> None:
         self.config = config
@@ -174,6 +203,7 @@ class _SpeechLoader:
             mask_text_ratio=config.mask_text_ratio,
             mask_audio_ratio=config.mask_audio_ratio,
             prediction=prediction,
+            trace=trace,
             ar_framing=ar_framing,
             tasks=config.tasks,
         )
@@ -182,6 +212,10 @@ class _SpeechLoader:
         self._dataset: Dataset[RawSample] | None = None
         self._subset: Subset[RawSample] | None = None
         self._asset_job: AssetJob | None = None
+        self._streaming_dataset: StreamingSnapshotDataset | None = None
+        self._streaming_loader: StreamingDataLoader | None = None
+        self._pending_streaming_state: Mapping[str, object] | None = None
+        self._synthesis_controller: SynthesisController | None = None
 
     def setup(
         self,
@@ -203,6 +237,41 @@ class _SpeechLoader:
             )
         if dataset is not None:
             self._set_dataset(dataset)
+            return
+        streaming = self.config.streaming
+        if streaming.enabled:
+            root = workspace_stream_root(streaming.root or self.config.dataset.root)
+            if not isinstance(self.collator.runtime, DataRuntimeSnapshot):
+                snapshot = DataRuntimeSnapshot.from_runtime(self.runtime)
+                self.collator.runtime = cast(DataRuntime, cast(object, snapshot))
+            feed = SnapshotFeed(
+                root,
+                stream_id=cast(str, streaming.stream_id),
+                expected_samples=cast(int, streaming.expected_samples),
+                codec=self.runtime.codec_name,
+                input_codec=self.runtime.input_codec_name,
+                loader=WorkspaceSnapshotLoader(
+                    codec=self.runtime.codec_name,
+                    split=self.config.dataset.split,
+                    input_codec=self.runtime.input_codec_name,
+                ),
+            )
+            self._streaming_dataset = StreamingSnapshotDataset(
+                feed,
+                batch_size=self.config.dataloader.batch_size,
+                poll_seconds=streaming.poll_seconds,
+                status_seconds=streaming.status_seconds,
+            )
+            self._streaming_loader = StreamingDataLoader(
+                self._streaming_dataset,
+                collate_fn=self.collator,
+                pin_memory=self.config.dataloader.pin_memory,
+            )
+            pending = self._pending_streaming_state
+            if pending is not None:
+                self._streaming_loader.load_state_dict(pending)
+                self._pending_streaming_state = None
+            self._set_dataset(self._streaming_dataset)
             return
         materialization = self.config.materialization
         if materialization.enabled:
@@ -241,9 +310,90 @@ class _SpeechLoader:
             self._subset = Subset(self._dataset, [self.sample_index])
 
     def train_samples(self, indices: Sequence[int]) -> list[RawSample]:
+        if self._streaming_dataset is not None:
+            published = self._streaming_dataset.feed.published(indices)
+            if len(published) != len(indices):
+                ready = {sample.index for sample in published}
+                missing = [index for index in indices if index not in ready]
+                raise RuntimeError(
+                    "streaming diagnostic samples are not published yet: "
+                    + ", ".join(str(index) for index in missing)
+                )
+            by_index = {sample.index: sample.sample for sample in published}
+            return [by_index[index] for index in indices]
         if self._dataset is None:
             raise RuntimeError("DataModule.setup() must run before reading samples.")
         return [self._dataset[index] for index in indices]
+
+    def published_samples(self, indices: Sequence[int]) -> list[PublishedSample]:
+        dataset = self._streaming_dataset
+        if dataset is None:
+            return []
+        return dataset.feed.published(indices)
+
+    def streaming_state_dict(self) -> dict[str, object] | None:
+        loader = self._streaming_loader
+        if loader is not None:
+            return loader.state_dict()
+        if self._pending_streaming_state is not None:
+            return dict(self._pending_streaming_state)
+        return None
+
+    def load_streaming_state_dict(self, state: Mapping[str, object]) -> None:
+        loader = self._streaming_loader
+        if loader is None:
+            self._pending_streaming_state = dict(state)
+            return
+        loader.load_state_dict(state)
+
+    def set_streaming_global_step(self, step: int) -> None:
+        if self._streaming_loader is not None:
+            self._streaming_loader.set_global_step(step)
+
+    def acknowledge_streaming_batch(self, global_step: int) -> None:
+        if self._streaming_loader is None:
+            raise RuntimeError("streaming batch acknowledgement requires its loader.")
+        self._streaming_loader.acknowledge(global_step)
+
+    def start_synthesis(self, *, owner: bool) -> None:
+        streaming = self.config.streaming
+        if not streaming.enabled or not owner or streaming.producer_factory is None:
+            return
+        if self._synthesis_controller is not None:
+            return
+        root = workspace_stream_root(streaming.root or self.config.dataset.root)
+        controller = synthesis_controller(
+            streaming.producer_factory,
+            SynthesisRequest(
+                root=root,
+                stream_id=cast(str, streaming.stream_id),
+                expected_samples=cast(int, streaming.expected_samples),
+                codec=self.runtime.codec_name,
+                split=self.config.dataset.split,
+                options=dict(streaming.producer_options),
+                input_codec=self.runtime.input_codec_name,
+            ),
+        )
+        try:
+            controller.start()
+        except Exception:
+            with suppress(Exception):
+                controller.close()
+            raise
+        self._synthesis_controller = controller
+
+    def check_synthesis(self, *, owner: bool) -> None:
+        if not owner or self._synthesis_controller is None:
+            return
+        self._synthesis_controller.check()
+
+    def close_synthesis(self, *, owner: bool) -> None:
+        if not owner:
+            return
+        controller = self._synthesis_controller
+        self._synthesis_controller = None
+        if controller is not None:
+            controller.close()
 
     def diagnostic_collator(
         self,
@@ -258,6 +408,7 @@ class _SpeechLoader:
             mask_text_ratio=self.config.mask_text_ratio,
             mask_audio_ratio=self.config.mask_audio_ratio,
             prediction=self.collator.prediction,
+            trace=self.collator.trace,
             ar_framing=self.collator.ar_framing,
             tasks=self.config.tasks,
         )
@@ -284,6 +435,10 @@ class _SpeechLoader:
                 num_workers=0,
                 collate_fn=self.collator,
             )
+        if self._streaming_dataset is not None:
+            if self._streaming_loader is None:
+                raise RuntimeError("streaming dataset is missing its stateful loader.")
+            return cast(Iterable[TrainInput], self._streaming_loader)
         loader = self.config.dataloader
         num_workers = self.num_workers
         if not isinstance(self.collator.runtime, DataRuntimeSnapshot):
@@ -350,6 +505,7 @@ class DataModule(LightningDataModule):
         if any(not name for name in self.loader_specs):
             raise ValueError("loader names must not be empty.")
         _validate_materialization_plan(self.loader_specs, validation)
+        _validate_streaming_plan(self.loader_specs, validation)
         self.schedule = schedule or LoaderSchedule(
             {name: 1.0 for name in self.loader_specs}
         )
@@ -392,6 +548,15 @@ class DataModule(LightningDataModule):
         )
 
     @property
+    def streaming_enabled(self) -> bool:
+        return any(
+            spec.kind is LoaderKind.SPEECH
+            and spec.speech_config is not None
+            and spec.speech_config.streaming.enabled
+            for spec in self.loader_specs.values()
+        )
+
+    @property
     def has_pending_assets(self) -> bool:
         return bool(self._asset_jobs())
 
@@ -411,9 +576,75 @@ class DataModule(LightningDataModule):
         for job in self._asset_jobs():
             job.close()
 
+    def start_streaming_synthesis(self, *, owner: bool) -> None:
+        for loader in self._speech_loaders(include_validation=False):
+            loader.start_synthesis(owner=owner)
+
+    def check_streaming_synthesis(self, *, owner: bool) -> None:
+        for loader in self._speech_loaders(include_validation=False):
+            loader.check_synthesis(owner=owner)
+
+    def close_streaming_synthesis(self, *, owner: bool) -> None:
+        for loader in self._speech_loaders(include_validation=False):
+            loader.close_synthesis(owner=owner)
+
+    def set_streaming_global_step(self, step: int) -> None:
+        for loader in self._speech_loaders(include_validation=False):
+            loader.set_streaming_global_step(step)
+
+    def acknowledge_streaming_batch(self, global_step: int) -> None:
+        loaders = self._speech_loaders(include_validation=False)
+        streaming = [loader for loader in loaders if loader.config.streaming.enabled]
+        if len(streaming) != 1:
+            raise RuntimeError(
+                "streaming batch acknowledgement requires exactly one loader."
+            )
+        streaming[0].acknowledge_streaming_batch(global_step)
+
     def teardown(self, stage: str | None = None) -> None:
         del stage
         self.close_asset_materialization()
+        self.close_streaming_synthesis(owner=True)
+
+    def state_dict(self) -> dict[str, object]:
+        streaming = {
+            name: state
+            for name, loader in self._loaders.items()
+            if isinstance(loader, _SpeechLoader)
+            and (state := loader.streaming_state_dict()) is not None
+        }
+        if not streaming:
+            return {}
+        return {
+            "schema": "speech-to-speech-datamodule-v1",
+            "streaming": streaming,
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        if not isinstance(state_dict, Mapping):
+            raise TypeError("DataModule checkpoint state must be a mapping.")
+        if state_dict.get("schema") != "speech-to-speech-datamodule-v1":
+            raise ValueError("DataModule checkpoint schema is incompatible.")
+        streaming = state_dict.get("streaming")
+        if not isinstance(streaming, Mapping):
+            raise TypeError("DataModule streaming checkpoint state must be a mapping.")
+        unknown = set(streaming) - set(self._loaders)
+        if unknown:
+            raise ValueError(
+                "DataModule checkpoint references unknown loaders: "
+                + ", ".join(sorted(cast(set[str], unknown)))
+            )
+        for name, state in streaming.items():
+            loader = self._loaders[name]
+            if not isinstance(loader, _SpeechLoader):
+                raise ValueError(
+                    f"DataModule checkpoint loader {name!r} is not a speech loader."
+                )
+            if not isinstance(state, Mapping):
+                raise TypeError(
+                    f"DataModule checkpoint loader {name!r} state must be a mapping."
+                )
+            loader.load_streaming_state_dict(cast(Mapping[str, object], state))
 
     def diagnostic_samples(
         self,
@@ -432,6 +663,20 @@ class DataModule(LightningDataModule):
         loader_name: str,
     ) -> Callable[[list[RawSample]], TrainInput]:
         return self._diagnostic_loader(split, loader_name).diagnostic_collator(task)
+
+    def published_streaming_samples(
+        self,
+        indices: Sequence[int],
+        *,
+        loader_name: str,
+    ) -> list[PublishedSample]:
+        try:
+            loader = self._loaders[loader_name]
+        except KeyError as error:
+            raise ValueError(f"unknown loader {loader_name!r}.") from error
+        if not isinstance(loader, _SpeechLoader):
+            raise ValueError("streaming samples require a speech loader.")
+        return loader.published_samples(indices)
 
     def train_dataloader(self) -> Iterable[TrainBatch]:
         loaders = {
@@ -510,6 +755,7 @@ def _build_loader(
             spec.task_weights,
             sample_index=spec.sample_index,
             prediction=spec.prediction,
+            trace=spec.trace,
             ar_framing=spec.ar_framing,
         )
     assert spec.text_config is not None
@@ -518,6 +764,7 @@ def _build_loader(
         cast(TextRuntime, runtime),
         spec.task_weights,
         prediction=spec.prediction,
+        trace=spec.trace,
         ar_framing=spec.ar_framing,
         max_samples=spec.max_samples,
         tasks=spec.task_configs,
@@ -536,6 +783,7 @@ def _build_validation_loader(
             spec.task_weights,
             sample_index=spec.sample_index,
             prediction=spec.prediction,
+            trace=spec.trace,
             ar_framing=spec.ar_framing,
         )
     assert spec.text_config is not None
@@ -544,6 +792,7 @@ def _build_validation_loader(
         cast(TextRuntime, runtime),
         spec.task_weights,
         prediction=spec.prediction,
+        trace=spec.trace,
         ar_framing=spec.ar_framing,
         max_samples=spec.max_samples,
         tasks=spec.task_configs,
@@ -594,6 +843,36 @@ def _validate_materialization_plan(
         raise ValueError(
             "training and validation asset materialization must resolve the same "
             "codec source request."
+        )
+
+
+def _validate_streaming_plan(
+    loaders: Mapping[str, LoaderSpec],
+    validation: LoaderSpec | None,
+) -> None:
+    enabled = [
+        spec
+        for spec in loaders.values()
+        if spec.kind is LoaderKind.SPEECH
+        and spec.speech_config is not None
+        and spec.speech_config.streaming.enabled
+    ]
+    if not enabled:
+        return
+    if len(loaders) != 1 or len(enabled) != 1:
+        raise ValueError(
+            "streaming synthesis currently requires exactly one training speech "
+            "loader so one global checkpoint cursor owns the logical epoch."
+        )
+    if enabled[0].sample_index is not None:
+        raise ValueError(
+            "streaming synthesis does not support sample_index; the backbone must "
+            "consume the complete logical epoch."
+        )
+    if validation is not None:
+        raise ValueError(
+            "streaming synthesis does not accept a validation loader; run validation "
+            "from an immutable sealed dataset."
         )
 
 
@@ -803,6 +1082,7 @@ def _collator(
     mask_text_ratio: float = 0.5,
     mask_audio_ratio: float = 0.5,
     prediction: PredictionModality | None = None,
+    trace: str | None = None,
     ar_framing: ARFraming = ARFraming.INSTRUCTION,
     tasks: Mapping[Task, TaskConfig] | None = None,
 ):
@@ -815,6 +1095,7 @@ def _collator(
             mask_text_ratio=mask_text_ratio,
             mask_audio_ratio=mask_audio_ratio,
             prediction=prediction,
+            trace=trace,
             ar_framing=ar_framing,
             tasks=tasks,
         )
@@ -827,6 +1108,7 @@ def _collator(
             mask_text_ratio=mask_text_ratio,
             mask_audio_ratio=mask_audio_ratio,
             prediction=prediction,
+            trace=trace,
             ar_framing=ar_framing,
             tasks=tasks,
         )

@@ -106,12 +106,45 @@ def tokens(
         hidden_size,
         device=text_embedding.weight.device,
     )
+    input_audio_embedding, input_audio_projection = _input_audio_interface(
+        runtime,
+        text_embedding,
+        hidden_size,
+    )
     return TokenInterface(
         runtime.layout,
         audio_embedding=audio_embedding,
         audio_projection=audio_projection,
         audio_head=audio_head,
+        input_audio_embedding=input_audio_embedding,
+        input_audio_projection=input_audio_projection,
     )
+
+
+def _input_audio_interface(
+    runtime: TokenModelRuntime,
+    text_embedding: nn.Embedding,
+    hidden_size: int,
+) -> tuple[nn.Embedding | None, CastOutput | None]:
+    block = runtime.layout.blocks.get("audio_input")
+    if block is None:
+        return None, None
+    start, end = block
+    embedding = nn.Embedding(
+        end - start,
+        hidden_size,
+        device=text_embedding.weight.device,
+        dtype=torch.float32,
+    )
+    reference_std = float(
+        text_embedding.weight.detach().to(dtype=torch.float32).std().clamp_min(1e-6)
+    )
+    nn.init.normal_(embedding.weight, mean=0.0, std=reference_std)
+    projection = CastOutput(
+        nn.Identity().to(device=text_embedding.weight.device, dtype=torch.float32),
+        reference=text_embedding.weight,
+    )
+    return embedding, projection
 
 
 def audio_input_adapter(

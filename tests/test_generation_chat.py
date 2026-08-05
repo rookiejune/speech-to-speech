@@ -20,10 +20,19 @@ from speech_to_speech.generation.chat import (
 )
 from speech_to_speech.generation.contract import TokenGenerator
 from speech_to_speech.runtime import AudioSequenceLayout
-from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
+from speech_to_speech.runtime.audio_tokenizer import (
+    BiCodecAudioTokenizer,
+    NativeAudioTokenizer,
+)
 from speech_to_speech.runtime.protocol import GenerationRuntime
 from speech_to_speech.runtime.backbone.contract import Backbone
-from speech_to_speech.task import Task
+from speech_to_speech.task import (
+    DIRECT,
+    FULL_COT,
+    TARGET_COT,
+    PredictionModality,
+    Task,
+)
 
 
 class _TextTokenizer:
@@ -105,25 +114,50 @@ def _runtime(
     audio_sequence_layout: AudioSequenceLayout = AudioSequenceLayout.FLATTENED,
     codec_name: str = "bicodec",
     codec: object | None = None,
+    decoupled: bool = False,
 ) -> GenerationRuntime:
     tokenizer = BiCodecAudioTokenizer(
         semantic_codebook_size=8,
         global_codebook_sizes=(3,),
         global_unit_length=2,
     )
+    input_tokenizer = NativeAudioTokenizer(vocab_size=16)
+    input_size = input_tokenizer.vocab_size + 2 if decoupled else 0
+    audio_start = 8 + input_size
+    layout = (
+        Layout(
+            text=(0, 8),
+            audio_input=(8, audio_start),
+            audio=(audio_start, audio_start + tokenizer.vocab_size + 3),
+        )
+        if decoupled
+        else Layout(
+            text=(0, 8),
+            audio=(8, 8 + tokenizer.vocab_size + 3),
+        )
+    )
     runtime = SimpleNamespace(
         audio_sequence_layout=audio_sequence_layout,
         audio_tokenizer=tokenizer,
+        input_audio_tokenizer=(input_tokenizer if decoupled else tokenizer),
         text_tokenizer=_TextTokenizer(),
-        layout=Layout(
-            text=(0, 8),
-            audio=(8, 8 + tokenizer.vocab_size + 3),
-        ),
-        boa_token_id=8 + tokenizer.vocab_size,
-        eoa_token_id=8 + tokenizer.vocab_size + 1,
+        layout=layout,
+        boa_token_id=audio_start + tokenizer.vocab_size,
+        eoa_token_id=audio_start + tokenizer.vocab_size + 1,
+        input_boa_token_id=(8 + input_tokenizer.vocab_size if decoupled else 8 + tokenizer.vocab_size),
+        input_eoa_token_id=(8 + input_tokenizer.vocab_size + 1 if decoupled else 8 + tokenizer.vocab_size + 1),
+        input_audio_block_name=("audio_input" if decoupled else "audio"),
+        input_audio_decoupled=decoupled,
+        input_codec_name=("glm4" if decoupled else codec_name),
+        input_audio_view=(AudioView.GLM4 if decoupled else AudioView.BICODEC),
         eos_token_id=7,
         pad_token_id=0,
-        codec_audio_range=(8, 8 + tokenizer.vocab_size),
+        codec_audio_range=(audio_start, audio_start + tokenizer.vocab_size),
+        input_codec_audio_range=(
+            (8, 8 + input_tokenizer.vocab_size)
+            if decoupled
+            else (8, 8 + tokenizer.vocab_size)
+        ),
         structured_full_sequence=True,
         acoustic_side_channel=False,
         codec_name=codec_name,
@@ -267,6 +301,82 @@ class _TextModel:
 
 
 class ChatAdapterTest(unittest.TestCase):
+    def test_decoupled_audio_source_uses_input_codes_and_output_boa(self) -> None:
+        runtime = _runtime(decoupled=True)
+        private = to_request(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "hello"},
+                            {
+                                "type": "codec_codes",
+                                "codec": "glm4",
+                                "codes": torch.tensor([[1], [2], [3]]),
+                            },
+                        ],
+                    }
+                ],
+                "task": Task.S2ST,
+            },
+            runtime,
+        )
+
+        positions = private["audio_input_positions"]
+        self.assertIsNotNone(positions)
+        assert positions is not None
+        prompt = private["prompt_ids"]
+        selected = prompt.index_select(0, positions)
+        input_start, input_end = runtime.input_codec_audio_range
+        self.assertTrue(bool(selected.ge(input_start).all()))
+        self.assertTrue(bool(selected.lt(input_end).all()))
+        self.assertEqual(int(prompt[-1]), runtime.boa_token_id)
+        self.assertIn(runtime.input_boa_token_id, prompt.tolist())
+        self.assertIn(runtime.input_eoa_token_id, prompt.tolist())
+
+    def test_decoupled_audio_source_rejects_output_codec_and_waveform_fallback(self) -> None:
+        runtime = _runtime(decoupled=True)
+        base = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "hello"},
+                        {
+                            "type": "codec_codes",
+                            "codec": "bicodec",
+                            "codes": torch.tensor([[1]]),
+                        },
+                    ],
+                }
+            ],
+            "task": Task.S2ST,
+        }
+        with self.assertRaisesRegex(ValueError, "runtime input codec"):
+            to_request(cast(ChatRequest, base), runtime)
+
+        with self.assertRaisesRegex(ValueError, "precomputed input codec_codes"):
+            to_request(
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "hello"},
+                                {
+                                    "type": "audio",
+                                    "waveform": torch.zeros(8),
+                                    "sample_rate": 16_000,
+                                },
+                            ],
+                        }
+                    ],
+                    "task": Task.S2ST,
+                },
+                runtime,
+            )
+
     def test_text_only_messages_build_private_request(self) -> None:
         runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
         request: ChatRequest = {
@@ -276,8 +386,84 @@ class ChatAdapterTest(unittest.TestCase):
         }
         private = to_request(request, runtime)
         self.assertIs(private["task"], Task.T2TT)
+        self.assertIs(private["prediction"], PredictionModality.TEXT)
+        self.assertEqual(private["trace"], DIRECT)
         self.assertNotIn("audio_context", private)
         self.assertGreater(private["prompt_ids"].numel(), 0)
+
+    def test_explicit_full_trace_is_normalized_and_added_to_prompt(self) -> None:
+        runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
+        private = to_request(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "hello world"},
+                            {
+                                "type": "codec_codes",
+                                "codec": "bicodec",
+                                "codes": _codes(),
+                            },
+                        ],
+                    }
+                ],
+                "task": Task.S2TT,
+                "prediction": PredictionModality.TEXT,
+                "trace": FULL_COT,
+            },
+            runtime,
+        )
+
+        self.assertIs(private["prediction"], PredictionModality.TEXT)
+        self.assertEqual(private["trace"], FULL_COT)
+        tokenizer = cast(_TextTokenizer, runtime.text_tokenizer)
+        self.assertIn(
+            "Respond in this exact order",
+            tokenizer.conversations[0][-1]["content"],
+        )
+
+    def test_bicodec_rejects_mixed_response_trace(self) -> None:
+        runtime = _runtime()
+        with self.assertRaisesRegex(
+            ValueError,
+            "BiCodec chat does not support mixed response traces",
+        ):
+            to_request(
+                {
+                    "messages": [{"role": "user", "content": "hello world"}],
+                    "task": Task.T2ST,
+                    "prediction": PredictionModality.PARALLEL,
+                    "trace": TARGET_COT,
+                },
+                runtime,
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "BiCodec chat does not support mixed response traces",
+        ):
+            to_request(
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "hello world"},
+                                {
+                                    "type": "codec_codes",
+                                    "codec": "bicodec",
+                                    "codes": _codes(),
+                                },
+                            ],
+                        }
+                    ],
+                    "task": Task.S2ST,
+                    "prediction": PredictionModality.PARALLEL,
+                    "trace": FULL_COT,
+                },
+                runtime,
+            )
 
     def test_messages_history_is_preserved_and_encoded_once(self) -> None:
         runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
@@ -336,6 +522,8 @@ class ChatAdapterTest(unittest.TestCase):
         private = to_request(request, runtime)
         self.assertNotIn("audio_context", private)
         self.assertIs(private["task"], Task.TTS)
+        self.assertIs(private["prediction"], PredictionModality.AUDIO)
+        self.assertEqual(private["trace"], DIRECT)
         local_global = runtime.audio_tokenizer.encode_global(codes)
         expected_suffix = torch.cat(
             (
@@ -457,6 +645,51 @@ class ChatAdapterTest(unittest.TestCase):
                     completion["choices"][0]["message"]["content"],
                     expected,
                 )
+                self.assertNotIn(
+                    "trace",
+                    completion["choices"][0]["message"],
+                )
+
+    def test_completion_returns_target_text_and_structured_trace(self) -> None:
+        runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
+        audio_start, _ = runtime.codec_audio_range
+        completion = completion_from_result(
+            {
+                "response_ids": torch.tensor(
+                    [
+                        4,
+                        runtime.eos_token_id,
+                        5,
+                        runtime.eos_token_id,
+                        runtime.boa_token_id,
+                        audio_start,
+                        runtime.eoa_token_id,
+                    ]
+                ),
+                "audio": None,
+            },
+            {
+                "messages": [{"role": "user", "content": "hello world"}],
+                "task": Task.S2ST,
+                "prediction": PredictionModality.PARALLEL,
+                "trace": FULL_COT,
+            },
+            runtime,
+        )
+
+        message = completion["choices"][0]["message"]
+        self.assertEqual(message["content"], "decoded:5")
+        self.assertEqual(
+            message["trace"],
+            [
+                {
+                    "index": 0,
+                    "role": "source",
+                    "modality": "text",
+                    "content": "decoded:4",
+                }
+            ],
+        )
 
     def test_completion_preserves_audio_decode_error(self) -> None:
         runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)

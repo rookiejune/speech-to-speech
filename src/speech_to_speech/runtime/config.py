@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import warnings
 import os
+import math
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -64,6 +65,68 @@ class AudioSequenceLayout(StrEnum):
 
 
 @dataclass(frozen=True)
+class InputAudioConfig:
+    """Optional input-only audio token space.
+
+    ``codec=None`` preserves the existing shared input/output audio space.  A
+    configured input space is intentionally metadata-only: prepared datasets
+    can use a tokenizer whose encoder/decoder backend is not loaded by the
+    output runtime.
+    """
+
+    codec: Optional[str] = None
+    tokenizer: Optional[Union[str, Path]] = None
+    vocab_size: Optional[int] = None
+    frame_rate: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.codec is None:
+            if any(
+                value is not None
+                for value in (self.tokenizer, self.vocab_size, self.frame_rate)
+            ):
+                raise ValueError(
+                    "runtime.input_audio codec is required when configuring its "
+                    "tokenizer, vocab_size, or frame_rate."
+                )
+            return
+        if not isinstance(self.codec, str):
+            raise TypeError("runtime.input_audio codec must be a string or None.")
+        if not self.codec:
+            raise ValueError("runtime.input_audio codec must not be empty.")
+        codec_audio_view(self.codec)
+        if self.tokenizer is not None:
+            if not isinstance(self.tokenizer, (str, Path)):
+                raise TypeError(
+                    "runtime.input_audio tokenizer must be a path or None."
+                )
+            if not str(self.tokenizer):
+                raise ValueError("runtime.input_audio tokenizer must not be empty.")
+        if self.vocab_size is not None:
+            if isinstance(self.vocab_size, bool) or not isinstance(
+                self.vocab_size,
+                int,
+            ):
+                raise TypeError(
+                    "runtime.input_audio vocab_size must be an integer or None."
+                )
+            if self.vocab_size <= 0:
+                raise ValueError("runtime.input_audio vocab_size must be positive.")
+        if self.frame_rate is not None:
+            if isinstance(self.frame_rate, bool) or not isinstance(
+                self.frame_rate,
+                (int, float),
+            ):
+                raise TypeError(
+                    "runtime.input_audio frame_rate must be numeric or None."
+                )
+            if not math.isfinite(float(self.frame_rate)) or self.frame_rate <= 0:
+                raise ValueError(
+                    "runtime.input_audio frame_rate must be finite and positive."
+                )
+
+
+@dataclass(frozen=True)
 class Config:
     codec: str = "longcat"
     backbone_type: BackboneType = BackboneType.HF_CAUSAL_LM
@@ -76,6 +139,7 @@ class Config:
     backbone_supports_cache_position: bool = True
     backbone_module: str = ""
     backbone_body: str = "base_model"
+    input_audio: InputAudioConfig = field(default_factory=InputAudioConfig)
     audio_tokenizer: Optional[Union[str, Path]] = None
     acoustic_generator_artifact: Optional[str] = None
     device: Optional[str] = None
@@ -103,6 +167,24 @@ class Config:
             raise TypeError("backbone_supports_cache_position must be a bool.")
         _validate_path(self.backbone_module, "backbone_module")
         _validate_path(self.backbone_body, "backbone_body", allow_empty=False)
+        if not isinstance(self.input_audio, InputAudioConfig):
+            raise TypeError("input_audio must be an InputAudioConfig.")
+        if (
+            self.input_audio.codec is not None
+            and self.input_audio.codec != self.codec
+        ):
+            if self.input_audio.frame_rate is None:
+                raise ValueError(
+                    "a distinct runtime.input_audio codec requires frame_rate."
+                )
+            if (
+                self.input_audio.tokenizer is None
+                and self.input_audio.vocab_size is None
+            ):
+                raise ValueError(
+                    "a distinct runtime.input_audio codec requires tokenizer or "
+                    "vocab_size."
+                )
         if self.acoustic_generator_artifact is not None:
             if not self.acoustic_generator_artifact:
                 raise ValueError("acoustic_generator_artifact must not be empty.")
@@ -129,12 +211,16 @@ class Config:
 
     @property
     def audio_view(self) -> AudioView:
-        if self.codec == "stable_codec":
-            return AudioView.STABLE
-        try:
-            return AudioView(self.codec)
-        except ValueError as error:
-            raise ValueError(f"unsupported codec: {self.codec}") from error
+        return codec_audio_view(self.codec)
+
+
+def codec_audio_view(codec: str) -> AudioView:
+    if codec == "stable_codec":
+        return AudioView.STABLE
+    try:
+        return AudioView(codec)
+    except ValueError as error:
+        raise ValueError(f"unsupported codec: {codec}") from error
 
 
 def config_for_local_rank(config: Config) -> Config:
@@ -207,6 +293,8 @@ def _validate_optional_nonempty_string(value: object, name: str) -> None:
 __all__ = [
     "AudioSequenceLayout",
     "Config",
+    "InputAudioConfig",
+    "codec_audio_view",
     "config_for_local_rank",
     "migrate_config_fields",
     "validate_sequence_layout_config",

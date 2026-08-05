@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, cast
 
-from anydataset.dataset import MapStyleABC
+from anydataset.dataset import AnyDataset, IndexSelection, MapStyleABC
 from anydataset.dataset.speaker import SpeakerAudioGrid
 import torch
 from anydataset.types import (
@@ -323,6 +323,9 @@ class ToyDataset(MapStyleABC):
         *,
         samples: int = 8,
         frames: int = 4,
+        input_view: AudioView | None = None,
+        input_vocab_size: int | None = None,
+        input_frame_rate: float | None = None,
     ) -> None:
         config = DatasetConfig(
             name=DatasetName.TOY,
@@ -336,6 +339,14 @@ class ToyDataset(MapStyleABC):
         self.samples = config.toy_samples
         self.frames = config.toy_frames
         self.frame_rate = codec.frame_rate
+        self.input_view = input_view
+        self.input_vocab_size = input_vocab_size
+        self.input_frame_rate = input_frame_rate
+        if self.input_view is not None:
+            if self.input_vocab_size is None or self.input_vocab_size <= 0:
+                raise ValueError("decoupled toy input requires a positive vocabulary size.")
+            if self.input_frame_rate is None or self.input_frame_rate <= 0:
+                raise ValueError("decoupled toy input requires a positive frame rate.")
         if self.view is AudioView.BICODEC:
             structured = global_codec(codec)
             self.codebook_sizes = tuple(structured.semantic_codebook_sizes)
@@ -355,19 +366,32 @@ class ToyDataset(MapStyleABC):
         if index < 0 or index >= self.samples:
             raise IndexError(index)
         return {
-            (Role.SOURCE, Modality.AUDIO): self._audio(index),
+            (Role.SOURCE, Modality.AUDIO): self._audio(index, input_audio=True),
             (Role.SOURCE, Modality.TEXT): TextItem(
                 views={TextView.TEXT: f"toy source {index}"},
                 meta={TextMeta.LANG: Lang.ZH},
             ),
-            (Role.TARGET, Modality.AUDIO): self._audio(index + self.samples),
+            (Role.TARGET, Modality.AUDIO): self._audio(
+                index + self.samples,
+                input_audio=False,
+            ),
             (Role.TARGET, Modality.TEXT): TextItem(
                 views={TextView.TEXT: f"toy target {index}"},
                 meta={TextMeta.LANG: Lang.EN},
             ),
         }
 
-    def _audio(self, offset: int) -> AudioItem:
+    def _audio(self, offset: int, *, input_audio: bool) -> AudioItem:
+        if input_audio and self.input_view is not None:
+            duration = self.frames / self.frame_rate
+            input_rate = cast(float, self.input_frame_rate)
+            input_frames = max(1, round(duration * input_rate))
+            steps = torch.arange(input_frames, dtype=torch.long)
+            values = ((steps + offset) % cast(int, self.input_vocab_size)).unsqueeze(-1)
+            return AudioItem(
+                views={self.input_view: values},
+                meta={AudioMeta.DURATION: duration},
+            )
         steps = torch.arange(self.frames, dtype=torch.long)
         if self.view is AudioView.BICODEC:
             semantic = ((steps + offset) % self.codebook_sizes[0]).unsqueeze(-1)
@@ -401,6 +425,35 @@ class ToyDataset(MapStyleABC):
         )
 
 
+class DualAudioDataset(MapStyleABC):
+    """Join aligned stores while keeping input/output codec views in one sample."""
+
+    def __init__(
+        self,
+        input_dataset: Dataset[Sample],
+        output_dataset: Dataset[Sample],
+        *,
+        input_view: AudioView,
+    ) -> None:
+        if not isinstance(input_dataset, Sized) or not isinstance(output_dataset, Sized):
+            raise TypeError("dual audio datasets must expose __len__().")
+        if len(input_dataset) != len(output_dataset):
+            raise ValueError("input and output codec datasets must have equal lengths.")
+        self.input_dataset = input_dataset
+        self.output_dataset = output_dataset
+        self.input_view = input_view
+
+    def __len__(self) -> int:
+        return len(cast(Sized, self.output_dataset))
+
+    def __getitem__(self, index: int) -> Sample:
+        return _merge_audio_view(
+            self.input_dataset[index],
+            self.output_dataset[index],
+            input_view=self.input_view,
+        )
+
+
 def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Sample]:
     if config.name is DatasetName.TOY:
         _reject_speaker(config)
@@ -410,6 +463,21 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
                 runtime.codec,
                 samples=config.toy_samples,
                 frames=config.toy_frames,
+                input_view=(
+                    runtime.input_audio_view
+                    if runtime.input_audio_decoupled
+                    else None
+                ),
+                input_vocab_size=(
+                    runtime.input_audio_tokenizer.vocab_size
+                    if runtime.input_audio_decoupled
+                    else None
+                ),
+                input_frame_rate=(
+                    runtime.input_codec_frame_rate
+                    if runtime.input_audio_decoupled
+                    else None
+                ),
             ),
             config,
         )
@@ -426,8 +494,9 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
             split=config.split,
         ).filter(config.filter)
 
+        output = cast(Dataset[Sample], cast(object, view.load()))
         return _apply_split_manifest(
-            cast(Dataset[Sample], cast(object, view.load())),
+            _with_input_audio_dataset(config, runtime, output),
             config,
         )
     if config.name is DatasetName.STREAMING_S2ST:
@@ -442,8 +511,9 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
             root=None if config.root is None else Path(config.root).expanduser(),
             split=config.split,
         )
+        output = cast(Dataset[Sample], cast(object, view.load()))
         return _apply_split_manifest(
-            cast(Dataset[Sample], cast(object, view.load())),
+            _with_input_audio_dataset(config, runtime, output),
             config,
         )
     if config.name is DatasetName.QWEN_TTS_SPEAKER:
@@ -468,6 +538,113 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
             config,
         )
     raise AssertionError(f"unsupported dataset: {config.name}")
+
+
+def _with_input_audio_dataset(
+    config: DatasetConfig,
+    runtime: DatasetRuntime,
+    output: Dataset[Sample],
+) -> Dataset[Sample]:
+    if (
+        not runtime.input_audio_decoupled
+        or runtime.input_audio_view is runtime.audio_view
+    ):
+        return output
+    root = _workspace_dataset_root(config)
+    store = root / _codec_store_dir(runtime.input_audio_view)
+    input_dataset: MapStyleABC = AnyDataset.from_store(store, split=config.split)
+    if config.filter is not None:
+        if not isinstance(output, IndexSelection):
+            raise TypeError(
+                "filtered dual-codec datasets require an index-selected output view."
+            )
+        input_dataset = IndexSelection(input_dataset, output.indices)
+    return DualAudioDataset(
+        input_dataset,
+        output,
+        input_view=runtime.input_audio_view,
+    )
+
+
+def _workspace_dataset_root(config: DatasetConfig) -> Path:
+    if config.name is DatasetName.WMT19_TTS:
+        from zhuyin.datasets.wmt19 import moss_tts
+
+        return moss_tts.dataset_root(config.root).expanduser()
+    if config.name is DatasetName.STREAMING_S2ST:
+        from zhuyin.datasets.wmt19 import streaming_s2st
+
+        return streaming_s2st.dataset_root(config.root).expanduser()
+    raise ValueError(f"dual codec stores are unsupported for {config.name.value!r}.")
+
+
+def _codec_store_dir(view: AudioView) -> str:
+    if view is AudioView.STABLE:
+        from zhuyin.datasets.wmt19.moss_tts import stable_store_dir
+
+        return stable_store_dir()
+    return view.value
+
+
+def _merge_audio_view(
+    input_sample: Sample,
+    output_sample: Sample,
+    *,
+    input_view: AudioView,
+) -> Sample:
+    if isinstance(input_sample, AudioContextSample) or isinstance(
+        output_sample,
+        AudioContextSample,
+    ):
+        if not isinstance(input_sample, AudioContextSample) or not isinstance(
+            output_sample,
+            AudioContextSample,
+        ):
+            raise TypeError("aligned dual codec samples must agree on audio context.")
+        return cast(
+            Sample,
+            cast(
+                object,
+                AudioContextSample(
+                    sample=_merge_audio_view(
+                        input_sample.sample,
+                        output_sample.sample,
+                        input_view=input_view,
+                    ),
+                    audio_context=_merge_audio_view(
+                        input_sample.audio_context,
+                        output_sample.audio_context,
+                        input_view=input_view,
+                    ),
+                ),
+            ),
+        )
+
+    merged = dict(output_sample)
+    for reference, input_item in input_sample.items():
+        if reference[1] is not Modality.AUDIO:
+            output_item = output_sample.get(reference)
+            if output_item != input_item:
+                raise ValueError(
+                    f"input/output codec stores are misaligned at {reference!r}."
+                )
+            continue
+        if not isinstance(input_item, AudioItem):
+            raise TypeError(f"input codec sample {reference!r} must be an AudioItem.")
+        output_item = output_sample.get(reference)
+        if not isinstance(output_item, AudioItem):
+            raise TypeError(f"output codec sample {reference!r} must be an AudioItem.")
+        if input_view not in input_item.views:
+            raise ValueError(
+                f"input codec sample {reference!r} is missing {input_view.value!r}."
+            )
+        views = dict(output_item.views)
+        views[input_view] = input_item.views[input_view]
+        meta = dict(output_item.meta)
+        for name, value in input_item.meta.items():
+            meta.setdefault(name, value)
+        merged[reference] = AudioItem(views=views, meta=meta)
+    return merged
 
 
 def _reject_speaker(config: DatasetConfig) -> None:

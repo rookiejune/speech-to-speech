@@ -10,7 +10,7 @@ from torch import Tensor
 
 from .._compat import StrEnum, auto
 from .._tensor import is_signed_integer_dtype
-from ..task import PredictionModality, SourceLayout, Task
+from ..task import PredictionModality, SourceLayout, Task, resolve_response
 from .loader.contract import ARFraming, validate_ar_framing
 
 
@@ -175,6 +175,7 @@ class SpeechTaskSample:
     target: Union[Speech, Text, RawSpeech]
     task: Task
     prediction: PredictionModality
+    trace: str | None = None
     audio_context: Union[Speech, RawSpeech, None] = None
 
     def __post_init__(self) -> None:
@@ -184,10 +185,12 @@ class SpeechTaskSample:
             raise TypeError(
                 "speech task sample prediction must be a PredictionModality."
             )
-        if self.prediction not in self.task.allowed_predictions:
-            raise ValueError(
-                f"{self.task.value} does not allow prediction={self.prediction.value}."
-            )
+        response = resolve_response(
+            self.task,
+            prediction=self.prediction,
+            trace=self.trace,
+        )
+        self.trace = response.name
         _validate_source_item(self.source, self.task.source_layout, name="source")
         _validate_target_item(
             self.target,
@@ -218,6 +221,7 @@ class SpeechTaskSample:
             target=target,
             task=self.task,
             prediction=self.prediction,
+            trace=self.trace,
             audio_context=_audio_context(_pin_task_item(self.audio_context)),
         )
 
