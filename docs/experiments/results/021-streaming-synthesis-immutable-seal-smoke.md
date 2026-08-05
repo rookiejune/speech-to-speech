@@ -161,3 +161,104 @@ SIGTERM：rank 0/1 日志各出现一次 `Received SIGTERM`，两 rank 和 produ
 - producer stage 事件记录 snapshot publish `0.050s,0.015s,0.045s` 和 seal validation
   `0.00029s`。真实 AS/TT/AT/codec producer 仍在本仓库外；只有那些 producer 显式接入同一个
   stage helper 后，才能得到真实模型阶段的分段耗时并与 GPU CSV 对齐。
+
+## Real A100 producer, training, and sealed resume probe (2026-08-06)
+
+revision `2f36d69` 已把真实 WMT19 producer 接入正式 streaming 入口；checkpoint link 修正使用
+revision `94bbac5`。复旦 121 的运行根为：
+
+```text
+/mnt/pami202/zhuyin/dynamic/debug/streaming_s2st_train_concurrent_a100_20260806_a
+```
+
+资源映射保持 GPU 0 上的既有任务不动：
+
+```text
+GPU 1: Qwen source TTS + Qwen3-0.6B translation + LongCat codec
+GPU 2: MOSS-TTS v1.5 target TTS worker
+GPU 3: Qwen3-0.6B backbone training
+```
+
+输入选择两个 WMT19 pair，workspace 双向展开后得到 4 个训练 sample。producer 以 batch size 2
+发布两个 snapshot，最终 seal 为 `sample_count=4`、`snapshot_count=2`，catalog SHA256 为
+`d6942f97e2bcc39c1c07488729db0bfb9507cff26bbe331fd5d6b4b935899fc4`。4090 上相同 MOSS
+batch size 2 会在 24 GB 显存 OOM；A100 40 GB 上两批 target TTS 峰值约 24.46/24.52 GB，均完成，
+因此当前 MOSS batch size 2 的最低生产档位应为 40 GB-class GPU。
+
+真实 producer 分段 telemetry 如下。GPU utilization、memory 和 power 来自 1 秒采样；codec 等
+短于 1 秒的 stage 样本不足，不能用 utilization 数值判断 kernel 效率。
+
+| Stage | Batch 0 | Batch 1 | GPU utilization | Mean used memory | Mean power |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Qwen source TTS, 2 samples | 32.223 s | 22.653 s | 26.15% / 27.65% | 8.73 / 9.71 GB | 42.74 / 43.09 W |
+| Qwen translation, 2 samples | 3.386 s | 1.213 s | 7.33% / 41.00% | 8.69 / 9.71 GB | 41.91 / 46.86 W |
+| MOSS target TTS, 2 samples | 7.164 s | 5.711 s | 49.83% / 54.75% | 24.46 / 24.52 GB | 120.22 / 124.34 W |
+| LongCat codec, 4 audios | 0.893 s | 0.281 s | under-sampled | 9.71 / 13.32 GB | 37.40 / 37.19 W |
+| Snapshot publication, 2 samples | 0.731 s | 0.877 s | CPU/NAS stage | n/a | n/a |
+
+producer 从 telemetry 启动到结束共 `120.273s`。训练在首批发布前等待，第二批发布并 seal 后完成
+唯一一个 optimizer step；Lightning 明确打印 `Trainer.fit stopped: max_epochs=1 reached`。首轮
+`metrics.json` 保留 finite loss：total `172.18854`、token `12.18853`、CTC `158.0`。TensorBoard
+关键 streaming 指标为：
+
+```text
+batch_wait_seconds       150.0114
+batch_fetch_seconds      150.2223
+batch_load_seconds         0.2109
+step_seconds               3.0175
+wait_ratio                  0.9789
+read_position               4
+committed_position          4
+committed_batches           1
+published_samples           4
+expected_samples            4
+poll_count_total             5
+wait_events_total            2
+```
+
+同一 TensorBoard event 含 20 条文本和 8 条音频：每个 sample 都有 source text、model
+translation、dataset translation、三行 comparison、metadata、source audio 和 target audio。
+4/4 的 model translation 都与 WMT19 dataset translation 不同，证明训练 target 是 backbone
+前的 Qwen 模型译文，原 WMT target 只作为 reference sidecar。sample 0 的对比为：
+
+```text
+source:
+巴黎-随着经济危机不断加深和蔓延，整个世界一直在寻找历史上的类似事件希望有助于我们了解目前正在发生的情况。
+
+model translation:
+Paris - As the economic crisis continues to deepen and spread, the world is searching for similar historical events to help us understand the current situation.
+
+dataset translation:
+PARIS – As the economic crisis deepens and widens, the world has been searching for historical analogies to help us understand what has been happening.
+```
+
+首轮 checkpoint 使用旧的 `save_last=true`，因此 async saver 先发布 3,616,093,609-byte
+`step-00000001.ckpt`，再完整复制一份 `last.ckpt`。训练计算结束后 NAS 尾延迟超过 30 分钟，期间
+checkpoint thread 位于 `folio_wait_bit_common`。revision `94bbac5` 将 streaming 配置改为
+`save_last=link`，正常有新 step 的 checkpoint publication 只需写一份 persistent checkpoint，
+`last.ckpt` 使用 link；本地 28 项定向测试、Ruff、basedpyright 以及复旦 py312 的 12 项
+streaming entry unittest 均通过。
+
+随后用完全相同的 stream/root/run、batch size、world size、codec 和原 HF cache 绝对路径再次进入
+`jobs/016/01_streaming_s2st.sh`：日志明确出现 `Restoring states from .../last.ckpt` 和
+`Restored all states`，随后直接因 `max_epochs=1` 结束，没有启动 producer/MOSS worker，没有新增
+snapshot，也没有 optimizer step。最终 checkpoint 仍为 `global_step=1`、`epoch=1`，DataModule
+cursor 为 `committed_position=4`、`committed_batches=1`、`next_snapshot_sequence=2`，catalog
+digest 与 seal 一致；sample logger 保留 `logged=[0,1,2,3]`。producer log、telemetry、GPU CSV、
+seal 和两个 snapshot 的大小/mtime 均未变化，GPU 3 最终释放到 10 MiB。
+
+旧 anytrain callback 没有恢复 train-end publication 状态，因此这次完成态 no-op resume 仍完整
+刷新了 `last.ckpt`，额外产生约 20 分钟 NAS 尾延迟。anytrain revision `4fdfd98` 随后把复用限制为
+`async_save=True, save_last="link"`、实际从当前 last 同一文件恢复、且本次 fit 从未进入 train batch；
+任意 train batch、旧 top-k、缺失路径和 changed dir 都回到原生保存，DDP 由 global rank 0 检查并
+广播统一决定。anytrain 全量测试为 `1012 passed, 5 skipped`，Ruff 和改动文件 basedpyright 通过。
+
+在隔离 anytrain worktree 上第三次进入同一 sealed run，进程在 `67.9s` 内 exit 0；日志再次确认
+checkpoint 完整恢复、训练数据长度为 0 和 `max_epochs=1`，没有 producer/MOSS 进程。运行前后
+`last.ckpt` 都是 inode `766248584`、大小 `3,616,093,609`、mtime epoch `1785955578` 的普通文件，
+checkpoint 目录仍只含它和原 `step-00000001.ckpt`，没有 `.part` 或额外序列化。seal SHA256 仍为
+`b25e2c1cf31aa1f08d8705a24fc5bad2182057fc8d2bb8fbf9fe50dbb32162d9`；snapshot、producer log、
+telemetry 和 producer GPU CSV 的大小/mtime 均未变化。GPU 1/2 始终空闲，GPU 3 退出后回到
+`10 MiB / 0%`。no-op 的空 metrics 归档为 `metrics.sealed-resume-anytrain-4fdfd98.json`，canonical
+`metrics.json` 已从 revision-specific backup 恢复，SHA256 为
+`c0b6cf1c6652a66223bb922b5579acd70604de234c6fcc06572e0a89c87dafed`。
