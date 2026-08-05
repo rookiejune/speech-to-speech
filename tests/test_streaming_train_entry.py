@@ -79,7 +79,8 @@ class StreamingTrainConfigTest(unittest.TestCase):
             "SPEECH_TO_SPEECH_STREAM_ROOT": "/tmp/stream",
             "SPEECH_TO_SPEECH_STREAM_ID": "wmt19-bidirectional-v1",
             "SPEECH_TO_SPEECH_STREAM_EXPECTED_SAMPLES": "8",
-            "SPEECH_TO_SPEECH_STREAM_PRODUCER_COMMAND": '["/bin/true"]',
+            "SPEECH_TO_SPEECH_PRODUCER_CUDA_VISIBLE_DEVICES": "0,1,2,3",
+            "WORKSPACE_ROOT": "/tmp/workspace",
         },
     )
     def test_formal_streaming_experiment_resolves_producer_and_parallel_labels(
@@ -94,7 +95,13 @@ class StreamingTrainConfigTest(unittest.TestCase):
         )
         self.assertEqual(
             config.datamodule.streaming.producer_options,
-            {"command": '["/bin/true"]'},
+            {
+                "command": [
+                    "/tmp/workspace/jobs/streaming_s2st/producer.sh"
+                ],
+                "environment": {"CUDA_VISIBLE_DEVICES": "0,1,2,3"},
+                "retry": True,
+            },
         )
         self.assertEqual(config.logging.version, 0)
         self.assertEqual(config.loader_plan.loaders["s2st"].prediction, "parallel")
@@ -246,10 +253,18 @@ class SynthesisSampleLoggerTest(unittest.TestCase):
             Sample,
             {
                 (Role.SOURCE, Modality.TEXT): _text_item("source", Lang.ZH),
-                (Role.TARGET, Modality.TEXT): _text_item("target", Lang.EN),
+                (Role.TARGET, Modality.TEXT): _text_item(
+                    "model translation",
+                    Lang.EN,
+                ),
             },
         )
-        published = PublishedSample(3, "snapshot-0007", sample)
+        published = PublishedSample(
+            3,
+            "snapshot-0007",
+            sample,
+            "dataset translation",
+        )
         datamodule = SimpleNamespace(
             streaming_enabled=True,
             published_streaming_samples=Mock(return_value=[published]),
@@ -285,10 +300,20 @@ class SynthesisSampleLoggerTest(unittest.TestCase):
             _tags(text_writer.add_text),
             {
                 "synthesis/3/source_text",
-                "synthesis/3/target_text",
+                "synthesis/3/model_translation",
+                "synthesis/3/dataset_translation",
+                "synthesis/3/translation_comparison",
                 "synthesis/3/metadata",
             },
         )
+        comparison = next(
+            call.args[1]
+            for call in text_writer.add_text.call_args_list
+            if call.args[0] == "synthesis/3/translation_comparison"
+        )
+        self.assertIn("| source | source |", comparison)
+        self.assertIn("| model translation | model translation |", comparison)
+        self.assertIn("| dataset translation | dataset translation |", comparison)
         metadata = json.loads(
             next(
                 call.args[1]
@@ -300,9 +325,10 @@ class SynthesisSampleLoggerTest(unittest.TestCase):
             metadata,
             {
                 "dataset_index": 3,
+                "dataset_translation": "dataset translation",
+                "model_translation": "model translation",
                 "snapshot_id": "snapshot-0007",
                 "source_text": "source",
-                "target_text": "target",
             },
         )
         self.assertEqual(

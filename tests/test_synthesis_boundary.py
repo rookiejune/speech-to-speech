@@ -29,7 +29,10 @@ from speech_to_speech.datamodule.streaming import (
     SynthesisRequest,
     WorkspaceSnapshotLoader,
 )
-from speech_to_speech.synthesis.publisher import SnapshotPublisher
+from speech_to_speech.synthesis.publisher import (
+    SnapshotPublisher,
+    TranslationReference,
+)
 from speech_to_speech.synthesis.process import controller
 from speech_to_speech.synthesis.subprocess import SubprocessController
 
@@ -90,6 +93,13 @@ def _store_sample(index: int, view: AudioView) -> Sample:
     )
 
 
+def _references(*indices: int) -> list[TranslationReference]:
+    return [
+        TranslationReference(index, f"dataset translation {index}")
+        for index in indices
+    ]
+
+
 def _restore_environment(name: str, previous: str | None) -> None:
     if previous is None:
         os.environ.pop(name, None)
@@ -117,18 +127,21 @@ class SnapshotPublisherTest(unittest.TestCase):
             first = publisher.publish(
                 snapshot_id="first",
                 sample_indices=[0],
+                translation_references=_references(0),
                 base_samples=base[:1],
                 codec_samples=codec[:1],
             )
             repeated = publisher.publish(
                 snapshot_id="first",
                 sample_indices=[0],
+                translation_references=_references(0),
                 base_samples=base[:1],
                 codec_samples=codec[:1],
             )
             second = publisher.publish(
                 snapshot_id="second",
                 sample_indices=[1],
+                translation_references=_references(1),
                 base_samples=base[1:],
                 codec_samples=codec[1:],
             )
@@ -136,8 +149,20 @@ class SnapshotPublisherTest(unittest.TestCase):
             self.assertEqual(first, repeated)
             self.assertTrue((first / "base").is_dir())
             self.assertTrue((first / "longcat").is_dir())
+            self.assertTrue((first / "translation_references.jsonl").is_file())
             self.assertTrue((second / "snapshot.json").is_file())
             self.assertTrue((root / "sealed.json").is_file())
+            manifest = json.loads(
+                (first / "snapshot.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                manifest["schema"],
+                "speech-to-speech-stream-snapshot-v2",
+            )
+            self.assertEqual(
+                manifest["translation_references"]["file"],
+                "translation_references.jsonl",
+            )
             snapshot = publisher.feed.status().catalog.snapshots[0]
             loaded = publisher.feed.load(snapshot)
             self.assertEqual(len(cast(Sized, cast(object, loaded))), 1)
@@ -154,12 +179,98 @@ class SnapshotPublisherTest(unittest.TestCase):
                     torch.tensor([[0, 1]], dtype=torch.long),
                 )
             )
+            comparison = publisher.feed.published([0])[0]
+            self.assertEqual(comparison.reference_translation, "dataset translation 0")
             with self.assertRaisesRegex(RuntimeError, "after sealing"):
                 publisher.publish(
                     snapshot_id="third",
                     sample_indices=[0],
+                    translation_references=_references(0),
                     base_samples=base[:1],
                     codec_samples=codec[:1],
+                )
+
+    def test_idempotent_publish_rejects_changed_translation_reference(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            previous_home = os.environ.get("ANYDATASET_HOME")
+            self.addCleanup(_restore_environment, "ANYDATASET_HOME", previous_home)
+            os.environ["ANYDATASET_HOME"] = str(root / "anydataset")
+            publisher = SnapshotPublisher(
+                root,
+                stream_id="stream-a",
+                expected_samples=2,
+                codec="longcat",
+                split="train",
+                loader=WorkspaceSnapshotLoader(codec="longcat", split="train"),
+            )
+            base = [_store_sample(0, AudioView.WAVEFORM)]
+            codec = [_store_sample(0, AudioView.LONGCAT)]
+            publisher.publish(
+                snapshot_id="first",
+                sample_indices=[0],
+                translation_references=_references(0),
+                base_samples=base,
+                codec_samples=codec,
+            )
+
+            with self.assertRaisesRegex(ValueError, "other translation references"):
+                publisher.publish(
+                    snapshot_id="first",
+                    sample_indices=[0],
+                    translation_references=[TranslationReference(0, "changed")],
+                    base_samples=base,
+                    codec_samples=codec,
+                )
+
+    def test_reference_sidecar_is_lazy_and_digest_checked(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            previous_home = os.environ.get("ANYDATASET_HOME")
+            self.addCleanup(_restore_environment, "ANYDATASET_HOME", previous_home)
+            os.environ["ANYDATASET_HOME"] = str(root / "anydataset")
+            publisher = SnapshotPublisher(
+                root,
+                stream_id="stream-a",
+                expected_samples=1,
+                codec="longcat",
+                split="train",
+                loader=WorkspaceSnapshotLoader(codec="longcat", split="train"),
+            )
+            published = publisher.publish(
+                snapshot_id="only",
+                sample_indices=[0],
+                translation_references=_references(0),
+                base_samples=[_store_sample(0, AudioView.WAVEFORM)],
+                codec_samples=[_store_sample(0, AudioView.LONGCAT)],
+            )
+            catalog = publisher.feed.status().catalog
+            publisher.feed.sample_at(0, catalog)
+            (published / "translation_references.jsonl").write_text(
+                '{"sample_index":0,"text":"tampered"}\n',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "sidecar digest mismatch"):
+                publisher.feed.published([0])
+
+    def test_translation_reference_indices_must_match_snapshot_indices(self) -> None:
+        with TemporaryDirectory() as directory:
+            publisher = SnapshotPublisher(
+                Path(directory),
+                stream_id="stream-a",
+                expected_samples=2,
+                codec="longcat",
+                split="train",
+                loader=_loader,
+            )
+            with self.assertRaisesRegex(ValueError, "exactly match sample_indices"):
+                publisher.publish(
+                    snapshot_id="first",
+                    sample_indices=[0],
+                    translation_references=_references(1),
+                    base_samples=[_store_sample(0, AudioView.WAVEFORM)],
+                    codec_samples=[_store_sample(0, AudioView.LONGCAT)],
                 )
 
     def test_decoupled_snapshot_joins_glm4_source_and_bicodec_target(self) -> None:
@@ -184,6 +295,7 @@ class SnapshotPublisherTest(unittest.TestCase):
             published = publisher.publish(
                 snapshot_id="dual",
                 sample_indices=[0],
+                translation_references=_references(0),
                 base_samples=[_store_sample(0, AudioView.WAVEFORM)],
                 input_codec_samples=[_store_sample(0, AudioView.GLM4)],
                 codec_samples=[_store_sample(0, AudioView.BICODEC)],
@@ -262,6 +374,7 @@ class SnapshotPublisherTest(unittest.TestCase):
                     publisher.publish(
                         snapshot_id="dual",
                         sample_indices=[0],
+                        translation_references=_references(0),
                         base_samples=[_store_sample(0, AudioView.WAVEFORM)],
                         input_codec_samples=[_store_sample(0, AudioView.GLM4)],
                         codec_samples=[output],
@@ -294,6 +407,7 @@ class SnapshotPublisherTest(unittest.TestCase):
                 publisher.publish(
                     snapshot_id="dual",
                     sample_indices=[0],
+                    translation_references=_references(0),
                     base_samples=[_store_sample(0, AudioView.WAVEFORM)],
                     input_codec_samples=[_store_sample(0, AudioView.GLM4)],
                     codec_samples=_FailingSamples(),
@@ -516,7 +630,11 @@ class SubprocessControllerTest(unittest.TestCase):
                     expected_samples=2,
                     codec="bicodec",
                     split="train",
-                    options={"command": json.dumps(command), "monitor_seconds": 0.01},
+                    options={
+                        "command": json.dumps(command),
+                        "environment": {"S2S_TEST_PRODUCER_DEVICE": "cuda:3"},
+                        "monitor_seconds": 0.01,
+                    },
                     input_codec="glm4",
                 )
             )
@@ -538,6 +656,30 @@ class SubprocessControllerTest(unittest.TestCase):
                 (root / "env.txt").read_text(encoding="utf-8"),
                 "stream-a|glm4|bicodec|bicodec",
             )
+            metadata = json.loads((root / "producer.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                metadata["environment"],
+                {"S2S_TEST_PRODUCER_DEVICE": "cuda:3"},
+            )
             with self.assertRaisesRegex(RuntimeError, "exited before"):
                 instance.check()
             instance.close()
+
+    def test_rejects_reserved_stream_environment_override(self) -> None:
+        with TemporaryDirectory() as directory:
+            instance = controller(
+                SynthesisRequest(
+                    root=Path(directory),
+                    stream_id="stream-a",
+                    expected_samples=2,
+                    codec="longcat",
+                    split="train",
+                    options={
+                        "command": [sys.executable, "-c", "pass"],
+                        "environment": {"S2S_SYNTHESIS_STREAM_ID": "other"},
+                    },
+                )
+            )
+
+            with self.assertRaisesRegex(ValueError, "cannot override"):
+                instance.start()

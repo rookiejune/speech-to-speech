@@ -201,6 +201,26 @@ cell 和 `speaker_grid_manifest.jsonl` 契约，不能沿用 WMT19 pair material
 
 ## 流式训练观测
 
+streaming snapshot v2 在 `base`/codec store 之外保存
+`translation_references.jsonl`。每条记录以 direction-aware `sample_index` 对齐一条训练 sample，内容只含
+原数据集的参考译文；sidecar 的 schema 与 SHA256 写进 `snapshot.json`，重复发布同一 snapshot 时
+reference 内容也必须完全一致。训练迭代器仍只返回 store 中的 `Sample`：其 target
+`TextView.TEXT` 是翻译模型生成的译文，也是 backbone 实际消费的标签；dataset reference 不进入
+`Sample`、collate 或 checkpoint cursor。只有诊断入口 `published_streaming_samples()` 按需读取并校验
+sidecar。旧 snapshot v1 仍可继续训练，但请求 published diagnostics 时会明确报告没有 reference，
+不会把模型译文冒充数据集译文。
+
+`SynthesisSampleLogger` 在 rank zero 为选定样本写入 `source_text`、`model_translation`、
+`dataset_translation` 和三行 Markdown `translation_comparison`，metadata JSON 也使用这两个无歧义的
+translation 字段；source/target audio 继续来自同一条已发布的模型合成 sample，不重新运行 backbone。
+
+producer 对当前未发布 batch 维护 `.stage-cache`：`source_tts`、`translation`、`target_tts`、`codec`
+分别原子发布自己的标准 store。重启先尝试最高可复用阶段；例如已有 `target_tts` cache 时直接恢复完整
+base waveform 和模型译文，只重跑 codec。snapshot 原子发布后删除该 batch cache；如果恰好在 publish
+之后、cache 清理之前退出，下次会根据连续 snapshot prefix 清理冗余 cache。stage cache 绑定
+`producer_identity.json` 的 SHA256，生产语义变化会明确失败，不会把不同模型 revision 或生成参数混入
+同一 stream。
+
 `StreamingSnapshotDataset` 累计真实 wall-clock 等待时间、等待事件和 poll 次数；
 `StreamingDataLoader` 进一步拆分每 batch 的 fetch、wait 与 load/collate 时间，并把累计值随
 cursor checkpoint 恢复。`StreamingTelemetryCallback` 将这些时间、train step 时间、read/committed/
@@ -224,6 +244,12 @@ device 与 GPU ids 的 JSON start/finish/failure 事件；这些事件可以与 
 AS/TT/AT/codec 阶段；本仓库当前提供外部 producer 的生命周期和发布边界，不包含具体模型 DAG。
 训练侧 CSV 也只采样训练进程 `CUDA_VISIBLE_DEVICES` 中的卡。producer 使用独立 GPU 时，应在
 producer 内单独采样并按 stage timestamp 汇总，不能把训练卡的利用率当作 producer 阶段利用率。
+
+正式 producer 明确记录 `source_tts`（源文本合成语音）、`translation`（模型翻译）、
+`target_tts`（模型译文在源语音条件下合成目标语音）、`codec` 和 `snapshot_publish`，并把
+`source_tts_join` / `translation_join` 作为独立等待事件。这里不使用 AS/TT/AT 缩写，避免把模型阶段
+和数据模态混在一起。每次重新进入正式 streaming job 都以已有连续 snapshot prefix 为起点；配置中的
+`retry=true` 只在这次人工重启时清理旧进程失败标记，不会在同一次进程内无限重试模型错误。
 
 ## 输入输出
 

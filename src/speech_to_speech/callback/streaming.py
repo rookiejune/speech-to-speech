@@ -337,7 +337,7 @@ class StreamingTelemetryCallback(Callback):
 
 
 class SynthesisSampleLogger(Callback):
-    """Log persisted teacher artifacts without running the backbone again."""
+    """Log generated artifacts alongside their dataset translation references."""
 
     def __init__(
         self,
@@ -427,10 +427,29 @@ class SynthesisSampleLogger(Callback):
     ) -> None:
         tag = f"synthesis/{published.index}"
         source_text = _text(published.sample, types.Role.SOURCE)
-        target_text = _text(published.sample, types.Role.TARGET)
+        model_translation = _text(published.sample, types.Role.TARGET)
+        dataset_translation = published.reference_translation
         if text_writer is not None:
             text_writer.add_text(f"{tag}/source_text", source_text, step)
-            text_writer.add_text(f"{tag}/target_text", target_text, step)
+            text_writer.add_text(
+                f"{tag}/model_translation",
+                model_translation,
+                step,
+            )
+            text_writer.add_text(
+                f"{tag}/dataset_translation",
+                dataset_translation,
+                step,
+            )
+            text_writer.add_text(
+                f"{tag}/translation_comparison",
+                _translation_comparison(
+                    source_text,
+                    model_translation,
+                    dataset_translation,
+                ),
+                step,
+            )
             text_writer.add_text(
                 f"{tag}/metadata",
                 json.dumps(
@@ -438,7 +457,8 @@ class SynthesisSampleLogger(Callback):
                         "dataset_index": published.index,
                         "snapshot_id": published.snapshot_id,
                         "source_text": source_text,
-                        "target_text": target_text,
+                        "model_translation": model_translation,
+                        "dataset_translation": dataset_translation,
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -566,6 +586,29 @@ def _text(sample: types.Sample, role: types.Role) -> str:
             f"synthesis sample {role.value} TextView.TEXT must be non-empty."
         )
     return value
+
+
+def _translation_comparison(
+    source_text: str,
+    model_translation: str,
+    dataset_translation: str,
+) -> str:
+    rows = (
+        ("source", source_text),
+        ("model translation", model_translation),
+        ("dataset translation", dataset_translation),
+    )
+    return "\n".join(
+        (
+            "| artifact | text |",
+            "| --- | --- |",
+            *(f"| {name} | {_markdown_cell(value)} |" for name, value in rows),
+        )
+    )
+
+
+def _markdown_cell(value: str) -> str:
+    return value.replace("|", "\\|").replace("\r\n", "<br>").replace("\n", "<br>")
 
 
 __all__ = [

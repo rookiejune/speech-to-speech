@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import unittest
 from collections.abc import Mapping
@@ -20,7 +21,10 @@ from speech_to_speech.datamodule.streaming import (
 )
 
 
-_SNAPSHOT_SCHEMA = "speech-to-speech-stream-snapshot-v1"
+_SNAPSHOT_SCHEMA_V1 = "speech-to-speech-stream-snapshot-v1"
+_SNAPSHOT_SCHEMA = "speech-to-speech-stream-snapshot-v2"
+_TRANSLATION_REFERENCE_SCHEMA = "speech-to-speech-translation-references-v1"
+_TRANSLATION_REFERENCE_FILE = "translation_references.jsonl"
 _SEAL_SCHEMA = "speech-to-speech-stream-seal-v1"
 _FAILURE_SCHEMA = "speech-to-speech-stream-failure-v1"
 _STREAM_ID = "wmt19-bidirectional-v1"
@@ -115,11 +119,12 @@ def _write_snapshot(
     revision: str | None = None,
     codec: str | None = None,
     input_codec: str | None = None,
+    schema: str = _SNAPSHOT_SCHEMA,
 ) -> Path:
     directory = root / "snapshots" / f"{sequence:06d}-{snapshot_id}"
     directory.mkdir(parents=True)
     payload: dict[str, object] = {
-        "schema": _SNAPSHOT_SCHEMA,
+        "schema": schema,
         "stream_id": stream_id,
         "expected_samples": expected,
         "sequence": sequence,
@@ -132,6 +137,28 @@ def _write_snapshot(
         payload["input_codec"] = codec if input_codec is None else input_codec
     if revision is not None:
         payload["revision"] = revision
+    if schema == _SNAPSHOT_SCHEMA:
+        reference_payload = (
+            "\n".join(
+                json.dumps(
+                    {
+                        "sample_index": index,
+                        "text": f"dataset translation {index}",
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                for index in indices
+            )
+            + "\n"
+        ).encode("utf-8")
+        (directory / _TRANSLATION_REFERENCE_FILE).write_bytes(reference_payload)
+        payload["translation_references"] = {
+            "schema": _TRANSLATION_REFERENCE_SCHEMA,
+            "file": _TRANSLATION_REFERENCE_FILE,
+            "sha256": hashlib.sha256(reference_payload).hexdigest(),
+        }
     path = directory / "snapshot.json"
     path.write_text(
         json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
@@ -251,6 +278,67 @@ class SnapshotFeedTest(unittest.TestCase):
             [(item.index, item.snapshot_id, _sample_index(item.sample)) for item in published],
             [(1, "chunk-b", 1), (3, "chunk-a", 3)],
         )
+        self.assertEqual(
+            [item.reference_translation for item in published],
+            ["dataset translation 1", "dataset translation 3"],
+        )
+
+    def test_reference_sidecar_is_validated_only_for_published_diagnostics(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot_path = _write_snapshot(
+                root,
+                0,
+                "chunk-a",
+                [0],
+                expected=1,
+            )
+            sidecar = snapshot_path.parent / _TRANSLATION_REFERENCE_FILE
+            reference_payload = b'{"sample_index":1,"text":"misaligned"}\n'
+            sidecar.write_bytes(reference_payload)
+            manifest = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            manifest["translation_references"]["sha256"] = hashlib.sha256(
+                reference_payload
+            ).hexdigest()
+            snapshot_path.write_text(
+                json.dumps(
+                    manifest,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            feed = _feed(root, expected=1)
+            catalog = feed.status().catalog
+
+            _snapshot, _offset, sample = feed.sample_at(0, catalog)
+            self.assertEqual(_sample_index(sample), 0)
+            with self.assertRaisesRegex(ValueError, "not aligned with the snapshot"):
+                feed.published([0])
+
+    def test_v1_snapshot_remains_trainable_but_has_no_reference_diagnostics(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_snapshot(
+                root,
+                0,
+                "chunk-a",
+                [0],
+                expected=1,
+                schema=_SNAPSHOT_SCHEMA_V1,
+            )
+            feed = _feed(root, expected=1)
+            catalog = feed.status().catalog
+
+            _snapshot, _offset, sample = feed.sample_at(0, catalog)
+            self.assertEqual(_sample_index(sample), 0)
+            with self.assertRaisesRegex(RuntimeError, "no dataset translation references"):
+                feed.published([0])
 
     def test_catalog_rejects_overlapping_chunk_membership(self) -> None:
         with TemporaryDirectory() as directory:
@@ -360,6 +448,7 @@ class SnapshotFeedTest(unittest.TestCase):
                 [0, 1],
                 expected=2,
                 codec="longcat",
+                schema=_SNAPSHOT_SCHEMA_V1,
             )
             snapshot_payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
             snapshot_payload.pop("input_codec")

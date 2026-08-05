@@ -70,10 +70,16 @@ class SubprocessController:
                 )
             failure.unlink()
         command = _command(self.request.options)
+        environment_overrides = _option_environment(self.request.options)
         self._command = command
         metadata = self.root / "producer.json"
         if metadata.exists():
-            pid = _read_pid(metadata, self.request, command)
+            pid = _read_pid(
+                metadata,
+                self.request,
+                command,
+                environment_overrides,
+            )
             if _alive(pid):
                 self._pid = pid
                 self._start_monitor()
@@ -89,6 +95,7 @@ class SubprocessController:
             metadata.unlink()
             (self.root / "failed.json").unlink(missing_ok=True)
         environment = os.environ.copy()
+        environment.update(environment_overrides)
         environment.update(_environment(self.request, self.root))
         cwd = _cwd(self.request.options)
         log = (self.root / "producer.log").open("a", encoding="utf-8")
@@ -121,6 +128,7 @@ class SubprocessController:
                 "split": self.request.split,
                 "pid": process.pid,
                 "command": list(command),
+                "environment": environment_overrides,
             },
         )
         self._start_monitor()
@@ -165,7 +173,11 @@ class SubprocessController:
             command = self._command
             if command is None:
                 raise RuntimeError("owned streaming producer command was not initialized.")
-            if metadata.exists() and _read_pid(metadata, self.request, command) == self._pid:
+            environment = _option_environment(self.request.options)
+            if (
+                metadata.exists()
+                and _read_pid(metadata, self.request, command, environment) == self._pid
+            ):
                 metadata.unlink()
 
     def _start_monitor(self) -> None:
@@ -236,7 +248,13 @@ def _command(options: Mapping[str, object]) -> tuple[str, ...]:
 
 
 def _validate_options(options: Mapping[str, object]) -> None:
-    unknown = set(options) - {"command", "cwd", "monitor_seconds", "retry"}
+    unknown = set(options) - {
+        "command",
+        "cwd",
+        "environment",
+        "monitor_seconds",
+        "retry",
+    }
     if unknown:
         raise ValueError(
             "unknown streaming subprocess producer options: "
@@ -251,6 +269,30 @@ def _cwd(options: Mapping[str, object]) -> str | None:
     if not isinstance(value, str) or not value:
         raise TypeError("streaming subprocess producer cwd must be a non-empty string.")
     return value
+
+
+def _option_environment(options: Mapping[str, object]) -> dict[str, str]:
+    value = options.get("environment", {})
+    if not isinstance(value, Mapping):
+        raise TypeError("streaming subprocess producer environment must be a mapping.")
+    result: dict[str, str] = {}
+    reserved = set(_environment_names())
+    for name, item in value.items():
+        if not isinstance(name, str) or not name:
+            raise TypeError(
+                "streaming subprocess producer environment keys must be non-empty strings."
+            )
+        if name in reserved:
+            raise ValueError(
+                f"streaming subprocess producer environment cannot override {name}."
+            )
+        if not isinstance(item, str):
+            raise TypeError(
+                "streaming subprocess producer environment values must be strings."
+            )
+        if item:
+            result[name] = item
+    return result
 
 
 def _bool_option(options: Mapping[str, object], name: str, *, default: bool) -> bool:
@@ -279,6 +321,18 @@ def _environment(request: SynthesisRequest, root: Path) -> dict[str, str]:
         "S2S_SYNTHESIS_OUTPUT_CODEC": request.codec,
         "S2S_SYNTHESIS_SPLIT": request.split,
     }
+
+
+def _environment_names() -> tuple[str, ...]:
+    return (
+        "S2S_SYNTHESIS_STREAM_ID",
+        "S2S_SYNTHESIS_ROOT",
+        "S2S_SYNTHESIS_EXPECTED_SAMPLES",
+        "S2S_SYNTHESIS_INPUT_CODEC",
+        "S2S_SYNTHESIS_CODEC",
+        "S2S_SYNTHESIS_OUTPUT_CODEC",
+        "S2S_SYNTHESIS_SPLIT",
+    )
 
 
 def _sealed(root: Path, request: SynthesisRequest) -> bool:
@@ -321,7 +375,12 @@ def _terminate_group(process: subprocess.Popen[Any], signal_number: int) -> None
         return
 
 
-def _read_pid(path: Path, request: SynthesisRequest, command: Sequence[str]) -> int:
+def _read_pid(
+    path: Path,
+    request: SynthesisRequest,
+    command: Sequence[str],
+    environment: Mapping[str, str],
+) -> int:
     value = _read_json(path, "streaming producer metadata")
     expected: dict[str, object] = {
         "schema": _PID_SCHEMA,
@@ -339,6 +398,11 @@ def _read_pid(path: Path, request: SynthesisRequest, command: Sequence[str]) -> 
         )
     if value.get("command") != list(command):
         raise ValueError("streaming producer metadata command does not match the request.")
+    recorded_environment = value.get("environment", {})
+    if recorded_environment != dict(environment):
+        raise ValueError(
+            "streaming producer metadata environment does not match the request."
+        )
     pid = value.get("pid")
     if type(pid) is not int or pid <= 0:
         raise ValueError(f"streaming producer metadata has an invalid pid: {path}.")
