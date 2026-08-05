@@ -9,6 +9,7 @@ from typing import Any, cast
 from unittest.mock import Mock, patch
 
 from anydataset.types import Lang, Modality, Role, Sample, TextItem, TextMeta, TextView
+from anytrain.lightning import ModelCheckpoint
 from lightning.pytorch.callbacks import Callback
 
 from _config_helpers import _train
@@ -105,6 +106,21 @@ class StreamingTrainConfigTest(unittest.TestCase):
         )
         self.assertEqual(config.logging.version, 0)
         self.assertEqual(config.loader_plan.loaders["s2st"].prediction, "parallel")
+        self.assertEqual(config.callbacks.checkpoint.save_last, "link")
+        checkpoint = next(
+            callback
+            for callback in train_script.training_callbacks(
+                config,
+                Path("/tmp/output"),
+                Mock(),
+            )
+            if isinstance(callback, ModelCheckpoint)
+        )
+        self.assertEqual(checkpoint.save_last, "link")
+
+    def test_checkpoint_save_last_rejects_unknown_string(self) -> None:
+        with self.assertRaisesRegex(ValueError, "save_last"):
+            _streaming_train("callbacks.checkpoint.save_last=copy")
 
     def test_streaming_requires_resume_checkpoint_or_auto_resume(self) -> None:
         with self.assertRaisesRegex(ValueError, "auto_resume"):
