@@ -9,6 +9,7 @@ from typing import cast
 from unittest.mock import patch
 
 from anydataset.types import Sample
+from lightning.pytorch.utilities.exceptions import SIGTERMException
 from torch.utils.data import Dataset
 
 from speech_to_speech.datamodule.streaming import (
@@ -440,6 +441,29 @@ class SnapshotFeedTest(unittest.TestCase):
 
 
 class StreamingSnapshotDatasetTest(unittest.TestCase):
+    def test_stop_request_interrupts_snapshot_polling(self) -> None:
+        with TemporaryDirectory() as directory:
+            feed = _feed(Path(directory), expected=4)
+            dataset = _dataset(feed)
+            requested = False
+
+            def stop() -> bool:
+                return requested
+
+            def request_stop(_seconds: float) -> None:
+                nonlocal requested
+                requested = True
+
+            dataset.set_stop_requested(stop)
+            with patch(
+                "speech_to_speech.datamodule.streaming.time.sleep",
+                side_effect=request_stop,
+            ), self.assertRaises(SIGTERMException):
+                next(iter(dataset))
+
+        self.assertEqual(dataset.wait_events, 1)
+        self.assertEqual(dataset.poll_count, 0)
+
     def test_iterator_waits_for_new_chunk_and_for_seal(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

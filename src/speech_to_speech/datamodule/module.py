@@ -217,6 +217,7 @@ class _SpeechLoader:
         self._streaming_loader: StreamingDataLoader | None = None
         self._pending_streaming_state: Mapping[str, object] | None = None
         self._synthesis_controller: SynthesisController | None = None
+        self._streaming_stop_requested: Callable[[], bool] | None = None
 
     def setup(
         self,
@@ -263,6 +264,10 @@ class _SpeechLoader:
                 poll_seconds=streaming.poll_seconds,
                 status_seconds=streaming.status_seconds,
             )
+            if self._streaming_stop_requested is not None:
+                self._streaming_dataset.set_stop_requested(
+                    self._streaming_stop_requested
+                )
             self._streaming_loader = StreamingDataLoader(
                 self._streaming_dataset,
                 collate_fn=self.collator,
@@ -337,6 +342,14 @@ class _SpeechLoader:
         if loader is None:
             return None
         return loader.telemetry()
+
+    def set_streaming_stop_requested(self, requested: Callable[[], bool]) -> None:
+        if not callable(requested):
+            raise TypeError("streaming stop request must be callable.")
+        self._streaming_stop_requested = requested
+        dataset = self._streaming_dataset
+        if dataset is not None:
+            dataset.set_stop_requested(requested)
 
     def streaming_state_dict(self) -> dict[str, object] | None:
         loader = self._streaming_loader
@@ -586,6 +599,10 @@ class DataModule(LightningDataModule):
     def start_streaming_synthesis(self, *, owner: bool) -> None:
         for loader in self._speech_loaders(include_validation=False):
             loader.start_synthesis(owner=owner)
+
+    def set_streaming_stop_requested(self, requested: Callable[[], bool]) -> None:
+        for loader in self._speech_loaders(include_validation=False):
+            loader.set_streaming_stop_requested(requested)
 
     def check_streaming_synthesis(self, *, owner: bool) -> None:
         for loader in self._speech_loaders(include_validation=False):

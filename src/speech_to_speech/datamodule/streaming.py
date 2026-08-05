@@ -15,6 +15,7 @@ from typing import Any, Protocol, cast
 
 import torch.distributed as dist
 from anydataset.types import Modality, Role, Sample
+from lightning.pytorch.utilities.exceptions import SIGTERMException
 from torch.utils.data import DataLoader, Dataset, IterableDataset
 
 
@@ -498,6 +499,7 @@ class StreamingSnapshotDataset(IterableDataset[Sample]):
         self._wait_seconds = 0.0
         self._wait_events = 0
         self._poll_count = 0
+        self._stop_requested: Callable[[], bool] | None = None
 
     @property
     def read_position(self) -> int:
@@ -522,6 +524,11 @@ class StreamingSnapshotDataset(IterableDataset[Sample]):
     @property
     def poll_count(self) -> int:
         return self._poll_count
+
+    def set_stop_requested(self, requested: Callable[[], bool]) -> None:
+        if not callable(requested):
+            raise TypeError("streaming stop request must be callable.")
+        self._stop_requested = requested
 
     def logical_batch_count(self) -> int:
         rank, world_size = self._rank_world()
@@ -560,6 +567,7 @@ class StreamingSnapshotDataset(IterableDataset[Sample]):
         next_status = 0.0
         try:
             while True:
+                self._check_stop_requested()
                 catalog = status.catalog
                 next_position = self._read_position + world_size
                 final_group = next_position == self.feed.expected_samples
@@ -599,7 +607,8 @@ class StreamingSnapshotDataset(IterableDataset[Sample]):
                         self._poll_count,
                     )
                     next_status = now + self.status_seconds
-                time.sleep(self.poll_seconds)
+                self._interruptible_sleep()
+                self._check_stop_requested()
                 self._poll_count += 1
                 status = self.feed.status()
         except BaseException:
@@ -609,6 +618,23 @@ class StreamingSnapshotDataset(IterableDataset[Sample]):
     def _start_wait(self) -> None:
         if self._waiting_since is None:
             self._waiting_since = time.perf_counter()
+
+    def _interruptible_sleep(self) -> None:
+        if self._stop_requested is None:
+            time.sleep(self.poll_seconds)
+            return
+        deadline = time.monotonic() + self.poll_seconds
+        while True:
+            self._check_stop_requested()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(remaining, 0.5))
+
+    def _check_stop_requested(self) -> None:
+        requested = self._stop_requested
+        if requested is not None and requested():
+            raise SIGTERMException()
 
     def _finish_wait(self) -> None:
         started = self._waiting_since

@@ -207,6 +207,11 @@ cursor checkpoint 恢复。`StreamingTelemetryCallback` 将这些时间、train 
 published position 和 wait ratio 写入 `streaming/*` TensorBoard scalar。DDP 的时间指标取各 rank
 最大值，以暴露最慢 rank 的实际瓶颈。
 
+Lightning 的 SIGTERM 标记由 `StreamingSynthesis` 绑定为 dataset stop request。snapshot poll sleep
+最多每 0.5 秒检查一次；收到停止请求时抛出 Lightning 的 `SIGTERMException`，使阻塞在同步
+`next()` 内的 rank 也进入标准 exception teardown，而不是等新 snapshot 才释放 GPU。cursor 仍只以
+最近成功 checkpoint 的 committed position 为恢复边界。
+
 rank zero 同时把可见 GPU 的 utilization、memory 和 power 原始采样追加到 logger 目录下的
 `streaming_gpu.csv`；固定 streaming logger version 后，该 CSV 和 TensorBoard event 会跨 auto-resume
 启动继续追加。结束时覆盖写入的 `streaming_gpu_summary.json` 只概括当前进程，本次运行之外的完整

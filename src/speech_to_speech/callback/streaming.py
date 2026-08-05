@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -35,6 +35,8 @@ class _StreamingDataModule(Protocol):
 
     def acknowledge_streaming_batch(self, global_step: int) -> None: ...
 
+    def set_streaming_stop_requested(self, requested: Callable[[], bool]) -> None: ...
+
     def streaming_telemetry(
         self,
         *,
@@ -57,6 +59,9 @@ class StreamingSynthesis(Callback):
         datamodule = _datamodule(trainer)
         if not datamodule.streaming_enabled:
             return
+        datamodule.set_streaming_stop_requested(
+            lambda: bool(trainer.received_sigterm)
+        )
         self._owner_call(trainer, "start", datamodule.start_streaming_synthesis)
 
     def on_train_start(self, trainer: Trainer, pl_module: LightningModule) -> None:

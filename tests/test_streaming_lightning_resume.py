@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -127,6 +127,9 @@ class _StreamingDataModule(LightningDataModule):
     def acknowledge_streaming_batch(self, global_step: int) -> None:
         self._loader().acknowledge(global_step)
 
+    def set_streaming_stop_requested(self, requested: Callable[[], bool]) -> None:
+        self._loader().dataset.set_stop_requested(requested)
+
     def streaming_telemetry(
         self,
         *,
@@ -224,9 +227,10 @@ class StreamingLightningResumeTest(unittest.TestCase):
                 _write_seal(root)
                 published = True
 
-            with patch(
-                "speech_to_speech.datamodule.streaming.time.sleep",
-                side_effect=publish,
+            with patch.object(
+                StreamingSnapshotDataset,
+                "_interruptible_sleep",
+                side_effect=lambda: publish(0.0),
             ):
                 _trainer(
                     max_steps=2,
