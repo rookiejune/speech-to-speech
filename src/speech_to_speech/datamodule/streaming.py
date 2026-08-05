@@ -483,6 +483,22 @@ class StreamingSnapshotDataset(IterableDataset[Sample]):
     def committed_position(self) -> int:
         return self._committed_position
 
+    def logical_batch_count(self) -> int:
+        rank, world_size = self._rank_world()
+        _validate_rank_world(rank, world_size)
+        if self._world_size is not None and self._world_size != world_size:
+            raise ValueError(
+                "streaming resume requires the same DDP world size: "
+                f"{self._world_size} != {world_size}."
+            )
+        if self.feed.expected_samples % world_size != 0:
+            raise ValueError(
+                "streaming expected_samples must be divisible by the DDP "
+                f"world size: {self.feed.expected_samples} % {world_size} != 0."
+            )
+        per_rank = self.feed.expected_samples // world_size
+        return (per_rank + self.batch_size - 1) // self.batch_size
+
     def __iter__(self) -> Iterator[Sample]:
         rank, world_size = self._rank_world()
         _validate_rank_world(rank, world_size)
@@ -504,10 +520,15 @@ class StreamingSnapshotDataset(IterableDataset[Sample]):
         next_status = 0.0
         while True:
             catalog = status.catalog
-            if self._read_position + world_size <= catalog.sample_count:
+            next_position = self._read_position + world_size
+            final_group = next_position == self.feed.expected_samples
+            if (
+                next_position <= catalog.sample_count
+                and (not final_group or status.seal is not None)
+            ):
                 position = self._read_position + rank
                 _snapshot, _offset, sample = self.feed.sample_at(position, catalog)
-                self._read_position += world_size
+                self._read_position = next_position
                 yield sample
                 continue
             if status.seal is not None:
@@ -674,6 +695,9 @@ class StreamingDataLoader:
         self._delivered: deque[BatchSpan] = deque()
         self._pending: list[BatchSpan] = []
         self._last_global_step = 0
+
+    def __len__(self) -> int:
+        return self.dataset.logical_batch_count()
 
     def __iter__(self) -> Iterator[Any]:
         iterator = iter(self.loader)

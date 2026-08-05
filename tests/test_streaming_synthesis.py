@@ -455,6 +455,7 @@ class StreamingSnapshotDatasetTest(unittest.TestCase):
                     _write_snapshot(root, 1, "chunk-b", [2, 3], expected=4)
                     return
                 if sleep_calls == 2:
+                    self.assertEqual(dataset.read_position, 3)
                     _write_seal(root, feed)
                     return
                 raise AssertionError("streaming iterator waited after the seal")
@@ -506,6 +507,40 @@ class StreamingSnapshotDatasetTest(unittest.TestCase):
 
 
 class StreamingDataLoaderTest(unittest.TestCase):
+    def test_length_is_the_per_rank_logical_batch_count(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            full_batches = _loader(
+                _dataset(_feed(root, expected=8), batch_size=1, world_size=2)
+            )
+            partial_tail = _loader(
+                _dataset(_feed(root, expected=6), batch_size=2, world_size=2)
+            )
+
+            self.assertEqual(len(full_batches), 4)
+            self.assertEqual(len(partial_tail), 2)
+
+    def test_length_rejects_a_resumed_world_size_change(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_snapshot(root, 0, "chunk-a", [0, 1, 2, 3], expected=4)
+            feed = _feed(root, expected=4)
+            _write_seal(root, feed)
+            original = _dataset(feed, batch_size=1, rank=0, world_size=2)
+            next(iter(original))
+
+            restored = _dataset(
+                _feed(root, expected=4),
+                batch_size=1,
+                rank=0,
+                world_size=1,
+            )
+            restored.load_state_dict(original.state_dict())
+
+            with self.assertRaisesRegex(ValueError, "same DDP world size"):
+                len(_loader(restored))
+
     def test_delivered_pending_and_committed_positions_are_distinct(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

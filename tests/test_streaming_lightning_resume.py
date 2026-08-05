@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
+from unittest.mock import patch
 
 import torch
 from anydataset.types import Sample
@@ -153,6 +154,41 @@ class _AcknowledgedCheckpoint(ModelCheckpoint):
 
 
 class StreamingLightningResumeTest(unittest.TestCase):
+    def test_trains_published_batch_before_waiting_for_the_next_snapshot(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_snapshot(root, snapshot_id="first", indices=[0, 1])
+            data = _StreamingDataModule(root)
+            model = _Module()
+            published = False
+
+            def publish(_seconds: float) -> None:
+                nonlocal published
+                if published:
+                    raise AssertionError("streaming loader waited after the seal.")
+                self.assertEqual(model.seen, [0, 1])
+                _write_snapshot(
+                    root,
+                    sequence=1,
+                    snapshot_id="second",
+                    indices=[2, 3],
+                )
+                _write_seal(root)
+                published = True
+
+            with patch(
+                "speech_to_speech.datamodule.streaming.time.sleep",
+                side_effect=publish,
+            ):
+                _trainer(
+                    max_steps=2,
+                    callbacks=[StreamingSynthesis()],
+                    enable_checkpointing=False,
+                ).fit(model, datamodule=data)
+
+        self.assertTrue(published)
+        self.assertEqual(model.seen, [0, 1, 2, 3])
+
     def test_checkpoint_resume_restores_only_unconsumed_sealed_samples(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -241,17 +277,24 @@ def _load_snapshot(root: Path) -> Dataset[Sample]:
     return _Samples(cast(list[int], indices))
 
 
-def _write_snapshot(root: Path) -> None:
-    directory = root / "snapshots" / "000000-all"
+def _write_snapshot(
+    root: Path,
+    *,
+    sequence: int = 0,
+    snapshot_id: str = "all",
+    indices: list[int] | None = None,
+) -> None:
+    sample_indices = [0, 1, 2, 3] if indices is None else indices
+    directory = root / "snapshots" / f"{sequence:06d}-{snapshot_id}"
     directory.mkdir(parents=True)
     payload = {
         "schema": _SNAPSHOT_SCHEMA,
         "stream_id": _STREAM_ID,
         "expected_samples": 4,
-        "sequence": 0,
-        "snapshot_id": "all",
-        "sample_indices": [0, 1, 2, 3],
-        "sample_count": 4,
+        "sequence": sequence,
+        "snapshot_id": snapshot_id,
+        "sample_indices": sample_indices,
+        "sample_count": len(sample_indices),
     }
     (directory / "snapshot.json").write_text(
         json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
@@ -261,13 +304,14 @@ def _write_snapshot(root: Path) -> None:
 
 def _write_seal(root: Path) -> None:
     feed = SnapshotFeed(root, stream_id=_STREAM_ID, expected_samples=4, loader=_load_snapshot)
+    catalog = feed.status().catalog
     payload = {
         "schema": _SEAL_SCHEMA,
         "stream_id": _STREAM_ID,
         "expected_samples": 4,
-        "snapshot_count": 1,
-        "sample_count": 4,
-        "catalog_sha256": feed.status().catalog.sha256,
+        "snapshot_count": len(catalog.snapshots),
+        "sample_count": catalog.sample_count,
+        "catalog_sha256": catalog.sha256,
     }
     (root / "sealed.json").write_text(
         json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
