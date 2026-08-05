@@ -40,7 +40,7 @@ class SemanticCodebookCodec(Protocol):
     def semantic_codebook(self) -> Tensor: ...
 
 
-class Codec(Protocol):
+class FrameTokenizer(Protocol):
     @property
     def sample_rate(self) -> int: ...
 
@@ -51,6 +51,10 @@ class Codec(Protocol):
     def codebook_sizes(self) -> tuple[int, ...]: ...
 
     def encode(self, audio: Tensor, sample_rate: int) -> Tensor: ...
+
+
+class Codec(FrameTokenizer, Protocol):
+    """Complete frame-code backend supporting both waveform directions."""
 
     def decode(self, codes: Tensor) -> Tensor: ...
 
@@ -107,7 +111,7 @@ class GlobalCodec(SemanticCodebookCodec, Protocol):
 
 
 StructuredCodec = Union[AcousticCodec, GlobalCodec]
-CodecBackend = Union[Codec, AcousticCodec, GlobalCodec]
+CodecBackend = Union[FrameTokenizer, AcousticCodec, GlobalCodec]
 
 
 class CodebookCodec(SemanticCodebookCodec, Protocol):
@@ -139,12 +143,19 @@ class _FrameRateCapability(Protocol):
 
 
 @runtime_checkable
-class _FrameCapability(_SampleRateCapability, _FrameRateCapability, Protocol):
+class _FrameTokenizerCapability(
+    _SampleRateCapability,
+    _FrameRateCapability,
+    Protocol,
+):
     @property
     def codebook_sizes(self) -> tuple[int, ...]: ...
 
     def encode(self, audio: Tensor, sample_rate: int) -> Tensor: ...
 
+
+@runtime_checkable
+class _FrameCapability(_FrameTokenizerCapability, Protocol):
     def decode(self, codes: Tensor) -> Tensor: ...
 
 
@@ -333,12 +344,19 @@ def fsq_radix_order(codec: object) -> str | None:
     return value
 
 
+def frame_tokenizer(codec: object) -> FrameTokenizer:
+    if not isinstance(codec, _FrameTokenizerCapability):
+        raise TypeError("frame-code tokenization requires a frame tokenizer capability.")
+    codec_sample_rate(codec)
+    codec_frame_rate(codec)
+    _codebook_sizes(codec.codebook_sizes, "frame tokenizer")
+    return cast(FrameTokenizer, codec)
+
+
 def frame_codec(codec: object) -> Codec:
     if not isinstance(codec, _FrameCapability):
         raise TypeError("full frame-code encoding and decoding require a frame codec capability.")
-    codec_sample_rate(codec)
-    codec_frame_rate(codec)
-    _codebook_sizes(codec.codebook_sizes, "frame codec")
+    frame_tokenizer(codec)
     return cast(Codec, codec)
 
 
@@ -464,6 +482,7 @@ __all__ = [
     "CodebookCodec",
     "Codec",
     "CodecBackend",
+    "FrameTokenizer",
     "GlobalCodec",
     "SemanticCodebookCodec",
     "SemanticCodec",
@@ -474,6 +493,7 @@ __all__ = [
     "codec_sample_rate",
     "frame_codebook_sizes",
     "frame_codec",
+    "frame_tokenizer",
     "fsq_level_values",
     "fsq_levels",
     "fsq_radix_order",

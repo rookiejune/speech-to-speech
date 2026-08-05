@@ -156,8 +156,10 @@ runtime 的 input/output `AudioView` 都从对应 `audio_input.tokenizer` /
    子进程。返回值必须是有限、稳定且有 `__len__` 的 dataset，
    并提供 map-style `__getitem__` 或 anydataset 支持的显式 shard iteration；Sample 必须包含内置
    codec provider 所需的 waveform/file audio，以及 workspace pair schema 所需的 source/target text、
-   `TextView.TEXT` 和 `TextMeta.LANG`。frame-code view 使用 anydataset `CodecProvider.encode()`；
-   BiCodec 使用 structured `tokenize()`，并支持同一 WMT19 sample 内 source/target 两个 audio reference。
+   `TextView.TEXT` 和 `TextMeta.LANG`。完整 frame codec view 使用 anydataset
+   `CodecProvider.encode()`；GLM-4 等 tokenizer-only frame view 使用
+   `AudioTokenizerProvider.tokenize()`；BiCodec 使用 structured `tokenize()`，并支持同一 WMT19
+   sample 内 source/target 两个 audio reference。
 
 两侧 backend/derived view 不同时，resolver 会分别查 input/output store，再按同一
 sample index 合并。同 backend 但 BPE 不同时虽然 model token space 独立，prepared
@@ -169,9 +171,11 @@ codec codes 仍只读同一份 store。GLM-4 input / BiCodec output 的边界是
 - GLM-4 input ready 但 BiCodec output 缺失时，fallback 把 ready GLM-4 view 合入同一
   waveform sample。训练 batch 只在 output 侧调 BiCodec online materializer，后台也只补产
   BiCodec store；到 epoch 边界仍要重载并验证两侧等长后才切 ready dataset。
-- GLM-4 input store 缺失时，内置 workspace materializer 没有 GLM-4 provider/backend，会明确
-  要求先发布该 prepared store 或扩展显式 provider；绝不复用 BiCodec output provider
-  伪造 input codes。
+- GLM-4 input store 缺失时，内置 workspace materializer 使用独立 tokenizer provider 补产，绝不
+  复用 BiCodec output provider 伪造 input codes。GLM-4 loader 接受任意 checkout/fork，不绑定源码
+  Git commit，但严格校验源码/API/模型契约、固定 weights revision 和 `transformers==4.44.1`；若
+  output provider 的依赖不能与之共存，应在兼容环境中运行独立
+  AnyDataset producer，再由本 resolver 消费持续发布的 store。
 
 `streaming_s2st` 的 source factory 返回上游 `translation_seed` 对应的双向 waveform dataset。方向
 展开只发生在 seed 层：若 filtered WMT19 有 `N` 个 pair，fallback、后台 codec store 和刷新后的
@@ -206,8 +210,8 @@ ViewMaterializer 的 resume state 会供后续同一请求继续补产。直接�
 
 当前实现只允许唯一的 training loader，且它必须是启用补产的 speech loader，以提供有限且唯一的 reload
 边界；validation 若也启用补产，必须与 training 指向同一个 codec source request。内置 provider 当前
-支持 `wmt19_tts` 的 DAC、LongCat、Stable Codec、UniCodec frame-code view，以及 semantic/global BiCodec
-view。WMT19 workspace 为每个 codec store 单独解析 filter selection；BiCodec selection
+支持 `wmt19_tts` 的 GLM-4 tokenizer-only frame view，DAC、LongCat、Stable Codec、UniCodec 完整
+frame-code view，以及 semantic/global BiCodec view。WMT19 workspace 为每个 codec store 单独解析 filter selection；BiCodec selection
 缺失时仍走同一 filtered waveform/stream fallback，不会拿 `base` selection 冒充 `bicodec` selection。
 Qwen speaker-grid read-through 仍需要独立 backend：它拥有不同的 waveform/codec root、DEFAULT-role flat
 cell 和 `speaker_grid_manifest.jsonl` 契约，不能沿用 WMT19 pair materializer 猜测格式。
@@ -416,7 +420,7 @@ LongCat 同时暴露 structured capability 就改变数据表示。同一 batch 
 
 解耦模式不允许缺失 input view 时调用 output codec waveform fallback。普通显式 debug
 fallback 若处理 raw input waveform，必须调用可加载的 `runtime.input_codec`；workspace read-through
-则遵循上述 provider 边界，GLM-4 input 必须先 prepared。若 input store 已 ready、output store
+则遵循上述方向性 provider 边界。若 input store 已 ready、output store
 尚在后台补产，composite fallback 会把 ready input view
 合入 waveform sample，只让缺失的 output target/audio context 进入现有 output codec materializer，
 并在 epoch 边界等两侧 store 都严格可加载且等长后再切换到 ready dataset。

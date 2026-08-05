@@ -25,9 +25,14 @@ from speech_to_speech.runtime.audio_tokenizer import (
     BiCodecAudioTokenizer,
     FlattenedAudioTokenizer,
 )
-from speech_to_speech.runtime.codec import has_codec_loader, load_codec
+from speech_to_speech.runtime.codec import (
+    has_audio_tokenizer_loader,
+    has_codec_loader,
+    load_codec,
+)
 from speech_to_speech.runtime.codec_contract import (
     frame_codec,
+    frame_tokenizer,
     supports_acoustic,
     supports_global,
     supports_structured,
@@ -36,12 +41,16 @@ from speech_to_speech.runtime.codec_contract import (
 
 class RuntimeCodecTest(unittest.TestCase):
     def test_codec_loader_capability_matches_runtime_dispatch(self) -> None:
-        for name in ("longcat", "bicodec", "stable_codec", "unicodec"):
+        for name in ("glm4", "longcat", "bicodec", "stable_codec", "unicodec"):
             with self.subTest(name=name):
-                self.assertTrue(has_codec_loader(name))
-        for name in ("glm4", "dac"):
+                self.assertTrue(has_audio_tokenizer_loader(name))
+        for name in ("dac",):
             with self.subTest(name=name):
-                self.assertFalse(has_codec_loader(name))
+                self.assertFalse(has_audio_tokenizer_loader(name))
+        self.assertEqual(
+            has_codec_loader("glm4"),
+            has_audio_tokenizer_loader("glm4"),
+        )
 
     def test_legacy_generator_artifact_config_field_is_migrated_explicitly(self) -> None:
         fields = {"semantic_codec_artifact": "/tmp/legacy-generator"}
@@ -211,8 +220,8 @@ class RuntimeCodecTest(unittest.TestCase):
                 audio_output=AudioOutputConfig(tokenizer="longcat"),
             )
         )
-        self.assertTrue(has_codec_loader("unicodec"))
-        self.assertFalse(has_codec_loader("glm4"))
+        self.assertTrue(has_audio_tokenizer_loader("unicodec"))
+        self.assertTrue(has_audio_tokenizer_loader("glm4"))
         self.assertEqual(runtime.input_codec_frame_rate, 75.0)
         self.assertEqual(runtime.input_audio_tokenizer.vocab_size, 16_384)
         self.assertNotIn("input_audio_tokenizer_backend", runtime.__dict__)
@@ -587,6 +596,18 @@ class RuntimeCodecTest(unittest.TestCase):
             codec = _acoustic_codec(**overrides)
             with self.subTest(overrides=overrides), self.assertRaisesRegex(error, message):
                 frame_codec(codec)
+
+    def test_frame_tokenizer_accepts_tokenizer_only_backend(self) -> None:
+        backend = SimpleNamespace(
+            sample_rate=16_000,
+            frame_rate=12.5,
+            codebook_sizes=(16_384,),
+            encode=Mock(),
+        )
+
+        self.assertIs(frame_tokenizer(backend), backend)
+        with self.assertRaisesRegex(TypeError, "encoding and decoding"):
+            frame_codec(backend)
 
     def test_acoustic_capability_rejects_invalid_metadata(self) -> None:
         cases = (

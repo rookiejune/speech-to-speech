@@ -15,8 +15,7 @@ from .._tensor import is_signed_integer_dtype
 from ..audio import AudioCodes
 from ..datamodule.parse import parse_audio_codes
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
-from ..runtime.codec import has_codec_loader
-from ..runtime.codec_contract import frame_codec, global_codec, supports_global
+from ..runtime.codec_contract import frame_tokenizer, global_codec, supports_global
 from ..runtime.protocol import GenerationRuntime
 from ..task import (
     FieldRole,
@@ -179,11 +178,6 @@ def _materialize_input_codes(
         return _validated_input_codes(part, runtime)
     if part["type"] != "audio":
         raise TypeError(f"unsupported media part type: {part.get('type')!r}")
-    if not has_codec_loader(runtime.input_codec_name):
-        raise ValueError(
-            f"input audio tokenizer {runtime.input_codec_name!r} has no runtime "
-            "codec backend; pass precomputed input codec_codes."
-        )
     return _encode_audio(part, runtime, input_audio=True)
 
 
@@ -500,7 +494,11 @@ def _encode_audio(
     waveform = waveform.to(dtype=torch.float32)
     batched = _batched_waveform(waveform)
     view = runtime.input_audio_view if input_audio else runtime.audio_view
-    backend = runtime.input_codec if input_audio else runtime.codec
+    backend = (
+        runtime.input_audio_tokenizer_backend
+        if input_audio
+        else runtime.output_audio_tokenizer_backend
+    )
     with torch.autocast(device_type=batched.device.type, enabled=False):
         if view is AudioView.BICODEC:
             if not supports_global(backend):
@@ -518,7 +516,7 @@ def _encode_audio(
                     global_codes=encoded.global_codes[0].detach(),
                 )
             )
-        codes = frame_codec(backend).encode(batched, sample_rate)
+        codes = frame_tokenizer(backend).encode(batched, sample_rate)
     if not isinstance(codes, Tensor):
         raise TypeError("codec encode must return a Tensor.")
     if codes.dim() == 3:

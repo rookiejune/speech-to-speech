@@ -174,6 +174,64 @@ class DualAudioTokenizerTest(unittest.TestCase):
             canonical_model.state_dict(),
         )
 
+    def test_detokenizer_only_changes_runtime_checkpoint_contract(self) -> None:
+        waveform_model = _checkpoint_model(
+            _bicodec_runtime(
+                Config(
+                    audio_output=AudioOutputConfig(
+                        tokenizer="bicodec",
+                        detokenizer="bicodec",
+                    )
+                )
+            )
+        )
+        codes_model = _checkpoint_model(
+            _bicodec_runtime(
+                Config(
+                    audio_output=AudioOutputConfig(
+                        tokenizer="bicodec",
+                        detokenizer=None,
+                    )
+                )
+            )
+        )
+
+        self.assertEqual(_state_schema(waveform_model), _state_schema(codes_model))
+        waveform_components = cast(
+            Mapping[str, object],
+            waveform_model.checkpoint_contract.components,
+        )
+        codes_components = cast(
+            Mapping[str, object],
+            codes_model.checkpoint_contract.components,
+        )
+        self.assertEqual(
+            waveform_components["interface"],
+            codes_components["interface"],
+        )
+        waveform_runtime = cast(
+            Mapping[str, object],
+            waveform_components["runtime"],
+        )
+        codes_runtime = cast(
+            Mapping[str, object],
+            codes_components["runtime"],
+        )
+        self.assertEqual(
+            waveform_runtime["token_space"],
+            codes_runtime["token_space"],
+        )
+        waveform_codecs = cast(
+            Mapping[str, object],
+            waveform_runtime["audio_codecs"],
+        )
+        codes_codecs = cast(
+            Mapping[str, object],
+            codes_runtime["audio_codecs"],
+        )
+        self.assertIsNotNone(waveform_codecs["output_detokenizer"])
+        self.assertIsNone(codes_codecs["output_detokenizer"])
+
     def test_explicit_same_pair_ties_backend_tokenizer_and_embedding(self) -> None:
         runtime = _bicodec_runtime(
             Config(
@@ -281,23 +339,71 @@ class DualAudioTokenizerTest(unittest.TestCase):
         self.assertEqual(tuple(input_codec.encode.call_args.args[0].shape), (1, 1, 4))
         self.assertEqual(tuple(output_codec.encode.call_args.args[0].shape), (1, 1, 6))
 
-    def test_glm4_waveform_fallback_still_requires_prepared_codes(self) -> None:
-        with self.assertRaisesRegex(ValueError, "no runtime codec backend"):
-            Collator(
-                _runtime(),
-                {Task.S2ST: 1.0},
-                encode_missing_codes=True,
-            )([_waveform_sample()])
-
-        with self.assertRaisesRegex(ValueError, "no runtime codec backend"):
-            chat_adapter._materialize_input_codes(
-                {
-                    "type": "audio",
-                    "waveform": torch.ones(1, 4),
-                    "sample_rate": 4,
-                },
-                _runtime(),
+    def test_glm4_waveform_fallback_uses_tokenizer_only_input_backend(self) -> None:
+        runtime = _bicodec_runtime(
+            Config(
+                audio_input=AudioInputConfig(tokenizer="glm4"),
+                audio_output=AudioOutputConfig(
+                    tokenizer="bicodec",
+                    detokenizer="bicodec",
+                ),
             )
+        )
+        input_tokenizer = SimpleNamespace(
+            sample_rate=16_000,
+            frame_rate=12.5,
+            codebook_sizes=(16_384,),
+            encode=Mock(
+                return_value=torch.tensor(
+                    [[[1], [2]]],
+                    dtype=torch.long,
+                )
+            ),
+        )
+        runtime.__dict__["input_audio_tokenizer_backend"] = input_tokenizer
+        runtime.codec.tokenize.return_value = SemanticGlobalCodes(
+            semantic=torch.tensor([[[1], [2], [3]]], dtype=torch.long),
+            global_codes=torch.tensor(
+                [[[0, 1], [2, 3], [4, 5]]],
+                dtype=torch.long,
+            ),
+        )
+
+        raw = Collator(
+            runtime,
+            {Task.S2ST: 1.0},
+            encode_missing_codes=True,
+        )([_waveform_sample()])
+        batch = OnDeviceCodecMaterializer(runtime)(
+            raw,
+            device=torch.device("cpu"),
+        )
+
+        self.assertIsInstance(batch, ModelBatch)
+        self.assertFalse(hasattr(input_tokenizer, "decode"))
+        self.assertEqual(
+            tuple(input_tokenizer.encode.call_args.args[0].shape),
+            (1, 1, 4),
+        )
+        self.assertEqual(
+            tuple(runtime.codec.tokenize.call_args.args[0].shape),
+            (1, 1, 6),
+        )
+
+        input_tokenizer.encode.reset_mock()
+        runtime.codec.tokenize.reset_mock()
+        codes = chat_adapter._materialize_input_codes(
+            {
+                "type": "audio",
+                "waveform": torch.ones(1, 4),
+                "sample_rate": 4,
+            },
+            runtime,
+        )
+
+        self.assertIsInstance(codes, torch.Tensor)
+        input_tokenizer.encode.assert_called_once()
+        runtime.codec.tokenize.assert_not_called()
 
     def test_loadable_input_chat_waveform_uses_input_backend(self) -> None:
         runtime = Runtime(

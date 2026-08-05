@@ -96,11 +96,15 @@ validation 时显式拒绝 input-only ID，generation allowed IDs 从不包含�
 ID block 路由，因此 KV-cache continuation 中新生成的 BiCodec ID 不会误进 GLM-4 embedding。
 
 `audio_input.bpe=null` 时使用 backend native tokenization；包括 GLM-4 在内的 vocabulary、frame
-rate 与 codebook metadata 都来自 preset 静态 spec，配置不重复填写。若当前安装没有 GLM-4
-online tokenizer loader，训练仍可消费按 `AudioView.GLM4` 准备的 store 或外部 producer 持续发布的
-codes，但 waveform fallback 会明确失败。训练的显式 waveform fallback 对具有 tokenize capability
-的 input backend 调用 input tokenizer，绝不用 output backend 伪造 input codes；在线 chat 遵循相同
-规则。BiCodec input 始终保留 global +
+rate 与 codebook metadata 都来自 preset 静态 spec，配置不重复填写。GLM-4 online loader 只暴露
+waveform→frame codes，不伪造 decoder；它接受任意 GLM-4-Voice checkout/fork，不绑定源码 Git
+commit，但严格校验源码/API/模型契约、固定 tokenizer weights revision 和
+`transformers==4.44.1`，source checkout 通过
+`GLM4_VOICE_SOURCE_ROOT` 指定。该版本与部分 output codec 的主环境依赖不兼容时，生产
+路径应让独立 AnyDataset provider/producer 持续发布 `AudioView.GLM4` store，训练按现有 streaming
+边界读取；只有同进程依赖满足严格检查时才启用 waveform fallback。训练 fallback 对具有 tokenize
+capability 的 input backend 调用 input tokenizer，绝不用 output backend 伪造 input codes；在线 chat
+遵循相同规则。BiCodec input 始终保留 global +
 semantic 完整序列；独立 BPE 只改变 semantic 子流的 token space，不丢弃 global units。
 checkpoint contract 分别记录 input/output tokenizer backend、output detokenizer、audio schema、selector、
 payload range、codec-private grammar、blocks、special IDs 和 embedding ownership；
@@ -140,8 +144,9 @@ tokenize 与 detokenize。`FULL_CODEC_SEQUENCE` 对 frame-code tokenizer 展开�
 `semantic_acoustic_generator.runtime.GeneratorRuntime` 负责。semantic-only decoder 不放回
 anytrain，也不通过普通 codec 的 `decode()` 伪装。
 
-能力检查按实际接口而不是 codec 名称分派：`frame_codec()` 要求完整 encode/decode、frame rate 和
-codebook sizes；`structured_codec()` 接受完整的 semantic/acoustic 或 semantic/global contract；
+能力检查按实际接口而不是 codec 名称分派：`frame_tokenizer()` 只要求 encode、frame rate 和
+codebook sizes，`frame_codec()` 另外要求 decode；`structured_codec()` 接受完整的
+semantic/acoustic 或 semantic/global contract；
 `acoustic_codec()` 只用于 frame-aligned side channel，`global_codec()` 只用于独立 global units。一个 backend 只有在
 满足对应完整 Protocol 时才进入该路径，不用单个同名属性推断整组能力。
 capability metadata 在这些边界统一校验：sample rate 必须是正整数，frame rate 必须是有限正数，

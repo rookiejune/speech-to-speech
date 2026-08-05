@@ -20,10 +20,11 @@ ChatRequest(messages, task, language?, trace?)
   `{role, content}`；`content` 为字符串或 part 列表。
 - content parts：
   - `text`：标准文本
-  - `audio`：`waveform` + `sample_rate`；入口按 source role 使用 input tokenizer 的 codec
-    backend encode 成 codes。同名 input/output tokenizer 复用同一 backend；不同但可加载的 input
-    tokenizer 使用自己的 encoder，绝不回退到 output encoder。GLM-4 等 prepared-only input
-    tokenizer 没有 runtime backend，必须改传预先生成的 `codec_codes`。
+  - `audio`：`waveform` + `sample_rate`；入口按 source role 使用 input tokenizer backend encode 成
+    codes。同名 input/output tokenizer 复用同一 backend；不同但可加载的 input tokenizer 使用自己的
+    encoder，绝不回退到 output encoder。GLM-4 online backend 是 tokenizer-only；源码 checkout/fork
+    不绑定 Git commit，但源码/API/模型契约、weights revision 和 `transformers==4.44.1` 会严格校验。
+    当前进程不满足该依赖契约时，改传独立 producer 生成的 `codec_codes`。
   - `codec_codes`：已 materialize 的 codes，携带 `codec` 名；audio-source part 须等于
     `runtime.input_audio_tokenizer_name`（耦合时即 output name），以及
     `codes`（`AudioCodes` 或 frame `[frames, codebooks]`）。BiCodec input 的 `AudioCodes` 保留

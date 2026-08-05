@@ -105,6 +105,68 @@ class _GlobalCodec:
         return semantic_codes[..., 0].float()
 
 
+class _FrameTokenizerBackend:
+    sample_rate = 16_000
+    frame_rate = 12.5
+    codebook_sizes = (16,)
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Tensor, int]] = []
+
+    def encode(self, audio: Tensor, sample_rate: int) -> Tensor:
+        self.calls.append((audio.detach().clone(), sample_rate))
+        return torch.tensor(
+            [[[1], [2], [3]]],
+            dtype=torch.long,
+            device=audio.device,
+        )
+
+
+class _BackendLoader:
+    def __init__(self, backend: object, *, forbidden: bool = False) -> None:
+        self.backend = backend
+        self.forbidden = forbidden
+        self.loads = 0
+
+    def load(self) -> object:
+        self.loads += 1
+        if self.forbidden:
+            raise AssertionError("unexpected audio tokenizer backend load")
+        return self.backend
+
+
+class _LazyBackendRuntime:
+    def __init__(
+        self,
+        runtime: SimpleNamespace,
+        *,
+        input_loader: _BackendLoader,
+        output_loader: _BackendLoader,
+    ) -> None:
+        self._runtime = runtime
+        self._input_loader = input_loader
+        self._output_loader = output_loader
+
+    def __getattr__(self, name: str):
+        return getattr(self._runtime, name)
+
+    @property
+    def input_audio_tokenizer_backend(self) -> object:
+        return self._input_loader.load()
+
+    @property
+    def output_audio_tokenizer_backend(self) -> object:
+        return self._output_loader.load()
+
+    @property
+    def input_codec(self) -> object:
+        raise AssertionError("chat input must not use the deprecated input_codec alias")
+
+    @property
+    def codec(self) -> object:
+        raise AssertionError("chat input must not load the output codec alias")
+
+
 def _codes() -> AudioCodes:
     return AudioCodes(
         semantic_codes=torch.tensor([[1], [2], [3]], dtype=torch.int32),
@@ -200,6 +262,8 @@ def _runtime(
         acoustic_side_channel=False,
         codec_name=codec_name,
         audio_view=AudioView.BICODEC,
+        output_audio_tokenizer_backend=codec,
+        input_audio_tokenizer_backend=codec,
         codec=codec,
     )
     return cast(GenerationRuntime, runtime)
@@ -423,7 +487,7 @@ class ChatAdapterTest(unittest.TestCase):
         self.assertIn(runtime.input_eoa_token_id, prompt.tolist())
         self.assertNotEqual(int(prompt[-1]), runtime.input_eoa_token_id)
 
-    def test_decoupled_audio_source_rejects_output_codec_and_waveform_fallback(self) -> None:
+    def test_decoupled_audio_source_rejects_output_codec_codes(self) -> None:
         runtime = _runtime(decoupled=True)
         base = {
             "messages": [
@@ -444,26 +508,57 @@ class ChatAdapterTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "runtime input codec"):
             to_request(cast(ChatRequest, base), runtime)
 
-        with self.assertRaisesRegex(ValueError, "precomputed input codec_codes"):
-            to_request(
-                {
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": "hello"},
-                                {
-                                    "type": "audio",
-                                    "waveform": torch.zeros(8),
-                                    "sample_rate": 16_000,
-                                },
-                            ],
-                        }
-                    ],
-                    "task": Task.S2ST,
-                },
-                runtime,
+    def test_decoupled_waveform_loads_only_input_frame_tokenizer(self) -> None:
+        input_backend = _FrameTokenizerBackend()
+        input_loader = _BackendLoader(input_backend)
+        output_loader = _BackendLoader(_GlobalCodec(), forbidden=True)
+        base = cast(SimpleNamespace, _runtime(decoupled=True))
+        runtime = cast(
+            GenerationRuntime,
+            _LazyBackendRuntime(
+                base,
+                input_loader=input_loader,
+                output_loader=output_loader,
+            ),
+        )
+
+        private = to_request(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "hello"},
+                            {
+                                "type": "audio",
+                                "waveform": torch.zeros(8),
+                                "sample_rate": 16_000,
+                            },
+                        ],
+                    }
+                ],
+                "task": Task.S2ST,
+            },
+            runtime,
+        )
+
+        self.assertEqual(input_loader.loads, 1)
+        self.assertEqual(output_loader.loads, 0)
+        self.assertEqual(len(input_backend.calls), 1)
+        encoded_waveform, sample_rate = input_backend.calls[0]
+        self.assertEqual(tuple(encoded_waveform.shape), (1, 1, 8))
+        self.assertEqual(encoded_waveform.dtype, torch.float32)
+        self.assertEqual(sample_rate, 16_000)
+        positions = private["audio_input_positions"]
+        self.assertIsNotNone(positions)
+        assert positions is not None
+        torch.testing.assert_close(
+            private["prompt_ids"].index_select(0, positions),
+            runtime.layout.to_global(
+                runtime.input_audio_block_name,
+                torch.tensor([1, 2, 3]),
             )
+        )
 
     def test_text_only_messages_build_private_request(self) -> None:
         runtime = _runtime(audio_sequence_layout=AudioSequenceLayout.FLATTENED)
@@ -702,7 +797,16 @@ class ChatAdapterTest(unittest.TestCase):
 
     def test_audio_part_encodes_with_structured_codec(self) -> None:
         codec = _GlobalCodec()
-        runtime = _runtime(codec=codec)
+        input_loader = _BackendLoader(object(), forbidden=True)
+        output_loader = _BackendLoader(codec)
+        runtime = cast(
+            GenerationRuntime,
+            _LazyBackendRuntime(
+                cast(SimpleNamespace, _runtime()),
+                input_loader=input_loader,
+                output_loader=output_loader,
+            ),
+        )
         waveform = torch.zeros(8, dtype=torch.float32)
         codes = materialize_codes(
             {
@@ -712,6 +816,8 @@ class ChatAdapterTest(unittest.TestCase):
             },
             runtime,
         )
+        self.assertEqual(input_loader.loads, 0)
+        self.assertEqual(output_loader.loads, 1)
         self.assertIsInstance(codes, AudioCodes)
         assert isinstance(codes, AudioCodes)
         self.assertEqual(codes.semantic_codes.size(1), 1)

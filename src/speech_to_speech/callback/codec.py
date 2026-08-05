@@ -21,7 +21,7 @@ from ..datamodule.sample import (
     Text,
 )
 from ..runtime.codec_contract import (
-    frame_codec,
+    frame_tokenizer,
     global_codec,
     supports_global,
 )
@@ -177,7 +177,7 @@ class OnDeviceCodecMaterializer:
                     )
                 )
             return _encoded_codes(
-                frame_codec(backend).encode(
+                frame_tokenizer(backend).encode(
                     batched_waveform,
                     sample.sample_rate,
                 )

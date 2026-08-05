@@ -367,6 +367,41 @@ class AssetMaterializationTest(unittest.TestCase):
         self.assertEqual(provider.codec, "bicodec")
         self.assertEqual(producer.output_dir, request.asset_root / "bicodec")
 
+    def test_glm4_request_uses_tokenizer_only_provider_factory(self) -> None:
+        request = AssetRequest(
+            dataset="wmt19_tts",
+            source_root=Path("/source"),
+            output_root=Path("/output"),
+            split="train",
+            codec="glm4",
+            codec_view=AudioView.GLM4,
+            filter_policy="speech_translation_v1",
+            input_id="input-v1",
+            provider_id="provider-v1",
+        )
+        tokenizer = SimpleNamespace(
+            spec=SimpleNamespace(
+                view="glm4",
+                frame_codebook_sizes=(16_384,),
+            ),
+            backend=SimpleNamespace(),
+            tokenize=Mock(),
+        )
+
+        factory = asset._provider_factory(request)
+        self.assertIsInstance(factory, asset.AudioTokenizerProviderFactory)
+        with patch.object(
+            asset,
+            "load_audio_tokenizer",
+            return_value=tokenizer,
+        ) as load:
+            provider = factory("cpu")
+
+        self.assertIsInstance(provider, asset.AudioTokenizerProvider)
+        self.assertIs(provider.tokenizer, tokenizer)
+        self.assertIs(provider.output, AudioView.GLM4)
+        load.assert_called_once_with("glm4", device="cpu")
+
     def test_workspace_hit_reuses_filtered_codec_without_job(self) -> None:
         existing = _TaggedDataset("workspace")
         with TemporaryDirectory() as directory:
@@ -725,7 +760,7 @@ class AssetMaterializationTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "equal lengths"):
                 producer.load()
 
-    def test_missing_glm4_input_requires_explicit_provider_backend(self) -> None:
+    def test_missing_glm4_input_uses_its_tokenizer_provider(self) -> None:
         output_dataset = _TaggedDataset("workspace-bicodec")
         fallback = _TaggedDataset("waveform")
 
@@ -757,21 +792,23 @@ class AssetMaterializationTest(unittest.TestCase):
                     return_value="workspace-input-v1",
                 ),
                 patch.object(asset, "_load_materialized_dataset", return_value=None),
+                patch.object(
+                    asset,
+                    "AudioTokenizerProviderFactory",
+                ) as input_provider,
                 patch.object(asset, "BiCodecProviderFactory") as output_provider,
             ):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "provider/backend.*glm4.*never reuses the output codec provider",
-                ):
-                    resolve_workspace_asset(
-                        DatasetConfig(root=str(root)),
-                        _decoupled_runtime(),
-                        _materialization(
-                            Path(directory) / "output",
-                            codec_view=AudioView.BICODEC.value,
-                        ),
-                    )
+                resolution = resolve_workspace_asset(
+                    DatasetConfig(root=str(root)),
+                    _decoupled_runtime(),
+                    _materialization(
+                        Path(directory) / "output",
+                        codec_view=AudioView.BICODEC.value,
+                    ),
+                )
 
+        self.assertIsNotNone(resolution.job)
+        input_provider.assert_called_once_with("glm4", AudioView.GLM4)
         output_provider.assert_not_called()
 
     def test_missing_workspace_filter_does_not_fall_back_to_unfiltered_data(self) -> None:

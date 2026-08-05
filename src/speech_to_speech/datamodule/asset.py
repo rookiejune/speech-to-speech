@@ -9,7 +9,10 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from anydataset.dataset import AnyDataset, IndexSelection
-from anydataset.provider import CodecProvider
+from anydataset.provider import (
+    AudioTokenizerProvider,
+    CodecProvider,
+)
 from anydataset.store import ViewMaterializer
 from anydataset.store.reader import read_store_manifest
 from anydataset.types import (
@@ -21,7 +24,7 @@ from anydataset.types import (
     TextReq,
     TextView,
 )
-from anytrain.codec import load_frame, load_semantic_global
+from anytrain.codec import load_audio_tokenizer, load_frame, load_semantic_global
 from anytrain.lightning import (
     BackgroundMaterialization,
     MaterializationPhase,
@@ -49,7 +52,12 @@ _FRAME_CODEC_VIEWS = frozenset(
         AudioView.UNICODEC,
     }
 )
-_BUILTIN_CODEC_VIEWS = _FRAME_CODEC_VIEWS | frozenset({AudioView.BICODEC})
+_TOKENIZER_ONLY_VIEWS = frozenset({AudioView.GLM4})
+_BUILTIN_CODEC_VIEWS = (
+    _FRAME_CODEC_VIEWS
+    | _TOKENIZER_ONLY_VIEWS
+    | frozenset({AudioView.BICODEC})
+)
 _ASSET_DATASETS = frozenset(
     {
         DatasetName.STREAMING_S2ST,
@@ -248,6 +256,18 @@ class FrameCodecProviderFactory:
 
     def __call__(self, device: str) -> CodecProvider:
         return CodecProvider(load_frame(self.codec, device=device), self.output)
+
+
+@dataclass(frozen=True)
+class AudioTokenizerProviderFactory:
+    tokenizer: str
+    output: AudioView
+
+    def __call__(self, device: str) -> AudioTokenizerProvider:
+        return AudioTokenizerProvider(
+            load_audio_tokenizer(self.tokenizer, device=device),
+            self.output,
+        )
 
 
 @dataclass(frozen=True)
@@ -740,9 +760,15 @@ def _codec_request(
 
 def _provider_factory(
     request: AssetRequest,
-) -> FrameCodecProviderFactory | BiCodecProviderFactory:
+) -> (
+    AudioTokenizerProviderFactory
+    | FrameCodecProviderFactory
+    | BiCodecProviderFactory
+):
     if request.codec_view is AudioView.BICODEC:
         return BiCodecProviderFactory(request.codec)
+    if request.codec_view in _TOKENIZER_ONLY_VIEWS:
+        return AudioTokenizerProviderFactory(request.codec, request.codec_view)
     if request.codec_view in _FRAME_CODEC_VIEWS:
         return FrameCodecProviderFactory(request.codec, request.codec_view)
     raise ValueError(

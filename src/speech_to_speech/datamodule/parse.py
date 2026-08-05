@@ -22,7 +22,7 @@ from .sample import (
     seconds,
 )
 from ..runtime.audio_tokenizer import BiCodecAudioTokenizer, FlattenedAudioTokenizer
-from ..runtime.codec import has_codec_loader
+from ..runtime.codec import has_audio_tokenizer_loader
 from ..audio import AudioCodes
 from ..task import SourceLayout, Task, resolve_response
 
@@ -403,11 +403,11 @@ def _parse_task_item(
         and runtime.input_audio_decoupled
         and runtime.input_codec_name != runtime.codec_name
         and encode_missing_codes
-        and not has_codec_loader(runtime.input_codec_name)
+        and not has_audio_tokenizer_loader(runtime.input_codec_name)
     ):
         raise ValueError(
-            f"input audio tokenizer {runtime.input_codec_name!r} has no runtime "
-            "codec backend for waveform fallback; "
+            f"input audio tokenizer {runtime.input_codec_name!r} has no online "
+            "tokenizer backend for waveform fallback; "
             f"materialize the {view.value!r} input view before training."
         )
     if not encode_missing_codes:

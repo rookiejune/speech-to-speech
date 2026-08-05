@@ -579,7 +579,7 @@ def state_dict_contract(model: nn.Module) -> dict[str, object]:
     }
 
 
-def audio_resource_sharing(runtime: TokenModelRuntime) -> str:
+def audio_token_space_sharing(runtime: TokenModelRuntime) -> str:
     decoupled = runtime.input_audio_decoupled
     if not isinstance(decoupled, bool):
         raise TypeError("runtime input_audio_decoupled must be a bool.")
@@ -647,7 +647,7 @@ def control_embedding_contract(tokens: TokenInterface) -> dict[str, object]:
 
 
 def input_audio_projection_contract(model: ContractModel) -> dict[str, object]:
-    sharing = audio_resource_sharing(model.runtime)
+    sharing = audio_token_space_sharing(model.runtime)
     projection = model.tokens.input_audio_projection
     if sharing == "shared":
         if projection is not None:
@@ -667,7 +667,7 @@ def input_audio_projection_contract(model: ContractModel) -> dict[str, object]:
 
 
 def audio_embeddings_contract(model: ContractModel) -> dict[str, object]:
-    sharing = audio_resource_sharing(model.runtime)
+    sharing = audio_token_space_sharing(model.runtime)
     output = audio_embedding_contract(model.tokens.audio_embedding)
     input_embedding = model.tokens.input_audio_embedding
     if sharing == "shared":
@@ -975,7 +975,7 @@ def token_space_contract(runtime: TokenModelRuntime) -> dict[str, object]:
     blocks = runtime.layout.blocks
     if not isinstance(blocks, Mapping):
         raise TypeError("runtime token layout blocks must be a mapping.")
-    sharing = audio_resource_sharing(runtime)
+    sharing = audio_token_space_sharing(runtime)
     input_block_name = runtime.input_audio_block_name
     if not isinstance(input_block_name, str) or not input_block_name:
         raise TypeError("runtime input_audio_block_name must be a non-empty string.")

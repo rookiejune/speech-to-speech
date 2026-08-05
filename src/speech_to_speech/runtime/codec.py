@@ -203,7 +203,9 @@ class StableCodec:
         return self.codec.decode(codes)
 
 
-_RUNTIME_BACKENDS = frozenset({"longcat", "bicodec", "unicodec", "stable_codec"})
+_RUNTIME_AUDIO_TOKENIZERS = frozenset(
+    {"glm4", "longcat", "bicodec", "unicodec", "stable_codec"}
+)
 
 
 def audio_code_spec(name: str) -> AudioCodeSpec:
@@ -218,10 +220,20 @@ def audio_backend_identity(name: str) -> AudioBackendIdentity:
     return registered_audio_backend_identity(name)
 
 
-def has_codec_loader(name: str) -> bool:
-    """Whether S2S can construct this preset's online tokenizer backend."""
+def has_audio_tokenizer_loader(name: str) -> bool:
+    """Whether S2S implements online tokenizer dispatch for this preset.
 
-    return name in _RUNTIME_BACKENDS and can_load_audio_tokenizer(name)
+    Optional source, dependency, and artifact readiness is validated when the
+    backend is actually loaded.
+    """
+
+    return name in _RUNTIME_AUDIO_TOKENIZERS and can_load_audio_tokenizer(name)
+
+
+def has_codec_loader(name: str) -> bool:
+    """Deprecated alias for :func:`has_audio_tokenizer_loader`."""
+
+    return has_audio_tokenizer_loader(name)
 
 
 def has_audio_tokenizer_capability(name: str) -> bool:
@@ -235,7 +247,7 @@ def has_audio_detokenizer_capability(name: str) -> bool:
 def has_detokenizer_loader(name: str) -> bool:
     """Whether S2S can construct this preset's online detokenizer backend."""
 
-    return name in _RUNTIME_BACKENDS and can_load_audio_detokenizer(name)
+    return name in _RUNTIME_AUDIO_TOKENIZERS and can_load_audio_detokenizer(name)
 
 
 def _adapt_backend(name: str, backend: object) -> CodecBackend:
@@ -264,8 +276,8 @@ def load_audio_tokenizer_backend(
 ) -> CodecBackend:
     """Load the waveform-to-codes capability for an audio backend."""
 
-    if not has_codec_loader(name):
-        raise NotImplementedError(f"unsupported codec: {name}") from None
+    if not has_audio_tokenizer_loader(name):
+        raise NotImplementedError(f"unsupported audio tokenizer: {name}") from None
     view = load_audio_tokenizer(name, device=device)
     return _adapt_backend(name, view.backend)
 
