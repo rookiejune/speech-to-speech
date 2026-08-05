@@ -210,7 +210,9 @@ published position 和 wait ratio 写入 `streaming/*` TensorBoard scalar。DDP 
 Lightning 的 SIGTERM 标记由 `StreamingSynthesis` 绑定为 dataset stop request。snapshot poll sleep
 最多每 0.5 秒检查一次；收到停止请求时抛出 Lightning 的 `SIGTERMException`，使阻塞在同步
 `next()` 内的 rank 也进入标准 exception teardown，而不是等新 snapshot 才释放 GPU。cursor 仍只以
-最近成功 checkpoint 的 committed position 为恢复边界。
+最近成功 checkpoint 的 committed position 为恢复边界。每个 rank 在 train start 后用 one-shot guard
+包装 Lightning 已注册的 SIGTERM handler；同一进程收到重复或重入信号时只执行第一次，避免进程组
+投递与 Lightning launcher fan-out 同时发生时重复进入 distributed signal collective。
 
 rank zero 同时把可见 GPU 的 utilization、memory 和 power 原始采样追加到 logger 目录下的
 `streaming_gpu.csv`；固定 streaming logger version 后，该 CSV 和 TensorBoard event 会跨 auto-resume

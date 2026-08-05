@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import signal
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Protocol, cast
+from types import FrameType
+from typing import Any, Optional, Protocol, cast
 
 import torch
 from anydataset import types
@@ -17,6 +19,9 @@ from ..datamodule.streaming import PublishedSample, StreamingTelemetry
 from ..task import Task
 from .interval import TrainInterval
 from .gpu import GpuTelemetrySampler
+
+
+_SignalHandler = Callable[[int, Optional[FrameType]], Any]
 
 
 class _StreamingDataModule(Protocol):
@@ -51,8 +56,29 @@ class _StreamingDataModule(Protocol):
     ) -> list[PublishedSample]: ...
 
 
+class _OnceSignalHandler:
+    """Delegate only the first signal, including re-entrant delivery."""
+
+    def __init__(
+        self,
+        handler: _SignalHandler,
+    ) -> None:
+        self._handler = handler
+        self._handled = False
+
+    def __call__(self, signum: int, frame: FrameType | None) -> None:
+        if self._handled:
+            return
+        self._handled = True
+        self._handler(signum, frame)
+
+
 class StreamingSynthesis(Callback):
     """Resume the producer and commit the training cursor at optimizer boundaries."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._sigterm_guard: _OnceSignalHandler | None = None
 
     def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         del pl_module
@@ -68,7 +94,22 @@ class StreamingSynthesis(Callback):
         del pl_module
         datamodule = _datamodule(trainer)
         if datamodule.streaming_enabled:
+            self._install_sigterm_guard()
             datamodule.set_streaming_global_step(int(trainer.global_step))
+
+    def _install_sigterm_guard(self) -> None:
+        current = signal.getsignal(signal.SIGTERM)
+        if current is self._sigterm_guard:
+            return
+        if not callable(current):
+            raise RuntimeError(
+                "Lightning must register its SIGTERM handler before streaming starts."
+            )
+        guard = _OnceSignalHandler(cast(_SignalHandler, current))
+        # Lightning owns restoration; keeping the guard through teardown prevents a
+        # second process-group SIGTERM from re-entering its distributed handler.
+        signal.signal(signal.SIGTERM, guard)
+        self._sigterm_guard = guard
 
     def on_train_batch_start(
         self,
