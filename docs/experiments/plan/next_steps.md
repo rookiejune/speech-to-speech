@@ -10,7 +10,7 @@
 
 推荐执行顺序：
 
-1. 从外部 `semantic-acoustic-codec` 获取并校验 frame-aligned SAC artifact，完成 Stage 0 TTS + MT 验证；
+1. 从外部 `semantic-acoustic-generator` 获取并校验 frame-aligned generator artifact，完成 Stage 0 TTS + MT 验证；
 2. 完成 Stage 0 LoRA merge/export 和跨阶段 weight-only handoff 后引入 ASR，完成 Stage 1
    ASR + TTS + MT 联合训练；
 3. 在 Stage 1 基础上加入 S2TT 和 T2ST，完成 Stage 2 的跨模态分解训练；
@@ -24,15 +24,15 @@
 
 需要做的事：
 
-- 固定外部 SAC artifact 的版本、route、frame layout 和 decoder contract；
-- 通过 `SPEECH_TO_SPEECH_SAC_ARTIFACT` 显式传入该 artifact，并完成 composition smoke；
+- 固定外部 generator artifact 的版本、route、frame layout 和 decoder contract；
+- 通过 `SPEECH_TO_SPEECH_ACOUSTIC_GENERATOR_ARTIFACT` 显式传入该 artifact，并完成 composition smoke；
 - 对特殊 Token 做消融；
 - 比较强结构化输入、少量特殊 Token、纯文本 Prompt 三种接口。
 - 固定 MT 数据和评估集，验证 0.1 权重能否防止文本翻译能力退化。
 
 需要回答的问题：
 
-1. 在外部 SAC generator contract 固定后，LLM 能否稳定完成文本到 Codec Token 的映射？
+1. 在外部 acoustic generator contract 固定后，LLM 能否稳定完成文本到 Codec Token 的映射？
 2. 不依赖强结构化特殊 Token 时，TTS 质量是否仍接近 Spark-TTS？
 3. TTS + MT 联合训练能否在建立语音生成能力的同时保持 Qwen3 原有文本翻译能力？
 
@@ -163,7 +163,7 @@
 
 第一批应优先落地：
 
-1. 固化外部 SAC artifact 的版本和校验信息；
+1. 固化外部 generator artifact 的版本和校验信息；
 2. 固化 Stage 0 TTS/MT 数据格式、Prompt 格式和 0.9/0.1 权重；
 3. 做特殊 Token 消融设计；
 4. 建立 TTS 自动评估与固定样本人工听测流程；

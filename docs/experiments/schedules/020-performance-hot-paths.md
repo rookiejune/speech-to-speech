@@ -160,5 +160,5 @@ GRPO 训练吞吐。
   原始指标、固定公式汇总、GPU 监控摘要、异常和最终判定。
 - 原始日志、TensorBoard、GPU CSV 和微基准输出保存在 `debug/` 或远程 dynamic debug 目录，不纳入
   Git。
-- 本 schedule 和对应 result 含内部 benchmark 与远程实验信息，只保留在本地或私有仓库，不提交或
-  push 到公开仓库。
+- 本 schedule 和对应 result 保留 benchmark 与远程实验的复现信息，可以提交并 push 到当前仓库；
+  原始日志、TensorBoard、GPU CSV 和微基准输出仍只放在 debug 或制品存储。

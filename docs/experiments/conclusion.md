@@ -2,6 +2,13 @@
 
 ## 适用范围
 
+本页最新流式数据闭环实验是 021（2026-08-04 至 2026-08-05）：复旦 `125` 的 6 张 RTX 3090
+完成 AS/TT/AT/LongCat 四阶段 8-sample 物化、immutable seal、四 worker 去重重跑和 sealed store
+上的两卡 S2ST optimizer step；复旦 `145` 随后验证 durable snapshot tail、精确 checkpoint cursor、
+两卡 DDP 中断续跑、可中断 SIGTERM 和跨启动 telemetry。该结果只证明执行、恢复与观测契约；
+MOSS 在 24 GB 上没有安全余量，128-token workaround 尚未通过完整性或质量门禁，probe 文本/音频
+也不代表真实翻译或语音质量。
+
 本页最新真实实验是 020 的 performance hot-path 四段反转对照（2026-08-04）：复旦 `145`
 三张 RTX 4090 D、真实 BiCodec/Qwen3-0.6B、bs8 TTS+MT `serial_joint` 完成
 `A1 -> B1 -> B2 -> A2` 各 100 optimizer steps。optimized revision 的两个顺序方向都更快，
@@ -47,6 +54,20 @@ model/runtime/data/generation 和按模态 token CE 仍有调整，因此相应 
 
 ## 已验证结论
 
+- 021 的 8 条样本全部完成 AS、TT、AT、CODEC，四阶段 attempts 均为 8；immutable seal 后
+  原样重跑四个 worker 均为 `computed: 0`，attempts 未增长。标准 LongCat store 可由现有
+  workspace/anydataset loader 读取 8 条，sample 0 source/target code shape 为 `[163,4]`/
+  `[128,4]`；随后 Qwen3-0.6B full-policy S2ST 两卡 DDP 完成 2 steps，loss 从
+  `11.628868` 降至 `10.658365` 且 finite。后续正式 streaming 入口在首 4 条 durable prefix 后
+  中断，第二次入口从同一 `last.ckpt` 和 producer prefix 恢复，最终 cursor 为 8、两个 snapshot
+  seal 且训练到 `4/4`；process-group SIGTERM 在 one-shot guard 后 7.115 秒内关闭两 rank 与
+  producer，不依赖 SIGKILL。TensorBoard wait/cursor、追加 GPU CSV、producer stage 事件和生成样本
+  logger 均已实测。该结论不覆盖翻译/语音质量、MOSS 128-token 输出完整性或两个月生产规模；
+  MOSS 256-token 长输入在 3090 上因额外 72 MiB OOM，生产 target TTS 应优先使用 40 GB-class GPU
+  （[021 result, lines 29-43](results/021-streaming-synthesis-immutable-seal-smoke.md#L29-L43)，
+  [lines 80-97](results/021-streaming-synthesis-immutable-seal-smoke.md#L80-L97)，
+  [lines 99-127](results/021-streaming-synthesis-immutable-seal-smoke.md#L99-L127)，
+  [lines 129-163](results/021-streaming-synthesis-immutable-seal-smoke.md#L129-L163)）。
 - 020 的 `A1 -> B1 -> B2 -> A2` 四段 100-step 对照均 exit 0；固定 step 19 -> 99 诊断窗口内，
   B1/A1 与 B2/A2 的 optimizer steps/s 分别提高 `6.4435%/3.5740%`，几何平均为
   `4.9989%`，高于 `1.6281%` repeat drift；按实际监督 token 归一化为 `4.9670%`。但预注册

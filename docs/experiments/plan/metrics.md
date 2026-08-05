@@ -23,7 +23,7 @@
 
 比较对象：
 
-- Stage 0 外部 SAC generator 的 reconstruction upper bound；
+- Stage 0 外部 acoustic generator 的 reconstruction upper bound；
 - 强特殊 Token、少量特殊 Token、纯文本 Prompt 三种接口。
 
 核心指标：

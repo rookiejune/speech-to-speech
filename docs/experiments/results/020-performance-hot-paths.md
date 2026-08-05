@@ -207,5 +207,5 @@ bit-exact；loss 为 `0.00015540761523880064`。
 
 `profile/` 下保留四段 `.log`、`.gpu.csv`、`.time.txt`、`.exit.txt`、`.meta.txt`，以及
 `train/<run>/metrics.json`、resolved Hydra config、TensorBoard events；GRPO 原始 JSON 为
-`profile/grpo_cuda_formal.json`。这些内部 benchmark 产物与本文只保留在本地或私有仓库，不提交或
-push 到公开仓库。
+`profile/grpo_cuda_formal.json`。这些原始 benchmark 产物保留在远程 dynamic debug 存储，不进入
+Git；本文保留复现信息、指标摘要和结论，可以提交并 push 到当前仓库。

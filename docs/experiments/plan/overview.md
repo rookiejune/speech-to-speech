@@ -58,15 +58,15 @@ flowchart LR
 
 需要注意：去掉显式 ASR/TTS 模块，不意味着系统不需要 ASR/TTS 能力，而是要把这些能力内化到 LLM 中。
 
-## 4. 外部 SAC 前置依赖
+## 4. 外部 generator plugin 前置依赖
 
 Codec 预训练、筛选、重建上限评估和 generator artifact 导出由仓库外的
-`semantic-acoustic-codec` 负责。本仓库不在 staged curriculum 中重新训练 codec，也不通过其他
+`semantic-acoustic-generator` 负责。本仓库不在 staged curriculum 中重新训练 codec，也不通过其他
 codec 训练入口绕过这条边界。
 
 Stage 0-3 的 Flow/RVQ S2S 训练在 composition 时显式读取外部导出的、frame-aligned
-`AcousticGeneratorArtifact`。正式 wrapper 通过 `SPEECH_TO_SPEECH_SAC_ARTIFACT` 接收路径并转写到
-`model.acoustic.init_artifact`。SAC 的 conditioner、训练数据和导出流程不进入 S2S model；本仓库只
+`AcousticGeneratorArtifact`。正式 wrapper 通过 `SPEECH_TO_SPEECH_ACOUSTIC_GENERATOR_ARTIFACT` 接收路径并转写到
+`model.acoustic.init_artifact`。generator plugin 的 conditioner、训练数据和导出流程不进入 S2S model；本仓库只
 训练 hidden-state condition adapter、LLM 与 joint task objectives。artifact 的 route、decoder 配置、
 frame layout 和 backend metadata 必须在进入正式训练前通过校验。
 
