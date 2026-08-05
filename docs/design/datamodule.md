@@ -199,6 +199,22 @@ cell 和 `speaker_grid_manifest.jsonl` 契约，不能沿用 WMT19 pair material
 进程；布局/吞吐字段 `max_shard_samples`、`max_shard_bytes`、`batch_size`、`commit_samples`、
 `write_workers` 和 `write_prefetch` 不属于逻辑 request identity。
 
+## 流式训练观测
+
+`StreamingSnapshotDataset` 累计真实 wall-clock 等待时间、等待事件和 poll 次数；
+`StreamingDataLoader` 进一步拆分每 batch 的 fetch、wait 与 load/collate 时间，并把累计值随
+cursor checkpoint 恢复。`StreamingTelemetryCallback` 将这些时间、train step 时间、read/committed/
+published position 和 wait ratio 写入 `streaming/*` TensorBoard scalar。DDP 的时间指标取各 rank
+最大值，以暴露最慢 rank 的实际瓶颈。
+
+rank zero 同时把可见 GPU 的 utilization、memory 和 power 原始采样追加到 logger 目录下的
+`streaming_gpu.csv`；固定 streaming logger version 后，该 CSV 和 TensorBoard event 会跨 auto-resume
+启动继续追加。结束时覆盖写入的 `streaming_gpu_summary.json` 只概括当前进程，本次运行之外的完整
+时间轴以 CSV/TensorBoard 为准。producer 可用
+`speech_to_speech.synthesis.telemetry.stage()` 输出带 wall-clock timestamp、elapsed、sample count、
+device 与 GPU ids 的 JSON start/finish/failure 事件；这些事件可以与 GPU CSV 对齐。`nvidia-smi`
+不可用时只记录原因，不使训练失败。
+
 ## 输入输出
 
 输入是 `anydataset.types.Sample`，包含 source/target 两个 role 及 audio/text modality。

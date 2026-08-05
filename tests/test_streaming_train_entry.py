@@ -13,8 +13,12 @@ from lightning.pytorch.callbacks import Callback
 
 from _config_helpers import _train
 from scripts import train as train_script
-from speech_to_speech.callback import StreamingSynthesis, SynthesisSampleLogger
-from speech_to_speech.datamodule.config import StreamingConfig
+from speech_to_speech.callback import (
+    StreamingSynthesis,
+    StreamingTelemetryCallback,
+    SynthesisSampleLogger,
+)
+from speech_to_speech.datamodule.config import StreamingConfig, StreamingTelemetryConfig
 from speech_to_speech.datamodule.streaming import PublishedSample
 
 
@@ -30,6 +34,9 @@ class StreamingConfigTest(unittest.TestCase):
 
         self.assertEqual(config.poll_seconds, 2.0)
         self.assertEqual(config.status_seconds, 3.0)
+        self.assertTrue(config.telemetry.enabled)
+        self.assertEqual(config.telemetry.gpu_sample_interval_seconds, 1.0)
+        self.assertEqual(config.telemetry.log_every_n_steps, 1)
         for kwargs, error, message in (
             ({"enabled": 1}, TypeError, "enabled"),
             ({"expected_samples": True}, TypeError, "expected_samples"),
@@ -42,6 +49,12 @@ class StreamingConfigTest(unittest.TestCase):
         ):
             with self.subTest(kwargs=kwargs), self.assertRaisesRegex(error, message):
                 StreamingConfig(**cast(Any, kwargs))
+
+    def test_telemetry_rejects_invalid_sampling_and_logging_cadence(self) -> None:
+        with self.assertRaisesRegex(ValueError, "gpu_sample_interval_seconds"):
+            StreamingTelemetryConfig(gpu_sample_interval_seconds=-1)
+        with self.assertRaisesRegex(ValueError, "log_every_n_steps"):
+            StreamingTelemetryConfig(log_every_n_steps=0)
 
 
 @patch.dict(
@@ -83,6 +96,7 @@ class StreamingTrainConfigTest(unittest.TestCase):
             config.datamodule.streaming.producer_options,
             {"command": '["/bin/true"]'},
         )
+        self.assertEqual(config.logging.version, 0)
         self.assertEqual(config.loader_plan.loaders["s2st"].prediction, "parallel")
 
     def test_streaming_requires_resume_checkpoint_or_auto_resume(self) -> None:
@@ -179,7 +193,14 @@ class StreamingTrainEntryTest(unittest.TestCase):
             for index, callback in enumerate(callbacks)
             if isinstance(callback, SynthesisSampleLogger)
         )
+        telemetry_index = next(
+            index
+            for index, callback in enumerate(callbacks)
+            if isinstance(callback, StreamingTelemetryCallback)
+        )
         self.assertLess(streaming_index, synthesis_index)
+        self.assertLess(streaming_index, telemetry_index)
+        self.assertLess(telemetry_index, synthesis_index)
         self.assertEqual(
             [type(callback) for callback in train_script._lifecycle_callbacks(config)],
             [StreamingSynthesis],

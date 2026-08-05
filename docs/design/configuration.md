@@ -25,6 +25,9 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
   train/dev/test 子集时，通过 `DatasetConfig.split_manifest` 和 `split_label` 显式选择
   manifest 中的索引集合。task template 也在 `datamodule` 上：
   `datamodule.tasks.<task>.template`（`int` 固定下标，`null` 随机；默认 `0`）。
+  `datamodule.streaming.telemetry` 控制流式训练的观测开关、TensorBoard scalar cadence 和
+  rank-zero `nvidia-smi` 采样间隔；GPU 间隔设为 `0` 只关闭 GPU 采样，不关闭 loader 的
+  wait/fetch/load 计时。
 - `callback/parameter_policy`：写入 `callbacks.parameter_policy`，声明可训练参数组、
   冻结参数组和 `backbone_top_fraction`。这是通用训练 callback 能力，由 experiment 显式选择。
   正式 train 的 loader mix 不再是独立 Hydra group，而是由 train experiment 内联的

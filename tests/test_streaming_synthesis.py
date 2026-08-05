@@ -464,6 +464,9 @@ class StreamingSnapshotDatasetTest(unittest.TestCase):
             with patch(
                 "speech_to_speech.datamodule.streaming.time.sleep",
                 side_effect=publish,
+            ), patch(
+                "speech_to_speech.datamodule.streaming.time.perf_counter",
+                side_effect=[10.0, 11.0, 12.0, 20.0, 23.0],
             ):
                 actual = [_sample_index(next(iterator)) for _ in range(4)]
                 with self.assertRaises(StopIteration):
@@ -471,6 +474,9 @@ class StreamingSnapshotDatasetTest(unittest.TestCase):
 
         self.assertEqual(actual, [0, 1, 2, 3])
         self.assertEqual(sleep_calls, 2)
+        self.assertEqual(dataset.wait_events, 2)
+        self.assertEqual(dataset.poll_count, 2)
+        self.assertEqual(dataset.wait_seconds, 5.0)
 
     def test_two_ddp_ranks_partition_global_publication_positions(self) -> None:
         with TemporaryDirectory() as directory:
@@ -507,6 +513,44 @@ class StreamingSnapshotDatasetTest(unittest.TestCase):
 
 
 class StreamingDataLoaderTest(unittest.TestCase):
+    def test_batch_timing_is_checkpointed_without_replaying_the_last_batch(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_snapshot(root, 0, "chunk-a", [0, 1, 2, 3], expected=4)
+            feed = _feed(root, expected=4)
+            _write_seal(root, feed)
+            loader = _loader(_dataset(feed))
+
+            with patch(
+                "speech_to_speech.datamodule.streaming.time.perf_counter",
+                side_effect=[10.0, 10.5],
+            ):
+                self.assertEqual(_batch_indices(next(iter(loader))), [0, 1])
+
+            telemetry = loader.telemetry()
+            self.assertEqual(telemetry.batch_fetch_seconds, 0.5)
+            self.assertEqual(telemetry.batch_wait_seconds, 0.0)
+            self.assertEqual(telemetry.batch_load_seconds, 0.5)
+
+            state = loader.state_dict()
+            dataset_state = cast(dict[str, object], state["dataset"])
+            self.assertEqual(dataset_state["wait_seconds"], 0.0)
+            self.assertEqual(dataset_state["wait_events"], 0)
+            self.assertEqual(dataset_state["poll_count"], 0)
+            dataset_state["wait_seconds"] = 2.5
+            dataset_state["wait_events"] = 2
+            dataset_state["poll_count"] = 7
+            restored = _loader(_dataset(_feed(root, expected=4)))
+            restored.load_state_dict(state)
+            resumed = restored.telemetry()
+
+        self.assertEqual(resumed.batch_fetch_seconds, 0.0)
+        self.assertEqual(resumed.total_fetch_seconds, 0.5)
+        self.assertEqual(resumed.total_wait_seconds, 2.5)
+        self.assertEqual(resumed.total_load_seconds, 0.5)
+        self.assertEqual(resumed.wait_events, 2)
+        self.assertEqual(resumed.poll_count, 7)
+
     def test_length_is_the_per_rank_logical_batch_count(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

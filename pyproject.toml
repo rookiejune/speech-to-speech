@@ -16,6 +16,7 @@ dependencies = [
     "omegaconf>=2.3",
     "peft>=0.17.1,<0.21",
     "semantic-acoustic-generator",
+    "tensorboard>=2.14",
     "tokenizers>=0.20",
     "torch>=2.8",
     "transformers>=4.46",

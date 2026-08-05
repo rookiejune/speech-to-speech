@@ -20,6 +20,7 @@ from speech_to_speech.callback import (
     AssetMaterialization,
     OnDeviceCodecMaterializer,
     StreamingSynthesis,
+    StreamingTelemetryCallback,
     SynthesisSampleLogger,
     build_unit_schedule,
 )
@@ -262,6 +263,7 @@ def training_callbacks(
         ),
     )
     callbacks.extend(_logging_callbacks(summary, validation_history))
+    callbacks.extend(_streaming_telemetry_callbacks(config))
     callbacks.extend(_task_sample_loggers(config))
     callbacks.extend(_synthesis_sample_loggers(config))
     text_retention = text_retention_logger(config.callbacks.text_retention)
@@ -283,6 +285,21 @@ def _lifecycle_callbacks(config: StagedTrainConfig) -> tuple[Callback, ...]:
     if config.datamodule.streaming.enabled:
         callbacks.append(StreamingSynthesis())
     return tuple(callbacks)
+
+
+def _streaming_telemetry_callbacks(config: StagedTrainConfig) -> list[Callback]:
+    if not config.datamodule.streaming.enabled:
+        return []
+    telemetry = config.datamodule.streaming.telemetry
+    if not telemetry.enabled:
+        return []
+    return [
+        StreamingTelemetryCallback(
+            loader_name=next(iter(config.loader_plan.loaders)),
+            gpu_sample_interval_seconds=telemetry.gpu_sample_interval_seconds,
+            log_every_n_steps=telemetry.log_every_n_steps,
+        )
+    ]
 
 
 def _resume_checkpoint(config: StagedTrainConfig, output_dir: Path) -> str | None:

@@ -33,6 +33,10 @@ datamodule:
     status_seconds: 60.0
     producer_factory:
     producer_options: {}
+    telemetry:
+      enabled: true
+      gpu_sample_interval_seconds: 1.0
+      log_every_n_steps: 1
   dataloader:
     batch_size: 8
     num_workers: 4

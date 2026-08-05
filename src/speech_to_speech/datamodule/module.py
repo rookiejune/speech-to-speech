@@ -43,6 +43,7 @@ from .streaming import (
     SnapshotFeed,
     StreamingDataLoader,
     StreamingSnapshotDataset,
+    StreamingTelemetry,
     SynthesisController,
     SynthesisRequest,
     WorkspaceSnapshotLoader,
@@ -330,6 +331,12 @@ class _SpeechLoader:
         if dataset is None:
             return []
         return dataset.feed.published(indices)
+
+    def streaming_telemetry(self) -> StreamingTelemetry | None:
+        loader = self._streaming_loader
+        if loader is None:
+            return None
+        return loader.telemetry()
 
     def streaming_state_dict(self) -> dict[str, object] | None:
         loader = self._streaming_loader
@@ -677,6 +684,30 @@ class DataModule(LightningDataModule):
         if not isinstance(loader, _SpeechLoader):
             raise ValueError("streaming samples require a speech loader.")
         return loader.published_samples(indices)
+
+    def streaming_telemetry(self, *, loader_name: str | None = None) -> StreamingTelemetry | None:
+        if loader_name is not None:
+            try:
+                loader = self._loaders[loader_name]
+            except KeyError as error:
+                raise ValueError(f"unknown loader {loader_name!r}.") from error
+            if not isinstance(loader, _SpeechLoader):
+                raise ValueError("streaming telemetry requires a speech loader.")
+            return loader.streaming_telemetry()
+
+        streaming = [
+            loader
+            for loader in self._speech_loaders(include_validation=False)
+            if loader.config.streaming.enabled
+        ]
+        if not streaming:
+            return None
+        if len(streaming) != 1:
+            raise RuntimeError(
+                "streaming telemetry requires exactly one streaming loader when "
+                "loader_name is omitted."
+            )
+        return streaming[0].streaming_telemetry()
 
     def train_dataloader(self) -> Iterable[TrainBatch]:
         loaders = {

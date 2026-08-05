@@ -10,7 +10,6 @@ boundary.
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import time
@@ -34,6 +33,7 @@ from anydataset.types import (
 
 from speech_to_speech.datamodule.streaming import StreamStatus, WorkspaceSnapshotLoader
 from speech_to_speech.synthesis.publisher import SnapshotPublisher
+from speech_to_speech.synthesis.telemetry import emit_event, stage
 
 
 _DELAY_ENV = "S2S_SYNTHESIS_PROBE_DELAY_SECONDS"
@@ -115,12 +115,17 @@ def run(
     )
 
     for position, batch in enumerate(batches):
-        publisher.publish(
-            snapshot_id=batch.snapshot_id,
-            sample_indices=batch.indices,
-            base_samples=[_sample(index, AudioView.WAVEFORM) for index in batch.indices],
-            codec_samples=[_sample(index, AudioView.LONGCAT) for index in batch.indices],
-        )
+        with stage(
+            "snapshot_publish",
+            sample_count=len(batch.indices),
+            device="cpu",
+        ):
+            publisher.publish(
+                snapshot_id=batch.snapshot_id,
+                sample_indices=batch.indices,
+                base_samples=[_sample(index, AudioView.WAVEFORM) for index in batch.indices],
+                codec_samples=[_sample(index, AudioView.LONGCAT) for index in batch.indices],
+            )
         _event(
             "published",
             snapshot_id=batch.snapshot_id,
@@ -130,12 +135,18 @@ def run(
         )
         if position == 0 and not first_was_published and config.delay_seconds > 0:
             _event("delay", seconds=config.delay_seconds)
-            sleep(config.delay_seconds)
+            with stage("resume_probe_delay", sample_count=0, device="cpu"):
+                sleep(config.delay_seconds)
 
-    status = publisher.feed.status()
-    _validate_prefix(status, batches)
-    if status.seal is None:
-        raise RuntimeError("bounded streaming probe finished without sealing the stream.")
+    with stage(
+        "stream_seal_validation",
+        sample_count=config.expected_samples,
+        device="cpu",
+    ):
+        status = publisher.feed.status()
+        _validate_prefix(status, batches)
+        if status.seal is None:
+            raise RuntimeError("bounded streaming probe finished without sealing the stream.")
     _event(
         "sealed",
         stream_id=config.stream_id,
@@ -256,7 +267,7 @@ def _nonnegative_seconds(value: str, name: str) -> float:
 
 
 def _event(event: str, **values: object) -> None:
-    print(json.dumps({"event": event, **values}, ensure_ascii=False, sort_keys=True), flush=True)
+    emit_event(event, **values)
 
 
 if __name__ == "__main__":
