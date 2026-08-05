@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Protocol, Union
@@ -426,9 +427,13 @@ def _validate_lora(config: _EntryConfig) -> None:
     if enabled and config.model.lora is not None and config.model.lora.inference_mode:
         raise ValueError("training requires model.lora.inference_mode=false.")
     if enabled and config.callbacks.performance.enabled:
-        raise ValueError(
-            "LoRA training FLOPs are not supported by the current performance provider; "
-            "set callbacks.performance.enabled=false."
+        warnings.warn(
+            "LoRA performance metrics use approximate FLOPs: the provider counts the "
+            "wrapped backbone's dense base projections with the conventional full-training "
+            "backward multiplier and omits the low-rank adapter projections. Use MFU for "
+            "smoke and relative diagnostics, not exact accounting.",
+            UserWarning,
+            stacklevel=3,
         )
     if enabled and config.optim.name == "muon":
         init = config.model.lora.init_lora_weights if config.model.lora is not None else None

@@ -357,8 +357,10 @@ PEFT LoRA 必须同时选择 `+model/lora@model.lora=qwen` 与
 其它训练策略，或选择 policy 却没有 adapter。OmegaConf 2.3 不能把 PEFT 的复杂 union 字段直接作为
 nested structured config 展开，因此 normalization 边界先用官方字段构造 `peft.LoraConfig`，再把
 该对象写回公开 `model.Config`；它不复制字段或二次校验。PEFT 负责 backbone 内参数的冻结语义，
-该 policy 再训练现有 speech/acoustic interface；当前 performance FLOPs provider 不支持 LoRA，入口
-拒绝同时启用 performance callback。`optim.name=muon` 与 LoRA 组合时，要求
+该 policy 再训练现有 speech/acoustic interface。LoRA 可以同时启用 performance callback，但入口会
+明确 warning：该模式按 wrapped backbone 的 dense base projection 和常规全参 backward multiplier
+提供稳定的近似 FLOPs proxy，不计 low-rank adapter projection，因此 MFU 只用于 smoke 和相对诊断，
+不作为精确算力核算。`optim.name=muon` 与 LoRA 组合时，要求
 `init_lora_weights` 为 PiSSA 系满秩初始化，否则入口早失败。
 
 overfit 入口继续默认 `callbacks.parameter_policy.name=full` 且不启用 LoRA，专门验收全参闭环。

@@ -10,6 +10,7 @@ from anytrain.codec import AcousticLayout, SemanticAcousticCodes
 from anytrain.module.idspace import Layout
 from lightning import pytorch as pl
 from lightning.fabric.utilities.throughput import measure_flops
+from peft import LoraConfig
 from torch import Tensor, nn
 from transformers import Qwen3Model
 
@@ -87,6 +88,35 @@ class TrainingFlopsTest(unittest.TestCase):
             tasks=[Task.TTS, Task.TTS],
         )
         self.assertGreater(_flops(module, batch), _flops(module, fewer_labels))
+
+    def test_lora_uses_wrapped_dense_backbone_as_approximate_proxy(self):
+        baseline = _token_model()
+        lora = _token_model(
+            _model_config(
+                lora=LoraConfig(
+                    r=1,
+                    target_modules=[
+                        "q_proj",
+                        "k_proj",
+                        "v_proj",
+                        "o_proj",
+                        "gate_proj",
+                        "up_proj",
+                        "down_proj",
+                    ],
+                )
+            )
+        )
+        batch = _batch(
+            input_ids=torch.tensor([[1, 7, 8, 2], [1, 7, 0, 0]]),
+            labels=torch.tensor([[-100, 7, 8, -100], [-100, 9, -100, -100]]),
+            tasks=[Task.TTS, Task.TTS],
+        )
+
+        self.assertEqual(
+            _flops(_module(lora, TokenObjective(_layout())), batch),
+            _flops(_module(baseline, TokenObjective(_layout())), batch),
+        )
 
     def test_text_head_counts_only_the_layout_slice_without_lm_head(self):
         model = _token_model()
@@ -473,12 +503,14 @@ def _model_config(
     semantic_audio_adapter: AdapterType = AdapterType.LINEAR,
     audio_input_adapter: AudioInputAdapterConfig | None = None,
     audio_output_adapter: AudioOutputAdapterConfig | None = None,
+    lora: LoraConfig | None = None,
 ) -> ModelConfig:
     return ModelConfig(
         semantic_audio_adapter=semantic_audio_adapter,
         audio_input_adapter=audio_input_adapter or AudioInputAdapterConfig(),
         audio_output_adapter=audio_output_adapter
         or AudioOutputAdapterConfig(),
+        lora=lora,
         toy=ToyConfig(
             hidden_size=4,
             intermediate_size=8,

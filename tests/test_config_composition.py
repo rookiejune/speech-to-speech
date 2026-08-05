@@ -594,9 +594,18 @@ class ConfigCompositionTest(ConfigTestCase):
         self.assertEqual(muon.optim.name, "muon")
         self.assertEqual(muon.model.lora.init_lora_weights, "pissa")
 
-    def test_lora_rejects_unsupported_performance_provider(self):
-        with self.assertRaisesRegex(ValueError, "LoRA training FLOPs"):
-            _lora_overfit("callbacks.performance.enabled=true")
+    def test_lora_training_smoke_accepts_approximate_performance_provider(self):
+        with self.assertWarnsRegex(UserWarning, "approximate FLOPs"):
+            config = _train(
+                "experiment=train/smoke/parameter_policy",
+                "+model/lora@model.lora=qwen",
+                "callback/parameter_policy@callbacks.parameter_policy=lora",
+                "callbacks.performance.enabled=true",
+                "callbacks.task_sample.enabled=false",
+            )
+
+        self.assertTrue(config.callbacks.performance.enabled)
+        self.assertIs(config.callbacks.parameter_policy.name, ParameterPolicyName.LORA)
 
     def test_lora_rejects_peft_inference_mode_for_training(self):
         with self.assertRaisesRegex(ValueError, "inference_mode=false"):

@@ -5,6 +5,7 @@ from typing import cast
 
 import torch
 from anytrain.module.dit import DiTBlock, SequenceAttention, TimeEmbedding
+from peft.tuners.tuners_utils import BaseTunerLayer
 from semantic_acoustic_generator.model.dit import DiTDecoder
 from semantic_acoustic_generator.model.rvq import AcousticRVQDecoder
 from torch import Tensor, nn
@@ -401,11 +402,13 @@ def _qwen_layer(
     )
 
 
-def linear(module: nn.Linear, rows: int) -> int:
-    """Count multiply-adds for a dense linear projection."""
-    if type(module) is not nn.Linear:
-        raise TypeError("linear FLOPs require an exact nn.Linear module.")
-    return _linear(module, rows)
+def linear(module: nn.Module, rows: int) -> int:
+    """Count multiply-adds for a dense or PEFT-wrapped linear projection.
+
+    PEFT adapters are intentionally excluded: LoRA performance mode uses the
+    wrapped dense projection as a stable, approximate compute proxy.
+    """
+    return _linear(_base_linear(module), rows)
 
 
 def require_linear(
@@ -414,11 +417,15 @@ def require_linear(
     out_features: int,
     name: str,
 ) -> None:
-    """Require an exact Linear shape before applying an analytical formula."""
-    if type(module) is not nn.Linear or (
-        module.in_features,
-        module.out_features,
-    ) != (in_features, out_features):
+    """Require a supported Linear shape before applying an analytical formula."""
+    try:
+        base = _base_linear(module)
+    except TypeError:
+        base = None
+    if base is None or (base.in_features, base.out_features) != (
+        in_features,
+        out_features,
+    ):
         raise ValueError(f"{name} must be Linear({in_features}, {out_features}).")
 
 
@@ -535,8 +542,20 @@ def _linear(module: nn.Linear, rows: int) -> int:
     return 2 * rows * module.in_features * module.out_features
 
 
-def _linear_sum(modules: Sequence[nn.Linear], rows: int) -> int:
+def _linear_sum(modules: Sequence[nn.Module], rows: int) -> int:
     return sum(linear(module, rows) for module in modules)
+
+
+def _base_linear(module: nn.Module) -> nn.Linear:
+    if type(module) is nn.Linear:
+        return module
+    if isinstance(module, BaseTunerLayer):
+        base = module.get_base_layer()
+        if type(base) is nn.Linear:
+            return base
+    raise TypeError(
+        "linear FLOPs require an exact nn.Linear or a PEFT-wrapped nn.Linear module."
+    )
 
 
 def _lengths(

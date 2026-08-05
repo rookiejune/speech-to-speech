@@ -102,7 +102,7 @@ class TrainingFlops:
         _outputs(outputs, expected)
         token_model = cast(Model, model)
         core = _backbone(token_model)
-        _trainable(model)
+        _trainable(token_model)
         forward = _token_path(token_model, core, batch)
 
         if isinstance(model, FlowModel):
@@ -193,7 +193,7 @@ def _backbone(model: Model) -> Qwen3Model:
     return core
 
 
-def _trainable(model: nn.Module) -> None:
+def _trainable(model: Model) -> None:
     replaced_linear = next(
         (
             type(module).__name__
@@ -209,12 +209,15 @@ def _trainable(model: nn.Module) -> None:
             f"{replaced_linear}."
         )
     allowed_frozen: set[str] = set()
-    if isinstance(model, Model):
-        text_weight = model.text_embedding.weight
+    text_weight = model.text_embedding.weight
+    allowed_frozen.update(
+        name
+        for name, parameter in model.named_parameters()
+        if parameter is text_weight
+    )
+    if model.lora_config is not None:
         allowed_frozen.update(
-            name
-            for name, parameter in model.named_parameters()
-            if parameter is text_weight
+            name for name, _ in model.named_parameters() if name.startswith("backbone.")
         )
     if isinstance(model, RVQModel):
         last = model.acoustic_decoder.codebooks - 1
