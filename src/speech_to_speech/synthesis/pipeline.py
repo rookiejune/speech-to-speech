@@ -9,7 +9,7 @@ diagnostic sidecar.
 
 from __future__ import annotations
 
-from collections.abc import Sequence, Sized
+from collections.abc import Mapping, Sequence, Sized
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Protocol, TypeVar, cast
@@ -25,8 +25,14 @@ from anydataset.types import (
     TextMeta,
     TextView,
 )
+import torch
+from torch import Tensor
 
-from speech_to_speech.datamodule.streaming import StreamStatus
+from speech_to_speech.datamodule.streaming import (
+    StreamStatus,
+    directional_codec_sample,
+)
+from speech_to_speech.runtime.config import tokenizer_audio_view
 
 from .cache import SynthesisStageCache
 from .publisher import SnapshotPublisher, TranslationReference
@@ -78,12 +84,19 @@ class Codec(Protocol):
     ) -> Sequence[CodecPair]: ...
 
 
+class InputCodec(Protocol):
+    """Encode source waveforms for a distinct input-audio token space."""
+
+    def __call__(self, sources: Sequence[AudioItem]) -> Sequence[AudioItem]: ...
+
+
 @dataclass(frozen=True)
 class Components:
     source_tts: SourceTTS
     translation: Translation
     target_tts: TargetTTS
     codec: Codec
+    input_codec: InputCodec | None = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +125,7 @@ class PipelineConfig:
     translation: StagePlacement = StagePlacement()
     target_tts: StagePlacement = StagePlacement()
     codec: StagePlacement = StagePlacement()
+    input_codec: StagePlacement = StagePlacement()
 
     def __post_init__(self) -> None:
         if type(self.batch_size) is not int or self.batch_size <= 0:
@@ -136,10 +150,14 @@ class StreamingSynthesisPipeline:
                 "streaming synthesis seed count must match expected_samples: "
                 f"{len(dataset)} != {publisher.expected_samples}."
             )
-        if publisher.input_codec != publisher.codec:
+        decoupled = publisher.input_codec != publisher.codec
+        if decoupled and components.input_codec is None:
             raise ValueError(
-                "the standard streaming synthesis pipeline requires one codec "
-                "for both source and target audio."
+                "decoupled streaming synthesis requires an input codec component."
+            )
+        if not decoupled and components.input_codec is not None:
+            raise ValueError(
+                "coupled streaming synthesis does not accept an input codec component."
             )
         self.dataset = dataset
         self.components = components
@@ -282,7 +300,11 @@ class StreamingSynthesisPipeline:
                         gpu_ids=self.config.codec.gpu_ids,
                     ):
                         encoded = self.components.codec(source_audio, target_audio)
-                    pairs = _codec_batch(encoded, expected=len(indices))
+                    pairs = _codec_batch(
+                        encoded,
+                        expected=len(indices),
+                        codec=self.publisher.codec,
+                    )
                     codec_samples = [
                         _sample(source_text, target_text, pair.source, pair.target)
                         for source_text, target_text, pair in zip(
@@ -303,7 +325,17 @@ class StreamingSynthesisPipeline:
                         cached_codec,
                         source_texts=source_texts,
                         target_texts=target_texts,
+                        codec=self.publisher.codec,
                     )
+                input_codec_samples = self._input_codec_samples(
+                    telemetry,
+                    snapshot_id,
+                    indices,
+                    source_texts,
+                    target_texts,
+                    source_audio,
+                    codec_samples,
+                )
                 references = [
                     TranslationReference(index, reference)
                     for index, reference in zip(indices, reference_texts)
@@ -319,6 +351,7 @@ class StreamingSynthesisPipeline:
                         translation_references=references,
                         base_samples=base_samples,
                         codec_samples=codec_samples,
+                        input_codec_samples=input_codec_samples,
                     )
                 if self.cache is not None:
                     self.cache.discard(snapshot_id)
@@ -436,6 +469,74 @@ class StreamingSynthesisPipeline:
             ],
         )
         return targets
+
+    def _input_codec_samples(
+        self,
+        telemetry: SynthesisTelemetry,
+        snapshot_id: str,
+        indices: Sequence[int],
+        source_texts: Sequence[TextItem],
+        target_texts: Sequence[TextItem],
+        source_audio: Sequence[AudioItem],
+        codec_samples: Sequence[Sample],
+    ) -> list[Sample] | None:
+        component = self.components.input_codec
+        if component is None:
+            return None
+        cached = self._cache_load(
+            telemetry,
+            snapshot_id,
+            "input_codec",
+            indices,
+        )
+        if cached is not None:
+            samples = _cached_input_codec_batch(
+                cached,
+                source_texts=source_texts,
+                target_texts=target_texts,
+                codec=self.publisher.input_codec,
+            )
+            _validate_directional_batch(
+                samples,
+                codec_samples,
+                input_codec=self.publisher.input_codec,
+                output_codec=self.publisher.codec,
+            )
+            return samples
+        with telemetry.stage(
+            "input_codec",
+            sample_count=len(indices),
+            device=self.config.input_codec.device,
+            gpu_ids=self.config.input_codec.gpu_ids,
+        ):
+            encoded = component(source_audio)
+        source_codes = _input_codec_batch(
+            encoded,
+            expected=len(indices),
+            codec=self.publisher.input_codec,
+        )
+        samples = [
+            _input_codec_sample(source_text, target_text, source)
+            for source_text, target_text, source in zip(
+                source_texts,
+                target_texts,
+                source_codes,
+            )
+        ]
+        _validate_directional_batch(
+            samples,
+            codec_samples,
+            input_codec=self.publisher.input_codec,
+            output_codec=self.publisher.codec,
+        )
+        self._cache_save(
+            telemetry,
+            snapshot_id,
+            "input_codec",
+            indices,
+            samples,
+        )
+        return samples
 
     def _cache_load(
         self,
@@ -647,6 +748,7 @@ def _cached_codec_batch(
     *,
     source_texts: Sequence[TextItem],
     target_texts: Sequence[TextItem],
+    codec: str,
 ) -> list[Sample]:
     values = _sample_batch(samples, expected=len(source_texts), name="codec")
     result: list[Sample] = []
@@ -659,14 +761,39 @@ def _cached_codec_batch(
             raise ValueError("cached codec source text does not match the seed.")
         if _text_item(sample, Role.TARGET, require_text=True) != target_text:
             raise ValueError("cached codec target text does not match target TTS.")
-        result.append(
-            _sample(
-                source_text,
-                target_text,
-                _audio_item(sample, Role.SOURCE, waveform=False),
-                _audio_item(sample, Role.TARGET, waveform=False),
-            )
-        )
+        source_audio = _audio_item(sample, Role.SOURCE, waveform=False)
+        target_audio = _audio_item(sample, Role.TARGET, waveform=False)
+        _validate_codec_audio(source_audio, codec=codec, name="cached codec source")
+        _validate_codec_audio(target_audio, codec=codec, name="cached codec target")
+        result.append(_sample(source_text, target_text, source_audio, target_audio))
+    return result
+
+
+def _cached_input_codec_batch(
+    samples: Sequence[Sample],
+    *,
+    source_texts: Sequence[TextItem],
+    target_texts: Sequence[TextItem],
+    codec: str,
+) -> list[Sample]:
+    values = _sample_batch(
+        samples,
+        expected=len(source_texts),
+        name="input_codec",
+    )
+    result: list[Sample] = []
+    for sample, source_text, target_text in zip(
+        values,
+        source_texts,
+        target_texts,
+    ):
+        if _text_item(sample, Role.SOURCE, require_text=True) != source_text:
+            raise ValueError("cached input codec source text does not match the seed.")
+        if _text_item(sample, Role.TARGET, require_text=True) != target_text:
+            raise ValueError("cached input codec target text does not match target TTS.")
+        source_audio = _audio_item(sample, Role.SOURCE, waveform=False)
+        _validate_codec_audio(source_audio, codec=codec, name="cached input_codec")
+        result.append(_input_codec_sample(source_text, target_text, source_audio))
     return result
 
 
@@ -729,15 +856,87 @@ def _audio_batch(
     return items
 
 
-def _codec_batch(values: Sequence[CodecPair], *, expected: int) -> list[CodecPair]:
+def _codec_batch(
+    values: Sequence[CodecPair],
+    *,
+    expected: int,
+    codec: str,
+) -> list[CodecPair]:
     result = list(values)
     if len(result) != expected:
         raise ValueError("codec output count must match its input batch.")
     if any(not isinstance(value, CodecPair) for value in result):
         raise TypeError("codec outputs must be CodecPair values.")
-    if any(not value.source.views or not value.target.views for value in result):
-        raise ValueError("codec outputs must contain source and target audio views.")
+    for value in result:
+        _validate_codec_audio(value.source, codec=codec, name="codec source")
+        _validate_codec_audio(value.target, codec=codec, name="codec target")
     return result
+
+
+def _input_codec_batch(
+    values: Sequence[AudioItem],
+    *,
+    expected: int,
+    codec: str,
+) -> list[AudioItem]:
+    result = _audio_batch(
+        values,
+        expected=expected,
+        name="input_codec",
+        waveform=False,
+    )
+    for value in result:
+        _validate_codec_audio(value, codec=codec, name="input_codec")
+    return result
+
+
+def _validate_codec_audio(audio: AudioItem, *, codec: str, name: str) -> None:
+    try:
+        view = tokenizer_audio_view(codec)
+    except ValueError as error:
+        raise ValueError(f"{name} uses unsupported codec {codec!r}.") from error
+    if set(audio.views) != {view}:
+        raise ValueError(
+            f"{name} outputs must contain exactly AudioView.{view.name}."
+        )
+    value = audio.views[view]
+    if view is AudioView.BICODEC:
+        if not isinstance(value, Mapping) or set(value) != {"semantic", "global"}:
+            raise ValueError(
+                f"{name} BiCodec output must contain semantic and global tensors."
+            )
+        values = (value["semantic"], value["global"])
+    else:
+        values = (value,)
+    for codes in values:
+        if not isinstance(codes, Tensor) or codes.ndim != 2:
+            raise ValueError(f"{name} codec output must have shape [frames, codebooks].")
+        if (
+            codes.dtype == torch.bool
+            or codes.is_floating_point()
+            or codes.is_complex()
+        ):
+            raise TypeError(f"{name} codec output must contain integer code ids.")
+        if codes.numel() == 0 or bool((codes < 0).any()):
+            raise ValueError(f"{name} codec output must contain non-negative codes.")
+
+
+def _validate_directional_batch(
+    inputs: Sequence[Sample],
+    outputs: Sequence[Sample],
+    *,
+    input_codec: str,
+    output_codec: str,
+) -> None:
+    if len(inputs) != len(outputs):
+        raise ValueError("directional codec sample counts must match.")
+    for input_sample, output_sample in zip(inputs, outputs):
+        directional_codec_sample(
+            input_sample,
+            output_sample,
+            input_codec=input_codec,
+            output_codec=output_codec,
+        )
 
 
 def _sample(
@@ -754,10 +953,23 @@ def _sample(
     }
 
 
+def _input_codec_sample(
+    source_text: TextItem,
+    target_text: TextItem,
+    source_audio: AudioItem,
+) -> Sample:
+    return {
+        (Role.SOURCE, Modality.TEXT): source_text,
+        (Role.TARGET, Modality.TEXT): target_text,
+        (Role.SOURCE, Modality.AUDIO): source_audio,
+    }
+
+
 __all__ = [
     "Codec",
     "CodecPair",
     "Components",
+    "InputCodec",
     "PipelineConfig",
     "SourceTTS",
     "StagePlacement",

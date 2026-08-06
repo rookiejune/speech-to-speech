@@ -106,6 +106,8 @@ class SnapshotPublisher:
                 directional_codec_sample(
                     input_codec_samples[index],
                     codec_samples[index],
+                    input_codec=self.input_codec,
+                    output_codec=self.codec,
                 )
         elif input_codec_samples is not None:
             raise ValueError(

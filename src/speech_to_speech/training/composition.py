@@ -143,6 +143,7 @@ def build_performance(config: PerformanceConfig) -> Callback | None:
         measure_window_steps=config.measure_window_steps,
         sync_cuda=config.sync_cuda,
         sync_distributed=config.sync_distributed,
+        stop_after_measurement=config.stop_after_measurement,
     )
 
 

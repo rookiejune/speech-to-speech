@@ -16,7 +16,9 @@ from anydataset.types import Sample
 
 
 _SCHEMA = "speech-to-speech-synthesis-stage-cache-v1"
-_STAGES = frozenset({"source_tts", "translation", "target_tts", "codec"})
+_STAGES = frozenset(
+    {"source_tts", "translation", "target_tts", "codec", "input_codec"}
+)
 
 
 class SynthesisStageCache:

@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import json
-import signal
 import time
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import suppress
 from pathlib import Path
-from types import FrameType
-from typing import Any, Optional, Protocol, cast
+from typing import Any, Protocol, cast
 
 import torch
 from anydataset import types
@@ -21,14 +18,14 @@ from .interval import TrainInterval
 from .gpu import GpuTelemetrySampler
 
 
-_SignalHandler = Callable[[int, Optional[FrameType]], Any]
-
-
 class _StreamingDataModule(Protocol):
     runtime: object
 
     @property
     def streaming_enabled(self) -> bool: ...
+
+    @property
+    def streaming_synthesis_enabled(self) -> bool: ...
 
     def start_streaming_synthesis(self, *, owner: bool) -> None: ...
 
@@ -56,29 +53,38 @@ class _StreamingDataModule(Protocol):
     ) -> list[PublishedSample]: ...
 
 
-class _OnceSignalHandler:
-    """Delegate only the first signal, including re-entrant delivery."""
+class _StreamingSynthesisService:
+    def __init__(self, datamodule: _StreamingDataModule) -> None:
+        self.datamodule = datamodule
 
-    def __init__(
-        self,
-        handler: _SignalHandler,
-    ) -> None:
-        self._handler = handler
-        self._handled = False
+    def start(self, *, owner: bool) -> None:
+        self.datamodule.start_streaming_synthesis(owner=owner)
 
-    def __call__(self, signum: int, frame: FrameType | None) -> None:
-        if self._handled:
-            return
-        self._handled = True
-        self._handler(signum, frame)
+    def check(self, *, owner: bool) -> None:
+        self.datamodule.check_streaming_synthesis(owner=owner)
+
+    def close(self, *, owner: bool) -> None:
+        self.datamodule.close_streaming_synthesis(owner=owner)
+
+
+def streaming_synthesis_service(
+    trainer: Trainer,
+) -> _StreamingSynthesisService | None:
+    """Expose the stream producer through anytrain's managed service API."""
+
+    datamodule = _datamodule(trainer)
+    enabled = getattr(
+        datamodule,
+        "streaming_synthesis_enabled",
+        datamodule.streaming_enabled,
+    )
+    if not enabled:
+        return None
+    return _StreamingSynthesisService(datamodule)
 
 
 class StreamingSynthesis(Callback):
-    """Resume the producer and commit the training cursor at optimizer boundaries."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._sigterm_guard: _OnceSignalHandler | None = None
+    """Connect trainer stop state and optimizer boundaries to the stream cursor."""
 
     def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         del pl_module
@@ -88,40 +94,12 @@ class StreamingSynthesis(Callback):
         datamodule.set_streaming_stop_requested(
             lambda: bool(trainer.received_sigterm)
         )
-        self._owner_call(trainer, "start", datamodule.start_streaming_synthesis)
 
     def on_train_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         del pl_module
         datamodule = _datamodule(trainer)
         if datamodule.streaming_enabled:
-            self._install_sigterm_guard()
             datamodule.set_streaming_global_step(int(trainer.global_step))
-
-    def _install_sigterm_guard(self) -> None:
-        current = signal.getsignal(signal.SIGTERM)
-        if current is self._sigterm_guard:
-            return
-        if not callable(current):
-            raise RuntimeError(
-                "Lightning must register its SIGTERM handler before streaming starts."
-            )
-        guard = _OnceSignalHandler(cast(_SignalHandler, current))
-        # Lightning owns restoration; keeping the guard through teardown prevents a
-        # second process-group SIGTERM from re-entering its distributed handler.
-        signal.signal(signal.SIGTERM, guard)
-        self._sigterm_guard = guard
-
-    def on_train_batch_start(
-        self,
-        trainer: Trainer,
-        pl_module: LightningModule,
-        batch: Any,
-        batch_idx: int,
-    ) -> None:
-        del pl_module, batch, batch_idx
-        datamodule = _datamodule(trainer)
-        if datamodule.streaming_enabled:
-            self._owner_call(trainer, "check", datamodule.check_streaming_synthesis)
 
     def on_train_batch_end(
         self,
@@ -135,61 +113,6 @@ class StreamingSynthesis(Callback):
         datamodule = _datamodule(trainer)
         if datamodule.streaming_enabled:
             datamodule.acknowledge_streaming_batch(int(trainer.global_step))
-
-    def on_exception(
-        self,
-        trainer: Trainer,
-        pl_module: LightningModule,
-        exception: BaseException,
-    ) -> None:
-        del pl_module, exception
-        self._close(trainer)
-
-    def on_train_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        del pl_module
-        self._close(trainer)
-
-    def _close(self, trainer: Trainer) -> None:
-        datamodule = _datamodule(trainer)
-        if not datamodule.streaming_enabled:
-            return
-        with suppress(Exception):
-            datamodule.close_streaming_synthesis(owner=bool(trainer.is_global_zero))
-
-    def _owner_call(
-        self,
-        trainer: Trainer,
-        operation: str,
-        method: Any,
-    ) -> None:
-        error: Exception | None = None
-        if trainer.is_global_zero:
-            try:
-                method(owner=True)
-            except Exception as caught:
-                error = caught
-        payload = (
-            None
-            if error is None
-            else (type(error).__name__, str(error))
-        )
-        received = trainer.strategy.broadcast(payload, src=0)
-        if received is None:
-            return
-        if (
-            not isinstance(received, tuple)
-            or len(received) != 2
-            or any(not isinstance(value, str) for value in received)
-        ):
-            raise TypeError("streaming synthesis error broadcast was invalid.")
-        error_type, message = cast(tuple[str, str], received)
-        failure = RuntimeError(
-            f"streaming synthesis {operation} failed on the global owner: "
-            f"{error_type}: {message}"
-        )
-        if error is not None:
-            raise failure from error
-        raise failure
 
 
 class StreamingTelemetryCallback(Callback):
@@ -615,4 +538,5 @@ __all__ = [
     "StreamingSynthesis",
     "StreamingTelemetryCallback",
     "SynthesisSampleLogger",
+    "streaming_synthesis_service",
 ]

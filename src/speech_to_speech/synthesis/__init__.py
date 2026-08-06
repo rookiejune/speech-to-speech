@@ -4,6 +4,7 @@ from .cache import SynthesisStageCache
 from .pipeline import (
     CodecPair,
     Components,
+    InputCodec,
     PipelineConfig,
     StagePlacement,
     StreamingSynthesisPipeline,
@@ -15,6 +16,7 @@ from .telemetry import SynthesisTelemetry, emit_event, stage
 __all__ = [
     "CodecPair",
     "Components",
+    "InputCodec",
     "PipelineConfig",
     "SnapshotPublisher",
     "StagePlacement",

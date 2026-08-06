@@ -13,9 +13,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+import torch
 import torch.distributed as dist
-from anydataset.types import Modality, Role, Sample
+from anydataset.types import AudioItem, AudioView, Modality, Role, Sample
 from lightning.pytorch.utilities.exceptions import SIGTERMException
+from torch import Tensor
 from torch.utils.data import DataLoader, Dataset, IterableDataset
 
 
@@ -160,7 +162,12 @@ class WorkspaceSnapshotLoader:
             root=root,
             split=self.split,
         )
-        return _DirectionalCodecDataset(input_dataset, output)
+        return _DirectionalCodecDataset(
+            input_dataset,
+            output,
+            input_codec=input_codec,
+            output_codec=self.codec,
+        )
 
 
 class _DirectionalCodecDataset(Dataset[Sample]):
@@ -170,6 +177,9 @@ class _DirectionalCodecDataset(Dataset[Sample]):
         self,
         input_dataset: Dataset[Sample],
         output_dataset: Dataset[Sample],
+        *,
+        input_codec: str | None = None,
+        output_codec: str | None = None,
     ) -> None:
         if not isinstance(input_dataset, Sized) or not isinstance(output_dataset, Sized):
             raise TypeError("streaming codec stores must expose __len__().")
@@ -182,6 +192,8 @@ class _DirectionalCodecDataset(Dataset[Sample]):
             )
         self.input_dataset = input_dataset
         self.output_dataset = output_dataset
+        self.input_codec = input_codec
+        self.output_codec = output_codec
         self._count = input_count
 
     def __len__(self) -> int:
@@ -190,14 +202,27 @@ class _DirectionalCodecDataset(Dataset[Sample]):
     def __getitem__(self, index: int) -> Sample:
         input_sample = self.input_dataset[index]
         output_sample = self.output_dataset[index]
-        return directional_codec_sample(input_sample, output_sample)
+        return directional_codec_sample(
+            input_sample,
+            output_sample,
+            input_codec=self.input_codec,
+            output_codec=self.output_codec,
+        )
 
 
 def directional_codec_sample(
     input_sample: Sample,
     output_sample: Sample,
+    *,
+    input_codec: str | None = None,
+    output_codec: str | None = None,
 ) -> Sample:
-    """Keep only input-source and output-target audio after strict alignment."""
+    """Join aligned codec samples, composing GLM4 input with BiCodec output."""
+
+    if (input_codec is None) != (output_codec is None):
+        raise ValueError(
+            "streaming directional joins must specify both input_codec and output_codec."
+        )
 
     source_audio = (Role.SOURCE, Modality.AUDIO)
     target_audio = (Role.TARGET, Modality.AUDIO)
@@ -216,8 +241,138 @@ def directional_codec_sample(
                 "streaming input/output codec stores disagree on aligned text."
             )
     merged = dict(output_sample)
-    merged[source_audio] = input_sample[source_audio]
+    composed = input_codec == "glm4" and output_codec == "bicodec"
+    if composed:
+        if source_audio not in output_sample:
+            raise KeyError("streaming output codec sample is missing source audio.")
+        target_value = output_sample[target_audio]
+        if not isinstance(target_value, AudioItem):
+            raise TypeError("streaming composed output target audio must be an AudioItem.")
+        _validate_bicodec_view(target_value, label="output target")
+        merged[source_audio] = _composed_source_audio(
+            input_sample[source_audio],
+            output_sample[source_audio],
+        )
+    else:
+        merged[source_audio] = input_sample[source_audio]
     return cast(Sample, merged)
+
+
+def _composed_source_audio(input_value: object, output_value: object) -> AudioItem:
+    """Merge GLM4 semantic input with the complete BiCodec source view."""
+
+    if not isinstance(input_value, AudioItem):
+        raise TypeError("streaming composed input source audio must be an AudioItem.")
+    if not isinstance(output_value, AudioItem):
+        raise TypeError("streaming composed output source audio must be an AudioItem.")
+
+    _validate_glm4_view(input_value, label="input source")
+    _validate_bicodec_view(output_value, label="output source")
+    views = _merge_item_mapping(
+        output_value.views,
+        input_value.views,
+        name="source audio views",
+    )
+    meta = _merge_item_mapping(
+        output_value.meta,
+        input_value.meta,
+        name="source audio metadata",
+    )
+    result = AudioItem(views=views, meta=meta)
+    # Validate the final object too, so future merge changes cannot silently
+    # drop one of the parser-facing views.
+    _validate_glm4_view(result, label="composed source")
+    _validate_bicodec_view(result, label="composed source")
+    return result
+
+
+def _validate_glm4_view(audio: AudioItem, *, label: str) -> None:
+    try:
+        value = audio.views[AudioView.GLM4]
+    except KeyError as error:
+        raise ValueError(f"{label} audio is missing the GLM4 semantic view.") from error
+    if not isinstance(value, Tensor) or value.ndim != 2:
+        raise ValueError(
+            f"{label} GLM4 semantic view must be an integer Tensor with shape "
+            "[frames, codebooks]."
+        )
+    _validate_code_tensor(value, label=f"{label} GLM4 semantic view")
+
+
+def _validate_bicodec_view(audio: AudioItem, *, label: str) -> None:
+    try:
+        value = audio.views[AudioView.BICODEC]
+    except KeyError as error:
+        raise ValueError(f"{label} audio is missing the BiCodec view.") from error
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            f"{label} BiCodec view must contain semantic and global tensors."
+        )
+    required = {"semantic", "global"}
+    missing = tuple(name for name in required if name not in value)
+    if missing:
+        names = ", ".join(repr(name) for name in missing)
+        raise ValueError(f"{label} BiCodec view is missing {names} codes.")
+    extra = tuple(name for name in value if name not in required)
+    if extra:
+        names = ", ".join(repr(name) for name in extra)
+        raise ValueError(f"{label} BiCodec view has unexpected {names} fields.")
+    for name in ("semantic", "global"):
+        codes = value[name]
+        if not isinstance(codes, Tensor) or codes.ndim != 2:
+            raise ValueError(
+                f"{label} BiCodec {name} codes must have shape "
+                "[frames, codebooks]."
+            )
+        _validate_code_tensor(codes, label=f"{label} BiCodec {name} codes")
+
+
+def _validate_code_tensor(value: Tensor, *, label: str) -> None:
+    if value.numel() == 0 or any(size == 0 for size in value.shape):
+        raise ValueError(f"{label} must contain at least one code.")
+    if value.dtype == torch.bool or value.is_floating_point() or value.is_complex():
+        raise TypeError(f"{label} must contain integer code ids.")
+    if bool((value < 0).any()):
+        raise ValueError(f"{label} must not contain negative code ids.")
+
+
+def _merge_item_mapping(
+    base: Mapping[Any, Any],
+    incoming: Mapping[Any, Any],
+    *,
+    name: str,
+) -> dict[Any, Any]:
+    result = dict(base)
+    for key, value in incoming.items():
+        if key in result and not _same_value(result[key], value):
+            raise ValueError(f"streaming composed {name} conflict at {key!r}.")
+        result[key] = value
+    return result
+
+
+def _same_value(left: object, right: object) -> bool:
+    if isinstance(left, Tensor) or isinstance(right, Tensor):
+        return isinstance(left, Tensor) and isinstance(right, Tensor) and torch.equal(
+            left,
+            right,
+        )
+    if isinstance(left, Mapping) or isinstance(right, Mapping):
+        if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+            return False
+        return left.keys() == right.keys() and all(
+            _same_value(left[key], right[key]) for key in left
+        )
+    if isinstance(left, (tuple, list)) or isinstance(right, (tuple, list)):
+        if not isinstance(left, (tuple, list)) or not isinstance(right, (tuple, list)):
+            return False
+        return len(left) == len(right) and all(
+            _same_value(first, second) for first, second in zip(left, right)
+        )
+    try:
+        result = left == right
+    except (TypeError, ValueError):
+        return False
+    return result if isinstance(result, bool) else False
 
 
 def _workspace_codec_dataset(

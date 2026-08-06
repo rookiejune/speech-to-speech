@@ -89,6 +89,7 @@ class PerformanceConfig:
     measure_window_steps: int = MISSING
     sync_cuda: bool = MISSING
     sync_distributed: bool = MISSING
+    stop_after_measurement: bool = False
 
 
 @dataclass
@@ -240,8 +241,14 @@ class _EntryConfig(Protocol):
 
 def validate_training(config: _EntryConfig) -> None:
     non_negative_integer(config.train.seed, "train.seed")
-    if config.datamodule.streaming.enabled:
-        if config.train.max_steps != -1:
+    if config.datamodule.streaming.enabled or config.datamodule.source.enabled:
+        source_toy = (
+            config.datamodule.source.enabled
+            and config.datamodule.source.mode == "toy"
+        )
+        if source_toy and config.train.max_steps != -1:
+            positive_integer(config.train.max_steps, "train.max_steps")
+        elif not source_toy and config.train.max_steps != -1:
             raise ValueError(
                 "streaming synthesis requires train.max_steps=-1 so only the "
                 "sealed logical epoch can stop training."
@@ -335,6 +342,10 @@ def _validate_performance(config: PerformanceConfig) -> None:
         config.measure_window_steps,
         "callbacks.performance.measure_window_steps",
     )
+    if not isinstance(config.stop_after_measurement, bool):
+        raise TypeError(
+            "callbacks.performance.stop_after_measurement must be a boolean."
+        )
 
 
 def _validate_output(config: _EntryConfig) -> None:

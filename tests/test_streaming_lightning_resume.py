@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import json
-import signal
 import unittest
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import Mock, patch
 
 import torch
 from anydataset.types import Sample
+from anytrain.lightning import ManagedServiceCallback
 from lightning import LightningDataModule, LightningModule, Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
@@ -22,6 +23,7 @@ from torch.utils.data import Dataset
 from speech_to_speech.callback.streaming import (
     StreamingSynthesis,
     StreamingTelemetryCallback,
+    streaming_synthesis_service,
 )
 from speech_to_speech.datamodule.streaming import (
     SnapshotFeed,
@@ -172,25 +174,102 @@ class _AcknowledgedCheckpoint(ModelCheckpoint):
 
 
 class StreamingLightningResumeTest(unittest.TestCase):
-    def test_sigterm_guard_delegates_reentrant_signal_once(self) -> None:
-        callback = StreamingSynthesis()
-        delegate = Mock()
-        with (
-            patch(
-                "speech_to_speech.callback.streaming.signal.getsignal",
-                return_value=delegate,
-            ),
-            patch("speech_to_speech.callback.streaming.signal.signal") as register,
+    def test_managed_service_owns_streaming_producer_lifecycle(self) -> None:
+        datamodule = _mock_streaming_datamodule()
+        strategy = SimpleNamespace(
+            broadcast=Mock(side_effect=lambda value, src=0: value)
+        )
+        trainer = SimpleNamespace(
+            datamodule=datamodule,
+            is_global_zero=True,
+            global_rank=0,
+            world_size=1,
+            global_step=0,
+            strategy=strategy,
+        )
+        callback = ManagedServiceCallback(
+            streaming_synthesis_service,
+            label="streaming synthesis",
+            guard_sigterm=False,
+        )
+
+        callback.on_fit_start(cast(Any, trainer), cast(Any, object()))
+        callback.on_train_batch_start(
+            cast(Any, trainer), cast(Any, object()), None, 0
+        )
+        callback.on_train_end(cast(Any, trainer), cast(Any, object()))
+
+        datamodule.start_streaming_synthesis.assert_called_once_with(owner=True)
+        datamodule.check_streaming_synthesis.assert_called_once_with(owner=True)
+        datamodule.close_streaming_synthesis.assert_called_once_with(owner=True)
+
+    def test_managed_service_propagates_owner_health_failure(self) -> None:
+        datamodule = _mock_streaming_datamodule()
+        strategy = SimpleNamespace(
+            broadcast=Mock(
+                side_effect=[
+                    None,
+                    None,
+                    True,
+                    True,
+                    None,
+                    ("RuntimeError", "producer exited"),
+                ]
+            )
+        )
+        trainer = SimpleNamespace(
+            datamodule=datamodule,
+            is_global_zero=False,
+            global_rank=1,
+            world_size=2,
+            global_step=0,
+            strategy=strategy,
+        )
+        callback = ManagedServiceCallback(
+            streaming_synthesis_service,
+            label="streaming synthesis",
+            guard_sigterm=False,
+        )
+
+        callback.on_fit_start(cast(Any, trainer), cast(Any, object()))
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "streaming synthesis health check failed on the global owner: "
+            "RuntimeError: producer exited",
         ):
-            callback._install_sigterm_guard()
+            callback.on_train_batch_start(
+                cast(Any, trainer), cast(Any, object()), None, 0
+            )
 
-        guard = register.call_args.args[1]
-        delegate.side_effect = guard
-        guard(signal.SIGTERM, None)
-        guard(signal.SIGTERM, None)
+        datamodule.start_streaming_synthesis.assert_not_called()
+        datamodule.check_streaming_synthesis.assert_not_called()
+        datamodule.close_streaming_synthesis.assert_not_called()
 
-        register.assert_called_once_with(signal.SIGTERM, guard)
-        delegate.assert_called_once_with(signal.SIGTERM, None)
+    def test_streaming_synthesis_only_updates_stop_and_cursor_state(self) -> None:
+        datamodule = _mock_streaming_datamodule()
+        trainer = SimpleNamespace(
+            datamodule=datamodule,
+            received_sigterm=False,
+            global_step=7,
+        )
+        callback = StreamingSynthesis()
+
+        callback.on_fit_start(cast(Any, trainer), cast(Any, object()))
+        requested = datamodule.set_streaming_stop_requested.call_args.args[0]
+        self.assertFalse(requested())
+        trainer.received_sigterm = True
+        self.assertTrue(requested())
+        callback.on_train_start(cast(Any, trainer), cast(Any, object()))
+        trainer.global_step = 8
+        callback.on_train_batch_end(
+            cast(Any, trainer), cast(Any, object()), None, None, 0
+        )
+
+        datamodule.set_streaming_global_step.assert_called_once_with(7)
+        datamodule.acknowledge_streaming_batch.assert_called_once_with(8)
+        datamodule.start_streaming_synthesis.assert_not_called()
+        datamodule.check_streaming_synthesis.assert_not_called()
+        datamodule.close_streaming_synthesis.assert_not_called()
 
     def test_telemetry_writes_real_tensorboard_scalars_and_gpu_summary(self) -> None:
         with TemporaryDirectory() as directory:
@@ -206,7 +285,7 @@ class StreamingLightningResumeTest(unittest.TestCase):
 
             _trainer(
                 max_steps=2,
-                callbacks=[StreamingSynthesis(), callback],
+                callbacks=_streaming_callbacks(callback),
                 logger=logger,
                 default_root_dir=root,
             ).fit(_Module(), datamodule=data)
@@ -255,7 +334,7 @@ class StreamingLightningResumeTest(unittest.TestCase):
             ):
                 _trainer(
                     max_steps=2,
-                    callbacks=[StreamingSynthesis()],
+                    callbacks=_streaming_callbacks(),
                     enable_checkpointing=False,
                 ).fit(model, datamodule=data)
 
@@ -276,7 +355,7 @@ class StreamingLightningResumeTest(unittest.TestCase):
                 every_n_train_steps=1,
             )
             first_model = _Module()
-            _trainer(max_steps=1, callbacks=[StreamingSynthesis(), checkpoint]).fit(
+            _trainer(max_steps=1, callbacks=_streaming_callbacks(checkpoint)).fit(
                 first_model,
                 datamodule=first_data,
             )
@@ -296,7 +375,7 @@ class StreamingLightningResumeTest(unittest.TestCase):
             resumed_model = _Module()
             _trainer(
                 max_steps=2,
-                callbacks=[StreamingSynthesis()],
+                callbacks=_streaming_callbacks(),
                 enable_checkpointing=False,
             ).fit(
                 resumed_model,
@@ -309,6 +388,30 @@ class StreamingLightningResumeTest(unittest.TestCase):
         self.assertEqual(resumed_data.loaded_states, 1)
         self.assertIsNotNone(resumed_data.loader)
         self.assertGreaterEqual(cast(_CountingStreamingDataLoader, resumed_data.loader).restore_count, 2)
+
+
+def _mock_streaming_datamodule() -> SimpleNamespace:
+    return SimpleNamespace(
+        streaming_enabled=True,
+        start_streaming_synthesis=Mock(),
+        check_streaming_synthesis=Mock(),
+        close_streaming_synthesis=Mock(),
+        set_streaming_global_step=Mock(),
+        acknowledge_streaming_batch=Mock(),
+        set_streaming_stop_requested=Mock(),
+    )
+
+
+def _streaming_callbacks(*callbacks: Any) -> list[Any]:
+    return [
+        ManagedServiceCallback(
+            streaming_synthesis_service,
+            label="streaming synthesis",
+            guard_sigterm=False,
+        ),
+        StreamingSynthesis(),
+        *callbacks,
+    ]
 
 
 def _trainer(

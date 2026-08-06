@@ -7,6 +7,7 @@ from .streaming import (
     StreamingSynthesis,
     StreamingTelemetryCallback,
     SynthesisSampleLogger,
+    streaming_synthesis_service,
 )
 from ._oom import OOMDiagnostics
 
@@ -21,4 +22,5 @@ __all__ = [
     "TrainInterval",
     "build_parameter_policy",
     "build_unit_schedule",
+    "streaming_synthesis_service",
 ]

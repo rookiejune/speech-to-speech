@@ -336,9 +336,12 @@ producer 内单独采样并按 stage timestamp 汇总，不能把训练卡的利
 ### 任务程序与响应 trace
 
 response trace 是 loader 级数据课程配置，同一次训练可以用多个 homogeneous loader 分别采样 direct、
-target CoT 和 full CoT。`trace` 是唯一 response 选择轴；未指定时使用 program 的
-`default_response`，旧 `prediction` 配置会作为未知字段失败。S2ST 的三个逻辑序列为（`|` 左侧属于
-prompt，右侧属于完整、自回归监督的 response）：
+target CoT 和 full CoT。任务表示就是 CoT：lexical prompt 只用自然语言说明步骤，response 再按该
+步骤顺序生成并监督对应字段；`trace` 只是选择 CoT 变体的配置键，不会映射成额外的 task token。协议
+token 只保留字段分隔、路由、语言选择和音频/codec framing 所必需的部分，不承担 `<s2st>`、`<cot>`
+一类 task identity。`trace` 是唯一 response 选择轴；未指定时使用 program 的 `default_response`，旧
+`prediction` 配置会作为未知字段失败。S2ST 的三个逻辑序列为（`|` 左侧属于 prompt，右侧属于完整、
+自回归监督的 response）：
 
 ```text
 direct:     ... | BOA output_schema target-codec-sequence EOA
@@ -346,16 +349,20 @@ target_cot: ... | <mt><lang_en> target text </mt> BOA output_schema target-codec
 full_cot:   ... | <asr> source text </asr> <mt><lang_en> target text </mt> BOA output_schema target-codec-sequence EOA
 ```
 
-中文目标把 `<lang_en>` 换成 `<lang_zh>`。S2TT 的 `full_cot` 同理为
+中文目标把 `<lang_en>` 换成 `<lang_zh>`。当前 UniSS-style BiCodec 路径中，`target_cot` 的必需
+response protocol 是 `<mt>`、目标语言 selector、target text、`</mt>`，随后是 BOA、output schema、
+BiCodec private marker/order/payload grammar 和 EOA；`full_cot` 只在其前额外增加
+`<asr> source text </asr>`。两者都不增加 `<s2st>` 或 `<cot>` task token。S2TT 的 `full_cot` 同理为
 `... | <asr> source text </asr> <mt><lang_en> target text </mt>`。ASR/MT 不再借用通用 EOS：Runtime
 在 lexical tokenizer 词表之后固定追加 `<asr>`、`</asr>`、`<mt>`、`</mt>`、`<lang_en>`、
 `<lang_zh>` 六个可组合控制 ID；它们不写入或扩充 HF/Kimi tokenizer。普通 `TEXT_AR` 仍使用
 tokenizer 自己的 EOS。audio 使用通用 BOA/EOA 包络，并在 BOA 后显式生成当前 output schema
 selector；selector 之后才是 codec tokenizer 自己的 marker/order/payload grammar。
 
-prompt 只包含 instruction 和 source/context，不包含任何 response begin。builder 按 resolved
-response steps 编译完整 trace；从第一个 `<asr>`、`<mt>` 或 BOA 到最后一个 end token 都是普通
-teacher-forcing target。grammar 可以把某一步候选收窄为一个合法 token，但不能替模型插入该 token。
+lexical prompt 只用自然语言描述任务和 response 顺序，不出现协议 token；完整 prompt 还包含
+source/context 的音频协议序列，但不包含任何 response begin。builder 按 resolved response steps 编译
+完整 CoT trace；从第一个 `<asr>`、`<mt>` 或 BOA 到最后一个 end token 都是普通 teacher-forcing
+target。grammar 可以把某一步候选收窄为一个合法 token，但不能替模型插入该 token。
 
 一条具体的 S2ST full CoT 样本如下。正式训练直接从已 materialize 的 `anydataset` codec store
 读取 tensor。以 LongCat 的第 0 条样本为例，source/target codec payload 分别位于对应 audio view
@@ -415,27 +422,34 @@ loader_plan:
 audio 按 program 声明的顺序成为 response。正式配置保持 `encode_missing_codes=false`；只有显式开启
 debug/materialization fallback 时才允许从 `AudioView.WAVEFORM` 现场生成缺失 codes。
 
-该实例的逻辑 prompt 与 teacher-forcing 序列为：
+该实例把自然语言 lexical prompt、prompt-owned source audio protocol 和监督 response protocol
+明确分开：
 
 ```text
-prompt:
-  Translate the following speech into English speech: <source_audio>
+lexical prompt:
+  Translate the following speech into English speech.
   Respond in this exact order:
-  1. transcribe the source speech as text as <asr>...</asr>
-  2. produce the English translation as text as <mt><lang_en>...</mt>
+  1. transcribe the source speech as text
+  2. produce the English translation as text
   3. generate the corresponding English speech
+
+source audio context (prompt-owned protocol):
   BOA input_schema <source .pt codec tokens> EOA
 
-response:
+response protocol:
   <asr> 今天天气很好。 </asr>
   <mt> <lang_en> The weather is nice today. </mt>
-  BOA output_schema <target .pt codec tokens> EOA
+  BOA output_schema <LongCat marker/order + target .pt payload> EOA
 
 labels:
-  prompt（含 source BOA/input_schema/source .pt payload/EOA）全部为 -100
+  lexical prompt 和 source audio context 全部为 -100
   response 全部监督：所有 begin/end、language selector、BOA、output_schema、
   codec-private marker/payload 和 EOA 的 label 都等于自身 token ID
 ```
+
+其中 full CoT 的任务表示是自然语言三步 CoT 及其顺序监督，不是响应协议字面量；`trace=full_cot` 只
+选择这套 CoT 编译规则。若选择 `target_cot`，lexical prompt 只描述“先输出目标译文、再生成目标语音”，response 从
+`<mt> <lang_en> ... </mt>` 开始，不含 ASR step。两条 CoT 路径都不使用 `<s2st>` 或 `<cot>`。
 
 上面的 source/target audio payload 直接来自各自 tar shard 内的 `.pt` tensor；正常路径不会先还原
 WAV，也不会重新调用 codec encoder。WAV 只属于显式开启的缺失-code materialization/debug fallback。

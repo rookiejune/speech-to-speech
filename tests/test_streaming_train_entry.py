@@ -9,7 +9,7 @@ from typing import Any, cast
 from unittest.mock import Mock, patch
 
 from anydataset.types import Lang, Modality, Role, Sample, TextItem, TextMeta, TextView
-from anytrain.lightning import ModelCheckpoint
+from anytrain.lightning import ManagedServiceCallback, ModelCheckpoint
 from lightning.pytorch.callbacks import Callback
 
 from _config_helpers import _train
@@ -74,36 +74,19 @@ class StreamingTrainConfigTest(unittest.TestCase):
         self.assertTrue(config.train.auto_resume)
         self.assertEqual(set(config.loader_plan.loaders), {"s2st"})
 
-    @patch.dict(
-        "os.environ",
-        {
-            "SPEECH_TO_SPEECH_STREAM_ROOT": "/tmp/stream",
-            "SPEECH_TO_SPEECH_STREAM_ID": "wmt19-bidirectional-v1",
-            "SPEECH_TO_SPEECH_STREAM_EXPECTED_SAMPLES": "8",
-            "SPEECH_TO_SPEECH_PRODUCER_CUDA_VISIBLE_DEVICES": "0,1,2,3",
-            "WORKSPACE_ROOT": "/tmp/workspace",
-        },
-    )
-    def test_formal_streaming_experiment_resolves_producer_and_target_cot_trace(
+    def test_formal_streaming_experiment_resolves_source_and_target_cot_trace(
         self,
     ) -> None:
         config = _train("experiment=train/streaming_s2st")
 
-        self.assertEqual(config.datamodule.streaming.expected_samples, 8)
+        self.assertFalse(config.datamodule.streaming.enabled)
+        self.assertIsNone(config.datamodule.streaming.expected_samples)
         self.assertEqual(
-            config.datamodule.streaming.producer_factory,
-            "speech_to_speech.synthesis.process:controller",
+            config.datamodule.source.factory,
+            "zhuyin.datasets.wmt19.streaming_s2st:source",
         )
-        self.assertEqual(
-            config.datamodule.streaming.producer_options,
-            {
-                "command": [
-                    "/tmp/workspace/jobs/streaming_s2st/producer.sh"
-                ],
-                "environment": {"CUDA_VISIBLE_DEVICES": "0,1,2,3"},
-                "retry": True,
-            },
-        )
+        self.assertEqual(config.datamodule.source.mode, "auto")
+        self.assertEqual(config.datamodule.source.options, {})
         self.assertEqual(config.loader_plan.loaders["s2st"].trace, "target_cot")
         self.assertEqual(config.logging.version, 0)
         self.assertEqual(config.callbacks.checkpoint.save_last, "link")
@@ -117,6 +100,53 @@ class StreamingTrainConfigTest(unittest.TestCase):
             if isinstance(callback, ModelCheckpoint)
         )
         self.assertEqual(checkpoint.save_last, "link")
+
+    @patch.dict(
+        "os.environ",
+        {
+            "SPEECH_TO_SPEECH_STREAM_ROOT": "/tmp/stream",
+            "SPEECH_TO_SPEECH_STREAM_ID": "uniss-wmt19-v1",
+            "SPEECH_TO_SPEECH_STREAM_EXPECTED_SAMPLES": "8",
+            "SPEECH_TO_SPEECH_PRODUCER_CUDA_VISIBLE_DEVICES": "0,1",
+            "WORKSPACE_ROOT": "/tmp/workspace",
+        },
+    )
+    def test_uniss_streaming_experiment_fixes_composed_target_cot_contract(
+        self,
+    ) -> None:
+        config = _train("experiment=train/uniss_streaming_s2st")
+
+        audio_input = config.runtime.audio_input
+        self.assertIsNotNone(audio_input)
+        assert audio_input is not None
+        self.assertTrue(audio_input.composed)
+        streams = audio_input.streams
+        self.assertIsNotNone(streams)
+        assert streams is not None
+        self.assertEqual(
+            {name: stream.tokenizer for name, stream in streams.items()},
+            {"semantic": "glm4", "global": "bicodec"},
+        )
+        self.assertEqual(config.runtime.backbone, "Qwen/Qwen3-0.6B")
+        self.assertEqual(config.runtime.audio_output.tokenizer, "bicodec")
+        self.assertEqual(config.audio_sequence_layout.value, "flattened")
+        self.assertEqual(config.loader_plan.loaders["s2st"].trace, "target_cot")
+        self.assertEqual(config.datamodule.dataloader.batch_size, 1)
+
+    def test_local_uniss_composed_smoke_uses_toy_two_step_target_cot(self) -> None:
+        config = _train("experiment=train/smoke/uniss_composed")
+
+        audio_input = config.runtime.audio_input
+        self.assertIsNotNone(audio_input)
+        assert audio_input is not None
+        self.assertTrue(audio_input.composed)
+        self.assertEqual(config.runtime.audio_output.tokenizer, "bicodec")
+        self.assertEqual(config.loader_plan.loaders["s2st"].trace, "target_cot")
+        self.assertEqual(config.train.max_steps, 2)
+        self.assertEqual(config.trainer.accelerator, "cpu")
+        self.assertEqual(config.trainer.precision, "32-true")
+        self.assertFalse(config.datamodule.streaming.enabled)
+        self.assertFalse(config.callbacks.performance.enabled)
 
     def test_checkpoint_save_last_rejects_unknown_string(self) -> None:
         with self.assertRaisesRegex(ValueError, "save_last"):
@@ -195,6 +225,7 @@ class StreamingTrainEntryTest(unittest.TestCase):
         config = _streaming_train(
             "callbacks.synthesis_sample.enabled=true",
             "callbacks.synthesis_sample.indices=[0]",
+            "datamodule.streaming.producer_factory=speech_to_speech.synthesis.process:controller",
         )
         schedule_runtime = Mock()
         schedule_runtime.callbacks.return_value = []
@@ -206,6 +237,11 @@ class StreamingTrainEntryTest(unittest.TestCase):
             schedule_runtime=schedule_runtime,
         )
 
+        managed_index = next(
+            index
+            for index, callback in enumerate(callbacks)
+            if isinstance(callback, ManagedServiceCallback)
+        )
         streaming_index = next(
             index
             for index, callback in enumerate(callbacks)
@@ -221,13 +257,18 @@ class StreamingTrainEntryTest(unittest.TestCase):
             for index, callback in enumerate(callbacks)
             if isinstance(callback, StreamingTelemetryCallback)
         )
+        self.assertLess(managed_index, streaming_index)
         self.assertLess(streaming_index, synthesis_index)
         self.assertLess(streaming_index, telemetry_index)
         self.assertLess(telemetry_index, synthesis_index)
+        lifecycle = train_script._lifecycle_callbacks(config)
         self.assertEqual(
-            [type(callback) for callback in train_script._lifecycle_callbacks(config)],
-            [StreamingSynthesis],
+            [type(callback) for callback in lifecycle],
+            [ManagedServiceCallback, StreamingSynthesis],
         )
+        managed = cast(ManagedServiceCallback, lifecycle[0])
+        self.assertIs(managed.service, train_script.streaming_synthesis_service)
+        self.assertEqual(managed.label, "streaming synthesis")
 
     def test_streaming_disables_epoch_dataloader_reload(self) -> None:
         config = _streaming_train()
@@ -379,6 +420,7 @@ def _streaming_train(*overrides: str):
         "loader_plan.step_mode=weighted_window",
         "callbacks.task_sample.enabled=false",
         "callbacks.text_retention.enabled=false",
+        "validation.enabled=false",
         *overrides,
     )
 

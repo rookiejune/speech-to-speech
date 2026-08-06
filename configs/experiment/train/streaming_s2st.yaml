@@ -34,6 +34,10 @@ loader_plan:
 
 datamodule:
   encode_missing_codes: false
+  source:
+    factory: zhuyin.datasets.wmt19.streaming_s2st:source
+    mode: auto
+    options: {}
   dataloader:
     batch_size: 8
     num_workers: 0
@@ -42,21 +46,6 @@ datamodule:
     costs:
       enabled: false
   streaming:
-    enabled: true
-    root: ${oc.env:SPEECH_TO_SPEECH_STREAM_ROOT}
-    stream_id: ${oc.env:SPEECH_TO_SPEECH_STREAM_ID}
-    expected_samples: ${oc.decode:${oc.env:SPEECH_TO_SPEECH_STREAM_EXPECTED_SAMPLES}}
-    producer_factory: speech_to_speech.synthesis.process:controller
-    producer_options:
-      command:
-        - ${oc.env:WORKSPACE_ROOT}/jobs/streaming_s2st/producer.sh
-      # A new invocation is an explicit request to continue the immutable
-      # published prefix after a previous process or host failure.
-      retry: true
-      environment:
-        # Empty inherits the trainer visibility.  The production job requires
-        # an explicit producer allocation so independent model cards are visible.
-        CUDA_VISIBLE_DEVICES: ${oc.env:SPEECH_TO_SPEECH_PRODUCER_CUDA_VISIBLE_DEVICES,''}
     telemetry:
       enabled: true
       gpu_sample_interval_seconds: 1.0

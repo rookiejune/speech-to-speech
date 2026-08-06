@@ -28,6 +28,7 @@ from torch.utils.data import Dataset
 from speech_to_speech.datamodule.streaming import (
     SynthesisRequest,
     WorkspaceSnapshotLoader,
+    directional_codec_sample,
 )
 from speech_to_speech.synthesis.publisher import (
     SnapshotPublisher,
@@ -321,11 +322,27 @@ class SnapshotPublisherTest(unittest.TestCase):
             sample = cast(dict[object, object], cast(object, publisher.feed.load(snapshot)[0]))
             source = cast(AudioItem, sample[Role.SOURCE, Modality.AUDIO])
             target = cast(AudioItem, sample[Role.TARGET, Modality.AUDIO])
-            self.assertEqual(set(source.views), {AudioView.GLM4})
+            self.assertEqual(set(source.views), {AudioView.GLM4, AudioView.BICODEC})
             self.assertEqual(set(target.views), {AudioView.BICODEC})
             self.assertTrue(
                 torch.equal(
                     cast(torch.Tensor, source.views[AudioView.GLM4]),
+                    torch.tensor([[0, 1]], dtype=torch.long),
+                )
+            )
+            source_codes = cast(
+                dict[str, torch.Tensor],
+                source.views[AudioView.BICODEC],
+            )
+            self.assertTrue(
+                torch.equal(
+                    source_codes["global"],
+                    torch.tensor([[2]], dtype=torch.long),
+                )
+            )
+            self.assertTrue(
+                torch.equal(
+                    source_codes["semantic"],
                     torch.tensor([[0, 1]], dtype=torch.long),
                 )
             )
@@ -339,6 +356,71 @@ class SnapshotPublisherTest(unittest.TestCase):
             seal = json.loads((root / "sealed.json").read_text(encoding="utf-8"))
             self.assertEqual(seal["input_codec"], "glm4")
             self.assertEqual(seal["codec"], "bicodec")
+
+    def test_composed_join_rejects_conflicting_duplicate_source_view(self) -> None:
+        input_sample = _store_sample(0, AudioView.GLM4)
+        input_mapping = cast(dict[object, object], cast(object, input_sample))
+        input_mapping[Role.SOURCE, Modality.AUDIO] = AudioItem(
+            views={
+                AudioView.GLM4: torch.tensor([[0, 1]], dtype=torch.long),
+                AudioView.BICODEC: {
+                    "semantic": torch.tensor([[0, 1]], dtype=torch.long),
+                    "global": torch.tensor([[99]], dtype=torch.long),
+                },
+            }
+        )
+        output_sample = _store_sample(0, AudioView.BICODEC)
+
+        with self.assertRaisesRegex(ValueError, "source audio views conflict"):
+            directional_codec_sample(
+                input_sample,
+                output_sample,
+                input_codec="glm4",
+                output_codec="bicodec",
+            )
+
+    def test_composed_join_rejects_incomplete_target_bicodec_view(self) -> None:
+        input_sample = _store_sample(0, AudioView.GLM4)
+        output_sample = _store_sample(0, AudioView.BICODEC)
+        output_mapping = cast(dict[object, object], cast(object, output_sample))
+        output_mapping[Role.TARGET, Modality.AUDIO] = AudioItem(
+            views={
+                AudioView.BICODEC: {
+                    "semantic": torch.tensor([[0, 1]], dtype=torch.long),
+                }
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "output target BiCodec view is missing"):
+            directional_codec_sample(
+                input_sample,
+                output_sample,
+                input_codec="glm4",
+                output_codec="bicodec",
+            )
+
+    def test_directional_join_keeps_output_target_for_both_join_modes(self) -> None:
+        output_sample = _store_sample(0, AudioView.BICODEC)
+        output_target = output_sample[Role.TARGET, Modality.AUDIO]
+        for input_codec, view in (
+            ("glm4", AudioView.GLM4),
+            ("longcat", AudioView.LONGCAT),
+        ):
+            with self.subTest(input_codec=input_codec):
+                input_sample = _store_sample(0, view)
+                joined = directional_codec_sample(
+                    input_sample,
+                    output_sample,
+                    input_codec=input_codec,
+                    output_codec="bicodec",
+                )
+
+                self.assertIs(joined[Role.TARGET, Modality.AUDIO], output_target)
+                if input_codec == "longcat":
+                    self.assertIs(
+                        joined[Role.SOURCE, Modality.AUDIO],
+                        input_sample[Role.SOURCE, Modality.AUDIO],
+                    )
 
     def test_decoupled_snapshot_rejects_misaligned_stores_before_visibility(
         self,

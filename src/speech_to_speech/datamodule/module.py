@@ -606,6 +606,16 @@ class DataModule(LightningDataModule):
         )
 
     @property
+    def streaming_synthesis_enabled(self) -> bool:
+        return any(
+            spec.kind is LoaderKind.SPEECH
+            and spec.speech_config is not None
+            and spec.speech_config.streaming.enabled
+            and spec.speech_config.streaming.producer_factory is not None
+            for spec in self.loader_specs.values()
+        )
+
+    @property
     def has_pending_assets(self) -> bool:
         return bool(self._asset_jobs())
 

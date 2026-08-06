@@ -238,6 +238,75 @@ class StreamingConfig:
 
 
 @dataclass
+class ToyPerformanceConfig:
+    """Bounded real-model performance probe used by an auto-routed toy source."""
+
+    warmup_steps: int = 5
+    measure_window_steps: int = 20
+    log_every_n_steps: int = 1
+
+    def __post_init__(self) -> None:
+        for name in (
+            "warmup_steps",
+            "measure_window_steps",
+            "log_every_n_steps",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"workspace source toy {name} must be an integer.")
+        if self.warmup_steps < 0:
+            raise ValueError("workspace source toy warmup_steps must be non-negative.")
+        if self.measure_window_steps <= 0:
+            raise ValueError(
+                "workspace source toy measure_window_steps must be positive."
+            )
+        if self.log_every_n_steps <= 0:
+            raise ValueError(
+                "workspace source toy log_every_n_steps must be positive."
+            )
+
+
+@dataclass
+class WorkspaceSourceConfig:
+    """Resolve one workspace source through access, generation, or toy routes."""
+
+    factory: Optional[str] = None
+    mode: str = "auto"
+    options: Dict[str, Any] = field(default_factory=dict)
+    toy: ToyPerformanceConfig = field(default_factory=ToyPerformanceConfig)
+
+    def __post_init__(self) -> None:
+        if self.factory is not None:
+            _non_empty_string("workspace source factory", self.factory)
+            module, separator, attribute = self.factory.partition(":")
+            if not separator or not module or not attribute:
+                raise ValueError(
+                    "workspace source factory must use 'module:attribute' syntax."
+                )
+        if self.mode not in {"auto", "access", "generate", "toy"}:
+            raise ValueError(
+                "workspace source mode must be auto, access, generate, or toy."
+            )
+        if not isinstance(self.options, dict):
+            raise TypeError("workspace source options must be a dictionary.")
+        if not isinstance(self.toy, ToyPerformanceConfig):
+            raise TypeError("workspace source toy must be a ToyPerformanceConfig.")
+        if self.factory is None:
+            if self.mode != "auto":
+                raise ValueError(
+                    "workspace source mode requires a configured factory."
+                )
+            if self.options:
+                raise ValueError(
+                    "workspace source options require a configured factory."
+                )
+
+    @property
+    def enabled(self) -> bool:
+        return self.factory is not None
+
+
+@dataclass
 class SpeechConfig:
     codec: str
     dataloader: DataLoaderConfig
@@ -252,6 +321,7 @@ class SpeechConfig:
         default_factory=AssetMaterializationConfig
     )
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
+    source: WorkspaceSourceConfig = field(default_factory=WorkspaceSourceConfig)
 
     def __post_init__(self) -> None:
         if not isinstance(self.dataloader, DataLoaderConfig):
@@ -266,15 +336,25 @@ class SpeechConfig:
             )
         if not isinstance(self.streaming, StreamingConfig):
             raise TypeError("streaming must be a StreamingConfig.")
+        if not isinstance(self.source, WorkspaceSourceConfig):
+            raise TypeError("source must be a WorkspaceSourceConfig.")
+        if self.source.enabled and self.materialization.enabled:
+            raise ValueError(
+                "workspace source routing and asset materialization are mutually exclusive."
+            )
+        if self.source.enabled and self.streaming.enabled:
+            raise ValueError(
+                "workspace source routing and explicit legacy streaming are mutually exclusive."
+            )
         if self.materialization.enabled and not self.encode_missing_codes:
             raise ValueError(
                 "enabled asset materialization requires encode_missing_codes=true "
                 "for the first-epoch waveform fallback."
             )
-        if self.streaming.enabled:
+        if self.streaming.enabled or self.source.enabled:
             if self.dataset.name is not DatasetName.STREAMING_S2ST:
                 raise ValueError(
-                    "enabled streaming requires dataset streaming_s2st."
+                    "streaming workspace sources require dataset streaming_s2st."
                 )
             if self.shape is not DataShape.PAIR:
                 raise ValueError("streaming synthesis requires pair-shaped samples.")

@@ -1,0 +1,69 @@
+# @package _global_
+# Local structural gate for the UniSS-style composed source and target-CoT path.
+defaults:
+  - /runtime: glm4_bicodec_composed
+  - /model: toy
+  - /model/acoustic@model.acoustic: none
+  - /datamodule/dataset@datamodule.dataset: toy
+  - /callback/parameter_policy@callbacks.parameter_policy: full
+  - /pl_module: sft
+  - /trainer: default
+  - /logging: csv
+  - _self_
+
+audio_sequence_layout: flattened
+
+run_name: uniss-composed
+output_subdir: uniss-composed-smoke/${run_name}
+
+loader_plan:
+  loaders:
+    s2st:
+      weight: 1.0
+      task_weights:
+        s2st: 1.0
+      trace: target_cot
+  accumulate_grad_batches: 1
+  step_mode: weighted_window
+
+runtime:
+  device: cpu
+  dtype: float32
+  attn_implementation:
+
+datamodule:
+  dataloader:
+    batch_size: 1
+    num_workers: 0
+    pin_memory: false
+    persistent_workers: false
+    costs:
+      enabled: false
+
+model:
+  lora: null
+
+train:
+  max_steps: 2
+
+validation:
+  enabled: false
+
+trainer:
+  accelerator: cpu
+  devices: 1
+  precision: 32-true
+  log_every_n_steps: 1
+  enable_checkpointing: false
+
+callbacks:
+  synthesis_sample:
+    enabled: false
+  task_sample:
+    enabled: false
+  text_retention:
+    enabled: false
+  performance:
+    enabled: false
+  checkpoint:
+    every_n_train_steps: 1

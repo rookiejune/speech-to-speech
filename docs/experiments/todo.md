@@ -19,6 +19,22 @@
 
 ## 其他工程欠账
 
+- 完成 UniSS-style Qwen3-0.6B 流式 S2ST 的真实 producer 与 P0-P2 gate：
+  - id: `s2s-023-uniss-streaming-qwen06b`
+  - state: `draft`
+  - entry: `jobs/023/01_uniss_streaming_s2st.sh`
+  - num_gpus: `unknown`（训练与 producer 分配待 P1 probe）
+  - gpu: `probe`
+  - min_vram_gb_per_gpu: `unknown`
+  - preferred_hosts: `121,125,145`
+  - estimated_hours: `unknown`
+  - monitor: `TensorBoard + producer_telemetry.jsonl + streaming_gpu.csv + train log + checkpoint cursor`
+  - ready_gate: `workspace producer 接入默认过滤 WMT19 并严格展开 2N；原子发布 GLM4 input 与
+    BiCodec output；隔离 transformers==4.44.1 与 MOSS/BiCodec runtime；完成真实 P0
+    forward/backward、P1 单/双 rank seal/resume 与显存/吞吐 probe`
+  - output_root: `$DYNAMIC_HOME/train/speech-to-speech/streaming-s2st/<run>`
+  - task: `先改造 /private/tmp/workspace-streaming-producer 的 decoupled codec/runtime 边界，再用
+    8 或 32 条默认过滤 WMT19 seed 完成 P1；gate 未通过前不启动正式在线训练。`
 - 监控 BiCodec + Qwen3-0.6B Stage 0 的 10k stability / learning-curve pilot：
   - id: `s2s-022-bicodec-qwen06b-10k`
   - state: `running`

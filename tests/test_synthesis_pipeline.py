@@ -22,6 +22,7 @@ from anydataset.types import (
 )
 
 from speech_to_speech.datamodule.streaming import WorkspaceSnapshotLoader
+from speech_to_speech.synthesis import InputCodec
 from speech_to_speech.synthesis.pipeline import (
     CodecPair,
     Components,
@@ -120,7 +121,44 @@ class _Codec:
         ]
 
 
+class _BiCodec:
+    def __call__(
+        self,
+        sources: Sequence[AudioItem],
+        targets: Sequence[AudioItem],
+    ) -> Sequence[CodecPair]:
+        del targets
+        return [
+            CodecPair(_bicodec(index), _bicodec(index + 101))
+            for index in range(len(sources))
+        ]
+
+
+class _InputCodec:
+    def __init__(self, *, fail_call: int | None = None) -> None:
+        self.calls = 0
+        self.fail_call = fail_call
+
+    def __call__(self, sources: Sequence[AudioItem]) -> Sequence[AudioItem]:
+        self.calls += 1
+        if self.calls == self.fail_call:
+            raise RuntimeError("injected input codec interruption")
+        return [_glm4(index) for index in range(len(sources))]
+
+
+class _WrongViewInputCodec:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, sources: Sequence[AudioItem]) -> Sequence[AudioItem]:
+        self.calls += 1
+        return [_longcat(index) for index in range(len(sources))]
+
+
 class StreamingSynthesisPipelineTest(unittest.TestCase):
+    def test_input_codec_is_public_and_cacheable(self) -> None:
+        self.assertIsNotNone(InputCodec)
+
     def test_resume_keeps_dataset_translation_out_of_training_label(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -206,6 +244,197 @@ class StreamingSynthesisPipelineTest(unittest.TestCase):
         )
         self.assertLessEqual({"source_tts_join", "translation_join"}, set(waits))
 
+    def test_decoupled_pipeline_publishes_composed_source_views(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            previous_home = os.environ.get("ANYDATASET_HOME")
+            self.addCleanup(_restore_environment, "ANYDATASET_HOME", previous_home)
+            os.environ["ANYDATASET_HOME"] = str(root / "anydataset")
+            publisher = SnapshotPublisher(
+                root,
+                stream_id="pipeline-composed",
+                expected_samples=2,
+                codec="bicodec",
+                input_codec="glm4",
+                split="train",
+                loader=WorkspaceSnapshotLoader(
+                    codec="bicodec",
+                    input_codec="glm4",
+                    split="train",
+                ),
+            )
+            placement = StagePlacement(device="cpu")
+            pipeline = StreamingSynthesisPipeline(
+                _Seeds(2),
+                Components(
+                    source_tts=_SourceTTS(),
+                    translation=_Translation(),
+                    target_tts=_TargetTTS(),
+                    codec=_BiCodec(),
+                    input_codec=_InputCodec(),
+                ),
+                publisher,
+                PipelineConfig(
+                    batch_size=2,
+                    source_tts=placement,
+                    translation=placement,
+                    target_tts=placement,
+                    codec=placement,
+                    input_codec=placement,
+                ),
+            )
+
+            with SynthesisTelemetry(root, gpu_sample_interval_seconds=0) as telemetry:
+                status = pipeline.run(telemetry)
+
+            self.assertIsNotNone(status.seal)
+            sample = publisher.feed.published([0])[0].sample
+            source = sample[Role.SOURCE, Modality.AUDIO]
+            target = sample[Role.TARGET, Modality.AUDIO]
+            assert isinstance(source, AudioItem)
+            assert isinstance(target, AudioItem)
+            self.assertEqual(set(source.views), {AudioView.GLM4, AudioView.BICODEC})
+            self.assertEqual(set(target.views), {AudioView.BICODEC})
+
+    def test_decoupled_pipeline_requires_input_codec_component(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            publisher = SnapshotPublisher(
+                root,
+                stream_id="pipeline-composed",
+                expected_samples=1,
+                codec="bicodec",
+                input_codec="glm4",
+                split="train",
+                loader=WorkspaceSnapshotLoader(
+                    codec="bicodec",
+                    input_codec="glm4",
+                    split="train",
+                ),
+            )
+            with self.assertRaisesRegex(ValueError, "input codec component"):
+                StreamingSynthesisPipeline(
+                    _Seeds(1),
+                    Components(
+                        source_tts=_SourceTTS(),
+                        translation=_Translation(),
+                        target_tts=_TargetTTS(),
+                        codec=_BiCodec(),
+                    ),
+                    publisher,
+                    PipelineConfig(batch_size=1),
+                )
+
+    def test_decoupled_pipeline_resumes_with_input_codec_stage_cache(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            previous_home = os.environ.get("ANYDATASET_HOME")
+            self.addCleanup(_restore_environment, "ANYDATASET_HOME", previous_home)
+            os.environ["ANYDATASET_HOME"] = str(root / "anydataset")
+            publisher = SnapshotPublisher(
+                root,
+                stream_id="pipeline-composed-resume",
+                expected_samples=4,
+                codec="bicodec",
+                input_codec="glm4",
+                split="train",
+                loader=WorkspaceSnapshotLoader(
+                    codec="bicodec",
+                    input_codec="glm4",
+                    split="train",
+                ),
+            )
+            first_source = _SourceTTS()
+            first_translation = _Translation()
+            first_input = _InputCodec(fail_call=2)
+            first = _composed_pipeline(
+                publisher,
+                first_source,
+                first_translation,
+                first_input,
+                cache=_composed_cache(root),
+            )
+            with self.assertRaisesRegex(RuntimeError, "input codec interruption"):
+                with SynthesisTelemetry(root, gpu_sample_interval_seconds=0) as telemetry:
+                    first.run(telemetry)
+
+            self.assertEqual(publisher.feed.status().catalog.sample_count, 2)
+            resumed_source = _SourceTTS()
+            resumed_translation = _Translation()
+            resumed_input = _InputCodec()
+            resumed = _composed_pipeline(
+                publisher,
+                resumed_source,
+                resumed_translation,
+                resumed_input,
+                cache=_composed_cache(root),
+            )
+            with SynthesisTelemetry(root, gpu_sample_interval_seconds=0) as telemetry:
+                status = resumed.run(telemetry)
+
+            self.assertIsNotNone(status.seal)
+            self.assertEqual(status.catalog.sample_count, 4)
+            self.assertEqual(resumed_source.calls, [])
+            self.assertEqual(resumed_translation.calls, [])
+            self.assertEqual(resumed_input.calls, 1)
+            sample = publisher.feed.published([3])[0].sample
+            source = sample[Role.SOURCE, Modality.AUDIO]
+            assert isinstance(source, AudioItem)
+            self.assertEqual(set(source.views), {AudioView.GLM4, AudioView.BICODEC})
+
+    def test_wrong_input_codec_view_is_not_cached_and_can_be_retried(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            previous_home = os.environ.get("ANYDATASET_HOME")
+            self.addCleanup(_restore_environment, "ANYDATASET_HOME", previous_home)
+            os.environ["ANYDATASET_HOME"] = str(root / "anydataset")
+            publisher = SnapshotPublisher(
+                root,
+                stream_id="pipeline-composed-resume",
+                expected_samples=4,
+                codec="bicodec",
+                input_codec="glm4",
+                split="train",
+                loader=WorkspaceSnapshotLoader(
+                    codec="bicodec",
+                    input_codec="glm4",
+                    split="train",
+                ),
+            )
+            wrong_input = _WrongViewInputCodec()
+            broken = _composed_pipeline(
+                publisher,
+                _SourceTTS(),
+                _Translation(),
+                wrong_input,
+                cache=_composed_cache(root),
+            )
+
+            with self.assertRaisesRegex(ValueError, "exactly AudioView.GLM4"):
+                with SynthesisTelemetry(root, gpu_sample_interval_seconds=0) as telemetry:
+                    broken.run(telemetry)
+
+            first_batch = root / ".stage-cache" / "samples-000000000000-000000000002"
+            self.assertEqual(wrong_input.calls, 1)
+            self.assertFalse((first_batch / "input_codec").exists())
+            self.assertTrue((first_batch / "codec").is_dir())
+            self.assertEqual(publisher.feed.status().catalog.sample_count, 0)
+
+            fixed_input = _InputCodec()
+            resumed = _composed_pipeline(
+                publisher,
+                _SourceTTS(),
+                _Translation(),
+                fixed_input,
+                cache=_composed_cache(root),
+            )
+            with SynthesisTelemetry(root, gpu_sample_interval_seconds=0) as telemetry:
+                status = resumed.run(telemetry)
+
+            self.assertIsNotNone(status.seal)
+            self.assertEqual(status.catalog.sample_count, 4)
+            self.assertEqual(fixed_input.calls, 2)
+
 
 def _pipeline(
     publisher: SnapshotPublisher,
@@ -245,6 +474,46 @@ def _cache(root: Path) -> SynthesisStageCache:
     )
 
 
+def _composed_pipeline(
+    publisher: SnapshotPublisher,
+    source_tts: _SourceTTS,
+    translation: _Translation,
+    input_codec: _InputCodec,
+    *,
+    cache: SynthesisStageCache | None = None,
+) -> StreamingSynthesisPipeline:
+    placement = StagePlacement(device="cpu")
+    return StreamingSynthesisPipeline(
+        _Seeds(4),
+        Components(
+            source_tts=source_tts,
+            translation=translation,
+            target_tts=_TargetTTS(),
+            codec=_BiCodec(),
+            input_codec=input_codec,
+        ),
+        publisher,
+        PipelineConfig(
+            batch_size=2,
+            source_tts=placement,
+            translation=placement,
+            target_tts=placement,
+            codec=placement,
+            input_codec=placement,
+        ),
+        cache=cache,
+    )
+
+
+def _composed_cache(root: Path) -> SynthesisStageCache:
+    return SynthesisStageCache(
+        root,
+        stream_id="pipeline-composed-resume",
+        split="train",
+        identity_sha256="b" * 64,
+    )
+
+
 def _languages(index: int) -> tuple[Lang, Lang]:
     return (Lang.ZH, Lang.EN) if index % 2 == 0 else (Lang.EN, Lang.ZH)
 
@@ -266,6 +535,31 @@ def _longcat(value: int) -> AudioItem:
         *(torch.full((4,), value % 8100, dtype=torch.long) for _ in range(3)),
     ]
     return AudioItem(views={AudioView.LONGCAT: torch.stack(columns, dim=1)})
+
+
+def _bicodec(value: int) -> AudioItem:
+    semantic = torch.tensor(
+        [[value % 1024], [(value + 1) % 1024]],
+        dtype=torch.long,
+    )
+    global_codes = torch.tensor(
+        [[value % 2048], [(value + 1) % 2048]],
+        dtype=torch.long,
+    )
+    return AudioItem(
+        views={
+            AudioView.BICODEC: {
+                "semantic": semantic,
+                "global": global_codes,
+            }
+        }
+    )
+
+
+def _glm4(value: int) -> AudioItem:
+    return AudioItem(
+        views={AudioView.GLM4: torch.tensor([[value], [value + 1]], dtype=torch.long)}
+    )
 
 
 def _text(item: TextItem) -> str:

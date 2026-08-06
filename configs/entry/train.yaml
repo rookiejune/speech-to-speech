@@ -11,6 +11,14 @@ output_dir: ${repo_output_root}/${output_subdir}
 
 datamodule:
   codec: ${runtime.audio_output.tokenizer}
+  source:
+    factory:
+    mode: auto
+    options: {}
+    toy:
+      warmup_steps: 5
+      measure_window_steps: 20
+      log_every_n_steps: 1
   materialization:
     enabled: false
     codec_view:

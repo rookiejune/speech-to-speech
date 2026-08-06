@@ -30,6 +30,7 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
         self.assertEqual(enabled.callbacks.performance.measure_window_steps, 100)
         self.assertTrue(enabled.callbacks.performance.sync_cuda)
         self.assertTrue(enabled.callbacks.performance.sync_distributed)
+        self.assertFalse(enabled.callbacks.performance.stop_after_measurement)
 
         with self.assertRaisesRegex(ValueError, "task_sample.enabled=false"):
             _overfit("callbacks.performance.enabled=true")
@@ -43,7 +44,8 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
     ):
         disabled = _overfit()
         enabled = _performance_overfit(
-            "callbacks.performance.hardware_peak_flops=123.0"
+            "callbacks.performance.hardware_peak_flops=123.0",
+            "callbacks.performance.stop_after_measurement=true",
         )
 
         self.assertIsNone(build_performance(disabled.callbacks.performance))
@@ -57,6 +59,7 @@ class ConfigPerformanceCallbackTest(ConfigTestCase):
             measure_window_steps=100,
             sync_cuda=True,
             sync_distributed=True,
+            stop_after_measurement=True,
         )
         self.assertIs(callback, performance.return_value)
 

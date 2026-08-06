@@ -1,11 +1,13 @@
-"""Publish a bounded two-batch LongCat stream for restart probes.
+"""Publish bounded deterministic streams for restart probes.
 
 The training subprocess controller supplies stream identity through
 ``S2S_SYNTHESIS_*`` environment variables.  This producer materializes small,
-valid canonical stores without loading a synthesis model.  Its first batch is
-durable before the optional delay, so terminating the first invocation during
-that delay and starting the same command again exercises the real resume
-boundary.
+valid canonical stores without loading a synthesis model.  The default probe
+is the historical LongCat coupled stream; the composed ``glm4 -> bicodec``
+variant publishes separate input/output stores using the same two-batch plan.
+The first batch is durable before the optional delay, so terminating the first
+invocation during that delay and starting the same command again exercises the
+real resume boundary.
 """
 
 from __future__ import annotations
@@ -42,6 +44,12 @@ from speech_to_speech.synthesis.telemetry import emit_event, stage
 _DELAY_ENV = "S2S_SYNTHESIS_PROBE_DELAY_SECONDS"
 _DEFAULT_DELAY_SECONDS = 60.0
 _LONGCAT_CODEBOOK_SIZES = (8192, 8100, 8100, 8100)
+_GLM4_CODEBOOK_SIZE = 16_384
+_BICODEC_SEMANTIC_CODEBOOK_SIZE = 8_192
+_BICODEC_GLOBAL_CODEBOOK_SIZE = 4_096
+_BICODEC_GLOBAL_UNIT_LENGTH = 32
+_BICODEC_SEMANTIC_FRAMES = 4
+_GLM4_SEMANTIC_FRAMES = 2
 
 
 @dataclass(frozen=True)
@@ -50,18 +58,32 @@ class ProbeConfig:
     stream_id: str
     expected_samples: int
     codec: str
+    input_codec: str
     split: str
     delay_seconds: float
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> ProbeConfig:
         codec = _required(environment, "S2S_SYNTHESIS_CODEC")
-        if codec != "longcat":
-            raise ValueError("the bounded streaming probe only supports codec='longcat'.")
-        for name in ("S2S_SYNTHESIS_INPUT_CODEC", "S2S_SYNTHESIS_OUTPUT_CODEC"):
-            value = environment.get(name, codec)
-            if value != codec:
-                raise ValueError(f"the bounded streaming probe requires {name}={codec!r}.")
+        input_codec = environment.get("S2S_SYNTHESIS_INPUT_CODEC", codec)
+        output_codec = environment.get("S2S_SYNTHESIS_OUTPUT_CODEC", codec)
+        if not input_codec:
+            raise ValueError("S2S_SYNTHESIS_INPUT_CODEC must be a non-empty string.")
+        if not output_codec:
+            raise ValueError("S2S_SYNTHESIS_OUTPUT_CODEC must be a non-empty string.")
+        if output_codec != codec:
+            raise ValueError(
+                "the bounded streaming probe requires "
+                "S2S_SYNTHESIS_OUTPUT_CODEC to match S2S_SYNTHESIS_CODEC."
+            )
+        if (input_codec, codec) not in {
+            ("longcat", "longcat"),
+            ("glm4", "bicodec"),
+        }:
+            raise ValueError(
+                "the bounded streaming probe only supports codec='longcat' "
+                "or input_codec='glm4' with codec='bicodec'."
+            )
         expected_samples = _positive_int(
             _required(environment, "S2S_SYNTHESIS_EXPECTED_SAMPLES"),
             "S2S_SYNTHESIS_EXPECTED_SAMPLES",
@@ -75,6 +97,7 @@ class ProbeConfig:
             stream_id=_required(environment, "S2S_SYNTHESIS_STREAM_ID"),
             expected_samples=expected_samples,
             codec=codec,
+            input_codec=input_codec,
             split=_required(environment, "S2S_SYNTHESIS_SPLIT"),
             delay_seconds=_nonnegative_seconds(
                 environment.get(_DELAY_ENV, str(_DEFAULT_DELAY_SECONDS)),
@@ -103,8 +126,13 @@ def run(
         stream_id=config.stream_id,
         expected_samples=config.expected_samples,
         codec=config.codec,
+        input_codec=config.input_codec,
         split=config.split,
-        loader=WorkspaceSnapshotLoader(codec=config.codec, split=config.split),
+        loader=WorkspaceSnapshotLoader(
+            codec=config.codec,
+            input_codec=config.input_codec,
+            split=config.split,
+        ),
     )
     initial = publisher.feed.status()
     _validate_prefix(initial, batches)
@@ -131,7 +159,14 @@ def run(
                     for index in batch.indices
                 ],
                 base_samples=[_sample(index, AudioView.WAVEFORM) for index in batch.indices],
-                codec_samples=[_sample(index, AudioView.LONGCAT) for index in batch.indices],
+                codec_samples=[
+                    _sample(index, _output_view(config)) for index in batch.indices
+                ],
+                input_codec_samples=(
+                    [_input_sample(index, config.input_codec) for index in batch.indices]
+                    if config.input_codec != config.codec
+                    else None
+                ),
             )
         _event(
             "published",
@@ -191,6 +226,14 @@ def _validate_prefix(status: StreamStatus, batches: Sequence[_Batch]) -> None:
             )
 
 
+def _output_view(config: ProbeConfig) -> AudioView:
+    if config.codec == "longcat":
+        return AudioView.LONGCAT
+    if config.codec == "bicodec":
+        return AudioView.BICODEC
+    raise AssertionError(f"unsupported bounded probe output codec: {config.codec!r}.")
+
+
 def _sample(index: int, view: AudioView) -> Sample:
     source_text, source_lang, target_text, target_lang = _translation(index)
     return cast(
@@ -209,6 +252,34 @@ def _sample(index: int, view: AudioView) -> Sample:
             ),
             (Role.TARGET, Modality.AUDIO): AudioItem(
                 views={view: _audio(index, target=True, view=view)}
+            ),
+        },
+    )
+
+
+def _input_sample(index: int, codec: str) -> Sample:
+    if codec != "glm4":
+        raise AssertionError(f"unsupported bounded probe input codec: {codec!r}.")
+    source_text, source_lang, target_text, target_lang = _translation(index)
+    return cast(
+        Sample,
+        {
+            (Role.SOURCE, Modality.TEXT): TextItem(
+                views={TextView.TEXT: source_text},
+                meta={TextMeta.LANG: source_lang},
+            ),
+            (Role.TARGET, Modality.TEXT): TextItem(
+                views={TextView.TEXT: target_text},
+                meta={TextMeta.LANG: target_lang},
+            ),
+            (Role.SOURCE, Modality.AUDIO): AudioItem(
+                views={
+                    AudioView.GLM4: _audio(
+                        index,
+                        target=False,
+                        view=AudioView.GLM4,
+                    )
+                }
             ),
         },
     )
@@ -243,14 +314,28 @@ def _audio(index: int, *, target: bool, view: AudioView) -> object:
     if view is AudioView.WAVEFORM:
         amplitude = float((seed % 11) + 1) / 100.0
         return torch.full((1, 320), amplitude, dtype=torch.float32), 16_000
-    if view is not AudioView.LONGCAT:
-        raise ValueError(f"unsupported bounded probe audio view: {view.value}.")
-    frames = 4
-    columns = [
-        (torch.arange(frames, dtype=torch.long) + seed * 17 + codebook * 29) % size
-        for codebook, size in enumerate(_LONGCAT_CODEBOOK_SIZES)
-    ]
-    return torch.stack(columns, dim=1)
+    if view is AudioView.LONGCAT:
+        frames = 4
+        columns = [
+            (torch.arange(frames, dtype=torch.long) + seed * 17 + codebook * 29) % size
+            for codebook, size in enumerate(_LONGCAT_CODEBOOK_SIZES)
+        ]
+        return torch.stack(columns, dim=1)
+    if view is AudioView.GLM4:
+        steps = torch.arange(_GLM4_SEMANTIC_FRAMES, dtype=torch.long)
+        return ((steps + seed * 31) % _GLM4_CODEBOOK_SIZE).unsqueeze(1)
+    if view is AudioView.BICODEC:
+        semantic_steps = torch.arange(_BICODEC_SEMANTIC_FRAMES, dtype=torch.long)
+        global_steps = torch.arange(_BICODEC_GLOBAL_UNIT_LENGTH, dtype=torch.long)
+        return {
+            "semantic": (
+                (semantic_steps + seed * 37) % _BICODEC_SEMANTIC_CODEBOOK_SIZE
+            ).unsqueeze(1),
+            "global": (
+                (global_steps + seed * 41) % _BICODEC_GLOBAL_CODEBOOK_SIZE
+            ).unsqueeze(1),
+        }
+    raise ValueError(f"unsupported bounded probe audio view: {view.value}.")
 
 
 def _required(environment: Mapping[str, str], name: str) -> str:

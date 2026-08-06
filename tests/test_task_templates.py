@@ -9,10 +9,14 @@ from omegaconf import OmegaConf
 from speech_to_speech.datamodule.config import DataLoaderConfig, SpeechConfig
 from speech_to_speech.datamodule.dataset.text import TextConfig
 from speech_to_speech.task import (
+    ControlToken,
     FULL_COT,
     PredictionModality,
+    ResponseControl,
     SourceLayout,
+    TARGET_COT,
     Task,
+    response_control_tokens,
     resolve_response,
 )
 from speech_to_speech.task.templates import (
@@ -118,6 +122,11 @@ class TaskTemplateTest(unittest.TestCase):
             resolve_response(Task.S2ST),
             language="English",
         )
+        target = format_response_instruction(
+            base,
+            resolve_response(Task.S2ST, trace=TARGET_COT),
+            language="English",
+        )
         full = format_response_instruction(
             base,
             resolve_response(Task.S2ST, trace=FULL_COT),
@@ -126,6 +135,11 @@ class TaskTemplateTest(unittest.TestCase):
 
         self.assertEqual(direct, base)
         self.assertLess(
+            target.index("1. produce the English translation as text"),
+            target.index("2. generate the corresponding English speech"),
+        )
+        self.assertNotIn("transcribe the source speech as text", target)
+        self.assertLess(
             full.index("1. transcribe the source speech as text"),
             full.index("2. produce the English translation as text"),
         )
@@ -133,30 +147,31 @@ class TaskTemplateTest(unittest.TestCase):
             full.index("2. produce the English translation as text"),
             full.index("3. generate the corresponding English speech"),
         )
-        self.assertIn("<asr>...</asr>", full)
-        self.assertIn("<mt><lang_en>...</mt>", full)
+        for token in ControlToken:
+            self.assertNotIn(token.value, target)
+            self.assertNotIn(token.value, full)
 
     def test_direct_text_tasks_describe_their_control_semantics(self):
         cases = (
             (
                 Task.ASR,
                 "English",
-                "transcribe the speech as text as <asr>...</asr>",
+                "transcribe the speech as text",
             ),
             (
                 Task.MT,
                 "English",
-                "produce the English translation as text as <mt><lang_en>...</mt>",
+                "produce the English translation as text",
             ),
             (
                 Task.S2TT,
                 "Chinese",
-                "produce the Chinese translation as text as <mt><lang_zh>...</mt>",
+                "produce the Chinese translation as text",
             ),
             (
                 Task.T2TT,
                 "English",
-                "produce the English translation as text as <mt><lang_en>...</mt>",
+                "produce the English translation as text",
             ),
         )
         for task, language, expected in cases:
@@ -181,6 +196,30 @@ class TaskTemplateTest(unittest.TestCase):
             language="English",
         )
         self.assertNotIn("translation as text", asr)
+
+    def test_control_tokens_remain_response_targets_not_prompt_literals(self):
+        asr = response_control_tokens(ResponseControl.ASR)
+        mt = response_control_tokens(ResponseControl.MT, target_language="English")
+
+        self.assertIsNotNone(asr)
+        self.assertIsNotNone(mt)
+        assert asr is not None
+        assert mt is not None
+        self.assertEqual(asr.prefix, (ControlToken.ASR_BEGIN,))
+        self.assertEqual(asr.end, ControlToken.ASR_END)
+        self.assertEqual(
+            mt.prefix,
+            (ControlToken.MT_BEGIN, ControlToken.LANG_EN),
+        )
+        self.assertEqual(mt.end, ControlToken.MT_END)
+
+        prompt = format_response_instruction(
+            "Translate this speech.",
+            resolve_response(Task.S2ST, trace=FULL_COT),
+            language="English",
+        )
+        for token in ControlToken:
+            self.assertNotIn(token.value, prompt)
 
     def test_speech_config_accepts_per_task_templates(self):
         from scripts._config.normalization import prepare

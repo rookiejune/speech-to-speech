@@ -250,24 +250,35 @@ def train(config: DictConfig) -> StagedTrainConfig:
 def _validate_streaming(config: StagedTrainConfig) -> None:
     if not isinstance(config.train.auto_resume, bool):
         raise TypeError("train.auto_resume must be a boolean.")
-    if not config.datamodule.streaming.enabled:
+    if not (
+        config.datamodule.streaming.enabled
+        or config.datamodule.source.enabled
+    ):
         return
-    if config.trainer.max_epochs != 1:
+    source_toy = (
+        config.datamodule.source.enabled
+        and config.datamodule.source.mode == "toy"
+    )
+    if not source_toy and config.trainer.max_epochs != 1:
         raise ValueError(
             "streaming synthesis requires trainer.max_epochs=1; the one epoch "
             "continues across checkpoints until the dataset is sealed."
         )
-    if config.trainer.use_distributed_sampler:
+    if not source_toy and config.trainer.use_distributed_sampler:
         raise ValueError(
             "streaming synthesis requires trainer.use_distributed_sampler=false."
         )
-    if not config.trainer.enable_checkpointing:
+    if not source_toy and not config.trainer.enable_checkpointing:
         raise ValueError("streaming synthesis requires checkpointing for resume.")
-    if config.callbacks.checkpoint.save_last not in (True, "link"):
+    if not source_toy and config.callbacks.checkpoint.save_last not in (True, "link"):
         raise ValueError(
             "streaming synthesis requires checkpoint.save_last=true or 'link'."
         )
-    if not config.train.auto_resume and config.train.ckpt_path is None:
+    if (
+        not source_toy
+        and not config.train.auto_resume
+        and config.train.ckpt_path is None
+    ):
         raise ValueError(
             "streaming synthesis requires train.auto_resume=true or an explicit "
             "train.ckpt_path."
@@ -294,11 +305,11 @@ def _validate_streaming(config: StagedTrainConfig) -> None:
             "streaming synthesis initially requires accumulate_grad_batches=1 "
             "for an unambiguous optimizer-boundary cursor."
         )
-    if config.validation.enabled:
+    if not source_toy and config.validation.enabled:
         raise ValueError(
             "streaming synthesis validation must run from a sealed immutable dataset."
         )
-    if config.callbacks.task_sample.enabled:
+    if not source_toy and config.callbacks.task_sample.enabled:
         raise ValueError(
             "streaming synthesis uses callbacks.synthesis_sample for artifacts; "
             "task_sample requires fixed samples available at fit start."
@@ -315,9 +326,12 @@ def _validate_synthesis_samples(config: StagedTrainConfig) -> None:
         raise TypeError("callbacks.synthesis_sample.loader must be a non-empty string.")
     if not callback.enabled:
         return
-    if not config.datamodule.streaming.enabled:
+    if not (
+        config.datamodule.streaming.enabled
+        or config.datamodule.source.enabled
+    ):
         raise ValueError(
-            "callbacks.synthesis_sample requires datamodule.streaming.enabled=true."
+            "callbacks.synthesis_sample requires a streaming workspace source."
         )
     if callback.loader not in config.loader_plan.loaders:
         raise ValueError(

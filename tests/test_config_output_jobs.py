@@ -177,6 +177,22 @@ class ConfigOutputJobTest(ConfigTestCase):
             source,
         )
 
+    def test_uniss_streaming_job_pins_composition_and_workspace_source(self):
+        root = Path(__file__).parents[1]
+        source = (root / "jobs" / "023" / "01_uniss_streaming_s2st.sh").read_text()
+
+        self.assertIn('"experiment=train/uniss_streaming_s2st"', source)
+        self.assertIn('"runtime.backbone=${qwen_root}"', source)
+        self.assertIn(
+            "job_reject_overrides experiment runtime datamodule.source "
+            'loader_plan trainer.max_epochs -- "$@"',
+            source,
+        )
+        self.assertIn(
+            '${CUDA_VISIBLE_DEVICES:?the scheduler must assign all generation and training GPUs}',
+            source,
+        )
+
     def test_job_wrappers_source_existing_project_environment(self):
         root = Path(__file__).parents[1]
         env = root / "jobs" / "env.sh"

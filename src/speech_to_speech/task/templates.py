@@ -489,7 +489,7 @@ def format_response_instruction(
     *,
     language: str,
 ) -> str:
-    """Append the exact typed response schema required by the task program."""
+    """Describe the task program's response steps in natural language."""
     if not isinstance(instruction, str) or not instruction:
         raise ValueError("response instruction base must be a non-empty string.")
     if not isinstance(response, ResponseSpec):
@@ -506,25 +506,24 @@ def format_response_instruction(
         return (
             instruction
             + "\nRespond in this exact format:\n"
-            + _step_format(response.steps[0], language)
+            + _step_instruction(response.steps[0], language)
         )
     steps = [
-        f"{index}. {_step_format(step, language)}"
+        f"{index}. {_step_instruction(step, language)}"
         for index, step in enumerate(response.steps, start=1)
     ]
     return instruction + "\nRespond in this exact order:\n" + "\n".join(steps)
 
 
-def _step_format(step: ResponseStep, language: str) -> str:
-    description = _control_instruction(step, language)
-    control = response_control_tokens(
+def _step_instruction(step: ResponseStep, language: str) -> str:
+    # Keep the runtime-owned control protocol out of the lexical prompt.  The
+    # response serializer still emits and supervises these tokens; this lookup
+    # preserves its language/control validation at the prompt boundary.
+    response_control_tokens(
         step.control,
         target_language=language,
     )
-    if control is None:
-        return description
-    prefix = "".join(token.value for token in control.prefix)
-    return f"{description} as {prefix}...{control.end.value}"
+    return _control_instruction(step, language)
 
 
 def _control_instruction(step: ResponseStep, language: str) -> str:

@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING, Literal, cast
 import hydra
 import torch
 from anytrain.lightning import (
+    ManagedServiceCallback,
     ModelCheckpoint,
+    PerformanceCallback,
     validation,
 )
 from anytrain.lightning.schedule import ScheduleRuntime
@@ -23,6 +25,7 @@ from speech_to_speech.callback import (
     StreamingTelemetryCallback,
     SynthesisSampleLogger,
     build_unit_schedule,
+    streaming_synthesis_service,
 )
 from speech_to_speech.callback.logging import (
     LossSummary,
@@ -36,6 +39,7 @@ from speech_to_speech.datamodule.config import (
     DataLoaderCostsConfig,
     StreamingConfig,
     TaskConfig,
+    WorkspaceSourceConfig,
 )
 from speech_to_speech.datamodule.module import DataModule
 from speech_to_speech.datamodule.loader import LoaderConfig, LoaderSchedule
@@ -49,6 +53,12 @@ from speech_to_speech.training.composition import (
     gradient_comparisons,
     gradient_logger,
     text_retention_logger,
+)
+from speech_to_speech.training.source import (
+    SourceResolution,
+    SourceRoute,
+    emit_data_plan,
+    resolve_workspace_source,
 )
 from speech_to_speech.task import Task
 
@@ -68,8 +78,11 @@ def main(config: DictConfig) -> None:
 
 
 def run(config: StagedTrainConfig) -> None:
+    source_resolution = resolve_workspace_source(config)
+    config = source_resolution.config
     output_dir = Path(config.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
+    emit_data_plan(source_resolution.plan, output_dir)
 
     pl.seed_everything(config.train.seed, workers=True)
     rt_config = config_for_local_rank(config.runtime)
@@ -90,7 +103,11 @@ def run(config: StagedTrainConfig) -> None:
     ):
         module.batch_materializer = OnDeviceCodecMaterializer(rt)
 
-    datamodule = build_datamodule(config, rt)
+    datamodule = build_datamodule(
+        config,
+        rt,
+        source_resolution=source_resolution,
+    )
     module.set_validation_loader_names(datamodule.validation_names)
     summary = LossSummary()
     validation_history = validation.History() if config.validation.enabled else None
@@ -138,13 +155,25 @@ def run(config: StagedTrainConfig) -> None:
     }
     if validation_history is not None:
         result["validation"] = validation_history.report()
+    if source_resolution.plan is not None:
+        result["data"] = source_resolution.plan.as_dict()
+    if (
+        source_resolution.plan is not None
+        and source_resolution.plan.route is SourceRoute.TOY
+    ):
+        result["performance_probe"] = _performance_report(callbacks)
     (output_dir / "metrics.json").write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n"
     )
     print(json.dumps(result, sort_keys=True))
 
 
-def build_datamodule(config: StagedTrainConfig, runtime: Runtime) -> DataModule:
+def build_datamodule(
+    config: StagedTrainConfig,
+    runtime: Runtime,
+    *,
+    source_resolution: SourceResolution | None = None,
+) -> DataModule:
     loaders = {
         name: _loader_spec(config, loader)
         for name, loader in config.loader_plan.loaders.items()
@@ -161,7 +190,25 @@ def build_datamodule(config: StagedTrainConfig, runtime: Runtime) -> DataModule:
         validation=(
             _validation_specs(config) if config.validation.enabled else None
         ),
+        training_datasets=(
+            None
+            if source_resolution is None
+            else source_resolution.training_datasets
+        ),
     )
+
+
+def _performance_report(callbacks: list[Callback]) -> dict[str, object]:
+    matches = [
+        callback
+        for callback in callbacks
+        if isinstance(callback, PerformanceCallback)
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(
+            "toy performance routing requires exactly one PerformanceCallback."
+        )
+    return cast(dict[str, object], matches[0].report())
 
 
 def _loader_spec(
@@ -215,6 +262,7 @@ def _canonical_validation_spec(
         dataset=loader.dataset,
         materialization=AssetMaterializationConfig(),
         streaming=StreamingConfig(),
+        source=WorkspaceSourceConfig(),
     )
     return LoaderSpec.speech(
         speech,
@@ -328,6 +376,16 @@ def _lifecycle_callbacks(config: StagedTrainConfig) -> tuple[Callback, ...]:
     callbacks: list[Callback] = []
     if config.datamodule.materialization.enabled:
         callbacks.append(AssetMaterialization())
+    if (
+        config.datamodule.streaming.enabled
+        and config.datamodule.streaming.producer_factory is not None
+    ):
+        callbacks.append(
+            ManagedServiceCallback(
+                streaming_synthesis_service,
+                label="streaming synthesis",
+            )
+        )
     if config.datamodule.streaming.enabled:
         callbacks.append(StreamingSynthesis())
     return tuple(callbacks)
