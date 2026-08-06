@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Literal, cast
 import hydra
 import torch
 from anytrain.lightning import (
-    ManagedServiceCallback,
     ModelCheckpoint,
     PerformanceCallback,
     validation,
@@ -380,6 +379,8 @@ def _lifecycle_callbacks(config: StagedTrainConfig) -> tuple[Callback, ...]:
         config.datamodule.streaming.enabled
         and config.datamodule.streaming.producer_factory is not None
     ):
+        from anytrain.lightning import ManagedServiceCallback
+
         callbacks.append(
             ManagedServiceCallback(
                 streaming_synthesis_service,
