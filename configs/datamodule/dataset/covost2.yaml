@@ -1,0 +1,11 @@
+name: covost2
+root:
+split: validation
+filter:
+split_manifest:
+split_label: validation
+speaker:
+source_lang: zh
+target_lang: en
+toy_samples: 8
+toy_frames: 4

@@ -26,11 +26,18 @@ class TrainConfigContractTest(ConfigTestCase):
         self.assertEqual(default.model.lora.init_lora_weights, "pissa")
         self.assertFalse(default.runtime.gradient_checkpointing)
         self.assertEqual(default.optim.name, "adamw")
-        self.assertFalse(default.validation.enabled)
-        self.assertEqual(default.validation.loader, "tts")
-        self.assertEqual(default.validation.split_label, "dev")
-        self.assertEqual(default.validation.every_n_steps, 1000)
-        self.assertEqual(default.validation.sanity_steps, -1)
+        self.assertTrue(default.validation.enabled)
+        self.assertEqual(tuple(default.validation.loaders), ("s2tt", "tts"))
+        self.assertEqual(
+            default.validation.loaders["s2tt"].dataset.name,
+            DatasetName.COVOST2,
+        )
+        self.assertEqual(
+            default.validation.loaders["tts"].dataset.name,
+            DatasetName.LIBRITTS,
+        )
+        self.assertEqual(default.validation.every_n_steps, 10_000)
+        self.assertEqual(default.validation.sanity_steps, 0)
         self.assertFalse(default.callbacks.performance.enabled)
         self.assertTrue(default.datamodule.dataloader.costs.enabled)
         self.assertEqual(default.datamodule.dataloader.costs.max_batch_frames, 4800)
@@ -170,17 +177,23 @@ class TrainConfigContractTest(ConfigTestCase):
                 )
                 self.assertTrue(config.callbacks.task_sample.enabled)
                 self.assertEqual(config.callbacks.task_sample.every_n_steps, 10_000)
+                panels = config.callbacks.task_sample.panels
                 self.assertEqual(
-                    tuple(
-                        (panel.loader, panel.task) for panel in config.callbacks.task_sample.panels
-                    ),
+                    tuple((panel.loader, panel.task) for panel in panels[: len(expected_panels)]),
                     expected_panels,
                 )
                 self.assertTrue(
                     all(
                         panel.split == "train" and panel.indices == [0, 1, 2]
-                        for panel in config.callbacks.task_sample.panels
+                        for panel in panels[: len(expected_panels)]
                     )
+                )
+                self.assertEqual(
+                    tuple((panel.split, panel.loader, panel.task) for panel in panels[-2:]),
+                    (
+                        ("validation", "s2tt", "s2tt"),
+                        ("validation", "tts", "tts"),
+                    ),
                 )
 
     def test_static_ddp_rejects_multi_loader_dynamic_branches(self):
@@ -267,10 +280,7 @@ class TrainConfigContractTest(ConfigTestCase):
             )
 
     def test_stable_codec_stage1_long_run_enables_fixed_samples_for_asr_and_tts(self):
-        config = _train(
-            "experiment=train/stable_codec/stage_1",
-            "datamodule.dataset.split_manifest=/tmp/splits.json",
-        )
+        config = _train("experiment=train/stable_codec/stage_1")
 
         self.assertEqual(config.train.max_steps, 1_000_000)
         self.assertEqual(config.output_subdir, "stable-codec/stage_1/token")
@@ -304,22 +314,26 @@ class TrainConfigContractTest(ConfigTestCase):
             [
                 ("train", "asr", "asr", [0, 1, 2]),
                 ("train", "tts", "tts", [0, 1, 2]),
+                ("validation", "s2tt", "s2tt", [0, 1, 2]),
+                ("validation", "tts", "tts", [3, 4, 5]),
             ],
         )
         self.assertEqual(config.callbacks.checkpoint.every_n_train_steps, 10_000)
 
-    def test_validation_sample_panel_requires_validation_dataset(self):
-        with self.assertRaisesRegex(ValueError, "split_manifest"):
-            _train("experiment=train/stable_codec/stage_1")
+    def test_validation_sample_panel_requires_named_validation_loader(self):
+        with self.assertRaisesRegex(ValueError, "unknown validation loader"):
+            _train(
+                "experiment=train/stable_codec/stage_1",
+                "callbacks.task_sample.panels=[{split:validation,loader:missing,task:tts,indices:[0]}]",
+            )
 
     def test_mt_sample_panel_requires_train_split(self):
-        with self.assertRaisesRegex(ValueError, "validation.*speech loaders"):
+        with self.assertRaisesRegex(ValueError, "unknown validation loader"):
             _train(
                 "experiment=train/staged_joint/stage_1",
                 "callbacks.task_sample.enabled=true",
                 "callbacks.task_sample.panels=[{split:validation,loader:mt,task:mt,indices:[0]}]",
                 "validation.enabled=true",
-                "datamodule.dataset.split_manifest=/tmp/splits.json",
             )
 
     def test_train_datamodule_routes_mt_to_text_loader(self):
@@ -345,6 +359,19 @@ class TrainConfigContractTest(ConfigTestCase):
         self.assertEqual(datamodule.schedule.accumulate_grad_batches, 3)
         self.assertEqual(datamodule.schedule.step_mode, "fused_joint")
         self.assertTrue(datamodule.schedule.fuse_loaders_per_step)
+        self.assertEqual(datamodule.validation_names, ("s2tt", "tts"))
+        s2tt = datamodule.validation_specs["s2tt"]
+        tts = datamodule.validation_specs["tts"]
+        self.assertEqual(s2tt.task_weights, {Task.S2TT: 1.0})
+        self.assertEqual(tts.task_weights, {Task.TTS: 1.0})
+        if s2tt.speech_config is None or tts.speech_config is None:
+            self.fail("canonical validation loaders must use speech configs")
+        self.assertIs(s2tt.speech_config.shape, DataShape.PAIR)
+        self.assertIs(tts.speech_config.shape, DataShape.SINGLE)
+        self.assertTrue(s2tt.speech_config.encode_missing_codes)
+        self.assertTrue(tts.speech_config.encode_missing_codes)
+        self.assertFalse(s2tt.speech_config.dataloader.costs.enabled)
+        self.assertFalse(tts.speech_config.dataloader.costs.enabled)
 
         with self.assertRaisesRegex(ValueError, "cannot mix pure text and speech"):
             LoaderConfig(
@@ -399,9 +426,11 @@ class TrainConfigContractTest(ConfigTestCase):
         config = _train(
             "experiment=train/staged_joint/stage_1",
             "validation.enabled=true",
+            "~validation.loaders",
             "validation.loader=tts",
             "validation.split_label=dev",
             "datamodule.dataset.split_manifest=/tmp/splits.json",
+            "callbacks.task_sample.enabled=false",
         )
 
         datamodule = build_train_datamodule(config, object())
@@ -423,7 +452,9 @@ class TrainConfigContractTest(ConfigTestCase):
         config = _train(
             "experiment=train/staged_joint/stage_1",
             "validation.enabled=true",
+            "~validation.loaders",
             "validation.loader=mt",
+            "callbacks.task_sample.enabled=false",
         )
 
         datamodule = build_train_datamodule(config, object())
@@ -438,25 +469,35 @@ class TrainConfigContractTest(ConfigTestCase):
 
     def test_enabled_validation_requires_a_distinct_manifest_split(self):
         with self.assertRaisesRegex(ValueError, "split_manifest"):
-            _train("validation.enabled=true")
+            _train(
+                "validation.enabled=true",
+                "~validation.loaders",
+                "callbacks.task_sample.enabled=false",
+            )
         with self.assertRaisesRegex(ValueError, "unknown validation loader"):
             _train(
                 "validation.enabled=true",
+                "~validation.loaders",
                 "validation.loader=missing",
                 "datamodule.dataset.split_manifest=/tmp/splits.json",
+                "callbacks.task_sample.enabled=false",
             )
         mt = _train(
             "experiment=train/staged_joint/stage_1",
             "validation.enabled=true",
+            "~validation.loaders",
             "validation.loader=mt",
+            "callbacks.task_sample.enabled=false",
         )
         self.assertEqual(mt.validation.text_split, "validation")
         self.assertEqual(mt.validation.max_samples, 1000)
         with self.assertRaisesRegex(ValueError, "must differ"):
             _train(
                 "validation.enabled=true",
+                "~validation.loaders",
                 "validation.split_label=train",
                 "datamodule.dataset.split_manifest=/tmp/splits.json",
+                "callbacks.task_sample.enabled=false",
             )
 
     def test_train_trainer_forwards_step_validation_options(self):
@@ -464,7 +505,6 @@ class TrainConfigContractTest(ConfigTestCase):
             "validation.enabled=true",
             "validation.every_n_steps=25",
             "validation.sanity_steps=2",
-            "datamodule.dataset.split_manifest=/tmp/splits.json",
         )
         callbacks = []
 
@@ -484,7 +524,6 @@ class TrainConfigContractTest(ConfigTestCase):
         config = _train(
             "experiment=train/staged_joint/stage_1",
             "validation.enabled=true",
-            "validation.loader=mt",
             "validation.every_n_steps=25",
         )
 
@@ -509,7 +548,6 @@ class TrainConfigContractTest(ConfigTestCase):
             "loader_plan.loaders.mt.weight=1.0",
             "loader_plan.accumulate_grad_batches=3",
             "validation.enabled=true",
-            "validation.loader=mt",
             "validation.every_n_steps=25",
         )
 

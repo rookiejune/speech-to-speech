@@ -129,6 +129,53 @@ class ScheduledDataLoaderTest(unittest.TestCase):
         validation_loader.validation_dataloader.assert_called_once_with()
         validation_loader.train_dataloader.assert_not_called()
 
+    def test_datamodule_exposes_named_validation_loaders_in_stable_order(self) -> None:
+        train = LoaderSpec.speech(
+            SpeechConfig(
+                codec="longcat",
+                dataloader=DataLoaderConfig(batch_size=2, num_workers=0),
+            ),
+            {Task.TTS: 1.0},
+        )
+        s2tt = LoaderSpec.speech(
+            SpeechConfig(
+                codec="longcat",
+                dataloader=DataLoaderConfig(batch_size=1, num_workers=0),
+            ),
+            {Task.S2TT: 1.0},
+        )
+        tts = LoaderSpec.speech(
+            SpeechConfig(
+                codec="longcat",
+                dataloader=DataLoaderConfig(batch_size=1, num_workers=0),
+            ),
+            {Task.TTS: 1.0},
+        )
+        loaders = [Mock(), Mock()]
+        loaders[0].validation_dataloader.return_value = "s2tt-batches"
+        loaders[1].validation_dataloader.return_value = "tts-batches"
+
+        with (
+            patch(
+                "speech_to_speech.datamodule.module._build_loader",
+                return_value=Mock(),
+            ),
+            patch(
+                "speech_to_speech.datamodule.module._build_validation_loader",
+                side_effect=loaders,
+            ),
+        ):
+            datamodule = DataModule(
+                Mock(),
+                {"train": train},
+                validation={"s2tt": s2tt, "tts": tts},
+            )
+            validation = datamodule.val_dataloader()
+
+        self.assertEqual(datamodule.validation_names, ("s2tt", "tts"))
+        self.assertIsNone(datamodule.validation_spec)
+        self.assertEqual(validation, ["s2tt-batches", "tts-batches"])
+
     def test_diagnostic_panels_select_train_or_validation_data_and_one_task(self) -> None:
         train_spec = LoaderSpec.speech(
             SpeechConfig(
@@ -173,6 +220,60 @@ class ScheduledDataLoaderTest(unittest.TestCase):
         self.assertEqual(train, [train_samples[1]])
         self.assertEqual(validation, [validation_samples[2]])
         self.assertEqual(collator.tasks, [Task.T2ST])
+
+    def test_diagnostic_panels_select_named_validation_datasets(self) -> None:
+        train_spec = LoaderSpec.speech(
+            SpeechConfig(
+                codec="longcat",
+                dataloader=DataLoaderConfig(batch_size=1, num_workers=0),
+            ),
+            {Task.TTS: 1.0},
+        )
+        s2tt_spec = LoaderSpec.speech(
+            SpeechConfig(
+                codec="longcat",
+                dataloader=DataLoaderConfig(batch_size=1, num_workers=0),
+            ),
+            {Task.S2TT: 1.0},
+        )
+        tts_spec = LoaderSpec.speech(
+            SpeechConfig(
+                codec="longcat",
+                dataloader=DataLoaderConfig(batch_size=1, num_workers=0),
+            ),
+            {Task.TTS: 1.0},
+        )
+        train_samples = [object()]
+        s2tt_samples = [object(), object()]
+        tts_samples = [object(), object(), object()]
+
+        with patch(
+            "speech_to_speech.datamodule.module.load_dataset",
+            side_effect=[train_samples, s2tt_samples, tts_samples],
+        ):
+            datamodule = DataModule(
+                Mock(codec_name="longcat"),
+                {"train": train_spec},
+                validation={"s2tt": s2tt_spec, "tts": tts_spec},
+            )
+            datamodule.setup("fit")
+
+        self.assertEqual(
+            datamodule.diagnostic_samples(
+                [1],
+                split=SampleSplit.VALIDATION,
+                loader_name="s2tt",
+            ),
+            [s2tt_samples[1]],
+        )
+        self.assertEqual(
+            datamodule.diagnostic_samples(
+                [2],
+                split=SampleSplit.VALIDATION,
+                loader_name="tts",
+            ),
+            [tts_samples[2]],
+        )
 
     def test_text_diagnostic_panel_reads_global_iterable_indices(self) -> None:
         spec = LoaderSpec.text(

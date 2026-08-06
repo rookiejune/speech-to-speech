@@ -90,6 +90,9 @@ model 构造器不接收路径或执行文件 I/O。
 - `anytrain.lightning.validation.History`：正式训练入口启用 validation 时挂载该通用 callback；它在
   每次 validation 结束后收集 `val/*` 标量，区分 fit 前 sanity run 和 optimizer-step interval run，
   并把可恢复的 report 写入 `metrics.json`。本项目不重复实现 history state 或 scalar 校验。
+- `SpeechToSpeechModule.validation_step()` 接受 Lightning `dataloader_idx` 并使用 DataModule 提供的
+  stable loader names。CoVoST 2 `s2tt` batch 复用文本 generation evaluator，聚合
+  `val/s2tt/{bleu,chrf,wer}`；LibriTTS `tts` batch 使用 `val/tts/...` teacher-forcing 指标。
 - `AcousticEvaluation`：对 fixed-sample acoustic model 使用本地 generator seeds 采样，记录 feature、
   waveform 与 STFT 距离；纯评估函数位于 `generation.evaluation`，不留在脚本私有模块。
 - `TaskSampleLogger`：只在 global zero 读取 datamodule 的公开 fixed-sample/diagnostic API，正式训练
@@ -180,8 +183,10 @@ FlashAttention 或其他 custom op 也可能不在通用算子计数覆盖范围
 - `OutputsLogger` 的 TensorBoard tag 按通道归组：`token/{key}/{task}` 与
   `alignment/ctc/{key}/{task}`、`acoustic/{rvq|flow_matching|repa}/{key}/{task}`；`repa` 与 `rvq` / `flow_matching` 平级，
   不嵌套在 flow 下。验证指标使用同一路径并加 `val/` 前缀。
-- validation 是 teacher-forcing loss/accuracy 口径，不调用 autoregressive generation；真实生成质量
-  仍由 generation callback 与独立结果文档验收。
+- TTS validation 主指标仍是 teacher-forcing loss/accuracy；LibriTTS 固定样本额外调用
+  autoregressive generation 并记录 target/generated waveform 与基础波形统计。S2TT validation 直接
+ 进行 greedy generation 并聚合 BLEU/chrF/WER。上述训练期监控仍不替代完整 TTS 可懂度、speaker
+  similarity、MOS 或独立结果文档验收。
 - 正式 `scripts/train.py` 使用 `anytrain.lightning.ModelCheckpoint` 的默认异步保存；checkpoint
   目录、命名、保留数量和触发步数仍由本项目配置拥有。
 - `SpeechToSpeechModule` 把 `model.checkpoint_contract` 保存为必需的

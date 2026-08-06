@@ -62,8 +62,11 @@
   find-unused DDP；`serial_joint` 每个 optimizer step 串行消费每个非零 loader 一次，必须使用
   find-unused DDP。weighted mode 的 loader weight 表示采样频率；joint mode 的 loader
   weight 表示归一化 task loss 权重。每个子 loader 自己保持单一 execution signature。
-- `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts`、`qwen_tts_speaker` prepared data
-  或确定性的内存 `toy` data。`qwen_tts_speaker` 通过 workspace 加载
+- `DatasetConfig` / `load_dataset()`：显式选择 `wmt19_tts`、`qwen_tts_speaker` prepared data、
+  canonical online `covost2` / `libritts` validation source，或确定性的内存 `toy` data。
+  CoVoST 2 固定返回 source audio/transcript + target translation 的 pair sample；LibriTTS 固定返回
+  `Role.DEFAULT` waveform + normalized text 的 single sample。两者调用 workspace pinned loader，
+  不接受本地 root/filter 覆写。`qwen_tts_speaker` 通过 workspace 加载
   `SpeakerAudioGrid`，再由 `SpeakerGridCellsDataset` 暴露 `Role.DEFAULT` flat cells；默认覆盖
   所有 speaker，也可用 `speaker` 显式选择一列。它的 `filter` 是绑定当前 waveform/codec
   grid snapshot 的 source-level selection revision，默认 `null`；不复用 WMT19-TTS 生成前的
@@ -122,8 +125,9 @@ speaker grid 构造 voice-clone 数据，应在 dataset 边界产出上述 pair�
   sample_index=...)`，纯文本 loader 使用 `LoaderSpec.text(config, task_weights)`。`setup()` 加载
   所选 dataset，并在加载前校验 speech config 与 runtime 的 codec identity；重复调用不会重新
   加载已持有的数据集。fixed-sample overfit 只是 speech spec 的 `sample_index` 变体，仍复用
-  `diagnostic_samples()` 边界供 callback 读取 raw sample。可选 `validation` 是独立的 `LoaderSpec`；
-  `val_dataloader()` 不进入 train schedule，也不复用 train loader instance。
+  `diagnostic_samples()` 边界供 callback 读取 raw sample。可选 `validation` 接受单个 `LoaderSpec` 或
+  `name -> LoaderSpec` 映射；named loaders 按映射顺序返回给 Lightning，均不进入 train schedule，
+  也不复用 train loader instance。speech validation spec 可用 `max_samples` 取确定性前缀。
   `diagnostic_samples()` 显式选择 train/validation 数据源；`diagnostic_collator()` 为 panel 指定的
   单一 task 构造独立 collator，不修改训练 loader 的共享 task weights。speech 与 text train loader
   都提供这两个 diagnostic 边界；text loader 对 WMT19 iterable dataset 使用 global shard 的固定
@@ -652,14 +656,13 @@ BOA/schema selector/EOA 则排除。
   不能开启 costs。多 loader train 的外层 `ScheduledDataLoader` 不接受 Lightning 注入
   sampler；正式 distributed sample partition 由各 loader 的公开 dataloader 契约负责。
 - validation speech loader 使用同一公开 batch planner 和 distributed partition，但显式关闭
-  shuffle。正式 train 入口从一个现有 stage speech loader 复制 task weights 与 speech config，
-  只把复制后的 `DatasetConfig.split_label` 改为 dev；训练 spec 与 dataset config 保持不变。
-  validation diagnostic panel 读取该独立数据源，但使用 panel 的 task-specific collator，因此同一
-  paired speech split 可同时监督 ASR 与 TTS generation。
+  shuffle。canonical `s2tt` / `tts` loaders 分别持有 CoVoST 2 pair config 和 LibriTTS single config；
+  raw waveform collate 为 `RawSpeechBatch`，统一由 `OnDeviceCodecMaterializer` 编码。删除 named mapping
+  时，旧单-loader入口仍可从现有 stage loader 复制 task/config 并切换 manifest `split_label`。
+  validation diagnostic panel 按 loader name 读取对应独立数据源，并使用 task-specific collator。
 - train loader 与 validation loader 使用独立的窄 Protocol。没有 validation spec 时
-  `DataModule.val_dataloader()` 返回空 iterable，Lightning 不运行 validation；text loader 不提供
-  `validation_dataloader()`，把 text spec 作为 validation 传入时在 DataModule 构造边界直接报错，
-  不用 training loader 伪装 validation。
+  `DataModule.val_dataloader()` 返回空 iterable，Lightning 不运行 validation；一个 validation 返回
+  单 loader，多个 validation 返回稳定顺序的 loader list。
 - `DataModule.diagnostic_samples()` 是 callback 按 split、loader 和索引读取已 setup 样本的公开边界；
   callback 不读取私有 dataset 字段。text loader 的 iterable dataset 通过 `iter_shard(1, 0)` 读取固定
   global indices，避免 callback 样本随 world size 变化。诊断代码通过 `diagnostic.source_item()` / `target_item()` 按 task

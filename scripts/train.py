@@ -30,6 +30,13 @@ from speech_to_speech.callback.logging import (
     TaskSampleLogger,
 )
 from speech_to_speech.datamodule import SampleSplit
+from speech_to_speech.datamodule.config import (
+    AssetMaterializationConfig,
+    DataLoaderConfig,
+    DataLoaderCostsConfig,
+    StreamingConfig,
+    TaskConfig,
+)
 from speech_to_speech.datamodule.module import DataModule
 from speech_to_speech.datamodule.loader import LoaderConfig, LoaderSchedule
 from speech_to_speech.datamodule.module import LoaderSpec
@@ -47,7 +54,7 @@ from speech_to_speech.task import Task
 
 if TYPE_CHECKING:
     from speech_to_speech.runtime import Runtime
-    from scripts._config.train import StagedTrainConfig
+    from scripts._config.train import StagedTrainConfig, ValidationLoaderConfig
 
 if __package__:
     from ._config.train import train as parse_config
@@ -78,10 +85,13 @@ def run(config: StagedTrainConfig) -> None:
     schedule_runtime = build_unit_schedule(config.optim.schedule)
     module.optim = config.optim
     module.schedule_runtime = schedule_runtime
-    if config.datamodule.encode_missing_codes is True:
+    if config.datamodule.encode_missing_codes is True or (
+        config.validation.enabled and bool(config.validation.loaders)
+    ):
         module.batch_materializer = OnDeviceCodecMaterializer(rt)
 
     datamodule = build_datamodule(config, rt)
+    module.set_validation_loader_names(datamodule.validation_names)
     summary = LossSummary()
     validation_history = validation.History() if config.validation.enabled else None
     callbacks = training_callbacks(
@@ -149,7 +159,7 @@ def build_datamodule(config: StagedTrainConfig, runtime: Runtime) -> DataModule:
             step_mode=config.loader_plan.step_mode,
         ),
         validation=(
-            _validation_spec(config) if config.validation.enabled else None
+            _validation_specs(config) if config.validation.enabled else None
         ),
     )
 
@@ -174,7 +184,47 @@ def _loader_spec(
     )
 
 
-def _validation_spec(config: StagedTrainConfig) -> LoaderSpec:
+def _validation_specs(
+    config: StagedTrainConfig,
+) -> LoaderSpec | dict[str, LoaderSpec]:
+    if config.validation.loaders:
+        return {
+            name: _canonical_validation_spec(config, loader)
+            for name, loader in config.validation.loaders.items()
+        }
+    return _legacy_validation_spec(config)
+
+
+def _canonical_validation_spec(
+    config: StagedTrainConfig,
+    loader: ValidationLoaderConfig,
+) -> LoaderSpec:
+    task = Task(loader.task)
+    speech = replace(
+        config.datamodule,
+        dataloader=DataLoaderConfig(
+            batch_size=loader.batch_size,
+            num_workers=loader.num_workers,
+            pin_memory=False,
+            persistent_workers=False,
+            costs=DataLoaderCostsConfig(),
+        ),
+        shape=loader.shape,
+        encode_missing_codes=True,
+        tasks={task: TaskConfig(template=0)},
+        dataset=loader.dataset,
+        materialization=AssetMaterializationConfig(),
+        streaming=StreamingConfig(),
+    )
+    return LoaderSpec.speech(
+        speech,
+        {task: 1.0},
+        trace=loader.trace,
+        max_samples=loader.max_samples,
+    )
+
+
+def _legacy_validation_spec(config: StagedTrainConfig) -> LoaderSpec:
     loader = config.loader_plan.loaders[config.validation.loader]
     if loader.is_text:
         dataset = replace(

@@ -5,6 +5,7 @@ from typing import Optional, Type, Union
 from omegaconf import MISSING, DictConfig
 
 from speech_to_speech.datamodule.config import SpeechConfig
+from speech_to_speech.datamodule.dataset.speech import DatasetConfig, DatasetName
 from speech_to_speech.datamodule.loader import (
     LoaderPlanConfig,
     LoaderSchedule,
@@ -19,6 +20,7 @@ from speech_to_speech.pl_module import Config as ModuleConfig
 from speech_to_speech.runtime import AudioSequenceLayout, Config as RuntimeConfig
 from speech_to_speech.training.parameter_policy import ParameterPolicyConfig
 from speech_to_speech.task import TARGET_COT, Task, resolve_response
+from speech_to_speech.datamodule.sample import DataShape
 
 from speech_to_speech.training.config import (
     FlowModelConfig,
@@ -49,6 +51,49 @@ class ResumableTrainConfig(TrainConfig):
 
 
 @dataclass
+class ValidationLoaderConfig:
+    task: str = MISSING
+    shape: DataShape = DataShape.PAIR
+    dataset: DatasetConfig = MISSING
+    max_samples: Optional[int] = 1000
+    batch_size: int = 1
+    num_workers: int = 0
+    trace: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task, str) or not self.task:
+            raise TypeError("validation loader task must be a non-empty string.")
+        try:
+            task = Task(self.task)
+        except ValueError as error:
+            raise ValueError(f"unknown validation task {self.task!r}.") from error
+        if not isinstance(self.shape, DataShape):
+            raise TypeError("validation loader shape must be a DataShape.")
+        if not isinstance(self.dataset, DatasetConfig):
+            raise TypeError("validation loader dataset must be a DatasetConfig.")
+        if self.max_samples is not None:
+            positive_integer(self.max_samples, "validation loader max_samples")
+        positive_integer(self.batch_size, "validation loader batch_size")
+        non_negative_integer(self.num_workers, "validation loader num_workers")
+        if self.trace is not None and (
+            not isinstance(self.trace, str) or not self.trace
+        ):
+            raise TypeError("validation loader trace must be a non-empty string or None.")
+        resolve_response(task, trace=self.trace)
+        if self.dataset.name is DatasetName.COVOST2:
+            if task is not Task.S2TT or self.shape is not DataShape.PAIR:
+                raise ValueError("covost2 validation requires task=s2tt and shape=pair.")
+            return
+        if self.dataset.name is DatasetName.LIBRITTS:
+            if task is not Task.TTS or self.shape is not DataShape.SINGLE:
+                raise ValueError("libritts validation requires task=tts and shape=single.")
+            return
+        raise ValueError(
+            "canonical validation loaders support only covost2 and libritts datasets."
+        )
+
+
+@dataclass
 class ValidationConfig:
     enabled: bool = False
     loader: str = "tts"
@@ -57,6 +102,7 @@ class ValidationConfig:
     max_samples: int = 1000
     every_n_steps: int = 1000
     sanity_steps: int = -1
+    loaders: dict[str, ValidationLoaderConfig] = field(default_factory=dict)
 
 
 @dataclass
@@ -315,19 +361,26 @@ def _validate_task_samples(config: StagedTrainConfig) -> None:
         loader_name = panel.loader
         if not isinstance(loader_name, str) or not loader_name:
             raise TypeError("task sample loader names must be non-empty strings.")
-        if loader_name not in config.loader_plan.loaders:
-            raise ValueError(
-                f"task sample callback references unknown loader {loader_name!r}."
-            )
-        loader = config.loader_plan.loaders[loader_name]
         try:
             task = Task(panel.task)
         except ValueError as error:
             raise ValueError(f"unknown task sample task {panel.task!r}.") from error
-        if loader.tasks.get(task, 0.0) <= 0:
-            raise ValueError(
-                f"task sample task {task.value!r} is not active in loader "
-                f"{loader_name!r}."
+        if panel.split == "train":
+            if loader_name not in config.loader_plan.loaders:
+                raise ValueError(
+                    f"task sample callback references unknown loader {loader_name!r}."
+                )
+            loader = config.loader_plan.loaders[loader_name]
+            if loader.tasks.get(task, 0.0) <= 0:
+                raise ValueError(
+                    f"task sample task {task.value!r} is not active in loader "
+                    f"{loader_name!r}."
+                )
+        else:
+            _validate_validation_sample_panel(
+                config,
+                loader_name=loader_name,
+                task=task,
             )
         if not panel.indices:
             raise ValueError(
@@ -350,15 +403,42 @@ def _validate_task_samples(config: StagedTrainConfig) -> None:
                     "coordinates and must not collide on task+index."
                 )
             seen.add(key)
-        if panel.split == "validation":
-            if loader.is_text:
-                raise ValueError(
-                    "validation task sample panels require speech loaders."
-                )
-            if not config.validation.enabled:
-                raise ValueError(
-                    "validation task sample panels require validation.enabled=true."
-                )
+
+
+def _validate_validation_sample_panel(
+    config: StagedTrainConfig,
+    *,
+    loader_name: str,
+    task: Task,
+) -> None:
+    if not config.validation.enabled:
+        raise ValueError(
+            "validation task sample panels require validation.enabled=true."
+        )
+    if config.validation.loaders:
+        try:
+            loader = config.validation.loaders[loader_name]
+        except KeyError as error:
+            raise ValueError(
+                f"task sample callback references unknown validation loader {loader_name!r}."
+            ) from error
+        if Task(loader.task) is not task:
+            raise ValueError(
+                f"validation loader {loader_name!r} is configured for task "
+                f"{loader.task!r}, not {task.value!r}."
+            )
+        return
+    if loader_name not in config.loader_plan.loaders:
+        raise ValueError(
+            f"task sample callback references unknown loader {loader_name!r}."
+        )
+    loader = config.loader_plan.loaders[loader_name]
+    if loader.is_text:
+        raise ValueError("validation task sample panels require speech loaders.")
+    if loader.tasks.get(task, 0.0) <= 0:
+        raise ValueError(
+            f"task sample task {task.value!r} is not active in loader {loader_name!r}."
+        )
 
 
 def _validate_callback_cadences(config: StagedCallbacksConfig) -> None:
@@ -470,6 +550,15 @@ def _validate_validation(config: StagedTrainConfig) -> None:
         raise TypeError("validation sanity_steps must be -1 or non-negative.")
     if not validation.enabled:
         return
+    if validation.loaders:
+        for name, loader in validation.loaders.items():
+            if not isinstance(name, str) or not name:
+                raise TypeError("validation loader names must be non-empty strings.")
+            if not isinstance(loader, ValidationLoaderConfig):
+                raise TypeError(
+                    "validation loaders must contain ValidationLoaderConfig values."
+                )
+        return
     if validation.loader not in config.loader_plan.loaders:
         raise ValueError(f"unknown validation loader {validation.loader!r}.")
     loader = config.loader_plan.loaders[validation.loader]
@@ -502,5 +591,6 @@ __all__ = [
     "TaskSamplePanelConfig",
     "TextProbeConfig",
     "ValidationConfig",
+    "ValidationLoaderConfig",
     "train",
 ]

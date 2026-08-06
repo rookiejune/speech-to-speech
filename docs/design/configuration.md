@@ -24,7 +24,9 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
 - `datamodule`：speech 数据源 preset，通过
   `datamodule/dataset=<name>` 组合到统一的
   `SpeechConfig.dataset`；`datamodule/dataset=toy` 选择内存 codec samples，
-  production/fixed-sample experiment 默认仍使用 WMT19 TTS prepared data。需要固定正式
+  production/fixed-sample experiment 默认仍使用 WMT19 TTS prepared data；`covost2` 与
+  `libritts` 是 canonical online validation source，分别固定服务 S2TT 与 TTS，不作为训练数据的
+  隐式替换。需要固定正式
   train/dev/test 子集时，通过 `DatasetConfig.split_manifest` 和 `split_label` 显式选择
   manifest 中的索引集合。task template 也在 `datamodule` 上：
   `datamodule.tasks.<task>.template`（`int` 固定下标，`null` 随机；字段默认 `0`，正式
@@ -217,13 +219,20 @@ generator plugin 预训练、codec 筛选和 generator artifact 导出属于仓�
 `model.acoustic.init_artifact`，composition 再在构造 S2S model 前校验 artifact 的 route、frame
 layout、decoder 配置和 acoustic backend metadata。该变量缺失或为空时 wrapper 在启动 Python 前失败。
 
-正式 train 的 `validation` 默认关闭。启用时，`loader` 必须选择当前 `loader_plan` 的一个 speech loader，
-且 `datamodule.dataset.split_manifest` 必须存在、`split_label` 必须与训练 split 不同。入口复制该 loader
-的 task weights 与 speech data config，仅替换 dev `split_label`；配置的 `every_n_steps` 使用
-optimizer-step 语义；`fused_joint` 下入口传给 Lightning 的 batch 级 `val_check_interval` 等于该
-step 数，`serial_joint` 下乘以 `loader_plan.accumulate_grad_batches`。`sanity_steps=-1` 表示 fit 前遍历完整 dev split，非负值表示对应 sanity batch
-数。为了让 step interval 不受 epoch 边界控制，入口同时设置
-`check_val_every_n_epoch=None`。每次 sanity/interval 结果按 step 记录到 `metrics.json.validation`。
+正式 staged train 默认启用两个 named validation loader：`s2tt` 使用 workspace CoVoST 2
+`zh -> en / validation`，`tts` 使用 LibriTTS `dev-clean`。两者读取 raw waveform，通过显式
+`encode_missing_codes=true` 在模型设备上编码，并使用固定 template 0、batch size 1、关闭 cost
+planning；默认各取确定性的前 1000 条用于训练期监控，设 `max_samples=null` 可遍历完整 canonical
+split。`sanity_steps=0` 避免 fit 前触发大规模下载/编码，默认每 10000 optimizer steps 验证一次。
+S2TT validation 做 greedy generation 并记录 BLEU/chrF/WER；TTS validation 记录 teacher-forcing
+loss/accuracy，固定 LibriTTS 样本的自回归波形由 `TaskSampleLogger` 同步归档。
+
+`validation.loaders` 映射的顺序同时定义 Lightning `dataloader_idx` 与指标命名。删除该映射后仍可使用
+旧的单-loader manifest validation：`loader` 选择当前 `loader_plan` 中的 speech/MT loader，speech
+路径要求 `datamodule.dataset.split_manifest` 且 `split_label` 与训练 split 不同。两种模式的
+`every_n_steps` 都使用 optimizer-step 语义；`fused_joint` 下 batch 级 `val_check_interval` 等于该
+step 数，`serial_joint` 下乘以 `loader_plan.accumulate_grad_batches`。入口设置
+`check_val_every_n_epoch=None`，每次结果按 step 写入 `metrics.json.validation`。
 
 ## 入口边界
 

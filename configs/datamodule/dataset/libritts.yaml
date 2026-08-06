@@ -1,0 +1,11 @@
+name: libritts
+root:
+split: dev-clean
+filter:
+split_manifest:
+split_label: validation
+speaker:
+source_lang:
+target_lang:
+toy_samples: 8
+toy_frames: 4

@@ -93,13 +93,52 @@ train:
   auto_resume: false
 
 validation:
-  enabled: false
+  enabled: true
   loader: tts
   split_label: dev
   text_split: validation
   max_samples: 1000
-  every_n_steps: 1000
-  sanity_steps: -1
+  every_n_steps: 10000
+  sanity_steps: 0
+  loaders:
+    s2tt:
+      task: s2tt
+      shape: pair
+      max_samples: 1000
+      batch_size: 1
+      num_workers: 0
+      trace:
+      dataset:
+        name: covost2
+        root:
+        split: validation
+        filter:
+        split_manifest:
+        split_label: validation
+        speaker:
+        source_lang: zh
+        target_lang: en
+        toy_samples: 8
+        toy_frames: 4
+    tts:
+      task: tts
+      shape: single
+      max_samples: 1000
+      batch_size: 1
+      num_workers: 0
+      trace:
+      dataset:
+        name: libritts
+        root:
+        split: dev-clean
+        filter:
+        split_manifest:
+        split_label: validation
+        speaker:
+        source_lang:
+        target_lang:
+        toy_samples: 8
+        toy_frames: 4
 
 callbacks:
   synthesis_sample:

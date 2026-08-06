@@ -35,6 +35,8 @@ from ..sample import AudioContextCostRow, AudioContextSample
 
 
 class DatasetName(StrEnum):
+    COVOST2 = auto()
+    LIBRITTS = auto()
     QWEN_TTS_SPEAKER = auto()
     STREAMING_S2ST = auto()
     WMT19_TTS = auto()
@@ -50,6 +52,8 @@ class DatasetConfig:
     split_manifest: Optional[str] = None
     split_label: str = "train"
     speaker: Optional[str] = None
+    source_lang: Optional[str] = None
+    target_lang: Optional[str] = None
     toy_samples: int = 8
     toy_frames: int = 4
 
@@ -82,6 +86,13 @@ class DatasetConfig:
                 raise TypeError("dataset speaker must be a string or None.")
             if not self.speaker:
                 raise ValueError("dataset speaker must not be empty.")
+        for name in ("source_lang", "target_lang"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, str):
+                raise TypeError(f"dataset {name} must be a string or None.")
+            if value == "":
+                raise ValueError(f"dataset {name} must not be empty.")
+        self._validate_canonical_evaluation_dataset()
         for name, value in (
             ("toy_samples", self.toy_samples),
             ("toy_frames", self.toy_frames),
@@ -90,6 +101,32 @@ class DatasetConfig:
                 raise TypeError(f"{name} must be an integer.")
             if value <= 0:
                 raise ValueError(f"{name} must be positive.")
+
+    def _validate_canonical_evaluation_dataset(self) -> None:
+        if self.name is DatasetName.COVOST2:
+            if self.root is not None:
+                raise ValueError("covost2 uses the canonical workspace loader and no root override.")
+            if self.filter is not None:
+                raise ValueError("covost2 does not accept a dataset filter.")
+            if self.speaker is not None:
+                raise ValueError("covost2 does not accept speaker selection.")
+            if self.source_lang is None or self.target_lang is None:
+                raise ValueError("covost2 requires source_lang and target_lang.")
+            return
+        if self.name is DatasetName.LIBRITTS:
+            if self.root is not None:
+                raise ValueError("libritts uses the canonical workspace loader and no root override.")
+            if self.filter is not None:
+                raise ValueError("libritts does not accept a dataset filter.")
+            if self.speaker is not None:
+                raise ValueError("libritts does not accept speaker selection.")
+            if self.source_lang is not None or self.target_lang is not None:
+                raise ValueError("libritts does not accept source or target languages.")
+            return
+        if self.source_lang is not None or self.target_lang is not None:
+            raise ValueError(
+                "dataset source_lang and target_lang are supported only by covost2."
+            )
 
 
 class SplitManifestDataset(MapStyleABC):
@@ -465,6 +502,27 @@ class DualAudioDataset(MapStyleABC):
 
 
 def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Sample]:
+    if config.name is DatasetName.COVOST2:
+        from zhuyin.datasets import covost2
+
+        return cast(
+            Dataset[Sample],
+            cast(
+                object,
+                covost2.load(
+                    split=config.split,
+                    source_lang=cast(str, config.source_lang),
+                    target_lang=cast(str, config.target_lang),
+                ),
+            ),
+        )
+    if config.name is DatasetName.LIBRITTS:
+        from zhuyin.datasets import libritts
+
+        return cast(
+            Dataset[Sample],
+            cast(object, libritts.load(split=config.split)),
+        )
     if config.name is DatasetName.TOY:
         _reject_speaker(config)
         distinct_audio_assets = uses_distinct_audio_assets(runtime)

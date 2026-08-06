@@ -112,8 +112,9 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         self._current_loss_outputs: Outputs | None = None
         self._current_gradient_loss_groups: dict[str, Outputs] | None = None
         self._current_gradient_loader_outputs: tuple[tuple[str, Outputs], ...] | None = None
-        self.mt_validation_evaluator = TextComparisonEvaluator()
-        self._mt_validation_seen = False
+        self.validation_loader_names: tuple[str, ...] = ()
+        self.text_validation_evaluators: dict[str, TextComparisonEvaluator] = {}
+        self._text_validation_seen: set[str] = set()
 
     def training_step(self, batch: TrainBatch, batch_idx: int = 0):
         del batch_idx
@@ -130,33 +131,71 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
         )
         return outputs
 
-    def validation_step(self, batch: TrainInput, batch_idx: int = 0):
+    def validation_step(
+        self,
+        batch: TrainInput,
+        batch_idx: int = 0,
+        dataloader_idx: int = 0,
+    ):
         del batch_idx
         materialized = self.materialize_batch(batch)
-        if _is_mt_validation_batch(materialized):
-            return self._mt_validation_step(materialized)
+        namespace = _validation_namespace(
+            self.validation_loader_names,
+            dataloader_idx,
+        )
+        text_task = _text_generation_validation_task(materialized)
+        if text_task is not None:
+            return self._text_validation_step(
+                materialized,
+                task=text_task,
+                namespace=namespace,
+            )
         outputs = self._outputs(materialized, self.objective.validation)
-        validation.log(self, validation_metrics(outputs))
+        validation.log(
+            self,
+            validation_metrics(outputs),
+            prefix="val" if namespace is None else f"val/{namespace}",
+        )
         return outputs
 
     def on_validation_epoch_start(self) -> None:
-        self.mt_validation_evaluator.reset()
-        self._mt_validation_seen = False
+        for evaluator in self.text_validation_evaluators.values():
+            evaluator.reset()
+        self._text_validation_seen.clear()
 
     def on_validation_epoch_end(self) -> None:
-        if not _distributed_any(self._mt_validation_seen, self.device):
-            return
-        metrics = self.mt_validation_evaluator.compute()
-        for name, value in sorted(metrics.items()):
-            self.log(
-                f"val/mt/{name}",
-                float(value),
-                on_step=False,
-                on_epoch=True,
-                sync_dist=False,
-            )
+        for namespace, evaluator in sorted(self.text_validation_evaluators.items()):
+            if not _distributed_any(namespace in self._text_validation_seen, self.device):
+                continue
+            metrics = evaluator.compute()
+            for name, value in sorted(metrics.items()):
+                self.log(
+                    f"val/{namespace}/{name}",
+                    float(value),
+                    on_step=False,
+                    on_epoch=True,
+                    sync_dist=False,
+                )
 
-    def _mt_validation_step(self, batch: ModelBatch) -> dict[str, torch.Tensor]:
+    def set_validation_loader_names(self, names: Sequence[str]) -> None:
+        resolved = tuple(names)
+        if any(not isinstance(name, str) or not name for name in resolved):
+            raise ValueError("validation loader names must be non-empty strings.")
+        self.validation_loader_names = resolved
+        for name in resolved:
+            if name != "validation":
+                self.text_validation_evaluators.setdefault(
+                    name,
+                    TextComparisonEvaluator(),
+                )
+
+    def _text_validation_step(
+        self,
+        batch: ModelBatch,
+        *,
+        task: Task,
+        namespace: str | None,
+    ) -> dict[str, torch.Tensor]:
         generations = generate_responses(
             requests_from_batch(batch),
             self.model,
@@ -167,10 +206,15 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
             decode_text_ids(self.model.runtime, result["response_ids"]) for result in generations
         ]
         references = _reference_texts(batch, self.model.runtime)
-        self.mt_validation_evaluator.update(predictions, references)
-        self._mt_validation_seen = True
+        metric_namespace = task.value if namespace is None else namespace
+        evaluator = self.text_validation_evaluators.setdefault(
+            metric_namespace,
+            TextComparisonEvaluator(),
+        )
+        evaluator.update(predictions, references)
+        self._text_validation_seen.add(metric_namespace)
         return {
-            "mt_validation_samples": batch.input_ids.new_tensor(
+            f"{metric_namespace}_validation_samples": batch.input_ids.new_tensor(
                 len(predictions),
                 dtype=torch.float32,
             )
@@ -411,11 +455,32 @@ def _scale_training_output(output: Outputs, scale: float | None) -> Outputs:
     return result
 
 
-def _is_mt_validation_batch(batch: ModelBatch) -> bool:
-    return bool(batch.tasks) and all(
-        task is Task.MT and prediction is PredictionModality.TEXT
-        for task, prediction in zip(batch.tasks, batch.predictions)
-    )
+def _text_generation_validation_task(batch: ModelBatch) -> Task | None:
+    if not batch.tasks:
+        return None
+    task = batch.tasks[0]
+    if task not in {Task.MT, Task.S2TT}:
+        return None
+    if all(
+        candidate is task and prediction is PredictionModality.TEXT
+        for candidate, prediction in zip(batch.tasks, batch.predictions)
+    ):
+        return task
+    return None
+
+
+def _validation_namespace(
+    names: Sequence[str],
+    dataloader_idx: int,
+) -> str | None:
+    if not names:
+        return None
+    if dataloader_idx < 0 or dataloader_idx >= len(names):
+        raise IndexError(
+            f"validation dataloader index {dataloader_idx} is outside {len(names)} loaders."
+        )
+    name = names[dataloader_idx]
+    return None if name == "validation" else name
 
 
 def _distributed_any(value: bool, device: torch.device) -> bool:

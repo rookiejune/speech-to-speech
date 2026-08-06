@@ -11,6 +11,58 @@ from speech_to_speech.datamodule.dataset.speech import uses_distinct_audio_asset
 
 
 class DataModuleContractTest(unittest.TestCase):
+    def test_canonical_covost2_validation_uses_workspace_loader(self):
+        dataset = [Mock()]
+        covost2 = SimpleNamespace(load=Mock(return_value=dataset))
+        datasets = ModuleType("zhuyin.datasets")
+        datasets.covost2 = covost2
+        config = DatasetConfig(
+            name=DatasetName.COVOST2,
+            split="validation",
+            filter=None,
+            source_lang="zh",
+            target_lang="en",
+        )
+
+        with patch.dict(
+            sys.modules,
+            {
+                "zhuyin": ModuleType("zhuyin"),
+                "zhuyin.datasets": datasets,
+            },
+        ):
+            loaded = load_dataset(config, _data_runtime())
+
+        self.assertIs(loaded, dataset)
+        covost2.load.assert_called_once_with(
+            split="validation",
+            source_lang="zh",
+            target_lang="en",
+        )
+
+    def test_canonical_libritts_validation_uses_workspace_loader(self):
+        dataset = [Mock()]
+        libritts = SimpleNamespace(load=Mock(return_value=dataset))
+        datasets = ModuleType("zhuyin.datasets")
+        datasets.libritts = libritts
+        config = DatasetConfig(
+            name=DatasetName.LIBRITTS,
+            split="dev-clean",
+            filter=None,
+        )
+
+        with patch.dict(
+            sys.modules,
+            {
+                "zhuyin": ModuleType("zhuyin"),
+                "zhuyin.datasets": datasets,
+            },
+        ):
+            loaded = load_dataset(config, _data_runtime())
+
+        self.assertIs(loaded, dataset)
+        libritts.load.assert_called_once_with(split="dev-clean")
+
     @patch("speech_to_speech.datamodule.module.load_dataset")
     def test_datamodule_setup_loads_dataset_once(self, load_dataset):
         load_dataset.return_value = []
@@ -28,6 +80,29 @@ class DataModuleContractTest(unittest.TestCase):
         datamodule.setup()
 
         load_dataset.assert_called_once_with(config.dataset, runtime)
+
+    @patch("speech_to_speech.datamodule.module.load_dataset")
+    def test_speech_validation_max_samples_builds_a_deterministic_prefix(self, load_dataset):
+        samples = [_raw_sample() for _ in range(5)]
+        load_dataset.return_value = samples
+        runtime = _data_runtime()
+        config = SpeechConfig(
+            codec="longcat",
+            dataloader=DataLoaderConfig(batch_size=2, num_workers=0),
+        )
+        spec = LoaderSpec.speech(
+            config,
+            {Task.TTS: 1.0},
+            max_samples=3,
+        )
+        datamodule = DataModule(runtime, {"train": spec}, validation=spec)
+
+        datamodule.setup()
+        validation = cast(Any, datamodule.val_dataloader())
+
+        self.assertEqual(len(validation.dataset), 3)
+        self.assertEqual(list(validation.dataset.indices), [0, 1, 2])
+        self.assertEqual(validation.batch_size, 2)
 
     @patch("speech_to_speech.datamodule.module.load_dataset")
     def test_multi_loader_shares_speech_dataset_and_worker_budget(

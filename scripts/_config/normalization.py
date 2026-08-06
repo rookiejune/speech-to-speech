@@ -71,6 +71,7 @@ def prepare(config: DictConfig) -> DictConfig:
     _dataset(result.get("datamodule", {}).get("dataset"))
     _data_shape(result.get("datamodule"))
     _data_tasks(result.get("datamodule"))
+    _validation_loaders(result.get("validation"))
     _text_dataset(result.get("text_datamodule", {}).get("dataset"))
     _audio_sequence_layout(result)
     _reject_audio_representation(result)
@@ -157,6 +158,19 @@ def _data_tasks(value: object) -> None:
             # OmegaConf enum-key dictionaries accept member names at the schema boundary.
             renamed[task.name] = tasks[key]
         value.tasks = renamed
+
+
+def _validation_loaders(value: object) -> None:
+    if not isinstance(value, DictConfig):
+        return
+    loaders = value.get("loaders")
+    if not isinstance(loaders, DictConfig):
+        return
+    for loader in loaders.values():
+        if not isinstance(loader, DictConfig):
+            continue
+        _dataset(loader.get("dataset"))
+        _data_shape(loader)
 
 
 def _text_dataset(value: object) -> None:

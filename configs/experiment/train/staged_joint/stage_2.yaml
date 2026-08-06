@@ -76,3 +76,11 @@ callbacks:
         loader: mt
         task: mt
         indices: [0, 1, 2]
+      - split: validation
+        loader: s2tt
+        task: s2tt
+        indices: [3, 4, 5]
+      - split: validation
+        loader: tts
+        task: tts
+        indices: [3, 4, 5]

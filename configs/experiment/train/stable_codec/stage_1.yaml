@@ -45,8 +45,6 @@ train:
 
 validation:
   enabled: true
-  loader: tts
-  split_label: dev
   every_n_steps: 10000
   sanity_steps: 0
 
@@ -68,6 +66,14 @@ callbacks:
         loader: tts
         task: tts
         indices: [0, 1, 2]
+      - split: validation
+        loader: s2tt
+        task: s2tt
+        indices: [0, 1, 2]
+      - split: validation
+        loader: tts
+        task: tts
+        indices: [3, 4, 5]
     max_new_tokens: 512
     temperature: 1.0
     top_p: 1.0

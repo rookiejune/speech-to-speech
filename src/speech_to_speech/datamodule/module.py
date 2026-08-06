@@ -98,8 +98,6 @@ class LoaderSpec:
                     "speech loaders require speech_config and must not set text_config."
                 )
             _validate_sample_index(self.sample_index)
-            if self.max_samples is not None:
-                raise ValueError("speech loaders do not support max_samples.")
         else:
             if self.text_config is None or self.speech_config is not None:
                 raise ValueError(
@@ -117,6 +115,7 @@ class LoaderSpec:
         sample_index: int | None = None,
         trace: str | None = None,
         ar_framing: ARFraming = ARFraming.INSTRUCTION,
+        max_samples: int | None = None,
     ) -> LoaderSpec:
         return cls(
             kind=LoaderKind.SPEECH,
@@ -125,6 +124,7 @@ class LoaderSpec:
             sample_index=sample_index,
             trace=trace,
             ar_framing=ar_framing,
+            max_samples=max_samples,
         )
 
     @classmethod
@@ -180,6 +180,7 @@ class _SpeechLoader:
         *,
         trace: str | None = None,
         ar_framing: ARFraming = ARFraming.INSTRUCTION,
+        max_samples: int | None = None,
     ) -> None:
         self.config = config
         self.runtime = runtime
@@ -196,6 +197,7 @@ class _SpeechLoader:
             tasks=config.tasks,
         )
         self.sample_index = sample_index
+        self.max_samples = max_samples
         self.num_workers = config.dataloader.num_workers
         self._dataset: Dataset[RawSample] | None = None
         self._subset: Subset[RawSample] | None = None
@@ -301,6 +303,11 @@ class _SpeechLoader:
                     f"sample_index {self.sample_index} is outside the training dataset."
                 )
             self._subset = Subset(self._dataset, [self.sample_index])
+        elif self.max_samples is not None:
+            self._subset = Subset(
+                self._dataset,
+                range(min(self.max_samples, len(cast(Sized, self._dataset)))),
+            )
 
     def train_samples(self, indices: Sequence[int]) -> list[RawSample]:
         if self._streaming_dataset is not None:
@@ -430,7 +437,7 @@ class _SpeechLoader:
             raise RuntimeError(
                 "speech loader setup() must run before building a loader."
             )
-        if self._subset is not None:
+        if self._subset is not None and self.sample_index is not None:
             _reject_enabled_costs(
                 self.config.dataloader,
                 "fixed-sample speech loaders",
@@ -450,8 +457,9 @@ class _SpeechLoader:
         if not isinstance(self.collator.runtime, DataRuntimeSnapshot):
             snapshot = DataRuntimeSnapshot.from_runtime(self.runtime)
             self.collator.runtime = cast(DataRuntime, cast(object, snapshot))
+        dataset = self._dataset if self._subset is None else self._subset
         source_loader = _source_loader(
-            self._dataset,
+            dataset,
             loader=loader,
             num_workers=num_workers,
             collate_fn=self.collator,
@@ -459,10 +467,10 @@ class _SpeechLoader:
             frame_rate=self.runtime.codec_frame_rate,
         )
         if source_loader is not None:
-            if source_loader.dataset is self._dataset:
+            if source_loader.dataset is dataset:
                 return cast(Iterable[TrainInput], source_loader)
             return DataLoader(
-                self._dataset,
+                dataset,
                 batch_sampler=source_loader.batch_sampler,
                 num_workers=num_workers,
                 pin_memory=loader.pin_memory,
@@ -473,7 +481,7 @@ class _SpeechLoader:
             )
         _reject_enabled_costs(loader, "non-MapStyle speech datasets")
         return DataLoader(
-            self._dataset,
+            dataset,
             batch_size=loader.batch_size,
             num_workers=num_workers,
             pin_memory=loader.pin_memory,
@@ -491,7 +499,8 @@ class DataModule(LightningDataModule):
         loaders: Mapping[str, LoaderSpec],
         schedule: LoaderSchedule | None = None,
         *,
-        validation: LoaderSpec | None = None,
+        validation: LoaderSpec | Mapping[str, LoaderSpec] | None = None,
+        training_datasets: Mapping[str, Dataset[RawSample]] | None = None,
     ) -> None:
         super().__init__()
         self.runtime = runtime
@@ -502,16 +511,42 @@ class DataModule(LightningDataModule):
             name: _build_loader(spec, runtime)
             for name, spec in self.loader_specs.items()
         }
-        self.validation_spec = validation
+        self._training_datasets = dict(training_datasets or {})
+        unknown_datasets = set(self._training_datasets) - set(self._loaders)
+        if unknown_datasets:
+            raise ValueError(
+                "training dataset injection references unknown loaders: "
+                + ", ".join(sorted(unknown_datasets))
+            )
+        non_speech_datasets = [
+            name
+            for name in self._training_datasets
+            if not isinstance(self._loaders[name], _SpeechLoader)
+        ]
+        if non_speech_datasets:
+            raise ValueError(
+                "training datasets can only be injected into speech loaders: "
+                + ", ".join(sorted(non_speech_datasets))
+            )
+        self.validation_specs = _validation_specs(validation)
+        self.validation_spec = (
+            next(iter(self.validation_specs.values()))
+            if len(self.validation_specs) == 1
+            else None
+        )
+        self._validation_loaders = {
+            name: _build_validation_loader(spec, runtime)
+            for name, spec in self.validation_specs.items()
+        }
         self._validation_loader = (
-            None
-            if validation is None
-            else _build_validation_loader(validation, runtime)
+            next(iter(self._validation_loaders.values()))
+            if len(self._validation_loaders) == 1
+            else None
         )
         if any(not name for name in self.loader_specs):
             raise ValueError("loader names must not be empty.")
-        _validate_materialization_plan(self.loader_specs, validation)
-        _validate_streaming_plan(self.loader_specs, validation)
+        _validate_materialization_plan(self.loader_specs, self.validation_specs)
+        _validate_streaming_plan(self.loader_specs, self.validation_specs)
         self.schedule = schedule or LoaderSchedule(
             {name: 1.0 for name in self.loader_specs}
         )
@@ -520,9 +555,13 @@ class DataModule(LightningDataModule):
 
     def setup(self, stage: str | None = None) -> None:
         speech_datasets: list[tuple[object, Dataset[RawSample]]] = []
-        for loader in self._loaders.values():
+        for name, loader in self._loaders.items():
             if not isinstance(loader, _SpeechLoader):
                 loader.setup(stage)
+                continue
+            injected = self._training_datasets.get(name)
+            if injected is not None:
+                loader.setup(stage, dataset=injected)
                 continue
             shared = next(
                 (
@@ -537,12 +576,16 @@ class DataModule(LightningDataModule):
                 if loader._dataset is None:
                     raise RuntimeError("speech loader setup did not load a dataset.")
                 speech_datasets.append((loader.config.dataset, loader._dataset))
-        if self._validation_loader is not None:
-            self._validation_loader.setup(stage)
+        for loader in self._validation_loaders.values():
+            loader.setup(stage)
 
     @property
     def loader_names(self) -> tuple[str, ...]:
         return tuple(self.loader_specs)
+
+    @property
+    def validation_names(self) -> tuple[str, ...]:
+        return tuple(self.validation_specs)
 
     @property
     def materialization_enabled(self) -> bool:
@@ -721,12 +764,15 @@ class DataModule(LightningDataModule):
         return ScheduledDataLoader(loaders, self.schedule)
 
     def val_dataloader(self) -> Iterable[TrainInput]:
-        if self._validation_loader is None:
+        if not self._validation_loaders:
             return ()
-        return cast(
-            Iterable[TrainInput],
-            self._validation_loader.validation_dataloader(),
-        )
+        loaders = [
+            loader.validation_dataloader()
+            for loader in self._validation_loaders.values()
+        ]
+        if len(loaders) == 1:
+            return cast(Iterable[TrainInput], loaders[0])
+        return cast(Iterable[TrainInput], loaders)
 
     def _asset_jobs(self) -> tuple[AssetJob, ...]:
         jobs: dict[str, AssetJob] = {}
@@ -746,12 +792,13 @@ class DataModule(LightningDataModule):
             for loader in self._loaders.values()
             if isinstance(loader, _SpeechLoader)
         )
-        validation = self._validation_loader
-        if (
-            include_validation
-            and isinstance(validation, _SpeechLoader)
-        ):
-            return (*loaders, validation)
+        if include_validation:
+            validations = tuple(
+                loader
+                for loader in self._validation_loaders.values()
+                if isinstance(loader, _SpeechLoader)
+            )
+            return (*loaders, *validations)
         return loaders
 
     def _diagnostic_loader(
@@ -761,19 +808,20 @@ class DataModule(LightningDataModule):
     ) -> _DiagnosticLoader:
         if not isinstance(split, SampleSplit):
             raise TypeError("diagnostic split must be a SampleSplit.")
-        try:
-            spec = self.loader_specs[loader_name]
-        except KeyError as error:
-            raise ValueError(f"unknown loader {loader_name!r}.") from error
         if split is SampleSplit.TRAIN:
-            return self._loaders[loader_name]
-        if spec.kind is not LoaderKind.SPEECH:
+            try:
+                return self._loaders[loader_name]
+            except KeyError as error:
+                raise ValueError(f"unknown loader {loader_name!r}.") from error
+        if not self._validation_loaders:
             raise ValueError("validation diagnostic samples require a speech loader.")
-        loader = self._validation_loader
+        loader = self._validation_loaders.get(loader_name)
+        if loader is None and len(self._validation_loaders) == 1:
+            loader = next(iter(self._validation_loaders.values()))
         if loader is None:
-            raise RuntimeError(
-                "validation diagnostic samples require a validation dataset."
-            )
+            raise ValueError(f"unknown validation loader {loader_name!r}.")
+        if not isinstance(loader, _SpeechLoader):
+            raise ValueError("validation diagnostic samples require a speech loader.")
         return loader
 
 
@@ -790,6 +838,7 @@ def _build_loader(
             sample_index=spec.sample_index,
             trace=spec.trace,
             ar_framing=spec.ar_framing,
+            max_samples=spec.max_samples,
         )
     assert spec.text_config is not None
     return TextLoader(
@@ -816,6 +865,7 @@ def _build_validation_loader(
             sample_index=spec.sample_index,
             trace=spec.trace,
             ar_framing=spec.ar_framing,
+            max_samples=spec.max_samples,
         )
     assert spec.text_config is not None
     return TextLoader(
@@ -829,9 +879,26 @@ def _build_validation_loader(
     )
 
 
+def _validation_specs(
+    value: LoaderSpec | Mapping[str, LoaderSpec] | None,
+) -> dict[str, LoaderSpec]:
+    if value is None:
+        return {}
+    if isinstance(value, LoaderSpec):
+        return {"validation": value}
+    if not isinstance(value, Mapping):
+        raise TypeError("validation must be a LoaderSpec, mapping, or None.")
+    result = dict(value)
+    if any(not isinstance(name, str) or not name for name in result):
+        raise ValueError("validation loader names must be non-empty strings.")
+    if any(not isinstance(spec, LoaderSpec) for spec in result.values()):
+        raise TypeError("validation loader mappings must contain LoaderSpec values.")
+    return result
+
+
 def _validate_materialization_plan(
     loaders: Mapping[str, LoaderSpec],
-    validation: LoaderSpec | None,
+    validations: Mapping[str, LoaderSpec],
 ) -> None:
     enabled = [
         spec
@@ -840,16 +907,13 @@ def _validate_materialization_plan(
         and spec.speech_config is not None
         and spec.speech_config.materialization.enabled
     ]
-    validation_config = (
-        validation.speech_config
-        if validation is not None and validation.kind is LoaderKind.SPEECH
-        else None
-    )
+    validation_configs = [
+        spec.speech_config
+        for spec in validations.values()
+        if spec.kind is LoaderKind.SPEECH and spec.speech_config is not None
+    ]
     if not enabled:
-        if (
-            validation_config is not None
-            and validation_config.materialization.enabled
-        ):
+        if any(config.materialization.enabled for config in validation_configs):
             raise ValueError(
                 "validation asset materialization requires an enabled training "
                 "speech loader."
@@ -861,24 +925,25 @@ def _validate_materialization_plan(
             "speech loader so the epoch has a finite reload boundary."
         )
     train = enabled[0].speech_config
-    if train is None or validation_config is None:
+    if train is None:
         return
-    if not validation_config.materialization.enabled:
-        return
-    if (
-        train.codec != validation_config.codec
-        or train.materialization != validation_config.materialization
-        or _asset_source_key(train) != _asset_source_key(validation_config)
-    ):
-        raise ValueError(
-            "training and validation asset materialization must resolve the same "
-            "codec source request."
-        )
+    for validation_config in validation_configs:
+        if not validation_config.materialization.enabled:
+            continue
+        if (
+            train.codec != validation_config.codec
+            or train.materialization != validation_config.materialization
+            or _asset_source_key(train) != _asset_source_key(validation_config)
+        ):
+            raise ValueError(
+                "training and validation asset materialization must resolve the same "
+                "codec source request."
+            )
 
 
 def _validate_streaming_plan(
     loaders: Mapping[str, LoaderSpec],
-    validation: LoaderSpec | None,
+    validations: Mapping[str, LoaderSpec],
 ) -> None:
     enabled = [
         spec
@@ -899,7 +964,7 @@ def _validate_streaming_plan(
             "streaming synthesis does not support sample_index; the backbone must "
             "consume the complete logical epoch."
         )
-    if validation is not None:
+    if validations:
         raise ValueError(
             "streaming synthesis does not accept a validation loader; run validation "
             "from an immutable sealed dataset."

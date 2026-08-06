@@ -864,6 +864,73 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertEqual(metrics["val/mt/chrf"], 100.0)
         self.assertEqual(metrics["val/mt/wer"], 0.0)
 
+    def test_named_s2tt_validation_generates_translation_metrics(self):
+        class _Tokenizer:
+            def decode(self, token_ids, *, skip_special_tokens):
+                return " ".join(str(token_id) for token_id in token_ids)
+
+        runtime = SimpleNamespace(
+            text_tokenizer=_Tokenizer(),
+            layout=Layout(text=(0, 32), audio=(32, 36)),
+            lexical_text_vocab_size=32,
+            pad_token_id=0,
+            eos_token_id=31,
+        )
+        module = _module(
+            ModuleConfig(mt_validation_max_new_tokens=8),
+            model=SimpleNamespace(runtime=runtime),
+            objective=_BatchObjective(),
+        )
+        module.set_validation_loader_names(("s2tt", "tts"))
+        batch = _batch(
+            Task.S2TT,
+            token_labels=torch.tensor([[-100, 4, 5, 31]]),
+        )
+
+        module.on_validation_epoch_start()
+        with (
+            patch(
+                "speech_to_speech.pl_module.module.generate_responses",
+                return_value=[
+                    {
+                        "response_ids": torch.tensor([4, 5]),
+                        "audio": None,
+                    }
+                ],
+            ),
+            patch.object(module, "log") as log,
+        ):
+            returned = module.validation_step(batch, 0, dataloader_idx=0)
+            module.on_validation_epoch_end()
+
+        self.assertEqual(float(returned["s2tt_validation_samples"]), 1.0)
+        metrics = {call.args[0]: call.args[1] for call in log.call_args_list}
+        self.assertEqual(
+            set(metrics),
+            {"val/s2tt/bleu", "val/s2tt/chrf", "val/s2tt/wer"},
+        )
+        self.assertEqual(metrics["val/s2tt/bleu"], 100.0)
+
+    def test_named_tts_validation_prefixes_teacher_forcing_metrics(self):
+        module = _module(objective=_BatchObjective())
+        module.set_validation_loader_names(("s2tt", "tts"))
+        outputs: Outputs = {
+            "loss": torch.tensor(2.0),
+            "token": LossItem(
+                torch.tensor([2.0]),
+                {"tokens": torch.tensor([3.0])},
+            ),
+        }
+        batch = _batch(Task.TTS, token_labels=torch.tensor([[-100, 1]]))
+
+        with (
+            patch.object(module, "_outputs", return_value=outputs),
+            patch.object(module, "log") as log,
+        ):
+            module.validation_step(batch, 0, dataloader_idx=1)
+
+        self.assertEqual(log.call_args.args[0], "val/tts/token/loss")
+
     def test_combined_outputs_use_effective_units_without_loader_weights(self):
         first = LossItem(
             torch.tensor([1.0]),
