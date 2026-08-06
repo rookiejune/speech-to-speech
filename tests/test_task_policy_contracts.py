@@ -28,6 +28,8 @@ class TaskPolicyContractTest(unittest.TestCase):
             and not uses_target_ctc(Task.S2ST, trace=TARGET_COT)
         )
         self.assertFalse(uses_target_ctc(Task.TTS))
+        self.assertFalse(uses_source_ctc(Task.TTS_VOICE_CLONE))
+        self.assertFalse(uses_target_ctc(Task.TTS_VOICE_CLONE))
 
     def test_task_allocation_tracks_weights_across_tiny_batches(self):
         allocation = allocate_tasks([Task.T2ST, Task.TTS], [1.0, 2.0], 6)

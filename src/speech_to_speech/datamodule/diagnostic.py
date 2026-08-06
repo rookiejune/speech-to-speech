@@ -18,6 +18,8 @@ class SampleSplit(StrEnum):
 
 def source_item(sample: types.Sample, task: Task) -> SampleRef | None:
     modality = task.source_modality
+    if modality is None and task.source_layout.includes_audio:
+        modality = types.Modality.AUDIO
     if modality is None:
         return None
     pair_role = types.Role.SOURCE if task.uses_source_role else types.Role.TARGET

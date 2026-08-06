@@ -21,11 +21,13 @@ from speech_to_speech.datamodule.builder import build_task_sample
 from speech_to_speech.datamodule.parse import parse_task_sample
 from speech_to_speech.datamodule.sample import (
     AudioContextSample,
-    Speech,
 )
 from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.runtime.audio_schema import AudioTokenSpec
-from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
+from speech_to_speech.runtime.audio_tokenizer import (
+    BiCodecAudioTokenizer,
+    NativeAudioTokenizer,
+)
 from speech_to_speech.task import ControlToken, Task
 
 
@@ -47,18 +49,18 @@ class PairReferenceContextTest(unittest.TestCase):
         built = build_task_sample(parsed, cast(object, runtime))
         self.assertNotIn("audio_context", built.request)
 
-    def test_s2st_reuses_visible_source_global(self) -> None:
+    def test_s2st_predicts_complete_target_audio(self) -> None:
         runtime = _bicodec_runtime(AudioSequenceLayout.FLATTENED)
         parsed = parse_task_sample(_pair_sample(), Task.S2ST, cast(object, runtime))
         built = build_task_sample(parsed, cast(object, runtime))
         response = built.labels.response_ids
         local = response[2:-1] - runtime.layout.blocks["audio"][0]
-        self.assertEqual(int(local[0]), runtime.audio_tokenizer.semantic_token_id)
-        prompt_global = _prompt_global_ids(built.request["prompt_ids"], runtime)
-        decoded = runtime.audio_tokenizer.decode_streams(prompt_global)
+        self.assertEqual(int(local[0]), runtime.audio_tokenizer.global_token_id)
+        decoded = runtime.audio_tokenizer.decode_full(local)
         self.assertIsNotNone(decoded.global_codes)
+        self.assertIsNotNone(decoded.semantic_codes)
 
-    def test_explicit_audio_context_is_serialized_into_prompt(self) -> None:
+    def test_explicit_audio_context_is_rejected(self) -> None:
         runtime = _bicodec_runtime(AudioSequenceLayout.FLATTENED)
         pair = _pair_sample()
         context_cell = {
@@ -69,20 +71,63 @@ class PairReferenceContextTest(unittest.TestCase):
             ),
         }
         wrapped = AudioContextSample(sample=pair, audio_context=context_cell)
-        parsed = parse_task_sample(wrapped, Task.TTS, cast(object, runtime))
-        self.assertIsInstance(parsed.audio_context, Speech)
-        assert isinstance(parsed.audio_context, Speech)
-        torch.testing.assert_close(
-            parsed.audio_context.global_codes,
-            context_cell[(Role.DEFAULT, Modality.AUDIO)].views[AudioView.BICODEC][
-                "global"
-            ],
+        with self.assertRaisesRegex(ValueError, "TTS_VOICE_CLONE"):
+            parse_task_sample(wrapped, Task.TTS, cast(object, runtime))
+
+    def test_voice_clone_uses_source_audio_and_predicts_full_target(self) -> None:
+        runtime = _bicodec_runtime(AudioSequenceLayout.FLATTENED)
+        parsed = parse_task_sample(
+            _pair_sample(),
+            Task.TTS_VOICE_CLONE,
+            cast(object, runtime),
         )
+
         built = build_task_sample(parsed, cast(object, runtime))
-        self.assertNotIn("audio_context", built.request)
+
+        positions = built.audio_input_positions
+        self.assertIsNotNone(positions)
+        assert positions is not None
+        prompt_audio = built.request["prompt_ids"].index_select(0, positions)
+        audio_start = runtime.layout.blocks[runtime.input_audio_block_name][0]
+        source_local = prompt_audio - audio_start
+        source_codes = runtime.input_audio_tokenizer.decode_full(source_local)
+        torch.testing.assert_close(source_codes.semantic_codes, parsed.source.semantic_codes)
         response = built.labels.response_ids
-        local = response[2:-1] - runtime.layout.blocks["audio"][0]
-        self.assertEqual(int(local[0]), runtime.audio_tokenizer.semantic_token_id)
+        output_start = runtime.layout.blocks["audio"][0]
+        target_codes = runtime.audio_tokenizer.decode_full(response[2:-1] - output_start)
+        torch.testing.assert_close(target_codes.semantic_codes, parsed.target.semantic_codes)
+        torch.testing.assert_close(target_codes.global_codes, parsed.target.global_codes)
+
+    def test_voice_clone_supports_asymmetric_audio_runtime(self) -> None:
+        runtime = _glm4_bicodec_runtime()
+        parsed = parse_task_sample(
+            _pair_sample(),
+            Task.TTS_VOICE_CLONE,
+            cast(object, runtime),
+        )
+
+        built = build_task_sample(parsed, cast(object, runtime))
+
+        positions = built.audio_input_positions
+        self.assertIsNotNone(positions)
+        assert positions is not None
+        prompt = built.request["prompt_ids"]
+        input_start, input_end = runtime.layout.blocks["audio_input"]
+        prompt_audio = prompt.index_select(0, positions)
+        self.assertTrue(prompt_audio.ge(input_start).all())
+        self.assertTrue(prompt_audio.lt(input_end).all())
+        input_boa = (prompt == runtime.input_boa_token_id).nonzero().flatten()
+        self.assertEqual(input_boa.numel(), 1)
+        start = int(input_boa[0]) - parsed.target.text_token_ids.numel()
+        torch.testing.assert_close(
+            prompt[start : int(input_boa[0])],
+            parsed.target.text_token_ids,
+        )
+        output_start = runtime.layout.blocks["audio"][0]
+        response_local = built.labels.response_ids[2:-1] - output_start
+        decoded = runtime.audio_tokenizer.decode_full(response_local)
+        torch.testing.assert_close(decoded.semantic_codes, parsed.target.semantic_codes)
+        torch.testing.assert_close(decoded.global_codes, parsed.target.global_codes)
 
 
 def _pair_sample() -> dict:
@@ -113,6 +158,7 @@ def _audio(offset: int) -> AudioItem:
     )
     return AudioItem(
         views={
+            AudioView.GLM4: semantic,
             AudioView.BICODEC: {
                 "semantic": semantic,
                 "global": global_codes,
@@ -176,6 +222,58 @@ def _bicodec_runtime(audio_sequence_layout: AudioSequenceLayout):
     return runtime
 
 
+def _glm4_bicodec_runtime():
+    input_tokenizer = NativeAudioTokenizer(vocab_size=8)
+    output_tokenizer = BiCodecAudioTokenizer(
+        semantic_codebook_size=8,
+        global_codebook_sizes=(3, 3),
+        global_unit_length=2,
+    )
+    lexical_text_vocab_size = 10
+    control_token_ids = tuple(
+        range(lexical_text_vocab_size, lexical_text_vocab_size + len(ControlToken))
+    )
+    input_start = lexical_text_vocab_size + len(ControlToken)
+    input_boa = input_start + input_tokenizer.vocab_size
+    audio_start = input_boa + 4
+    boa = audio_start + output_tokenizer.vocab_size
+    return SimpleNamespace(
+        input_audio_decoupled=True,
+        input_codec_name="glm4",
+        input_audio_view=AudioView.GLM4,
+        input_codec_frame_rate=12.5,
+        codec_name="bicodec",
+        audio_view=AudioView.BICODEC,
+        codec_frame_rate=50.0,
+        audio_sequence_layout=AudioSequenceLayout.FLATTENED,
+        acoustic_generator_artifact=None,
+        text_tokenizer=_ChatTokenizer(),
+        input_audio_tokenizer=input_tokenizer,
+        audio_tokenizer=output_tokenizer,
+        layout=Layout(
+            text=(0, input_start),
+            audio_input=(input_start, audio_start),
+            audio=(audio_start, boa + 4),
+        ),
+        lexical_text_vocab_size=lexical_text_vocab_size,
+        control_token_ids=control_token_ids,
+        control_token_id=lambda token: control_token_ids[
+            list(ControlToken).index(token)
+        ],
+        pad_token_id=0,
+        eos_token_id=1,
+        boa_token_id=boa,
+        eoa_token_id=boa + 1,
+        mask_token_id=boa + 2,
+        audio_schema_token_id=boa + 3,
+        input_audio_block_name="audio_input",
+        input_boa_token_id=input_boa,
+        input_eoa_token_id=input_boa + 1,
+        input_audio_schema_token_id=input_boa + 3,
+        input_codec_audio_range=(input_start, input_boa),
+    )
+
+
 class _ChatTokenizer:
     def __init__(self) -> None:
         self.encoded: list[str] = []
@@ -188,20 +286,6 @@ class _ChatTokenizer:
     def apply_chat_template(self, messages, **kwargs):
         del kwargs
         return " ".join(message["content"] for message in messages)
-
-
-def _prompt_global_ids(input_ids: torch.Tensor, runtime) -> torch.Tensor:
-    row = input_ids
-    boa_positions = (row == runtime.boa_token_id).nonzero(as_tuple=False).flatten()
-    if boa_positions.numel() < 1:
-        raise AssertionError("expected BOA-wrapped reference prompt in TTS input")
-    prompt_boa = int(boa_positions[0].item())
-    prompt_eoa = int(
-        (row[prompt_boa + 1 :] == runtime.eoa_token_id)
-        .nonzero(as_tuple=False)[0]
-        .item()
-    ) + prompt_boa + 1
-    return row[prompt_boa + 2 : prompt_eoa] - runtime.layout.blocks["audio"][0]
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ class ConfigCompositionTest(ConfigTestCase):
         for preset in (
             "bicodec",
             "glm4_bicodec",
+            "glm4_bicodec_composed",
             "kimi_audio",
             "longcat",
             "longcat_native",
@@ -40,6 +41,13 @@ class ConfigCompositionTest(ConfigTestCase):
         glm4 = _compose("overfit", "runtime=glm4_bicodec")
         self.assertEqual(set(glm4.runtime.audio_input), {"tokenizer", "bpe"})
 
+        composed = _compose("overfit", "runtime=glm4_bicodec_composed")
+        self.assertEqual(set(composed.runtime.audio_input), {"streams"})
+        self.assertEqual(
+            set(composed.runtime.audio_input.streams),
+            {"semantic", "global"},
+        )
+
     def test_runtime_audio_sides_are_regular_overrides(self):
         config = _overfit(
             "runtime=glm4_bicodec",
@@ -56,6 +64,24 @@ class ConfigCompositionTest(ConfigTestCase):
         self.assertEqual(config.runtime.audio_output.detokenizer, "bicodec")
         self.assertIsNone(config.runtime.audio_output.bpe)
         self.assertEqual(config.datamodule.codec, "bicodec")
+
+    def test_composed_audio_input_parses_to_typed_stream_configs(self):
+        config = _overfit(
+            "runtime=glm4_bicodec_composed",
+            "model/acoustic=none",
+            "audio_sequence_layout=flattened",
+        )
+
+        self.assertIsNotNone(config.runtime.audio_input)
+        if config.runtime.audio_input is None:
+            self.fail("configured input audio must be independent")
+        self.assertTrue(config.runtime.audio_input.composed)
+        self.assertIsNone(config.runtime.audio_input.tokenizer)
+        streams = config.runtime.audio_input.streams
+        self.assertIsNotNone(streams)
+        assert streams is not None
+        self.assertEqual(streams["semantic"].tokenizer, "glm4")
+        self.assertEqual(streams["global"].tokenizer, "bicodec")
 
     def test_output_detokenizer_null_is_explicit_codes_only(self):
         config = _overfit(
@@ -283,29 +309,32 @@ class ConfigCompositionTest(ConfigTestCase):
         self.assertIsInstance(config.model.toy, ToyConfig)
         self.assertIs(config.datamodule.dataset.name, DatasetName.TOY)
 
-    def test_bicodec_smokes_learn_input_and_output_global_ownership(self):
-        reuse = overfit(_compose("overfit", "experiment=overfit/bicodec_input_global_smoke"))
+    def test_bicodec_smokes_predict_complete_target_audio(self):
+        clone = overfit(_compose("overfit", "experiment=overfit/bicodec_voice_clone_smoke"))
         generate = overfit(_compose("overfit", "experiment=overfit/bicodec_generate_global_smoke"))
 
-        for config in (reuse, generate):
+        for config in (clone, generate):
             self.assertIsInstance(config, OverfitTokenConfig)
             self.assertEqual(config.runtime.audio_output.tokenizer, "bicodec")
-            self.assertIs(
-                config.datamodule.dataset.name,
-                DatasetName.QWEN_TTS_SPEAKER,
-            )
-            self.assertIs(config.datamodule.shape, DataShape.SINGLE)
             self.assertIsNone(config.datamodule.dataset.speaker)
 
-        self.assertIs(reuse.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
+        self.assertIs(clone.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
         self.assertIs(generate.audio_sequence_layout, AudioSequenceLayout.FLATTENED)
-        self.assertEqual(reuse.task, Task.S2ST.value)
+        self.assertEqual(clone.runtime.audio_input.tokenizer, "glm4")
+        self.assertIs(clone.datamodule.dataset.name, DatasetName.TOY)
+        self.assertIs(clone.datamodule.shape, DataShape.PAIR)
+        self.assertEqual(clone.task, Task.TTS_VOICE_CLONE.value)
+        self.assertIs(
+            generate.datamodule.dataset.name,
+            DatasetName.QWEN_TTS_SPEAKER,
+        )
+        self.assertIs(generate.datamodule.shape, DataShape.SINGLE)
         self.assertEqual(generate.task, Task.TTS.value)
-        self.assertEqual(reuse.run_name, "bicodec-reuse-input-global")
+        self.assertEqual(clone.run_name, "bicodec-voice-clone-full-audio")
         self.assertEqual(generate.run_name, "bicodec-generate-global")
-        self.assertIn("bicodec-input-global-smoke", reuse.output_dir)
+        self.assertIn("bicodec-voice-clone-smoke", clone.output_dir)
         self.assertIn("bicodec-generate-global-smoke", generate.output_dir)
-        self.assertIsNone(reuse.runtime.audio_output.acoustic_generator_artifact)
+        self.assertIsNone(clone.runtime.audio_output.acoustic_generator_artifact)
         self.assertIsNone(generate.runtime.audio_output.acoustic_generator_artifact)
 
     def test_root_schema_rejects_unknown_and_foreign_fields(self):

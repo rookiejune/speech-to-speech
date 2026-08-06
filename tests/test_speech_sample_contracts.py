@@ -180,9 +180,11 @@ class SpeechSampleContractTest(unittest.TestCase):
         pair = parse_sample(_raw_sample_without_duration(), runtime)
 
         tts = build_sample(pair, Task.TTS, runtime)
+        clone = build_sample(pair, Task.TTS_VOICE_CLONE, runtime)
         s2st = build_sample(pair, Task.S2ST, runtime)
 
         self.assertEqual(tts.audio_seconds, 0.04)
+        self.assertEqual(clone.audio_seconds, 0.08)
         self.assertEqual(s2st.audio_seconds, 0.08)
         self.assertNotIn("target_language", tts.request)
         self.assertNotIn("target_language", s2st.request)
@@ -198,6 +200,7 @@ class SpeechSampleContractTest(unittest.TestCase):
             Task.T2ST: (False, True),
             Task.S2ST: (True, True),
             Task.TTS: (False, False),
+            Task.TTS_VOICE_CLONE: (False, False),
             Task.MT: (False, False),
         }
         for task, (source_expected, target_expected) in expected.items():

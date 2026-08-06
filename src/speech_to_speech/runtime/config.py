@@ -9,9 +9,10 @@ from pathlib import Path
 from typing import Any, Optional, Union, cast
 
 from anydataset.types import AudioView, Modality
-from anytrain.codec import AudioBackendIdentity, AudioCodeSpec
+from anytrain.codec import AudioBackendIdentity, AudioCodeSchema, AudioCodeSpec
 import torch
 
+from ..audio import AudioStream
 from .._compat import StrEnum, auto
 from .backbone import BackboneInitialization, BackboneType, validate_backbone_readout
 from .codec import (
@@ -43,7 +44,7 @@ _FLOW_METHODS = frozenset(
 
 _GENERATOR_ARTIFACT_FIELD = "acoustic_generator_artifact"
 _LEGACY_GENERATOR_ARTIFACT_FIELD = "semantic_codec_artifact"
-_AUDIO_INPUT_FIELDS = ("tokenizer", "bpe", "vocab_size", "frame_rate")
+_AUDIO_INPUT_FIELDS = ("tokenizer", "bpe", "vocab_size", "frame_rate", "streams")
 
 
 class _Unset:
@@ -167,6 +168,7 @@ def _optional_audio_input_mapping(
             "bpe": value.bpe,
             "vocab_size": value.vocab_size,
             "frame_rate": value.frame_rate,
+            "streams": value.streams,
         }), False
     result = _nested_mapping(value, name)
     migrated = _migrate_side_fields(
@@ -362,14 +364,61 @@ class AudioSequenceLayout(StrEnum):
     SEMANTIC = auto()
 
 
+@dataclass
+class AudioInputStreamConfig:
+    """One backend contributing a stream to a composed source token sequence."""
+
+    tokenizer: str
+    bpe: Optional[Union[str, Path]] = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.tokenizer, str):
+            raise TypeError("audio input stream tokenizer must be a string.")
+        if not self.tokenizer:
+            raise ValueError("audio input stream tokenizer must not be empty.")
+        _audio_tokenizer_spec(self.tokenizer, "audio input stream tokenizer")
+        _validate_bpe_path(self.bpe, "audio input stream bpe")
+
+    @property
+    def audio_view(self) -> AudioView:
+        return tokenizer_audio_view(self.tokenizer)
+
+    @property
+    def token_space_identity(
+        self,
+    ) -> tuple[AudioBackendIdentity, AudioCodeSpec, str | None]:
+        return (
+            audio_backend_identity(self.tokenizer),
+            audio_code_spec(self.tokenizer),
+            _artifact_identity(self.bpe),
+        )
+
+
 @dataclass(frozen=True)
 class _AudioInputFields:
     tokenizer: Optional[str] = None
     bpe: Optional[Union[str, Path]] = None
     vocab_size: Optional[int] = None
     frame_rate: Optional[float] = None
+    streams: Optional[dict[str, AudioInputStreamConfig]] = None
 
     def __post_init__(self) -> None:
+        if self.streams is not None:
+            if any(
+                value is not None
+                for value in (
+                    self.tokenizer,
+                    self.bpe,
+                    self.vocab_size,
+                    self.frame_rate,
+                )
+            ):
+                raise ValueError(
+                    "runtime.audio_input streams cannot be combined with tokenizer, "
+                    "bpe, vocab_size, or frame_rate."
+                )
+            _validate_input_streams(self.streams)
+            return
         if self.tokenizer is None:
             if any(
                 value is not None
@@ -435,14 +484,35 @@ class _AudioInputFields:
 
     @property
     def audio_view(self) -> AudioView:
+        if self.streams is not None:
+            return self.stream(AudioStream.SEMANTIC).audio_view
         if self.tokenizer is None:
             raise RuntimeError("shared audio input does not have an independent view.")
         return tokenizer_audio_view(self.tokenizer)
 
     @property
+    def composed(self) -> bool:
+        return self.streams is not None
+
+    def stream(self, stream: AudioStream) -> AudioInputStreamConfig:
+        if not isinstance(stream, AudioStream):
+            raise TypeError("audio input stream lookup requires an AudioStream.")
+        if self.streams is None:
+            raise RuntimeError("audio input is not stream-composed.")
+        return self.streams[stream.value]
+
+    @property
     def token_space_identity(
         self,
-    ) -> tuple[AudioBackendIdentity, AudioCodeSpec, str | None]:
+    ) -> object:
+        if self.streams is not None:
+            return (
+                "semantic-global-v1",
+                tuple(
+                    (stream.value, *self.stream(stream).token_space_identity)
+                    for stream in (AudioStream.SEMANTIC, AudioStream.GLOBAL)
+                ),
+            )
         if self.tokenizer is None:
             raise RuntimeError("shared audio input has no independent token identity.")
         return (
@@ -461,7 +531,73 @@ class _AudioInputFields:
     def view(self) -> Optional[AudioView]:
         """Deprecated derived-view alias retained for direct Python callers."""
 
-        return None if self.tokenizer is None else self.audio_view
+        return None if self.tokenizer is None and self.streams is None else self.audio_view
+
+
+def _input_streams(
+    value: Optional[
+        Mapping[str, Union[AudioInputStreamConfig, Mapping[str, object]]]
+    ],
+) -> Optional[dict[str, AudioInputStreamConfig]]:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError("runtime.audio_input streams must be a mapping.")
+    result: dict[str, AudioInputStreamConfig] = {}
+    for name, config in value.items():
+        if not isinstance(name, str):
+            raise TypeError("runtime.audio_input stream names must be strings.")
+        if isinstance(config, AudioInputStreamConfig):
+            resolved = config
+        elif isinstance(config, Mapping):
+            unknown = set(config) - {"tokenizer", "bpe"}
+            if unknown:
+                labels = ", ".join(sorted(str(key) for key in unknown))
+                raise ValueError(
+                    f"runtime.audio_input stream {name!r} has unknown fields: {labels}."
+                )
+            tokenizer = config.get("tokenizer")
+            bpe = config.get("bpe")
+            resolved = AudioInputStreamConfig(
+                tokenizer=cast(str, tokenizer),
+                bpe=cast(Optional[Union[str, Path]], bpe),
+            )
+        else:
+            raise TypeError(
+                f"runtime.audio_input stream {name!r} must be a mapping or config."
+            )
+        result[name] = resolved
+    return result
+
+
+def _validate_input_streams(streams: Mapping[str, AudioInputStreamConfig]) -> None:
+    expected = {AudioStream.SEMANTIC.value, AudioStream.GLOBAL.value}
+    if set(streams) != expected:
+        raise ValueError(
+            "runtime.audio_input streams must contain exactly semantic and global."
+        )
+    if any(not isinstance(value, AudioInputStreamConfig) for value in streams.values()):
+        raise TypeError(
+            "runtime.audio_input streams must contain AudioInputStreamConfig values."
+        )
+    semantic = streams[AudioStream.SEMANTIC.value]
+    semantic_spec = audio_code_spec(semantic.tokenizer)
+    if len(semantic_spec.primary_codebook_sizes) != 1:
+        raise ValueError(
+            "runtime.audio_input semantic stream requires exactly one primary codebook."
+        )
+    global_ = streams[AudioStream.GLOBAL.value]
+    if global_.bpe is not None:
+        raise ValueError("runtime.audio_input global stream cannot use bpe.")
+    global_spec = audio_code_spec(global_.tokenizer)
+    if (
+        global_spec.schema is not AudioCodeSchema.SEMANTIC_GLOBAL
+        or not global_spec.global_codebook_sizes
+        or global_spec.global_unit_length is None
+    ):
+        raise ValueError(
+            "runtime.audio_input global stream requires a semantic-global tokenizer."
+        )
 
 
 @dataclass(frozen=True, init=False)
@@ -475,6 +611,9 @@ class AudioInputConfig(_AudioInputFields):
         bpe: Union[str, Path, None, _Unset] = _UNSET,
         vocab_size: Optional[int] = None,
         frame_rate: Optional[float] = None,
+        streams: Optional[
+            Mapping[str, Union[AudioInputStreamConfig, Mapping[str, object]]]
+        ] = None,
         *,
         codec: Union[str, None, _Unset] = _UNSET,
     ) -> None:
@@ -492,6 +631,7 @@ class AudioInputConfig(_AudioInputFields):
             bpe=resolved_bpe,
             vocab_size=vocab_size,
             frame_rate=frame_rate,
+            streams=_input_streams(streams),
         )
 
 
@@ -645,6 +785,18 @@ class _ConfigFields:
             raise TypeError("audio_input must be an AudioInputConfig or None.")
         if not isinstance(self.audio_output, AudioOutputConfig):
             raise TypeError("audio_output must be an AudioOutputConfig.")
+        if self.audio_input is not None and self.audio_input.composed:
+            global_ = self.audio_input.stream(AudioStream.GLOBAL)
+            if (
+                audio_backend_identity(global_.tokenizer)
+                != audio_backend_identity(self.audio_output.tokenizer)
+                or audio_code_spec(global_.tokenizer)
+                != audio_code_spec(self.audio_output.tokenizer)
+            ):
+                raise ValueError(
+                    "composed runtime.audio_input global stream must reuse the "
+                    "audio_output tokenizer backend and code spec."
+                )
         if self.audio_output.acoustic_generator_artifact is not None:
             if self.audio_view is AudioView.BICODEC:
                 raise ValueError(
@@ -783,7 +935,7 @@ def _audio_input_config(
 def _configured_audio_input(
     value: Optional[AudioInputConfig],
 ) -> Optional[AudioInputConfig]:
-    if value is None or value.tokenizer is None:
+    if value is None or (value.tokenizer is None and not value.composed):
         return None
     return value
 
@@ -985,6 +1137,7 @@ def _validate_optional_nonempty_string(value: object, name: str) -> None:
 
 __all__ = [
     "AudioInputConfig",
+    "AudioInputStreamConfig",
     "AudioOutputConfig",
     "AudioSequenceLayout",
     "Config",

@@ -260,74 +260,38 @@ class SpeakerGridDatasetTest(unittest.TestCase):
 
 
 class BiCodecSpeakerCellTest(unittest.TestCase):
-    def test_explicit_reference_serializes_global_without_batch_side_channel(self):
+    def test_explicit_audio_context_is_rejected(self):
         runtime = _runtime(AudioSequenceLayout.FLATTENED)
         sample = SpeakerGridCellsDataset(
             _grid(),
             with_audio_context=True,
         )[0]
 
-        batch = SingleCollator(runtime, {Task.TTS: 1.0})([sample])
+        with self.assertRaisesRegex(ValueError, "TTS_VOICE_CLONE"):
+            SingleCollator(runtime, {Task.TTS: 1.0})([sample])
+
+    def test_tts_predicts_complete_bicodec_response(self):
+        runtime = _runtime(AudioSequenceLayout.FLATTENED)
+        cell = SpeakerGridCellsDataset(_grid())[0]
+        batch = SingleCollator(runtime, {Task.TTS: 1.0})([cell])
 
         self.assertIsInstance(batch, ModelBatch)
-        row = batch.input_ids[0]
-        boa_positions = (row == runtime.boa_token_id).nonzero(as_tuple=False).flatten()
-        self.assertGreaterEqual(boa_positions.numel(), 2)
-        prompt_boa = int(boa_positions[0].item())
-        prompt_eoa = int(
-            (row[prompt_boa + 1 :] == runtime.eoa_token_id)
-            .nonzero(as_tuple=False)[0]
-            .item()
-        ) + prompt_boa + 1
-        audio_start, _ = runtime.layout.blocks["audio"]
-        local_prompt = row[prompt_boa + 2 : prompt_eoa] - audio_start
-        decoded = runtime.audio_tokenizer.decode_streams(
-            local_prompt,
+        self.assertEqual(batch.tasks, [Task.TTS])
+        self.assertIsNone(batch.acoustic_target)
+        prompt_length = int(batch.generation_prompt_lengths[0].item())
+        response = batch.input_ids[0, prompt_length:]
+        semantic_marker = runtime.layout.to_global(
+            "audio",
+            torch.tensor(runtime.audio_tokenizer.semantic_token_id),
         )
-        self.assertIsNone(decoded.semantic_codes)
-        torch.testing.assert_close(
-            decoded.global_codes,
-            torch.tensor([[0, 1], [2, 3], [4, 5]]),
+        global_marker = runtime.layout.to_global(
+            "audio",
+            torch.tensor(runtime.audio_tokenizer.global_token_id),
         )
-
-    def test_input_presence_selects_tts_response_opening_marker(self):
-        for with_audio_context in (False, True):
-            with self.subTest(with_audio_context=with_audio_context):
-                runtime = _runtime(AudioSequenceLayout.FLATTENED)
-                cell = SpeakerGridCellsDataset(
-                    _grid(),
-                    with_audio_context=with_audio_context,
-                )[0]
-                batch = SingleCollator(runtime, {Task.TTS: 1.0})([cell])
-
-                self.assertIsInstance(batch, ModelBatch)
-                self.assertEqual(batch.tasks, [Task.TTS])
-                self.assertIsNone(batch.acoustic_target)
-                prompt_length = int(batch.generation_prompt_lengths[0].item())
-                response = batch.input_ids[0, prompt_length:]
-                semantic_marker = runtime.layout.to_global(
-                    "audio",
-                    torch.tensor(runtime.audio_tokenizer.semantic_token_id),
-                )
-                global_marker = runtime.layout.to_global(
-                    "audio",
-                    torch.tensor(runtime.audio_tokenizer.global_token_id),
-                )
-                if not with_audio_context:
-                    self.assertEqual(int(response[2]), int(global_marker))
-                    global_index = (response == global_marker).nonzero(
-                        as_tuple=False,
-                    )[0].item()
-                    semantic_index = (response == semantic_marker).nonzero(
-                        as_tuple=False,
-                    )[0].item()
-                    self.assertLess(global_index, semantic_index)
-                else:
-                    self.assertEqual(int(response[2]), int(semantic_marker))
-                    boa_positions = (
-                        batch.input_ids[0] == runtime.boa_token_id
-                    ).nonzero(as_tuple=False)
-                    self.assertGreaterEqual(boa_positions.numel(), 2)
+        self.assertEqual(int(response[2]), int(global_marker))
+        global_index = (response == global_marker).nonzero(as_tuple=False)[0].item()
+        semantic_index = (response == semantic_marker).nonzero(as_tuple=False)[0].item()
+        self.assertLess(global_index, semantic_index)
 
 
 class _Cells(MapStyleABC):

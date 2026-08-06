@@ -91,7 +91,6 @@ speech_to_speech/
 │   ├── text.py
 │   ├── mixed.py
 │   ├── chat.py
-│   ├── bicodec.py
 │   ├── mimo.py
 │   ├── rollout.py
 │   └── evaluation.py

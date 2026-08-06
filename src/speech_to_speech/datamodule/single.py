@@ -219,6 +219,11 @@ def _build_item(
     encode_missing_codes: bool,
     trace: str | None,
 ) -> SpeechTaskSample:
+    if isinstance(sample, AudioContextSample):
+        raise ValueError(
+            "out-of-band audio_context is not supported; construct a source/target "
+            "pair and use TTS_VOICE_CLONE."
+        )
     _validate_single_tasks([task])
     response = resolve_response(task, trace=trace)
     prediction = response.prediction
@@ -246,21 +251,11 @@ def _build_item(
         runtime,
         encode_missing_codes=encode_missing_codes,
     )
-    audio_context = None
-    if isinstance(sample, AudioContextSample):
-        context_audio, _ = _single_items(sample.audio_context)
-        audio_context = _utterance(
-            sample.audio_context,
-            context_audio,
-            runtime,
-            encode_missing_codes=encode_missing_codes,
-        )
     return _task_sample(
         utterance,
         text,
         task,
         response=response,
-        audio_context=audio_context,
     )
 
 
@@ -296,7 +291,6 @@ def _task_sample(
     task: Task,
     *,
     response: ResponseSpec,
-    audio_context: Speech | RawSpeech | None = None,
 ) -> SpeechTaskSample:
     source = None
     if task.source_layout is SourceLayout.TEXT_AUDIO:
@@ -314,7 +308,6 @@ def _task_sample(
         target=target,
         task=task,
         trace=response.name,
-        audio_context=audio_context,
     )
 
 

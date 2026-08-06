@@ -19,6 +19,7 @@ from speech_to_speech.generation.chat import (
     to_request,
 )
 from speech_to_speech.generation.contract import TokenGenerator
+from speech_to_speech.generation.request import validate
 from speech_to_speech.model.generation import GenerationStepResult
 from speech_to_speech.runtime import AudioSequenceLayout
 from speech_to_speech.runtime.audio_schema import AudioTokenSpec
@@ -487,6 +488,43 @@ class ChatAdapterTest(unittest.TestCase):
         self.assertIn(runtime.input_eoa_token_id, prompt.tolist())
         self.assertNotEqual(int(prompt[-1]), runtime.input_eoa_token_id)
 
+    def test_voice_clone_chat_places_target_text_before_source_audio(self) -> None:
+        runtime = _runtime(decoupled=True)
+        private = to_request(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "hello world"},
+                            {
+                                "type": "codec_codes",
+                                "codec": "glm4",
+                                "codes": torch.tensor([[1], [2], [3]]),
+                            },
+                        ],
+                    }
+                ],
+                "task": Task.TTS_VOICE_CLONE,
+            },
+            runtime,
+        )
+
+        self.assertIs(private["task"], Task.TTS_VOICE_CLONE)
+        positions = private["audio_input_positions"]
+        self.assertIsNotNone(positions)
+        assert positions is not None
+        prompt = private["prompt_ids"]
+        input_boa = (prompt == runtime.input_boa_token_id).nonzero().flatten()
+        self.assertEqual(input_boa.numel(), 1)
+        boundary = int(input_boa[0])
+        torch.testing.assert_close(prompt[boundary - 2 : boundary], torch.tensor([2, 3]))
+        selected = prompt.index_select(0, positions)
+        input_start, input_end = runtime.input_codec_audio_range
+        self.assertTrue(bool(selected.ge(input_start).all()))
+        self.assertTrue(bool(selected.lt(input_end).all()))
+        validate(private, cast(TokenGenerator, _RouteModel(runtime, _codes())))
+
     def test_decoupled_audio_source_rejects_output_codec_codes(self) -> None:
         runtime = _runtime(decoupled=True)
         base = {
@@ -732,9 +770,8 @@ class ChatAdapterTest(unittest.TestCase):
         self.assertIn("<system>Use terse wording.</system>", tokenizer.encoded[0])
         self.assertIn("<assistant>Acknowledged.</assistant>", tokenizer.encoded[0])
 
-    def test_codec_codes_passthrough_matches_bicodec_builder(self) -> None:
+    def test_plain_tts_rejects_reference_codec_codes(self) -> None:
         runtime = _runtime()
-        codes = _codes()
         request: ChatRequest = {
             "messages": [
                 {
@@ -744,7 +781,7 @@ class ChatAdapterTest(unittest.TestCase):
                         {
                             "type": "codec_codes",
                             "codec": "bicodec",
-                            "codes": codes,
+                            "codes": _codes(),
                         },
                     ],
                 }
@@ -752,25 +789,8 @@ class ChatAdapterTest(unittest.TestCase):
             "task": Task.TTS,
             "language": "Chinese",
         }
-        private = to_request(request, runtime)
-        self.assertNotIn("audio_context", private)
-        self.assertNotIn("target_language", private)
-        self.assertIs(private["task"], Task.TTS)
-        self.assertNotIn("prediction", private)
-        self.assertEqual(private["trace"], DIRECT)
-        local_global = runtime.audio_tokenizer.encode_global(codes)
-        expected_suffix = torch.cat(
-            (
-                torch.tensor([runtime.boa_token_id]),
-                torch.tensor([runtime.audio_schema_token_id]),
-                runtime.layout.to_global(Modality.AUDIO.value, local_global),
-                torch.tensor([runtime.eoa_token_id]),
-            )
-        )
-        torch.testing.assert_close(
-            private["prompt_ids"][-expected_suffix.numel() :],
-            expected_suffix,
-        )
+        with self.assertRaisesRegex(ValueError, "audio/codec_codes are not supported"):
+            to_request(request, runtime)
 
     def test_codec_name_mismatch_is_explicit(self) -> None:
         runtime = _runtime()

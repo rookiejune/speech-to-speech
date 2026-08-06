@@ -11,6 +11,7 @@ from anydataset.types import AudioView, Modality
 from anytrain.codec import AudioBackendIdentity, AudioCodeSchema, AudioCodeSpec
 from anytrain.module.idspace import Layout
 
+from ..audio import AudioStream
 from ..task import ControlToken
 from ._artifact import content_sha256
 from .audio_tokenizer import (
@@ -18,6 +19,7 @@ from .audio_tokenizer import (
     BiCodecAudioTokenizer,
     FlattenedAudioTokenizer,
     NativeAudioTokenizer,
+    SemanticGlobalAudioTokenizer,
 )
 from .audio_schema import AudioTokenRegistry, AudioTokenSpec
 from .backbone import (
@@ -30,6 +32,7 @@ from .backbone import (
 from .codec import (
     audio_backend_identity,
     audio_code_spec,
+    is_audio_tokenizer_only,
     load_audio_detokenizer_backend,
     load_audio_tokenizer_backend,
 )
@@ -88,6 +91,19 @@ def _audio_tokens(
     return NativeAudioTokenizer(vocab_size=int(spec.primary_codebook_sizes[0]))
 
 
+def _stream_source_contract(name: str, spec: AudioCodeSpec) -> dict[str, object]:
+    identity = audio_backend_identity(name)
+    return {
+        "tokenizer": name,
+        "backend_identity": {
+            "preset": identity.preset,
+            "artifact": identity.artifact,
+            "revision": identity.revision,
+        },
+        "view": spec.view,
+    }
+
+
 @dataclass(frozen=True)
 class Runtime:
     config: Config
@@ -129,6 +145,30 @@ class Runtime:
         return audio_backend_identity(self.input_audio_tokenizer_name)
 
     @property
+    def input_audio_stream_backend_identities(
+        self,
+    ) -> tuple[tuple[AudioStream, AudioBackendIdentity], ...]:
+        config = self.config.audio_input
+        if config is None or not config.composed:
+            return ((AudioStream.SEMANTIC, self.input_audio_backend_identity),)
+        return tuple(
+            (stream, audio_backend_identity(config.stream(stream).tokenizer))
+            for stream in (AudioStream.SEMANTIC, AudioStream.GLOBAL)
+        )
+
+    @property
+    def input_audio_stream_tokenizer_names(
+        self,
+    ) -> tuple[tuple[AudioStream, str], ...]:
+        config = self.config.audio_input
+        if config is None or not config.composed:
+            return ((AudioStream.SEMANTIC, self.input_audio_tokenizer_name),)
+        return tuple(
+            (stream, config.stream(stream).tokenizer)
+            for stream in (AudioStream.SEMANTIC, AudioStream.GLOBAL)
+        )
+
+    @property
     def output_audio_backend_identity(self) -> AudioBackendIdentity:
         return audio_backend_identity(self.output_audio_tokenizer_name)
 
@@ -156,9 +196,22 @@ class Runtime:
     @property
     def input_codec_name(self) -> str:
         config = self.config.audio_input
-        if config is None or config.tokenizer is None:
+        if config is None:
+            return self.codec_name
+        if config.composed:
+            return config.stream(AudioStream.SEMANTIC).tokenizer
+        if config.tokenizer is None:
             return self.codec_name
         return config.tokenizer
+
+    @property
+    def input_audio_schema_codec_name(self) -> str:
+        config = self.config.audio_input
+        if config is None or not config.composed:
+            return self.input_codec_name
+        semantic = config.stream(AudioStream.SEMANTIC).tokenizer
+        global_ = config.stream(AudioStream.GLOBAL).tokenizer
+        return f"{global_}-global+{semantic}-semantic"
 
     @property
     def input_audio_tokenizer_name(self) -> str:
@@ -175,9 +228,25 @@ class Runtime:
     @property
     def input_audio_view(self) -> AudioView:
         config = self.config.audio_input
-        if config is None or config.tokenizer is None:
+        if config is None:
+            return self.audio_view
+        if config.composed:
+            return config.stream(AudioStream.SEMANTIC).audio_view
+        if config.tokenizer is None:
             return self.audio_view
         return AudioView(self.input_audio_code_spec.view)
+
+    @property
+    def input_audio_stream_views(
+        self,
+    ) -> tuple[tuple[AudioStream, AudioView], ...]:
+        config = self.config.audio_input
+        if config is None or not config.composed:
+            return ((AudioStream.SEMANTIC, self.input_audio_view),)
+        return tuple(
+            (stream, config.stream(stream).audio_view)
+            for stream in (AudioStream.SEMANTIC, AudioStream.GLOBAL)
+        )
 
     @cached_property
     def output_audio_code_spec(self) -> AudioCodeSpec:
@@ -185,9 +254,21 @@ class Runtime:
 
     @cached_property
     def input_audio_code_spec(self) -> AudioCodeSpec:
-        if self.input_audio_backend_shared:
+        if self.input_audio_tokenizer_name == self.output_audio_tokenizer_name:
             return self.output_audio_code_spec
         return audio_code_spec(self.input_audio_tokenizer_name)
+
+    @property
+    def input_audio_stream_code_specs(
+        self,
+    ) -> tuple[tuple[AudioStream, AudioCodeSpec], ...]:
+        config = self.config.audio_input
+        if config is None or not config.composed:
+            return ((AudioStream.SEMANTIC, self.input_audio_code_spec),)
+        return tuple(
+            (stream, audio_code_spec(config.stream(stream).tokenizer))
+            for stream in (AudioStream.SEMANTIC, AudioStream.GLOBAL)
+        )
 
     @property
     def codec_frame_rate(self) -> float:
@@ -304,6 +385,12 @@ class Runtime:
             self.output_audio_tokenizer_name,
             self.config.device,
         )
+
+    @property
+    def output_audio_embedding_initialization(self) -> str:
+        if is_audio_tokenizer_only(self.output_audio_tokenizer_name):
+            return "model_random"
+        return self.output_audio_tokenizer.embedding_initialization
 
     @cached_property
     def codec(self) -> CodecBackend:
@@ -426,6 +513,36 @@ class Runtime:
                     "output audio token vocabulary."
                 )
             return self.audio_tokenizer
+        if config.composed:
+            semantic_config = config.stream(AudioStream.SEMANTIC)
+            global_config = config.stream(AudioStream.GLOBAL)
+            semantic_spec = audio_code_spec(semantic_config.tokenizer)
+            global_spec = audio_code_spec(global_config.tokenizer)
+            if global_spec.global_unit_length is None:
+                raise ValueError(
+                    "composed audio input global stream requires global_unit_length."
+                )
+            semantic = (
+                None
+                if semantic_config.bpe is None
+                else audio_tokenizer(semantic_config.bpe)
+            )
+            return SemanticGlobalAudioTokenizer(
+                semantic_codebook_size=semantic_spec.primary_codebook_sizes[0],
+                global_codebook_sizes=global_spec.global_codebook_sizes,
+                global_unit_length=global_spec.global_unit_length,
+                semantic_tokenizer=semantic,
+                stream_sources={
+                    AudioStream.SEMANTIC.value: _stream_source_contract(
+                        semantic_config.tokenizer,
+                        semantic_spec,
+                    ),
+                    AudioStream.GLOBAL.value: _stream_source_contract(
+                        global_config.tokenizer,
+                        global_spec,
+                    ),
+                },
+            )
         tokenizer = _audio_tokens(
             name=self.input_audio_tokenizer_name,
             view=self.input_audio_view,
@@ -446,7 +563,7 @@ class Runtime:
         if self.input_audio_token_space_shared:
             return self.output_audio_token_spec
         return AudioTokenSpec.create(
-            codec_name=self.input_codec_name,
+            codec_name=self.input_audio_schema_codec_name,
             sequence_layout=self.audio_sequence_layout.value,
             tokenizer=self.input_audio_tokenizer,
         )

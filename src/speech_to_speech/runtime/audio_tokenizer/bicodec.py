@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import torch
 from torch import Tensor
@@ -18,8 +18,8 @@ from .bpe import TorchCodecBPE
 from .native import NativeAudioTokenizer
 
 
-class BiCodecAudioTokenizer:
-    """Serialize BiCodec semantic units and fixed-length global speaker slots."""
+class SemanticGlobalAudioTokenizer:
+    """Serialize semantic units and fixed-length global speaker/style slots."""
 
     embedding_initialization = "random"
 
@@ -30,6 +30,10 @@ class BiCodecAudioTokenizer:
         global_codebook_sizes: Sequence[int],
         global_unit_length: int,
         semantic_tokenizer: NativeAudioTokenizer | TorchCodecBPE | None = None,
+        stream_sources: Mapping[str, Mapping[str, object]] | None = None,
+        _contract_name: str = "semantic-global-v1",
+        _grammar_name: str = "semantic-global-streams-v1",
+        _allow_partial_streams: bool = False,
     ) -> None:
         self._semantic_codebook_size = codebook_size(semantic_codebook_size)
         self._semantic_tokenizer = (
@@ -52,6 +56,14 @@ class BiCodecAudioTokenizer:
         if global_unit_length <= 0:
             raise ValueError("BiCodec tokenizer requires a positive global unit length.")
         self._global_unit_length = global_unit_length
+        if not isinstance(_contract_name, str) or not _contract_name:
+            raise ValueError("semantic-global contract name must be non-empty.")
+        if not isinstance(_grammar_name, str) or not _grammar_name:
+            raise ValueError("semantic-global grammar name must be non-empty.")
+        if not isinstance(_allow_partial_streams, bool):
+            raise TypeError("semantic-global partial-stream flag must be a bool.")
+        self._contract_name = _contract_name
+        self._stream_sources = _stream_sources(stream_sources)
         offsets = [self._semantic_vocab_size]
         for size in self._global_codebook_sizes[:-1]:
             offsets.append(offsets[-1] + size)
@@ -72,21 +84,35 @@ class BiCodecAudioTokenizer:
             marker_id=self._semantic_token_id,
             token_ranges=(self.semantic_token_range,),
         )
-        self._grammar = AudioTokenGrammar(
-            name="bicodec-streams-v1",
-            variants=(
-                AudioGrammarVariant(
-                    name="global_semantic",
-                    blocks=(global_block, semantic_block),
-                ),
+        full = AudioGrammarVariant(
+            name="global_semantic",
+            blocks=(global_block, semantic_block),
+        )
+        variants = (
+            (
+                full,
                 AudioGrammarVariant(name="global", blocks=(global_block,)),
                 AudioGrammarVariant(name="semantic", blocks=(semantic_block,)),
-            ),
+            )
+            if _allow_partial_streams
+            else (full,)
+        )
+        self._grammar = AudioTokenGrammar(
+            name=_grammar_name,
+            variants=variants,
             default_variant="global_semantic",
-            generation_variants=("global_semantic", "semantic"),
+            generation_variants=(
+                ("global_semantic", "semantic")
+                if _allow_partial_streams
+                else ("global_semantic",)
+            ),
             prompt_continuations=(
-                ("global", "semantic"),
-                ("global_semantic", "semantic"),
+                (
+                    ("global", "semantic"),
+                    ("global_semantic", "semantic"),
+                )
+                if _allow_partial_streams
+                else ()
             ),
         )
 
@@ -150,8 +176,8 @@ class BiCodecAudioTokenizer:
 
     def contract_state(self) -> dict[str, object]:
         """Return the effective structured token-ID grammar used by checkpoints."""
-        return {
-            "grammar": "bicodec-v3",
+        state: dict[str, object] = {
+            "grammar": self._contract_name,
             "semantic_codebook_size": self.semantic_codebook_size,
             "semantic_vocab_size": self.semantic_vocab_size,
             "semantic_tokenizer": dict(self.semantic_tokenizer.contract_state()),
@@ -166,6 +192,11 @@ class BiCodecAudioTokenizer:
             "global_token_id": self.global_token_id,
             "vocab_size": self.vocab_size,
         }
+        if self._stream_sources is not None:
+            state["stream_sources"] = {
+                name: dict(source) for name, source in self._stream_sources.items()
+            }
+        return state
 
     def encode(self, frames: Sequence[Sequence[int]] | Tensor) -> Tensor:
         """Encode semantic payload codes without structured stream markers."""
@@ -247,7 +278,9 @@ class BiCodecAudioTokenizer:
     def decode_full(self, token_ids: Sequence[int] | Tensor) -> AudioCodes:
         decoded = self.decode_streams(token_ids)
         if decoded.semantic_codes is None or decoded.global_codes is None:
-            raise AssertionError("full BiCodec decode must produce both streams.")
+            raise ValueError(
+                "full BiCodec decode requires both global and semantic streams."
+            )
         return AudioCodes(
             semantic_codes=decoded.semantic_codes,
             global_codes=decoded.global_codes,
@@ -346,6 +379,46 @@ class BiCodecAudioTokenizer:
         if isinstance(token_ids, Tensor):
             return spans.to(device=token_ids.device)
         return [int(value) for value in spans.tolist()]
+
+
+class BiCodecAudioTokenizer(SemanticGlobalAudioTokenizer):
+    """BiCodec's complete semantic/global output tokenizer."""
+
+    def __init__(
+        self,
+        *,
+        semantic_codebook_size: int,
+        global_codebook_sizes: Sequence[int],
+        global_unit_length: int,
+        semantic_tokenizer: NativeAudioTokenizer | TorchCodecBPE | None = None,
+    ) -> None:
+        super().__init__(
+            semantic_codebook_size=semantic_codebook_size,
+            global_codebook_sizes=global_codebook_sizes,
+            global_unit_length=global_unit_length,
+            semantic_tokenizer=semantic_tokenizer,
+            _contract_name="bicodec-v3",
+            _grammar_name="bicodec-streams-v1",
+        )
+
+
+def _stream_sources(
+    value: Mapping[str, Mapping[str, object]] | None,
+) -> dict[str, dict[str, object]] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError("semantic-global stream sources must be a mapping.")
+    if set(value) != {AudioStream.SEMANTIC.value, AudioStream.GLOBAL.value}:
+        raise ValueError(
+            "semantic-global stream sources must contain semantic and global."
+        )
+    result: dict[str, dict[str, object]] = {}
+    for name, source in value.items():
+        if not isinstance(name, str) or not isinstance(source, Mapping):
+            raise TypeError("semantic-global stream source entries must be mappings.")
+        result[name] = dict(source)
+    return result
 
 
 def _validate_semantic_tokenizer(

@@ -21,10 +21,13 @@ from .sample import (
     TextPair,
     seconds,
 )
-from ..runtime.audio_tokenizer import BiCodecAudioTokenizer, FlattenedAudioTokenizer
+from ..runtime.audio_tokenizer import (
+    FlattenedAudioTokenizer,
+    SemanticGlobalAudioTokenizer,
+)
 from ..runtime.codec import has_audio_tokenizer_loader
-from ..audio import AudioCodes
-from ..task import SourceLayout, Task, resolve_response
+from ..audio import AudioCodes, AudioStream
+from ..task import SourceLayout, Task, TaskObjective, resolve_response
 
 
 def from_frames(
@@ -83,8 +86,14 @@ def parse_task_sample(
     encode_missing_codes: bool = False,
     trace: str | None = None,
 ) -> SpeechTaskSample:
+    if isinstance(sample, AudioContextSample):
+        raise ValueError(
+            "out-of-band audio_context is not supported; construct a source/target "
+            "pair and use TTS_VOICE_CLONE."
+        )
     response = resolve_response(task, trace=trace)
-    if task.source_layout is SourceLayout.TEXT_AUDIO and runtime.input_audio_decoupled:
+    reconstructs_context = task.program.objective is TaskObjective.RECONSTRUCTION
+    if reconstructs_context and runtime.input_audio_decoupled:
         raise ValueError(
             "MASKED_AR does not support different input and output audio tokenizers."
         )
@@ -92,7 +101,7 @@ def parse_task_sample(
     if task.source_layout is SourceLayout.TEXT_AUDIO:
         source = _parse_task_item(
             sample,
-            types.Role.TARGET,
+            types.Role.TARGET if reconstructs_context else types.Role.SOURCE,
             types.Modality.AUDIO,
             runtime,
             encode_missing_codes=encode_missing_codes,
@@ -113,7 +122,7 @@ def parse_task_sample(
         if response.prediction.supervises_audio
         else types.Modality.TEXT
     )
-    if task.source_layout is SourceLayout.TEXT_AUDIO:
+    if reconstructs_context:
         if not isinstance(source, (Speech, RawSpeech)):
             raise TypeError("MASKED_AR source must be Speech or RawSpeech.")
         target: Speech | Text | RawSpeech = source
@@ -126,40 +135,12 @@ def parse_task_sample(
             encode_missing_codes=encode_missing_codes,
             input_audio=False,
         )
-    audio_context = _parse_audio_context(
-        sample,
-        runtime,
-        encode_missing_codes=encode_missing_codes,
-    )
     return SpeechTaskSample(
         source=source,
         target=target,
         task=task,
         trace=response.name,
-        audio_context=audio_context,
     )
-
-
-def _parse_audio_context(
-    sample: types.Sample,
-    runtime: DataRuntime,
-    *,
-    encode_missing_codes: bool,
-) -> Speech | RawSpeech | None:
-    """Resolve an explicitly supplied reference audio sample."""
-    if not isinstance(sample, AudioContextSample):
-        return None
-    context = _parse_task_item(
-        sample.audio_context,
-        types.Role.DEFAULT,
-        types.Modality.AUDIO,
-        runtime,
-        encode_missing_codes=encode_missing_codes,
-        input_audio=False,
-    )
-    if isinstance(context, Text):
-        raise AssertionError("audio context parser returned text.")
-    return context
 
 
 def parse_text_sample(sample: types.Sample, runtime: TextRuntime) -> TextPair:
@@ -184,7 +165,7 @@ def parse_audio_codes(
     input_audio: bool = False,
 ) -> AudioCodes:
     view = runtime.input_audio_view if input_audio else runtime.audio_view
-    parsed = _split_audio_codes(codes, view)
+    parsed = codes if isinstance(codes, AudioCodes) else _split_audio_codes(codes, view)
     tokenizer = runtime.input_audio_tokenizer if input_audio else runtime.audio_tokenizer
     if (
         isinstance(tokenizer, FlattenedAudioTokenizer)
@@ -210,9 +191,9 @@ def speech_from_codes(
     if semantic_codes is None:
         raise ValueError("prepared speech codes require semantic_codes.")
     tokenizer = runtime.input_audio_tokenizer if input_audio else runtime.audio_tokenizer
-    if isinstance(tokenizer, BiCodecAudioTokenizer):
+    if isinstance(tokenizer, SemanticGlobalAudioTokenizer):
         if parsed.global_codes is None:
-            raise ValueError("BiCodec full sequence requires global codes.")
+            raise ValueError("semantic-global full sequence requires global codes.")
         audio_token_ids = tokenizer.encode_full(parsed)
     else:
         audio_token_ids = _as_tensor(tokenizer.encode(semantic_codes))
@@ -307,8 +288,13 @@ def _speech(
 ) -> Speech:
     text = text_item.views[types.TextView.TEXT]
     view = runtime.input_audio_view if input_audio else runtime.audio_view
-    codes = audio_item.views[view]
-    semantic_codes = _split_audio_codes(codes, view).semantic_codes
+    codes: object = (
+        _composed_input_codes(audio_item, runtime)
+        if input_audio and len(_input_stream_views(runtime)) > 1
+        else audio_item.views[view]
+    )
+    parsed = parse_audio_codes(codes, runtime, input_audio=input_audio)
+    semantic_codes = parsed.semantic_codes
     if semantic_codes is None:
         raise ValueError("prepared speech codes require semantic_codes.")
     return speech_from_codes(
@@ -390,14 +376,28 @@ def _parse_task_item(
         raise ValueError(f"unsupported speech task modality: {modality.value}")
     audio_item = _audio_item(sample, role)
     text_item = _text_item(sample, role)
-    view = runtime.input_audio_view if input_audio else runtime.audio_view
-    if view in audio_item.views:
+    views = (
+        tuple(view for _, view in _input_stream_views(runtime))
+        if input_audio
+        else (runtime.audio_view,)
+    )
+    missing = tuple(view for view in views if view not in audio_item.views)
+    if not missing:
         return _speech(
             audio_item,
             text_item,
             runtime,
             input_audio=input_audio,
         )
+    if input_audio and len(views) > 1:
+        labels = ", ".join(repr(view.value) for view in missing)
+        raise ValueError(
+            "composed input audio requires prepared semantic and global views; "
+            f"missing {labels}."
+        )
+    if not views:
+        raise AssertionError("audio parsing requires at least one runtime view.")
+    view = views[0]
     if (
         input_audio
         and runtime.input_audio_decoupled
@@ -417,6 +417,56 @@ def _parse_task_item(
             "waveform fallback."
         )
     return raw_speech(audio_item, text_item, runtime)
+
+
+def _input_stream_views(
+    runtime: DataRuntime,
+) -> tuple[tuple[AudioStream, types.AudioView], ...]:
+    values = getattr(runtime, "input_audio_stream_views", None)
+    if values is None:
+        return ((AudioStream.SEMANTIC, runtime.input_audio_view),)
+    result = tuple(values)
+    if not result:
+        raise ValueError("runtime input audio stream views must not be empty.")
+    if any(
+        not isinstance(stream, AudioStream) or not isinstance(view, types.AudioView)
+        for stream, view in result
+    ):
+        raise TypeError(
+            "runtime input audio stream views must contain AudioStream/AudioView pairs."
+        )
+    return result
+
+
+def _composed_input_codes(
+    audio_item: types.AudioItem,
+    runtime: DataRuntime,
+) -> AudioCodes:
+    views = dict(_input_stream_views(runtime))
+    if set(views) != {AudioStream.SEMANTIC, AudioStream.GLOBAL}:
+        raise ValueError(
+            "composed input audio requires exactly semantic and global streams."
+        )
+    missing = tuple(view for view in views.values() if view not in audio_item.views)
+    if missing:
+        labels = ", ".join(repr(view.value) for view in missing)
+        raise ValueError(
+            "composed input audio requires prepared semantic and global views; "
+            f"missing {labels}."
+        )
+    semantic = _split_audio_codes(
+        audio_item.views[views[AudioStream.SEMANTIC]],
+        views[AudioStream.SEMANTIC],
+    ).semantic_codes
+    global_codes = _split_audio_codes(
+        audio_item.views[views[AudioStream.GLOBAL]],
+        views[AudioStream.GLOBAL],
+    ).global_codes
+    if semantic is None or global_codes is None:
+        raise ValueError(
+            "composed input views must provide semantic codes and global codes."
+        )
+    return AudioCodes(semantic_codes=semantic, global_codes=global_codes)
 
 
 def _audio_item(sample: types.Sample, role: types.Role) -> types.AudioItem:

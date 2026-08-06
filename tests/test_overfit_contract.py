@@ -65,7 +65,7 @@ class OverfitContractTest(unittest.TestCase):
             {path.stem for path in experiments},
             {
                 "bicodec_generate_global_smoke",
-                "bicodec_input_global_smoke",
+                "bicodec_voice_clone_smoke",
                 "longcat_semantic_only_smoke",
                 "longcat_flattened_smoke",
                 "default",

@@ -82,6 +82,30 @@ runtime:
 audio_sequence_layout: flattened
 ```
 
+需要 UniSS-style source composition 时，使用
+`runtime=glm4_bicodec_composed audio_sequence_layout=flattened`，其 canonical 形状为：
+
+```yaml
+runtime:
+  audio_input:
+    streams:
+      semantic: {tokenizer: glm4, bpe: null}
+      global: {tokenizer: bicodec, bpe: null}
+  audio_output:
+    tokenizer: bicodec
+    detokenizer: bicodec
+    bpe: null
+audio_sequence_layout: flattened
+```
+
+composed input 使用独立 `audio_input` token space，codec-private 顺序固定为
+`BiCodec global -> GLM4 semantic`；target 仍为完整
+`BiCodec global -> BiCodec semantic`。global stream 必须复用 output tokenizer backend/code spec，
+因此现有 dual-store join 只需合并 GLM4 input store 与 BiCodec output store，不引入第三个 store。
+parser 分别从 `AudioView.GLM4` 和 `AudioView.BICODEC` 取 semantic/global；任一 prepared view 缺失时
+直接报错。首版不支持 composed input waveform fallback，online chat 必须提供带 semantic/global 的
+`AudioCodes`。
+
 旧的 `runtime.codec` / `runtime.input_audio` / `runtime.audio_tokenizer` /
 `runtime.acoustic_generator_artifact`，以及两侧的 `codec` / `view` / `vocab_size` /
 `frame_rate` 仅作为边界迁移或静态 spec 一致性校验字段。
@@ -104,9 +128,11 @@ commit，但严格校验源码/API/模型契约、固定 tokenizer weights revis
 路径应让独立 AnyDataset provider/producer 持续发布 `AudioView.GLM4` store，训练按现有 streaming
 边界读取；只有同进程依赖满足严格检查时才启用 waveform fallback。训练 fallback 对具有 tokenize
 capability 的 input backend 调用 input tokenizer，绝不用 output backend 伪造 input codes；在线 chat
-遵循相同规则。BiCodec input 始终保留 global +
-semantic 完整序列；独立 BPE 只改变 semantic 子流的 token space，不丢弃 global units。
-checkpoint contract 分别记录 input/output tokenizer backend、output detokenizer、audio schema、selector、
+遵循相同规则。普通 BiCodec input 始终保留 BiCodec global + semantic 完整序列；composed input
+则保留 BiCodec global + GLM4 semantic，semantic BPE 只改变对应 semantic 子流的 token space，
+不丢弃 global units。
+checkpoint contract 对 composed input 分 stream 记录 backend identity/code spec，并继续记录 output
+tokenizer backend、output detokenizer、audio schema、selector、
 payload range、codec-private grammar、blocks、special IDs 和 embedding ownership；
 旧 schema 不做静默迁移。
 
@@ -173,13 +199,16 @@ BOA schema_selector codec-private-markers-and-payload EOA
 BOA/selector/EOA 由 Runtime 拥有；中间 grammar 由所选 `AudioTokenSpec` 拥有。四部分都是模型 token，
 response 中全部参与监督；grammar 只提供合法候选 mask 和完整性校验，不替模型写 token。
 BiCodec 的 codec-private 序列为：
-fixed-length global payload 采用 slot-major 布局并排在 semantic payload 之前。response 以
-`<begin_of_global>` 开局时 LLM 生成 global 与 semantic；以 `<begin_of_semantic>` 开局时只生成
-semantic 并复用 prompt global。decode 从 prompt/response marker 解析唯一的 global owner，并要求
-两侧恰好一方拥有 global；不再使用独立 `semantic` route、`audio_context` side channel 或可切换的
-`audio_route`。BiCodec 不再自造内部 end marker；外层 EOA 是唯一结束符。global/semantic markers
+fixed-length global payload 采用 slot-major 布局并排在 semantic payload 之前。response 必须以
+`<begin_of_global>` 开局，由 LLM 依次生成 global 与 semantic；只含 semantic 的 response 非法。
+decode 只解析完整 response，不从 prompt 或 side channel 恢复 global。BiCodec 不再自造内部 end
+marker；外层 EOA 是唯一结束符。global/semantic markers
 属于 codec-private grammar 并与 payload 一样由模型生成和监督。LongCat 等非 BiCodec semantic-only 路径仍交给 side
 module 或 semantic-acoustic codec。
+
+datamodule 的 TTS 与 `TTS_VOICE_CLONE` 都监督 `<begin_of_global>` 开局的完整 target sequence；
+voice clone 另由 input runtime 把完整 source audio 放进 prompt。输入可以是 GLM4、输出可以是 BiCodec，
+两侧 serialization 独立，runtime 和 builder 都不从 source stream 推断或复用 target global。
 
 BiCodec 配置 `runtime.audio_output.bpe` 时，该 artifact 只作为 semantic 子 tokenizer：raw
 semantic IDs 先经
@@ -234,8 +263,8 @@ DataModule 与 generation service。runtime 不保存进程级 singleton；同�
 `audio_sequence_layout` 字符串作为兼容性判断，因为相同 layout 名下的 vocabulary、grammar 或
 composition 仍可能不兼容。校验按结构能力而非 preset 身份：`semantic` layout 要求 semantic-only
 decode provider 或 acoustic side module；`flattened` layout 要求 codec 能消费完整 full codes；
-BiCodec 固定使用 `flattened`，reference global 直接来自
-prompt 中的 structured stream，而不是额外配置轴或 side channel。
+BiCodec 固定使用 `flattened`，并始终生成完整 global/semantic output；source audio 由 input runtime
+独立序列化，不是额外配置轴或 output side channel。
 
 文件职责保持分离：`runtime/config.py` 拥有配置、layout 校验和 local-rank device 绑定；
 `runtime/core.py` 聚合资源；`runtime/factory.py` 选择 sequence-layout runtime；

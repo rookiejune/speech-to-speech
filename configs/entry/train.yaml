@@ -59,6 +59,7 @@ datamodule:
     t2st: { template: null }
     t2tt: { template: null }
     tts: { template: null }
+    tts_voice_clone: { template: null }
 
 text_datamodule:
   dataloader:

@@ -26,7 +26,7 @@ from anytrain.codec import (
     SemanticGlobalCodes,
 )
 
-from speech_to_speech.audio import AudioCodes
+from speech_to_speech.audio import AudioCodes, AudioStream
 from speech_to_speech.callback import OnDeviceCodecMaterializer
 from speech_to_speech.datamodule.collate import Collator
 from speech_to_speech.datamodule.builder import build_speech_sample
@@ -46,6 +46,7 @@ from speech_to_speech.model import (
 )
 from speech_to_speech.runtime import (
     AudioInputConfig,
+    AudioInputStreamConfig,
     AudioOutputConfig,
     AudioSequenceLayout,
     Config,
@@ -56,6 +57,7 @@ from speech_to_speech.runtime.audio_tokenizer import (
     BiCodecAudioTokenizer,
     FlattenedAudioTokenizer,
     NativeAudioTokenizer,
+    SemanticGlobalAudioTokenizer,
 )
 from speech_to_speech.task import Task
 
@@ -231,6 +233,79 @@ class DualAudioTokenizerTest(unittest.TestCase):
         )
         self.assertIsNotNone(waveform_codecs["output_detokenizer"])
         self.assertIsNone(codes_codecs["output_detokenizer"])
+        self.assertNotEqual(
+            waveform_model.checkpoint_contract.sha256,
+            codes_model.checkpoint_contract.sha256,
+        )
+
+    def test_prepared_glm4_output_builds_and_checkpoints_without_backend(self) -> None:
+        runtime = Runtime(
+            Config(
+                audio_output=AudioOutputConfig(
+                    tokenizer="glm4",
+                    detokenizer=None,
+                )
+            )
+        )
+        runtime.__dict__["text_tokenizer"] = _TextTokenizer()
+
+        with patch(
+            "speech_to_speech.runtime.core.load_audio_tokenizer_backend",
+            side_effect=AssertionError("unexpected GLM4 backend load"),
+        ) as load_backend:
+            model = _checkpoint_model(runtime)
+            contract = model.checkpoint_contract
+
+        load_backend.assert_not_called()
+        self.assertEqual(
+            tuple(model.tokens.audio_embedding.weight.shape),
+            (16_384 + 4, 8),
+        )
+        self.assertIsNone(model.tokens.input_audio_embedding)
+        self.assertNotIn("output_audio_tokenizer_backend", runtime.__dict__)
+        audio_codecs = cast(
+            Mapping[str, object],
+            cast(Mapping[str, object], contract.components["runtime"])["audio_codecs"],
+        )
+        output = cast(Mapping[str, object], audio_codecs["output"])
+        self.assertEqual(output["initialization"], "model_random")
+        self.assertIsNone(audio_codecs["output_detokenizer"])
+
+    def test_composed_input_checkpoint_binds_both_stream_backends(self) -> None:
+        runtime = _bicodec_runtime(
+            Config(
+                audio_input=AudioInputConfig(
+                    streams={
+                        "semantic": AudioInputStreamConfig(tokenizer="glm4"),
+                        "global": AudioInputStreamConfig(tokenizer="bicodec"),
+                    }
+                ),
+                audio_output=AudioOutputConfig(
+                    tokenizer="bicodec",
+                    detokenizer="bicodec",
+                ),
+            )
+        )
+
+        model = _checkpoint_model(runtime)
+        runtime_contract = cast(
+            Mapping[str, object],
+            cast(Mapping[str, object], model.checkpoint_contract.components)["runtime"],
+        )
+        audio_codecs = cast(Mapping[str, object], runtime_contract["audio_codecs"])
+        input_ = cast(Mapping[str, object], audio_codecs["input"])
+        streams = cast(Mapping[str, object], input_["streams"])
+
+        self.assertEqual(input_["composition"], "semantic-global-v1")
+        self.assertEqual(input_["name"], "bicodec-global+glm4-semantic")
+        self.assertEqual(
+            cast(Mapping[str, object], streams["semantic"])["name"],
+            "glm4",
+        )
+        self.assertEqual(
+            cast(Mapping[str, object], streams["global"])["name"],
+            "bicodec",
+        )
 
     def test_explicit_same_pair_ties_backend_tokenizer_and_embedding(self) -> None:
         runtime = _bicodec_runtime(
@@ -558,7 +633,7 @@ class DualAudioTokenizerTest(unittest.TestCase):
             (1, 1, 6),
         )
 
-    def test_raw_audio_context_uses_output_backend(self) -> None:
+    def test_raw_audio_context_is_rejected_before_materialization(self) -> None:
         runtime = _bicodec_runtime(
             Config(
                 audio_input=AudioInputConfig(
@@ -578,25 +653,14 @@ class DualAudioTokenizerTest(unittest.TestCase):
             ),
         )
 
-        raw = Collator(
-            runtime,
-            {Task.S2ST: 1.0},
-            encode_missing_codes=True,
-        )([_prepared_pair_with_raw_context()])
-        self.assertIsInstance(raw, RawSpeechBatch)
-
-        batch = OnDeviceCodecMaterializer(runtime)(
-            raw,
-            device=torch.device("cpu"),
-        )
-
-        self.assertIsInstance(batch, ModelBatch)
+        with self.assertRaisesRegex(ValueError, "TTS_VOICE_CLONE"):
+            Collator(
+                runtime,
+                {Task.S2ST: 1.0},
+                encode_missing_codes=True,
+            )([_prepared_pair_with_raw_context()])
         self.assertNotIn("input_audio_tokenizer_backend", runtime.__dict__)
-        self.assertEqual(runtime.codec.tokenize.call_count, 1)
-        self.assertEqual(
-            tuple(runtime.codec.tokenize.call_args.args[0].shape),
-            (1, 1, 5),
-        )
+        self.assertEqual(runtime.codec.tokenize.call_count, 0)
 
     def test_bicodec_input_preserves_global_and_semantic_streams(self) -> None:
         runtime = Runtime(
@@ -634,6 +698,135 @@ class DualAudioTokenizerTest(unittest.TestCase):
         decoded = tokenizer.decode_full(source.audio_token_ids)
         torch.testing.assert_close(decoded.semantic_codes, semantic)
         torch.testing.assert_close(decoded.global_codes, global_codes)
+
+    def test_composed_input_uses_glm4_semantic_and_bicodec_global_views(self) -> None:
+        runtime = Runtime(
+            Config(
+                audio_input=AudioInputConfig(
+                    streams={
+                        "semantic": AudioInputStreamConfig(tokenizer="glm4"),
+                        "global": AudioInputStreamConfig(tokenizer="bicodec"),
+                    }
+                ),
+                audio_output=AudioOutputConfig(
+                    tokenizer="bicodec",
+                    detokenizer="bicodec",
+                ),
+            ),
+            audio_sequence_layout=AudioSequenceLayout.FLATTENED,
+        )
+        runtime.__dict__["text_tokenizer"] = _TextTokenizer()
+        semantic = torch.tensor([[1], [2], [3]], dtype=torch.long)
+        source_global = torch.arange(32, dtype=torch.long).reshape(32, 1)
+        target_global = torch.arange(32, dtype=torch.long).reshape(32, 1) + 32
+        sample = _sample()
+        sample[Role.SOURCE, Modality.AUDIO] = AudioItem(
+            views={
+                AudioView.GLM4: semantic,
+                AudioView.BICODEC: {
+                    "semantic": torch.tensor([[7]], dtype=torch.long),
+                    "global": source_global,
+                },
+            },
+            meta={AudioMeta.DURATION: 0.24},
+        )
+        sample[Role.TARGET, Modality.AUDIO] = AudioItem(
+            views={
+                AudioView.BICODEC: {
+                    "semantic": torch.tensor([[4], [5]], dtype=torch.long),
+                    "global": target_global,
+                }
+            },
+            meta={AudioMeta.DURATION: 0.04},
+        )
+
+        pair = parse_sample(sample, runtime)
+
+        tokenizer = runtime.input_audio_tokenizer
+        self.assertIsInstance(tokenizer, SemanticGlobalAudioTokenizer)
+        self.assertNotIsInstance(tokenizer, BiCodecAudioTokenizer)
+        assert isinstance(tokenizer, SemanticGlobalAudioTokenizer)
+        decoded = tokenizer.decode_full(pair.source.audio_token_ids)
+        torch.testing.assert_close(decoded.semantic_codes, semantic)
+        torch.testing.assert_close(decoded.global_codes, source_global)
+        self.assertEqual(
+            runtime.input_audio_stream_views,
+            (
+                (AudioStream.SEMANTIC, AudioView.GLM4),
+                (AudioStream.GLOBAL, AudioView.BICODEC),
+            ),
+        )
+        self.assertEqual(
+            tokenizer.grammar.generation_variants,
+            ("global_semantic",),
+        )
+        self.assertTrue(tokenizer.grammar.is_complete(pair.source.audio_token_ids))
+
+    def test_composed_input_rejects_missing_prepared_global_view(self) -> None:
+        runtime = Runtime(
+            Config(
+                audio_input=AudioInputConfig(
+                    streams={
+                        "semantic": AudioInputStreamConfig(tokenizer="glm4"),
+                        "global": AudioInputStreamConfig(tokenizer="bicodec"),
+                    }
+                ),
+                audio_output=AudioOutputConfig(tokenizer="bicodec"),
+            ),
+            audio_sequence_layout=AudioSequenceLayout.FLATTENED,
+        )
+        runtime.__dict__["text_tokenizer"] = _TextTokenizer()
+
+        with self.assertRaisesRegex(ValueError, "composed input.*global views"):
+            parse_sample(_sample(), runtime)
+
+    def test_composed_input_chat_accepts_prepared_semantic_global_codes(self) -> None:
+        runtime = Runtime(
+            Config(
+                audio_input=AudioInputConfig(
+                    streams={
+                        "semantic": AudioInputStreamConfig(tokenizer="glm4"),
+                        "global": AudioInputStreamConfig(tokenizer="bicodec"),
+                    }
+                ),
+                audio_output=AudioOutputConfig(tokenizer="bicodec"),
+            ),
+            audio_sequence_layout=AudioSequenceLayout.FLATTENED,
+        )
+        runtime.__dict__["text_tokenizer"] = _TextTokenizer()
+        codes = AudioCodes(
+            semantic_codes=torch.tensor([[1], [2]], dtype=torch.long),
+            global_codes=torch.arange(32, dtype=torch.long).reshape(32, 1),
+        )
+
+        request = chat_adapter.to_request(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "codec_codes",
+                                "codec": runtime.input_audio_schema_codec_name,
+                                "codes": codes,
+                            }
+                        ],
+                    }
+                ],
+                "task": Task.ASR,
+            },
+            runtime,
+        )
+
+        positions = request["audio_input_positions"]
+        self.assertIsNotNone(positions)
+        assert positions is not None
+        expected = runtime.layout.to_global(
+            runtime.input_audio_block_name,
+            runtime.input_audio_tokenizer.encode_full(codes),
+        )
+        actual = request["prompt_ids"].index_select(0, positions)
+        torch.testing.assert_close(actual, expected)
 
     def test_flattened_longcat_input_preserves_all_codebooks(self) -> None:
         runtime = Runtime(

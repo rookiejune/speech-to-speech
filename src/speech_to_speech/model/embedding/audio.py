@@ -47,6 +47,9 @@ class _Runtime(Protocol):
     @cached_property
     def audio_tokenizer(self) -> AudioTokenizer: ...
 
+    @property
+    def output_audio_embedding_initialization(self) -> str: ...
+
     @cached_property
     def codec(self) -> object: ...
 
@@ -72,16 +75,37 @@ def create_semantic_audio_embedding(
 ) -> SemanticAudioEmbedding:
     audio_start, audio_end = runtime.layout.blocks[Modality.AUDIO.value]
     audio_rows = audio_end - audio_start
-    levels = fsq_levels(runtime.codec)
+    tokenizer = runtime.audio_tokenizer
+    initialization = getattr(
+        runtime,
+        "output_audio_embedding_initialization",
+        None,
+    )
+    if initialization is None:
+        initialization = tokenizer.embedding_initialization
+    if initialization == "model_random":
+        if embedding_dim is None:
+            raise ValueError("model-random audio embedding requires embedding_dim.")
+        return _embedding_from_base(
+            random_weight(
+                embedding_dim,
+                tokenizer,
+                reference=reference,
+            ),
+            tokenizer,
+            num_embeddings=audio_rows,
+        )
+
+    codec = runtime.codec
+    levels = fsq_levels(codec)
     if levels is not None:
         if embedding_dim is None:
             raise ValueError("FSQ audio embedding requires embedding_dim.")
-        tokenizer = runtime.audio_tokenizer
         if not isinstance(tokenizer, _CodebookTokenizer):
             raise TypeError(
                 "FSQ embedding requires a flattened codebook tokenizer."
             )
-        radix_order = fsq_radix_order(runtime.codec)
+        radix_order = fsq_radix_order(codec)
         if radix_order not in {None, FsqEmbedding.radix_order}:
             raise ValueError(
                 "FSQ embedding only supports first_fastest mixed-radix IDs."
@@ -93,11 +117,11 @@ def create_semantic_audio_embedding(
             embedding_dim=embedding_dim,
             target_rms=reference_rms(reference),
             config=fsq,
-            level_values=fsq_level_values(runtime.codec),
+            level_values=fsq_level_values(codec),
         )
     return embedding(
-        runtime.codec,
-        runtime.audio_tokenizer,
+        codec,
+        tokenizer,
         reference=reference,
         num_embeddings=audio_rows,
     )
@@ -274,6 +298,19 @@ def embedding(
         )
     else:
         raise ValueError(f"unsupported audio embedding initialization: {initialization}")
+    return _embedding_from_base(
+        base,
+        tokenizer,
+        num_embeddings=num_embeddings,
+    )
+
+
+def _embedding_from_base(
+    base: Tensor,
+    tokenizer: AudioTokenizer,
+    *,
+    num_embeddings: int,
+) -> nn.Embedding:
     control_rows = num_embeddings - tokenizer.vocab_size
     if control_rows < 1:
         raise ValueError("audio token block must reserve runtime control rows.")

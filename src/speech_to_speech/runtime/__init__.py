@@ -1,6 +1,7 @@
 from .backbone import BackboneInitialization, BackboneType
 from .config import (
     AudioInputConfig,
+    AudioInputStreamConfig,
     AudioOutputConfig,
     AudioSequenceLayout,
     Config,
@@ -13,6 +14,7 @@ from .audio_schema import AudioTokenRegistry, AudioTokenSpec
 
 __all__ = [
     "AudioInputConfig",
+    "AudioInputStreamConfig",
     "AudioOutputConfig",
     "AudioSequenceLayout",
     "AudioTokenRegistry",

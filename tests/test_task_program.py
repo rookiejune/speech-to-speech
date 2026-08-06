@@ -63,6 +63,11 @@ class TaskProgramTest(unittest.TestCase):
             Task.T2ST: (SourceLayout.TEXT, PredictionModality.AUDIO, True),
             Task.T2TT: (SourceLayout.TEXT, PredictionModality.TEXT, True),
             Task.TTS: (SourceLayout.TEXT, PredictionModality.AUDIO, False),
+            Task.TTS_VOICE_CLONE: (
+                SourceLayout.TEXT_AUDIO,
+                PredictionModality.AUDIO,
+                True,
+            ),
         }
         for task, (source, prediction, source_role) in expected.items():
             with self.subTest(task=task):
@@ -139,6 +144,7 @@ class TaskProgramTest(unittest.TestCase):
             ),
             (Task.T2TT, DIRECT): (ResponseControl.MT,),
             (Task.TTS, DIRECT): (ResponseControl.AUDIO,),
+            (Task.TTS_VOICE_CLONE, DIRECT): (ResponseControl.AUDIO,),
         }
 
         actual = {
@@ -195,6 +201,8 @@ class TaskProgramTest(unittest.TestCase):
         self.assertTrue(uses_target_ctc(Task.S2ST))
         self.assertTrue(uses_target_ctc(Task.T2ST))
         self.assertFalse(uses_target_ctc(Task.TTS))
+        self.assertFalse(uses_source_ctc(Task.TTS_VOICE_CLONE))
+        self.assertFalse(uses_target_ctc(Task.TTS_VOICE_CLONE))
         self.assertFalse(uses_target_ctc(Task.S2ST, trace=TARGET_COT))
         self.assertFalse(uses_target_ctc(Task.S2ST, trace=FULL_COT))
 

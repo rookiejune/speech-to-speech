@@ -20,10 +20,14 @@ from torch import Tensor, nn
 from ..runtime import AudioSequenceLayout
 from ..runtime.audio_schema import AudioTokenSpec
 from ..task import ControlToken
+from ..audio import AudioStream
 from ..runtime.audio_tokenizer.contract import AudioTokenizer
 from ..runtime.backbone import BackboneEncoder
 from ..runtime.backbone.contract import Backbone, TextTokenizer
-from ..runtime.codec import audio_backend_identity, audio_code_spec
+from ..runtime.codec import (
+    audio_backend_identity,
+    audio_code_spec,
+)
 from ..runtime.codec_contract import (
     acoustic_codec,
     codec_frame_rate,
@@ -909,6 +913,9 @@ def audio_code_spec_contract(spec: AudioCodeSpec) -> dict[str, object]:
 
 
 def input_codec_contract(runtime: TokenModelRuntime) -> dict[str, object]:
+    names = getattr(runtime, "input_audio_stream_tokenizer_names", None)
+    if names is not None and len(names) > 1:
+        return composed_input_codec_contract(runtime, tuple(names))
     name = runtime.input_codec_name
     if not isinstance(name, str) or not name:
         raise TypeError("runtime input_codec_name must be a non-empty string.")
@@ -925,7 +932,58 @@ def input_codec_contract(runtime: TokenModelRuntime) -> dict[str, object]:
     }
 
 
+def composed_input_codec_contract(
+    runtime: TokenModelRuntime,
+    names: tuple[tuple[AudioStream, str], ...],
+) -> dict[str, object]:
+    views = dict(runtime.input_audio_stream_views)
+    specs = dict(runtime.input_audio_stream_code_specs)
+    identities = dict(runtime.input_audio_stream_backend_identities)
+    tokenizer_names = dict(names)
+    expected = {AudioStream.SEMANTIC, AudioStream.GLOBAL}
+    if set(views) != expected or set(specs) != expected or set(identities) != expected:
+        raise ValueError(
+            "composed input codec contract requires semantic and global stream metadata."
+        )
+    if set(tokenizer_names) != expected:
+        raise ValueError(
+            "composed input codec contract requires semantic and global tokenizer names."
+        )
+    streams: dict[str, object] = {}
+    for stream in (AudioStream.SEMANTIC, AudioStream.GLOBAL):
+        view = views[stream]
+        if not isinstance(view, AudioView):
+            raise TypeError("composed input codec views must be AudioView values.")
+        streams[stream.value] = {
+            "name": tokenizer_names[stream],
+            "audio_view": view.value,
+            "backend_identity": audio_backend_identity_contract(identities[stream]),
+            "code_spec": audio_code_spec_contract(specs[stream]),
+        }
+    name = getattr(runtime, "input_audio_schema_codec_name", None)
+    if not isinstance(name, str) or not name:
+        raise TypeError("composed input audio schema name must be a non-empty string.")
+    return {
+        "name": name,
+        "audio_view": views[AudioStream.SEMANTIC].value,
+        "frame_rate": positive_float(
+            specs[AudioStream.SEMANTIC].frame_rate,
+            "input semantic codec frame rate",
+        ),
+        "composition": "semantic-global-v1",
+        "streams": streams,
+    }
+
+
 def codec_contract(runtime: TokenModelRuntime) -> dict[str, object]:
+    initialization = getattr(
+        runtime,
+        "output_audio_embedding_initialization",
+        None,
+    )
+    if initialization == "model_random":
+        return model_random_audio_tokenizer_contract(runtime)
+
     codec = runtime.codec
     semantic_sizes = positive_sizes(
         runtime.semantic_codebook_sizes,
@@ -971,6 +1029,33 @@ def codec_contract(runtime: TokenModelRuntime) -> dict[str, object]:
     }
 
 
+def model_random_audio_tokenizer_contract(
+    runtime: TokenModelRuntime,
+) -> dict[str, object]:
+    name = runtime.codec_name
+    if not isinstance(name, str) or not name:
+        raise TypeError("runtime codec_name must be a non-empty string.")
+    view = runtime.audio_view
+    if not isinstance(view, AudioView):
+        raise TypeError("runtime audio_view must be an AudioView.")
+    identity = getattr(runtime, "output_audio_backend_identity", None)
+    if not isinstance(identity, AudioBackendIdentity):
+        identity = audio_backend_identity(name)
+    spec = runtime.output_audio_code_spec
+    return {
+        "name": name,
+        "audio_view": view.value,
+        "frame_rate": positive_float(
+            spec.frame_rate,
+            "output audio tokenizer frame rate",
+        ),
+        "initialization": "model_random",
+        "backend_identity": audio_backend_identity_contract(identity),
+        "code_spec": audio_code_spec_contract(spec),
+        "semantic_artifact_sha256": semantic_artifact_sha256(runtime),
+    }
+
+
 def token_space_contract(runtime: TokenModelRuntime) -> dict[str, object]:
     blocks = runtime.layout.blocks
     if not isinstance(blocks, Mapping):
@@ -982,7 +1067,7 @@ def token_space_contract(runtime: TokenModelRuntime) -> dict[str, object]:
     expected_input_block = "audio" if sharing == "shared" else "audio_input"
     if input_block_name != expected_input_block:
         raise ValueError(
-            "runtime input audio block does not match audio resource sharing: "
+            "runtime input audio block does not match audio token-space sharing: "
             f"expected {expected_input_block!r}, got {input_block_name!r}."
         )
     block_names = (
@@ -1094,7 +1179,11 @@ def input_audio_schema_contract(
         audio_block=audio_block,
         reserved_ids=reserved_ids,
         side="input",
-        codec_name=runtime.input_codec_name,
+        codec_name=getattr(
+            runtime,
+            "input_audio_schema_codec_name",
+            runtime.input_codec_name,
+        ),
         sequence_layout=runtime.audio_sequence_layout,
     )
 

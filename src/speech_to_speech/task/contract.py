@@ -319,6 +319,7 @@ class Task(StrEnum):
     T2ST = auto()
     T2TT = auto()
     TTS = auto()
+    TTS_VOICE_CLONE = auto()
 
     @property
     def program(self) -> TaskProgram:

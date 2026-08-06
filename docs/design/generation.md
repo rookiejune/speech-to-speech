@@ -43,8 +43,7 @@ ChatRequest(messages, task, language?, trace?)
 
 - `task.contract.Request(prompt_ids, task, audio_input_positions, trace?, target_language?)`：无 target、无
   batch padding 的单条推理输入，与训练 `ModelSample.request` 共用同一类型。`prompt_ids` 是一维
-  layout global token IDs；BiCodec reference global stream 也直接序列化在这里，不存在并行的
-  context codes 字段。可选的
+  layout global token IDs；source audio 也直接序列化在这里，不存在并行的 context codes 字段。可选的
   `audio_input_positions` 只标记 source audio payload 在 prompt 中的位置。可选 `trace` 唯一确定
   `ResponseSpec`；含 MT step 时还必须携带规范化后的 `target_language`，不能从 prompt 文本猜测。
   trace 未设置时使用 program 默认 response。请求不能直接选择执行 route。
@@ -58,15 +57,13 @@ ChatRequest(messages, task, language?, trace?)
 - `generation.result.AudioOutput(features, codes, waveform, sample_rate)`：audio task 的恢复结果。
   codes-only 路径总会填充 decoder-independent 的 `codes`：semantic/structured 路径使用
   `AudioCodes(semantic_codes, global_codes, acoustic_codes)`，flattened frame codec 使用 raw
-  `[frames, codebooks]` tensor。BiCodec 会先解析 prompt/response 的 global stream ownership，再返回
-  完整 semantic/global codes。配置 `runtime.audio_output.detokenizer=null` 时不加载 waveform backend，
+  `[frames, codebooks]` tensor。BiCodec 从完整 response 解析 semantic/global codes。配置
+  `runtime.audio_output.detokenizer=null` 时不加载 waveform backend，
   `waveform=None`、`sample_rate=None`；配置 decoder 时这两个字段一起填充。unified-token codec 没有
   独立 acoustic feature side channel，因此 `features=None`。
 - `model.output.AcousticGeneration(sequence, features, frame_counts)`：acoustic model 与 audio strategy 之间的批量
   返回契约。
 - `generate_responses()`：校验私有 request、解析 task/trace 对应的 `ResponseSpec` 后分组并生成。
-- `generation.bicodec`：BiCodec 私有 request 组装 helper；公开路径应走 `create` /
-  `to_request`。
 - `decode_generated_audio()` / `decode_generated_codes()`：分别把 audio token 配合 acoustic
   feature/code 解码为 waveform。
 - `TextProbe` / `TextProbeResult` / `evaluate_text()`：greedy text generation 与 reference NLL
@@ -108,13 +105,11 @@ template、不插入 instruction。按 task builder 契约构造的 request 只�
 公开 Chat 的 audio-source lowering 会先在完整 history 的 rendered template 中保留唯一 source
 placeholder，再把 input BOA/schema/payload/EOA 插入该位置；不能把 source audio 追加到 assistant generation
 marker 之后，否则会偏离训练 prompt 布局。
-prompt 中若包含 BiCodec reference stream，`prompt_ids` 已经包含 serialized global stream，
-decode 直接从该 span 恢复 prompt-owned global stream。reference builder 生成的 span 严格为
-`[BOA, input schema, serialized global stream, EOA]`；无 reference 时不追加 audio response token。response marker
-是序列自己的 generation contract：以 `<begin_of_global>` 开局时 LLM 生成 global，随后生成
-semantic；以 `<begin_of_semantic>` 开局时 LLM 只生成 semantic。decode 要求 prompt 与 response
-恰好一方包含 global；两边都有或都没有都报错。shape、dtype、值域和 fixed-length global 数量由
-`BiCodecAudioTokenizer` 统一校验。
+`Task.TTS_VOICE_CLONE` 走通用 audio-source lowering：prompt 是 target text 加 input-runtime source
+audio，response 始终由 output runtime 自回归完整 target audio。source audio 的 codec stream 组成只由
+input runtime 决定，不会抽取、复用或强制拷贝为 target global。BiCodec response 必须包含
+`<begin_of_global>`、固定长度 global payload、`<begin_of_semantic>` 和 semantic payload；shape、dtype、
+值域和 global 数量由 `BiCodecAudioTokenizer` 统一校验。
 `FlattenedAudioTokenizer` 的 codebook marker 和各 codebook range 是 codec-private grammar。
 生成时该 grammar 屏蔽错误 marker/order/range 和过早 EOA，decode 前再做完整性校验。BOA、selector、
 marker 与 EOA 都计入
@@ -125,11 +120,10 @@ codec parser 完整解释则继续 decode，不强制补 EOA。多码本、flatt
 结构交给 codec，也不让整批结果失败。
 `generation.service.requests_from_batch()` 会从 teacher-forcing batch 保留 task prefix，直接构造
 request 的调用方负责保持相同 task prefix 契约。
-当前 prompt 只由 layout global token IDs 表达；普通 audio-source 内容编码为 semantic audio token，
+当前 prompt 只由 layout global token IDs 表达；普通 audio-source 内容编码为 input-runtime audio token，
 并可通过 `audio_input_positions` 让 model 在这些 payload 的 embedding 上运行可配置的
 `AudioInputTower`。该 tower 只处理 source input，不改变 prompt 长度、generation token sequence 或
-output head。structured BiCodec reference global 已经属于 prompt token sequence，不会通过
-request/batch side channel 旁路，也不会再次经过 source tower。
+output head。source audio 不会通过 request/batch side channel 旁路。
 `Request` 不接受可切换的 acoustic feature side channel。
 
 service 在 padding 前校验每条 request 的通用外形，audio strategy 继续校验 codec sequence 契约：
@@ -137,11 +131,11 @@ service 在 padding 前校验每条 request 的通用外形，audio strategy 继
 - task 必须是 `Task`；prompt 必须是非空一维有符号整数 Tensor，且所有 ID 都属于 runtime
   layout。
 - `audio_input_positions` 若存在，必须是一维有符号整数 Tensor，非空位置唯一、位于 prompt 内、
-  任务 source modality 为 audio，并指向 runtime codec audio range。service 左 padding 时同步
+  task context 包含 source audio，并指向 runtime input codec audio range。service 左 padding 时同步
   偏移这些位置；model 使用 cache 时只在首个完整 prompt 传递它们，后续新 token 不重复运行
   input tower。
-- 旧式 `audio_context` request 字段会被拒绝；BiCodec global ownership 只能由 prompt/response
-  marker 表达。
+- 旧式 `audio_context` request 字段会被拒绝；voice clone 使用
+  `Task.TTS_VOICE_CLONE` 的 target-text + source-audio prompt。
 ## 执行流程
 
 `generate_responses()` 先按 request 的 `(task, trace, normalized target_language)` 解析
@@ -197,7 +191,7 @@ structured BiCodec full-output path 只支持 `PARALLEL` 的单个完整 audio s
 可能产生多个独立 structured span，而当前单一 `Result.audio` 无法保留这些边界，因此在 request
 校验时显式拒绝。
 公开 Chat 入口进一步显式拒绝 BiCodec mixed trace，避免把 audio-source S2ST 请求误路由为 TTS
-speaker-reference helper；direct BiCodec audio response 仍按 prompt/response marker ownership 执行。
+voice-clone 请求；direct BiCodec audio response 仍必须生成完整 global/semantic sequence。
 
 ```text
 ordinary TEXT_AR prediction
@@ -238,16 +232,14 @@ codec，也只走 token-only generation 分支；实际 waveform decoder 仍按 
 semantic artifact 路径选择。
 `flattened` layout 对普通 `FrameCodec` 仍调用 `decode(full_codes)`；flattened parser 校验有序
 marker、各 codebook 等长 payload 和 EOA，非法序列只影响对应行的 audio decode。BiCodec parser
-从 prompt/response 的 marker 解析 semantic token 和固定数量 slot-major global codebook token：
-prompt 有 global 时 response 必须以 semantic marker 开局；prompt 没有 global 时 response 必须以
-global marker 开局并同时提供 global 与 semantic。parser 不读取 task/request route，只要求两侧恰好
-一个 global owner。S2S 内部恢复 `AudioCodes`，只在调用 anycodec `detokenize()` 的边界把
+只解析 response 中的 semantic token 和固定数量 slot-major global codebook token；response 必须以
+global marker 开局并同时提供 global 与 semantic。parser 不读取 prompt 中的 source audio，也不按
+task/request route 改变 output grammar。S2S 内部恢复 `AudioCodes`，只在调用 anycodec `detokenize()` 的边界把
 `global_codes` 映射回 `SemanticGlobalCodes.global_codes`。配置
 `runtime.audio_output.acoustic_generator_artifact` 后，semantic strategy 只处理 structured backend 的 semantic tokens，
 并把 waveform decode 交给 `GeneratorRuntime`；普通 frame codec 的 `decode()` 不再接收
 semantic-only codes。semantic-artifact 与 structured full-sequence 是配置阶段选择的两条解码路径；
-structured full-sequence 内部的 prompt/output/decode ownership 由 self-describing marker 决定，
-generation 请求不能覆盖；
+structured full-sequence 的完整性由 self-describing marker 决定，generation 请求不能覆盖；
 fixed-length 与 frame-aligned 的区别由 `AcousticLayout` 提供，不由第三种 stream 名伪装。
 
 自回归 cache、sampling、逐行 stop 状态和 frame condition 收集属于 model；mixed AR 的动态
@@ -267,7 +259,7 @@ allowed IDs 属于 `generation.mixed`。循环的 backbone forward 与 cache 始
 `generation.service.requests_from_batch()` 仅供 teacher-forcing 日志使用：它直接读取
 `ModelBatch.generation_prompt_lengths` 切出每行显式 prompt，并携带对应 response trace 与
 `target_language`，再去掉 batch
-padding；BiCodec reference 已经在 prompt 内，不再复制为 generation side channel。bridge 同时保留
+padding；source audio 已经在 prompt 内，不再复制为 generation side channel。bridge 同时保留
 `audio_input_positions` 的逐行 source payload
 位置。它不从第一个非 `-100` label 猜 prompt 边界；核心 service 不依赖 `ModelBatch`。
 
@@ -309,9 +301,9 @@ cached/full、batched/serial 任一 waveform 非 finite，或 greedy token 不�
   content 的语义，不能静默丢弃 user message。
 - `response_ids` 始终保留 layout global ID 空间。普通 `TEXT_AR` 裁掉最终 EOS；所有结构化 AUDIO
   response 保留 BOA、schema selector、codec-private marker/payload 与 EOA，以便复核 grammar、
-  解析 ownership 并抽取 decoder payload。
-- BiCodec decode 必须从 prompt/output marker 得到且只得到一个 global owner，并拥有 output
-  semantic stream；缺失或重复时显式失败，不用 target codes 或 out-of-band context 静默补齐。
+  并抽取 decoder payload。
+- BiCodec decode 要求 output 同时包含 global 与 semantic stream；缺失、重复或顺序错误时显式失败，
+  不从 prompt、target codes 或 out-of-band context 静默补齐。
 - service 与 audio strategy 只依赖 Protocol，不依赖具体 flow/RVQ model 或 LightningModule；
   audio generation 从 `AudioTokenSpec` 读取 compact marker/range 候选和 prompt continuation variant，
   codec-specific parse/decode 配对仍留在 audio strategy。

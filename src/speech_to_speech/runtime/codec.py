@@ -244,6 +244,15 @@ def has_audio_detokenizer_capability(name: str) -> bool:
     return AudioCapability.DETOKENIZER in audio_capabilities(name)
 
 
+def is_audio_tokenizer_only(name: str) -> bool:
+    """Whether a preset converts waveform to codes but not codes to waveform."""
+
+    return (
+        has_audio_tokenizer_capability(name)
+        and not has_audio_detokenizer_capability(name)
+    )
+
+
 def has_detokenizer_loader(name: str) -> bool:
     """Whether S2S can construct this preset's online detokenizer backend."""
 

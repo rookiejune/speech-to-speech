@@ -133,6 +133,12 @@ class OnDeviceCodecMaterializer:
     ) -> object:
         # Codec backends are materialization dependencies, not part of the model's
         # mixed-precision graph. Keep their input and internal kernels in FP32.
+        streams = getattr(self.runtime, "input_audio_stream_views", ())
+        if input_audio and len(streams) > 1:
+            raise ValueError(
+                "composed input audio requires prepared semantic and global views; "
+                "waveform fallback is not supported."
+            )
         waveform = sample.waveform.to(dtype=torch.float32)
         if device is not None:
             waveform = waveform.to(device=device)

@@ -7,6 +7,7 @@ from anydataset.types import AudioView, Modality
 from anytrain.codec import AudioBackendIdentity, AudioCodeSpec
 from anytrain.module.idspace import Layout
 
+from ..audio import AudioStream
 from ..task import ControlToken
 from .config import AudioSequenceLayout
 from .audio_tokenizer.contract import AudioTokenizer
@@ -30,6 +31,11 @@ class DataRuntime(Protocol):
     def input_audio_view(self) -> AudioView: ...
 
     @property
+    def input_audio_stream_views(
+        self,
+    ) -> tuple[tuple[AudioStream, AudioView], ...]: ...
+
+    @property
     def input_codec_frame_rate(self) -> float: ...
 
     @property
@@ -45,6 +51,16 @@ class DataRuntime(Protocol):
     def input_audio_backend_identity(self) -> AudioBackendIdentity: ...
 
     @property
+    def input_audio_stream_backend_identities(
+        self,
+    ) -> tuple[tuple[AudioStream, AudioBackendIdentity], ...]: ...
+
+    @property
+    def input_audio_stream_tokenizer_names(
+        self,
+    ) -> tuple[tuple[AudioStream, str], ...]: ...
+
+    @property
     def output_audio_backend_identity(self) -> AudioBackendIdentity: ...
 
     @property
@@ -52,6 +68,11 @@ class DataRuntime(Protocol):
 
     @cached_property
     def input_audio_code_spec(self) -> AudioCodeSpec: ...
+
+    @property
+    def input_audio_stream_code_specs(
+        self,
+    ) -> tuple[tuple[AudioStream, AudioCodeSpec], ...]: ...
 
     @cached_property
     def output_audio_code_spec(self) -> AudioCodeSpec: ...
@@ -219,6 +240,9 @@ class GenerationRuntime(DataRuntime, Protocol):
 
 
 class TokenModelRuntime(GenerationRuntime, Protocol):
+    @property
+    def output_audio_embedding_initialization(self) -> str: ...
+
     @cached_property
     def acoustic_generator_artifact_sha256(self) -> str | None: ...
 

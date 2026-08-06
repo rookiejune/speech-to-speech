@@ -143,7 +143,14 @@ def build_request_metadata(
         "trace": response.name,
         "prediction": response.prediction.value,
         "prompt_tokens": int(request["prompt_ids"].numel()),
-        "source": modality_metadata(source_item(sample, task), task.source_modality),
+        "source": modality_metadata(
+            source_item(sample, task),
+            (
+                types.Modality.AUDIO
+                if task.source_layout.includes_audio
+                else task.source_modality
+            ),
+        ),
         "reference": modality_metadata(target_item(sample, task), reference_modality),
     }
 
@@ -742,7 +749,7 @@ def log_source_audio(
     tag: str,
     step: int,
 ) -> None:
-    if task.source_modality is not types.Modality.AUDIO:
+    if not task.source_layout.includes_audio:
         return
     waveform, sample_rate = sample_audio(datamodule, sample, task, source=True)
     audio_writer.add_audio(f"{tag}/source", waveform, step, sample_rate=sample_rate)

@@ -17,7 +17,6 @@ from speech_to_speech.generation import (
     generate_responses,
 )
 from speech_to_speech.generation.audio import decode_token_audio_results
-from speech_to_speech.generation.bicodec import prepare_bicodec_tts_request
 from speech_to_speech.generation.request import validate
 from speech_to_speech.model.generation import GenerationStepResult
 from speech_to_speech.runtime import (
@@ -30,7 +29,7 @@ from speech_to_speech.runtime.audio_schema import AudioTokenSpec
 from speech_to_speech.runtime.audio_tokenizer import BiCodecAudioTokenizer
 from speech_to_speech.runtime.protocol import GenerationRuntime
 from speech_to_speech.runtime.backbone.contract import Backbone
-from speech_to_speech.task import ControlToken, DIRECT, Task
+from speech_to_speech.task import ControlToken, Task
 
 
 class _TextTokenizer:
@@ -125,86 +124,28 @@ def _codes() -> AudioCodes:
     )
 
 
+def _tts_request() -> Request:
+    return Request(
+        prompt_ids=torch.tensor([2, 3]),
+        task=Task.TTS,
+        audio_input_positions=None,
+    )
+
+
 class BiCodecRequestInputTest(unittest.TestCase):
-    def test_reference_request_serializes_text_and_global_stream(self) -> None:
+    def test_plain_tts_request_uses_text_only_prompt(self) -> None:
         runtime = _runtime()
-        codes = _codes()
-
-        request = prepare_bicodec_tts_request(
-            "hello world",
-            runtime,
-            reference_codes=codes,
-            language="Chinese",
-        )
+        request = _tts_request()
 
         self.assertNotIn("audio_context", request)
         self.assertNotIn("prediction", request)
         self.assertIs(request["task"], Task.TTS)
-        self.assertEqual(request["trace"], DIRECT)
-        self.assertEqual(len(runtime.text_tokenizer.encoded), 1)
-        self.assertIn("hello world", runtime.text_tokenizer.encoded[0])
-        local_audio = runtime.audio_tokenizer.encode_streams(
-            codes,
-            (AudioStream.GLOBAL,),
-        )
-        expected_suffix = torch.cat(
-            (
-                torch.tensor([runtime.boa_token_id]),
-                torch.tensor([runtime.audio_schema_token_id]),
-                runtime.layout.to_global(Modality.AUDIO.value, local_audio),
-                torch.tensor([runtime.eoa_token_id]),
-            )
-        )
-        torch.testing.assert_close(
-            request["prompt_ids"][-expected_suffix.numel() :],
-            expected_suffix,
-        )
+        torch.testing.assert_close(request["prompt_ids"], torch.tensor([2, 3]))
         validate(request, _RouteModel(runtime, _codes()))
-
-    def test_unconditioned_request_starts_full_output(self) -> None:
-        runtime = _runtime()
-        request = prepare_bicodec_tts_request("hello world", runtime)
-
-        self.assertNotIn("audio_context", request)
-        self.assertNotIn("prediction", request)
-        self.assertIs(request["task"], Task.TTS)
-        self.assertEqual(request["trace"], DIRECT)
-        torch.testing.assert_close(
-            request["prompt_ids"],
-            torch.tensor([2, 3]),
-        )
-        self.assertEqual(len(runtime.text_tokenizer.encoded), 1)
-
-    def test_reference_request_rejects_non_audio_task(self) -> None:
-        with self.assertRaisesRegex(ValueError, "text-to-audio"):
-            prepare_bicodec_tts_request(
-                "hello",
-                _runtime(),
-                reference_codes=_codes(),
-                task=Task.T2TT,
-            )
-
-    def test_reference_request_validates_code_shapes(self) -> None:
-        codes = _codes()
-        malformed = AudioCodes(
-            semantic_codes=codes.semantic_codes,
-            global_codes=torch.tensor([[0, 1], [1, 2]]),
-        )
-
-        with self.assertRaisesRegex(ValueError, "global codes must have shape"):
-            prepare_bicodec_tts_request(
-                "hello",
-                _runtime(),
-                reference_codes=malformed,
-            )
 
     def test_service_rejects_out_of_band_audio_context(self) -> None:
         runtime = _runtime()
-        request = prepare_bicodec_tts_request(
-            "hello",
-            runtime,
-            reference_codes=_codes(),
-        )
+        request = _tts_request()
         cast(dict[str, object], request)["audio_context"] = AudioCodes(
             semantic_codes=torch.tensor([[1], [2], [3]], dtype=torch.long),
             global_codes=torch.tensor([[2], [2]], dtype=torch.long),
@@ -293,47 +234,19 @@ class BiCodecRequestInputTest(unittest.TestCase):
         self.assertIsNone(audio["waveform"])
         self.assertIsNone(audio["sample_rate"])
 
-    def test_reference_request_generates_semantic_and_reuses_prompt_global(self) -> None:
+    def test_generated_response_requires_global_and_semantic(self) -> None:
         runtime = _runtime()
-        context = _codes()
         output = AudioCodes(
             semantic_codes=torch.tensor([[4], [5]], dtype=torch.long),
             global_codes=torch.tensor([[0], [0]], dtype=torch.long),
         )
-        codec = _GlobalCodec()
-        cast(SimpleNamespace, cast(object, runtime)).codec = codec
-
-        result = generate_responses(
-            [
-                prepare_bicodec_tts_request(
-                    "hello",
-                    runtime,
-                    reference_codes=context,
-                )
-            ],
-            _RouteModel(runtime, output, streams=(AudioStream.SEMANTIC,)),
-            max_new_tokens=8,
-            do_sample=False,
-        )[0]
-
-        audio = result["audio"]
-        if audio is None or audio["codes"] is None:
-            self.fail("route generation did not return structured audio codes")
-        torch.testing.assert_close(
-            audio["codes"].semantic_codes,
-            output.semantic_codes,
-        )
-        torch.testing.assert_close(audio["codes"].global_codes, context.global_codes)
-        if codec.codes is None:
-            self.fail("structured codec did not receive resolved route codes")
-        torch.testing.assert_close(
-            codec.codes.semantic,
-            output.semantic_codes.unsqueeze(0),
-        )
-        torch.testing.assert_close(
-            codec.codes.global_codes,
-            cast(Tensor, context.global_codes).unsqueeze(0),
-        )
+        with self.assertRaises(ValueError):
+            generate_responses(
+                [_tts_request()],
+                _RouteModel(runtime, output, streams=(AudioStream.SEMANTIC,)),
+                max_new_tokens=8,
+                do_sample=False,
+            )
 
     def test_unconditioned_request_generates_global_and_semantic(self) -> None:
         runtime = _runtime()
@@ -345,7 +258,7 @@ class BiCodecRequestInputTest(unittest.TestCase):
         cast(SimpleNamespace, cast(object, runtime)).codec = codec
 
         result = generate_responses(
-            [prepare_bicodec_tts_request("hello", runtime)],
+            [_tts_request()],
             _RouteModel(runtime, output),
             max_new_tokens=12,
             do_sample=False,
@@ -369,7 +282,7 @@ class BiCodecRequestInputTest(unittest.TestCase):
         cast(SimpleNamespace, cast(object, runtime)).output_audio_detokenizer = None
 
         result = generate_responses(
-            [prepare_bicodec_tts_request("hello", runtime)],
+            [_tts_request()],
             _RouteModel(runtime, output),
             max_new_tokens=12,
             do_sample=False,

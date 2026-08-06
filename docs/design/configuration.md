@@ -275,6 +275,10 @@ loader_plan:
   `runtime.audio_output.{tokenizer,detokenizer,bpe,acoustic_generator_artifact}`。例如 GLM-4 input /
   BiCodec output 选择 `runtime=glm4_bicodec audio_sequence_layout=flattened`；无需另传 `view`、
   `vocab_size` 或 `frame_rate`。
+  UniSS-style `BiCodec global + GLM4 semantic` input 选择
+  `runtime=glm4_bicodec_composed audio_sequence_layout=flattened`；其 input 形状为
+  `runtime.audio_input.streams.{semantic,global}.{tokenizer,bpe}`，global 必须复用 BiCodec output
+  backend/code spec，且只接受同时存在 GLM4/BiCodec prepared views 的 source sample。
   相同 resolved backend 的 tokenizer/detokenizer 共享一个资源实例；input/output 的 code schema 与
   `bpe` identity 也相同时才共享 model token space、special IDs 和 embedding。同 backend / 不同
   BPE 复用 backend 与 prepared codes，但保持两套 model-facing token space。detokenizer 参与
@@ -290,9 +294,9 @@ loader_plan:
   只预测 semantic。需要 waveform 时，acoustic 由 Flow/RVQ side module 或
   `runtime.audio_output.acoustic_generator_artifact` 提供。
 - BiCodec 只允许 `audio_sequence_layout=flattened` 的 self-describing structured sequence。
-  输入 global 直接序列化进 prompt，response 以 `<begin_of_semantic>` 开局；没有输入 global 时
-  response 以 `<begin_of_global>` 开局，由 LLM 生成 global 后继续生成 semantic。global ownership
-  由数据装配产生的 marker labels 学习，不是公开 config 或 runtime route 轴。
+  普通 TTS 与 `TTS_VOICE_CLONE` 都以完整 output-runtime audio sequence 为 target；后者另把
+  input-runtime source audio 放入 prompt。datamodule 不根据 source 是否含 global stream 改变
+  response，也不提供 global ownership 配置轴。
 - S2S 内部统一使用 `AudioCodes`：fixed-length non-semantic units 映射为 `global_codes`，
   frame-aligned units 映射为 `acoustic_codes`。`SemanticAcousticCodes.acoustic` 只保留在 anycodec
   adapter 边界。
@@ -308,13 +312,13 @@ loader_plan:
 - `runtime.audio_output.acoustic_generator_artifact` 为 `semantic-acoustic-generator` 的 semantic-only waveform
   support artifact；LongCat 的 `semantic` token-only 路径可使用它。BiCodec 不接受该 artifact，
   unified structured sequence 始终恢复完整 `AudioCodes`，在 backend 边界转换后调用 `detokenize()`，
-  也不接入 Flow/RVQ composition。两份 BiCodec smoke 都选择
+  也不接入 Flow/RVQ composition。普通 `bicodec_generate_global_smoke` 选择
   `datamodule/dataset=qwen_tts_speaker` 和 `datamodule.shape=single`；可用
   `datamodule.dataset.speaker=<id>` 限制到一个 speaker，也可用
   `datamodule.dataset.filter=<grid-revision>` 选择 workspace 已发布的 Qwen grid quality revision；
-  `bicodec_input_global_smoke` 使用 prompt
-  global stream，`bicodec_generate_global_smoke` 从 text 生成 global stream。FrameCodec 的
-  token-only full-code baseline 使用 `audio_sequence_layout=flattened`。
+  它从 text 自回归完整 target audio。`bicodec_voice_clone_smoke` 使用 `glm4_bicodec` 非对称
+  runtime 与 pair-shaped toy data，验证 `target text + GLM4 source audio -> 完整 BiCodec target audio`。
+  FrameCodec 的 token-only full-code baseline 使用 `audio_sequence_layout=flattened`。
 - `model.acoustic.init_artifact` 是 Flow/RVQ 联合训练的 generator 初始化路径，与
   `runtime.audio_output.acoustic_generator_artifact` 不同。composition 加载 artifact 后校验 frame-aligned layout、
   decoder/REPA 配置和 acoustic backend metadata，再把已加载对象交给 model；semantic conditioner 不进入

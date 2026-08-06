@@ -175,6 +175,12 @@ PROGRAMS: dict[Task, TaskProgram] = {
             _response(DIRECT, _TARGET_AUDIO_STEP, prediction=PredictionModality.AUDIO),
         ),
     ),
+    Task.TTS_VOICE_CLONE: TaskProgram(
+        context=(_TARGET_TEXT, _SOURCE_AUDIO),
+        responses=(
+            _response(DIRECT, _TARGET_AUDIO_STEP, prediction=PredictionModality.AUDIO),
+        ),
+    ),
 }
 
 

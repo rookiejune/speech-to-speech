@@ -8,6 +8,7 @@ from anydataset.types import AudioView
 from anytrain.module.idspace import Layout
 from torch import Tensor
 
+from ..audio import AudioStream
 from ..runtime import AudioSequenceLayout
 from ..runtime.audio_tokenizer.contract import AudioTokenizer
 from ..runtime.audio_schema import AudioTokenRegistry, AudioTokenSpec
@@ -118,6 +119,7 @@ class DataRuntimeSnapshot:
     input_audio_decoupled: bool
     input_codec_name: str
     input_audio_view: AudioView
+    input_audio_stream_views: tuple[tuple[AudioStream, AudioView], ...]
     input_codec_frame_rate: float
     codec_name: str
     audio_view: AudioView
@@ -208,6 +210,11 @@ class DataRuntimeSnapshot:
             input_audio_decoupled=runtime.input_audio_decoupled,
             input_codec_name=runtime.input_codec_name,
             input_audio_view=runtime.input_audio_view,
+            input_audio_stream_views=getattr(
+                runtime,
+                "input_audio_stream_views",
+                ((AudioStream.SEMANTIC, runtime.input_audio_view),),
+            ),
             input_codec_frame_rate=runtime.input_codec_frame_rate,
             codec_name=runtime.codec_name,
             audio_view=runtime.audio_view,

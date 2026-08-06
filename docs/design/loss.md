@@ -20,6 +20,8 @@
   softmax 竞争。`target_modality` 只是单模态 prediction 的便捷属性，mixed 时为 `None`，不作为
   loss 入口。BiCodec grammar 额外消费逐位置 `token_groups` 与 `model.selected_logits()`，只在当前
   semantic、semantic-or-end 或 acoustic codebook candidate group 上计算 restricted CE。
+  TTS 与 `TTS_VOICE_CLONE` 使用相同的 output-runtime audio objective；voice clone 的 source audio
+  只位于 prompt，BiCodec target 的 global/semantic 完整序列都参与自回归 CE。
 - `CTCAlignmentLoss`：对 transcript-latent audio span 做冻结文本头监督。source route 在 audio
   自身位置读取 `h[p]` 并使用非因果 decoder，target route 在 causal predecessor 读取 `h[p-1]` 并使用
   因果 decoder；两侧可分别选择 backbone readout、pooling 和 identity/linear/transformer topology，

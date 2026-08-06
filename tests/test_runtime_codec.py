@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 import torch
 from anydataset.types import AudioView
-from anytrain.codec import AcousticLayout
+from anytrain.codec import AcousticLayout, AudioBackendIdentity
 
 from speech_to_speech.runtime import (
     AudioInputConfig,
@@ -225,6 +225,33 @@ class RuntimeCodecTest(unittest.TestCase):
         self.assertEqual(runtime.input_codec_frame_rate, 75.0)
         self.assertEqual(runtime.input_audio_tokenizer.vocab_size, 16_384)
         self.assertNotIn("input_audio_tokenizer_backend", runtime.__dict__)
+
+    def test_shared_backend_identity_does_not_replace_an_independent_input_spec(
+        self,
+    ) -> None:
+        config = Config(
+            audio_input=AudioInputConfig(tokenizer="unicodec"),
+            audio_output=AudioOutputConfig(tokenizer="stable_codec"),
+        )
+        shared_identity = AudioBackendIdentity(preset="shared-fixture")
+
+        with patch(
+            "speech_to_speech.runtime.core.audio_backend_identity",
+            return_value=shared_identity,
+        ):
+            runtime = Runtime(
+                config,
+                audio_sequence_layout=AudioSequenceLayout.FLATTENED,
+            )
+
+            self.assertTrue(runtime.input_audio_backend_shared)
+            self.assertFalse(runtime.input_audio_token_space_shared)
+            self.assertEqual(runtime.input_audio_code_spec.view, "unicodec")
+            self.assertEqual(runtime.output_audio_code_spec.view, "stable")
+            self.assertNotEqual(
+                runtime.input_audio_code_spec,
+                runtime.output_audio_code_spec,
+            )
 
     def test_legacy_input_metadata_must_match_registered_preset(self) -> None:
         with self.assertWarns(FutureWarning), self.assertRaisesRegex(

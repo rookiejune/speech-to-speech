@@ -162,12 +162,10 @@ class _Codes:
         return [
             self._result(
                 _direct_audio_payload(response, self.model, variant=variant),
-                request,
                 response_ids=response,
             )
-            for response, request, variant in zip(
+            for response, variant in zip(
                 responses,
-                batch.requests,
                 variants,
             )
         ]
@@ -175,14 +173,13 @@ class _Codes:
     def _result(
         self,
         token_ids: Tensor,
-        request: Request | None,
         *,
         response_ids: Tensor | None = None,
         features: Tensor | None = None,
     ) -> Result:
         result_ids = token_ids if response_ids is None else response_ids
         try:
-            codes = self._codes(token_ids, request)
+            codes = self._codes(token_ids)
             if features is not None:
                 if not isinstance(codes, AudioCodes) or codes.semantic_codes is None:
                     raise ValueError("acoustic features require generated semantic codec codes.")
@@ -200,17 +197,13 @@ class _Codes:
             codes=codes,
         )
 
-    def _codes(self, token_ids: Tensor, request: Request | None) -> AudioCodes | Tensor:
+    def _codes(self, token_ids: Tensor) -> AudioCodes | Tensor:
         runtime = self.model.runtime
         if isinstance(runtime.audio_tokenizer, BiCodecAudioTokenizer):
             return decode_generated_bicodec_codes_row(
                 token_ids,
-                None if request is None else request["prompt_ids"],
                 audio_tokenizer=runtime.audio_tokenizer,
                 audio_token_range=runtime.codec_audio_range,
-                boa_token_id=runtime.boa_token_id,
-                eoa_token_id=runtime.eoa_token_id,
-                audio_schema_token_id=runtime.audio_schema_token_id,
             )
         if runtime.audio_sequence_layout is AudioSequenceLayout.FLATTENED:
             return decode_generated_frame_code_row(
@@ -271,14 +264,12 @@ class _AcousticCodes(_Codes):
         return [
             self._result(
                 payload,
-                request,
                 response_ids=response,
                 features=features,
             )
-            for response, payload, request, features in zip(
+            for response, payload, features in zip(
                 responses,
                 payloads,
-                batch.requests,
                 row_features,
             )
         ]
@@ -493,12 +484,10 @@ class _SemanticGlobal:
         return [
             self._decode_result(
                 _direct_audio_payload(response, self.model, variant=variant),
-                request,
                 response_ids=response,
             )
-            for response, request, variant in zip(
+            for response, variant in zip(
                 responses,
-                batch.requests,
                 variants,
             )
         ]
@@ -506,13 +495,12 @@ class _SemanticGlobal:
     def _decode_result(
         self,
         token_ids: Tensor,
-        request: Request | None,
         *,
         response_ids: Tensor | None = None,
     ) -> Result:
         result_ids = token_ids if response_ids is None else response_ids
         try:
-            waveform, codes = self._decode_row(token_ids, request)
+            waveform, codes = self._decode_row(token_ids)
         except torch.OutOfMemoryError:
             raise
         except Exception as error:
@@ -527,17 +515,12 @@ class _SemanticGlobal:
     def _decode_row(
         self,
         token_ids: Tensor,
-        request: Request | None,
     ) -> tuple[Tensor, AudioCodes]:
         return decode_generated_bicodec_row(
             token_ids,
-            None if request is None else request["prompt_ids"],
             codec=self.codec,
             audio_tokenizer=self.tokenizer,
             audio_token_range=self.model.runtime.codec_audio_range,
-            boa_token_id=self.model.runtime.boa_token_id,
-            eoa_token_id=self.model.runtime.eoa_token_id,
-            audio_schema_token_id=self.model.runtime.audio_schema_token_id,
         )
 
     def decode(self, token_ids: Tensor, features: Tensor | None) -> Tensor:
@@ -986,12 +969,10 @@ def decode_token_audio_results(
         decoded = [
             decoder._result(
                 row,
-                request,
                 response_ids=response,
             )
-            for row, request, response in zip(
+            for row, response in zip(
                 active_rows,
-                active_requests,
                 active_responses,
             )
         ]
@@ -1002,10 +983,9 @@ def decode_token_audio_results(
         ]
     elif isinstance(decoder, _SemanticGlobal):
         decoded = [
-            decoder._decode_result(row, request, response_ids=response)
-            for row, request, response in zip(
+            decoder._decode_result(row, response_ids=response)
+            for row, response in zip(
                 active_rows,
-                active_requests,
                 active_responses,
             )
         ]

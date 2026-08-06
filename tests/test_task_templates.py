@@ -38,6 +38,7 @@ _REQUIRED = {
     Task.T2ST: {"language", "source"},
     Task.T2TT: {"language", "source"},
     Task.TTS: {"source"},
+    Task.TTS_VOICE_CLONE: {"source"},
 }
 _FORBIDDEN = {
     Task.AUDIO_AR: {"source"},

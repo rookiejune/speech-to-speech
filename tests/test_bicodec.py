@@ -179,10 +179,6 @@ class BiCodecTokenizerTest(unittest.TestCase):
         self.assertFalse(spec.allows_eoa(global_prefix))
         with self.assertRaisesRegex(ValueError, "EOA.*before"):
             spec.validate_next(global_prefix, 100, eoa_token_id=100)
-        self.assertTrue(spec.allows_eoa(global_prefix, variant="global"))
-
-        semantic = torch.tensor([self.tokenizer.semantic_token_id, 1])
-        self.assertTrue(spec.allows_eoa(semantic, variant="semantic"))
         with self.assertRaisesRegex(ValueError, "global.*marker"):
             spec.validate_prefix(
                 torch.tensor(
@@ -196,22 +192,14 @@ class BiCodecTokenizerTest(unittest.TestCase):
 
         self.assertEqual(
             spec.grammar.generation_variants,
-            ("global_semantic", "semantic"),
+            ("global_semantic",),
         )
         self.assertEqual(
             spec.next_candidates([]).marker_ids,
-            (self.tokenizer.semantic_token_id, self.tokenizer.global_token_id),
-        )
-        self.assertEqual(
-            spec.next_candidates(
-                [],
-                variants=("global_semantic",),
-            ).marker_ids,
             (self.tokenizer.global_token_id,),
         )
         self.assertEqual(spec.generation_variant(()), "global_semantic")
-        self.assertEqual(spec.generation_variant((global_prefix,)), "semantic")
-        self.assertEqual(spec.generation_variant((tokens,)), "semantic")
+        self.assertEqual(spec.generation_variant((tokens,)), "global_semantic")
 
     def test_full_sequence_preserves_independent_semantic_and_global_lengths(self):
         codes = AudioCodes(
@@ -330,67 +318,17 @@ class BiCodecDecodeTest(unittest.TestCase):
             output,
             (AudioStream.GLOBAL, AudioStream.SEMANTIC),
         )
-        boa = 10 + tokenizer.vocab_size
-        schema = boa + 2
         _, resolved = decode_generated_bicodec_row(
             tokens + 10,
-            None,
             codec=_GlobalCodec(),
             audio_tokenizer=tokenizer,
             audio_token_range=(10, 10 + tokenizer.vocab_size),
-            boa_token_id=boa,
-            eoa_token_id=boa + 1,
-            audio_schema_token_id=schema,
         )
 
         torch.testing.assert_close(resolved.semantic_codes, output.semantic_codes)
         torch.testing.assert_close(resolved.global_codes, output.global_codes)
 
-    def test_reference_decode_reuses_prompt_global_and_output_semantic(self):
-        tokenizer = BiCodecAudioTokenizer(
-            semantic_codebook_size=8,
-            global_codebook_sizes=(3,),
-            global_unit_length=2,
-        )
-        context = AudioCodes(
-            semantic_codes=torch.tensor([[7]]),
-            global_codes=torch.tensor([[2], [1]]),
-        )
-        output = AudioCodes(
-            semantic_codes=torch.tensor([[1], [2]]),
-            global_codes=torch.tensor([[0], [1]]),
-        )
-        tokens = tokenizer.encode_streams(
-            output,
-            (AudioStream.SEMANTIC,),
-        )
-
-        boa = 10 + tokenizer.vocab_size
-        eoa = boa + 1
-        schema = boa + 2
-        prompt_global = tokenizer.encode_global(context) + 10
-        prompt = torch.cat(
-            (
-                torch.tensor([1, boa, schema]),
-                prompt_global,
-                torch.tensor([eoa, boa, schema]),
-            )
-        )
-        _, resolved = decode_generated_bicodec_row(
-            tokens + 10,
-            prompt,
-            codec=_GlobalCodec(),
-            audio_tokenizer=tokenizer,
-            audio_token_range=(10, 10 + tokenizer.vocab_size),
-            boa_token_id=boa,
-            eoa_token_id=eoa,
-            audio_schema_token_id=schema,
-        )
-
-        torch.testing.assert_close(resolved.semantic_codes, output.semantic_codes)
-        torch.testing.assert_close(resolved.global_codes, context.global_codes)
-
-    def test_route_decode_requires_exactly_one_global_owner(self):
+    def test_route_decode_rejects_semantic_only_response(self):
         tokenizer = BiCodecAudioTokenizer(
             semantic_codebook_size=8,
             global_codebook_sizes=(3,),
@@ -400,39 +338,14 @@ class BiCodecDecodeTest(unittest.TestCase):
             semantic_codes=torch.tensor([[1], [2]]),
             global_codes=torch.tensor([[0], [1]]),
         )
-        boa = 10 + tokenizer.vocab_size
-        eoa = boa + 1
-        schema = boa + 2
-        prompt = torch.cat(
-            (
-                torch.tensor([1, boa, schema]),
-                tokenizer.encode_global(codes) + 10,
-                torch.tensor([eoa, boa, schema]),
-            )
-        )
-        cases = (
-            (tokenizer.encode_full(codes) + 10, prompt),
-            (
+        with self.assertRaisesRegex(ValueError, "full BiCodec decode"):
+            decode_generated_bicodec_row(
                 tokenizer.encode_streams(codes, (AudioStream.SEMANTIC,)) + 10,
-                None,
-            ),
-        )
+                codec=_GlobalCodec(),
+                audio_tokenizer=tokenizer,
+                audio_token_range=(10, 10 + tokenizer.vocab_size),
+            )
 
-        for response, prompt_ids in cases:
-            with self.subTest(prompt=prompt_ids is not None), self.assertRaisesRegex(
-                ValueError,
-                "exactly one global stream owner",
-            ):
-                decode_generated_bicodec_row(
-                    response,
-                    prompt_ids,
-                    codec=_GlobalCodec(),
-                    audio_tokenizer=tokenizer,
-                    audio_token_range=(10, 10 + tokenizer.vocab_size),
-                    boa_token_id=boa,
-                    eoa_token_id=eoa,
-                    audio_schema_token_id=schema,
-                )
 
 class BiCodecConfigTest(unittest.TestCase):
     def test_bicodec_requires_one_structured_layout(self):

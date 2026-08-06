@@ -18,8 +18,8 @@
   `AudioView` 与 runtime `audio_sequence_layout`：逻辑 audio 输入/输出始终保留完整
   semantic/acoustic codes；`flattened` 把完整 codes 投影为 audio token sequence（acoustic-first、
   semantic-last），`semantic` 只把 semantic 放进 sequence，并保留 acoustic codes 给 side module、
-  generator plugin。BiCodec 固定使用 self-describing `flattened` sequence，prompt/output ownership 由 sample
-  builder 根据 source/reference 是否提供 global stream 处理，不由 parser 另造 semantic route。
+  generator plugin。BiCodec 固定使用 self-describing `flattened` sequence；source 与 target 分别由
+  input/output runtime 编码，parser 和 builder 都不检查 source stream 来决定 target serialization。
 - `parse.parser.parse_task_sample()`：按 `Task` 只解析实际消费的 source/target modality。pair/single
   只决定 role 映射；codec view 缺失时是否使用 waveform fallback 与数据 shape 无关。
 - `build.single.SingleCollator` / `build.single.parse_single_sample()`：处理 single utterance 数据形态，
@@ -32,8 +32,9 @@
 - `build.single.build_single_sample()`：复用同一 `ModelSample` / `ModelBatch` 输出契约，把 single
   utterance 组装成 text->audio 或 audio->text 序列；`pl_module` 不区分 batch 来源。
 - `sample.Speech` / `sample.SpeechPair`：prepared sample 的 codec、token 和语言逻辑视图；
-  `AudioContextSample` 为 raw sample 绑定独立 audio reference；`RawSpeech` / `SpeechTaskSample` /
-  `RawSpeechBatch` 表达 task 已选择、但部分 audio item 或 reference 尚待 codec encode 的中间状态。
+  `RawSpeech` / `SpeechTaskSample` / `RawSpeechBatch` 表达 task 已选择、但部分 audio item 尚待 codec
+  encode 的中间状态。旧的 `AudioContextSample` 只保留为数据边界类型，训练 parser/collator 明确拒绝；
+  voice clone 必须表示为普通 source/target pair。
 - `batch.ModelSample` / `batch.ModelBatch`：单条和 batch 级模型输入；
   `ModelBatch.from_samples(..., pad_token_id=...)` 完成校验与 padding，mask 由 padding 字段
   派生并缓存。
@@ -80,16 +81,19 @@ grouped rows，因此不会把 speaker 轴或 semantic padding 带入模型 batc
 把底层 flat store 的局部分组映射回 text-row 索引，再在过滤后执行 rank 分片，避免 speaker-minor
 排列把某一列集中到单个 distributed rank。该接入只确认 prepared-data 与模型输入契约；真实
 checkpoint 的收敛和生成音质仍需单独验收。
-显式 reference 的数据表示与 task source 分开处理：
+TTS 与 voice-clone TTS 使用同一 target-audio 输出路径，只在 context 上不同：
 
-- speaker-grid（`qwen_tts_speaker` / `shape=single`）：adapter 为每个 target cell 绑定同
-  speaker 的下一 text row 作为 `AudioContextSample.audio_context`，最后一行循环到第一行；
-  reference 与 target 必须是不同 row。它仍通过 flat-cell 索引读取，不把 grouped `rows` 或
-  另一 speaker 混入训练样本。
-- pair（例如 WMT19）：parser 只解析显式 `AudioContextSample`，不会把 pair 的
-  `Role.SOURCE` audio 自动改写成 reference。builder 只把 task source layout 实际可见的 audio
-  当作输入 global；因此 S2ST 可复用 source global，而 TTS/T2ST 即使底层 pair 携带 source audio，
-  仍从 `<begin_of_global>` 生成 global。显式 reference 则序列化进 prompt。
+```text
+TTS:             target text                -> full target audio
+TTS_VOICE_CLONE: target text + source audio -> full target audio
+```
+
+voice-clone 数据必须使用普通 pair：`Role.SOURCE/AUDIO` 是音色条件，`Role.TARGET/TEXT` 是要朗读的
+文本，`Role.TARGET/AUDIO` 是完整监督。两段 audio 可以使用不同 runtime/tokenizer；builder 只按 task
+program 排列 target text 与 source audio，不假设 source audio 含有 global codes，也不从 source 拷贝
+任何 target token。Qwen speaker grid 的 flat-cell adapter 仍服务 `shape=single` 普通 TTS；若要从
+speaker grid 构造 voice-clone 数据，应在 dataset 边界产出上述 pair，而不是 `audio_context` wrapper。
+
 - split manifest 的生成属于审计/部署入口，不属于 dataset loader：
   `scripts/create_split_manifest.py` 只消费 candidate、root audit 和 data-root 路径，输出带
   source artifact 与 root fingerprint 的 JSON；训练前必须先在 stable root 上完成该产物的独立
@@ -516,35 +520,32 @@ batch 仍暴露对齐的 `input_ids` / `token_labels` / `token_groups` / `acoust
 `Speech` 使用三分字段：`semantic_codes`、`global_codes`、`acoustic_codes`。fixed-layout anycodec
 输入在 parser/构造边界归入 `global_codes`，frame-aligned 输入才进入 `acoustic_codes`。
 
-BiCodec sample builder 先按“task 实际可见的 audio source 或显式 reference”是否提供 global stream
-决定 codec-private 序列。prompt 已有 global 时，response payload 从 `<begin_of_semantic>` 开始；
-prompt 没有 global 时，payload 从 `<begin_of_global>` 开始并按 global-first / semantic-last 生成两者。
-两种 payload 外面都包 `BOA + schema selector + ... + EOA`。装配完成后不再另存一份 context codes
-给 model batch 或 decode，target semantic 也不会被放进 prompt。外层控制 token、codec-private
-marker 与 payload 全部属于 response 监督；`token_groups` 只负责为不同位置选择合法候选范围，
-不负责代写 marker。
+audio target 始终直接使用 output runtime 已产生的 `target.audio_token_ids`。BiCodec target 因而是
+`global + semantic` 的完整 self-describing sequence，外面包
+`BOA + schema selector + ... + EOA`；source audio 的 codec 结构不会改变 response。外层控制 token、
+codec-private marker 与 payload 全部属于 response 监督；`token_groups` 只负责为不同位置选择合法候选
+范围，不负责代写 marker。
 
 `ModelBatch` 额外保存 `tasks: list[Task]`、`traces: list[str]`、
 `target_languages: list[str | None]` 和 `pad_token_id`，并公开
 `predictions`（从 task/trace 派生）、`attention_mask` 与 `acoustic_target_mask`。speech batch 还保存
 `audio_seconds: Tensor[B]`，表示每条训练样本按当前 task 实际消费的 source/target 音频秒数之和；
 纯文本样本为 0。batch padding 把单条 prompt 边界聚合为 `generation_prompt_lengths`；raw sample
-的显式 `audio_context` 已在装配阶段消费，不进入 batch。
+的显式 `audio_context` 会在 parser/collator 边界被拒绝，不进入 batch。
 teacher-forcing generation bridge（`requests_from_batch`）切出 `prompt_ids`，并带上同批
-resolved `trace` 与对应的 `target_language`，不从第一个非 `-100` label 反推。BiCodec reference
-global stream 已在该 prompt 边界内；audio-target BOA/schema 不在 prompt，真实生成必须从 BOA 开始
-预测完整 response trace。
+resolved `trace` 与对应的 `target_language`，不从第一个非 `-100` label 反推。voice-clone 的 target
+text 与 source audio 已在该 prompt 边界内；audio-target BOA/schema 不在 prompt，真实生成必须从
+BOA 开始预测完整 response trace。
 
 `audio_input_positions` 是每条序列中 source audio payload token 的位置，按 `[frames]` 保存，batch
-padding 后为 `[batch, frames]`，右侧填充 `-1`。sample builder 只为
-`task.source_modality == Modality.AUDIO` 的 source payload 记录位置；source BOA/EOA、target audio
-response、generated token 以及额外序列化的 BiCodec reference global span 不进入该字段。它只服务
-backbone input tower；BiCodec decode ownership 完全由 prompt/response token marker 表达。
+padding 后为 `[batch, frames]`，右侧填充 `-1`。sample builder 为 task program 中可见的 source audio
+payload 记录位置，包括 `AUDIO` 与 `TEXT_AUDIO` context；source BOA/EOA、target audio response 和
+generated token 不进入该字段。它只服务 backbone input tower，不规定 input/output codec 的内部排布。
 
 `source_ctc` / `target_ctc` 各自包含 audio span 的完整序列 `token_positions` 与 tokenizer-local
 `text_token_ids`。sample builder 不按“任务输出是否为 audio”这一条粗规则决定 CTC，而是按 transcript
 visibility 编译：ASR/S2TT/S2ST 有 source CTC；T2ST/S2ST 的纯 audio prediction 与 AUDIO_AR 有
-target CTC；这里的 prediction 来自 resolved response，而不是独立配置。TTS、MT、
+target CTC；这里的 prediction 来自 resolved response，而不是独立配置。TTS、TTS_VOICE_CLONE、MT、
 parallel/interleaved output 没有 target CTC。source positions 交给 non-causal
 route 读取 `h[p]`，target positions 保留 token 自身位置并由 loss 读取 `h[p-1]`。audio span 指
 tokenizer 序列化 payload：BiCodec stream marker 也可保留为 blank CTC step；外层
@@ -567,8 +568,9 @@ BOA/schema selector/EOA 则排除。
 - 正式训练路径优先使用预先 materialize 的 codec codes。训练时 wav->codes 只作为显式 debug
   fallback：普通 DataLoader worker 不持有 codec/CUDA module，fallback batch 必须在
   `pl_module` loss 前经 on-device materializer 转为 `ModelBatch`。materializer 对 S2ST 编码 source
-  和 target，对 S2TT/ASR 只编码音频 source，对 T2ST/TTS 只编码音频 target；纯文本 task 不调用
-  codec。在线编码是 FP32 预处理边界，不属于 backbone/acoustic decoder 的 autocast graph。
+  和 target，TTS_VOICE_CLONE 同样分别编码 source 与 target；对 S2TT/ASR 只编码音频 source，对
+  T2ST/TTS 只编码音频 target；纯文本 task 不调用 codec。在线编码是 FP32 预处理边界，不属于
+  backbone/acoustic decoder 的 autocast graph。
 - toy dataset 只读取正式 runtime 的 codec identity 与 codebook metadata；它不提供 tokenizer、
   codec、layout 或 special token，因此不存在 toy runtime 分支。
 - `parse.parser` 只解释 raw dataset representation；`build.sample` 只实现任务序列规则；
@@ -605,8 +607,8 @@ BOA/schema selector/EOA 则排除。
 - `audio_input_positions` 只表达可见 source audio payload 的 overlay 位置；其值必须唯一、落在
   当前序列内并指向 runtime codec audio range。没有 source audio 时必须为 `None`。
 - `ModelBatch.generation_prompt_lengths` 是 teacher-forcing 到真实推理的显式 prompt 桥接字段；
-  BiCodec reference global stream 必须已位于该边界内，decode 不从 batch side channel 或 target codes
-  回填缺失 ownership。
+  voice-clone source audio 必须已位于该边界内，decode 不从 batch side channel 或 target codes 回填
+  条件。
 - `AudioMeta.DURATION` 的单位是秒，不是 codec frame 或 waveform sample。parser 优先读取并校验
   该元数据；缺失时用当前 codec view 的 frame count 除以 `runtime.codec_frame_rate` 推导
   `Speech.duration_seconds`。task sample builder 按 source/target modality 决定哪些角色计入

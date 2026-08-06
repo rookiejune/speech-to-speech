@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import torch
-from anydataset.types import Modality
 from torch import Tensor
 
 from .._tensor import is_signed_integer_dtype
@@ -50,8 +49,8 @@ def target_language_of(
 def validate(request: Request, model: TokenGenerator) -> None:
     if "audio_context" in request:
         raise ValueError(
-            "generation request audio_context is not supported; encode BiCodec "
-            "global ownership in prompt/response markers."
+            "generation request audio_context is not supported; place source audio "
+            "in a task prompt such as TTS_VOICE_CLONE."
         )
     task = request["task"]
     if not isinstance(task, Task):
@@ -74,7 +73,7 @@ def validate(request: Request, model: TokenGenerator) -> None:
             "audio input positions",
             dimensions=1,
         )
-        if task.source_modality is not Modality.AUDIO:
+        if not task.source_layout.includes_audio:
             raise ValueError(
                 "audio input positions require an audio-source generation task."
             )

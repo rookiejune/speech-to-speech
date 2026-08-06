@@ -14,7 +14,10 @@ from typing_extensions import NotRequired
 from .._tensor import is_signed_integer_dtype
 from ..audio import AudioCodes
 from ..datamodule.parse import parse_audio_codes
-from ..runtime.audio_tokenizer import BiCodecAudioTokenizer
+from ..runtime.audio_tokenizer import (
+    BiCodecAudioTokenizer,
+    SemanticGlobalAudioTokenizer,
+)
 from ..runtime.codec_contract import frame_tokenizer, global_codec, supports_global
 from ..runtime.protocol import GenerationRuntime
 from ..task import (
@@ -31,7 +34,6 @@ from ..task.templates import (
     format_response_instruction,
     select_template,
 )
-from .bicodec import prepare_bicodec_tts_request
 from .contract import AudioOutput, Result, TokenGenerator
 from .service import generate_responses
 from .text import ResponseStepRuntime, decode_response_text_steps
@@ -134,14 +136,18 @@ def to_request(request: ChatRequest, runtime: GenerationRuntime) -> Request:
         task,
         language,
         response,
-        allow_empty_user=task.source_modality is Modality.AUDIO and media is not None,
+        allow_empty_user=(
+            task.source_layout.includes_audio
+            and not task.source_layout.includes_text
+            and media is not None
+        ),
     )
     codes = (
         None
         if media is None
         else (
             _materialize_input_codes(media, runtime)
-            if task.source_modality is Modality.AUDIO
+            if task.source_layout.includes_audio
             else materialize_codes(media, runtime)
         )
     )
@@ -244,11 +250,17 @@ def _build_request(
         if response.requires_target_language
         else None
     )
-    if task.source_modality is Modality.AUDIO:
+    if response.prediction.is_mixed and isinstance(
+        runtime.audio_tokenizer,
+        BiCodecAudioTokenizer,
+    ):
+        raise ValueError("BiCodec chat does not support mixed response traces.")
+    if task.source_layout.includes_audio:
         if codes is None:
             raise ValueError("audio-source chat requests require audio or codec_codes.")
         return _build_audio_source_request(
             prompt_messages,
+            source_text,
             codes,
             task=task,
             response=response,
@@ -265,25 +277,6 @@ def _build_request(
             audio_input_positions=None,
             trace=response.name,
         )
-        if target_language is not None:
-            private["target_language"] = target_language
-        return private
-
-    tokenizer = runtime.audio_tokenizer
-    if isinstance(tokenizer, BiCodecAudioTokenizer):
-        if response.prediction.is_mixed:
-            raise ValueError("BiCodec chat does not support mixed response traces.")
-        if codes is not None and not isinstance(codes, AudioCodes):
-            raise TypeError("BiCodec chat requests require AudioCodes.")
-        private = prepare_bicodec_tts_request(
-            source_text,
-            runtime,
-            reference_codes=codes,
-            language=language,
-            messages=prompt_messages,
-            task=task,
-        )
-        private["trace"] = response.name
         if target_language is not None:
             private["target_language"] = target_language
         return private
@@ -307,6 +300,7 @@ def _build_request(
 
 def _build_audio_source_request(
     prompt_messages: Sequence[Mapping[str, str]],
+    source_text: str,
     codes: AudioCodes | Tensor,
     *,
     task: Task,
@@ -324,9 +318,9 @@ def _build_audio_source_request(
     if semantic is None:
         raise ValueError("audio-source chat codes require semantic units.")
     tokenizer = runtime.input_audio_tokenizer
-    if isinstance(tokenizer, BiCodecAudioTokenizer):
+    if isinstance(tokenizer, SemanticGlobalAudioTokenizer):
         if parsed.global_codes is None:
-            raise ValueError("BiCodec audio input requires global codes.")
+            raise ValueError("semantic-global audio input requires global codes.")
         local_ids = torch.as_tensor(tokenizer.encode_full(parsed), dtype=torch.long)
     else:
         local_ids = torch.as_tensor(tokenizer.encode(semantic), dtype=torch.long)
@@ -347,7 +341,13 @@ def _build_audio_source_request(
         Modality.TEXT.value,
         _token_ids(pieces[1], runtime),
     )
-    start = prefix.numel() + 2
+    text_context = payload.new_empty((0,))
+    if task.source_layout.includes_text:
+        text_context = runtime.layout.to_global(
+            Modality.TEXT.value,
+            _token_ids(source_text, runtime),
+        ).to(device=payload.device)
+    start = prefix.numel() + text_context.numel() + 2
     positions = torch.arange(
         start,
         start + payload.numel(),
@@ -357,6 +357,7 @@ def _build_audio_source_request(
     prompt_ids = torch.cat(
         (
             prefix,
+            text_context,
             payload.new_tensor([runtime.input_boa_token_id]),
             payload.new_tensor([runtime.input_audio_schema_token_id]),
             payload,
@@ -433,7 +434,7 @@ def _prompt_messages(
     source_text = prompt_messages[source_index]["content"]
     instruction_source = (
         _AUDIO_SOURCE_PLACEHOLDER
-        if task.source_modality is Modality.AUDIO
+        if task.source_layout.includes_audio
         else source_text
     )
     prompt_messages[source_index]["content"] = _task_instruction(
@@ -491,6 +492,11 @@ def _encode_audio(
         raise TypeError("audio sample_rate must be an integer.")
     if sample_rate <= 0:
         raise ValueError("audio sample_rate must be positive.")
+    if input_audio and len(_input_audio_views(runtime)) > 1:
+        raise ValueError(
+            "composed input audio does not support waveform fallback; provide "
+            "prepared GLM4 semantic and BiCodec global codes."
+        )
     waveform = waveform.to(dtype=torch.float32)
     batched = _batched_waveform(waveform)
     view = runtime.input_audio_view if input_audio else runtime.audio_view
@@ -572,7 +578,11 @@ def _validated_input_codes(
     codec = part["codec"]
     if not isinstance(codec, str) or not codec.strip():
         raise TypeError("codec_codes codec must be a non-empty string.")
-    expected = getattr(runtime, "input_codec_name", runtime.codec_name)
+    expected = getattr(
+        runtime,
+        "input_audio_schema_codec_name",
+        getattr(runtime, "input_codec_name", runtime.codec_name),
+    )
     if codec != expected:
         raise ValueError(
             f"codec_codes codec {codec!r} does not match runtime input codec "
@@ -585,6 +595,14 @@ def _validated_input_codes(
             raise ValueError(
                 "input AudioCodes must contain 2D semantic_codes."
             )
+        if len(_input_audio_views(runtime)) > 1:
+            if codes.global_codes is None or codes.acoustic_codes is not None:
+                raise ValueError(
+                    "composed input AudioCodes require semantic_codes and "
+                    "global_codes only."
+                )
+            _validate_structured_codes(codes)
+            return codes
         if runtime.input_audio_view is AudioView.BICODEC:
             if codes.global_codes is None or codes.acoustic_codes is not None:
                 raise ValueError(
@@ -601,6 +619,11 @@ def _validated_input_codes(
             raise TypeError("input semantic codec_codes must use signed integers.")
         return codes
     if isinstance(codes, Tensor):
+        if len(_input_audio_views(runtime)) > 1:
+            raise TypeError(
+                "composed input codec_codes must use AudioCodes with semantic and "
+                "global streams."
+            )
         if codes.dim() != 2 or codes.numel() == 0:
             raise ValueError(
                 "input frame codec_codes must be non-empty [frames, codebooks]."
@@ -611,6 +634,16 @@ def _validated_input_codes(
     raise TypeError(
         "input codec_codes codes must be AudioCodes or a frame-code Tensor."
     )
+
+
+def _input_audio_views(runtime: GenerationRuntime) -> tuple[AudioView, ...]:
+    streams = getattr(runtime, "input_audio_stream_views", None)
+    if streams is None:
+        return (runtime.input_audio_view,)
+    views = tuple(view for _, view in streams)
+    if not views or any(not isinstance(view, AudioView) for view in views):
+        raise TypeError("runtime input audio stream views must contain AudioView values.")
+    return views
 
 
 def _validate_structured_codes(value: AudioCodes) -> None:

@@ -158,24 +158,16 @@ def decode_generated_bicodec_full(
 
 def decode_generated_bicodec_row(
     audio_token_ids: Tensor,
-    prompt_ids: Tensor | None,
     *,
     codec: GlobalCodec,
     audio_tokenizer: BiCodecAudioTokenizer,
     audio_token_range: tuple[int, int],
-    boa_token_id: int,
-    eoa_token_id: int,
-    audio_schema_token_id: int,
 ) -> tuple[Tensor, AudioCodes]:
-    """Resolve one self-describing BiCodec response against its prompt."""
+    """Decode one complete self-describing BiCodec response."""
     resolved = decode_generated_bicodec_codes_row(
         audio_token_ids,
-        prompt_ids,
         audio_tokenizer=audio_tokenizer,
         audio_token_range=audio_token_range,
-        boa_token_id=boa_token_id,
-        eoa_token_id=eoa_token_id,
-        audio_schema_token_id=audio_schema_token_id,
     )
     resolved_semantic = cast(Tensor, resolved.semantic_codes)
     waveform = codec.detokenize(
@@ -191,93 +183,15 @@ def decode_generated_bicodec_row(
 
 def decode_generated_bicodec_codes_row(
     audio_token_ids: Tensor,
-    prompt_ids: Tensor | None,
     *,
     audio_tokenizer: BiCodecAudioTokenizer,
     audio_token_range: tuple[int, int],
-    boa_token_id: int,
-    eoa_token_id: int,
-    audio_schema_token_id: int,
 ) -> AudioCodes:
-    """Resolve generated and prompt-owned BiCodec streams without a decoder."""
+    """Decode one complete generated BiCodec response without a decoder."""
     if audio_token_ids.dim() != 1:
         raise ValueError("BiCodec decode expects one generated token row.")
     local_ids = _local_ids(audio_token_ids[None], audio_token_range)[0]
-    output = audio_tokenizer.decode_streams(local_ids)
-    if output.semantic_codes is None:
-        raise ValueError("BiCodec generated output is missing semantic codes.")
-    prompt_global = _prompt_bicodec_global(
-        prompt_ids,
-        audio_tokenizer=audio_tokenizer,
-        audio_token_range=audio_token_range,
-        boa_token_id=boa_token_id,
-        eoa_token_id=eoa_token_id,
-        audio_schema_token_id=audio_schema_token_id,
-    )
-    if (prompt_global is None) == (output.global_codes is None):
-        raise ValueError(
-            "BiCodec decode requires exactly one global stream owner across "
-            "prompt and generated output."
-        )
-    global_codes = output.global_codes if output.global_codes is not None else prompt_global
-    if global_codes is None:
-        raise AssertionError("BiCodec global stream ownership was not resolved.")
-    resolved = AudioCodes(
-        semantic_codes=output.semantic_codes.to(
-            device=audio_token_ids.device,
-            dtype=torch.long,
-        ),
-        global_codes=global_codes.to(
-            device=audio_token_ids.device,
-            dtype=torch.long,
-        ),
-    )
-    return resolved
-
-
-def _prompt_bicodec_global(
-    prompt_ids: Tensor | None,
-    *,
-    audio_tokenizer: BiCodecAudioTokenizer,
-    audio_token_range: tuple[int, int],
-    boa_token_id: int,
-    eoa_token_id: int,
-    audio_schema_token_id: int,
-) -> Tensor | None:
-    if prompt_ids is None:
-        return None
-    if prompt_ids.dim() != 1:
-        raise ValueError("BiCodec prompt ids must have shape [tokens].")
-    start, end = audio_token_range
-    global_streams: list[Tensor] = []
-    cursor = 0
-    while cursor < prompt_ids.numel():
-        starts = prompt_ids[cursor:].eq(boa_token_id).nonzero(as_tuple=False)
-        if starts.numel() == 0:
-            break
-        schema_position = cursor + int(starts[0].item()) + 1
-        if (
-            schema_position >= prompt_ids.numel()
-            or int(prompt_ids[schema_position].item()) != audio_schema_token_id
-        ):
-            raise ValueError("BiCodec prompt audio span has the wrong schema selector.")
-        span_start = schema_position + 1
-        stops = prompt_ids[span_start:].eq(eoa_token_id).nonzero(as_tuple=False)
-        if stops.numel() == 0:
-            break
-        span_end = span_start + int(stops[0].item())
-        payload = prompt_ids[span_start:span_end]
-        if payload.numel() < 1:
-            raise ValueError("BiCodec prompt audio span must not be empty.")
-        if bool((payload < start).any()) or bool((payload >= end).any()):
-            raise ValueError("BiCodec prompt audio span contains non-codec tokens.")
-        decoded = audio_tokenizer.decode_streams(payload.to(dtype=torch.long) - start)
-        if decoded.global_codes is not None:
-            global_streams.append(decoded.global_codes)
-        cursor = span_end + 1
-    if len(global_streams) > 1:
-        raise ValueError("BiCodec prompt contains more than one global stream.")
-    return None if not global_streams else global_streams[0]
+    return audio_tokenizer.decode_full(local_ids)
 
 
 def decode_generated_codes(

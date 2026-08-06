@@ -326,6 +326,7 @@ class ToyDataset(MapStyleABC):
         input_view: AudioView | None = None,
         input_vocab_size: int | None = None,
         input_frame_rate: float | None = None,
+        input_global_from_output: bool = False,
     ) -> None:
         config = DatasetConfig(
             name=DatasetName.TOY,
@@ -342,6 +343,9 @@ class ToyDataset(MapStyleABC):
         self.input_view = input_view
         self.input_vocab_size = input_vocab_size
         self.input_frame_rate = input_frame_rate
+        if not isinstance(input_global_from_output, bool):
+            raise TypeError("toy input_global_from_output must be a bool.")
+        self.input_global_from_output = input_global_from_output
         if self.input_view is not None:
             if self.input_vocab_size is None or self.input_vocab_size <= 0:
                 raise ValueError("decoupled toy input requires a positive vocabulary size.")
@@ -356,6 +360,10 @@ class ToyDataset(MapStyleABC):
             self.codebook_sizes = _codebook_sizes(self.view, codec)
             self.global_codebook_sizes = ()
             self.global_unit_length = None
+        if self.input_global_from_output and self.view is not AudioView.BICODEC:
+            raise ValueError(
+                "composed toy input requires BiCodec output global metadata."
+            )
 
     def __len__(self) -> int:
         return self.samples
@@ -388,31 +396,17 @@ class ToyDataset(MapStyleABC):
             input_frames = max(1, round(duration * input_rate))
             steps = torch.arange(input_frames, dtype=torch.long)
             values = ((steps + offset) % cast(int, self.input_vocab_size)).unsqueeze(-1)
+            views: dict[AudioView, object] = {self.input_view: values}
+            if self.input_global_from_output:
+                views[AudioView.BICODEC] = self._bicodec_codes(offset)
             return AudioItem(
-                views={self.input_view: values},
+                views=views,
                 meta={AudioMeta.DURATION: duration},
             )
         steps = torch.arange(self.frames, dtype=torch.long)
         if self.view is AudioView.BICODEC:
-            semantic = ((steps + offset) % self.codebook_sizes[0]).unsqueeze(-1)
-            unit_length = self.global_unit_length
-            if unit_length is None:
-                raise RuntimeError("BiCodec toy data is missing its global unit length.")
-            global_steps = torch.arange(unit_length, dtype=torch.long)
-            global_codes = torch.stack(
-                [
-                    (global_steps + offset + codebook) % size
-                    for codebook, size in enumerate(self.global_codebook_sizes)
-                ],
-                dim=-1,
-            )
             return AudioItem(
-                views={
-                    AudioView.BICODEC: {
-                        "semantic": semantic,
-                        "global": global_codes,
-                    }
-                },
+                views={AudioView.BICODEC: self._bicodec_codes(offset)},
                 meta={AudioMeta.DURATION: self.frames / self.frame_rate},
             )
         columns = [
@@ -423,6 +417,22 @@ class ToyDataset(MapStyleABC):
             views={self.view: torch.stack(columns, dim=-1)},
             meta={AudioMeta.DURATION: self.frames / self.frame_rate},
         )
+
+    def _bicodec_codes(self, offset: int) -> dict[str, torch.Tensor]:
+        steps = torch.arange(self.frames, dtype=torch.long)
+        semantic = ((steps + offset) % self.codebook_sizes[0]).unsqueeze(-1)
+        unit_length = self.global_unit_length
+        if unit_length is None:
+            raise RuntimeError("BiCodec toy data is missing its global unit length.")
+        global_steps = torch.arange(unit_length, dtype=torch.long)
+        global_codes = torch.stack(
+            [
+                (global_steps + offset + codebook) % size
+                for codebook, size in enumerate(self.global_codebook_sizes)
+            ],
+            dim=-1,
+        )
+        return {"semantic": semantic, "global": global_codes}
 
 
 class DualAudioDataset(MapStyleABC):
@@ -458,6 +468,8 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
     if config.name is DatasetName.TOY:
         _reject_speaker(config)
         distinct_audio_assets = uses_distinct_audio_assets(runtime)
+        input_streams = getattr(runtime, "input_audio_stream_views", ())
+        composed_input = len(input_streams) > 1
         return _apply_split_manifest(
             ToyDataset(
                 runtime.codec_name,
@@ -470,7 +482,11 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
                     else None
                 ),
                 input_vocab_size=(
-                    runtime.input_audio_tokenizer.vocab_size
+                    (
+                        runtime.input_audio_code_spec.primary_codebook_sizes[0]
+                        if composed_input
+                        else runtime.input_audio_tokenizer.vocab_size
+                    )
                     if distinct_audio_assets
                     else None
                 ),
@@ -479,6 +495,7 @@ def load_dataset(config: DatasetConfig, runtime: DatasetRuntime) -> Dataset[Samp
                     if distinct_audio_assets
                     else None
                 ),
+                input_global_from_output=composed_input,
             ),
             config,
         )

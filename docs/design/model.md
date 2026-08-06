@@ -6,8 +6,8 @@
 ## 对外能力
 
 - `base.Model`：接收显式 runtime，提供 text/semantic-audio embedding、token
-  logits、structured token generation 与 frame condition 对齐原语；BiCodec global ownership
-  由序列 marker 表达，不进入 model route。
+  logits、structured token generation 与 frame condition 对齐原语；BiCodec 完整 output stream 的
+  顺序与合法候选由 runtime grammar 表达，不进入 model route。
 - `token.TokenInterface`：注册 runtime-owned text control embedding、semantic-audio embedding、
   audio-to-hidden projection 与 causal audio output head；lexical text embedding 由 backbone 独占，
   调用时显式传入。它同时维护
@@ -79,8 +79,8 @@ def generate_tokens(...) -> Tensor: ...
 - `forward()` 支持 HF backbone 的 cache/position 参数；sampling、stop 和 output-head selection
   参数不进入该通用接口。
 - `audio_input_positions` 是 `[batch, frames]` 的完整序列位置，`-1` 只用于 batch padding。它只
-  指向 source audio payload token；BOA/EOA、target audio token、generated token 和 BiCodec
-  额外序列化的 reference global span 都不经过 `AudioInputTower`。
+  指向 source audio payload token；BOA/EOA、target audio token 和 generated token 都不经过
+  `AudioInputTower`。
 - 输入路由提示使用严格类型 `frozenset[Modality]`。默认路径校验 global IDs 并推导精确模态集合；
   `validate_input=False` 时必须传入已验证的 `input_modalities`。训练可在 CPU batch 上预校验一次，
   generation 首步校验完整 prompt，后续步复用可信提示，避免逐 token 的 device-to-host 同步。
@@ -201,10 +201,10 @@ codec 也可以显式选择 `none` 作为 token-only baseline。入口不根据 
 semantic/global codec（例如 BiCodec）使用独立的 model-facing token layout。它只支持
 一套 self-describing structured sequence，不接入当前 frame-aligned Flow/RVQ acoustic side channel。
 speaker/style 含义由 `SemanticGlobalCodec` 的 global contract 明确表达。
-有 prompt-owned global 时 response 只输出 semantic；否则 response 同时输出 global 与 semantic。
-两种 ownership 使用同一套稳定 vocabulary，由 marker 和 prompt 内容决定，不按 request 动态改变
-模型 head 或 token generation 规则。无 reference 的 global generation 不自带 speaker ID；多 speaker
-训练若没有额外条件或
+task/datamodule 训练始终监督 output runtime 给出的完整 target audio sequence；
+`TTS_VOICE_CLONE` 的 source audio 仅作为 input runtime 编码的 prompt condition，不提供、复用或强制
+拷贝 target global token，也不改变模型 head。普通 TTS 的 global generation 不自带 speaker ID；多
+speaker 训练若没有额外条件或
 latent sampling，global（speaker）预测可能偏向数据中的主导 speaker，这属于模型条件设计而
 不是 codec 序列化问题。
 
@@ -252,6 +252,10 @@ global slot 和 marker 共用这一稳定 layout vocabulary；BOA、schema selec
 payload 和 EOA 都由相同因果目标监督，grammar 只屏蔽非法转移。
 随机初始化只读取 codec 声明的 semantic feature dimension，并使用 backbone embedding 作为
 device reference，不要求 backend 暴露虚构的 codebook tensor。
+tokenizer-only output preset（当前为 GLM-4）固定使用 `model_random`：直接按 backbone hidden
+dimension 构造 tied audio embedding/head，不加载 online tokenizer backend。该策略只由 output
+tokenizer preset 决定，`detokenizer=null` 或运行环境是否具备 loader 都不会改变模型 topology；
+checkpoint runtime contract 对此记录静态 backend identity 与完整 `AudioCodeSpec`。
 
 当 codec `semantic_feature_dim == 1` 且暴露 `fsq_levels`（Stable Codec）时，audio embedding
 改走 factorized FSQ：tokenizer 仍使用 packed product id，embedding 侧按 codec levels 和固定的
