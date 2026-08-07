@@ -29,14 +29,13 @@ from speech_to_speech.datamodule.sample import (
 from speech_to_speech.audio import AudioCodes, AudioStream
 from semantic_acoustic_generator.loss.flow import FlowLoss
 
-from speech_to_speech.loss.contract import LossItem, Outputs, combine_outputs
+from speech_to_speech.loss.contract import Outputs, combine_outputs
 from speech_to_speech.loss.supervised import (
     FlowObjective,
     Objective,
     RVQObjective,
     TokenLoss,
     TokenObjective,
-    validation_metrics,
 )
 from speech_to_speech.model.factory import text_embedding
 from speech_to_speech.model.base import Config, Model
@@ -326,8 +325,6 @@ class _RVQModel(_FlowModel):
                 0,
                 frame_indices,
             ),
-            row_indices=frame_indices.div(mask.size(1), rounding_mode="floor"),
-            batch_size=mask.size(0),
         )
 
 
@@ -340,13 +337,9 @@ class _BatchObjective(Objective[Any]):
         del model
         self.tasks.append(batch.tasks[0])
         value = 1.0 if batch.tasks[0] is Task.ASR else 3.0
-        tokens = 1.0 if batch.tasks[0] is Task.ASR else 3.0
         return {
             "loss": torch.tensor(value),
-            "token": LossItem(
-                torch.tensor([value]),
-                {"tokens": torch.tensor([tokens])},
-            ),
+            "token": torch.tensor(value),
         }
 
 
@@ -367,7 +360,7 @@ class ModelLossContractTest(unittest.TestCase):
             token_logits,
         )
 
-        self.assertTrue(torch.isfinite(item.loss).all())
+        self.assertTrue(torch.isfinite(item))
         self.assertEqual(
             calls,
             [(Modality.AUDIO, int(case.labels.ne(-100).sum()))],
@@ -389,9 +382,7 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertEqual(model.projected_audio_rows, [1])
         self.assertEqual(model.logit_modalities, [Modality.AUDIO, Modality.TEXT])
         self.assertEqual(model.logit_rows, 2)
-        details = _require_details(self, outputs["token"], "token loss")
-        self.assertEqual(float(details["text_tokens"].sum()), 1.0)
-        self.assertEqual(float(details["audio_tokens"].sum()), 1.0)
+        self.assertEqual(outputs["token"].ndim, 0)
 
     def test_token_objective_supervises_interleaved_text_and_audio_heads(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
@@ -410,9 +401,7 @@ class ModelLossContractTest(unittest.TestCase):
             {Modality.TEXT, Modality.AUDIO},
         )
         self.assertEqual(model.logit_rows, 3)
-        details = _require_details(self, outputs["token"], "token loss")
-        self.assertEqual(float(details["text_tokens"].sum()), 1.0)
-        self.assertEqual(float(details["audio_tokens"].sum()), 2.0)
+        self.assertEqual(outputs["token"].ndim, 0)
 
     def test_token_objective_uses_full_audio_logits_for_bicodec_tokens(self):
         case = _bicodec_full_vocab_case()
@@ -437,29 +426,18 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertEqual(model.logit_rows, int(case.labels.ne(-100).sum()))
         self.assertEqual(model.logit_modalities, [Modality.AUDIO])
 
-    def test_validation_metrics_maps_outputs_and_rvq_top1(self):
-        token = LossItem(
-            torch.tensor([1.0]),
-            {"tokens": torch.tensor([2.0])},
+    def test_combined_outputs_keep_scalar_objectives(self):
+        outputs = combine_outputs(
+            [
+                {"loss": torch.tensor(1.5), "token": torch.tensor(1.0)},
+                {"loss": torch.tensor(2.5), "rvq": torch.tensor(0.5)},
+            ]
         )
-        rvq = LossItem(
-            torch.tensor([0.5]),
-            {
-                "frames": torch.tensor([4.0]),
-                "codebook_0": torch.tensor([0.5]),
-                "codebook_0_top1": torch.tensor([1.0]),
-            },
-        )
-        metrics = validation_metrics({"loss": torch.tensor(1.5), "token": token, "rvq": rvq})
-        self.assertEqual(set(metrics), {
-            "token/loss",
-            "acoustic/rvq/loss",
-            "acoustic/rvq/codebook_0",
-            "acoustic/rvq/codebook_0_top1",
-        })
-        self.assertEqual(float(metrics["token/loss"].values.sum()), 1.0)
-        self.assertEqual(float(metrics["token/loss"].weights.sum()), 2.0)
-        self.assertEqual(float(metrics["acoustic/rvq/codebook_0_top1"].values.sum()), 1.0)
+
+        self.assertEqual(set(outputs), {"loss", "token", "rvq"})
+        torch.testing.assert_close(outputs["loss"], torch.tensor(2.0))
+        torch.testing.assert_close(outputs["token"], torch.tensor(0.5))
+        torch.testing.assert_close(outputs["rvq"], torch.tensor(0.25))
 
     def test_transfer_batch_requests_nonblocking_model_batch_copy(self):
         batch = _batch(Task.MT, token_labels=torch.tensor([[-100, 1]]))
@@ -553,25 +531,11 @@ class ModelLossContractTest(unittest.TestCase):
         audio_count = audio.sum(dim=1)
         total_count = text_count + audio_count
 
-        torch.testing.assert_close(
-            item.loss,
-            (token_loss * valid).sum(dim=1) / total_count,
-        )
-        self.assertIsNotNone(item.details)
-        details = item.details or {}
-        torch.testing.assert_close(
-            details["text_loss"],
-            (token_loss * text).sum(dim=1) / text_count.clamp_min(1),
-        )
-        torch.testing.assert_close(
-            details["audio_loss"],
-            (token_loss * audio).sum(dim=1) / audio_count.clamp_min(1),
-        )
-        torch.testing.assert_close(details["text_tokens"], text_count.float())
-        torch.testing.assert_close(details["audio_tokens"], audio_count.float())
+        expected = (token_loss * valid).sum() / total_count.sum()
+        torch.testing.assert_close(item, expected)
 
-        item.loss.mean().backward()
-        ((token_loss * valid).sum(dim=1) / total_count).mean().backward()
+        item.backward()
+        expected.backward()
         if sparse_hidden.grad is None or dense_hidden.grad is None:
             self.fail("token hidden gradients are unavailable")
         if sparse_weight.grad is None or dense_weight.grad is None:
@@ -614,7 +578,7 @@ class ModelLossContractTest(unittest.TestCase):
                 layout.blocks[modality.value][1] - layout.blocks[modality.value][0],
             ),
         )
-        self.assertTrue(torch.isfinite(item.loss).all())
+        self.assertTrue(torch.isfinite(item))
 
     def test_trusted_token_loss_avoids_host_predicates_for_empty_modality(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
@@ -639,7 +603,7 @@ class ModelLossContractTest(unittest.TestCase):
             )
 
         self.assertEqual(set(modalities), {Modality.TEXT, Modality.AUDIO})
-        self.assertTrue(torch.isfinite(item.loss).all())
+        self.assertTrue(torch.isfinite(item))
 
     def test_token_objective_uses_effective_token_mean(self):
         layout = Layout(text=(0, 2), audio=(2, 4))
@@ -655,14 +619,8 @@ class ModelLossContractTest(unittest.TestCase):
             return torch.stack((value, -value), dim=-1)
 
         item = loss(hidden, labels, Modality.TEXT, logits)
-        details = _require_details(self, item, "token loss")
-
-        weighted = item.weighted_mean(details["tokens"])
-        unweighted = item.loss.mean()
-
-        self.assertNotEqual(float(weighted), float(unweighted))
         torch.testing.assert_close(
-            weighted,
+            item,
             nn.functional.cross_entropy(
                 torch.tensor([[0.0, -0.0], [0.0, -0.0], [2.0, -2.0], [2.0, -2.0]]),
                 torch.tensor([1, 1, 1, 1]),
@@ -700,12 +658,6 @@ class ModelLossContractTest(unittest.TestCase):
                 "speech_to_speech.pl_module.module.combine_outputs",
                 wraps=combine_outputs,
             ) as combine,
-            patch(
-                "anytrain.loss.output.loss_item_mean",
-                side_effect=AssertionError(
-                    "fused training must not reduce concatenated objective losses"
-                ),
-            ),
         ):
             outputs = module.training_step(
                 FusedBatch(
@@ -721,12 +673,7 @@ class ModelLossContractTest(unittest.TestCase):
 
         self.assertEqual(objective.tasks, [Task.ASR, Task.MT])
         torch.testing.assert_close(outputs["loss"], torch.tensor(1.2))
-        torch.testing.assert_close(outputs["token"].loss, torch.tensor([1.0, 3.0]))
-        details = _require_details(self, outputs["token"], "fused token loss")
-        torch.testing.assert_close(
-            details["tokens"],
-            torch.tensor([1.0, 3.0]),
-        )
+        torch.testing.assert_close(outputs["token"], torch.tensor(1.2))
         self.assertEqual(tuple(groups), ("batch", "asr", "mt"))
         torch.testing.assert_close(groups["batch"]["loss"], torch.tensor(1.2))
         torch.testing.assert_close(groups["asr"]["loss"], torch.tensor(1.0))
@@ -749,32 +696,12 @@ class ModelLossContractTest(unittest.TestCase):
             torch.tensor(1.2),
         )
 
-    def test_validation_step_logs_effective_unit_weighted_metrics(self):
+    def test_validation_step_logs_total_loss(self):
         module = _module(objective=_BatchObjective())
         outputs: Outputs = {
             "loss": torch.tensor(3.0),
-            "token": LossItem(
-                torch.tensor([1.0, 3.0]),
-                {"tokens": torch.tensor([1.0, 3.0])},
-            ),
-            "rvq": LossItem(
-                torch.tensor([2.0, 5.0]),
-                {
-                    "frames": torch.tensor([2.0, 1.0]),
-                    "codebook_0": torch.tensor([1.0, 4.0]),
-                    "codebook_0_top1": torch.tensor([0.5, 1.0]),
-                    "codebook_1": torch.tensor([3.0, 6.0]),
-                    "codebook_1_top1": torch.tensor([1.0, 0.0]),
-                },
-            ),
-            "flow_matching": LossItem(
-                torch.tensor([1.0, 3.0]),
-                {"frames": torch.tensor([3.0, 1.0])},
-            ),
-            "repa": LossItem(
-                torch.tensor([0.2, 0.6]),
-                {"frames": torch.tensor([1.0, 1.0])},
-            ),
+            "token": torch.tensor(1.0),
+            "rvq": torch.tensor(2.0),
         }
         batch = _batch(Task.TTS, token_labels=torch.tensor([[-100, 1]]))
 
@@ -786,30 +713,14 @@ class ModelLossContractTest(unittest.TestCase):
 
         self.assertIs(returned, outputs)
         self.assertEqual(collect.call_args.args[1], module.objective.validation)
-        calls = {item.args[0]: item for item in log.call_args_list}
-        expected = {
-            "val/token/loss": (torch.tensor(2.5), 4),
-            "val/acoustic/rvq/loss": (torch.tensor(3.0), 3),
-            "val/acoustic/rvq/codebook_0": (torch.tensor(2.0), 3),
-            "val/acoustic/rvq/codebook_0_top1": (torch.tensor(2.0 / 3.0), 3),
-            "val/acoustic/rvq/codebook_1": (torch.tensor(4.0), 3),
-            "val/acoustic/rvq/codebook_1_top1": (torch.tensor(2.0 / 3.0), 3),
-            "val/acoustic/flow_matching/loss": (torch.tensor(1.5), 4),
-            "val/acoustic/repa/loss": (torch.tensor(0.4), 2),
-        }
-        self.assertEqual(set(calls), set(expected))
-        for name, (value, batch_size) in expected.items():
-            with self.subTest(metric=name):
-                torch.testing.assert_close(calls[name].args[1], value)
-                self.assertEqual(
-                    calls[name].kwargs,
-                    {
-                        "on_step": False,
-                        "on_epoch": True,
-                        "sync_dist": True,
-                        "batch_size": batch_size,
-                    },
-                )
+        log.assert_called_once_with(
+            "val/loss",
+            outputs["loss"],
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=1,
+        )
 
     def test_mt_validation_generates_and_logs_anytrain_text_metrics(self):
         class _Tokenizer:
@@ -916,10 +827,7 @@ class ModelLossContractTest(unittest.TestCase):
         module.set_validation_loader_names(("s2tt", "tts"))
         outputs: Outputs = {
             "loss": torch.tensor(2.0),
-            "token": LossItem(
-                torch.tensor([2.0]),
-                {"tokens": torch.tensor([3.0])},
-            ),
+            "token": torch.tensor(2.0),
         }
         batch = _batch(Task.TTS, token_labels=torch.tensor([[-100, 1]]))
 
@@ -929,27 +837,18 @@ class ModelLossContractTest(unittest.TestCase):
         ):
             module.validation_step(batch, 0, dataloader_idx=1)
 
-        self.assertEqual(log.call_args.args[0], "val/tts/token/loss")
+        self.assertEqual(log.call_args.args[0], "val/tts/loss")
 
-    def test_combined_outputs_use_effective_units_without_loader_weights(self):
-        first = LossItem(
-            torch.tensor([1.0]),
-            {"tokens": torch.tensor([10.0])},
-        )
-        second = LossItem(
-            torch.tensor([3.0]),
-            {"tokens": torch.tensor([30.0])},
-        )
-
+    def test_combined_outputs_average_scalar_objectives_without_loader_weights(self):
         outputs = combine_outputs(
             [
-                {"loss": torch.tensor(1.0), "token": first},
-                {"loss": torch.tensor(3.0), "token": second},
+                {"loss": torch.tensor(1.0), "token": torch.tensor(1.0)},
+                {"loss": torch.tensor(3.0), "token": torch.tensor(3.0)},
             ]
         )
 
-        torch.testing.assert_close(outputs["loss"], torch.tensor(2.5))
-        torch.testing.assert_close(outputs["token"].loss, torch.tensor([1.0, 3.0]))
+        torch.testing.assert_close(outputs["loss"], torch.tensor(2.0))
+        torch.testing.assert_close(outputs["token"], torch.tensor(2.0))
 
     def test_backbone_text_embedding_has_one_registered_path(self):
         backbone = _Backbone()
@@ -1168,9 +1067,9 @@ class ModelLossContractTest(unittest.TestCase):
             mask,
             _FlowRuntime(),
         )
-        item.loss.mean().backward()
+        item.backward()
 
-        self.assertTrue(torch.isfinite(item.loss).all())
+        self.assertTrue(torch.isfinite(item))
         self.assertIsNotNone(decoder.prediction.grad)
         gradient = decoder.prediction.grad
         if gradient is None:
@@ -1215,7 +1114,7 @@ class ModelLossContractTest(unittest.TestCase):
         self.assertIn("repa", outputs)
         self.assertTrue(torch.isfinite(outputs["loss"]))
 
-    def test_repa_uses_frame_weighting_and_requires_frame_counts(self):
+    def test_repa_weight_scales_the_scalar_objective(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
         model = _FlowModel(layout)
         objective = FlowObjective(
@@ -1233,18 +1132,9 @@ class ModelLossContractTest(unittest.TestCase):
                 [[1, 1, 1], [1, -1, -1]]
             ),
         )
-        token = LossItem(
-            torch.zeros(2),
-            {"tokens": torch.ones(2)},
-        )
-        flow = LossItem(
-            torch.zeros(2),
-            {"frames": torch.tensor([3.0, 1.0])},
-        )
-        repa = LossItem(
-            torch.tensor([1.0, 3.0]),
-            {"frames": torch.tensor([3.0, 1.0])},
-        )
+        token = torch.tensor(0.0)
+        flow = torch.tensor(0.0)
+        repa = torch.tensor(1.5)
         representation = torch.zeros(2, 3, 2)
 
         with (
@@ -1258,10 +1148,8 @@ class ModelLossContractTest(unittest.TestCase):
         ):
             outputs = objective(batch, model)
             torch.testing.assert_close(outputs["loss"], torch.tensor(0.15))
-
-            loss.return_value = LossItem(torch.tensor([1.0, 3.0]))
-            with self.assertRaisesRegex(ValueError, "frames"):
-                objective(batch, model)
+            torch.testing.assert_close(outputs["repa"], torch.tensor(0.15))
+            loss.assert_called_once()
 
     def test_audio_target_automatically_adds_rvq_objective(self):
         layout = Layout(text=(0, 4), audio=(4, 7))
@@ -1279,10 +1167,8 @@ class ModelLossContractTest(unittest.TestCase):
         validation = objective.validation(batch, model)
 
         self.assertIn("rvq", outputs)
-        training_details = _require_details(self, outputs["rvq"], "RVQ training loss")
-        validation_details = _require_details(self, validation["rvq"], "RVQ validation loss")
-        self.assertNotIn("codebook_0_top1", training_details)
-        self.assertIn("codebook_0_top1", validation_details)
+        self.assertEqual(outputs["rvq"].ndim, 0)
+        self.assertEqual(validation["rvq"].ndim, 0)
         self.assertEqual(model.token_hidden_calls, 2)
         self.assertTrue(torch.equal(model.positions, positions))
         self.assertEqual(model.padded_logit_calls, 0)
@@ -1302,17 +1188,6 @@ def _module(
         model=cast(Any, SimpleNamespace() if model is None else model),
         objective=cast(Any, SimpleNamespace() if objective is None else objective),
     )
-
-
-def _require_details(
-    test: unittest.TestCase,
-    item: LossItem,
-    name: str,
-) -> dict[str, Tensor]:
-    details = item.details
-    if details is None:
-        test.fail(f"{name} details are unavailable")
-    return details
 
 
 def _bicodec_full_vocab_case() -> SimpleNamespace:

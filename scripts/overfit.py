@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Union, cast
 
 import hydra
 import torch
-from anytrain.lightning import GradientComparison, GradientTarget
+from anytrain.lightning import GradientComparison, GradientTarget, ObservationCallback
 from anytrain.lightning.schedule import ScheduleRuntime
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import Callback
@@ -18,9 +18,7 @@ from speech_to_speech.callback import (
 )
 from speech_to_speech.callback.logging import (
     AcousticEvaluation,
-    FlowMatchingLogger,
     LossSummary,
-    OutputsLogger,
     TaskSampleLogger,
 )
 from speech_to_speech.datamodule.module import DataModule
@@ -141,7 +139,6 @@ def run(config: OverfitConfig) -> None:
         )
     callbacks = training_callbacks(
         config,
-        rt,
         acoustic_type=acoustic_type,
         gradient_comparison=gradient_comparison,
         task=task,
@@ -213,7 +210,6 @@ def build_datamodule(
 
 def training_callbacks(
     config: OverfitConfig,
-    runtime: Runtime,
     *,
     acoustic_type: AcousticType,
     gradient_comparison: GradientComparison | None,
@@ -230,16 +226,9 @@ def training_callbacks(
         schedule_runtime,
         active_ctc_routes=config.pl_module.ctc.active_routes,
     )
-    callbacks.append(OutputsLogger())
-
-    flow = config.callbacks.flow_matching
-    if flow.enabled and acoustic_type is AcousticType.FLOW:
-        callbacks.append(
-            FlowMatchingLogger(
-                runtime.flow_matching,
-                every_n_steps=flow.every_n_steps,
-            )
-        )
+    callbacks.append(
+        ObservationCallback(every_n_steps=config.trainer.log_every_n_steps)
+    )
     gradient = _gradient_logger(config, acoustic_type, gradient_comparison)
     if gradient is not None:
         callbacks.append(gradient)

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from anydataset.dataset import MapStyleABC
 from anydataset.types import AudioMeta, Modality, Sample as RawSample
 from lightning.pytorch import LightningDataModule
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Dataset, IterableDataset, Subset
 
 from .._compat import StrEnum, auto
 from .asset import AssetJob, resolve_workspace_asset
@@ -204,6 +204,7 @@ class _SpeechLoader:
         self._asset_job: AssetJob | None = None
         self._streaming_dataset: StreamingSnapshotDataset | None = None
         self._streaming_loader: StreamingDataLoader | None = None
+        self._live_s2st_dataset: Dataset[RawSample] | None = None
         self._pending_streaming_state: Mapping[str, object] | None = None
         self._synthesis_controller: SynthesisController | None = None
         self._streaming_stop_requested: Callable[[], bool] | None = None
@@ -295,6 +296,15 @@ class _SpeechLoader:
         self._asset_job = None
 
     def _set_dataset(self, dataset: Dataset[RawSample]) -> None:
+        if _is_live_s2st_dataset(dataset):
+            _validate_live_s2st_loader(
+                self.config.dataloader,
+                sample_index=self.sample_index,
+                max_samples=self.max_samples,
+            )
+            self._live_s2st_dataset = dataset
+        else:
+            self._live_s2st_dataset = None
         self._dataset = dataset
         self._subset = None
         if self.sample_index is not None:
@@ -321,6 +331,10 @@ class _SpeechLoader:
                 )
             by_index = {sample.index: sample.sample for sample in published}
             return [by_index[index] for index in indices]
+        if self._live_s2st_dataset is not None:
+            raise RuntimeError(
+                "live S2ST diagnostic samples are unavailable by map-style index."
+            )
         if self._dataset is None:
             raise RuntimeError("DataModule.setup() must run before reading samples.")
         return [self._dataset[index] for index in indices]
@@ -409,6 +423,15 @@ class _SpeechLoader:
         if controller is not None:
             controller.close()
 
+    def close_live_s2st_dataset(self) -> None:
+        dataset = self._live_s2st_dataset
+        self._live_s2st_dataset = None
+        if dataset is None:
+            return
+        close = getattr(dataset, "close", None)
+        if callable(close):
+            close()
+
     def diagnostic_collator(
         self,
         task: Task,
@@ -458,6 +481,14 @@ class _SpeechLoader:
             snapshot = DataRuntimeSnapshot.from_runtime(self.runtime)
             self.collator.runtime = cast(DataRuntime, cast(object, snapshot))
         dataset = self._dataset if self._subset is None else self._subset
+        if self._live_s2st_dataset is not None:
+            return DataLoader(
+                dataset,
+                batch_size=loader.batch_size,
+                num_workers=0,
+                pin_memory=loader.pin_memory,
+                collate_fn=self.collator,
+            )
         source_loader = _source_loader(
             dataset,
             loader=loader,
@@ -668,6 +699,8 @@ class DataModule(LightningDataModule):
         del stage
         self.close_asset_materialization()
         self.close_streaming_synthesis(owner=True)
+        for loader in self._speech_loaders(include_validation=False):
+            loader.close_live_s2st_dataset()
 
     def state_dict(self) -> dict[str, object]:
         streaming = {
@@ -1121,6 +1154,43 @@ def _source_loader(
 
 def _source_dataset(dataset: object) -> MapStyleABC | None:
     return dataset if isinstance(dataset, MapStyleABC) else None
+
+
+def _is_live_s2st_dataset(dataset: object) -> bool:
+    if not isinstance(dataset, IterableDataset):
+        return False
+    lineage_id = getattr(dataset, "lineage_id", None)
+    if not isinstance(lineage_id, str) or not lineage_id:
+        return False
+    return all(
+        callable(getattr(dataset, name, None))
+        for name in (
+            "acknowledge",
+            "state_dict",
+            "load_state_dict",
+            "set_stop_requested",
+            "close",
+        )
+    )
+
+
+def _validate_live_s2st_loader(
+    loader: DataLoaderConfig,
+    *,
+    sample_index: int | None,
+    max_samples: int | None,
+) -> None:
+    if loader.num_workers != 0:
+        raise ValueError("live S2ST datasets require dataloader num_workers=0.")
+    if loader.persistent_workers:
+        raise ValueError(
+            "live S2ST datasets require dataloader persistent_workers=false."
+        )
+    _reject_enabled_costs(loader, "live S2ST datasets")
+    if sample_index is not None or max_samples is not None:
+        raise ValueError(
+            "live S2ST datasets do not support sample_index or max_samples."
+        )
 
 
 def _reject_enabled_costs(loader: DataLoaderConfig, path: str) -> None:

@@ -179,6 +179,7 @@ class _StagedTrainConfig:
     repo_output_root: str = MISSING
     output_subdir: str = MISSING
     output_dir: str = MISSING
+    devices: dict[str, list[int]] = field(default_factory=dict)
     loader_plan: LoaderPlanConfig = field(default_factory=LoaderPlanConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     audio_sequence_layout: AudioSequenceLayout = MISSING
@@ -241,10 +242,26 @@ def train(config: DictConfig) -> StagedTrainConfig:
     _validate_validation(result)
     _validate_task_samples(result)
     _validate_synthesis_samples(result)
+    _validate_devices(result.devices)
     _validate_streaming(result)
     _validate_callback_cadences(result.callbacks)
     _validate_gradient_probe(result)
     return result
+
+
+def _validate_devices(devices: object) -> None:
+    if not isinstance(devices, dict):
+        raise TypeError("top-level devices must be a dictionary.")
+    for name, values in devices.items():
+        if not isinstance(name, str) or not name:
+            raise TypeError("top-level devices keys must be non-empty strings.")
+        if not isinstance(values, list):
+            raise TypeError(f"devices.{name} must be a list of relative device ids.")
+        for value in values:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"devices.{name} must contain integer device ids.")
+            if value < 0:
+                raise ValueError(f"devices.{name} device ids must be non-negative.")
 
 
 def _validate_streaming(config: StagedTrainConfig) -> None:

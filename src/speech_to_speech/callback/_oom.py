@@ -23,6 +23,7 @@ from ..datamodule.sample import (
     Speech,
     Text,
 )
+from ..mimo import MimoBatch
 
 if TYPE_CHECKING:
     from ..generation.evaluation import TextProbe
@@ -201,6 +202,23 @@ def batch_report(batch: object) -> dict[str, object]:
             "loader_names": batch.loader_names,
             "loss_weights": batch.loss_weights,
             "batches": [batch_report(child) for child in batch.batches],
+        }
+    if isinstance(batch, MimoBatch):
+        return {
+            "type": type(batch).__name__,
+            "task_ids": None if batch.task_ids is None else list(batch.task_ids),
+            "recording_ids": (
+                None if batch.recording_ids is None else list(batch.recording_ids)
+            ),
+            "text_input_ids": tensor_report(batch.text_input_ids),
+            "audio_input_ids": tensor_report(batch.audio_input_ids),
+            "text_labels": tensor_report(batch.text_labels),
+            "audio_labels": tensor_report(batch.audio_labels),
+            "attention_mask": tensor_report(batch.attention_mask),
+            "text_loss_mask": tensor_report(batch.text_loss_mask),
+            "audio_loss_mask": tensor_report(batch.audio_loss_mask),
+            "audio_features": tensor_report(batch.audio_features),
+            "audio_feature_mask": tensor_report(batch.audio_feature_mask),
         }
     if isinstance(batch, ModelBatch):
         target = batch.acoustic_target

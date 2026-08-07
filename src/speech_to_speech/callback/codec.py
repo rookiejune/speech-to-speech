@@ -5,7 +5,7 @@ from anytrain.codec import SemanticGlobalCodes
 from anydataset.types import AudioView
 from torch import Tensor
 
-from ..audio import AudioCodes
+from ..audio import AudioCodes, AudioStream
 from ..datamodule.contract import DatasetRuntime
 from ..datamodule.parse import speech_from_codes
 from ..datamodule.builder import build_task_sample
@@ -133,12 +133,7 @@ class OnDeviceCodecMaterializer:
     ) -> object:
         # Codec backends are materialization dependencies, not part of the model's
         # mixed-precision graph. Keep their input and internal kernels in FP32.
-        streams = getattr(self.runtime, "input_audio_stream_views", ())
-        if input_audio and len(streams) > 1:
-            raise ValueError(
-                "composed input audio requires prepared semantic and global views; "
-                "waveform fallback is not supported."
-            )
+        streams = tuple(getattr(self.runtime, "input_audio_stream_views", ()))
         waveform = sample.waveform.to(dtype=torch.float32)
         if device is not None:
             waveform = waveform.to(device=device)
@@ -147,6 +142,12 @@ class OnDeviceCodecMaterializer:
             device_type=batched_waveform.device.type,
             enabled=False,
         ):
+            if input_audio and len(streams) > 1:
+                return self._composed_input_codes(
+                    batched_waveform,
+                    sample.sample_rate,
+                    streams=streams,
+                )
             view = (
                 self.runtime.input_audio_view
                 if input_audio
@@ -163,24 +164,15 @@ class OnDeviceCodecMaterializer:
                         "BiCodec waveform fallback requires a semantic-global codec."
                     )
                 codec = global_codec(backend)
-                encoded = codec.tokenize(
-                    batched_waveform,
-                    sample.sample_rate,
+                semantic, global_codes = _semantic_global_codes(
+                    codec.tokenize(
+                        batched_waveform,
+                        sample.sample_rate,
+                    )
                 )
-                if not isinstance(encoded, SemanticGlobalCodes):
-                    raise TypeError(
-                        "BiCodec tokenize must return SemanticGlobalCodes."
-                    )
-                if (
-                    encoded.semantic.size(0) != 1
-                    or encoded.global_codes.size(0) != 1
-                ):
-                    raise ValueError("per-sample codec fallback expects one encoded item.")
-                return AudioCodes.from_semantic_global(
-                    SemanticGlobalCodes(
-                        semantic=encoded.semantic[0].detach().cpu(),
-                        global_codes=encoded.global_codes[0].detach().cpu(),
-                    )
+                return AudioCodes(
+                    semantic_codes=semantic,
+                    global_codes=global_codes,
                 )
             return _encoded_codes(
                 frame_tokenizer(backend).encode(
@@ -188,6 +180,38 @@ class OnDeviceCodecMaterializer:
                     sample.sample_rate,
                 )
             )
+
+    def _composed_input_codes(
+        self,
+        waveform: Tensor,
+        sample_rate: int,
+        *,
+        streams: tuple[tuple[AudioStream, AudioView], ...],
+    ) -> AudioCodes:
+        if (
+            len(streams) != 2
+            or {stream for stream, _ in streams}
+            != {AudioStream.SEMANTIC, AudioStream.GLOBAL}
+        ):
+            raise ValueError(
+                "composed input audio requires exactly semantic and global streams."
+            )
+        semantic = _encoded_codes(
+            frame_tokenizer(self.runtime.input_codec).encode(
+                waveform,
+                sample_rate,
+            )
+        )
+        _, global_codes = _semantic_global_codes(
+            global_codec(self.runtime.codec).tokenize(
+                waveform,
+                sample_rate,
+            )
+        )
+        return AudioCodes(
+            semantic_codes=semantic,
+            global_codes=global_codes,
+        )
 
 
 def _batched_waveform(waveform: Tensor) -> Tensor:
@@ -208,6 +232,17 @@ def _encoded_codes(codes: Tensor) -> Tensor:
     if codes.dim() == 2:
         return codes.detach().cpu()
     raise ValueError("codec encode must return [frames, codebooks] or [1, frames, codebooks].")
+
+
+def _semantic_global_codes(codes: object) -> tuple[Tensor, Tensor]:
+    if not isinstance(codes, SemanticGlobalCodes):
+        raise TypeError("BiCodec tokenize must return SemanticGlobalCodes.")
+    if codes.semantic.size(0) != 1 or codes.global_codes.size(0) != 1:
+        raise ValueError("per-sample codec fallback expects one encoded item.")
+    return (
+        codes.semantic[0].detach().cpu(),
+        codes.global_codes[0].detach().cpu(),
+    )
 
 
 def _move_model_batch(batch: ModelBatch, device: torch.device | None) -> ModelBatch:

@@ -10,6 +10,7 @@ import torch
 from anytrain.lightning import (
     ManagedServiceCallback,
     ModelCheckpoint,
+    ObservationCallback,
     PerformanceCallback,
     validation,
 )
@@ -29,7 +30,6 @@ from speech_to_speech.callback import (
 )
 from speech_to_speech.callback.logging import (
     LossSummary,
-    OutputsLogger,
     TaskSampleLogger,
 )
 from speech_to_speech.datamodule import SampleSplit
@@ -55,6 +55,8 @@ from speech_to_speech.training.composition import (
     text_retention_logger,
 )
 from speech_to_speech.training.source import (
+    GenerationServiceProvider,
+    LiveS2STCursor,
     SourceResolution,
     SourceRoute,
     emit_data_plan,
@@ -117,6 +119,7 @@ def run(config: StagedTrainConfig) -> None:
         summary,
         validation_history,
         schedule_runtime,
+        source_resolution=source_resolution,
     )
 
     trainer = build_trainer(config, output_dir, callbacks)
@@ -344,6 +347,7 @@ def training_callbacks(
     summary: Callback,
     validation_history: Callback | None = None,
     schedule_runtime: ScheduleRuntime | None = None,
+    source_resolution: SourceResolution | None = None,
 ) -> list[Callback]:
     if schedule_runtime is None:
         schedule_runtime = build_unit_schedule(config.optim.schedule)
@@ -353,10 +357,16 @@ def training_callbacks(
         schedule_runtime,
         active_ctc_routes=config.pl_module.ctc.active_routes,
         before_schedule=(
-            _lifecycle_callbacks(config)
+            _lifecycle_callbacks(config, source_resolution)
         ),
     )
-    callbacks.extend(_logging_callbacks(summary, validation_history))
+    callbacks.extend(
+        _logging_callbacks(
+            config.trainer.log_every_n_steps,
+            summary,
+            validation_history,
+        )
+    )
     callbacks.extend(_streaming_telemetry_callbacks(config))
     callbacks.extend(_task_sample_loggers(config))
     callbacks.extend(_synthesis_sample_loggers(config))
@@ -372,8 +382,25 @@ def training_callbacks(
     return callbacks
 
 
-def _lifecycle_callbacks(config: StagedTrainConfig) -> tuple[Callback, ...]:
+def _lifecycle_callbacks(
+    config: StagedTrainConfig,
+    source_resolution: SourceResolution | None = None,
+) -> tuple[Callback, ...]:
     callbacks: list[Callback] = []
+    if source_resolution is not None and source_resolution.service is not None:
+        callbacks.append(
+            ManagedServiceCallback(
+                GenerationServiceProvider(source_resolution.service),
+                label="S2ST generation",
+            )
+        )
+    if source_resolution is not None and source_resolution.live_dataset is not None:
+        callbacks.append(
+            LiveS2STCursor(
+                source_resolution.live_dataset,
+                source_resolution.service,
+            )
+        )
     if config.datamodule.materialization.enabled:
         callbacks.append(AssetMaterialization())
     if (
@@ -416,10 +443,14 @@ def _resume_checkpoint(config: StagedTrainConfig, output_dir: Path) -> str | Non
 
 
 def _logging_callbacks(
+    every_n_steps: int,
     summary: Callback,
     validation_history: Callback | None,
 ) -> list[Callback]:
-    callbacks = cast(list[Callback], [OutputsLogger(), summary])
+    callbacks = cast(
+        list[Callback],
+        [ObservationCallback(every_n_steps=every_n_steps), summary],
+    )
     if validation_history is not None:
         callbacks.append(validation_history)
     return callbacks

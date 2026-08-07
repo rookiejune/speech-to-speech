@@ -29,7 +29,7 @@ case "$experiment" in
     exit 2
     ;;
 esac
-visible_devices="${CUDA_VISIBLE_DEVICES:-${SPEECH_TO_SPEECH_EXPERIMENT_GPUS:-0,1}}"
+visible_devices="${CUDA_VISIBLE_DEVICES:?the scheduler or caller must assign the training GPUs}"
 step_mode="${SPEECH_TO_SPEECH_STEP_MODE:-${default_step_mode}}"
 case "$step_mode" in
   fused_joint)
@@ -66,6 +66,6 @@ args=(
 if [[ -n "${accumulate_grad_batches}" ]]; then
   args+=("loader_plan.accumulate_grad_batches=${accumulate_grad_batches}")
 fi
-CUDA_VISIBLE_DEVICES="${visible_devices}" "${SPEECH_TO_SPEECH_PYTHON}" scripts/train.py \
+"${SPEECH_TO_SPEECH_PYTHON}" scripts/train.py \
   "${args[@]}" \
   "$@"

@@ -50,12 +50,6 @@ class GradientProbeCallbackConfig:
 
 
 @dataclass
-class FlowMatchingCallbackConfig:
-    enabled: bool = MISSING
-    every_n_steps: int = MISSING
-
-
-@dataclass
 class OverfitCallbacksConfig:
     parameter_policy: ParameterPolicyConfig = field(
         default_factory=ParameterPolicyConfig
@@ -71,9 +65,6 @@ class OverfitCallbacksConfig:
     )
     gradient_probe: GradientProbeCallbackConfig = field(
         default_factory=GradientProbeCallbackConfig
-    )
-    flow_matching: FlowMatchingCallbackConfig = field(
-        default_factory=FlowMatchingCallbackConfig
     )
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
 
@@ -160,15 +151,8 @@ def _validate_callbacks(config: OverfitCallbacksConfig) -> None:
     )
     if config.gradient_probe.enabled and not config.gradient_probe.probes:
         raise ValueError("enabled gradient probe requires at least one probe.")
-    positive_integer(
-        config.flow_matching.every_n_steps,
-        "callbacks.flow_matching.every_n_steps",
-    )
-
-
 __all__ = [
     "EvaluationCallbackConfig",
-    "FlowMatchingCallbackConfig",
     "GradientProbeCallbackConfig",
     "GradientProbeConfig",
     "OverfitCallbacksConfig",

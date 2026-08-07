@@ -31,7 +31,7 @@ from speech_to_speech.callback import OnDeviceCodecMaterializer
 from speech_to_speech.datamodule.collate import Collator
 from speech_to_speech.datamodule.builder import build_speech_sample
 from speech_to_speech.datamodule.batch import ModelBatch, ModelSample
-from speech_to_speech.datamodule.parse import parse_sample
+from speech_to_speech.datamodule.parse import parse_sample, speech_from_codes
 from speech_to_speech.datamodule.sample import AudioContextSample, RawSpeechBatch
 from speech_to_speech.generation import chat as chat_adapter
 from speech_to_speech.model import (
@@ -479,6 +479,85 @@ class DualAudioTokenizerTest(unittest.TestCase):
         self.assertIsInstance(codes, torch.Tensor)
         input_tokenizer.encode.assert_called_once()
         runtime.codec.tokenize.assert_not_called()
+
+    def test_composed_waveform_fallback_uses_glm4_semantic_and_bicodec_global(
+        self,
+    ) -> None:
+        runtime = _bicodec_runtime(
+            Config(
+                audio_input=AudioInputConfig(
+                    streams={
+                        "semantic": AudioInputStreamConfig(tokenizer="glm4"),
+                        "global": AudioInputStreamConfig(tokenizer="bicodec"),
+                    }
+                ),
+                audio_output=AudioOutputConfig(
+                    tokenizer="bicodec",
+                    detokenizer="bicodec",
+                ),
+            )
+        )
+        source_semantic = torch.tensor([[1], [2]], dtype=torch.long)
+        source_global = torch.arange(32, dtype=torch.long).reshape(32, 1)
+        target_semantic = torch.tensor([[3], [4], [5]], dtype=torch.long)
+        target_global = torch.tensor(
+            [[0, 1], [2, 3], [4, 5]],
+            dtype=torch.long,
+        )
+        input_tokenizer = _frame_codec()
+        input_tokenizer.encode.return_value = source_semantic.unsqueeze(0)
+        runtime.__dict__["input_audio_tokenizer_backend"] = input_tokenizer
+        runtime.codec.tokenize.side_effect = (
+            SemanticGlobalCodes(
+                semantic=torch.tensor([[[7]]], dtype=torch.long),
+                global_codes=source_global.unsqueeze(0),
+            ),
+            SemanticGlobalCodes(
+                semantic=target_semantic.unsqueeze(0),
+                global_codes=target_global.unsqueeze(0),
+            ),
+        )
+
+        raw = Collator(
+            runtime,
+            {Task.S2ST: 1.0},
+            encode_missing_codes=True,
+        )([_waveform_sample()])
+        self.assertIsInstance(raw, RawSpeechBatch)
+
+        with patch(
+            "speech_to_speech.callback.codec.speech_from_codes",
+            wraps=speech_from_codes,
+        ) as materialize:
+            batch = OnDeviceCodecMaterializer(runtime)(
+                raw,
+                device=torch.device("cpu"),
+            )
+
+        self.assertIsInstance(batch, ModelBatch)
+        self.assertEqual(input_tokenizer.encode.call_count, 1)
+        self.assertEqual(
+            tuple(input_tokenizer.encode.call_args.args[0].shape),
+            (1, 1, 4),
+        )
+        self.assertEqual(runtime.codec.tokenize.call_count, 2)
+        self.assertEqual(
+            [tuple(call.args[0].shape) for call in runtime.codec.tokenize.call_args_list],
+            [(1, 1, 4), (1, 1, 6)],
+        )
+        source_call, target_call = materialize.call_args_list
+        source_codes = source_call.args[0]
+        target_codes = target_call.args[0]
+        self.assertIsInstance(source_codes, AudioCodes)
+        self.assertIsInstance(target_codes, AudioCodes)
+        assert isinstance(source_codes, AudioCodes)
+        assert isinstance(target_codes, AudioCodes)
+        torch.testing.assert_close(source_codes.semantic_codes, source_semantic)
+        torch.testing.assert_close(source_codes.global_codes, source_global)
+        torch.testing.assert_close(target_codes.semantic_codes, target_semantic)
+        torch.testing.assert_close(target_codes.global_codes, target_global)
+        self.assertTrue(source_call.kwargs["input_audio"])
+        self.assertFalse(target_call.kwargs["input_audio"])
 
     def test_loadable_input_chat_waveform_uses_input_backend(self) -> None:
         runtime = Runtime(

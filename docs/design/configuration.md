@@ -31,14 +31,19 @@ Hydra 配置优先复用 `src` 的公开 Config，而不是在入口脚本中维
   manifest 中的索引集合。task template 也在 `datamodule` 上：
   `datamodule.tasks.<task>.template`（`int` 固定下标，`null` 随机；字段默认 `0`，正式
   train entry 为所有任务显式配置 `null`）。
-  `datamodule.streaming` 是独立的 immutable synthesis snapshot consumer：启用时固定
-  `dataset=streaming_s2st`、pair shape、一个 speech loader、`num_workers=0`、
-  `persistent_workers=false`、关闭 cost batching 与 materialization。它要求 `stream_id`、
-  `expected_samples` 和可选的 `producer_factory=module:attribute`；`producer_options` 属于 factory，
-  不作为 dataset 配置的隐式参数。`streaming.telemetry` 独立控制 scalar cadence 和后台
-  `nvidia-smi` 采样间隔；间隔设为 `0` 只关闭 GPU 采样，不关闭 loader wait/fetch/load 计数。
-  正式 streaming experiment 固定 `logging.version=0` 以便跨 auto-resume 追加同一时间线，并使用
-  `callbacks.checkpoint.save_last=link` 避免在共享存储重复复制多 GB checkpoint。
+  `datamodule.source.factory=module:attribute` 是正式 workspace 统一入口；factory 返回的 source 必须
+  同时提供 `access()`、`generate()` 和 `toy()`。当前公开入口是
+  `zhuyin.datasets.s2st:source`，其 options 只属于 workspace 数据声明，例如 languages、每种语言的
+  source slots、translator、TTS、speaker list/reference audio、`initial_sources` 和
+  `interval_sources`。具体 source dataset 只是每个语言 slot 的输入，不定义 S2ST 入口身份。训练入口
+  不向它注入 dataset split/root 或 runtime codec。
+  `mode=auto|access|generate|toy` 主要用于正式自动路由和诊断；无论模式如何，invalid/corrupt access
+  都直接失败。最终 catalog 发布 waveform，`encode_missing_codes=true` 让 codec 在训练进程中在线执行。
+- 顶层 `devices`：只配置 workspace 暴露的生成工厂及其相对设备 id，例如
+  `devices: {translation: [0], tts: [1, 2]}`。id 相对于当前 `CUDA_VISIBLE_DEVICES`；同一个 id 不能
+  重复，未列出的所有可见设备自动交给 Lightning。factory key 必须与
+  `source.generate().factories` 完全一致。preflight 在任何 CUDA/model 初始化前校验 key、范围、重复
+  和剩余设备，并派生 `trainer.devices`。
 - `callback/parameter_policy`：写入 `callbacks.parameter_policy`，声明可训练参数组、
   冻结参数组和 `backbone_top_fraction`。这是通用训练 callback 能力，由 experiment 显式选择。
   正式 train 的 loader mix 不再是独立 Hydra group，而是由 train experiment 内联的
@@ -129,9 +134,10 @@ Hydra metadata 与 `metrics.json` 写入 `output_dir`；TensorBoard/CSV logger �
 正式 staged train 使用 `anytrain.lightning.ModelCheckpoint` 的默认异步落盘，把本机临时保存与目标
 目录复制串行解耦；本项目的 checkpoint 配置只决定目录、文件名、归档 cadence 与保留策略。
 
-五个 trainer preset 都使用 `devices: auto`，由 Lightning 使用 `CUDA_VISIBLE_DEVICES` 中的全部
-可见设备；设备数量不再作为运行时配置契约重复校验。job wrapper 只提供机器相关的默认可见设备，
-提交时可显式覆盖。`default`、`ddp`、`static_ddp` 保留通用 sampler 行为；正式 staged train
+五个 trainer preset 都使用 `devices: auto`。普通训练由 Lightning 使用 `CUDA_VISIBLE_DEVICES` 中的
+全部可见设备；workspace S2ST source 则先从顶层 `devices` 取出 `translation` / `tts` 工厂设备，
+再把剩余设备数量写入 `trainer.devices`。job wrapper 只提供机器相关的默认可见设备，提交时可显式
+覆盖。`default`、`ddp`、`static_ddp` 保留通用 sampler 行为；正式 staged train
 通过 `trainer=staged_static_ddp` 选择 static DDP 并明确关闭 distributed sampler；
 `trainer=staged_ddp` 保留为 dynamic unused-parameter fallback。LongCat prepared map-style dataset 通过
 `MapStyleABC.dataloader()` 暴露 deterministic shuffle 与 batch planning；UniCodec DDP smoke
@@ -174,25 +180,33 @@ experiment 之前，以便非 LoRA experiment 用 `model.lora: null` 覆盖）�
   只通过 `callback/parameter_policy=<name>` 切换冻结策略，不借用正式长跑配置充当策略测试夹具。
 - `toy_smoke`：正式 LongCat runtime 加 tiny model/in-memory dataset 的 CPU 两步训练契约测试；
   不读取真实 backbone 权重或 WMT19 prepared dataset，也不替代真实资源验收。
-- `train/streaming_s2st`：长驻的双向 S2ST teacher-label consumer，固定一个 `s2st`/`parallel`
-  loader、`max_epochs=1`、`train.auto_resume=true` 和 `last.ckpt`。一个 epoch 持续轮询，直到 immutable
-  catalog 被完整 seal；它不是短预算 smoke，也不与 staged-joint loader plan 混用。
+- `train/streaming_s2st`：长驻的 synthetic S2ST live-catalog consumer，固定一个 `s2st` /
+  `target_cot` loader、`max_epochs=1`、`train.auto_resume=true` 和 `last.ckpt`。workspace 默认入口使用
+  一个通用 translator、同一个 speaker-aware TTS 和按语言声明的 source slots；source dataset 可以按
+  实验扩展或重复声明。最终 snapshot 提供 waveform，GLM4 + BiCodec composed runtime 在训练进程中
+  在线编码。
 
-流式正式入口是 `scripts/train.py experiment=train/streaming_s2st`。启动环境必须显式提供
-`SPEECH_TO_SPEECH_STREAM_ROOT`、`SPEECH_TO_SPEECH_STREAM_ID`、
-`SPEECH_TO_SPEECH_STREAM_EXPECTED_SAMPLES` 和 JSON string-array 形式的
-`SPEECH_TO_SPEECH_STREAM_PRODUCER_COMMAND`；可用 `SPEECH_TO_SPEECH_STREAM_RUN` 区分输出目录。
-默认 subprocess producer 只在 global rank zero 启动或复用，并把 `S2S_SYNTHESIS_STREAM_ID`、
-`S2S_SYNTHESIS_ROOT`、`S2S_SYNTHESIS_EXPECTED_SAMPLES`、`S2S_SYNTHESIS_CODEC` 和
-`S2S_SYNTHESIS_SPLIT` 传给 child。producer 的退出若尚未 seal 会使训练失败；已 seal 时不再启动 child。
-显式 `train.ckpt_path` 优先于 auto-resume，否则入口从当前 output 的 `checkpoints/last.ckpt` 恢复。
-entry 在 `ModelCheckpoint` 前安装 `StreamingSynthesis`，因此 batch acknowledgement 的 committed cursor
-会随 `last.ckpt` 一起落盘。`callbacks.synthesis_sample` 取代固定 `task_sample`：它仅记录已发布的
-teacher artifact，索引尚未发布时等待后续 cadence，不做 generation。
-入口默认同时安装 `StreamingTelemetryCallback`。TensorBoard 的 `streaming/batch_wait_seconds`、
-`streaming/wait_seconds_total`、`streaming/step_seconds`、`streaming/wait_ratio` 和 cursor scalars
-用于区分等待数据与训练计算；logger 目录内的 `streaming_gpu.csv` 保留独立时间轴上的原始 GPU
-utilization/memory/power 采样，不能用单次 step-end GPU 查询替代。
+流式正式入口是 `scripts/train.py experiment=train/streaming_s2st`。experiment 只声明 workspace
+`datamodule.source.factory=zhuyin.datasets.s2st:source` 和顶层 `devices`。auto route 的规则是：
+
+- 已有 sealed snapshot：纯 access，全部可见设备训练；
+- 已有未 sealed snapshot：训练立即读取当前前缀；多卡同时恢复 generation，单卡不启动本地工厂；
+- 没有首版 snapshot：单卡进入 `toy-perf`，多卡启动 generation 并由 live dataset 等待首版；
+- invalid/corrupt：始终失败。
+
+`source.generate()` 只返回 `translation` / `tts` 两个 factory 的 command 与 environment；固定依赖
+`source@r -> translation@r -> tts@r` 留在 workspace 代码中，不进入 Hydra 配置。两个 subprocess
+只在 global rank zero 由 `ManagedServiceCallback` 启停和检查；每个 factory 的结构化 stage/wait 日志
+写入独立 generation log。训练始终持有 `access.load()` 返回的同一个 live dataset；catalog refresh
+由 dataset 自己完成，并输出 `data.snapshot.updated previous=... current=... added_samples=...
+total_samples=... cursor=... wait_seconds=...`。`LiveS2STCursor` 只在 optimizer step 前进后提交 cursor，
+其 `lineage_id`、`snapshot_id` 和 `pair_cursor` 随 checkpoint 恢复。显式 `train.ckpt_path` 优先于
+auto-resume，否则入口从当前 output 的 `checkpoints/last.ckpt` 恢复。
+
+toy route 关闭正式 checkpoint、resume、validation 和样本生成 callback，使用真实训练模型、唯一
+可见设备上的在线 codec 与 bounded `PerformanceCallback`，输出写入独立 `toy-perf/`。access/generation 保持普通
+训练指标；generation 的 source/translation/TTS 阶段等待与计算时间只写 workspace generation 日志，
+不复用旧 streaming telemetry。
 
 `jobs/002`、`jobs/005/02_unicodec.sh` 与 `jobs/005/05_unicodec_ddp.sh` 都显式传递对应的
 `experiment=`；002 job 另行选择 TTS/S2ST task。training job 传递 `repo_output_root`、相对

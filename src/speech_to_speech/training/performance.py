@@ -25,7 +25,6 @@ from ..datamodule.batch import (
     LoaderBatch,
     ModelBatch,
 )
-from ..loss.contract import LossItem
 from ..loss.supervised import FlowObjective, RVQObjective, TokenObjective
 from ..model import Model
 from ..model.acoustic.base import HiddenConditionAdapter
@@ -174,8 +173,11 @@ def _outputs(outputs: Any, expected: set[str]) -> None:
     if not isinstance(outputs["loss"], Tensor):
         raise TypeError("training FLOPs loss output must be a tensor.")
     for name in expected - {"loss"}:
-        if not isinstance(outputs[name], LossItem):
-            raise TypeError(f"training FLOPs output {name!r} must be a LossItem.")
+        value = outputs[name]
+        if not isinstance(value, Tensor) or value.ndim != 0:
+            raise TypeError(
+                f"training FLOPs output {name!r} must be a scalar tensor."
+            )
 
 
 def _backbone(model: Model) -> Qwen3Model:

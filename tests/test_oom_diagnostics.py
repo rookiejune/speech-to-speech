@@ -21,10 +21,38 @@ from speech_to_speech.datamodule.sample import (
     Text,
 )
 from speech_to_speech.generation import Request
+from speech_to_speech.mimo import MimoBatch
 from speech_to_speech.task import Task
 
 
 class OOMDiagnosticsTest(unittest.TestCase):
+    def test_mimo_batch_report_contains_both_aligned_streams(self) -> None:
+        callback = OOMDiagnostics()
+        trainer = _trainer(callback)
+        module = SimpleNamespace(device=torch.device("cpu"))
+        batch = MimoBatch(
+            text_input_ids=torch.tensor([[1, 2, 3]]),
+            audio_input_ids=torch.tensor([[4, 5, 6]]),
+            text_labels=torch.tensor([[-100, 2, 3]]),
+            audio_labels=torch.tensor([[-100, 5, 6]]),
+            task_ids=("text_to_audio",),
+        )
+
+        callback.on_train_batch_start(trainer, module, batch, 3)
+        payload = _exception_payload(
+            callback,
+            trainer,
+            module,
+            torch.OutOfMemoryError("MIMO allocation failed"),
+        )
+
+        inputs = payload["context"]["inputs"]
+        self.assertEqual(inputs["task_ids"], ["text_to_audio"])
+        self.assertEqual(inputs["text_input_ids"]["shape"], [1, 3])
+        self.assertEqual(inputs["audio_input_ids"]["shape"], [1, 3])
+        self.assertEqual(inputs["text_loss_mask"]["shape"], [1, 3])
+        self.assertEqual(inputs["audio_loss_mask"]["shape"], [1, 3])
+
     def test_model_batch_report_survives_until_backward_oom(self) -> None:
         callback = OOMDiagnostics()
         trainer = _trainer(callback)

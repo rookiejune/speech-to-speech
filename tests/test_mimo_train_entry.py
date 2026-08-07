@@ -4,8 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from anytrain.lightning import ObservationCallback
+from anytrain.lightning.schedule import UnitScheduleCallback
 from hydra import compose, initialize_config_dir
 
+from speech_to_speech.callback import OOMDiagnostics
+from speech_to_speech.callback.logging import LossSummary
 from scripts._config.mimo import MimoTrainConfig, parse
 from scripts.mimo_train import mimo_callbacks, run
 
@@ -31,6 +35,8 @@ class MimoTrainEntryTest(unittest.TestCase):
         self.assertTrue(config.model.toy)
         self.assertEqual(config.data.kind, "segments")
         self.assertEqual(config.trainer.accelerator, "cpu")
+        self.assertEqual(config.optim.schedule.unit, "tokens")
+        self.assertEqual(config.optim.schedule.phases[0].name, "main")
 
     def test_formal_kimi_preset_declares_runtime_and_data_contract(self) -> None:
         config = parse(self._compose())
@@ -126,11 +132,17 @@ class MimoTrainEntryTest(unittest.TestCase):
                 )
             )
             callbacks = mimo_callbacks(config)
-            self.assertEqual(callbacks, [])
+            self.assertTrue(any(isinstance(item, OOMDiagnostics) for item in callbacks))
+            self.assertTrue(any(isinstance(item, LossSummary) for item in callbacks))
+            self.assertTrue(any(isinstance(item, ObservationCallback) for item in callbacks))
+            self.assertTrue(
+                any(isinstance(item, UnitScheduleCallback) for item in callbacks)
+            )
             result = run(config)
 
         self.assertEqual(result["mode"], "mimo")
         self.assertEqual(result["global_step"], 1)
+        self.assertIn("loss", result["metrics"])
 
 
 if __name__ == "__main__":

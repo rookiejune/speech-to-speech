@@ -121,6 +121,27 @@ class MimoModuleSmokeTest(unittest.TestCase):
         }
         self.assertTrue(all(id(parameter) in optimized for parameter in model.parameters()))
 
+    def test_checkpoint_contract_rejects_incompatible_metadata(self) -> None:
+        checkpoint: dict[str, object] = {}
+        source = MimoModule(
+            model=_TinyMimoModel(),
+            checkpoint_metadata={"vocab": {"text_size": 8, "audio_size": 8}},
+        )
+        source.on_save_checkpoint(checkpoint)
+
+        compatible = MimoModule(
+            model=_TinyMimoModel(),
+            checkpoint_metadata={"vocab": {"text_size": 8, "audio_size": 8}},
+        )
+        compatible.on_load_checkpoint(checkpoint)
+
+        incompatible = MimoModule(
+            model=_TinyMimoModel(),
+            checkpoint_metadata={"vocab": {"text_size": 9, "audio_size": 8}},
+        )
+        with self.assertRaisesRegex(ValueError, "metadata.vocab.text_size"):
+            incompatible.on_load_checkpoint(checkpoint)
+
 
 if __name__ == "__main__":
     unittest.main()

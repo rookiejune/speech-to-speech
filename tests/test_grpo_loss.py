@@ -118,16 +118,14 @@ class GRPOLossTest(unittest.TestCase):
             model,
         )
 
-        expected, _ = GRPOLoss(clip_range=0.2)(
+        expected = GRPOLoss(clip_range=0.2)(
             policy_token_logps=_policy_logps(sequences, _GRPOModel()),
             old_token_logps=old_token_logps,
             rewards=rewards,
             response_mask=sequences.token_labels[:, 1:].ne(-100).view(1, 2, 2),
         )
         torch.testing.assert_close(outputs["loss"], expected)
-        grpo = outputs["grpo"]
-        self.assertIn("preferences", grpo.details or {})
-        self.assertEqual(float((grpo.details or {})["candidate_count"]), 2.0)
+        torch.testing.assert_close(outputs["grpo"], expected)
         self.assertEqual(model.hidden_calls, 1)
         self.assertEqual(model.predictions, [PredictionModality.TEXT])
         self.assertEqual(model.full_vocab_calls, 0)

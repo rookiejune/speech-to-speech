@@ -97,15 +97,16 @@ class AcousticRVQTest(unittest.TestCase):
         self.assertEqual(len(model.decoder.layers), 8)
 
     def test_structurally_unused_embeddings_are_frozen(self):
-        self.assertFalse(self.model.decoder.embed_tokens.weight.requires_grad)
-        self.assertFalse(self.model.codebook_embeddings[-1].weight.requires_grad)
-        self.assertFalse(
-            any(
-                parameter.requires_grad
-                for parameter in self.model.embedding_projections[-1].parameters()
-            )
+        self.assertIsInstance(self.model.decoder.embed_tokens, torch.nn.Identity)
+        self.assertEqual(
+            len(self.model.codebook_embeddings),
+            self.model.codebooks - 1,
         )
-        self.assertTrue(self.model.codebook_embeddings[-2].weight.requires_grad)
+        self.assertEqual(
+            len(self.model.embedding_projections),
+            self.model.codebooks - 1,
+        )
+        self.assertTrue(self.model.codebook_embeddings[-1].weight.requires_grad)
 
     def test_generation_uses_one_cached_token_per_codebook(self):
         lengths = []
@@ -189,9 +190,10 @@ class AcousticRVQTest(unittest.TestCase):
         baseline = MaskedCodebookCrossEntropyLoss()(logits, labels, mask)
         padded_changed = MaskedCodebookCrossEntropyLoss()(changed, labels, mask)
 
-        torch.testing.assert_close(baseline.loss, padded_changed.loss)
+        self.assertEqual(baseline.ndim, 0)
+        torch.testing.assert_close(baseline, padded_changed)
 
-    def test_causal_loss_reports_masked_codebook_top1(self):
+    def test_causal_loss_top1_observation_does_not_change_scalar_loss(self):
         labels = torch.tensor(
             [
                 [[1, 2], [0, 1], [-1, -1]],
@@ -227,29 +229,9 @@ class AcousticRVQTest(unittest.TestCase):
             include_top1=True,
         )
 
-        training_details = training.details
-        details = baseline.details
-        changed_details = padded_changed.details
-        if training_details is None or details is None or changed_details is None:
-            self.fail("RVQ loss details are unavailable")
-        self.assertNotIn("codebook_0_top1", training_details)
-        self.assertNotIn("codebook_1_top1", training_details)
-        torch.testing.assert_close(
-            details["codebook_0_top1"],
-            torch.tensor([0.5, 1.0]),
-        )
-        torch.testing.assert_close(
-            details["codebook_1_top1"],
-            torch.tensor([1.0, 0.0]),
-        )
-        torch.testing.assert_close(
-            changed_details["codebook_0_top1"],
-            details["codebook_0_top1"],
-        )
-        torch.testing.assert_close(
-            changed_details["codebook_1_top1"],
-            details["codebook_1_top1"],
-        )
+        self.assertEqual(training.ndim, 0)
+        torch.testing.assert_close(baseline, training)
+        torch.testing.assert_close(padded_changed, baseline)
 
     def test_causal_loss_accepts_signed_integer_label_dtypes(self):
         loss = MaskedCodebookCrossEntropyLoss()
@@ -259,7 +241,8 @@ class AcousticRVQTest(unittest.TestCase):
             torch.tensor([[True, True]]),
         )
 
-        self.assertTrue(torch.isfinite(item.loss).all())
+        self.assertEqual(item.ndim, 0)
+        self.assertTrue(torch.isfinite(item))
         for dtype in (torch.float32, torch.uint64):
             with (
                 self.subTest(dtype=dtype),
@@ -280,9 +263,10 @@ class AcousticRVQTest(unittest.TestCase):
         )
 
         item = MaskedCodebookCrossEntropyLoss()((logits,), labels, mask)
-        item.loss.mean().backward()
+        item.backward()
 
-        self.assertTrue(torch.isfinite(item.loss).all())
+        self.assertEqual(item.ndim, 0)
+        self.assertTrue(torch.isfinite(item))
         self.assertIsNotNone(logits.grad)
         gradient = logits.grad
         if gradient is None:

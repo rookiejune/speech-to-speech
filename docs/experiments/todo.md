@@ -23,18 +23,21 @@
   - id: `s2s-023-uniss-streaming-qwen06b`
   - state: `draft`
   - entry: `jobs/023/01_uniss_streaming_s2st.sh`
-  - num_gpus: `unknown`（训练与 producer 分配待 P1 probe）
+  - num_gpus: `1`（toy perf）或 `>=3`（当前 `translation:[0]`、`tts:[1]`，至少保留 1 张训练卡）；
+    可按实测吞吐增加任一 factory 的 device id
   - gpu: `probe`
   - min_vram_gb_per_gpu: `unknown`
   - preferred_hosts: `121,125,145`
   - estimated_hours: `unknown`
-  - monitor: `TensorBoard + producer_telemetry.jsonl + streaming_gpu.csv + train log + checkpoint cursor`
-  - ready_gate: `workspace producer 接入默认过滤 WMT19 并严格展开 2N；原子发布 GLM4 input 与
-    BiCodec output；隔离 transformers==4.44.1 与 MOSS/BiCodec runtime；完成真实 P0
-    forward/backward、P1 单/双 rank seal/resume 与显存/吞吐 probe`
+  - monitor: `toy-perf report + TensorBoard + generation/translation.log + generation/tts.log +
+    data.snapshot.updated + train log + checkpoint cursor`
+  - ready_gate: `真实 translator/TTS 短生成；真实 Qwen3-0.6B + GLM4/BiCodec P0；小规模首版
+    waveform snapshot、中断恢复和历史 source waveform 复用；P1 单/双 rank cursor resume；P2
+    生成等待、训练吞吐与显存 probe`
   - output_root: `$DYNAMIC_HOME/train/speech-to-speech/streaming-s2st/<run>`
-  - task: `先改造 /private/tmp/workspace-streaming-producer 的 decoupled codec/runtime 边界，再用
-    8 或 32 条默认过滤 WMT19 seed 完成 P1；gate 未通过前不启动正式在线训练。`
+  - task: `先完成 P0 单卡真实模型 perf；再用 initial_sources=8 和显式 devices.translation/tts
+    完成首版 source->translation->tts 发布、live refresh 与恢复；通过后设置 interval_sources 做短
+    并发 pilot。`
 - 监控 BiCodec + Qwen3-0.6B Stage 0 的 10k stability / learning-curve pilot：
   - id: `s2s-022-bicodec-qwen06b-10k`
   - state: `running`

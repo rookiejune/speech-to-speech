@@ -63,8 +63,9 @@ class MimoModelTest(unittest.TestCase):
         self.assertEqual(logits.text.shape, (1, 3, 8))
         self.assertEqual(logits.audio.shape, (1, 3, 9))
         self.assertEqual(body.calls, 2)
-        self.assertTrue(torch.isfinite(item.loss).all())
-        item.loss.mean().backward()
+        self.assertEqual(item.ndim, 0)
+        self.assertTrue(torch.isfinite(item))
+        item.backward()
         self.assertIsNotNone(model.text_embedding.weight.grad)
         self.assertIsNotNone(model.audio_embedding.weight.grad)
 

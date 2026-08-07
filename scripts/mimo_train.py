@@ -3,29 +3,37 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import hydra
 import torch
+from anytrain.lightning import ModelCheckpoint, ObservationCallback
+from anytrain.lightning.schedule import ScheduleRuntime
 from lightning import pytorch as pl
-from lightning.pytorch.callbacks import Callback, ModelCheckpoint
-from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
+from lightning.pytorch.callbacks import Callback
 from omegaconf import DictConfig
 from torch import nn
 from torch.utils.data import Dataset
 
+from speech_to_speech.callback import OOMDiagnostics, build_unit_schedule
+from speech_to_speech.callback.logging import LossSummary
 from speech_to_speech.datamodule.mimo import (
     MimoDataModule,
     MimoDatasetConfig,
 )
 from speech_to_speech.datamodule.mimo.factory import create_dataset, task_weights
-from speech_to_speech.mimo import MimoSample
+from speech_to_speech.mimo import MIMO_IGNORE_INDEX, MimoSample
 from speech_to_speech.model.toy import create_toy_mimo_model
-from speech_to_speech.model.mimo_factory import build_mimo_model, derive_mimo_vocab
+from speech_to_speech.model.mimo_factory import (
+    MimoVocab,
+    build_mimo_model,
+    derive_mimo_vocab,
+)
 from speech_to_speech.pl_module.mimo import MimoModule
 from speech_to_speech.runtime import runtime_for_sequence_layout
+from speech_to_speech.training.composition import build_logger, create_trainer
 
 if __package__:
     from ._config.mimo import (
@@ -57,8 +65,8 @@ def run(config: MimoTrainConfig | DictConfig) -> dict[str, Any]:
     pl.seed_everything(parsed.train.seed, workers=True)
     torch.manual_seed(parsed.train.seed)
 
-    model, runtime = build_model(parsed)
-    data_config = _data_for_model(parsed, runtime)
+    model, runtime, vocab = build_model(parsed)
+    data_config = _data_for_model(parsed, vocab)
     train_dataset = _dataset(data_config, data_config.factory, data_config.kwargs)
     validation_dataset = None
     if data_config.validation_factory is not None:
@@ -74,22 +82,21 @@ def run(config: MimoTrainConfig | DictConfig) -> dict[str, Any]:
         audio_pad_token_id=data_config.audio_pad_token_id,
         validation_dataset=validation_dataset,
     )
-    module = MimoModule(model=model, optim=parsed.optim)
-    callbacks = mimo_callbacks(parsed)
-    trainer = pl.Trainer(
-        accelerator=parsed.trainer.accelerator,
-        devices=parsed.trainer.devices,
-        strategy=parsed.trainer.strategy,
-        use_distributed_sampler=parsed.trainer.use_distributed_sampler,
-        precision=cast(Any, parsed.trainer.precision),
-        max_epochs=parsed.trainer.max_epochs,
-        max_steps=parsed.train.max_steps,
-        logger=_logger(parsed),
-        callbacks=callbacks,
-        default_root_dir=str(output_dir),
-        log_every_n_steps=parsed.trainer.log_every_n_steps,
-        enable_checkpointing=parsed.trainer.enable_checkpointing,
-        gradient_clip_val=parsed.trainer.gradient_clip_val,
+    schedule_runtime = build_unit_schedule(parsed.optim.schedule)
+    module = MimoModule(
+        model=model,
+        optim=parsed.optim,
+        schedule_runtime=schedule_runtime,
+        checkpoint_metadata=_checkpoint_metadata(parsed, data_config, vocab),
+    )
+    summary = LossSummary()
+    callbacks = mimo_callbacks(parsed, summary, schedule_runtime)
+    trainer = create_trainer(
+        parsed,
+        output_dir,
+        callbacks,
+        logger=build_logger(parsed.logging),
+        factory=pl.Trainer,
         num_sanity_val_steps=0,
     )
     if validation_dataset is None:
@@ -105,7 +112,7 @@ def run(config: MimoTrainConfig | DictConfig) -> dict[str, Any]:
     else:
         trainer.fit(module, datamodule=datamodule, ckpt_path=parsed.train.ckpt_path)
 
-    summary: dict[str, Any] = {
+    result: dict[str, Any] = {
         "run_name": parsed.run_name,
         "mode": "mimo",
         "global_step": int(trainer.global_step),
@@ -116,15 +123,18 @@ def run(config: MimoTrainConfig | DictConfig) -> dict[str, Any]:
             ),
         },
         "runtime": None if runtime is None else runtime.codec_name,
+        "metrics": summary.report(),
     }
     if trainer.is_global_zero:
         (output_dir / "metrics.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True) + "\n"
+            json.dumps(result, indent=2, sort_keys=True) + "\n"
         )
-    return summary
+    return result
 
 
-def build_model(config: MimoTrainConfig) -> tuple[nn.Module, Any | None]:
+def build_model(
+    config: MimoTrainConfig,
+) -> tuple[nn.Module, Any | None, MimoVocab | None]:
     """Build a runtime model, or a tiny local model for CPU smoke tests."""
 
     if bool(getattr(config.model, "toy", False)):
@@ -138,26 +148,27 @@ def build_model(config: MimoTrainConfig) -> tuple[nn.Module, Any | None]:
                 ),
             ),
             None,
+            None,
         )
     runtime_config = config.runtime
     runtime = runtime_for_sequence_layout(
         runtime_config,
         config.audio_sequence_layout,
     )
-    return build_mimo_model(runtime, config.model), runtime
+    vocab = derive_mimo_vocab(runtime, config.model)
+    return build_mimo_model(runtime, config.model, vocab=vocab), runtime, vocab
 
 
 def _runtime_data_config(
     config: MimoTrainConfig,
-    runtime: Any | None,
+    vocab: MimoVocab | None,
 ) -> PreparedMimoDataConfig:
     if not config.data.derive_special_tokens:
         return config.data
-    if runtime is None:
+    if vocab is None:
         if config.model.toy:
             return config.data
         raise ValueError("data.derive_special_tokens requires a runtime-backed model.")
-    vocab = derive_mimo_vocab(runtime, config.model)
     return replace(
         config.data,
         special=vocab.special_tokens(
@@ -170,10 +181,10 @@ def _runtime_data_config(
 
 def _data_for_model(
     config: MimoTrainConfig,
-    runtime: Any | None,
+    vocab: MimoVocab | None,
 ) -> PreparedMimoDataConfig:
     if not config.model.toy:
-        return _runtime_data_config(config, runtime)
+        return _runtime_data_config(config, vocab)
     # The production experiment intentionally replaces the entry's dataset
     # factory.  A CLI ``model.toy=true`` smoke override must switch both sides
     # of that contract and discard only the production manifest path.
@@ -214,7 +225,11 @@ def _dataset(
     )
 
 
-def mimo_callbacks(config: MimoTrainConfig) -> list[Callback]:
+def mimo_callbacks(
+    config: MimoTrainConfig,
+    summary: LossSummary | None = None,
+    schedule_runtime: ScheduleRuntime | None = None,
+) -> list[Callback]:
     """Return callbacks safe for MimoBatch/MimoModule.
 
     Single-stream callbacks intentionally do not appear here: they expect
@@ -222,34 +237,62 @@ def mimo_callbacks(config: MimoTrainConfig) -> list[Callback]:
     does not implement.
     """
 
+    resolved_summary = LossSummary() if summary is None else summary
+    resolved_schedule = (
+        build_unit_schedule(config.optim.schedule)
+        if schedule_runtime is None
+        else schedule_runtime
+    )
+    callbacks: list[Callback] = [OOMDiagnostics()]
+    callbacks.extend(resolved_schedule.callbacks())
+    callbacks.extend(
+        (
+            resolved_summary,
+            ObservationCallback(every_n_steps=config.trainer.log_every_n_steps),
+        )
+    )
     checkpoint = config.callbacks.checkpoint
-    if not checkpoint.enabled or not config.trainer.enable_checkpointing:
-        return []
-    return [
-        ModelCheckpoint(
-            dirpath=str(Path(config.output_dir) / "checkpoints"),
-            filename=checkpoint.filename,
-            save_last=checkpoint.save_last,
-            save_top_k=checkpoint.save_top_k,
-            every_n_train_steps=checkpoint.every_n_train_steps,
-            auto_insert_metric_name=False,
-            enable_version_counter=False,
+    if checkpoint.enabled and config.trainer.enable_checkpointing:
+        callbacks.append(
+            ModelCheckpoint(
+                dirpath=str(Path(config.output_dir) / "checkpoints"),
+                filename=checkpoint.filename,
+                save_last=checkpoint.save_last,
+                save_top_k=checkpoint.save_top_k,
+                every_n_train_steps=checkpoint.every_n_train_steps,
+                auto_insert_metric_name=False,
+                enable_version_counter=False,
+            )
         )
-    ]
+    return callbacks
 
 
-def _logger(config: MimoTrainConfig):
-    if config.logging.name == "csv":
-        return CSVLogger(
-            save_dir=config.logging.save_dir,
-            name=config.logging.run_name,
-        )
-    if config.logging.name == "tensorboard":
-        return TensorBoardLogger(
-            save_dir=config.logging.save_dir,
-            name=config.logging.run_name,
-        )
-    raise ValueError("logging.name must be csv or tensorboard.")
+def _checkpoint_metadata(
+    config: MimoTrainConfig,
+    data: PreparedMimoDataConfig,
+    vocab: MimoVocab | None,
+) -> dict[str, object]:
+    dataset = MimoDatasetConfig(
+        samples_per_epoch=data.samples_per_epoch,
+        seed=data.seed,
+        max_sequence_length=data.max_sequence_length,
+        task_weights=task_weights(data.task_weights),
+    )
+    return {
+        "factory_config": asdict(config.model),
+        "vocab": None if vocab is None else asdict(vocab),
+        "data": {
+            "special": asdict(data.special),
+            "text_pad_token_id": data.text_pad_token_id,
+            "audio_pad_token_id": data.audio_pad_token_id,
+            "audio_delay_tokens": data.audio_delay_tokens,
+            "task_weights": {
+                task.value: weight
+                for task, weight in dataset.resolved_task_weights.items()
+            },
+            "ignore_index": MIMO_IGNORE_INDEX,
+        },
+    }
 
 
 

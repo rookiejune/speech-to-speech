@@ -14,7 +14,6 @@ from speech_to_speech.datamodule.config import (
 )
 from speech_to_speech.mimo import MimoSpecialTokens
 from speech_to_speech.model.mimo_factory import MimoFactoryConfig
-from speech_to_speech.pl_module.optim import Config as OptimConfig
 from speech_to_speech.runtime import (
     AudioInputConfig,
     AudioOutputConfig,
@@ -23,6 +22,13 @@ from speech_to_speech.runtime import (
     BackboneType,
     Config as RuntimeConfig,
     migrate_config_fields,
+)
+from speech_to_speech.training.config import (
+    LoggingConfig,
+    OptimConfig,
+    UnitScheduleConfig,
+    UnitScheduleCurveConfig,
+    UnitSchedulePhaseConfig,
 )
 
 
@@ -47,10 +53,11 @@ class MimoTrainerConfig:
 
 
 @dataclass
-class MimoLoggingConfig:
+class MimoLoggingConfig(LoggingConfig):
     name: str = "csv"
     save_dir: str = "outputs"
     run_name: str = "mimo"
+    version: int | str | None = None
 
 
 @dataclass
@@ -150,11 +157,6 @@ def parse(config: DictConfig | Mapping[str, Any]) -> MimoTrainConfig:
     trainer = MimoTrainerConfig(**_mapping(raw, "trainer"))
     logging = MimoLoggingConfig(**_mapping(raw, "logging"))
     callbacks = _callbacks(_mapping(raw, "callbacks"))
-    optim_fields = _mapping(raw, "optim")
-    # The shared SFT preset also carries a unit schedule for single-stream
-    # staged training.  MimoModule currently consumes the base optimizer
-    # fields; reject nothing, but keep the schedule out of that constructor.
-    optim_fields.pop("schedule", None)
     result = MimoTrainConfig(
         run_name=str(raw.get("run_name", "mimo")),
         repo_output_root=str(raw.get("repo_output_root", "outputs")),
@@ -165,7 +167,7 @@ def parse(config: DictConfig | Mapping[str, Any]) -> MimoTrainConfig:
         model=model,
         data=data,
         dataloader=loader,
-        optim=OptimConfig(**optim_fields),
+        optim=_optim(_mapping(raw, "optim")),
         train=train,
         trainer=trainer,
         logging=logging,
@@ -232,6 +234,34 @@ def _loader(value: Mapping[str, Any]) -> DataLoaderConfig:
     if not isinstance(costs, DataLoaderCostsConfig):
         fields["costs"] = DataLoaderCostsConfig(**_mapping_value(costs, "dataloader.costs"))
     return DataLoaderConfig(**fields)
+
+
+def _optim(value: Mapping[str, Any]) -> OptimConfig:
+    fields = dict(value)
+    schedule = fields.pop("schedule", {})
+    if not isinstance(schedule, UnitScheduleConfig):
+        schedule_fields = _mapping_value(schedule, "optim.schedule")
+        phases = schedule_fields.get("phases", [])
+        if not isinstance(phases, list):
+            raise TypeError("optim.schedule.phases must be a list.")
+        schedule_fields["phases"] = [
+            _schedule_phase(phase, index) for index, phase in enumerate(phases)
+        ]
+        schedule = UnitScheduleConfig(**schedule_fields)
+    return OptimConfig(schedule=schedule, **fields)
+
+
+def _schedule_phase(value: object, index: int) -> UnitSchedulePhaseConfig:
+    if isinstance(value, UnitSchedulePhaseConfig):
+        return value
+    fields = _mapping_value(value, f"optim.schedule.phases[{index}]")
+    lr = fields.get("lr", {})
+    if not isinstance(lr, UnitScheduleCurveConfig):
+        lr = UnitScheduleCurveConfig(
+            **_mapping_value(lr, f"optim.schedule.phases[{index}].lr")
+        )
+    fields["lr"] = lr
+    return UnitSchedulePhaseConfig(**fields)
 
 
 def _callbacks(value: Mapping[str, Any]) -> MimoCallbacksConfig:

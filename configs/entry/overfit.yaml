@@ -56,8 +56,5 @@ callbacks:
         trainable_only: true
         parameters:
           - model.backbone.norm.weight
-  flow_matching:
-    enabled: true
-    every_n_steps: 1
   performance:
     enabled: false

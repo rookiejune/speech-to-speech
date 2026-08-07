@@ -11,16 +11,17 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
-from anytrain.loss import LossItem
 from torch import Tensor, nn
 from torch.nn import functional as F
 
 from .._tensor import is_signed_integer_dtype
 from ..mimo import MIMO_IGNORE_INDEX, MimoBatch
+from ._observation import emit, recommend, register
 
 TensorReadout = Callable[[Tensor], Tensor]
 
 
+@register
 class MimoObjective(nn.Module):
     """Compute aligned text/audio causal cross entropy.
 
@@ -48,6 +49,7 @@ class MimoObjective(nn.Module):
         self.text_weight = float(text_weight)
         self.audio_weight = float(audio_weight)
         self.ignore_index = ignore_index
+        recommend(self)
 
     def forward(
         self,
@@ -60,8 +62,9 @@ class MimoObjective(nn.Module):
         audio_loss_mask: Tensor | None = None,
         attention_mask: Tensor | None = None,
         validate: bool = True,
-    ) -> LossItem:
-        """Return one loss row per input example.
+        distributed: bool = False,
+    ) -> Tensor:
+        """Return the scalar text/audio objective.
 
         ``*_logits`` and ``*_labels`` have shape ``[B, T, V]`` and ``[B, T]``.
         Causal alignment is handled here: logits at ``t`` supervise labels at
@@ -71,6 +74,8 @@ class MimoObjective(nn.Module):
 
         if not isinstance(validate, bool):
             raise TypeError("validate must be a boolean.")
+        if not isinstance(distributed, bool):
+            raise TypeError("distributed must be a boolean.")
         _validate_logits(text_logits, text_labels, name="text")
         _validate_logits(audio_logits, audio_labels, name="audio")
         if text_logits.shape[:2] != audio_logits.shape[:2]:
@@ -134,18 +139,28 @@ class MimoObjective(nn.Module):
         audio_count = audio_target_mask.sum(dim=1)
         text_loss = _masked_row_mean(text_token_loss, text_target_mask, text_count)
         audio_loss = _masked_row_mean(audio_token_loss, audio_target_mask, audio_count)
-        total_loss = self.text_weight * text_loss + self.audio_weight * audio_loss
-        total_count = text_count + audio_count
-        return LossItem(
-            loss=total_loss,
-            details={
-                "text_loss": text_loss,
-                "audio_loss": audio_loss,
-                "text_tokens": text_count.to(dtype=total_loss.dtype),
-                "audio_tokens": audio_count.to(dtype=total_loss.dtype),
-                "tokens": total_count.to(dtype=total_loss.dtype),
+        text_mean = _distributed_route_mean(
+            text_loss,
+            text_count,
+            distributed=distributed,
+        )
+        audio_mean = _distributed_route_mean(
+            audio_loss,
+            audio_count,
+            distributed=distributed,
+        )
+        total_loss = self.text_weight * text_mean + self.audio_weight * audio_mean
+        emit(
+            self,
+            {
+                "text_loss": text_mean,
+                "audio_loss": audio_mean,
+                "text_tokens": text_count.sum().to(dtype=total_loss.dtype),
+                "audio_tokens": audio_count.sum().to(dtype=total_loss.dtype),
+                "tokens": (text_count + audio_count).sum().to(dtype=total_loss.dtype),
             },
         )
+        return total_loss
 
     def from_hidden_states(
         self,
@@ -160,7 +175,8 @@ class MimoObjective(nn.Module):
         audio_loss_mask: Tensor | None = None,
         attention_mask: Tensor | None = None,
         validate: bool = True,
-    ) -> LossItem:
+        distributed: bool = False,
+    ) -> Tensor:
         """Apply independent readouts, then evaluate :meth:`forward`.
 
         This helper keeps the objective agnostic to a concrete HF model while
@@ -184,45 +200,7 @@ class MimoObjective(nn.Module):
             audio_loss_mask=audio_loss_mask,
             attention_mask=attention_mask,
             validate=validate,
-        )
-
-    def mean(self, item: LossItem, *, distributed: bool = False) -> Tensor:
-        """Reduce rows with optional global token normalization for DDP."""
-
-        if not isinstance(distributed, bool):
-            raise TypeError("distributed must be a boolean.")
-        if not isinstance(item, LossItem):
-            raise TypeError("MimoObjective.mean expects a LossItem.")
-        details = item.details
-        required = {"text_loss", "audio_loss", "text_tokens", "audio_tokens"}
-        if details is None or not required.issubset(details):
-            raise ValueError("MIMO loss details are missing route losses or counts.")
-        text, audio = self.route_means(item, distributed=distributed)
-        return self.text_weight * text + self.audio_weight * audio
-
-    def route_means(
-        self,
-        item: LossItem,
-        *,
-        distributed: bool = False,
-    ) -> tuple[Tensor, Tensor]:
-        """Return text/audio route means with the requested reduction scope."""
-
-        if not isinstance(distributed, bool):
-            raise TypeError("distributed must be a boolean.")
-        if not isinstance(item, LossItem):
-            raise TypeError("MimoObjective.route_means expects a LossItem.")
-        details = item.details
-        required = {"text_loss", "audio_loss", "text_tokens", "audio_tokens"}
-        if details is None or not required.issubset(details):
-            raise ValueError("MIMO loss details are missing route losses or counts.")
-        return (
-            _distributed_route_mean(
-                details["text_loss"], details["text_tokens"], distributed=distributed
-            ),
-            _distributed_route_mean(
-                details["audio_loss"], details["audio_tokens"], distributed=distributed
-            ),
+            distributed=distributed,
         )
 
     def from_batch(
@@ -231,7 +209,8 @@ class MimoObjective(nn.Module):
         model: Any,
         *,
         validate: bool = True,
-    ) -> LossItem:
+        distributed: bool = False,
+    ) -> Tensor:
         """Evaluate a model exposing the dual-stream protocol.
 
         ``model.dual_hidden_states(batch)`` may return a
@@ -256,11 +235,15 @@ class MimoObjective(nn.Module):
             audio_loss_mask=batch.audio_loss_mask,
             attention_mask=batch.attention_mask,
             validate=validate,
+            distributed=distributed,
         )
 
 
 class MimoLoss(MimoObjective):
     """Descriptive alias for callers that distinguish losses from wrappers."""
+
+
+register(MimoLoss)
 
 
 def _call_dual_hidden(model: Any, batch: MimoBatch) -> Any:

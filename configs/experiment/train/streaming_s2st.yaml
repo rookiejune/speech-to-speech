@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /runtime: longcat_native
+  - /runtime: glm4_bicodec_composed
   - /model: default
   - /model/acoustic@model.acoustic: none
   - /datamodule/dataset@datamodule.dataset: streaming_s2st
@@ -17,8 +17,14 @@ audio_sequence_layout: flattened
 run_name: ${oc.env:SPEECH_TO_SPEECH_STREAM_RUN,streaming-s2st}
 output_subdir: streaming-s2st/${run_name}
 
-# Keep TensorBoard and streaming_gpu.csv in one append-only directory across
-# auto-resume invocations of the same logical stream run.
+# Listed devices run workspace snapshot factories. Every other visible device
+# is passed to Lightning for training.
+devices:
+  translation: [0]
+  tts: [1]
+
+# Keep one append-only TensorBoard directory across auto-resume invocations of
+# the same logical run.
 logging:
   version: 0
 
@@ -33,9 +39,11 @@ loader_plan:
   step_mode: weighted_window
 
 datamodule:
-  encode_missing_codes: false
+  # Final S2ST snapshots publish waveform; codec views are encoded online in
+  # the Lightning process.
+  encode_missing_codes: true
   source:
-    factory: zhuyin.datasets.wmt19.streaming_s2st:source
+    factory: zhuyin.datasets.s2st:source
     mode: auto
     options: {}
   dataloader:
@@ -45,12 +53,6 @@ datamodule:
     persistent_workers: false
     costs:
       enabled: false
-  streaming:
-    telemetry:
-      enabled: true
-      gpu_sample_interval_seconds: 1.0
-      log_every_n_steps: 1
-
 pl_module:
   ctc:
     source:
@@ -75,10 +77,10 @@ trainer:
 
 callbacks:
   synthesis_sample:
-    enabled: true
+    enabled: false
     every_n_steps: 100
     loader: s2st
-    indices: [0, 1, 2]
+    indices: []
   task_sample:
     enabled: false
   text_retention:

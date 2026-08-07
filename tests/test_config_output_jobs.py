@@ -217,6 +217,10 @@ class ConfigOutputJobTest(ConfigTestCase):
                 self.assertTrue(path.stat().st_mode & 0o111)
                 self.assertNotRegex(
                     source,
+                    r"(?m)^\s*(?:export\s+)?CUDA_VISIBLE_DEVICES=",
+                )
+                self.assertNotRegex(
+                    source,
                     r"/(?:home|mnt|Users)/|hf-mirror|Qwen3-0\.6B|HF_HOME|ANYTRAIN_HOME",
                 )
 

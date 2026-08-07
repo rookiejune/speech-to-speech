@@ -3,28 +3,19 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import Mock
 
 import torch
 from anydataset.types import Modality
 from anytrain.module.idspace import Layout
-from lightning import pytorch as pl
 from semantic_acoustic_generator.loss.flow import FlowRuntime
 from torch import Tensor, nn
 
-from speech_to_speech.callback.logging.outputs import OutputsLogger
-from speech_to_speech.datamodule.batch import (
-    FusedBatch,
-    ModelBatch,
-    ModelSample,
-)
+from speech_to_speech.datamodule.batch import ModelBatch, ModelSample
 from speech_to_speech.loss.ctc import CTCAlignmentLoss, CTCConfig, CTCRouteConfig
-from speech_to_speech.loss.contract import LossItem, Outputs
 from speech_to_speech.loss.supervised import (
     FlowObjective,
     RVQObjective,
     TokenObjective,
-    validation_metrics,
 )
 from speech_to_speech.model.ctc import (
     CTCRoute,
@@ -182,11 +173,8 @@ class CTCLossChainTest(unittest.TestCase):
         self.assertIs(calls[1][0], CTCRoute.TARGET)
         torch.testing.assert_close(calls[0][1], hidden[:, [1, 2]])
         torch.testing.assert_close(calls[1][1], hidden[:, [0, 2]])
-        self.assertTrue(torch.isfinite(item.loss).all())
-        details = _details(self, item)
-        torch.testing.assert_close(details["sequences"], torch.ones(1))
-        torch.testing.assert_close(details["source_tokens"], torch.ones(1))
-        torch.testing.assert_close(details["target_tokens"], torch.ones(1))
+        self.assertTrue(torch.isfinite(item))
+        self.assertEqual(item.ndim, 0)
 
     def test_all_token_objectives_reuse_hidden_states_for_ctc(self):
         layout = Layout(text=(0, 3), audio=(3, 5))
@@ -231,11 +219,7 @@ class CTCLossChainTest(unittest.TestCase):
                     [frozenset({CTCRoute.SOURCE})],
                 )
                 self.assertEqual(model.ctc_logit_routes, [CTCRoute.SOURCE])
-                expected = outputs["token"].weighted_mean(
-                    _details(self, outputs["token"])["tokens"]
-                ) + outputs["ctc"].weighted_mean(
-                    _details(self, outputs["ctc"])["sequences"]
-                )
+                expected = outputs["token"] + outputs["ctc"]
                 torch.testing.assert_close(outputs["loss"], expected)
 
     def test_both_routes_train_distinct_decoders_through_frozen_text_head(self):
@@ -294,12 +278,7 @@ class CTCLossChainTest(unittest.TestCase):
         outputs = objective(batch, model)
 
         ctc = outputs["ctc"]
-        details = _details(self, ctc)
-        torch.testing.assert_close(details["sequences"], torch.tensor([1.0, 0.0]))
-        token_mean = outputs["token"].weighted_mean(
-            _details(self, outputs["token"])["tokens"]
-        )
-        torch.testing.assert_close(outputs["loss"] - token_mean, ctc.loss[0])
+        torch.testing.assert_close(outputs["loss"], outputs["token"] + ctc)
 
     def test_tts_is_excluded_but_t2st_uses_target_ctc(self):
         layout = Layout(text=(0, 3), audio=(3, 5))
@@ -344,9 +323,7 @@ class CTCLossChainTest(unittest.TestCase):
             [frozenset({CTCRoute.TARGET})],
         )
         self.assertEqual(t2st_model.ctc_logit_routes, [CTCRoute.TARGET])
-        details = _details(self, t2st_outputs["ctc"])
-        torch.testing.assert_close(details["source_tokens"], torch.zeros(1))
-        torch.testing.assert_close(details["target_tokens"], torch.ones(1))
+        self.assertEqual(t2st_outputs["ctc"].ndim, 0)
 
     def test_all_padding_ctc_row_adds_zero_without_nan(self):
         layout = Layout(text=(0, 3), audio=(3, 5))
@@ -364,84 +341,10 @@ class CTCLossChainTest(unittest.TestCase):
 
         outputs = objective(batch, _Model(layout))
 
-        token_mean = outputs["token"].weighted_mean(
-            _details(self, outputs["token"])["tokens"]
-        )
         self.assertTrue(torch.isfinite(outputs["loss"]))
-        torch.testing.assert_close(outputs["loss"], token_mean)
+        torch.testing.assert_close(outputs["loss"], outputs["token"])
         ctc = outputs["ctc"]
-        torch.testing.assert_close(_details(self, ctc)["sequences"], torch.zeros(1))
-        torch.testing.assert_close(ctc.loss, torch.zeros(1))
-
-    def test_ctc_validation_and_task_logging_use_alignment_namespace(self):
-        item = LossItem(
-            torch.tensor([2.0]),
-            {
-                "source_loss": torch.tensor([2.0]),
-                "target_loss": torch.tensor([0.0]),
-                "source_tokens": torch.tensor([1.0]),
-                "target_tokens": torch.tensor([0.0]),
-                "source_steps": torch.tensor([2.0]),
-                "target_steps": torch.tensor([0.0]),
-                "tokens": torch.tensor([1.0]),
-                "sequences": torch.tensor([1.0]),
-            },
-        )
-        metrics = validation_metrics({"loss": torch.tensor(2.0), "ctc": item})
-        self.assertEqual(set(metrics), {"alignment/ctc/loss"})
-        torch.testing.assert_close(
-            metrics["alignment/ctc/loss"].weights,
-            torch.ones(1),
-        )
-
-        callback = OutputsLogger()
-        module = SimpleNamespace(log=Mock())
-        callback.on_train_batch_end(
-            cast(pl.Trainer, SimpleNamespace(world_size=1)),
-            cast(pl.LightningModule, module),
-            Outputs(loss=torch.tensor(2.0), ctc=item),
-            FusedBatch((_source_batch(), _mt_batch())),
-            0,
-        )
-
-        values = {call.args[0]: call.args[1] for call in module.log.call_args_list}
-        self.assertIn("alignment/ctc/loss/asr", values)
-        self.assertEqual(values["alignment/ctc/source_tokens/asr"], 1.0)
-        self.assertEqual(values["alignment/ctc/source_steps/asr"], 2.0)
-        self.assertEqual(values["alignment/ctc/sequences/asr"], 1.0)
-        self.assertFalse(any(name.endswith("/mt") for name in values))
-
-    def test_ctc_logging_masks_inactive_rows_and_unused_routes(self):
-        item = LossItem(
-            torch.tensor([0.0, 2.0]),
-            {
-                "source_loss": torch.tensor([0.0, 0.0]),
-                "target_loss": torch.tensor([0.0, 2.0]),
-                "source_tokens": torch.tensor([0.0, 0.0]),
-                "target_tokens": torch.tensor([0.0, 1.0]),
-                "source_steps": torch.tensor([0.0, 0.0]),
-                "target_steps": torch.tensor([0.0, 2.0]),
-                "tokens": torch.tensor([0.0, 1.0]),
-                "sequences": torch.tensor([0.0, 1.0]),
-            },
-        )
-        callback = OutputsLogger()
-        module = SimpleNamespace(log=Mock())
-
-        callback.on_train_batch_end(
-            cast(pl.Trainer, SimpleNamespace(world_size=1)),
-            cast(pl.LightningModule, module),
-            Outputs(loss=torch.tensor(2.0), ctc=item),
-            _mixed_target_batch(),
-            0,
-        )
-
-        values = {call.args[0]: call.args[1] for call in module.log.call_args_list}
-        self.assertEqual(values["alignment/ctc/loss/t2st"], 2.0)
-        self.assertEqual(values["alignment/ctc/target_loss/t2st"], 2.0)
-        self.assertEqual(values["alignment/ctc/target_tokens/t2st"], 1.0)
-        self.assertFalse(any(name.endswith("/tts") for name in values))
-        self.assertFalse(any("source_" in name for name in values))
+        torch.testing.assert_close(ctc, torch.zeros(()))
 
 
 def _source_batch() -> ModelBatch:
@@ -515,13 +418,6 @@ def _mixed_target_batch() -> ModelBatch:
         ],
         pad_token_id=99,
     )
-
-
-def _details(test: unittest.TestCase, item: LossItem) -> dict[str, Tensor]:
-    details = item.details
-    if details is None:
-        test.fail("loss details are unavailable")
-    return details
 
 
 if __name__ == "__main__":

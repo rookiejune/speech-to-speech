@@ -5,7 +5,6 @@ from typing import Any
 import torch
 from anydataset.types import Modality
 from anytrain.framework.rl import DPOLoss, GRPOLoss, sequence_logps
-from anytrain.loss import LossItem
 from torch import Tensor
 from torch.nn import functional as F
 
@@ -105,16 +104,14 @@ class DPOObjective(Objective[Model]):
         if not isinstance(batch, PreferenceBatch):
             raise TypeError("DPOObjective requires a PreferenceBatch.")
         policy_chosen_logps, policy_rejected_logps = _preference_logps(batch, model)
-        loss, details = self.loss(
+        loss = self.loss(
             policy_chosen_logps=policy_chosen_logps,
             policy_rejected_logps=policy_rejected_logps,
             ref_chosen_logps=batch.ref_chosen_logps,
             ref_rejected_logps=batch.ref_rejected_logps,
             validate=False,
         )
-        item_details = {"preferences": loss.detach().new_ones(())}
-        item_details.update(details)
-        return {"loss": loss, "dpo": LossItem(loss, item_details)}
+        return {"loss": loss, "dpo": loss}
 
 
 def _preference_logps(
@@ -218,7 +215,7 @@ class GRPOObjective(Objective[Model]):
             batch.old_token_logps
         )
         response_mask = _response_mask(batch.sequences).view_as(batch.old_token_logps)
-        loss, details = self.loss(
+        loss = self.loss(
             policy_token_logps=policy_token_logps,
             old_token_logps=batch.old_token_logps,
             rewards=batch.rewards,
@@ -227,9 +224,7 @@ class GRPOObjective(Objective[Model]):
             group_mask=batch.group_mask,
             validate=False,
         )
-        item_details = {"preferences": loss.detach().new_ones(())}
-        item_details.update(details)
-        return {"loss": loss, "grpo": LossItem(loss, item_details)}
+        return {"loss": loss, "grpo": loss}
 
 
 def _rollout_token_logps(batch: ModelBatch, model: Model) -> Tensor:

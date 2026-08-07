@@ -80,14 +80,10 @@ class CTCAlignmentLossTest(unittest.TestCase):
         torch.testing.assert_close(target_states, torch.tensor([[[10.0], [12.0]]]))
         torch.testing.assert_close(source_mask, torch.ones((1, 2), dtype=torch.bool))
         torch.testing.assert_close(target_mask, torch.ones((1, 2), dtype=torch.bool))
-        self.assertTrue(torch.isfinite(item.loss).all())
-        self.assertIsNotNone(item.details)
-        assert item.details is not None
-        self.assertEqual(item.details["source_tokens"].tolist(), [1.0])
-        self.assertEqual(item.details["target_tokens"].tolist(), [1.0])
-        self.assertEqual(item.details["sequences"].tolist(), [1.0])
+        self.assertTrue(torch.isfinite(item))
+        self.assertEqual(item.ndim, 0)
 
-        item.loss.sum().backward()
+        item.backward()
 
         self.assertIsNotNone(source_hidden.grad)
         self.assertIsNotNone(target_hidden.grad)
@@ -136,11 +132,8 @@ class CTCAlignmentLossTest(unittest.TestCase):
         )
 
         self.assertEqual(decode_calls, [CTCRoute.SOURCE])
-        self.assertIsNotNone(item.details)
-        assert item.details is not None
-        self.assertEqual(item.details["sequences"].tolist(), [1.0, 0.0])
-        self.assertEqual(item.details["target_tokens"].tolist(), [0.0, 0.0])
-        self.assertEqual(float(item.loss[1].item()), 0.0)
+        self.assertEqual(item.ndim, 0)
+        self.assertTrue(torch.isfinite(item))
 
     def test_decoder_mask_defines_pooled_step_count(self):
         reference = torch.zeros((1, 5, 2))
@@ -173,10 +166,8 @@ class CTCAlignmentLossTest(unittest.TestCase):
             decode=pooled_decode,
         )
 
-        self.assertIsNotNone(item.details)
-        assert item.details is not None
-        self.assertEqual(item.details["source_steps"].tolist(), [3.0])
-        self.assertEqual(item.details["source_tokens"].tolist(), [2.0])
+        self.assertEqual(item.ndim, 0)
+        self.assertTrue(torch.isfinite(item))
 
     def test_pooling_that_is_too_short_for_repeated_labels_is_rejected(self):
         def too_short_decode(

@@ -6,12 +6,9 @@ from typing import Any, Generic, TypeVar, TypedDict
 
 import torch
 from anydataset.types import Modality
-from anytrain.evaluator.weighted import Metric
 from anytrain.loss import (
-    LossItem,
     MaskedCodebookCrossEntropyLoss,
     MaskedCosineAlignmentLoss,
-    loss_item_mean,
 )
 from anytrain.module.idspace import Layout
 from semantic_acoustic_generator.loss.flow import FlowLoss, FlowRuntime
@@ -29,10 +26,9 @@ from .contract import (
     RVQObjectiveModel,
     TokenObjectiveModel,
     combine_outputs,
-    loss_items,
-    loss_unit,
 )
 from .ctc import CTCAlignmentLoss, CTCConfig
+from ._observation import emit, recommend, register
 
 
 ModelT_contra = TypeVar("ModelT_contra", bound=TokenObjectiveModel, contravariant=True)
@@ -47,26 +43,6 @@ class Objective(nn.Module, Generic[ModelT_contra], ABC):
 
     def reduce(self, outputs: Sequence[Outputs]) -> Outputs:
         return combine_outputs(outputs)
-
-
-def _weighted_mean(item: LossItem, key: str) -> Tensor:
-    return loss_item_mean(
-        item,
-        unit=key,
-        fallback_to_mean=False,
-        validate=False,
-    )
-
-
-def _zero_safe_weighted_mean(item: LossItem, key: str) -> Tensor:
-    details = item.details
-    if details is None or key not in details:
-        raise ValueError(f"loss item details must contain unit {key!r}.")
-    weight = details[key].to(device=item.loss.device, dtype=item.loss.dtype)
-    if weight.shape != item.loss.shape:
-        raise ValueError("loss weights must align with loss rows.")
-    safe_loss = item.loss.masked_fill(weight == 0, 0)
-    return (safe_loss * weight).sum() / weight.sum().clamp_min(1)
 
 
 def _audio_hidden(
@@ -106,7 +82,7 @@ def _token_forward(
     token: TokenLoss,
     *,
     hidden_states: Tensor | None = None,
-) -> LossItem:
+) -> Tensor:
     if hidden_states is None:
         hidden_states = _token_hidden_states(batch, model)
     audio_hidden = _audio_hidden(batch, model, hidden_states)
@@ -231,7 +207,7 @@ def _add_ctc(
         decode=model.ctc_logits,
     )
     outputs["ctc"] = ctc
-    outputs["loss"] = outputs["loss"] + _zero_safe_weighted_mean(ctc, "sequences")
+    outputs["loss"] = outputs["loss"] + ctc
 
 
 class TokenObjective(Objective[TokenObjectiveModel]):
@@ -261,7 +237,7 @@ class TokenObjective(Objective[TokenObjectiveModel]):
             self.token,
             hidden_states=hidden.token,
         )
-        result: Outputs = {"loss": _weighted_mean(token, "tokens"), "token": token}
+        result: Outputs = {"loss": token, "token": token}
         _add_ctc(result, batch, model, hidden, self.ctc)
         return result
 
@@ -310,7 +286,7 @@ class FlowObjective(Objective[FlowObjectiveModel]):
             self.token,
             hidden_states=hidden.token,
         )
-        result: Outputs = {"loss": _weighted_mean(token, "tokens"), "token": token}
+        result: Outputs = {"loss": token, "token": token}
         _add_ctc(result, batch, model, hidden, self.ctc)
 
         if target_data is not None:
@@ -353,13 +329,11 @@ class FlowObjective(Objective[FlowObjectiveModel]):
                     teacher,
                     target_mask,
                 )
-                result["repa"] = repa
-                result["loss_weights"] = {"repa": self.repa_weight}
-                result["loss"] = result["loss"] + self.repa_weight * _weighted_mean(
-                    repa, "frames"
-                )
+                weighted_repa = self.repa_weight * repa
+                result["repa"] = weighted_repa
+                result["loss"] = result["loss"] + weighted_repa
             result["flow_matching"] = acoustic
-            result["loss"] = result["loss"] + _weighted_mean(acoustic, "frames")
+            result["loss"] = result["loss"] + acoustic
         return result
 
 
@@ -411,7 +385,7 @@ class RVQObjective(Objective[RVQObjectiveModel]):
             self.token,
             hidden_states=hidden.token,
         )
-        result: Outputs = {"loss": _weighted_mean(token, "tokens"), "token": token}
+        result: Outputs = {"loss": token, "token": token}
         _add_ctc(result, batch, model, hidden, self.ctc)
 
         if target_data is not None:
@@ -428,16 +402,17 @@ class RVQObjective(Objective[RVQObjectiveModel]):
                 mask=target_mask,
                 validate=False,
             )
-            acoustic = self.rvq.forward_packed(
+            acoustic = self.rvq(
                 packed,
                 validate=False,
                 include_top1=include_top1,
             )
             result["rvq"] = acoustic
-            result["loss"] = result["loss"] + _weighted_mean(acoustic, "frames")
+            result["loss"] = result["loss"] + acoustic
         return result
 
 
+@register
 class TokenLoss(nn.Module):
     def __init__(
         self,
@@ -454,6 +429,7 @@ class TokenLoss(nn.Module):
             raise ValueError("audio neighbor smoothing must be in [0, 1).")
         self.layout = layout
         self.audio_neighbor_smoothing = float(audio_neighbor_smoothing)
+        recommend(self)
 
     def forward(
         self,
@@ -466,7 +442,7 @@ class TokenLoss(nn.Module):
         attention_mask: Tensor | None = None,
         audio_neighbors: Callable[[Tensor], FsqNeighbors | None] | None = None,
         validate: bool = True,
-    ) -> LossItem:
+    ) -> Tensor:
         if hidden_states.dim() != 3 or token_labels.dim() != 2:
             raise ValueError(
                 "token hidden states and labels must have shapes [B, T, H] and [B, T]."
@@ -523,17 +499,18 @@ class TokenLoss(nn.Module):
         text_loss = (token_loss * text_mask).sum(dim=1) / text_count.clamp_min(1)
         audio_loss = (token_loss * audio_mask).sum(dim=1) / audio_count.clamp_min(1)
         total_count = text_count + audio_count
-        total_loss = (token_loss * valid).sum(dim=1) / total_count.clamp_min(1)
-        return LossItem(
-            loss=total_loss,
-            details={
-                "text_loss": text_loss,
-                "audio_loss": audio_loss,
-                "tokens": total_count.to(dtype=hidden_states.dtype),
-                "text_tokens": text_count.to(dtype=hidden_states.dtype),
-                "audio_tokens": audio_count.to(dtype=hidden_states.dtype),
+        total_loss = (token_loss * valid).sum() / total_count.sum().clamp_min(1)
+        emit(
+            self,
+            {
+                "text_loss": _route_mean(text_loss, text_count),
+                "audio_loss": _route_mean(audio_loss, audio_count),
+                "tokens": total_count.sum().to(dtype=hidden_states.dtype),
+                "text_tokens": text_count.sum().to(dtype=hidden_states.dtype),
+                "audio_tokens": audio_count.sum().to(dtype=hidden_states.dtype),
             },
         )
+        return total_loss
 
     def _loss(
         self,
@@ -624,53 +601,8 @@ def _modalities(prediction: PredictionModality | Modality) -> frozenset[Modality
     return frozenset({prediction})
 
 
-_OBJECTIVE_NAME = {
-    "token": "token/loss",
-    "ctc": "alignment/ctc/loss",
-    "flow_matching": "acoustic/flow_matching/loss",
-    "repa": "acoustic/repa/loss",
-    "rvq": "acoustic/rvq/loss",
-}
-
-
-def validation_metrics(outputs: Outputs) -> dict[str, Metric]:
-    metrics: dict[str, Metric] = {}
-    for objective, item in loss_items(outputs):
-        name = _OBJECTIVE_NAME[objective]
-        metrics[name] = _metric(item, item.loss, loss_unit(objective))
-        if objective == "rvq":
-            metrics.update(_rvq_metrics(item))
-    return metrics
-
-
-def _rvq_metrics(item: LossItem) -> dict[str, Metric]:
-    details = item.details
-    if details is None:
-        raise TypeError("RVQ validation requires loss details.")
-    metrics = {}
-    for key, values in sorted(details.items()):
-        name = _rvq_name(key)
-        if name is not None:
-            metrics[name] = _metric(item, values, "frames")
-    return metrics
-
-
-def _rvq_name(key: str) -> str | None:
-    parts = key.split("_")
-    if len(parts) == 2 and parts[0] == "codebook" and parts[1].isdigit():
-        return f"acoustic/rvq/{key}"
-    if (
-        len(parts) == 3
-        and parts[0] == "codebook"
-        and parts[1].isdigit()
-        and parts[2] == "top1"
-    ):
-        return f"acoustic/rvq/{key}"
-    return None
-
-
-def _metric(item: LossItem, values: Tensor, unit: str) -> Metric:
-    details = item.details
-    if details is None or unit not in details:
-        raise TypeError(f"validation loss item requires {unit!r} details.")
-    return Metric(values, details[unit])
+def _route_mean(loss: Tensor, count: Tensor) -> Tensor:
+    weights = count.to(device=loss.device, dtype=loss.dtype)
+    total = weights.sum()
+    value = (loss.masked_fill(weights == 0, 0) * weights).sum() / total.clamp_min(1)
+    return torch.where(total > 0, value, loss.new_zeros(()))

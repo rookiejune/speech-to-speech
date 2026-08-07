@@ -31,7 +31,8 @@ class FsqNeighborLossTest(unittest.TestCase):
         hard = -log_probabilities[0, 0]
         smooth = -0.5 * (log_probabilities[0, 1] + log_probabilities[0, 2])
         expected = 0.8 * hard + 0.2 * smooth
-        torch.testing.assert_close(output.loss, expected.reshape(1))
+        self.assertEqual(output.ndim, 0)
+        torch.testing.assert_close(output, expected)
 
     def test_special_audio_rows_keep_hard_targets(self) -> None:
         layout = Layout(text=(0, 3), audio=(3, 10))
@@ -49,7 +50,8 @@ class FsqNeighborLossTest(unittest.TestCase):
         )
 
         expected = F.cross_entropy(logits, torch.tensor([6]), reduction="none")
-        torch.testing.assert_close(output.loss, expected)
+        self.assertEqual(output.ndim, 0)
+        torch.testing.assert_close(output, expected.squeeze(0))
 
     def test_enabled_smoothing_requires_fsq_neighbors(self) -> None:
         layout = Layout(text=(0, 3), audio=(3, 10))

@@ -10,7 +10,7 @@ job_reject_overrides experiment runtime datamodule.source loader_plan trainer.ma
 
 cd "${SPEECH_TO_SPEECH_ROOT}"
 echo "{\"event\":\"job.launch\",\"entry\":\"scripts/train.py\",\"experiment\":\"train/uniss_streaming_s2st\",\"assigned_devices\":\"${visible_devices}\"}"
-CUDA_VISIBLE_DEVICES="${visible_devices}" "${SPEECH_TO_SPEECH_PYTHON}" scripts/train.py \
+"${SPEECH_TO_SPEECH_PYTHON}" scripts/train.py \
   "experiment=train/uniss_streaming_s2st" \
   "repo_output_root=${SPEECH_TO_SPEECH_TRAIN_ROOT}" \
   "runtime.backbone=${qwen_root}" \

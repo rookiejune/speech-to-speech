@@ -113,6 +113,7 @@ def build_mimo_model(
     runtime: MimoRuntime,
     config: MimoFactoryConfig | None = None,
     *,
+    vocab: MimoVocab | None = None,
     audio_embedding: nn.Embedding | None = None,
     audio_feature_projection: nn.Module | None = None,
 ) -> MimoModel:
@@ -148,6 +149,9 @@ def build_mimo_model(
     options = MimoFactoryConfig() if config is None else config
     if not isinstance(options, MimoFactoryConfig):
         raise TypeError("config must be a MimoFactoryConfig or None.")
+    resolved_vocab = derive_mimo_vocab(runtime, options) if vocab is None else vocab
+    if not isinstance(resolved_vocab, MimoVocab):
+        raise TypeError("vocab must be a MimoVocab or None.")
 
     adapter = runtime.backbone_adapter
     backbone = runtime.backbone
@@ -157,17 +161,14 @@ def build_mimo_model(
     source_embedding = input_embeddings()
     if not isinstance(source_embedding, nn.Embedding):
         raise TypeError("runtime backbone input embeddings must be nn.Embedding.")
-    text_vocab = (
-        options.text_vocab_size if options.text_vocab_size is not None else _text_vocab(runtime)
-    )
-    _positive_int(text_vocab, "text vocabulary size")
+    text_vocab = resolved_vocab.text_size
     if source_embedding.num_embeddings < text_vocab:
         raise ValueError("runtime backbone input embeddings do not cover the text vocabulary.")
 
     hidden_size = _hidden_size(adapter, source_embedding)
     if options.audio_embedding_dim is not None and options.audio_embedding_dim != hidden_size:
         raise ValueError("audio_embedding_dim must match the runtime hidden size.")
-    _, audio_vocab = _mimo_audio_vocab(runtime, options.audio_vocab_size)
+    audio_vocab = resolved_vocab.audio_size
     local_audio = audio_embedding or _audio_embedding(
         runtime,
         audio_vocab,
@@ -451,6 +452,22 @@ class MimoVocab:
     audio_blank: int
     audio_bos: int
     audio_eos: int
+
+    def __post_init__(self) -> None:
+        _positive_int(self.text_size, "MIMO text vocabulary size")
+        _positive_int(self.audio_size, "MIMO audio vocabulary size")
+        for name, value, size in (
+            ("text_blank", self.text_blank, self.text_size),
+            ("text_bos", self.text_bos, self.text_size),
+            ("text_eos", self.text_eos, self.text_size),
+            ("audio_blank", self.audio_blank, self.audio_size),
+            ("audio_bos", self.audio_bos, self.audio_size),
+            ("audio_eos", self.audio_eos, self.audio_size),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an integer.")
+            if value < 0 or value >= size:
+                raise ValueError(f"{name} must be inside its local vocabulary.")
 
     def special_tokens(self, *, audio_delay_tokens: int = 0) -> MimoSpecialTokens:
         return MimoSpecialTokens(

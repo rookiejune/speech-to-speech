@@ -142,9 +142,9 @@ speaker grid 构造 voice-clone 数据，应在 dataset 边界产出上述 pair�
 runtime 的 input/output `AudioView` 都从对应 `audio_input.tokenizer` /
 `audio_output.tokenizer` 推导；`materialization.codec_view` 只是针对 output 推导值的可选
 防错校验，不是另一个表示选择轴。
-`DatasetName.WMT19_TTS` 继续读取原 `moss_tts` 资源及其 selection；双向边合成边训练使用独立的
-`DatasetName.STREAMING_S2ST`（Hydra: `datamodule/dataset=streaming_s2st`），通过 workspace
-`streaming_s2st` wrapper 读取 waveform 和 ready codec view，并要求 `dataset.filter=null`。
+`DatasetName.WMT19_TTS` 继续读取原 `moss_tts` 资源及其 selection。这个 read-through 路径面向有限的
+prepared dataset；新的 live S2ST 入口不使用它。`zhuyin.datasets.s2st:source` 直接发布 waveform
+catalog，训练 runtime 按 batch 在线编码。
 解析顺序固定为：
 
 1. 先按 workspace root、split、codec view 和 `DatasetConfig.filter` 读取现有 codec store；命中后
@@ -184,10 +184,6 @@ codec codes 仍只读同一份 store。GLM-4 input / BiCodec output 的边界是
   Git commit，但严格校验源码/API/模型契约、固定 weights revision 和 `transformers==4.44.1`；若
   output provider 的依赖不能与之共存，应在兼容环境中运行独立
   AnyDataset producer，再由本 resolver 消费持续发布的 store。
-
-`streaming_s2st` 的 source factory 返回上游 `translation_seed` 对应的双向 waveform dataset。方向
-展开只发生在 seed 层：若 filtered WMT19 有 `N` 个 pair，fallback、后台 codec store 和刷新后的
-训练 dataset 都必须是 `2N`。codec materializer 只编码已有 sample，不交换角色或二次展开成 `4N`。
 
 补产结果保持 workspace codec dataset 的读取格式，但它本身已经是过滤后的 composite store，因此
 ready store 加载时不再二次应用 filter。逻辑请求由 dataset/source root、split、backend
@@ -232,104 +228,87 @@ cell 和 `speaker_grid_manifest.jsonl` 契约，不能沿用 WMT19 pair material
 
 ## 流式 S2ST 合成消费
 
-`StreamingConfig` 与 `DatasetName.STREAMING_S2ST` 是独立于 read-through materialization 的长驻
-消费路径。上游 filtered `translation_seed` 有 `N` 个 pair 时，producer 在 seed 层恰好展开为 `2N`
-个有方向的 pair：正向与反向各一条；训练不再交换 role 或再次展开。每个 published sample 都是
-`Task.S2ST` 的 `trace=target_cot` teacher-forcing 样本，生成的 target text 和 target audio/code
-sequence 都是 backbone label，而不是训练时重新调用 teacher 的结果。
+正式入口在 CUDA runtime、distributed launch 和模型构造前解析
+`datamodule.source.factory`。workspace source 统一提供 `access()`、`generate()` 和 `toy()`；
+`access().load()` 在已有 snapshot 和尚无首版 snapshot 时都返回同一个 `LiveS2STDataset` facade。
+训练入口只做路由和设备切分，不读取生成目录，也不把 dataset split、root 或 codec 配置注入 source。
+invalid/corrupt access 在所有 mode 下直接失败，不允许用 toy 或 generation 掩盖损坏。
 
-producer 只通过原子发布的 immutable snapshot 交给训练端。每个
-`snapshots/<sequence>-<snapshot_id>/snapshot.json` 声明 stream identity、全局 sample membership、连续
-sequence、sample count 与自身 manifest digest；`SnapshotFeed` 只接受不重叠且不可改写的 append-only
-catalog prefix。最终 `sealed.json` 绑定 snapshot count、完整 `2N` membership 与 catalog digest；只有
-seal 与 catalog 完全一致时，逻辑 epoch 才结束。因而已观察到的 chunk、seal 或 checkpoint 前 catalog
-prefix 被删除、改写或分叉都会明确失败，不会把它当作可重采样的数据源。
+auto route 的行为固定为：
 
-解耦 audio runtime 时，一个 snapshot 仍是单个原子 sample batch，不允许 input/output backend 各自推进。
-publisher 先在同一临时目录写完 `base/`、input derived-view store（例如 `glm4/`）和
-output derived-view store（例如 `bicodec/`），逐一校验 sample count 后只做一次目录
-`os.replace`。loader 按相同 index 打开两套 store，
-把 input view 与 output view 合并回一个完整 `Sample`；snapshot、seal、producer metadata、failure marker
-和 cursor checkpoint 都绑定 input/output backend tokenizer identity。这样恢复时既不会观察
-半个 snapshot，也不能
-把旧 cursor 静默切换到另一套 tokenizer。coupled runtime 继续使用原来的单 codec store/API。
+- 已有 sealed snapshot：只走 access，全部可见设备用于训练；
+- 已有未 sealed snapshot：训练立即读取当前前缀；多卡恢复 generation，单卡只训练当前前缀；
+- 尚无首版 snapshot：单卡使用 toy 数据测真实模型与在线 codec 性能；多卡启动 generation，训练侧
+  live dataset 等待首个最终 snapshot；
+- 显式 `access|generate|toy` 只用于诊断，不能改变 invalid/corrupt 的失败语义。
 
-`StreamingSnapshotDataset` 区分已 delivered 与已 committed 的全局 position。`StreamingDataLoader`
-把 delivered batch 暂存到 optimizer 边界；`StreamingSynthesis` 仅在成功的 train batch end 确认它，
-并在 global step 前进时提交连续 span。checkpoint 同时保存 DataModule 的 loader state 和 Lightning
-fit-loop 的 stateful loader state：committed position/batches、world size、next snapshot identity、consumed
-catalog prefix digest 和 last global step。恢复会把 read position 回退到 committed position，因此未确认
-batch 可以重放，已确认 sample 不会重放；重复载入两份同一 state 是幂等的。该契约要求一个 speech
-loader、`accumulate_grad_batches=1`、`num_workers=0`、`persistent_workers=false`、关闭 cost batching、
-关闭 distributed sampler，且 `expected_samples` 必须能被 DDP world size 整除。
+顶层 `devices` 只列 workspace 暴露的 factory 名和 `CUDA_VISIBLE_DEVICES` 内相对 id；当前 factory
+只有 `translation` 与 `tts`。列表长度就是该 factory 的 replica 数，用来调节上下游吞吐；未列出的
+设备全部留给 Lightning，且必须至少保留一张。最终 S2ST snapshot 发布 source/target waveform，
+GLM4 semantic、BiCodec global/target 等 runtime view 都在训练进程中在线编码。
 
-流式 dataset 不接受 validation 或 split manifest；validation 必须在另一个已 sealed 的 immutable
-dataset 上运行。`published_streaming_samples()` 只暴露已经发布的 teacher artifacts 和独立保存的
-dataset translation reference；`SynthesisSampleLogger` 在 rank zero 按 optimizer-step cadence 写入
-source text、model/dataset translation 对照、audio 与 snapshot metadata，不运行 backbone 或 teacher，
-也不会要求固定样本在 fit 开始前就存在。
+### Source family、增长和发布
 
-`StreamingSnapshotDataset` 同时累计连续等待事件、poll 次数和实际 wall-clock wait seconds；
-`StreamingDataLoader` 按 batch 区分包含等待的 fetch time、等待部分和 snapshot load/collate 部分，
-这些累计值也随 cursor checkpoint 恢复。`StreamingTelemetryCallback` 把 batch/累计时间、read/committed/
-published position 和 wait ratio 写入 `streaming/*` scalar；DDP 的时间 scalar 取各 rank 最大值以表示
-实际瓶颈，而不是用平均值掩盖慢 rank。rank zero 另以配置的采样间隔后台调用
-`nvidia-smi`，原始样本追加到 logger 目录的 `streaming_gpu.csv`，结束摘要写到
-`streaming_gpu_summary.json`。producer 可用 `speech_to_speech.synthesis.telemetry.stage()` 输出带统一
-timestamp、stage elapsed、sample count、device 和 GPU ids 的 JSON 事件，与 GPU CSV 按时间对齐；
-`nvidia-smi` 不可用只在摘要中记录原因，不使训练失败。
+workspace 配置声明语言、每种语言的有序 source slots、一个通用 translator、一个 TTS、speaker list
+或 reference audio，以及 `initial_sources` / `interval_sources`。同一个物理来源可以重复声明；每个
+slot 用稳定 name 持有独立 cursor。source row 被接纳后形成一个 source family，并为其他语言各产生
+一条 source/target pair。source dataset 中已有的平行译文不作为 label，target text 始终由配置的
+translator 生成。
 
-### 可恢复 producer 与流式训练观测
+family 接纳时确定 voice condition。speaker-list 模式从当前 speaker pool 确定性选择一次 speaker，
+并用同一个 TTS/speaker 合成 source 与所有 target audio；reference-audio 模式保留原始 source
+waveform，并把它作为所有 target audio 的同一个 TTS condition。新增 speaker 只影响以后接纳的
+family；新增语言时先为旧 family 补新目标语言，再接纳新语言来源，最后恢复各语言 source slot 的
+稳定轮转。
 
-streaming snapshot v2 在 `base`/codec store 之外保存
-`translation_references.jsonl`。每条记录以 direction-aware `sample_index` 对齐一条训练 sample，内容只含
-原数据集的参考译文；sidecar 的 schema 与 SHA256 写进 `snapshot.json`，重复发布同一 snapshot 时
-reference 内容也必须完全一致。训练迭代器仍只返回 store 中的 `Sample`：其 target
-`TextView.TEXT` 是翻译模型生成的译文，也是 backbone 实际消费的标签；dataset reference 不进入
-`Sample`、collate 或 checkpoint cursor。只有诊断入口 `published_streaming_samples()` 按需读取并校验
-sidecar。旧 snapshot v1 仍可继续训练，但请求 published diagnostics 时会明确报告没有 reference，
-不会把模型译文冒充数据集译文。
+增长单位是 source family，而不是扁平 sample：
 
-`SynthesisSampleLogger` 在 rank zero 为选定样本写入 `source_text`、`model_translation`、
-`dataset_translation` 和三行 Markdown `translation_comparison`，metadata JSON 也使用这两个无歧义的
-translation 字段；source/target audio 继续来自同一条已发布的模型合成 sample，不重新运行 backbone。
+- `initial_sources` 控制首版最多接纳多少 family，可以设成刚好完成一个 optimizer step 或小规模
+  overfit 的数量；
+- `interval_sources` 控制后续每个 revision 最多新增或回填多少 family。
 
-producer 对当前未发布 batch 维护 `.stage-cache`：`source_tts`、`translation`、`target_tts`、`codec`
-分别原子发布自己的标准 store。重启先尝试最高可复用阶段；例如已有 `target_tts` cache 时直接恢复完整
-base waveform 和模型译文，只重跑 codec。snapshot 原子发布后删除该 batch cache；如果恰好在 publish
-之后、cache 清理之前退出，下次会根据连续 snapshot prefix 清理冗余 cache。stage cache 绑定
-`producer_identity.json` 的 SHA256，生产语义变化会明确失败，不会把不同模型 revision 或生成参数混入
-同一 stream。
+一个 revision 的逻辑依赖固定为：
 
-`StreamingSnapshotDataset` 累计真实 wall-clock 等待时间、等待事件和 poll 次数；
-`StreamingDataLoader` 进一步拆分每 batch 的 fetch、wait 与 load/collate 时间，并把累计值随
-cursor checkpoint 恢复。`StreamingTelemetryCallback` 将这些时间、train step 时间、read/committed/
-published position 和 wait ratio 写入 `streaming/*` TensorBoard scalar。DDP 的时间指标取各 rank
-最大值，以暴露最慢 rank 的实际瓶颈。
+```text
+source@r -> translation@r -> tts@r
+```
 
-Lightning 的 SIGTERM 标记由 `StreamingSynthesis` 绑定为 dataset stop request。snapshot poll sleep
-最多每 0.5 秒检查一次；收到停止请求时抛出 Lightning 的 `SIGTERMException`，使阻塞在同步
-`next()` 内的 rank 也进入标准 exception teardown，而不是等新 snapshot 才释放 GPU。cursor 仍只以
-最近成功 checkpoint 的 committed position 为恢复边界。每个 rank 在 train start 后用 one-shot guard
-包装 Lightning 已注册的 SIGTERM handler；同一进程收到重复或重入信号时只执行第一次，避免进程组
-投递与 Lightning launcher fan-out 同时发生时重复进入 distributed signal collective。
+三个阶段共享 revision，但发布时间可以不同。下游只消费 manifest 中明确记录的 upstream snapshot，
+不能重新查询某个模糊的 latest。`translation@r` 逻辑包含 `source@r`，`tts@r` 逻辑包含
+`translation@r`；只有最终 `tts` snapshot 会推进训练可见 catalog。依赖关系、staging 恢复、精确
+parent、store 校验和原子发布都由 workspace/anydataset 实现，不出现在训练配置中。
 
-rank zero 同时把可见 GPU 的 utilization、memory 和 power 原始采样追加到 logger 目录下的
-`streaming_gpu.csv`；固定 streaming logger version 后，该 CSV 和 TensorBoard event 会跨 auto-resume
-启动继续追加。结束时覆盖写入的 `streaming_gpu_summary.json` 只概括当前进程，本次运行之外的完整
-时间轴以 CSV/TensorBoard 为准。producer 可用
-`speech_to_speech.synthesis.telemetry.stage()` 输出带 wall-clock timestamp、elapsed、sample count、
-device 与 GPU ids 的 JSON start/finish/failure 事件；这些事件可以与 GPU CSV 对齐。`nvidia-smi`
-不可用时只记录原因，不使训练失败。stage helper 只观测 producer 显式包裹的调用，不会自动发现
-AS/TT/AT/codec 阶段；本仓库当前提供外部 producer 的生命周期和发布边界，不包含具体模型 DAG。
-训练侧 CSV 也只采样训练进程 `CUDA_VISIBLE_DEVICES` 中的卡。producer 使用独立 GPU 时，应在
-producer 内单独采样并按 stage timestamp 汇总，不能把训练卡的利用率当作 producer 阶段利用率。
+### DataModule、live refresh 和 cursor
 
-正式 producer 明确记录 `source_tts`（源文本合成语音）、`translation`（模型翻译）、
-`target_tts`（模型译文在源语音条件下合成目标语音）、`codec` 和 `snapshot_publish`，并把
-`source_tts_join` / `translation_join` 作为独立等待事件。这里不使用 AS/TT/AT 缩写，避免把模型阶段
-和数据模态混在一起。每次重新进入正式 streaming job 都以已有连续 snapshot prefix 为起点；配置中的
-`retry=true` 只在这次人工重启时清理旧进程失败标记，不会在同一次进程内无限重试模型错误。
+source preflight 通过现有 `training_datasets` seam 把 `access.load()` 返回的同一个 live dataset 注入
+唯一 speech loader。DataModule 只持有该对象并持续取 batch，不访问 workspace source、factory、stage
+manifest 或 snapshot 路径，也不需要收到“请更新 dataset”的控制消息。`LiveS2STDataset` 在首版等待和
+iterator/catalog 安全边界自行 refresh；每次观察到更长的 append-only catalog 前缀时只输出一条明确日志：
+
+```text
+data.snapshot.updated previous=... current=... added_samples=...
+total_samples=... cursor=... wait_seconds=...
+```
+
+旧前缀、sample identity 或 lineage 被改写时 refresh 直接失败。live facade 自己按稳定 global index 做
+rank 分片；入口强制一个 speech loader、`num_workers=0`、`persistent_workers=false`、关闭 cost batching
+和 distributed sampler，避免 worker 或 sampler 冻结旧长度。validation 使用独立的 sealed dataset，
+不从正在增长的训练 catalog 抽取固定索引。
+
+`LiveS2STCursor` 把 dataset 的 `lineage_id`、`snapshot_id` 和 `pair_cursor` 交给 Lightning checkpoint，
+并只在 `trainer.global_step` 真正前进后 acknowledge，因此 gradient accumulation 中间 batch 不会提前
+提交。等待数据期间，dataset 的 stop predicate 同时检查 SIGTERM 和 generation service 健康状态；
+factory 提前失败会立即暴露对应日志路径。`ManagedServiceCallback` 单独拥有 generation service 的
+start/check/close，DataModule teardown 是 live dataset 的唯一 close owner。
+
+### 日志边界
+
+- toy：`data.plan` 标记 `formal_training=false`，输出独立 `toy-perf/`、warmup、measurement window、
+  step time、throughput 和最终 perf report；不保存正式 checkpoint，也没有 generation stage 日志；
+- generate：普通训练 loss、吞吐和 checkpoint 日志不变；`generation/translation.log` 与
+  `generation/tts.log` 明确记录 plan、依赖/反压等待、每阶段计算时间和 snapshot publish，训练日志
+  只增加首版等待与 `data.snapshot.updated`；
+- access：保持普通正式训练日志，不安装 toy perf 或 generation telemetry。
 
 ## 输入输出
 

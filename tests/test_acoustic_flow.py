@@ -54,7 +54,7 @@ class AcousticRepaLossTest(unittest.TestCase):
             torch.tensor([[True, True, True], [True, False, False]]),
         )
 
-        item.loss.mean().backward()
+        item.backward()
 
         self.assertIsNotNone(representation.grad)
         self.assertIsNone(condition.grad)
@@ -71,9 +71,10 @@ class AcousticRepaLossTest(unittest.TestCase):
             target,
             torch.tensor([[True, False]]),
         )
-        item.loss.mean().backward()
+        item.backward()
 
-        self.assertTrue(torch.isfinite(item.loss).all())
+        self.assertEqual(item.ndim, 0)
+        self.assertTrue(torch.isfinite(item))
         self.assertIsNotNone(representation.grad)
         gradient = representation.grad
         if gradient is None:

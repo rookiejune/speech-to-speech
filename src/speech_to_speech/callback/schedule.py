@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from anytrain.lightning.schedule import (
     Constant,
@@ -18,7 +18,6 @@ from anytrain.lightning.schedule import (
 from speech_to_speech.datamodule.batch import (
     FusedBatch,
     LoaderBatch,
-    ModelBatch,
 )
 from speech_to_speech.datamodule.sample import RawSpeechBatch
 
@@ -79,6 +78,11 @@ class ScheduleConfig(Protocol):
     def phases(self) -> Sequence[PhaseConfig]: ...
 
 
+@runtime_checkable
+class TrainingUnitProvider(Protocol):
+    def training_units(self, unit: str) -> tuple[float, float | None]: ...
+
+
 @dataclass(frozen=True)
 class BatchUnits:
     unit: str = "tokens"
@@ -135,8 +139,11 @@ def _batch_units(batch: object, unit: str) -> UnitBatch:
             "unit schedule requires materialized ModelBatch inputs; raw waveform "
             "batches are not unit-counted by the training callback."
         )
-    if not isinstance(batch, ModelBatch):
-        raise TypeError(f"unit schedule expects ModelBatch, got {type(batch)!r}.")
+    if not isinstance(batch, TrainingUnitProvider):
+        raise TypeError(
+            "unit schedule expects a batch with training_units(), "
+            f"got {type(batch)!r}."
+        )
     valid, padded = batch.training_units(unit)
     return UnitBatch(valid=valid, padded=padded, unit=unit)
 
@@ -175,5 +182,6 @@ def _curve(config: LRCurveConfig) -> Constant | Linear | Cosine:
 __all__ = [
     "BatchUnits",
     "SUPPORTED_UNIT_NAMES",
+    "TrainingUnitProvider",
     "build_unit_schedule",
 ]

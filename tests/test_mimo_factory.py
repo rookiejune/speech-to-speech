@@ -11,6 +11,7 @@ from torch import nn
 from speech_to_speech.mimo import MimoBatch
 from speech_to_speech.model.mimo_factory import (
     MimoFactoryConfig,
+    MimoVocab,
     build_mimo_model,
     derive_mimo_vocab,
 )
@@ -136,6 +137,28 @@ class MimoFactoryTest(unittest.TestCase):
         self.assertEqual(vocab.audio_blank, 9)
         special = vocab.special_tokens(audio_delay_tokens=2)
         self.assertEqual(special.audio_delay_tokens, 2)
+
+    def test_factory_uses_the_supplied_resolved_vocabulary(self) -> None:
+        vocab = MimoVocab(
+            text_size=9,
+            audio_size=11,
+            text_blank=0,
+            text_bos=1,
+            text_eos=2,
+            audio_blank=10,
+            audio_bos=8,
+            audio_eos=9,
+        )
+
+        model = build_mimo_model(
+            _Runtime(),
+            MimoFactoryConfig(audio_embedding_dim=4),
+            vocab=vocab,
+        )
+        logits = model(_batch())
+
+        self.assertEqual(logits.text.shape[-1], vocab.text_size)
+        self.assertEqual(logits.audio.shape[-1], vocab.audio_size)
 
     def test_runtime_control_rows_do_not_expand_mimo_lexical_vocabulary(self) -> None:
         runtime = _Runtime(text_vocab_size=18)

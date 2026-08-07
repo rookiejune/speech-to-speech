@@ -389,7 +389,11 @@ def _parse_task_item(
             runtime,
             input_audio=input_audio,
         )
-    if input_audio and len(views) > 1:
+    if (
+        input_audio
+        and len(views) > 1
+        and (not encode_missing_codes or len(missing) != len(views))
+    ):
         labels = ", ".join(repr(view.value) for view in missing)
         raise ValueError(
             "composed input audio requires prepared semantic and global views; "

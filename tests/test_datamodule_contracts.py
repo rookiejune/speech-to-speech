@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from _contracts_helpers import *
+from torch.utils.data import IterableDataset
 from speech_to_speech.datamodule.asset import AssetPhase, AssetResolution
 from speech_to_speech.datamodule.config import AssetMaterializationConfig
 from speech_to_speech.datamodule.dataset.speech import uses_distinct_audio_assets
@@ -80,6 +81,152 @@ class DataModuleContractTest(unittest.TestCase):
         datamodule.setup()
 
         load_dataset.assert_called_once_with(config.dataset, runtime)
+
+    @patch("speech_to_speech.datamodule.module.load_dataset")
+    def test_datamodule_uses_injected_dataset_for_the_named_speech_loader(
+        self,
+        load_dataset,
+    ):
+        injected = [_raw_sample(), _raw_sample()]
+        runtime = _data_runtime()
+        config = SpeechConfig(
+            codec="longcat",
+            dataloader=_loader(),
+        )
+        datamodule = DataModule(
+            runtime,
+            {"train": LoaderSpec.speech(config, {Task.TTS: 1.0})},
+            training_datasets={"train": injected},
+        )
+
+        datamodule.setup()
+
+        load_dataset.assert_not_called()
+        loader = cast(Any, datamodule.train_dataloader())
+        self.assertIs(loader.dataset, injected)
+
+    def test_datamodule_rejects_unknown_or_text_training_dataset_injection(self):
+        runtime = _data_runtime()
+        speech = SpeechConfig(codec="longcat", dataloader=_loader())
+        with self.assertRaisesRegex(ValueError, "unknown loaders: missing"):
+            DataModule(
+                runtime,
+                {"train": LoaderSpec.speech(speech, {Task.TTS: 1.0})},
+                training_datasets={"missing": []},
+            )
+
+        text = TextConfig(dataloader=_loader())
+        with self.assertRaisesRegex(ValueError, "only be injected into speech"):
+            DataModule(
+                runtime,
+                {"mt": LoaderSpec.text(text, {Task.MT: 1.0})},
+                training_datasets={"mt": []},
+            )
+
+    def test_datamodule_keeps_and_closes_one_live_s2st_dataset(self):
+        class LiveDataset(IterableDataset):
+            lineage_id = "lineage"
+
+            def __init__(self):
+                self.closed = 0
+
+            def __iter__(self):
+                yield _raw_sample()
+
+            def acknowledge(self):
+                pass
+
+            def state_dict(self):
+                return {}
+
+            def load_state_dict(self, _value):
+                pass
+
+            def set_stop_requested(self, _predicate):
+                pass
+
+            def close(self):
+                self.closed += 1
+
+        dataset = LiveDataset()
+        runtime = _data_runtime()
+        config = SpeechConfig(
+            codec="longcat",
+            dataloader=DataLoaderConfig(batch_size=2, num_workers=0),
+        )
+        datamodule = DataModule(
+            runtime,
+            {"train": LoaderSpec.speech(config, {Task.TTS: 1.0})},
+            training_datasets={"train": dataset},
+        )
+
+        datamodule.setup()
+        loader = cast(Any, datamodule.train_dataloader())
+
+        self.assertIs(loader.dataset, dataset)
+        self.assertEqual(loader.num_workers, 0)
+        self.assertIs(cast(Any, datamodule)._loaders["train"]._dataset, dataset)
+        datamodule.teardown()
+        datamodule.teardown()
+        self.assertEqual(dataset.closed, 1)
+
+    def test_datamodule_rejects_workers_and_costs_for_live_s2st(self):
+        class LiveDataset(IterableDataset):
+            lineage_id = "lineage"
+
+            def __iter__(self):
+                return iter(())
+
+            def acknowledge(self):
+                pass
+
+            def state_dict(self):
+                return {}
+
+            def load_state_dict(self, _value):
+                pass
+
+            def set_stop_requested(self, _predicate):
+                pass
+
+            def close(self):
+                pass
+
+        cases = (
+            (
+                DataLoaderConfig(batch_size=1, num_workers=1),
+                "num_workers=0",
+            ),
+            (
+                DataLoaderConfig(
+                    batch_size=1,
+                    num_workers=0,
+                    persistent_workers=True,
+                ),
+                "persistent_workers=false",
+            ),
+            (
+                DataLoaderConfig(
+                    batch_size=1,
+                    num_workers=0,
+                    costs=DataLoaderCostsConfig(
+                        enabled=True,
+                        max_batch_frames=8,
+                    ),
+                ),
+                "costs are unsupported",
+            ),
+        )
+        for dataloader, message in cases:
+            with self.subTest(message=message):
+                config = SpeechConfig(codec="longcat", dataloader=dataloader)
+                datamodule = DataModule(
+                    _data_runtime(),
+                    {"train": LoaderSpec.speech(config, {Task.TTS: 1.0})},
+                    training_datasets={"train": LiveDataset()},
+                )
+                with self.assertRaisesRegex(ValueError, message):
+                    datamodule.setup()
 
     @patch("speech_to_speech.datamodule.module.load_dataset")
     def test_speech_validation_max_samples_builds_a_deterministic_prefix(self, load_dataset):

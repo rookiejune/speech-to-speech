@@ -7,9 +7,9 @@ from enum import Enum
 from typing import Any, Generic, Protocol, TypeVar, cast
 
 import torch
+from anytrain import observation
 from anydataset.types import Modality
 from anytrain.evaluator.text import TextComparisonEvaluator
-from anytrain.lightning import validation
 from anytrain.lightning.schedule import ScheduleRuntime
 from anytrain.optim.llm import create_optimizer
 from lightning.pytorch import LightningModule
@@ -35,7 +35,7 @@ from ..generation.text import decode_text_ids
 from ..generation.contract import Result
 from ..loss.contract import Outputs, TokenObjectiveModel, combine_outputs
 from ..loss.ctc import CTCConfig
-from ..loss.supervised import Objective, validation_metrics
+from ..loss.supervised import Objective
 from ..model.checkpoint_contract import ModelCheckpointContract, validate_checkpoint_contract
 from ..model.base import Model
 from ..generation.contract import TextEvaluationModel
@@ -150,11 +150,18 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
                 task=text_task,
                 namespace=namespace,
             )
-        outputs = self._outputs(materialized, self.objective.validation)
-        validation.log(
-            self,
-            validation_metrics(outputs),
-            prefix="val" if namespace is None else f"val/{namespace}",
+        outputs = self._outputs(
+            materialized,
+            self.objective.validation,
+            loader_name=namespace,
+        )
+        self.log(
+            "val/loss" if namespace is None else f"val/{namespace}/loss",
+            outputs["loss"],
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=materialized.input_ids.size(0),
         )
         return outputs
 
@@ -263,7 +270,15 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
 
     def _training_outputs(self, batch: TrainBatch) -> Outputs:
         if isinstance(batch, FusedBatch):
-            outputs = [self._loss_outputs(self.materialize_batch(child)) for child in batch.batches]
+            outputs = [
+                self._loss_outputs(
+                    self.materialize_batch(child),
+                    loader_name=(
+                        None if batch.loader_names is None else batch.loader_names[index]
+                    ),
+                )
+                for index, child in enumerate(batch.batches)
+            ]
             combined = _combine_training_outputs(
                 outputs,
                 loss_weights=batch.loss_weights,
@@ -272,7 +287,10 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
                 self._current_gradient_loader_outputs = tuple(zip(batch.loader_names, outputs))
             return combined
         if isinstance(batch, LoaderBatch):
-            output = self._loss_outputs(self.materialize_batch(batch.batch))
+            output = self._loss_outputs(
+                self.materialize_batch(batch.batch),
+                loader_name=batch.loader_name,
+            )
             weighted = _scale_training_output(output, batch.loss_scale)
             self._current_gradient_loss_groups = {
                 "batch": weighted,
@@ -281,20 +299,32 @@ class SpeechToSpeechModule(LightningModule, Generic[ModelT]):
             return weighted
         return self._loss_outputs(self.materialize_batch(batch))
 
-    def _loss_outputs(self, batch: ModelBatch) -> Outputs:
-        return self._outputs(batch, self.objective.forward)
+    def _loss_outputs(
+        self,
+        batch: ModelBatch,
+        *,
+        loader_name: str | None = None,
+    ) -> Outputs:
+        return self._outputs(
+            batch,
+            self.objective.forward,
+            loader_name=loader_name,
+        )
 
     def _outputs(
         self,
         batch: ModelBatch,
         objective: Callable[[ModelBatch, ModelT], Outputs],
+        *,
+        loader_name: str | None = None,
     ) -> Outputs:
         if not isinstance(batch, ModelBatch):
             raise TypeError(
                 "training_step requires ModelBatch unless a batch materializer "
                 "converts the incoming batch."
             )
-        return objective(batch, self.model)
+        with observation.context(_observation_prefix(batch, loader_name)):
+            return objective(batch, self.model)
 
     def materialize_batch(self, batch: TrainInput) -> ModelBatch:
         if self.batch_materializer is None:
@@ -444,15 +474,23 @@ def _combine_training_outputs(
     return combine_outputs(
         outputs,
         total_loss=(losses * weights).sum() / total,
+        weights=resolved_weights,
     )
 
 
 def _scale_training_output(output: Outputs, scale: float | None) -> Outputs:
     if scale is None:
         return output
-    result = cast(Outputs, dict(output))
-    result["loss"] = output["loss"] * float(scale)
-    return result
+    factor = float(scale)
+    return cast(Outputs, {name: value * factor for name, value in output.items()})
+
+
+def _observation_prefix(batch: ModelBatch, loader_name: str | None) -> str:
+    tasks = {task.value for task in batch.tasks}
+    task = next(iter(tasks)) if len(tasks) == 1 else "mixed"
+    if loader_name is None:
+        return f"task/{task}"
+    return f"loader/{loader_name}/task/{task}"
 
 
 def _text_generation_validation_task(batch: ModelBatch) -> Task | None:

@@ -127,9 +127,7 @@ class PreferenceLossTest(unittest.TestCase):
         margin = _logps(chosen, expected_model) - _logps(rejected, expected_model)
         expected = -F.logsigmoid(0.5 * margin).mean()
         torch.testing.assert_close(outputs["loss"], expected)
-        dpo = outputs["dpo"]
-        self.assertIn("preferences", dpo.details or {})
-        self.assertEqual(float((dpo.details or {})["accuracy"]), 1.0)
+        torch.testing.assert_close(outputs["dpo"], expected)
         self.assertEqual(model.hidden_calls, 1)
         self.assertEqual(model.hidden_batch_sizes, [2])
         self.assertEqual(model.predictions, [PredictionModality.TEXT])

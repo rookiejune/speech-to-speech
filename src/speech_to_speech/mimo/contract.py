@@ -7,7 +7,7 @@ step, so it has a deliberately separate batch contract in this module.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import Tensor
@@ -165,6 +165,8 @@ class MimoBatch:
     task_ids: tuple[str, ...] | None = None
     recording_ids: tuple[str | None, ...] | None = None
     ignore_index: int = MIMO_IGNORE_INDEX
+    _training_token_count: float = field(init=False, repr=False)
+    _padded_token_count: float = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         token_values = {
@@ -289,6 +291,11 @@ class MimoBatch:
             allow_none_values=True,
         )
         _validate_same_device(tuple(value for value in self._tensors() if value is not None))
+        attention_mask = self.attention_mask
+        if attention_mask is None:
+            raise RuntimeError("MimoBatch attention_mask was not normalized.")
+        self._training_token_count = float(attention_mask.sum().item())
+        self._padded_token_count = float(attention_mask.numel())
 
     def _tensors(self) -> tuple[Tensor | None, ...]:
         return (
@@ -331,6 +338,12 @@ class MimoBatch:
     @property
     def supervised_token_counts(self) -> tuple[Tensor, Tensor]:
         return self.text_target_mask.sum(dim=1), self.audio_target_mask.sum(dim=1)
+
+    def training_units(self, unit: str) -> tuple[float, float | None]:
+        """Count aligned backbone positions once, independent of output routes."""
+        if unit != "tokens":
+            raise ValueError("MimoBatch supports only token training units.")
+        return self._training_token_count, self._padded_token_count
 
     @property
     def supervised_token_count(self) -> int:
@@ -423,6 +436,8 @@ class MimoBatch:
         result.task_ids = self.task_ids
         result.recording_ids = self.recording_ids
         result.ignore_index = self.ignore_index
+        result._training_token_count = self._training_token_count
+        result._padded_token_count = self._padded_token_count
         return result
 
 

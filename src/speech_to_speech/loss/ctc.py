@@ -5,7 +5,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import torch
-from anytrain.loss import LossItem
 from torch import Tensor, nn
 from torch.nn import functional as F
 
@@ -14,6 +13,7 @@ from ..datamodule.contract import (
     CTCTarget,
 )
 from ..model.ctc import CTCRoute
+from ._observation import emit, recommend, register
 
 
 CTCDecode = Callable[[CTCRoute, Tensor, Tensor], tuple[Tensor, Tensor]]
@@ -68,6 +68,7 @@ class CTCConfig:
         raise AssertionError(f"unsupported CTC route: {route}")
 
 
+@register
 class CTCAlignmentLoss(nn.Module):
     """Project audio-slot hidden states through the frozen text readout."""
 
@@ -81,6 +82,7 @@ class CTCAlignmentLoss(nn.Module):
             raise TypeError("CTC alignment config must be a CTCConfig.")
         self.blank_token_id = blank_token_id
         self.config = config
+        recommend(self)
 
     def forward(
         self,
@@ -91,7 +93,7 @@ class CTCAlignmentLoss(nn.Module):
         source: CTCTarget | None,
         target: CTCTarget | None,
         decode: CTCDecode,
-    ) -> LossItem:
+    ) -> Tensor:
         if reference_states.dim() != 3 or not reference_states.is_floating_point():
             raise ValueError("CTC hidden_states must be floating-point [B, T, H].")
         if not callable(decode):
@@ -119,19 +121,21 @@ class CTCAlignmentLoss(nn.Module):
             float(self.config.source.weight) * source_loss
             + float(self.config.target.weight) * target_loss
         )
-        return LossItem(
-            loss=loss,
-            details={
-                "source_loss": source_loss,
-                "target_loss": target_loss,
-                "source_tokens": source_tokens,
-                "target_tokens": target_tokens,
-                "source_steps": source_steps,
-                "target_steps": target_steps,
-                "tokens": source_tokens + target_tokens,
-                "sequences": sequences,
+        scalar = _active_mean(loss, sequences)
+        emit(
+            self,
+            {
+                "source_loss": _active_mean(source_loss, source_tokens),
+                "target_loss": _active_mean(target_loss, target_tokens),
+                "source_tokens": source_tokens.sum(),
+                "target_tokens": target_tokens.sum(),
+                "source_steps": source_steps.sum(),
+                "target_steps": target_steps.sum(),
+                "tokens": (source_tokens + target_tokens).sum(),
+                "sequences": sequences.sum(),
             },
         )
+        return scalar
 
     def _route(
         self,
@@ -243,6 +247,13 @@ def _validate_pooled_lengths(
         raise ValueError(
             f"{name} CTC pooling leaves too few steps for its transcript labels."
         )
+
+
+def _active_mean(loss: Tensor, count: Tensor) -> Tensor:
+    if loss.shape != count.shape:
+        raise ValueError("CTC losses and counts must align on batch rows.")
+    active = count.gt(0)
+    return loss.masked_fill(~active, 0).sum() / active.sum().clamp_min(1)
 
 
 __all__ = [

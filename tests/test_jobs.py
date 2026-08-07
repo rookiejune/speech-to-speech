@@ -33,6 +33,7 @@ def _environment(**overrides: str) -> dict[str, str]:
             "STATIC_HOME": "/private/tmp/speech-to-speech-jobs-static",
             "DYNAMIC_HOME": "/private/tmp/speech-to-speech-jobs-dynamic",
             "PYTHONPYCACHEPREFIX": "/private/tmp/speech-to-speech-jobs-pycache",
+            "CUDA_VISIBLE_DEVICES": "0,1",
             "SPEECH_TO_SPEECH_ACOUSTIC_GENERATOR_ARTIFACT": "/private/tmp/speech-to-speech-sac-artifact",
             "SPEECH_TO_SPEECH_STAGE_DATA_ROOT": "/private/tmp/speech-to-speech-jobs-data",
         }

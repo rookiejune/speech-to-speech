@@ -370,23 +370,24 @@ class SpeechConfig:
                     "streaming synthesis consumption and asset materialization "
                     "are mutually exclusive."
                 )
-            if self.encode_missing_codes:
+            if self.streaming.enabled and self.encode_missing_codes:
                 raise ValueError(
-                    "streaming synthesis snapshots must already contain codec views; "
-                    "encode_missing_codes must be false."
+                    "legacy streaming synthesis snapshots must already contain codec "
+                    "views; encode_missing_codes must be false."
                 )
-            if self.dataloader.num_workers != 0:
-                raise ValueError(
-                    "streaming checkpoint cursors require dataloader num_workers=0."
-                )
-            if self.dataloader.persistent_workers:
-                raise ValueError(
-                    "streaming checkpoint cursors require persistent_workers=false."
-                )
-            if self.dataloader.costs.enabled:
-                raise ValueError(
-                    "streaming snapshot consumption does not support cost batching."
-                )
+            if self.streaming.enabled:
+                if self.dataloader.num_workers != 0:
+                    raise ValueError(
+                        "streaming checkpoint cursors require dataloader num_workers=0."
+                    )
+                if self.dataloader.persistent_workers:
+                    raise ValueError(
+                        "streaming checkpoint cursors require persistent_workers=false."
+                    )
+                if self.dataloader.costs.enabled:
+                    raise ValueError(
+                        "streaming snapshot consumption does not support cost batching."
+                    )
         if (
             isinstance(self.interleave_audio_frames, bool)
             or not isinstance(self.interleave_audio_frames, int)

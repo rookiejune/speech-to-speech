@@ -83,10 +83,12 @@ class StreamingTrainConfigTest(unittest.TestCase):
         self.assertIsNone(config.datamodule.streaming.expected_samples)
         self.assertEqual(
             config.datamodule.source.factory,
-            "zhuyin.datasets.wmt19.streaming_s2st:source",
+            "zhuyin.datasets.s2st:source",
         )
         self.assertEqual(config.datamodule.source.mode, "auto")
         self.assertEqual(config.datamodule.source.options, {})
+        self.assertEqual(config.devices, {"translation": [0], "tts": [1]})
+        self.assertTrue(config.datamodule.encode_missing_codes)
         self.assertEqual(config.loader_plan.loaders["s2st"].trace, "target_cot")
         self.assertEqual(config.logging.version, 0)
         self.assertEqual(config.callbacks.checkpoint.save_last, "link")

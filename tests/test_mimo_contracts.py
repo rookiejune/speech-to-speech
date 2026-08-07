@@ -11,6 +11,7 @@ from torch.nn import functional as F
 
 from speech_to_speech.datamodule.mimo import MimoDataModule, collate_mimo
 from speech_to_speech.datamodule.config import DataLoaderConfig
+from speech_to_speech.callback import BatchUnits
 from speech_to_speech.loss.mimo import MimoObjective
 from speech_to_speech.mimo import MimoBatch, MimoSample
 from speech_to_speech.runtime.backbone import (
@@ -23,6 +24,33 @@ from speech_to_speech.runtime.backbone import (
 
 
 class MimoBatchContractTest(unittest.TestCase):
+    def test_schedule_counts_aligned_positions_once(self) -> None:
+        batch = MimoBatch(
+            text_input_ids=torch.tensor([[1, 2, 3], [4, 5, 0]]),
+            audio_input_ids=torch.tensor([[6, 7, 8], [9, 10, 0]]),
+            text_labels=torch.tensor([[-100, 2, 3], [-100, 5, -100]]),
+            audio_labels=torch.tensor([[-100, 7, 8], [-100, 10, -100]]),
+            attention_mask=torch.tensor(
+                [[True, True, True], [True, True, False]],
+            ),
+        )
+
+        with patch.object(
+            torch.Tensor,
+            "item",
+            side_effect=AssertionError("schedule must use cached batch metadata"),
+        ):
+            units = BatchUnits("tokens")(
+                trainer=object(),
+                pl_module=object(),
+                outputs=None,
+                batch=batch,
+                batch_idx=0,
+            )
+
+        self.assertEqual(units.valid, 5.0)
+        self.assertEqual(units.padded, 6.0)
+
     def test_transfer_reuses_validated_batch_contract(self) -> None:
         batch = collate_mimo(
             [
@@ -228,20 +256,10 @@ class MimoObjectiveContractTest(unittest.TestCase):
         audio_expected = (audio_per_token * audio_target_mask).sum(1) / audio_target_mask.sum(
             1
         ).clamp_min(1)
-        torch.testing.assert_close(item.loss, text_expected + audio_expected)
-        self.assertIsNotNone(item.details)
-        details = item.details or {}
-        torch.testing.assert_close(details["text_loss"], text_expected)
-        torch.testing.assert_close(details["audio_loss"], audio_expected)
-        torch.testing.assert_close(details["text_tokens"], torch.tensor([2.0, 1.0]))
-        torch.testing.assert_close(details["audio_tokens"], torch.tensor([2.0, 1.0]))
         text_global = (text_expected * torch.tensor([2.0, 1.0])).sum() / 3
         audio_global = (audio_expected * torch.tensor([2.0, 1.0])).sum() / 3
-        torch.testing.assert_close(objective.mean(item), text_global + audio_global)
-        torch.testing.assert_close(
-            objective.mean(item, distributed=True), text_global + audio_global
-        )
-        item.loss.mean().backward()
+        torch.testing.assert_close(item, text_global + audio_global)
+        item.backward()
         self.assertIsNotNone(text_logits.grad)
         self.assertIsNotNone(audio_logits.grad)
 
@@ -286,7 +304,7 @@ class MimoObjectiveContractTest(unittest.TestCase):
                 return text_head(hidden.text), audio_head(hidden.audio)
 
         actual = objective.from_batch(batch, Model())
-        torch.testing.assert_close(actual.loss, expected.loss)
+        torch.testing.assert_close(actual, expected)
 
 
 class DualStreamBackboneContractTest(unittest.TestCase):

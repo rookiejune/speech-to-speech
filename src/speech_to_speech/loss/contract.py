@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
-from typing import Any, Protocol, TypedDict, cast
+import math
+from collections.abc import Sequence
+from typing import Protocol, TypedDict, cast
 
+import torch
 from anydataset.types import Modality
-from anytrain.loss import (
-    LossItem,
-    PackedCodebookLogits,
-    combine_loss_outputs,
-    iter_loss_items,
-)
+from anytrain.loss import PackedCodebookLogits
 from anytrain.module.idspace import Layout
 from torch import Tensor
 from typing_extensions import NotRequired
@@ -21,15 +18,14 @@ from ..task import PredictionModality
 
 class Outputs(TypedDict):
     loss: Tensor
-    dpo: NotRequired[LossItem]
-    grpo: NotRequired[LossItem]
-    token: NotRequired[LossItem]
-    ctc: NotRequired[LossItem]
-    flow_matching: NotRequired[LossItem]
-    repa: NotRequired[LossItem]
-    rvq: NotRequired[LossItem]
-    mimo: NotRequired[LossItem]
-    loss_weights: NotRequired[dict[str, float]]
+    dpo: NotRequired[Tensor]
+    grpo: NotRequired[Tensor]
+    token: NotRequired[Tensor]
+    ctc: NotRequired[Tensor]
+    flow_matching: NotRequired[Tensor]
+    repa: NotRequired[Tensor]
+    rvq: NotRequired[Tensor]
+    mimo: NotRequired[Tensor]
 
 
 class TokenObjectiveModel(Protocol):
@@ -173,25 +169,67 @@ def combine_outputs(
     outputs: Sequence[Outputs],
     *,
     total_loss: Tensor | None = None,
+    weights: Sequence[float] | None = None,
 ) -> Outputs:
-    generic_outputs = cast(Sequence[dict[str, Any]], outputs)
-    return cast(
-        Outputs,
-        combine_loss_outputs(
-            generic_outputs,
-            _UNITS,
-            validate_item_weights=False,
-            total_loss=total_loss,
-        ),
+    if not outputs:
+        raise ValueError("cannot combine empty loss outputs.")
+    resolved_weights = _weights(len(outputs), weights)
+    reference = _scalar(outputs[0]["loss"], "loss")
+    coefficients = reference.new_tensor(resolved_weights)
+    denominator = coefficients.sum()
+    result: dict[str, Tensor] = {
+        "loss": (
+            _weighted(outputs, "loss", coefficients, denominator, reference)
+            if total_loss is None
+            else _scalar(total_loss, "total_loss")
+        )
+    }
+    for name in _OBJECTIVES:
+        if any(name in output for output in outputs):
+            result[name] = _weighted(
+                outputs,
+                name,
+                coefficients,
+                denominator,
+                reference,
+            )
+    return cast(Outputs, result)
+
+
+def _weighted(
+    outputs: Sequence[Outputs],
+    name: str,
+    coefficients: Tensor,
+    denominator: Tensor,
+    reference: Tensor,
+) -> Tensor:
+    values = torch.stack(
+        [
+            _scalar(output[name], name) if name in output else reference.new_zeros(())
+            for output in outputs
+        ]
+    )
+    weights = coefficients.to(device=values.device, dtype=values.dtype)
+    return (values * weights).sum() / denominator.to(
+        device=values.device,
+        dtype=values.dtype,
     )
 
 
-def loss_items(outputs: Mapping[str, Any]) -> Iterator[tuple[str, LossItem]]:
-    yield from iter_loss_items(outputs, _OBJECTIVES)
+def _weights(size: int, values: Sequence[float] | None) -> tuple[float, ...]:
+    if values is None:
+        return (1.0,) * size
+    resolved = tuple(float(value) for value in values)
+    if len(resolved) != size:
+        raise ValueError("loss weights must align with outputs.")
+    if any(not math.isfinite(value) or value < 0 for value in resolved):
+        raise ValueError("loss weights must be finite and non-negative.")
+    if math.fsum(resolved) <= 0:
+        raise ValueError("loss weights must have a positive total.")
+    return resolved
 
 
-def loss_unit(name: str) -> str:
-    try:
-        return _UNITS[name]
-    except KeyError as error:
-        raise ValueError(f"unsupported loss objective: {name}") from error
+def _scalar(value: Tensor, name: str) -> Tensor:
+    if not isinstance(value, Tensor) or value.ndim != 0:
+        raise TypeError(f"loss output {name!r} must be a scalar Tensor.")
+    return value

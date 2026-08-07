@@ -8,6 +8,7 @@ run_name: ${oc.select:model.acoustic.name,token}
 repo_output_root: ${oc.env:SPEECH_TO_SPEECH_TRAIN_ROOT,${oc.env:DYNAMIC_HOME}/train/speech-to-speech}
 output_subdir: train/${run_name}
 output_dir: ${repo_output_root}/${output_subdir}
+devices: {}
 
 datamodule:
   codec: ${runtime.audio_output.tokenizer}
@@ -32,6 +33,8 @@ datamodule:
     commit_samples:
     write_workers: 1
     write_prefetch:
+  # Deprecated WMT19 snapshot compatibility. New S2ST experiments use
+  # datamodule.source plus the top-level devices mapping above.
   streaming:
     enabled: false
     root:

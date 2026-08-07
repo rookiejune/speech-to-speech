@@ -110,10 +110,8 @@ class OverfitContractTest(unittest.TestCase):
                 "callbacks.text_retention.max_new_tokens=9",
                 "callbacks.gradient_probe.every_n_steps=5",
                 "callbacks.gradient_probe.probes.backbone_l0_attn.parameters=[full.weight]",
-                "callbacks.flow_matching.every_n_steps=6",
             )
         )
-        runtime = Mock()
         summary = Mock()
         evaluation = Mock()
 
@@ -122,11 +120,8 @@ class OverfitContractTest(unittest.TestCase):
                 "OOMDiagnostics": stack.enter_context(
                     patch("speech_to_speech.training.composition.OOMDiagnostics")
                 ),
-                "OutputsLogger": stack.enter_context(
-                    patch("scripts.overfit.OutputsLogger")
-                ),
-                "FlowMatchingLogger": stack.enter_context(
-                    patch("scripts.overfit.FlowMatchingLogger")
+                "ObservationCallback": stack.enter_context(
+                    patch("scripts.overfit.ObservationCallback")
                 ),
                 "GradLogger": stack.enter_context(
                     patch("speech_to_speech.training.composition.GradLogger")
@@ -146,7 +141,6 @@ class OverfitContractTest(unittest.TestCase):
             )
             callbacks = training_callbacks(
                 config,
-                runtime,
                 acoustic_type=AcousticType.FLOW,
                 gradient_comparison=GradientComparison(
                     GradientTarget("token"),
@@ -163,8 +157,7 @@ class OverfitContractTest(unittest.TestCase):
                 callbacks[0],
                 factories["OOMDiagnostics"].return_value,
                 callbacks[2],
-                factories["OutputsLogger"].return_value,
-                factories["FlowMatchingLogger"].return_value,
+                factories["ObservationCallback"].return_value,
                 factories["GradLogger"].return_value,
                 factories["TaskSampleLogger"].return_value,
                 factories["TextRetentionLogger"].return_value,
@@ -175,9 +168,8 @@ class OverfitContractTest(unittest.TestCase):
         self.assertIsInstance(callbacks[0], ParameterPolicyCallback)
         self.assertIsInstance(callbacks[2], UnitScheduleCallback)
         performance.assert_called_once_with(config.callbacks.performance)
-        factories["FlowMatchingLogger"].assert_called_once_with(
-            runtime.flow_matching,
-            every_n_steps=6,
+        factories["ObservationCallback"].assert_called_once_with(
+            every_n_steps=config.trainer.log_every_n_steps,
         )
         factories["GradLogger"].assert_called_once_with(
             (
@@ -230,13 +222,11 @@ class OverfitContractTest(unittest.TestCase):
                 "callbacks.evaluation.enabled=false",
                 "callbacks.text_retention.enabled=false",
                 "callbacks.gradient_probe.enabled=false",
-                "callbacks.flow_matching.enabled=false",
             )
         )
-        runtime = Mock()
         summary = Mock()
         oom = Mock()
-        outputs = Mock()
+        observation = Mock()
 
         with (
             patch(
@@ -247,11 +237,10 @@ class OverfitContractTest(unittest.TestCase):
                 "speech_to_speech.training.composition.OOMDiagnostics",
                 return_value=oom,
             ),
-            patch("scripts.overfit.OutputsLogger", return_value=outputs),
+            patch("scripts.overfit.ObservationCallback", return_value=observation),
         ):
             callbacks = training_callbacks(
                 config,
-                runtime,
                 acoustic_type=AcousticType.FLOW,
                 gradient_comparison=GradientComparison(
                     GradientTarget("token"),
@@ -265,7 +254,7 @@ class OverfitContractTest(unittest.TestCase):
         self.assertIsInstance(callbacks[0], ParameterPolicyCallback)
         self.assertIs(callbacks[1], oom)
         self.assertIsInstance(callbacks[2], UnitScheduleCallback)
-        self.assertEqual(callbacks[3:], [outputs, summary])
+        self.assertEqual(callbacks[3:], [observation, summary])
 
     def test_oom_follows_performance_before_other_callbacks(self) -> None:
         config = overfit(
@@ -290,7 +279,6 @@ class OverfitContractTest(unittest.TestCase):
         ):
             callbacks = training_callbacks(
                 config,
-                Mock(),
                 acoustic_type=AcousticType.NONE,
                 gradient_comparison=None,
                 task=Task.TTS,
@@ -373,11 +361,6 @@ class OverfitContractTest(unittest.TestCase):
                 "callbacks.gradient_probe.probes.backbone_l0_attn.match=glob",
                 ValueError,
                 "callbacks.gradient_probe.probes.backbone_l0_attn.match",
-            ),
-            (
-                "callbacks.flow_matching.every_n_steps=0",
-                ValueError,
-                "callbacks.flow_matching.every_n_steps",
             ),
         )
 

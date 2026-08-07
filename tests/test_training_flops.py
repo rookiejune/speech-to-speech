@@ -24,7 +24,6 @@ from speech_to_speech.training._flops import (
 )
 from speech_to_speech.datamodule.batch import ModelBatch
 from speech_to_speech.datamodule.batch import AcousticTarget
-from speech_to_speech.loss.contract import LossItem
 from speech_to_speech.loss.supervised import FlowObjective, RVQObjective, TokenObjective
 from speech_to_speech.model import (
     AdapterType,
@@ -737,10 +736,10 @@ def _expected_fsq_logits(embedding: FsqEmbedding, *, rows: int) -> int:
 def _outputs(*, acoustic: str | None = None) -> dict[str, Any]:
     output: dict[str, Any] = {
         "loss": torch.tensor(1.0),
-        "token": LossItem(torch.ones(2), None),
+        "token": torch.tensor(1.0),
     }
     if acoustic is not None:
-        output[acoustic] = LossItem(torch.ones(2), None)
+        output[acoustic] = torch.tensor(1.0)
     return output
 
 

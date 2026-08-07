@@ -265,15 +265,15 @@ def rvq_decoder(decoder: AcousticRVQDecoder, *, valid_frames: int) -> int:
     )
 
     if (
-        len(decoder.codebook_embeddings) != codebooks
-        or len(decoder.embedding_projections) != codebooks
+        len(decoder.codebook_embeddings) != codebooks - 1
+        or len(decoder.embedding_projections) != codebooks - 1
     ):
         raise ValueError("RVQ embedding modules do not match the decoder codebooks.")
     for index, (embedding, projection, size) in enumerate(
         zip(
             decoder.codebook_embeddings,
             decoder.embedding_projections,
-            decoder.codebook_sizes,
+            decoder.codebook_sizes[:-1],
         )
     ):
         if type(embedding) is not nn.Embedding or embedding.weight.shape != (
@@ -288,8 +288,7 @@ def rvq_decoder(decoder: AcousticRVQDecoder, *, valid_frames: int) -> int:
             out_features=hidden,
             name=f"RVQ codebook {index} projection",
         )
-        if index + 1 < codebooks:
-            forward += cost
+        forward += cost
 
     core = decoder.decoder
     if type(core) is not Qwen3Model:

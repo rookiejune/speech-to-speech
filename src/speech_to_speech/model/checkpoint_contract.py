@@ -1668,5 +1668,6 @@ __all__ = [
     "contract_sha256",
     "flow_acoustic_contract",
     "rvq_acoustic_contract",
+    "state_dict_contract",
     "validate_checkpoint_contract",
 ]
